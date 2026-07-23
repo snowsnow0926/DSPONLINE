@@ -27,6 +27,7 @@ import {
   Radio,
   MessageSquare,
   MousePointer2,
+  Palette,
   Smartphone,
   ShieldCheck,
   Users,
@@ -206,6 +207,19 @@ function SettingsPanel({ game, report, desktopRelease, onChange, onRunBenchmark,
           {([0.8, 1, 1.25, 1.5, 2] as FontScale[]).map((scale) => (
             <button className={settings.fontScale === scale ? "active" : ""} type="button" key={scale} aria-pressed={settings.fontScale === scale} onClick={() => onChange({ fontScale: scale })}>{Math.round(scale * 100)}%</button>
           ))}
+        </div>
+      </section>
+      <section className="settings-group">
+        <header><Palette size={14} /><span>界面主题</span><small>{{ dark: "深色", light: "亮色", system: "跟随系统" }[settings.theme]}</small></header>
+        <div className="settings-segmented" aria-label="界面主题">
+          {(["dark", "light", "system"] as const).map((theme) => <button className={settings.theme === theme ? "active" : ""} type="button" key={theme} onClick={() => onChange({ theme })}>{{ dark: "深色", light: "亮色", system: "跟随系统" }[theme]}</button>)}
+        </div>
+      </section>
+      <section className="settings-group">
+        <header><Settings2 size={14} /><span>科技树布局</span><small>{settings.technologyLayout === "compact" ? "精简" : "标准"}</small></header>
+        <div className="settings-segmented" aria-label="科技树布局">
+          <button className={settings.technologyLayout === "standard" ? "active" : ""} type="button" onClick={() => onChange({ technologyLayout: "standard" })}>标准模式</button>
+          <button className={settings.technologyLayout === "compact" ? "active" : ""} type="button" onClick={() => onChange({ technologyLayout: "compact" })}>精简模式</button>
         </div>
       </section>
       <section className="settings-group settings-toggle-list">

@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUp, BarChart3, Bookmark, BookmarkPlus, Box, Calculator, CheckSquare, CircleCheckBig, ClipboardCopy, Factory, Focus, Gauge, Layers3, MapPin, Orbit, Pause, Play, Plus, Rocket, Route, Search, Send, Settings2, Sparkles, Trash2, TrendingUp, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowUp, BarChart3, Bookmark, BookmarkPlus, Box, Calculator, CheckSquare, CircleCheckBig, ClipboardCopy, Factory, Focus, Gauge, MapPin, Orbit, Pause, Play, Plus, Rocket, Route, Search, Send, Settings2, Sparkles, Trash2, TrendingUp, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ITEMS, PLANET_LIST, getBuilding, getItem, getPlanet, getRecipe } from "../game/content";
 import { calculateProductionPlan, getProductionRecipeOptions } from "../game/planning";
@@ -34,7 +34,7 @@ interface StatisticsWorkspaceProps {
   onFocusBeltNetwork: (beltId: string, planetId: PlanetId) => void;
   onBulkRecipeChange: (entityIds: string[], recipeId: RecipeId) => void;
   onBulkStationSlotApply: (entityIds: string[], slotIndex: number, template: StationSlotTemplate) => void;
-  onBulkBeltUpgrade: (beltIds: string[], target: "belt" | "sorter") => void;
+  onBulkBeltUpgrade: (beltIds: string[]) => void;
   onBulkBeltRoute: (beltIds: string[], routeMode: BeltRouteMode) => void;
   onBulkBeltConfiguration: (beltIds: string[]) => void;
   onBulkBeltRemove: (beltIds: string[]) => void;
@@ -130,8 +130,7 @@ function NetworkOverview({ game, onFocusBeltNetwork, onBulkBeltUpgrade, onBulkBe
       <section className={`network-batch-bar${selectedCount > 0 ? " network-batch-bar--active" : ""}`} aria-label="批量线路操作">
         <button type="button" className="network-select-all" onClick={() => setSelectedIds(selectedCount === visibleIds.length ? [] : visibleIds)}><CheckSquare size={14} />{selectedCount === visibleIds.length && visibleIds.length > 0 ? "取消全选" : "选择当前结果"}</button>
         <strong>{selectedCount} 个网络</strong>
-        <button type="button" disabled={selectedCount === 0} onClick={() => onBulkBeltUpgrade(selectedVisible, "belt")}><ArrowUp size={14} />升级传送带</button>
-        <button type="button" disabled={selectedCount === 0} onClick={() => onBulkBeltUpgrade(selectedVisible, "sorter")}><Layers3 size={14} />升级分拣器</button>
+        <button type="button" disabled={selectedCount === 0} onClick={() => onBulkBeltUpgrade(selectedVisible)}><ArrowUp size={14} />升级传送带</button>
         <label><select value={routeMode} onChange={(event) => setRouteMode(event.target.value as BeltRouteMode)} aria-label="批量线路路由"><option value="auto">自动避让</option><option value="bezier">曲线</option><option value="upper">上绕</option><option value="lower">下绕</option><option value="manual">手动控制点</option></select><button type="button" disabled={selectedCount === 0} onClick={() => onBulkBeltRoute(selectedVisible, routeMode)}><Route size={14} />批量改道</button></label>
         <button type="button" disabled={selectedCount < 2} onClick={() => onBulkBeltConfiguration(selectedVisible)} title="使用首个所选网络的设置覆盖其余网络"><ClipboardCopy size={14} />同步首条设置</button>
         <button className="danger" type="button" disabled={selectedCount === 0} onClick={() => { onBulkBeltRemove(selectedVisible); setSelectedIds([]); }}><Trash2 size={14} />批量回收</button>

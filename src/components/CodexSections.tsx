@@ -34,7 +34,6 @@ import {
   getStarSystem,
   getTechnology,
   isConveyorBeltId,
-  isSorterId,
 } from "../game/content";
 import { getBeltCapacity, getDysonEngineeringSnapshot, isTechnologyCompleted } from "../game/engine";
 import { getPlanetIndustrialProfile, getPlanetSolarPowerMultiplier, getStarSystemProfile } from "../game/galaxy";
@@ -156,7 +155,6 @@ function BuildingSection({ game, selectedId, detailOnly, onSelect, onSelectItem,
 
 function LogisticsSection({ game, onSelectBuilding, onSelectItem }: { game: GameState; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
   const beltDefinitions = CONSTRUCTION.filter((definition) => isConveyorBeltId(definition.buildingId));
-  const sorterDefinitions = CONSTRUCTION.filter((definition) => isSorterId(definition.buildingId));
   const logisticsBuildings = Object.values(BUILDINGS).filter((building) => building.kind === "storage" || building.kind === "splitter" || building.kind === "station");
   const capacity = (tier: BeltTier, stackSize: CargoStackSize) => getBeltCapacity({ tier, lanes: 1, stackSize } as BeltConnection);
   return <div className="codex-overview">
@@ -165,7 +163,6 @@ function LogisticsSection({ game, onSelectBuilding, onSelectItem }: { game: Game
       return <article key={definition.buildingId}><header><span><strong>{definition.name}</strong><small>{definition.requiredTechId ? getTechnology(definition.requiredTechId)?.name : "基础物流"}</small></span><b>{capacity(tier, 1)} 件/秒</b></header><dl><div><dt>1 层</dt><dd>{capacity(tier, 1)}/s</dd></div><div><dt>2 层</dt><dd>{capacity(tier, 2)}/s</dd></div><div><dt>4 层</dt><dd>{capacity(tier, 4)}/s</dd></div></dl><div className="codex-link-grid">{definition.costs.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />)}</div></article>;
     })}</div></section>
     <section className="codex-section-block"><header><GitFork size={17} /><strong>物流设施</strong><small>{logisticsBuildings.length} 类</small></header><div className="codex-card-grid">{logisticsBuildings.map((building) => <button type="button" key={building.id} onClick={() => onSelectBuilding(building.id)}><Factory size={18} /><span><strong>{building.name}</strong><small>{building.description}</small></span></button>)}</div></section>
-    <section className="codex-section-block"><header><Route size={17} /><strong>兼容分拣器施工件</strong><small>当前玩法由传送带直接承担设备连接</small></header><div className="codex-compact-list">{sorterDefinitions.map((definition) => <article key={definition.buildingId}><span><strong>{definition.name}</strong><small>{definition.requiredTechId ? getTechnology(definition.requiredTechId)?.name : "基础"}</small></span><div>{definition.costs.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />)}</div></article>)}</div></section>
     <small className="codex-live-note">当前已铺设 {game.belts.length.toLocaleString("zh-CN")} 条线路；堆叠吞吐会按每条线路的实际层数计算。</small>
   </div>;
 }

@@ -1,7 +1,7 @@
 {
   "name": "dsp-idle-network",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "戴森球计划风格的 2D 生产网络挂机游戏",
   "author": "DSP Idle Network Contributors",
   "type": "module",

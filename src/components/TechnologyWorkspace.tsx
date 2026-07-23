@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ITEMS, MATRIX_ITEM_IDS, PLANET_LIST, TECHNOLOGY_LIST, getTechnology } from "../game/content";
 import { canQueueTechnology, getDysonSailAbsorptionMultiplier, getInterstellarCargoCapacity, getLogisticsSpeedMultiplier, getMiningSpeedMultiplier, getPlanetaryCargoCapacity, getRayReceiverCapacityKw, getRecipeSpeedMultiplier, getSolarSailLifetimeSeconds, isTechnologyCompleted } from "../game/engine";
 import { INFINITE_RESEARCH_DEFINITIONS, getInfiniteResearchCompletion, getInfiniteResearchCost, getInfiniteResearchLevel, isEndgameUnlocked } from "../game/endgame";
-import type { GameState, InfiniteResearchId, ItemId, TechId } from "../game/types";
+import type { GameState, InfiniteResearchId, ItemId, TechnologyLayoutMode, TechId } from "../game/types";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { useHorizontalPan } from "../hooks/useHorizontalPan";
 
@@ -19,6 +19,7 @@ interface TechnologyWorkspaceProps {
   onRemoveQueued: (techId: TechId) => void;
   onSelectInfiniteResearch: (researchId: InfiniteResearchId) => void;
   onInfiniteResearchAutomation: (enabled: boolean) => void;
+  onLayoutChange: (layout: TechnologyLayoutMode) => void;
   focusTechId?: TechId | null;
   mobile?: boolean;
   mobileSubview?: string | null;
@@ -34,7 +35,7 @@ function networkMatrixStock(game: GameState, itemId: ItemId): number {
   return Math.floor(nodeStock + trayStock + (game.cargo?.itemId === itemId ? game.cargo.amount : 0));
 }
 
-export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
+export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, onLayoutChange, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
   const [focusedTechId, setFocusedTechId] = useState<TechId | null>(null);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [mobileFilter, setMobileFilter] = useState<"available" | "active" | "all">("available");
@@ -155,6 +156,10 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
           <span>已完成 <strong>{game.research.completedTechIds.length}/{TECHNOLOGY_LIST.length}</strong></span>
           <span>无限等级 <strong>{Object.values(game.endgame.infiniteResearch).reduce((sum, progress) => sum + progress.level, 0)}</strong></span>
         </div>
+        <div className="technology-layout-toggle" role="group" aria-label="科技树布局">
+          <button className={game.settings.technologyLayout === "standard" ? "active" : ""} type="button" onClick={() => onLayoutChange("standard")}>标准</button>
+          <button className={game.settings.technologyLayout === "compact" ? "active" : ""} type="button" onClick={() => onLayoutChange("compact")}>精简</button>
+        </div>
         <button className="technology-close" type="button" onClick={onClose} title="关闭科技树" aria-label="关闭科技树"><X size={18} /></button>
       </header>
 
@@ -224,7 +229,7 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
         </div> : null}
       </div>
 
-      <div className={`technology-tree${horizontalPan.isPanning ? " horizontal-pan--active" : ""}`} style={{ "--technology-tier-count": maximumTier + 1 } as CSSProperties} {...horizontalPan.bindings}>
+      <div className={`technology-tree technology-tree--${game.settings.technologyLayout}${horizontalPan.isPanning ? " horizontal-pan--active" : ""}`} style={{ "--technology-tier-count": maximumTier + 1 } as CSSProperties} {...horizontalPan.bindings}>
         {Array.from({ length: maximumTier + 1 }, (_, tier) => (
           <section className="technology-tier" key={tier}>
             <header><span>层级 {String(tier + 1).padStart(2, "0")}</span></header>

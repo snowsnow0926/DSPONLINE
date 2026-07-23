@@ -313,3 +313,28 @@ Chrome 桌面触摸仿真通过不等于 Android Chrome 或 iPhone Safari 真机
 正式构建在独立干净 worktree 中完成，没有结束或复用玩家当前的 `4318/4320` 进程。香港切换前通过 SQLite Backup API 创建 59,940,864 字节的 schema v6 一致性备份，并以全新 Web/API release 目录原子切换；当前回滚点为 `0.5.0-5b3a468c94d0`。公网根域名、健康接口、`www` 跳转、管理员 `401`、gzip、immutable/no-cache 边界以及桌面、新旧手机横竖屏均通过。上海公开 manifest 仍为 `0.5.0-5b3a468c94d0`，没有执行上传或切换。
 
 Android Chrome 与 iPhone Safari 的 30 分钟真机温度、耗电、FPS、软键盘和 PWA standalone 仍未完成，因此新版继续 opt-in，不切为默认。完整制品、备份、回滚和生产截图证据见 [releases/0.6.0.md](./releases/0.6.0.md)。
+
+## 14. v31 物流与工作区体验本地验收（未发布）
+
+本节记录 2026-07-23 当前工作区结果，不代表香港或上海已经更新。工作区状态版本为 v31，存档 envelope 仍为 v2；香港 `0.6.0` 与上海 `0.5.0` 继续使用 v30。
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run typecheck` | 通过 |
+| `npm test` | 27/27 文件、282/282 通过 |
+| `npm run build` | 通过 |
+| 先前失败的物流/经典手机 focused Playwright | 7/7 通过 |
+| `tests/e2e/v31-workspaces.spec.ts` | 5/5 通过 |
+| `npm run test:e2e` | 113/113 通过，3 workers 约 5.3 分钟 |
+| `git diff --check` | 通过 |
+
+专项覆盖供需两端载具调度和归属、旧 `stationProgress` 首航迁移、逐行星视口、三种主题、建筑制造中心递归任务、分拣器退款迁移、科技树精简布局、所有主工作区再次点击关闭、堆叠容量以及物流站五槽顺序自动配置。完整 E2E 同时回归经典/新版手机、80%-200% 字体、线路端点、星图互斥、旧存档迁移、有限资源、云存档和大型工作区。
+
+视觉检查产物：
+
+- `artifacts/qa/v31-light-theme-1440.png`
+- `artifacts/qa/v31-light-factory-1440.png`
+- `artifacts/qa/v31-technology-compact-light-1440.png`
+- `artifacts/qa/v31-light-mobile-390.png`
+
+本次没有执行服务器操作、发布构建清单、生产备份、Git 提交或标签。完整 E2E 的 Vite 测试服务器在两个页面卸载时报告过非阻断的 `ResizeObserver loop completed with undelivered notifications`，全部 113 项断言和进程退出码仍为成功；发布前可单独跟踪该浏览器提示，但它不是当前功能失败。

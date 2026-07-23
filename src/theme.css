@@ -1,0 +1,437 @@
+/* Theme overrides are isolated here so gameplay and responsive rules remain independent. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef2f0;
+  --surface: #ffffff;
+  --surface-raised: #f7f9f8;
+  --surface-soft: #e7ece9;
+  --line: #c9d2cd;
+  --line-strong: #95a59d;
+  --text: #17201c;
+  --text-soft: #3e4c45;
+  --muted: #65766d;
+  --cyan: #187f7a;
+  --cyan-deep: #0b625e;
+  --yellow: #9a6a08;
+  --coral: #b24736;
+  --green: #27854b;
+  --blue: #28799f;
+}
+
+html[data-theme="light"] body,
+html[data-theme="light"] #root,
+html[data-theme="light"] .game-shell,
+html[data-theme="light"] .workspace-loading {
+  background: var(--bg);
+  color: var(--text);
+}
+
+html[data-theme="light"] .start-menu,
+html[data-theme="light"] .start-menu-scene {
+  background: #edf3f0;
+  color: var(--text);
+}
+
+html[data-theme="light"] .start-menu-scene::after {
+  background: rgba(238, 244, 241, .42);
+}
+
+html[data-theme="light"] :is(
+  .game-header,
+  .header-overflow-menu,
+  .resource-rail,
+  .inspector-panel,
+  .construction-dock,
+  .planet-navigator,
+  .canvas-selection-tools,
+  .canvas-status,
+  .recipe-focus-panel,
+  .technology-workspace,
+  .statistics-workspace,
+  .recipe-workspace,
+  .star-map-workspace,
+  .blueprint-workspace,
+  .dyson-planner-workspace,
+  .operations-workspace,
+  .campaign-workspace,
+  .galaxy-workspace,
+  .construction-center-workspace,
+  .command-palette,
+  .mobile-next-topbar,
+  .mobile-next-bottom-nav,
+  .mobile-next-hub,
+  .mobile-sheet-frame,
+  .mobile-workspace
+) {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(
+  .factory-canvas,
+  .react-flow__pane,
+  .technology-tree,
+  .statistics-content,
+  .operations-panel,
+  .mobile-workspace-scroll
+) {
+  background-color: var(--bg);
+}
+
+html[data-theme="light"] :is(
+  .campaign-header,
+  .recipe-header,
+  .technology-header,
+  .dyson-planner-header,
+  .blueprint-header,
+  .star-map-header,
+  .statistics-header,
+  .operations-header,
+  .galaxy-header,
+  .construction-center-header,
+  .construction-center-toolbar,
+  .technology-research-strip,
+  .technology-queue-strip,
+  .research-focus,
+  .operations-tabs,
+  .statistics-tabs,
+  .star-map-tabs,
+  .galaxy-tabs
+) {
+  border-color: var(--line);
+  background-color: var(--surface-raised);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(
+  .operations-tabs button.active,
+  .statistics-tabs button.active,
+  .star-map-tabs button.active,
+  .galaxy-tabs button.active,
+  .settings-segmented button.active,
+  .technology-layout-toggle button.active
+) {
+  background-color: #dcebe5;
+  color: var(--cyan-deep);
+}
+
+html[data-theme="light"] :is(
+  .settings-segmented,
+  .technology-layout-toggle,
+  .technology-queue,
+  .research-advanced-panel,
+  .statistics-toolbar,
+  .construction-center-status
+) {
+  border-color: var(--line);
+  background-color: var(--surface-soft);
+  color: var(--text-soft);
+}
+
+html[data-theme="light"] :is(
+  .factory-node,
+  .react-flow__node,
+  .technology-node,
+  .recipe-method,
+  .statistics-row,
+  .issue-row,
+  .consumer-row,
+  .construction-center-row,
+  .codex-detail,
+  .codex-section-block,
+  .mobile-tech-list button,
+  .mobile-detail-section,
+  .mobile-sheet-card
+) {
+  border-color: var(--line);
+  background-color: var(--surface);
+  color: var(--text);
+  box-shadow: 0 5px 16px rgba(40, 62, 51, .08);
+}
+
+html[data-theme="light"] :is(
+  .factory-node__header,
+  .factory-node__footer,
+  .factory-node__io > div,
+  .factory-edge-label,
+  .belt-label,
+  .recipe-focus-step,
+  .recipe-focus-item,
+  .chart-card,
+  .metric-card,
+  .settings-group,
+  .save-card,
+  .station-slot,
+  .galaxy-cloud-save-card,
+  .construction-center-row
+) {
+  border-color: var(--line);
+  background-color: var(--surface-raised);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(
+  .dyson-block,
+  .cargo-slot,
+  .onboarding-coach,
+  .fabricator-command,
+  .planet-navigator button.active,
+  .canvas-selection-tools button:hover,
+  .canvas-selection-tools button.active,
+  .factory-node button,
+  .factory-node select
+) {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  box-shadow: none;
+}
+
+html[data-theme="light"] :is(
+  .research-current-actions button,
+  .research-paused-summary button,
+  .research-advanced-toggle
+) {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text-soft);
+}
+
+html[data-theme="light"] .research-progress > i {
+  background: var(--surface-soft);
+}
+
+html[data-theme="light"] :is(
+  .dyson-planner-command,
+  .onboarding-coach > footer button,
+  .construction-item-craft,
+  .dock-compact-toggle[aria-pressed="true"],
+  .dock-belt-auto.active,
+  .placement-count button.active
+) {
+  border-color: #73a596;
+  background: #dcebe5;
+  color: var(--cyan-deep);
+}
+
+html[data-theme="light"] :is(.manual-mine, .factory-node .manual-mine) {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+  color: var(--text-soft);
+}
+
+html[data-theme="light"] .technology-node:hover:not(:disabled),
+html[data-theme="light"] button:hover:not(:disabled) {
+  background-color: #e9f2ee;
+}
+
+html[data-theme="light"] :is(.technology-node--complete, .status-card--ready, .station-slot--configured) {
+  background-color: #e6f3e9;
+}
+
+html[data-theme="light"] :is(.technology-node--paused, .warning, .status-card--warning) {
+  background-color: #fff4d9;
+}
+
+html[data-theme="light"] :is(.danger, .danger-command, .status-card--blocked) {
+  background-color: #fff0ed;
+}
+
+html[data-theme="light"] :is(input, select, textarea) {
+  border-color: var(--line);
+  background: #ffffff;
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(input, select, textarea)::placeholder {
+  color: var(--muted);
+}
+
+html[data-theme="light"] .react-flow__controls,
+html[data-theme="light"] .react-flow__minimap {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 6px 18px rgba(40, 62, 51, .12);
+}
+
+html[data-theme="light"] .react-flow__controls-button {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+  fill: currentColor;
+}
+
+html[data-theme="light"] :is(.modal-backdrop, .mobile-backdrop, .mobile-action-backdrop) {
+  background: rgba(42, 55, 49, .34);
+}
+
+html[data-theme="light"] :is(.chart-grid line, .technology-tier) {
+  border-color: var(--line);
+  stroke: var(--line);
+}
+
+html[data-theme="light"] :is(.chart-grid text, .chart-axis text, .recharts-text) {
+  fill: var(--text-soft);
+}
+
+html[data-theme="light"] .react-flow__edge-textbg {
+  fill: var(--surface-raised);
+}
+
+html[data-theme="light"] .react-flow__edge-text {
+  fill: var(--text-soft);
+}
+
+html[data-theme="light"] .start-menu-layout {
+  border-color: var(--line-strong);
+  background: rgba(247, 250, 248, .96);
+  box-shadow: 0 22px 70px rgba(40, 62, 51, .16);
+}
+
+html[data-theme="light"] :is(
+  .start-menu-command,
+  .start-menu-workspace,
+  .start-menu-overview,
+  .start-menu-saves,
+  .start-menu-cloud,
+  .start-menu-import,
+  .start-menu-settings,
+  .start-menu-new,
+  .start-menu-cloud-save,
+  .start-menu-cloud-user,
+  .start-menu-save-list > article,
+  .start-menu-snapshots > article,
+  .start-menu-toggle,
+  .start-menu-community,
+  .start-menu-release-notes
+) {
+  border-color: var(--line);
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(.start-menu-title h1, .start-menu-brand-mini strong) {
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(.start-menu-node-state, .start-menu-segments, .start-menu-auth input) {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+/* FactoryRuntime loads the opt-in mobile styles lazily. These higher-specificity
+   rules keep the selected theme authoritative after those chunks arrive. */
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] :is(
+  .mobile-next-topbar,
+  .mobile-next-bottom-nav,
+  .mobile-next-workspace-hub,
+  .mobile-next-sheet,
+  .mobile-next-sheet > header,
+  .mobile-next-bridge-header,
+  .mobile-workspace,
+  .mobile-workspace-scroll,
+  .mobile-build-controls,
+  .mobile-inventory-toolbar,
+  .mobile-detail-actionbar,
+  .mobile-research-status,
+  .mobile-statistics .statistics-tabs,
+  .mobile-statistics .statistics-toolbar,
+  .operations-tabs,
+  .galaxy-tabs,
+  .construction-center-toolbar,
+  .dyson-system-tabs
+) {
+  border-color: var(--line) !important;
+  background: var(--surface-raised) !important;
+  color: var(--text) !important;
+  box-shadow: none;
+}
+
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] :is(
+  .mobile-next-topbar button,
+  .mobile-next-workspace-hub__scroll > section > div > button,
+  .mobile-next-planet-list > button,
+  .mobile-next-sheet-primary,
+  .mobile-next-tool-groups button,
+  .mobile-next-sheet__handle > nav button,
+  .mobile-segmented > button,
+  .mobile-build-controls > label,
+  .mobile-build-controls > nav button,
+  .mobile-build-card,
+  .mobile-cargo-slot,
+  .mobile-cargo-slot > button,
+  .mobile-inventory-toolbar > label,
+  .mobile-inventory-toolbar > button,
+  .mobile-inventory-list > button,
+  .mobile-inventory-row,
+  .mobile-dyson-summary > div,
+  .mobile-inspector-io > div,
+  .mobile-belt-summary > div,
+  .mobile-inspector-actions > button,
+  .mobile-placement-bar,
+  .mobile-mode-status,
+  .mobile-selection-context,
+  .mobile-placement-stepper button,
+  .mobile-placement-bar > button,
+  .mobile-mode-status button,
+  .mobile-selection-context button,
+  .mobile-detail-section,
+  .mobile-detail-section > p,
+  .mobile-detail-actionbar > button,
+  .mobile-tech-filter button,
+  .mobile-tech-list button,
+  .mobile-tech-unlocks > span,
+  .mobile-statistics-overview > div,
+  .mobile-statistics .statistics-row,
+  .mobile-system-planets > button,
+  .mobile-planet-environment > div
+) {
+  border-color: var(--line) !important;
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  box-shadow: none;
+}
+
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] :is(
+  .mobile-next-bottom-nav button.active,
+  .mobile-next-planet-list > button.active,
+  .mobile-next-tool-groups button.active,
+  .mobile-segmented > button.active,
+  .mobile-build-controls > nav button.active,
+  .mobile-build-card.active,
+  .mobile-tech-filter button.active,
+  .mobile-tech-list button.active,
+  .mobile-detail-actionbar > button.primary
+) {
+  border-color: #73a596 !important;
+  background: #dcebe5 !important;
+  color: var(--cyan-deep) !important;
+}
+
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] :is(
+  .mobile-next-planet-command small,
+  .mobile-next-power span,
+  .mobile-next-topbar--workspace > div small,
+  .mobile-next-workspace-hub small,
+  .mobile-next-sheet small,
+  .mobile-build-card small,
+  .mobile-inventory-list small,
+  .mobile-inspector-status small,
+  .mobile-inspector-progress small,
+  .mobile-detail-section small
+) {
+  color: var(--muted) !important;
+}
+
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] :is(
+  .mobile-next-topbar--workspace > div strong,
+  .mobile-build-controls input,
+  .mobile-inventory-toolbar input
+) {
+  color: var(--text) !important;
+}
+
+html[data-theme="light"] .game-shell[data-mobile-shell="true"] .mobile-next-sheet-backdrop {
+  background: rgba(45, 61, 53, .28);
+}

@@ -1,14 +1,14 @@
 import { Check, Factory, Layers3, Minus, PackageOpen, Plus, Power, Search, Truck, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { CONSTRUCTION, ITEMS, getConstructionDefinition, getPlanet, getTechnology, isConveyorBeltId, isSorterId } from "../game/content";
-import { getConstructionAutomationCycleSeconds, getConstructionAutomationStockLimit, isTechnologyCompleted } from "../game/engine";
+import { CONSTRUCTION, ITEMS, getConstructionDefinition, getPlanet, getTechnology, isConveyorBeltId } from "../game/content";
+import { getConstructionAutomationCycleSeconds, getConstructionAutomationMaterialSeconds, getConstructionAutomationStatus, getConstructionAutomationStockLimit, isTechnologyCompleted } from "../game/engine";
 import type { ConstructionId, GameState, ItemId } from "../game/types";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 
 type CenterCategory = "all" | "power" | "production" | "logistics" | "dyson";
 
 const POWER_IDS = new Set<ConstructionId>(["wind_turbine", "solar_panel", "geothermal_power_station", "thermal_power_plant", "mini_fusion_power_plant", "artificial_star", "accumulator", "energy_exchanger"]);
-const LOGISTICS_IDS = new Set<ConstructionId>(["conveyor_belt_mk1", "conveyor_belt_mk2", "conveyor_belt_mk3", "sorter_mk1", "sorter_mk2", "sorter_mk3", "storage_mk1", "material_delivery_hub", "storage_tank", "splitter_4way", "planetary_logistics_station", "interstellar_logistics_station", "orbital_collector"]);
+const LOGISTICS_IDS = new Set<ConstructionId>(["conveyor_belt_mk1", "conveyor_belt_mk2", "conveyor_belt_mk3", "storage_mk1", "material_delivery_hub", "storage_tank", "splitter_4way", "planetary_logistics_station", "interstellar_logistics_station", "orbital_collector"]);
 const DYSON_IDS = new Set<ConstructionId>(["em_rail_ejector", "ray_receiver", "vertical_launching_silo"]);
 
 function categoryFor(id: ConstructionId): Exclude<CenterCategory, "all"> {
@@ -20,7 +20,7 @@ function categoryFor(id: ConstructionId): Exclude<CenterCategory, "all"> {
 
 function DefinitionIcon({ id }: { id: ConstructionId }) {
   if (POWER_IDS.has(id)) return <Power size={16} />;
-  if (isConveyorBeltId(id) || isSorterId(id)) return <Layers3 size={16} />;
+  if (isConveyorBeltId(id)) return <Layers3 size={16} />;
   if (LOGISTICS_IDS.has(id)) return <Truck size={16} />;
   return <Factory size={16} />;
 }
@@ -39,6 +39,7 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
   const sourceTray = sourcePlanetId === game.activePlanetId ? game.tray : game.planetTrays[sourcePlanetId];
   const stockLimit = getConstructionAutomationStockLimit(game);
   const cycleSeconds = getConstructionAutomationCycleSeconds(game);
+  const materialSeconds = getConstructionAutomationMaterialSeconds(game);
   const term = query.trim().toLocaleLowerCase("zh-CN");
   const definitions = useMemo(() => CONSTRUCTION.filter((definition) => {
     if (category !== "all" && categoryFor(definition.buildingId) !== category) return false;
@@ -61,6 +62,7 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
           <div><dt>制造中心</dt><dd>{centers.reduce((sum, entity) => sum + entity.machineCount, 0)}</dd></div>
           <div><dt>补货目标</dt><dd>{completedTargets}/{activeTargets}</dd></div>
           <div><dt>制造周期</dt><dd>{cycleSeconds}s</dd></div>
+          <div><dt>材料加工</dt><dd>{materialSeconds.toFixed(2)}s/件</dd></div>
           <div><dt>库存上限</dt><dd>{stockLimit}</dd></div>
         </dl>
         <button type="button" onClick={onClose} title="关闭建筑制造中心" aria-label="关闭建筑制造中心"><X size={18} /></button>
@@ -78,6 +80,10 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
         <span><PackageOpen size={14} />取料行星 <strong>{getPlanet(sourcePlanetId).name}</strong></span>
         <span>累计制造 <strong>{game.constructionAutomation.totalCrafted.toLocaleString("zh-CN")}</strong></span>
         <span>最近完成 <strong>{game.constructionAutomation.lastCraftedId ? getConstructionDefinition(game.constructionAutomation.lastCraftedId)?.name ?? "未知" : "尚无"}</strong></span>
+        {centers.map((center) => {
+          const status = getConstructionAutomationStatus(game, center.id);
+          return <span key={center.id}>{getPlanet(center.planetId).name} <strong>{status.stage}</strong>{status.missingItemId ? ` · 缺${ITEMS[status.missingItemId].name} ${status.missingAmount ?? 1}` : status.etaSeconds > 0 ? ` · ${status.etaSeconds.toFixed(1)}s` : ""}</span>;
+        })}
         {centers.length === 0 ? <em>需要先在画布放置建筑制造中心</em> : null}
       </div>
 

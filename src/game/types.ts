@@ -681,6 +681,8 @@ export interface StationRoute {
   waypointStationIds?: string[];
   distanceLy?: number;
   warpersPerVessel?: number;
+  /** Station whose installed fleet is occupied by this route. Legacy routes use the demand station. */
+  vehicleStationId?: string;
 }
 
 export type DraggedItemSourceKind = "node" | "node-input" | "tray";
@@ -950,6 +952,8 @@ export interface RecipeFocusState {
 export interface GameSettings {
   simulationSpeed: SimulationSpeed;
   fontScale: FontScale;
+  theme: ThemeMode;
+  technologyLayout: TechnologyLayoutMode;
   performanceMode: boolean;
   reducedMotion: boolean;
   soundEnabled: boolean;
@@ -958,6 +962,15 @@ export interface GameSettings {
   autosaveIntervalSeconds: AutosaveIntervalSeconds;
   resourceMode: ResourceMode;
   difficulty: DifficultyMode;
+}
+
+export type ThemeMode = "dark" | "light" | "system";
+export type TechnologyLayoutMode = "standard" | "compact";
+
+export interface CanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
 }
 
 export interface CanvasBookmark {
@@ -1099,10 +1112,33 @@ export interface ConstructionAutomationState {
   cursor: number;
   totalCrafted: number;
   lastCraftedId: ConstructionId | null;
+  jobs: Record<string, ConstructionAutomationJob>;
+}
+
+export interface ConstructionAutomationRecipeStep {
+  kind: "material";
+  recipeId: RecipeId;
+  batches: number;
+  outputItemId: ItemId;
+  outputAmount: number;
+}
+
+export interface ConstructionAutomationBuildingStep {
+  kind: "building";
+  constructionId: ConstructionId;
+}
+
+export type ConstructionAutomationStep = ConstructionAutomationRecipeStep | ConstructionAutomationBuildingStep;
+
+export interface ConstructionAutomationJob {
+  constructionId: ConstructionId;
+  steps: ConstructionAutomationStep[];
+  stepIndex: number;
+  elapsedSeconds: number;
 }
 
 export interface GameState {
-  version: 30;
+  version: 31;
   nextId: number;
   activePlanetId: PlanetId;
   entities: FactoryEntity[];
@@ -1123,6 +1159,7 @@ export interface GameState {
   settings: GameSettings;
   achievements: AchievementState;
   campaign: CampaignState;
+  planetViewports: Record<PlanetId, CanvasViewport>;
   canvasBookmarks: CanvasBookmark[];
   canvasRegions: CanvasRegion[];
   blueprints: BlueprintDefinition[];

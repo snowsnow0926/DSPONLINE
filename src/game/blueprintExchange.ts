@@ -135,7 +135,7 @@ function parseBelt(value: unknown, index: number, entityKeys: Set<string>, issue
   if (!isRecord(value) || !validId(value.key) || typeof value.sourceKey !== "string" || typeof value.targetKey !== "string" ||
     !entityKeys.has(value.sourceKey) || !entityKeys.has(value.targetKey) || value.sourceKey === value.targetKey ||
     typeof value.itemId !== "string" || !(value.itemId in ITEMS) || !validNumber(value.lanes, 1, 64) ||
-    (value.tier !== 1 && value.tier !== 2 && value.tier !== 3) || (value.sorterTier !== 1 && value.sorterTier !== 2 && value.sorterTier !== 3) ||
+    (value.tier !== 1 && value.tier !== 2 && value.tier !== 3) ||
     (value.priority !== 0 && value.priority !== 1 && value.priority !== 2)) {
     issues.push(`线路 ${index + 1} 包含未知端点、物品或等级`);
     return null;
@@ -147,7 +147,7 @@ function parseBelt(value: unknown, index: number, entityKeys: Set<string>, issue
     itemId: value.itemId as ItemId,
     lanes: Math.floor(value.lanes),
     tier: value.tier,
-    sorterTier: value.sorterTier,
+    sorterTier: value.tier,
     priority: value.priority,
     ...(value.stackSize === 1 || value.stackSize === 2 || value.stackSize === 4 ? { stackSize: value.stackSize } : {}),
     ...(typeof value.monitorEnabled === "boolean" ? { monitorEnabled: value.monitorEnabled } : {}),

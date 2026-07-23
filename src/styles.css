@@ -7366,7 +7366,7 @@ select:focus-visible {
 
 .technology-header {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto 48px;
+  grid-template-columns: minmax(190px, 240px) minmax(0, 1fr) auto 48px;
   align-items: center;
   border-bottom: 1px solid var(--line);
   background: #111714;
@@ -7409,9 +7409,11 @@ select:focus-visible {
 
 .technology-summary {
   display: flex;
+  min-width: 0;
   align-items: center;
-  gap: 22px;
-  padding: 0 18px;
+  gap: 14px;
+  overflow: hidden;
+  padding: 0 12px;
   color: var(--muted);
   font-size: 10px;
 }
@@ -7793,6 +7795,67 @@ select:focus-visible {
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+}
+
+.technology-layout-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(48px, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-soft);
+}
+
+.technology-layout-toggle button {
+  min-width: 48px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.technology-layout-toggle button.active {
+  background: var(--surface-raised);
+  color: var(--cyan);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.technology-tree--compact {
+  grid-template-columns: repeat(var(--technology-tier-count, 6), minmax(190px, 1fr));
+}
+
+.technology-tree--compact .technology-tier {
+  min-width: 190px;
+  padding: 9px;
+}
+
+.technology-tree--compact .technology-tier > div {
+  gap: 6px;
+}
+
+.technology-tree--compact .technology-node {
+  min-height: 76px;
+  gap: 5px;
+  padding: 7px;
+}
+
+.technology-tree--compact .technology-node > p,
+.technology-tree--compact .technology-unlocks {
+  display: none;
+}
+
+.technology-tree--compact .technology-costs {
+  gap: 3px;
+}
+
+.technology-tree--compact .technology-node small {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .technology-tier {
@@ -12703,6 +12766,10 @@ select:focus-visible {
     grid-template-columns: minmax(150px, 1fr) auto 44px;
   }
 
+  .technology-layout-toggle {
+    display: none;
+  }
+
   .technology-title {
     gap: 8px;
     padding: 0 10px;
@@ -14182,6 +14249,13 @@ select {
 .header-actions .header-alert-command--active {
   border-color: #715047;
   color: #e59a86;
+}
+
+.header-actions > button.active {
+  border-color: var(--cyan-deep);
+  background: color-mix(in srgb, var(--cyan) 16%, var(--surface-raised));
+  color: var(--cyan);
+  box-shadow: inset 0 -2px 0 var(--cyan);
 }
 
 .header-alert-command > span {

@@ -343,6 +343,9 @@ function normalizeStationRoutes(entity: FactoryEntity): StationRoute[] | undefin
         : [],
       distanceLy: nonNegativeNumber(route.distanceLy),
       warpersPerVessel: Math.max(route.requiresWarp ? 1 : 0, nonNegativeInteger(route.warpersPerVessel)),
+      vehicleStationId: typeof route.vehicleStationId === "string" && route.vehicleStationId.length > 0
+        ? route.vehicleStationId
+        : undefined,
     } satisfies StationRoute];
   });
 }
@@ -474,7 +477,7 @@ function inferLegacyPlanet(entity: FactoryEntity): PlanetId {
 export function migrateGame(value: unknown): GameState | null {
   if (!value || typeof value !== "object") return null;
   const saved = value as Record<string, any>;
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].includes(saved.version) || !Array.isArray(saved.entities)) return null;
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31].includes(saved.version) || !Array.isArray(saved.entities)) return null;
   const savedSeed = saved.version >= 20 && typeof saved.galaxy?.seed === "number" && Number.isFinite(saved.galaxy.seed)
     ? saved.galaxy.seed
     : DEFAULT_GALAXY_SEED;
@@ -598,14 +601,26 @@ export function migrateGame(value: unknown): GameState | null {
     const amount = saved.construction?.[buildingId];
     return [buildingId, Math.max(0, Math.floor(typeof amount === "number" ? amount : 0))];
   })) as GameState["construction"];
+  if (saved.version < 31) {
+    const legacySorterRefunds = [
+      ["sorter_mk1", "conveyor_belt_mk1"],
+      ["sorter_mk2", "conveyor_belt_mk2"],
+      ["sorter_mk3", "conveyor_belt_mk3"],
+    ] as const;
+    for (const [sorterId, beltId] of legacySorterRefunds) {
+      construction[beltId] = nonNegativeInteger(construction[beltId]) + nonNegativeInteger(saved.construction?.[sorterId]);
+      construction[sorterId] = 0;
+    }
+  }
   const migratedBelts: BeltConnection[] = Array.isArray(saved.belts) ? saved.belts.map((belt: Record<string, any>) => {
     const source = entities.find((entity) => entity.id === belt.source);
+    const tier = saved.version >= 8 && validBeltTier(belt.tier) ? belt.tier : 1;
     return {
       ...belt,
       planetId: validPlanetId(belt.planetId) ? belt.planetId : source?.planetId ?? "home",
       lanes: Math.max(1, Math.floor(belt.lanes ?? 1)),
-      tier: saved.version >= 8 && validBeltTier(belt.tier) ? belt.tier : 1,
-      sorterTier: saved.version >= 10 && validBeltTier(belt.sorterTier) ? belt.sorterTier : 1,
+      tier,
+      sorterTier: tier,
       progress: typeof belt.progress === "number" ? Math.max(0, belt.progress) : 0,
       priority: validPriority(belt.priority) ? belt.priority : 0,
       stackSize: validCargoStackSize(belt.stackSize) ? belt.stackSize : 1,
@@ -653,7 +668,32 @@ export function migrateGame(value: unknown): GameState | null {
     lastCraftedId: saved.version >= 26 && typeof saved.constructionAutomation?.lastCraftedId === "string" && saved.constructionAutomation.lastCraftedId in initial.construction
       ? saved.constructionAutomation.lastCraftedId as ConstructionId
       : null,
+    jobs: {},
   };
+  if (saved.version >= 31 && saved.constructionAutomation?.jobs && typeof saved.constructionAutomation.jobs === "object") {
+    const centerIds = new Set(entities.filter((entity) => entity.buildingId === "construction_center").map((entity) => entity.id));
+    for (const [entityId, rawJob] of Object.entries(saved.constructionAutomation.jobs as Record<string, any>)) {
+      if (!centerIds.has(entityId) || !rawJob || typeof rawJob !== "object" ||
+        typeof rawJob.constructionId !== "string" || !(rawJob.constructionId in initial.construction) || !Array.isArray(rawJob.steps)) continue;
+      const steps = rawJob.steps.flatMap((step: Record<string, any>) => {
+        if (step?.kind === "material" && typeof step.recipeId === "string" && getRecipe(step.recipeId as RecipeId) &&
+          typeof step.outputItemId === "string" && step.outputItemId in ITEMS) {
+          return [{ kind: "material" as const, recipeId: step.recipeId as RecipeId, batches: Math.max(1, nonNegativeInteger(step.batches)), outputItemId: step.outputItemId as ItemId, outputAmount: Math.max(1, nonNegativeInteger(step.outputAmount)) }];
+        }
+        if (step?.kind === "building" && typeof step.constructionId === "string" && step.constructionId in initial.construction) {
+          return [{ kind: "building" as const, constructionId: step.constructionId as ConstructionId }];
+        }
+        return [];
+      });
+      if (steps.length === 0) continue;
+      constructionAutomation.jobs[entityId] = {
+        constructionId: rawJob.constructionId as ConstructionId,
+        steps,
+        stepIndex: Math.min(steps.length - 1, nonNegativeInteger(rawJob.stepIndex)),
+        elapsedSeconds: nonNegativeNumber(rawJob.elapsedSeconds),
+      };
+    }
+  }
   let selectedTechId = getTechnology(saved.research?.selectedTechId) && !completedTechIds.includes(saved.research.selectedTechId)
     ? saved.research.selectedTechId as TechId
     : null;
@@ -674,6 +714,16 @@ export function migrateGame(value: unknown): GameState | null {
   if (!selectedTechId && !pausedTechId && queuedTechIds.length > 0) selectedTechId = queuedTechIds.shift()!;
 
   const activePlanetId = validPlanetId(saved.activePlanetId) ? saved.activePlanetId : "home";
+  const planetViewports = Object.fromEntries(PLANET_LIST.map((planet) => {
+    const viewport = saved.version >= 31 ? saved.planetViewports?.[planet.id] : undefined;
+    return [planet.id, {
+      x: Number.isFinite(viewport?.x) ? Math.round(viewport.x * 100) / 100 : initial.planetViewports[planet.id].x,
+      y: Number.isFinite(viewport?.y) ? Math.round(viewport.y * 100) / 100 : initial.planetViewports[planet.id].y,
+      zoom: Number.isFinite(viewport?.zoom)
+        ? Math.max(0.25, Math.min(1.8, Math.round(viewport.zoom * 1000) / 1000))
+        : initial.planetViewports[planet.id].zoom,
+    }];
+  })) as GameState["planetViewports"];
   const savedActiveTray = integerRecord(saved.tray);
   const planetTrays = Object.fromEntries(PLANET_LIST.map((planet) => [
     planet.id,
@@ -793,14 +843,15 @@ export function migrateGame(value: unknown): GameState | null {
       const keys = new Set(blueprintEntities.map((entity) => entity.key));
       const blueprintBelts = Array.isArray(blueprint.belts) ? blueprint.belts.flatMap((belt: Record<string, any>, beltIndex: number) => {
         if (!keys.has(belt.sourceKey) || !keys.has(belt.targetKey) || typeof belt.itemId !== "string" || !(belt.itemId in ITEMS)) return [];
+        const tier = validBeltTier(belt.tier) ? belt.tier : 1;
         return [{
           key: typeof belt.key === "string" && belt.key ? belt.key : `line_${beltIndex + 1}`,
           sourceKey: belt.sourceKey as string,
           targetKey: belt.targetKey as string,
           itemId: belt.itemId as ItemId,
           lanes: Math.max(1, nonNegativeInteger(belt.lanes)),
-          tier: validBeltTier(belt.tier) ? belt.tier : 1,
-          sorterTier: validBeltTier(belt.sorterTier) ? belt.sorterTier : 1,
+          tier,
+          sorterTier: tier,
           priority: validPriority(belt.priority) ? belt.priority : 0,
           stackSize: validCargoStackSize(belt.stackSize) ? belt.stackSize : 1,
           monitorEnabled: Boolean(belt.monitorEnabled),
@@ -1094,6 +1145,10 @@ export function migrateGame(value: unknown): GameState | null {
     fontScale: validFontScale(saved.settings?.fontScale)
       ? saved.settings.fontScale
       : initial.settings.fontScale,
+    theme: saved.settings?.theme === "light" || saved.settings?.theme === "system"
+      ? saved.settings.theme
+      : "dark",
+    technologyLayout: saved.settings?.technologyLayout === "compact" ? "compact" : "standard",
     performanceMode: typeof saved.settings?.performanceMode === "boolean"
       ? saved.settings.performanceMode
       : initial.settings.performanceMode,
@@ -1183,7 +1238,7 @@ export function migrateGame(value: unknown): GameState | null {
   const migrated = {
     ...initial,
     ...saved,
-    version: 30,
+    version: 31,
     activePlanetId,
     entities,
     belts,
@@ -1208,6 +1263,7 @@ export function migrateGame(value: unknown): GameState | null {
     settings,
     achievements: { unlockedIds: unlockedAchievementIds },
     campaign: normalizeCampaignState(saved.campaign),
+    planetViewports,
     canvasBookmarks,
     canvasRegions,
     blueprints,

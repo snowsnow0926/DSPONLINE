@@ -56,6 +56,7 @@ import {
   advanceSimulation,
   applyBeltConfigurationToNetwork,
   canConnectBelt,
+  getBeltConnectionCheck,
   connectBelt,
   canPlaceBlueprint,
   canQueueBlueprint,
@@ -169,8 +170,6 @@ import {
   upgradeBeltNetwork,
   upgradeEntities,
   upgradeEntity,
-  upgradeSorter,
-  upgradeSorterNetwork,
   updateCanvasRegion,
   resizeCanvasRegion,
   getBlueprintEligibleEntityIds,
@@ -212,13 +211,14 @@ import { baselineAccountProgress, createLocalAccount, getActiveAccount, loadAcco
 import { removeLeaderboardData, submitLeaderboardData } from "./game/leaderboard";
 import { trackAnalyticsEvent } from "./game/analytics";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSave, getCloudToken, markCloudSaveSynchronized, readCloudAutoSyncStatus, resumeCloudSession, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CargoStackSize, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { getOnboardingFocusTarget, getOnboardingStep, type OnboardingStepId } from "./game/onboarding";
 import { useCoarsePointer } from "./hooks/useCoarsePointer";
 import { useCompactLayout } from "./hooks/useCompactLayout";
 import { useLongPress } from "./hooks/useLongPress";
 import { useLowEndMobile } from "./hooks/useLowEndMobile";
+import { useResolvedTheme } from "./hooks/useResolvedTheme";
 import { useMobileNavigation, type MobileWorkspaceId } from "./hooks/useMobileNavigation";
 import { useMobileUiPreference } from "./hooks/useMobileUiPreference";
 import { usePlayerPresence } from "./hooks/usePlayerPresence";
@@ -468,6 +468,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [mobileUiPreference, setMobileUiPreference] = useMobileUiPreference();
   const [loaded] = useState(initialLoad);
   const [game, setGame] = useState(loaded.state);
+  const resolvedTheme = useResolvedTheme(game.settings.theme);
   const [canvasGame, setCanvasGame] = useState(loaded.state);
   const [selectedEntityIds, setSelectedEntityIds] = useState<string[]>([]);
   const [selectedBeltId, setSelectedBeltId] = useState<string | null>(null);
@@ -528,7 +529,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [clickConnectionTone, setClickConnectionTone] = useState<ConnectionPreviewTone>("pending");
   const [clickConnectionSnapPoint, setClickConnectionSnapPoint] = useState<{ x: number; y: number } | null>(null);
   const [connectionHint, setConnectionHint] = useState<{ label: string; tone: "ready" | "blocked" | "warning" } | null>(null);
-  const [viewportZoom, setViewportZoom] = useState(0.84);
+  const initialViewport = loaded.state.planetViewports[loaded.state.activePlanetId] ?? { x: 510, y: 250, zoom: 0.84 };
+  const [viewportZoom, setViewportZoom] = useState(initialViewport.zoom);
   const [highlightedTaskId, setHighlightedTaskId] = useState<CampaignTaskId | null>(null);
   const [rewardFlights, setRewardFlights] = useState<RewardFlight[]>([]);
   const [planetTransition, setPlanetTransition] = useState<PlanetTransition | null>(null);
@@ -577,7 +579,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const connectionDraftRef = useRef<ConnectionDraft | null>(null);
   const suppressConnectionClickRef = useRef(false);
   const suppressConnectionClickTimerRef = useRef(0);
-  const viewportRef = useRef({ x: 510, y: 250, zoom: 0.84 });
+  const viewportRef = useRef<CanvasViewport>({ ...initialViewport });
   const canvasSizeRef = useRef<{ width: number; height: number } | null>(null);
   const continuousPlacementRef = useRef<{ entityId: string; buildingId: BuildingId; planetId: PlanetId } | null>(null);
   const ctrlHeldRef = useRef(false);
@@ -934,6 +936,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // Without this, a second belt drag in the same frame can validate
       // against stale construction stock and report a connection that the
       // simulation subsequently rejects.
+      gameRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const persistPlanetViewport = useCallback((planetId: PlanetId, viewport: CanvasViewport) => {
+    const normalized = {
+      x: Math.round(viewport.x * 100) / 100,
+      y: Math.round(viewport.y * 100) / 100,
+      zoom: Math.max(0.25, Math.min(1.8, Math.round(viewport.zoom * 1000) / 1000)),
+    };
+    setGame((current) => {
+      const previous = current.planetViewports[planetId];
+      if (previous && previous.x === normalized.x && previous.y === normalized.y && previous.zoom === normalized.zoom) return current;
+      const next = { ...current, planetViewports: { ...current.planetViewports, [planetId]: normalized } };
       gameRef.current = next;
       return next;
     });
@@ -1462,16 +1479,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const openRecipeFocus = useCallback((itemId?: ItemId) => {
     const focused = itemId ?? gameRef.current.recipeFocus.itemId;
     if (focused) setCampaignFocusItemId(focused);
+    closeAllWorkspaces();
     setRecipesOpen(true);
-    setTechnologyOpen(false);
-    setStatisticsOpen(false);
-    setStarMapOpen(false);
-    setCampaignOpen(false);
-    setGalaxyOpen(false);
     setMobilePanel(null);
     setNotice(null);
     mobileNavigation.openWorkspace("recipes");
-  }, [mobileNavigation.openWorkspace]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace]);
 
   const onFuelChange = useCallback((entityId: string, itemId: ItemId) => {
     commitGame((current) => setFuelItem(current, entityId, itemId));
@@ -1497,11 +1510,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     onMiningStop();
     const cargo = gameRef.current.cargo;
     const previousPlanetId = gameRef.current.activePlanetId;
-    if (previousPlanetId !== planetId) {
-      if (!gameRef.current.settings.reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
-      playTone("travel");
-    }
-    setGame((current) => setActivePlanet(current, planetId));
+    if (previousPlanetId === planetId) return;
+    const leavingViewport = { ...viewportRef.current };
+    const destinationViewport = gameRef.current.planetViewports[planetId] ?? { x: 510, y: 250, zoom: 0.84 };
+    if (!gameRef.current.settings.reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
+    playTone("travel");
+    setGame((current) => {
+      const withViewport = {
+        ...current,
+        planetViewports: { ...current.planetViewports, [current.activePlanetId]: leavingViewport },
+      };
+      const next = setActivePlanet(withViewport, planetId);
+      gameRef.current = next;
+      return next;
+    });
     setSelectedEntityIds([]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -1516,7 +1538,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     regionPointerRef.current = null;
     regionResizeRef.current = null;
     setNodes([]);
-    setViewport({ x: 510, y: 250, zoom: 0.84 }, { duration: 180 });
+    viewportRef.current = { ...destinationViewport };
+    setViewportZoom(destinationViewport.zoom);
+    setViewport(destinationViewport, { duration: gameRef.current.settings.reducedMotion ? 0 : 180 });
     if (cargo) {
       const titanium = cargo.itemId === "titanium_ore" || cargo.itemId === "titanium_ingot";
       setNotice(`${titanium ? "托钛天王" : "手提星际运输"}：${ITEMS[cargo.itemId].name} ×${cargo.amount} 已抵达${getPlanet(planetId).name}`);
@@ -1608,17 +1632,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const openCommandWorkspace = useCallback((workspace: CommandWorkspace) => {
     setCommandPaletteOpen(false);
-    setTechnologyOpen(false);
-    setStatisticsOpen(false);
-    setStatisticsFocusTab(null);
-    setRecipesOpen(false);
-    setStarMapOpen(false);
-    setBlueprintsOpen(false);
-    setDysonPlannerOpen(false);
-    setOperationsOpen(false);
-    setCampaignOpen(false);
-    setGalaxyOpen(false);
-    setConstructionCenterOpen(false);
+    closeAllWorkspaces();
     setMobilePanel(null);
     if (workspace === "inspector" || workspace === "resources") {
       mobileNavigation.openSheet(workspace === "resources" ? "inventory" : "inspector");
@@ -1652,7 +1666,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setGalaxyOpen(true);
       mobileNavigation.openWorkspace("galaxy");
     }
-  }, [mobileNavigation.openSheet, mobileNavigation.openWorkspace, nextMobileShell]);
+  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, nextMobileShell]);
 
   const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null) => {
     onMiningStop();
@@ -1687,7 +1701,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setEventHistory([]);
     setCommandPaletteOpen(false);
     clearHistory();
-    setViewport({ x: 510, y: 250, zoom: 0.84 }, { duration: state.settings.reducedMotion ? 0 : 180 });
+    const viewport = state.planetViewports[state.activePlanetId] ?? { x: 510, y: 250, zoom: 0.84 };
+    viewportRef.current = { ...viewport };
+    setViewportZoom(viewport.zoom);
+    setViewport(viewport, { duration: state.settings.reducedMotion ? 0 : 180 });
   }, [clearHistory, onMiningStop, setNodes, setViewport]);
 
   const focusEntityIds = useCallback((entityIds: string[]) => {
@@ -1820,16 +1837,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [focusEntityIds, onPlanetChange]);
 
   const openCampaign = useCallback(() => {
+    closeAllWorkspaces();
     setCampaignOpen(true);
-    setTechnologyOpen(false);
-    setStatisticsOpen(false);
-    setStatisticsFocusTab(null);
-    setRecipesOpen(false);
-    setStarMapOpen(false);
-    setBlueprintsOpen(false);
-    setDysonPlannerOpen(false);
-    setOperationsOpen(false);
-    setGalaxyOpen(false);
     setMobilePanel(null);
     setPlacement(null);
     setBlueprintPlacementId(null);
@@ -1839,24 +1848,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setNotice(null);
     mobileNavigation.openWorkspace("campaign");
-  }, [mobileNavigation.openWorkspace]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace]);
 
   const navigateFromCampaign = useCallback((navigation: CampaignNavigation, taskId?: CampaignTaskId) => {
     if (taskId) {
       setHighlightedTaskId(taskId);
       setFocusedBeltNetworkId(null);
     }
-    setCampaignOpen(false);
+    closeAllWorkspaces();
     setCampaignFocusItemId(null);
     setCampaignFocusTechId(null);
-    setStatisticsOpen(false);
-    setStatisticsFocusTab(null);
-    setRecipesOpen(false);
-    setStarMapOpen(false);
-    setBlueprintsOpen(false);
-    setDysonPlannerOpen(false);
-    setOperationsOpen(false);
-    setGalaxyOpen(false);
     setMobilePanel(null);
     setPlacement(null);
     setBlueprintPlacementId(null);
@@ -1904,7 +1905,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (navigation.kind === "construction") {
       setInspectorTab("fabricate");
       setMobilePanel("inspector");
-      setNotice(`请在施工托盘中选择${navigation.constructionId.includes("conveyor") ? "传送带" : "分拣器"}`);
+      setNotice("请在施工托盘中选择传送带");
       return;
     }
     const entity = gameRef.current.entities.find((candidate) => candidate.buildingId === navigation.buildingId);
@@ -1922,18 +1923,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setInspectorTab("fabricate");
     setMobilePanel("inspector");
     setNotice(`施工托盘已切换到${getBuilding(navigation.buildingId).name}`);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [closeAllWorkspaces, focusEntityIds, onPlanetChange]);
 
   const runOnboardingAction = useCallback((stepId: OnboardingStepId) => {
-    setTechnologyOpen(false);
-    setStatisticsOpen(false);
-    setRecipesOpen(false);
-    setStarMapOpen(false);
-    setBlueprintsOpen(false);
-    setDysonPlannerOpen(false);
-    setOperationsOpen(false);
-    setCampaignOpen(false);
-    setGalaxyOpen(false);
+    closeAllWorkspaces();
     if (stepId === "research") {
       setTechnologyOpen(true);
       setNotice("选择一项可研究科技加入队列");
@@ -1988,7 +1981,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     openCampaign();
-  }, [focusBeltNetwork, focusEntityIds, focusPlacedEntity, navigateFromCampaign, onPlanetChange, openCampaign]);
+  }, [closeAllWorkspaces, focusBeltNetwork, focusEntityIds, focusPlacedEntity, navigateFromCampaign, onPlanetChange, openCampaign]);
 
   const onSelectCampaignTask = useCallback((taskId: CampaignTaskId) => {
     setGame((current) => selectCampaignTask(current, taskId));
@@ -2640,7 +2633,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setClickConnectionSnapPoint((current) => current && Math.abs(current.x - snapPoint.x) < 0.5 && Math.abs(current.y - snapPoint.y) < 0.5 ? current : snapPoint);
     const connection = connectionFromDraft(preview.draft, handle);
     if (tone !== "valid" || !connection.source || !connection.target) {
-      setConnectionHint({ label: "当前端口不可连接", tone: "blocked" });
+      const check = connection.source && connection.target
+        ? getBeltConnectionCheck(gameRef.current, connection.source, connection.target, preview.draft.itemId, preview.draft.tier)
+        : null;
+      setConnectionHint({ label: check && !check.ok ? check.label : "当前端口不可连接", tone: "blocked" });
       return;
     }
     const forecast = predictBeltConnection(gameRef.current, connection.source, connection.target, preview.draft.itemId, preview.draft.tier);
@@ -2704,7 +2700,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else {
       const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === fromItem);
       if (existing && existing.tier !== lockedTier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
-      else if (!canConnectBelt(current, source.id, target.id, fromItem, lockedTier)) label = `${ITEMS[fromItem].name}无法自动匹配当前设备`;
+      else {
+        const check = getBeltConnectionCheck(current, source.id, target.id, fromItem, lockedTier);
+        if (!check.ok) label = check.label;
+      }
     }
     setNotice(`运输线未建立：${label}`);
     setConnectionHint({ label, tone: "blocked" });
@@ -2760,7 +2759,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else {
       const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === sourceItem);
       if (existing && existing.tier !== preview.draft.tier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
-      else if (!canConnectBelt(current, source.id, target.id, sourceItem, preview.draft.tier)) label = `${ITEMS[sourceItem].name}无法自动匹配当前设备`;
+      else {
+        const check = getBeltConnectionCheck(current, source.id, target.id, sourceItem, preview.draft.tier);
+        if (!check.ok) label = check.label;
+      }
     }
     setNotice(`运输线未建立：${label}`);
     setConnectionHint({ label, tone: "blocked" });
@@ -2801,8 +2803,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           ? "两端必须位于同一行星"
           : !getProducedOutputs(source).includes(sourceItem)
             ? `${ITEMS[sourceItem].name}不是当前输出`
-           : !canConnectBelt(before, source.id, target.id, sourceItem, activeTier)
-              ? `${ITEMS[sourceItem].name}无法自动匹配当前设备`
+           : !getBeltConnectionCheck(before, source.id, target.id, sourceItem, activeTier).ok
+              ? getBeltConnectionCheck(before, source.id, target.id, sourceItem, activeTier).label
               : "施工托盘中没有可用传送带";
       setNotice(`运输线未建立：${reason}`);
       setConnectionHint({ label: `未建立 · ${reason}`, tone: "blocked" });
@@ -3411,6 +3413,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const openMobileSheet = (id: "build" | "inventory" | "inspector" | "planet" | "tools") => {
+    if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === id) {
+      mobileNavigation.requestBack();
+      setNotice(null);
+      return;
+    }
     mobileNavigation.openSheet(id);
     if (!nextMobileShell) setMobilePanel(id === "inventory" ? "resources" : id === "inspector" ? "inspector" : null);
     setNotice(null);
@@ -3418,6 +3425,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const openMobileWorkspace = (id: MobileWorkspaceId) => {
     setNotice(null);
+    if (nextMobileShell && activeMobileWorkspace === id) {
+      closeAllWorkspaces();
+      mobileNavigation.goFactory();
+      return;
+    }
     if (id === "construction-center") {
       closeAllWorkspaces();
       setConstructionCenterOpen(true);
@@ -3433,18 +3445,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const openMobileStatistics = (tab: StatisticsTab) => {
     setNotice(null);
+    if (statisticsOpen && statisticsFocusTab === tab) {
+      closeAllWorkspaces();
+      mobileNavigation.goFactory();
+      return;
+    }
     openCommandWorkspace("statistics");
     setStatisticsFocusTab(tab);
   };
 
   const openMobileOperations = (tab: OperationsTab) => {
     setNotice(null);
+    if (operationsOpen && operationsTab === tab) {
+      closeAllWorkspaces();
+      mobileNavigation.goFactory();
+      return;
+    }
     openCommandWorkspace("operations");
     setOperationsTab(tab);
   };
 
   const openMobileGalaxy = (tab: "ranking" | "cloud" | "account") => {
     setNotice(null);
+    if (galaxyOpen && galaxyFocusTab === tab) {
+      closeAllWorkspaces();
+      mobileNavigation.goFactory();
+      return;
+    }
     setGalaxyFocusTab(tab);
     openCommandWorkspace("galaxy");
   };
@@ -3459,6 +3486,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const mobileSheetSnap = mobileNavigation.overlay?.kind === "sheet" ? mobileNavigation.overlay.snap : "none";
   const mobileRouteId = mobileNavigation.route.kind;
   const mobileWorkspaceSubview = mobileNavigation.route.kind === "workspace" ? mobileNavigation.route.subview ?? null : null;
+  const headerActiveWorkspace = operationsOpen && operationsTab === "settings" ? "settings"
+    : galaxyOpen ? "galaxy"
+      : campaignOpen ? "campaign"
+        : constructionCenterOpen ? "construction-center"
+          : starMapOpen ? "star-map"
+            : statisticsOpen ? "statistics"
+              : recipesOpen ? "recipes"
+                : technologyOpen ? "technology"
+                  : null;
 
   return (
     <main
@@ -3491,8 +3527,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     >
       <HeaderControls
         game={game}
+        activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}
-        onOpenCampaign={openCampaign}
+        onOpenCampaign={() => {
+          if (campaignOpen) closeAllWorkspaces();
+          else openCampaign();
+        }}
         onPauseToggle={togglePause}
         showMobileUiSwitch={compactLayout.isMobileShell && mobileUiPreference === "legacy"}
         onMobileUiSwitch={() => {
@@ -3500,52 +3540,43 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice("新版手机界面已启用，可在更多工作区切回经典界面");
         }}
         onOpenConstructionCenter={() => {
+          if (constructionCenterOpen) {
+            closeAllWorkspaces();
+            setNotice(null);
+            return;
+          }
+          closeAllWorkspaces();
           setConstructionCenterOpen(true);
-          setTechnologyOpen(false);
-          setStatisticsOpen(false);
-          setRecipesOpen(false);
-          setStarMapOpen(false);
-          setBlueprintsOpen(false);
-          setDysonPlannerOpen(false);
-          setOperationsOpen(false);
-          setCampaignOpen(false);
-          setGalaxyOpen(false);
           setMobilePanel(null);
         }}
         onOpenGalaxy={() => {
-          setGalaxyOpen(true);
-          setTechnologyOpen(false);
-          setStatisticsOpen(false);
-          setRecipesOpen(false);
-          setStarMapOpen(false);
-          setBlueprintsOpen(false);
-          setDysonPlannerOpen(false);
-          setOperationsOpen(false);
-          setCampaignOpen(false);
+          if (galaxyOpen) {
+            closeAllWorkspaces();
+            setNotice(null);
+            return;
+          }
+          openCommandWorkspace("galaxy");
           setMobilePanel(null);
           setNotice(null);
         }}
         onOpenSettings={() => {
-          setOperationsOpen(true);
-          setGalaxyOpen(false);
+          if (operationsOpen && operationsTab === "settings") {
+            closeAllWorkspaces();
+            setNotice(null);
+            return;
+          }
+          openCommandWorkspace("operations");
           setOperationsTab("settings");
-          setTechnologyOpen(false);
-          setStatisticsOpen(false);
-          setRecipesOpen(false);
-          setStarMapOpen(false);
-          setBlueprintsOpen(false);
-          setDysonPlannerOpen(false);
-          setCampaignOpen(false);
           setMobilePanel(null);
           setNotice(null);
         }}
         onOpenCommandPalette={openCommandPalette}
         onOpenResources={() => { setMobilePanel((current) => current === "resources" ? null : "resources"); setNotice(null); }}
         onOpenInspector={() => { setMobilePanel((current) => current === "inspector" ? null : "inspector"); setNotice(null); }}
-        onOpenRecipes={() => { openCommandWorkspace("recipes"); setCampaignFocusItemId(null); setNotice(null); }}
-        onOpenTechnology={() => { openCommandWorkspace("technology"); setCampaignFocusTechId(null); setNotice(null); }}
-        onOpenStatistics={() => { openCommandWorkspace("statistics"); setStatisticsFocusTab(null); setNotice(null); }}
-        onOpenStarMap={() => { openCommandWorkspace("star-map"); setNotice(null); }}
+        onOpenRecipes={() => { if (recipesOpen) closeAllWorkspaces(); else openCommandWorkspace("recipes"); setCampaignFocusItemId(null); setNotice(null); }}
+        onOpenTechnology={() => { if (technologyOpen) closeAllWorkspaces(); else openCommandWorkspace("technology"); setCampaignFocusTechId(null); setNotice(null); }}
+        onOpenStatistics={() => { if (statisticsOpen) closeAllWorkspaces(); else openCommandWorkspace("statistics"); setStatisticsFocusTab(null); setNotice(null); }}
+        onOpenStarMap={() => { if (starMapOpen) closeAllWorkspaces(); else openCommandWorkspace("star-map"); setNotice(null); }}
       />
       <MobileGameShell
         enabled={nextMobileShell}
@@ -3669,7 +3700,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             mobileNavigation.goFactory();
           }
         }}
-        onOpenHub={() => { setNotice(null); mobileNavigation.openHub(); }}
+        onOpenHub={() => { setNotice(null); if (mobileNavigation.route.kind === "hub") mobileNavigation.goFactory(); else mobileNavigation.openHub(); }}
         onOpenSheet={openMobileSheet}
         onSheetSnap={mobileNavigation.setSheetSnap}
         onOpenWorkspace={openMobileWorkspace}
@@ -3754,14 +3785,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           game={game}
           onOpenCampaign={openCampaign}
           onOpenDysonPlanner={() => {
-            setDysonPlannerOpen(true);
-            setBlueprintsOpen(false);
-            setStarMapOpen(false);
-            setTechnologyOpen(false);
-            setStatisticsOpen(false);
-            setRecipesOpen(false);
-            setCampaignOpen(false);
-            setMobilePanel(null);
+            if (dysonPlannerOpen) closeAllWorkspaces();
+            else openCommandWorkspace("dyson");
           }}
           onPickTray={(itemId) => setGame((current) => pickFromTray(current, itemId))}
           onDropCargo={() => setGame((current) => dropCargoToTray(current))}
@@ -3879,11 +3904,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             connectionLineStyle={{ stroke: "#62b5ae", strokeWidth: 2, strokeDasharray: "6 5" }}
             connectionLineComponent={FactoryConnectionLine}
             connectOnClick
-            defaultViewport={{ x: 510, y: 250, zoom: 0.84 }}
+            defaultViewport={initialViewport}
             onMove={(_event, viewport) => {
               viewportRef.current = viewport;
               setViewportZoom(viewport.zoom);
             }}
+            onMoveEnd={(_event, viewport) => persistPlanetViewport(gameRef.current.activePlanetId, viewport)}
             panOnScroll
             panOnDrag={regionMode ? false : coarsePointer ? true : [1, 2]}
             zoomOnPinch={!coarsePointer}
@@ -3899,7 +3925,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onlyRenderVisibleElements={performanceVisualMode}
             proOptions={{ hideAttribution: true }}
           >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1.1} color="#3c4743" />
+            <Background variant={BackgroundVariant.Dots} gap={20} size={1.1} color={resolvedTheme === "light" ? "#b7c8bf" : "#3c4743"} />
             <ViewportPortal>
               <CanvasRegionLayer
                 regions={canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)}
@@ -3917,7 +3943,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               pannable
               zoomable
               nodeColor={(node) => node.type === "vein" ? ITEMS[(node.data as FactoryNodeData).entity.resourceId!].color : node.type === "power" ? "#e1b452" : node.type === "station" ? "#d8794d" : node.type === "storage" ? "#8aa69d" : node.type === "splitter" ? "#d2aa5b" : "#61a9a4"}
-              maskColor="rgba(8, 11, 10, 0.76)"
+              maskColor={resolvedTheme === "light" ? "rgba(218, 229, 223, 0.76)" : "rgba(8, 11, 10, 0.76)"}
             /> : null}
             <Controls position="bottom-left" showInteractive={false} />
           </ReactFlow>
@@ -3964,17 +3990,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               setSelectedBeltId(null);
               if (enabled) setNotice("在空白画布拖拽创建生产区域");
             }}
-            onOpenBlueprints={() => { setBlueprintsOpen(true); setSelectionMode(false); setRegionMode(false); setMobilePanel(null); }}
+            onOpenBlueprints={() => {
+              if (blueprintsOpen) closeAllWorkspaces();
+              else openCommandWorkspace("blueprints");
+              setSelectionMode(false);
+              setRegionMode(false);
+              setMobilePanel(null);
+            }}
             onOpenNetworks={() => {
-              setStatisticsOpen(true);
-              setStatisticsFocusTab("networks");
-              setRecipesOpen(false);
-              setTechnologyOpen(false);
-              setStarMapOpen(false);
-              setBlueprintsOpen(false);
-              setDysonPlannerOpen(false);
-              setOperationsOpen(false);
-              setCampaignOpen(false);
+              if (statisticsOpen && statisticsFocusTab === "networks") closeAllWorkspaces();
+              else {
+                openCommandWorkspace("statistics");
+                setStatisticsFocusTab("networks");
+              }
               setSelectionMode(false);
               setRegionMode(false);
               setMobilePanel(null);
@@ -4066,7 +4094,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           focusedBeltNetworkId={focusedBeltNetworkId}
           tab={inspectorTab}
           onTabChange={setInspectorTab}
-          onOpenConstructionCenter={() => { setConstructionCenterOpen(true); setMobilePanel(null); }}
+          onOpenConstructionCenter={() => {
+            if (constructionCenterOpen) closeAllWorkspaces();
+            else {
+              closeAllWorkspaces();
+              setConstructionCenterOpen(true);
+            }
+            setMobilePanel(null);
+          }}
           onRecipeChange={onRecipeChange}
           onFuelChange={onFuelChange}
           onEnergyModeChange={onEnergyModeChange}
@@ -4117,11 +4152,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice("已升级当前物品的连续运输网络");
             playTone("upgrade");
           }}
-          onUpgradeSorterNetwork={(beltId) => {
-            commitGame((current) => upgradeSorterNetwork(current, beltId));
-            setNotice("已升级连续网络中的可升级分拣器");
-            playTone("upgrade");
-          }}
           onCopyBeltConfiguration={(beltId) => {
             setCopiedBeltConfigurationId(beltId);
             setNotice("线路优先级、堆叠和监测设置已复制");
@@ -4145,11 +4175,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onUpgradeBelt={(beltId) => {
             commitGame((current) => upgradeBelt(current, beltId));
             setNotice("运输线升级完成");
-            playTone("upgrade");
-          }}
-          onUpgradeSorter={(beltId) => {
-            commitGame((current) => upgradeSorter(current, beltId));
-            setNotice("分拣器升级完成");
             playTone("upgrade");
           }}
           onInstallSprayCoater={(entityId) => {
@@ -4318,6 +4343,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onRemoveQueued={(techId) => setGame((current) => removeQueuedTechnology(current, techId))}
             onSelectInfiniteResearch={(researchId: InfiniteResearchId) => setGame((current) => selectInfiniteResearch(current, researchId))}
             onInfiniteResearchAutomation={(enabled) => setGame((current) => setInfiniteResearchAutomation(current, enabled))}
+            onLayoutChange={(technologyLayout) => updateSettings({ technologyLayout })}
           />
         ) : null}
         {statisticsOpen ? <StatisticsWorkspace
@@ -4352,9 +4378,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             commitGame((current) => applyStationSlotTemplateToEntities(current, entityIds, slotIndex, template));
             setNotice(`已为 ${entityIds.length} 个物流站同步槽位 ${slotIndex + 1}`);
           }}
-          onBulkBeltUpgrade={(beltIds, target) => {
-            commitGame((current) => beltIds.reduce((next, beltId) => target === "belt" ? upgradeBeltNetwork(next, beltId) : upgradeSorterNetwork(next, beltId), current));
-            setNotice(`已批量升级 ${beltIds.length} 个连续网络的${target === "belt" ? "传送带" : "分拣器"}`);
+          onBulkBeltUpgrade={(beltIds) => {
+            commitGame((current) => beltIds.reduce((next, beltId) => upgradeBeltNetwork(next, beltId), current));
+            setNotice(`已批量升级 ${beltIds.length} 个连续运输网络`);
             playTone("upgrade");
           }}
           onBulkBeltRoute={(beltIds, routeMode) => {

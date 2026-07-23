@@ -10,6 +10,7 @@ import {
   getPlanetaryTripSeconds,
   getResourceReserveSnapshot,
   getStationMinimumCargo,
+  getStationBusyVehicleCount,
   getStationSlotCapacity,
   getStationSlots,
   isTechnologyCompleted,
@@ -154,10 +155,11 @@ function getRouteStatus(
   target: FactoryEntity,
   scope: StationLogisticsScope,
   activeVehicles: number,
-  installedVehicles: number,
+  availableVehicles: number,
   requiresWarp: boolean,
   routeAvailable: boolean,
-  warpersPerVessel: number,
+  warpVehicleReady: boolean,
+  localVehiclePowerReady: boolean,
   sourceStock: number,
   minimumCargo: number,
   targetFree: number,
@@ -165,16 +167,17 @@ function getRouteStatus(
 ): StellarRouteStatus {
   if (!source) return "missing-source";
   if (activeVehicles > 0) return "active";
-  if (installedVehicles < 1) return "missing-vehicle";
+  if (availableVehicles < 1) return "missing-vehicle";
   if (requiresWarp && !routeAvailable) return "missing-hub";
-  if (requiresWarp && (!target.stationWarpEnabled || !isTechnologyCompleted(game, "space_warp") || (target.stationWarpers ?? 0) < warpersPerVessel)) {
+  if (requiresWarp && (!isTechnologyCompleted(game, "space_warp") || !warpVehicleReady)) {
     return "missing-warper";
   }
   const routeStations = [source, target, ...waypointStationIds.flatMap((stationId) => {
     const station = game.entities.find((entity) => entity.id === stationId);
     return station ? [station] : [];
   })];
-  if (routeStations.some((station) => getEntityPowerFactor(game, station) <= 0)) return "no-power";
+  if (scope === "remote" && routeStations.some((station) => getEntityPowerFactor(game, station) <= 0)) return "no-power";
+  if (scope === "local" && !localVehiclePowerReady) return "no-power";
   if (sourceStock < minimumCargo) return "missing-stock";
   if (targetFree < minimumCargo) return "target-full";
   return "ready";
@@ -202,7 +205,12 @@ export function getStellarRouteSnapshots(game: GameState): StellarRouteSnapshot[
         const active = (target.stationRoutes ?? []).filter((route) => route.scope === scope &&
           route.slotIndex === targetSlotIndex && (!source || route.peerId === source.id));
         const activeVehicles = active.reduce((sum, route) => sum + route.vehicleCount, 0);
-        const installedVehicles = stationInstalledVehicles(target, scope);
+        const vehicleStations = [target, source].filter((station, index, all): station is FactoryEntity => Boolean(station) &&
+          station!.buildingId !== "orbital_collector" && all.findIndex((candidate) => candidate?.id === station!.id) === index);
+        const installedVehicles = vehicleStations.reduce((sum, station) => sum + stationInstalledVehicles(station, scope), 0);
+        const availableVehiclesByStation = new Map(vehicleStations.map((station) => [station.id, Math.max(0,
+          stationInstalledVehicles(station, scope) - getStationBusyVehicleCount(game, station.id, scope))]));
+        const availableVehicles = [...availableVehiclesByStation.values()].reduce((sum, count) => sum + count, 0);
         const minimumCargo = getStationMinimumCargo(game, target, targetSlotIndex, scope);
         const sourceReserve = Math.max(0, Math.floor(sourceSlot?.minStock ?? 0));
         const sourceStock = source ? Math.max(0, Math.floor((source.outputs[targetSlot.itemId!] ?? 0) - sourceReserve)) : 0;
@@ -221,8 +229,14 @@ export function getStellarRouteSnapshots(game: GameState): StellarRouteSnapshot[
         const throughputPerMinute = installedVehicles > 0
           ? cargoPerVehicle * installedVehicles * 60 / Math.max(1, durationSeconds)
           : 0;
-        const status = getRouteStatus(game, source, target, scope, activeVehicles, installedVehicles, requiresWarp,
-          economics?.routeAvailable ?? true, economics?.warpersPerVessel ?? 0,
+        const requiredWarpers = economics?.warpersPerVessel ?? 0;
+        const warpVehicleReady = !requiresWarp || vehicleStations.some((station) =>
+          (availableVehiclesByStation.get(station.id) ?? 0) > 0 && station.stationWarpEnabled &&
+          (station.stationWarpers ?? 0) >= requiredWarpers);
+        const localVehiclePowerReady = scope !== "local" || vehicleStations.some((station) =>
+          (availableVehiclesByStation.get(station.id) ?? 0) > 0 && getEntityPowerFactor(game, station) > 0);
+        const status = getRouteStatus(game, source, target, scope, activeVehicles, availableVehicles, requiresWarp,
+          economics?.routeAvailable ?? true, warpVehicleReady, localVehiclePowerReady,
           sourceStock, minimumCargo, targetFree, economics?.waypointStationIds ?? []);
         snapshots.push({
           id: `${scope}:${target.id}:${targetSlotIndex}:${source?.id ?? "unbound"}`,
@@ -251,7 +265,10 @@ export function getStellarRouteSnapshots(game: GameState): StellarRouteSnapshot[
           energyMjPerTrip: economics?.energyMjPerTrip ?? ((getBuilding(target.buildingId!).powerDemandKw ?? 0) + 120 * installedVehicles) * durationSeconds / 1_000,
           warpersPerTrip: economics?.warpersPerTrip ?? 0,
           warpersPerVessel: economics?.warpersPerVessel ?? 0,
-          availableWarpers: Math.max(0, Math.floor(target.stationWarpers ?? 0)),
+          availableWarpers: vehicleStations.reduce((sum, station) => sum +
+            ((availableVehiclesByStation.get(station.id) ?? 0) > 0 && station.stationWarpEnabled
+              ? Math.max(0, Math.floor(station.stationWarpers ?? 0))
+              : 0), 0),
           routeKind: economics?.routeKind ?? "local",
           waypointStationIds: economics?.waypointStationIds ?? [],
           hopCount: economics?.hopCount ?? 0,

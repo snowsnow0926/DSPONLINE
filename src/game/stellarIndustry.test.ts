@@ -44,6 +44,43 @@ describe("stellar industry selectors", () => {
     expect(summary.recommendedRole).toBe("chemical");
   });
 
+  it("treats a powered supply station fleet and its warpers as a ready outbound route", () => {
+    let state = createInitialState();
+    state.research.completedTechIds.push("interstellar_logistics", "stellar_exploration", "space_warp");
+    state.exploration.unlockedSystemIds.push("borealis");
+    state.exploration.colonizedPlanetIds.push("frost");
+    state.construction.wind_turbine = 2;
+    state.construction.interstellar_logistics_station = 2;
+
+    state = placeBuilding(state, "wind_turbine", { x: -180, y: -180 });
+    state = placeBuilding(state, "interstellar_logistics_station", { x: -180, y: 0 });
+    const source = state.entities.find((entity) => entity.planetId === "home" && entity.buildingId === "interstellar_logistics_station")!;
+    state = setLogisticsItem(state, source.id, "titanium_ingot");
+    state = setStationSlotMode(state, source.id, 0, "remote", "supply");
+    Object.assign(state.entities.find((entity) => entity.id === source.id)!, {
+      stationVessels: 2,
+      stationWarpEnabled: true,
+      stationWarpers: 2,
+      outputs: { titanium_ingot: 250 },
+    });
+
+    state = setActivePlanet(state, "frost");
+    state = placeBuilding(state, "wind_turbine", { x: 180, y: -180 });
+    state = placeBuilding(state, "interstellar_logistics_station", { x: 180, y: 0 });
+    const target = state.entities.find((entity) => entity.planetId === "frost" && entity.buildingId === "interstellar_logistics_station")!;
+    state = setLogisticsItem(state, target.id, "titanium_ingot");
+    state = setStationSlotMode(state, target.id, 0, "remote", "demand");
+
+    const route = getStellarRouteSnapshots(state).find((candidate) => candidate.scope === "remote")!;
+    expect(route).toMatchObject({
+      sourceStationId: source.id,
+      targetStationId: target.id,
+      installedVehicles: 2,
+      availableWarpers: 2,
+      status: "ready",
+    });
+  });
+
   it("names relay waypoints and reports an unpowered hub before dispatch", () => {
     let state = createInitialState();
     state.research.completedTechIds.push("interstellar_logistics", "stellar_exploration", "space_warp");

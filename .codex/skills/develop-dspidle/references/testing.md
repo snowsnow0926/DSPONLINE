@@ -14,7 +14,7 @@ npm run test:e2e
 npm run desktop:pack
 ```
 
-Hong Kong `0.6.0` baseline: 272 Vitest tests and 108 Playwright Chrome tests. Shanghai remains on the `0.5.0` baseline with 268 Vitest and 97 Playwright tests. Both remain game state v30 and cloud schema v6.
+Hong Kong `0.7.0` baseline: 282 Vitest tests and 113 Playwright Chrome tests on game state v31. Shanghai remains on the `0.5.0` baseline with 268 Vitest and 97 Playwright tests on v30. Both use cloud schema v6.
 
 ## Choose By Change
 

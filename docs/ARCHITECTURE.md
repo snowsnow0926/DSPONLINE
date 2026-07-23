@@ -77,7 +77,7 @@ React Flow 的持久真相仍来自 `GameState`。手机横竖屏切换只重新
 ## 3. 状态与模拟流
 
 1. 主菜单调用 `loadGame()` 或加载指定槽位，得到 `LoadedGame`。
-2. 当前工作区的 `FactoryGame` 以 `GameState` v31 作为唯一持久游戏状态；香港 `0.6.0` 与上海 `0.5.0` 线上仍使用 v30，v31 尚未发布。
+2. 当前工作区与香港 `0.7.0` 的 `FactoryGame` 以 `GameState` v31 作为唯一持久游戏状态；上海 `0.5.0` 仍使用 v30。
 3. 桌面正常模式每 100 ms、手机正常模式每 500 ms、性能或受限手机模式每 750 ms 累积真实经过时间，并乘以 `1x/2x/4x` 模拟倍率。提交频率只影响 UI 发布，不改变传入模拟器的总秒数。
 4. 浏览器支持 Worker 时，状态和时间提交给 `src/game/simulation.worker.ts`；Worker 调用 `advanceSimulation()`。
 5. Worker 不可用或报错时，主线程使用同一个 `advanceSimulation()` 回退，保持规则一致。
@@ -136,7 +136,7 @@ React Flow 只负责可视节点、边、视口和交互；真实生产库存与
 
 | 数据 | 键或位置 | 说明 |
 | --- | --- | --- |
-| 主存档 | `dsp-idle-network.save.v1` | v2 envelope；当前工作区写 v31，香港/上海线上仍写 v30；`productionHistory` 始终以空数组写入 |
+| 主存档 | `dsp-idle-network.save.v1` | v2 envelope；当前工作区与香港写 v31，上海仍写 v30；`productionHistory` 始终以空数组写入 |
 | 主备份 | 主键后缀 `.backup` | 主存档写入并读回校验成功后，尽力保存上一份有效版本 |
 | 快照 | 主键后缀 `.snapshot.*` | 自动快照最多 2 份、至少每 5 分钟生成；手动快照独立保留，不参与自动清理 |
 | 手动槽位 | `dsp-idle-network.slot.1..3` | 3 个独立槽位 |

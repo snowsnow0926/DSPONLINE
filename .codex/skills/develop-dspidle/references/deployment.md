@@ -52,4 +52,4 @@ For backend rollback, switch code back and preserve the current database. For fr
 
 ## Current Known Optimization
 
-The Hong Kong `0.6.0` and Shanghai `0.5.0` production checks confirmed gzip for hashed JS/CSS, immutable asset caching, and no-cache HTML/service-worker behavior. Brotli remains optional and should be enabled only after comparing CPU cost and transfer savings with real traffic. Shanghai was about 89% full after `0.5.0`, so release directories, logs, and backup retention need close monitoring.
+The Hong Kong `0.7.0` and Shanghai `0.5.0` production checks confirmed gzip for hashed JS/CSS, immutable asset caching, and no-cache HTML/service-worker behavior. Hong Kong uses game state v31 and can roll code back to `0.6.0`; Shanghai remains on v30. Brotli remains optional and should be enabled only after comparing CPU cost and transfer savings with real traffic. Shanghai was about 89% full after `0.5.0`, so release directories, logs, and backup retention need close monitoring.

@@ -28,7 +28,7 @@
 
 服务端绑定 `127.0.0.1:4320`，公网只通过 Nginx 的 `/api` 访问。仓库里的 systemd 和 Nginx 文件是模板，实际安装前必须对照目标节点，不能把香港 Origin 或证书路径直接覆盖到上海。
 
-当前香港正式基线为 `0.6.0-ae779d297011`，Web/API 的 `previous-release` 均指向 `0.5.0-5b3a468c94d0`。上海保持 `0.5.0-5b3a468c94d0`，其 `previous-release` 仍指向 `0.4.0-c77d76223f67`。两地代码回滚继续使用各自的 schema v6 数据库；香港本次完整哈希、生产备份和验收记录见 [releases/0.6.0.md](./releases/0.6.0.md)。
+当前香港正式基线为 `0.7.0-8bf16d91d82d`，Web/API 的 `previous-release` 均指向 `0.6.0-ae779d297011`。上海保持 `0.5.0-5b3a468c94d0`，其 `previous-release` 仍指向 `0.4.0-c77d76223f67`。两地代码回滚继续使用各自的 schema v6 数据库；香港本次完整哈希、生产备份和验收记录见 [releases/0.7.0.md](./releases/0.7.0.md)。
 
 ## 3. 绝对数据保护规则
 
@@ -223,6 +223,6 @@ chmod 0600 backup-private.pem
 
 ## 10. 当前性能事项
 
-香港 `0.6.0` 与上海 `0.5.0` 均为 JS/CSS 启用 gzip，并验证 `Content-Encoding: gzip`；hashed asset 保持 immutable，`index.html` 与 `sw.js` 保持 no-cache。主菜单不 preload `FactoryRuntime`、`flow-vendor`、`game-core` 或 `storage`，页面加载、LCP 和传输体积按隐私分桶进入受保护后台。
+香港 `0.7.0` 与上海 `0.5.0` 均为 JS/CSS 启用 gzip，并验证 `Content-Encoding: gzip`；hashed asset 保持 immutable，`index.html` 与 `sw.js` 保持 no-cache。主菜单不 preload `FactoryRuntime`、`flow-vendor`、`game-core` 或 `storage`，页面加载、LCP 和传输体积按隐私分桶进入受保护后台。
 
 Brotli 仍是可选后续项，应先用真实流量比较 CPU、缓存命中和传输节省。不要用“提高服务器配置”替代静态压缩、缓存和 chunk 体积治理；当前 2 核 2 GB 对首版 Node + Nginx + SQLite 足够。上海节点 `0.5.0` 发布后约剩 6.7 GiB（文件系统使用率约 89%），发布目录、日志与备份增长应纳入日常磁盘检查。

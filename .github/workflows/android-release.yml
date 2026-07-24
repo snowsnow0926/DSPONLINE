@@ -59,7 +59,7 @@ jobs:
       - name: Create Android update manifest
         shell: pwsh
         run: node scripts/create-native-update-manifests.mjs --channel $env:DSP_RELEASE_CHANNEL --android-apk android/app/build/outputs/apk/release/app-release.apk --android-certificate-sha256 $env:ANDROID_CERTIFICATE_SHA256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dsp-idle-android-${{ env.DSP_RELEASE_CHANNEL }}
           path: |

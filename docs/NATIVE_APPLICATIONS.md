@@ -1,10 +1,10 @@
 # 原生应用构建与更新
 
-> 当前发布版本：Web/Windows `1.0.23`；Android 正式包 `1.0.23 / 1000023`
-> 当前公开稳定版本：Windows `1.0.23` 未签名测试包；Android `1.0.23 / 1000023` 正式签名包
+> 当前发布版本：Web/Windows `1.0.26`；Android 正式包 `1.0.26 / 1000026`
+> 当前公开稳定版本：Windows `1.0.26` 未签名测试包；Android `1.0.26 / 1000026` 正式签名包
 > Windows 包名：`com.dspidle.network`
 > Android applicationId：`cn.dsponline.network`
-> Web、Windows 与 Android 1.0.23 共用 `GameState` v46。两端存档 envelope v2 和云 schema v7 不变；旧存档通过连续守恒迁移载入。
+> Web、Windows 与 Android 1.0.26 共用 `GameState` v46。两端存档 envelope v2 和云 schema v7 不变；旧存档通过连续守恒迁移载入。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
 
 ## 1. 架构边界
@@ -61,7 +61,7 @@ CSC_KEY_PASSWORD
 
 `npm run desktop:release` 在缺少签名配置时会失败；`npm run desktop:dist` 仅用于本机未签名验收。
 
-当前公开的 Windows `1.0.15` 是明确标注的未签名测试安装包。它已通过构建、隔离启动、更新清单和下载校验，但 Windows 仍会显示“未知发布者”或 SmartScreen 提示；取得可信代码签名证书之前不得描述为正式签名版。
+当前公开的 Windows `1.0.26` 是明确标注的未签名测试安装包。它已通过构建、隔离启动、更新清单和下载校验，但 Windows 仍会显示“未知发布者”或 SmartScreen 提示；取得可信代码签名证书之前不得描述为正式签名版。
 
 Android 正式包需要长期保管且永不更换的 keystore：
 
@@ -80,9 +80,9 @@ npm run android:release
 
 没有这些变量时可用 `npm run android:release:unsigned` 验证 Release 编译，但未签名 APK/AAB 不得交付玩家。密钥、密码和证书私钥不能提交到 Git、文档、日志或 VPS Web 目录。
 
-Android `1.0.14` APK 已使用与 `1.0.0` 至 `1.0.13` 相同的长期发布密钥签名，证书 SHA-256 为 `ede2aa09ed143a3fbeb283aad0e7801d192c851f240cd39278c399918a0216ce`。APK Signature Scheme v2/v3 均通过；当前本机受保护发布库位于 `<LOCAL_SIGNING_VAULT>`，包含 `android-release-v1.p12`、密码配置和公证书，目录 ACL 仅允许本机系统账户与开发账户访问。密钥文件、密码和私钥仍不进入 Git、VPS 或公开文档内容。GitHub Actions Secrets 尚未配置，但本机长期 keystore 已恢复。
+Android `1.0.26` APK 已使用与 `1.0.0` 至 `1.0.25` 相同的长期发布密钥签名，证书 SHA-256 为 `ede2aa09ed143a3fbeb283aad0e7801d192c851f240cd39278c399918a0216ce`。APK Signature Scheme v2/v3 均通过；当前本机受保护发布库位于 `<LOCAL_SIGNING_VAULT>`，包含 `android-release-v1.p12`、密码配置和公证书，目录 ACL 仅允许本机系统账户与开发账户访问。密钥文件、密码和私钥仍不进入 Git、VPS 或公开文档内容。GitHub Actions Secrets 尚未配置，但本机长期 keystore 已恢复。
 
-使用该 vault 构建的 Android `1.0.16` 候选 APK 已验证包名 `cn.dsponline.network`、versionCode `1000016`、APK Signature Scheme v2/v3 和相同证书指纹；SHA-256 为 `200470f87fbf44a223f6b316e3ce446a2d9aec1cf0ebd2ef0d4f0976c4e2c892`。公开下载页在完成覆盖升级和清单验收前继续保持 Android `1.0.14`。
+使用该 vault 构建的 Android `1.0.26` APK 已验证包名 `cn.dsponline.network`、versionCode `1000026`、APK Signature Scheme v2/v3 和相同证书指纹；大小为 4,600,822 字节，SHA-256 为 `51b2f7f6217192691ea56535bd180c69917f6b890d8ff6f46659cbbc454caead`。该文件已进入上海稳定下载页与 Android stable 清单。
 
 本机发布前只在受保护 PowerShell 会话中从该 vault 读取配置，不把密码回显到终端：
 
@@ -114,7 +114,7 @@ https://dsponline.cn/downloads/android/nightly.json
 
 Android 清单只接受 schema v1、`cn.dsponline.network`、当前通道、同源 HTTPS 且位于 `/downloads/android/` 的 APK。发布工具默认拒绝文件名包含 `debug` 或 `unsigned` 的 APK，并要求用 `apksigner` 验证 APK Signature Scheme v2+ 和批准的证书 SHA-256 指纹。
 
-Android 1.0.14 的稳定清单将 `minimumSupportedVersionCode` 保持为 `1000002`：1.0.2～1.0.13 均能检测并覆盖升级到 1.0.14。服务端继续接受合法 v35-v42 存档，客户端不允许把 v42 有损降级。受支持版本进入应用版本卡时会自动检查一次并保留手动重试。
+Android 1.0.26 的稳定清单将 `minimumSupportedVersionCode` 保持为 `1000002`：1.0.2～1.0.25 均能检测并覆盖升级到 1.0.26。服务端继续接受合法 v35-v46 存档，客户端不允许把 v46 有损降级。受支持版本进入应用版本卡时会自动检查一次并保留手动重试。
 
 示例：
 
@@ -138,11 +138,11 @@ node scripts/create-native-update-manifests.mjs `
 
 ## 7. 当前原生发布状态
 
-- 已验证 Windows 解包版隔离启动、`file://` 加载、FileVersion 1.0.18、Stable 通道、受限 HTTPS API 和更新基址；隔离用户数据目录正常初始化。
-- Android 稳定 APK 为 `1.0.18 / 1000018`，大小 4,453,671 字节，SHA-256 为 `7294976ad074e77206d5e35258a4a70d0e4f1a9612987f028d3f174f2882aba3`。APK v2/v3 和批准证书均通过；AAB 未进入下载站或应用商店。
-- Windows x64 安装程序版本为 `1.0.18`，大小 103,144,907 字节，SHA-256 为 `b6b4d6343b82fa8001370dfb01cabb287fe97bffc256ce08ef6412d404c4a4d6`。Authenticode 状态为 `NotSigned`，下载页继续显示未知发布者警告。
-- 上海下载站当前目录为 `/var/www/dsp-idle-downloads/releases/1.0.18-0383e85d2d9d-dirty`，下载回滚目录为 `1.0.17-0383e85d2d9d-dirty`；历史安装包继续保留。二进制使用 immutable 缓存，更新清单使用 no-cache，Range 请求返回 `206`，香港 `/downloads/*` 重定向至上海下载域名。
-- Web/API 与双原生制品来自发布标识 `1.0.18-0383e85d2d9d-dirty`，包内版本、Build ID、官方 API、更新源与公网文件哈希均已复验。
+- 已验证 Windows 解包版隔离启动、`file://` 加载、FileVersion/ProductVersion 1.0.26、Stable 通道、受限 HTTPS API 和更新基址；隔离用户数据目录正常初始化。
+- Android 稳定 APK 为 `1.0.26 / 1000026`，大小 4,600,822 字节，SHA-256 为 `51b2f7f6217192691ea56535bd180c69917f6b890d8ff6f46659cbbc454caead`。APK v2/v3 和批准证书均通过；AAB 未进入下载站或应用商店。
+- Windows x64 安装程序版本为 `1.0.26`，大小 112,340,647 字节，SHA-256 为 `d92f788a8e744caa7c0e2a5d06cd839ccd110fd6c95f7e6175028ddddcbad7f2`。Authenticode 状态为 `NotSigned`，下载页继续显示未知发布者警告。
+- 上海下载站当前目录为 `/var/www/dsp-idle-downloads/releases/1.0.26-f675a6a11025`，下载回滚目录为 `1.0.25-628369a93ad7`；历史安装包继续保留。二进制使用 immutable 缓存，更新清单使用 no-cache，Range 请求返回 `206`，香港 `/downloads/*` 重定向至上海下载域名。
+- Web/API 与双原生制品来自发布标识 `1.0.26-f675a6a11025`，包内版本、Build ID、官方 API、更新源与公网文件哈希均已复验。
 - 本轮本机没有连接 Android 实体设备，因此未重复执行真机 `adb install -r`；同包名、递增 versionCode、长期证书 SHA-256 连续和 APK v2/v3 构成发布门禁。卸载应用仍会删除本机应用数据，覆盖升级不会主动清除应用数据。
 - GitHub Android/Desktop Release 工作流已具备签名门禁，但 GitHub Actions Secrets 尚未配置；本机 Android SDK 和长期 keystore 已恢复并记录在受保护 vault 中。后续配置 CI 时只能导入同一 Android 密钥，不能新建证书替代覆盖升级链。Windows 继续沿用历史未签名测试包策略。
 - Android 系统浏览器安装 APK 时，玩家设备可能要求允许该来源安装应用；正式商店分发可作为后续渠道，但不改变包名和签名连续性要求。

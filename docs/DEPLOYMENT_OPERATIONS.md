@@ -32,7 +32,7 @@
 
 服务端绑定 `127.0.0.1:4320`，公网只通过 Nginx 的 `/api` 访问。仓库里的 systemd 和 Nginx 文件是模板，实际安装前必须对照目标节点，不能把香港 Origin 或证书路径直接覆盖到上海。
 
-香港、上海 Web/API 与上海下载站均已切换到 `1.0.25-628369a93ad7` / GameState v46。两地继续使用云 schema v7 和 SQLite layout v2，代码回滚不得恢复数据库；香港 `/downloads/*` 仍重定向上海。1.0.25 Android SHA-256 为 `e5b74a6bc2022c5de5674b278bb21c8a135f1f6d35b1b323e1803b887b564e2b`，Windows SHA-256 为 `bf0673e9ba9ad54759f1b4ecafa7be2e23dad318540280d8016bd6c43f3fff11`（Authenticode `NotSigned` 测试包）。香港发布前 1,662,312,448 字节 Backup API 快照以及上海发布前/后各 143,360 字节快照均通过 `quick_check`；Web/API 和下载回滚目标均为 `1.0.24-019bac527829`。公网健康、下载页、完整下载哈希、Range、缓存头和上一版 hashed chunk 回退均通过。香港大库备份期间健康探针曾超时并自动重启旧版服务，备份成功且旧版恢复稳定后才切换 1.0.25；为避免重复高 I/O，本轮没有追加香港发布后手工快照。完整证据见 [releases/1.0.25.md](./releases/1.0.25.md)。
+香港、上海 Web/API 与上海下载站均已切换到 `1.0.26-f675a6a11025` / GameState v46。两地继续使用云 schema v7 和 SQLite layout v2，代码回滚不得恢复数据库；香港 `/downloads/*` 仍重定向上海。1.0.26 Android SHA-256 为 `51b2f7f6217192691ea56535bd180c69917f6b890d8ff6f46659cbbc454caead`，Windows SHA-256 为 `d92f788a8e744caa7c0e2a5d06cd839ccd110fd6c95f7e6175028ddddcbad7f2`（Authenticode `NotSigned` 测试包）。香港发布前 1,749,057,536 字节 Backup API 快照与上海发布前 151,552 字节快照均通过 `quick_check`；Web/API 和下载回滚目标均为 `1.0.25-628369a93ad7`。公网健康、下载页、完整下载哈希、Range、缓存头和上一版 hashed chunk 回退均通过。1.0.26 不含 schema/layout 迁移，为避免重复高 I/O，没有追加香港发布后手工快照。完整证据见 [releases/1.0.26.md](./releases/1.0.26.md)。
 
 `1.0.13` 两节点发布都只切换 Web/API 代码，未执行数据库迁移。香港发布前后 Backup API 快照均通过 `quick_check`；前备份为 887,271,424 字节，后备份为 888,795,136 字节。上海发布前后备份均为 122,880 字节并通过 `quick_check`；发布前 SHA-256 为 `a8af0eec173e6f8aad36af09b7e6d8c56b2b00014d76efd53124ddfb81b7e6a7`，发布后为 `8cb0c7bbbb270ac804b7c16909fc1b4274d0b2aed34a4ae7f379f333596cd737`。上海 0 个账号、0 个主云档、24 条玩家记录和 23 条错误记录均未减少，服务 `NRestarts=0`。受限备份传输账号仍只用于异地备份，代码发布使用独立的 `ubuntu` 授权。
 
@@ -297,4 +297,4 @@ chmod 0600 backup-private.pem
 
 香港 layout v1 的 136.8 MB `app_state` 曾使每分钟持久化把 Node 推到约 1.6 GB并阻塞健康接口。layout v2 上线后 `app_state` 约 2.55 MB，云存档正文按修订独立写入；240 秒生产观察中健康接口最大 10.407 ms、`NRestarts=0`、RSS 约 133～162 MB。监控若再次出现内存或延迟上升，应分别检查 `app_state` 大小、`cloud_save_payloads` 行数与历史元数据唯一键数，不能只调大健康超时。
 
-Brotli 仍是可选后续项，应先用真实流量比较 CPU、缓存命中和传输节省。不要用“提高服务器配置”替代静态压缩、缓存和 chunk 体积治理；当前 2 核 2 GB 对首版 Node + Nginx + SQLite 足够。1.0.25 发布后历史 SQLite 备份与旧发布目录仍保留，继续按备份保留/异地归档告警运营，且清理不得删除当前版、回滚版或有效备份。
+Brotli 仍是可选后续项，应先用真实流量比较 CPU、缓存命中和传输节省。不要用“提高服务器配置”替代静态压缩、缓存和 chunk 体积治理；当前 2 核 2 GB 对首版 Node + Nginx + SQLite 足够。1.0.26 发布后历史 SQLite 备份与旧发布目录仍保留，继续按备份保留/异地归档告警运营，且清理不得删除当前版、回滚版或有效备份。

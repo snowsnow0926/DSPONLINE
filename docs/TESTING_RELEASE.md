@@ -1,24 +1,24 @@
 # 测试与发布基线
 
-> **当前发布基线（2026-08-03）**：当前正式版本使用 `1.0.25 / GameState v46`；有效资产的 v43 空间站实验存档拒绝加载。量子网络回归以 GameState v46 语义为基线，并保留传统物流站升级兼容测试。1.0.25 不升级存档 envelope、云 schema 或 SQLite layout。
+> **当前发布基线（2026-08-04）**：当前正式版本使用 `1.0.26 / GameState v46`；有效资产的 v43 空间站实验存档拒绝加载。量子网络回归以 GameState v46 语义为基线，并保留传统物流站升级兼容测试。1.0.26 不升级存档 envelope、云 schema 或 SQLite layout。
 
 ## 1. 当前自动化覆盖
 
 | 层级 | 命令 | 当前规模 | 覆盖重点 |
 | --- | --- | ---: | --- |
 | 类型检查 | `npm run typecheck` | 全部前端 TS | 严格类型、Vite 配置 |
-| 单元/领域 | `npm test` | `1.0.25`：76 个文件通过、1 个跳过；692 项通过、9 项跳过 | 引擎暂停边界、历史安全超限堆叠、物流远程编辑、精确线路、按星球统计、寻线缓存、量子共享带宽、云存档兼容、v1-v46 存档、超大蓝图、确定性物流、画布投影/缓存、多 Worker 守恒和云同步等 |
-| 浏览器 E2E | `npm run test:e2e` | `1.0.25`：218 项通过、6 项显式本地夹具/基准跳过、0 失败 | 版本公告、开局到银河终局、稳定选中、星球统计、寻线、侧栏收起、自动保存、双语亮暗主题、新旧手机壳、390×844 与 200% 字号、终局画布、IndexedDB 存档保护和横竖屏回归 |
-| 云服务 | `npm run test:server` | `1.0.25`：46/46 | 用户名注册、四槽云存档、schema v3→v7、SQLite layout v1→v2、v35-v46 存档边界、历史安全超限实体/蓝图兼容、完整性/格式/体积错误、无人工封顶与极值饱和排名、内部排行榜限制和管理员保护 |
+| 单元/领域 | `npm test` | `1.0.26`：698 项通过、9 项跳过 | 引擎暂停边界、历史安全超限堆叠、主题设备偏好、物流远程编辑、精确线路、按星球统计、寻线缓存、量子共享带宽、云存档兼容、v1-v46 存档、超大蓝图、确定性物流、画布投影/缓存、多 Worker 守恒和云同步等 |
+| 浏览器 E2E | `npm run test:e2e` | `1.0.26`：219 项通过、6 项显式本地夹具/基准跳过、0 失败 | 版本历史、亮色语义主题、设置分类、科技树滚轮、物品悬浮交互、开局到银河终局、双语、新旧手机壳、390×844 与 200% 字号、IndexedDB 存档保护和横竖屏回归 |
+| 云服务 | `npm run test:server` | `1.0.26`：46/46 | 用户名注册、四槽云存档、schema v3→v7、SQLite layout v1→v2、v35-v46 存档边界、历史安全超限实体/蓝图兼容、完整性/格式/体积错误、无人工封顶与极值饱和排名、内部排行榜限制和管理员保护 |
 | 运维工具 | `npm run test:ops` | 6 项 | SQLite 一致性快照、认证加密、异地复制、隔离恢复、篡改拒绝、Nginx 压缩与缓存边界、Android origin 模板、端点/磁盘探针和告警载荷 |
 | 原生配置与发布工具 | `npm run test:native` | 8/8 | 社区更新源默认关闭、HTTPS 通道、Android/桌面更新清单、调试 APK 拒绝、显式发布基址、桌面包内元数据和静态下载页清单门禁 |
 | 第三方许可证 | `npm run licenses:check` | 128 个运行时包 | 根项目/云服务 lockfile、直接依赖通知、完整许可证文本和 public 法律文件一致性 |
-| 生产构建 | `npm run build` | 1,871 个模块 | `tsc -b`、Vite chunk、Worker 和 PWA 资源；生产多 Worker 入口硬关闭 |
+| 生产构建 | `npm run build` | 1,872 个模块 | `tsc -b`、Vite chunk、Worker 和 PWA 资源；生产多 Worker 入口硬关闭 |
 | 桌面目录包 | `npm run desktop:pack` | 按需 | Electron 启动与 Windows 解包 |
 
 1.0.18 专项回归覆盖量子上传/下载独立全局预算、轨道采集器供应端、无量子塔时零额度、本地运输机兼容、逐物品 1 万至 100 亿容量、调低容量保留超额库存、五秒流量摘要、v44→v45 守恒迁移，以及英文、390×844 和 200% 字号量子库存界面。完整门禁和线上证据见 [releases/1.0.18.md](./releases/1.0.18.md)。
 
-1.0.25 的完整 clean 提交、不可变制品、原生签名、双节点隔离启动、备份、原子切换、下载哈希、Range、缓存和回滚证据见 [releases/1.0.25.md](./releases/1.0.25.md)。
+1.0.26 的完整 clean 提交、不可变制品、原生签名、双节点隔离启动、备份、原子切换、下载哈希、Range、缓存和回滚证据见 [releases/1.0.26.md](./releases/1.0.26.md)。
 
 Playwright 使用本机 Google Chrome，串行执行，并在隔离的 `127.0.0.1:4319` 自动启动临时 Vite 服务，避免复用玩家正在试玩的 `4318` 进程或其旧模块缓存。失败时保留截图和 trace；GitHub CI 对单个失败用例最多重试 1 次，本地开发保持 0 次重试，持续性回归仍会使门禁失败。
 
@@ -973,3 +973,23 @@ Android `1.0.18 / 1000018` 使用历史长期证书，APK v2/v3 通过，SHA-256
 全量 Playwright 首次运行发现 4 个公告与英文翻译回归；修复提交 `628369a93ad7c42fd17764471272da9c7dcbe917` 后从 clean 候选完整重跑通过。Android `1.0.25 / 1000025` 通过 APK v2/v3 和长期证书连续性；Windows FileVersion/ProductVersion、正式 API、稳定更新源和隔离启动通过，Authenticode 继续明确为 `NotSigned`，没有创建新证书。
 
 香港、上海 Web/API 与上海下载页均已原子切换到 `1.0.25-628369a93ad7`，三处回滚目标均为 `1.0.24-019bac527829`。两地备份、生产依赖、备份副本隔离启动、公网 Build ID、健康接口、Android Origin、完整 APK/EXE 下载哈希、Range 206、immutable/no-cache、历史 1.0.24 hashed asset 和浏览器视觉验收均通过。完整证据见 [releases/1.0.25.md](./releases/1.0.25.md)。
+
+## 41. `1.0.26` / v46 主题、设置与交互体验
+
+本版统一亮色/深色语义主题，增加设置分类总览与二级页面，补齐 1.0.0 至 1.0.25 的离线版本历史，并优化科技树横向滚轮和物品悬浮卡的鼠标、键盘与触摸操作。GameState v46、存档 envelope v2、云 schema v7 和 SQLite layout v2 均未改变。
+
+| 检查 | 正式发布结果 |
+| --- | --- |
+| `npm ci` / `npm run typecheck` | 依赖安装通过；0 个 TypeScript 错误 |
+| `npm test` | 698 项通过、9 项跳过、0 失败 |
+| `npm run test:server` | 本地及香港、上海未激活目录均为 46/46 |
+| `npm run test:ops` | 6/6 |
+| `npm run test:native` | 8/8 |
+| `npm run licenses:check` | 128 个运行时包一致 |
+| `npm run build` | 通过；Vite 转换 1,872 个模块 |
+| `npm run test:e2e` | 219 项通过、6 项显式本地夹具/基准跳过、0 失败 |
+| Release manifest | 本地及两地未激活目录均为 145/145；聚合 SHA-256 `a0ed27c46eb5a377177da940f06b4e4328193007efd3f296e49aefd5f1674a68` |
+
+正式提交为 `f675a6a11025727419a48c50159eaa5973e88eac`，release ID 为 `1.0.26-f675a6a11025`。Android `1.0.26 / 1000026` 使用批准长期证书并通过 APK v2/v3；Windows FileVersion/ProductVersion、正式 API、稳定更新源和隔离启动通过，Authenticode 继续明确为 `NotSigned`，没有创建新证书。
+
+香港、上海 Web/API 与上海下载页均已原子切换到 `1.0.26-f675a6a11025`，三处回滚目标均为 `1.0.25-628369a93ad7`。两地发布前备份、生产依赖、备份副本隔离启动、公网 Build ID、健康接口、Android Origin、云接口未登录读写边界、完整 APK/EXE 下载哈希、Range 206、immutable/no-cache、历史 1.0.25 hashed asset 和四个生产浏览器场景均通过。完整证据见 [releases/1.0.26.md](./releases/1.0.26.md)。

@@ -20,6 +20,7 @@ const requestedPlatform = process.env.VITE_APP_PLATFORM?.trim().toLowerCase();
 const appPlatform = requestedPlatform === "desktop" || requestedPlatform === "android" ? requestedPlatform : "web";
 const requestedReleaseChannel = process.env.VITE_RELEASE_CHANNEL?.trim().toLowerCase();
 const releaseChannel = requestedReleaseChannel === "beta" || requestedReleaseChannel === "nightly" ? requestedReleaseChannel : "stable";
+const devApiUrl = process.env.DSP_DEV_API_URL?.trim() || "http://127.0.0.1:4320";
 
 function scaleUiFontSizes(): Plugin {
   return {
@@ -96,7 +97,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 4318,
-    proxy: { "/api": "http://127.0.0.1:4320" },
+    proxy: { "/api": devApiUrl },
   },
-  preview: { proxy: { "/api": "http://127.0.0.1:4320" } },
+  preview: { proxy: { "/api": devApiUrl } },
 });

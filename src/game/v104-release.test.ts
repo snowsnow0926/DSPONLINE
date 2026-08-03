@@ -97,18 +97,18 @@ describe("V1.04 belt bundles", () => {
   });
 });
 
-describe("V1.04 construction-center target", () => {
-  it("keeps the existing technology progression and raises the final limit to 100,000", () => {
+describe("construction-center target compatibility", () => {
+  it("keeps the existing technology progression and raises the final limit to 100,000,000", () => {
     const state = createInitialState(10_107);
     expect(getConstructionAutomationStockLimit(state)).toBe(100);
     state.research.completedTechIds.push("construction_capacity_1");
     expect(getConstructionAutomationStockLimit(state)).toBe(500);
     state.research.completedTechIds.push("construction_capacity_2");
-    expect(getConstructionAutomationStockLimit(state)).toBe(100_000);
+    expect(getConstructionAutomationStockLimit(state)).toBe(100_000_000);
 
-    const configured = setConstructionAutomationTarget(state, "arc_smelter", 100_000);
-    expect(configured.constructionAutomation.targetStock.arc_smelter).toBe(100_000);
-    expect(setConstructionAutomationTarget(configured, "arc_smelter", 100_001)).toBe(configured);
+    const configured = setConstructionAutomationTarget(state, "arc_smelter", 100_000_000);
+    expect(configured.constructionAutomation.targetStock.arc_smelter).toBe(100_000_000);
+    expect(setConstructionAutomationTarget(configured, "arc_smelter", 100_000_001)).toBe(configured);
     expect(setConstructionAutomationTarget(configured, "arc_smelter", 12.5)).toBe(configured);
   });
 

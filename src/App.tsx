@@ -313,8 +313,16 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
+import { readShowRunLogPreference, readThemePreference, writeShowRunLogPreference, writeThemePreference } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
+
+// Run-log visibility is a presentation preference. Keep safety-critical
+// feedback visible when the routine event feed is disabled, while allowing
+// ordinary success/status toasts to stay out of the player's way.
+function isPersistentNotice(message: string): boolean {
+  return /失败|错误|异常|损坏|未保存|冲突|无法|不能|不可|未执行|超出安全|成就解锁|研究完成|任务完成|云端已有|同步失败/.test(message);
+}
 
 interface AlignmentGuides {
   x: number | null;
@@ -656,7 +664,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [loaded] = useState(initialLoad);
   const [game, setGame] = useState(loaded.state);
   const observedGame = useObservedBeltFlowGame(game, !game.paused);
-  const resolvedTheme = useResolvedTheme(game.settings.theme);
+  const [themeMode, setThemeMode] = useState(() => readThemePreference() ?? loaded.state.settings.theme);
+  const [showRunLog, setShowRunLog] = useState(readShowRunLogPreference);
+  const resolvedTheme = useResolvedTheme(themeMode);
   const [canvasRenderSnapshot, setCanvasRenderSnapshot] = useState<CanvasRenderSnapshot>(() => createCanvasRenderSnapshot(loaded.state));
   const canvasGameSnapshot = canvasRenderSnapshot.game;
   const canvasGame = useObservedBeltFlowGame(canvasGameSnapshot, !canvasGameSnapshot.paused);
@@ -1834,12 +1844,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   useEffect(() => {
     if (!notice) return;
-    const id = eventSequenceRef.current + 1;
-    eventSequenceRef.current = id;
-    setEventHistory((current) => [...current, { id, text: notice }].slice(-4));
+    if (showRunLog) {
+      const id = eventSequenceRef.current + 1;
+      eventSequenceRef.current = id;
+      setEventHistory((current) => [...current, { id, text: notice }].slice(-4));
+    }
+    if (!showRunLog && !isPersistentNotice(notice)) return;
     const timer = window.setTimeout(() => setNotice(null), 4000);
     return () => window.clearTimeout(timer);
-  }, [notice]);
+  }, [notice, showRunLog]);
+
+  useEffect(() => {
+    if (showRunLog || !notice || isPersistentNotice(notice)) return;
+    setNotice(null);
+  }, [notice, showRunLog]);
 
   useEffect(() => {
     if (eventHistory.length === 0) return;
@@ -2344,8 +2362,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const updateSettings = useCallback((settings: Partial<GameSettings>) => {
     setGame((current) => ({ ...current, settings: { ...current.settings, ...settings } }));
+    if (settings.theme) {
+      setThemeMode(settings.theme);
+      writeThemePreference(settings.theme);
+    }
     if (settings.soundEnabled === true) playTone("confirm", true);
   }, [playTone]);
+
+  const updateRunLogPreference = useCallback((enabled: boolean) => {
+    setShowRunLog(enabled);
+    writeShowRunLogPreference(enabled);
+    if (!enabled) {
+      setEventHistory([]);
+      setNotice((current) => current && isPersistentNotice(current) ? current : null);
+    }
+  }, []);
 
   const updateGalaxyProfile = useCallback((changes: AccountProfileChanges) => {
     const current = accountStateRef.current;
@@ -6301,9 +6332,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             endgameExtremeMode={endgameExtremeMode}
             canvasPerformanceFeatures={canvasPerformanceFeatures}
             lineFindMode={lineFindMode}
+            showRunLog={showRunLog}
             onEndgameExtremeModeChange={toggleEndgameExtremeMode}
             onCanvasPerformanceFeatureChange={updateCanvasPerformanceFeature}
             onLineFindModeChange={setLineFindMode}
+            onRunLogChange={updateRunLogPreference}
             onProductionRefreshPreferenceChange={setProductionRefreshPreference}
             onStartPerformanceMonitor={performanceMonitor.start}
             onStopPerformanceMonitor={performanceMonitor.stop}
@@ -6433,11 +6466,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <span><strong>{saveFailure.code === "quota" ? "本地存储空间不足，当前进度尚未保存。请立即导出存档。" : saveFailure.message}</strong><small>自动保存会继续重试，导出文件不会删除或覆盖现有存档。</small></span>
         <button type="button" onClick={downloadSave}><Download size={15} /><span>立即导出当前进度</span></button>
       </aside> : null}
-      {eventHistory.length > 0 ? <aside className="interaction-event-feed" role="log" aria-label="运行事件" aria-live="polite">
+      {showRunLog && eventHistory.length > 0 ? <aside className="interaction-event-feed" role="log" aria-label="运行事件" aria-live="polite">
         <header><Activity size={13} /><span>运行记录</span><button type="button" onClick={() => setEventHistory([])} title="清空运行记录" aria-label="清空运行记录"><X size={12} /></button></header>
         <div>{eventHistory.map((event) => <p key={event.id}>{event.text}</p>)}</div>
       </aside> : null}
-      {notice ? <div className="game-notice" role="status">{notice}</div> : null}
+      {notice && (showRunLog || isPersistentNotice(notice)) ? <div className="game-notice" role="status">{notice}</div> : null}
       {pureIdleActive ? <TimeWarpIdleOverlay game={observedGame} startedAt={pureIdleStartedAt} saveFailure={saveFailure} workerActive={simulationWorkerActive} onStop={stopPureIdle} /> : null}
     </main>
     </ItemReferenceActionsProvider>

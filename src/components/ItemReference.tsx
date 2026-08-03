@@ -74,7 +74,7 @@ export function ItemHoverCard({ itemId, children, className = "" }: {
 
   const scheduleClose = () => {
     cancelClose();
-    closeTimerRef.current = window.setTimeout(() => setAnchor(null), 140);
+    closeTimerRef.current = window.setTimeout(() => setAnchor(null), 220);
   };
 
   const open = (element: HTMLElement) => {
@@ -101,6 +101,7 @@ export function ItemHoverCard({ itemId, children, className = "" }: {
   return (
     <span
       className={`item-reference${className ? ` ${className}` : ""}`}
+      aria-haspopup="dialog"
       onMouseEnter={(event) => open(event.currentTarget)}
       onMouseLeave={scheduleClose}
       onFocus={(event) => open(event.currentTarget)}
@@ -133,6 +134,9 @@ export function ItemHoverCard({ itemId, children, className = "" }: {
           style={anchor}
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
+          onPointerEnter={cancelClose}
+          onPointerLeave={scheduleClose}
+          onFocus={cancelClose}
           onClick={(event) => event.stopPropagation()}
         >
           <header>

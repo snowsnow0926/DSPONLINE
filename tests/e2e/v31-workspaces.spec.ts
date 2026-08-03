@@ -64,6 +64,21 @@ test("theme and technology layout controls apply immediately and sorters stay hi
   await expect(library).not.toContainText("兼容分拣器施工件");
 });
 
+test("settings opens a category overview and returns without changing the selected save", async ({ page }) => {
+  await openFactory(page);
+  await page.getByLabel("打开设置").click();
+  const operations = page.getByRole("dialog", { name: "运营中心" });
+  const overview = operations.locator(".settings-category-overview");
+  await expect(overview).toBeVisible();
+  await overview.getByRole("button", { name: /存档与云同步/ }).click();
+  await expect(overview).toBeHidden();
+  await expect(operations.getByRole("button", { name: "返回设置分类" })).toBeVisible();
+  await expect(operations.locator(".settings-group[data-settings-category='storage']").first()).toBeVisible();
+  await operations.getByRole("button", { name: "返回设置分类" }).click();
+  await expect(overview).toBeVisible();
+  await expect(page.locator(".game-shell")).toBeVisible();
+});
+
 test("each planet restores its last canvas viewport", async ({ page }) => {
   await openFactory(page);
   await page.addInitScript(() => {

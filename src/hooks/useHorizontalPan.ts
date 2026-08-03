@@ -3,6 +3,11 @@ import { useRef, useState, type HTMLAttributes, type PointerEvent as ReactPointe
 type HorizontalPanBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
   "onWheel" | "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel" | "onContextMenu">;
 
+/** Convert a vertical wheel gesture to horizontal motion without leaking it to the page. */
+export function horizontalWheelDelta(deltaX: number, deltaY: number): number {
+  return Math.abs(deltaX) > 0.01 ? deltaX : deltaY;
+}
+
 export function useHorizontalPan<T extends HTMLElement>(options: { wheelMode?: "horizontal" | "axis-lock" } = {}): { bindings: HorizontalPanBindings<T>; isPanning: boolean } {
   const dragRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number } | null>(null);
   const wheelLockRef = useRef<{ axis: "x" | "y"; expiresAt: number } | null>(null);
@@ -31,7 +36,7 @@ export function useHorizontalPan<T extends HTMLElement>(options: { wheelMode?: "
           if (axis === "x" && surface.scrollWidth <= surface.clientWidth && surface.scrollHeight > surface.clientHeight) axis = "y";
           if (axis === "y" && surface.scrollHeight <= surface.clientHeight && surface.scrollWidth > surface.clientWidth) axis = "x";
           const delta = axis === "x"
-            ? Math.abs(wheelEvent.deltaX) > 0.01 ? wheelEvent.deltaX : wheelEvent.deltaY
+            ? horizontalWheelDelta(wheelEvent.deltaX, wheelEvent.deltaY)
             : wheelEvent.deltaY;
           if (Math.abs(delta) <= 0.01) return;
           wheelLockRef.current = { axis, expiresAt: now + 180 };
@@ -42,7 +47,7 @@ export function useHorizontalPan<T extends HTMLElement>(options: { wheelMode?: "
           return;
         }
         const scrollTop = surface.scrollTop;
-        const delta = Math.abs(wheelEvent.deltaY) >= Math.abs(wheelEvent.deltaX) ? wheelEvent.deltaY : wheelEvent.deltaX;
+        const delta = horizontalWheelDelta(wheelEvent.deltaX, wheelEvent.deltaY);
         wheelEvent.preventDefault();
         wheelEvent.stopPropagation();
         if (Math.abs(delta) > 0.01) surface.scrollLeft += delta;

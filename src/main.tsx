@@ -13,7 +13,12 @@ import "./styles/ui-clarity.css";
 import { AppLocaleProvider, initializeDocumentLocale } from "./i18n/locale";
 import { initializeLocalSaveStore } from "./game/localSaveStore";
 import { importWithRecovery, reloadLatestBuild } from "./game/dynamicImportRecovery";
+import { initializeDocumentTheme } from "./game/uiPreferences";
 
+// Apply the device-only theme before the first React paint. The legacy
+// GameState theme is still read for old saves, but it is no longer the source
+// of the initial document color and therefore cannot cause a dark flash.
+initializeDocumentTheme();
 const nativeRuntime = initializeNativeRuntime();
 initializeDocumentLocale();
 installClientMonitoring();

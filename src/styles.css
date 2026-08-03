@@ -1474,6 +1474,50 @@ select:focus-visible {
   }
 }
 
+/* Font scaling must reflow controls instead of shrinking a setting card to a
+   one-character column. */
+.settings-group,
+.settings-group > header,
+.settings-group > header > span,
+.settings-group > header > small {
+  min-width: 0;
+}
+
+.settings-group > header > span,
+.settings-group > header > small {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px), (min-resolution: 1.5dppx) {
+  .settings-group > header {
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .settings-group > header > small {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: 3px;
+  }
+
+  .settings-segmented {
+    grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  }
+}
+
+html[data-ui-font-scale="150"] .settings-group > header,
+html[data-ui-font-scale="200"] .settings-group > header {
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+}
+
+html[data-ui-font-scale="150"] .settings-group > header > small,
+html[data-ui-font-scale="200"] .settings-group > header > small {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 3px;
+}
+
 @media (max-width: 760px) {
   .sidebar-edge-toggle { display: grid !important; top: 42%; width: 28px; height: 52px; }
   .sidebar-edge-toggle--left { left: 0; }
@@ -1763,8 +1807,12 @@ select:focus-visible {
 }
 
 .item-reference--badge {
-  display: block;
-  width: 100%;
+  /* The hover target follows the actual icon/name/amount content instead of
+     the entire input row, so blank space and adjacent controls do not open a
+     card accidentally. */
+  display: inline-grid;
+  width: auto;
+  max-width: 100%;
 }
 
 .item-hover-card {
@@ -1884,6 +1932,179 @@ select:focus-visible {
 
 .item-hover-actions button:first-child { border-color: #3c6d67; color: var(--cyan); }
 .item-hover-actions button:disabled { border-color: var(--line); color: var(--muted); cursor: not-allowed; opacity: .62; }
+
+/* Settings categories are a local UI filter. The default "全部" view keeps
+   legacy automation and keyboard navigation intact; selecting a category
+   hides only unrelated groups without changing GameState. */
+.settings-category-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.settings-category-tabs button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.settings-category-tabs button:hover,
+.settings-category-tabs button:focus-visible,
+.settings-category-tabs button.active {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--cyan);
+}
+
+.settings-category-hint {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.operations-settings:not([data-settings-category]) > [data-settings-category] {
+  display: block;
+}
+
+.settings-category-overview {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 10px;
+}
+
+.settings-category-overview button {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-category-overview button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settings-category-overview button strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.settings-category-overview button small {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.settings-category-overview button:hover,
+.settings-category-overview button:focus-visible {
+  border-color: var(--theme-accent-border, var(--line-strong));
+  background: var(--theme-selection-bg, var(--surface-soft));
+  color: var(--cyan);
+}
+
+.settings-category-quick {
+  display: grid;
+  gap: 7px;
+  margin-top: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-raised);
+}
+
+.settings-category-quick > header {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-category-quick > header span {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.settings-category-quick > header small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.settings-category-back {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 8px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.settings-category-back:hover,
+.settings-category-back:focus-visible {
+  border-color: var(--theme-accent-border, var(--line-strong));
+  background: var(--theme-selection-bg, var(--surface-soft));
+  color: var(--cyan);
+}
+
+.operations-settings[data-settings-category="all"] > [data-settings-category] {
+  display: none;
+}
+
+.operations-settings:not([data-settings-category="all"]) > .settings-category-overview {
+  display: none;
+}
+
+.operations-settings[data-settings-category="visual"] > [data-settings-category]:not([data-settings-category~="visual"]),
+.operations-settings[data-settings-category="performance"] > [data-settings-category]:not([data-settings-category~="performance"]),
+.operations-settings[data-settings-category="interaction"] > [data-settings-category]:not([data-settings-category~="interaction"]),
+.operations-settings[data-settings-category="storage"] > [data-settings-category]:not([data-settings-category~="storage"]),
+.operations-settings[data-settings-category="statistics"] > [data-settings-category]:not([data-settings-category~="statistics"]),
+.operations-settings[data-settings-category="other"] > [data-settings-category]:not([data-settings-category~="other"]) {
+  display: none;
+}
+
+@media (max-width: 620px) {
+  .settings-category-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-category-tabs button {
+    min-width: 0;
+    min-height: 42px;
+    overflow-wrap: anywhere;
+  }
+
+  .settings-category-overview button {
+    min-height: 64px;
+  }
+}
 
 .tray-list {
   display: flex;
@@ -21627,6 +21848,75 @@ input:focus-visible,
   -webkit-overflow-scrolling: touch;
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
+}
+
+.release-notes-history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.release-notes-history-toolbar > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.release-notes-history-toolbar button,
+.release-notes-history-list button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 8px;
+}
+
+.release-notes-history-toolbar button:hover:not(:disabled),
+.release-notes-history-toolbar button:focus-visible,
+.release-notes-history-list button:hover,
+.release-notes-history-list button.active {
+  border-color: var(--theme-accent-border, var(--line-strong));
+  background: var(--theme-selection-bg, var(--surface-soft));
+  color: var(--cyan);
+}
+
+.release-notes-history-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.release-notes-history-list {
+  display: grid;
+  gap: 5px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.release-notes-history-list button {
+  width: 100%;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.release-notes-history-list button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.release-notes-history-list button small {
+  color: var(--muted);
+  font-size: 7px;
 }
 
 .release-notes-scroll ol {

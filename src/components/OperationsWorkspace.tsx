@@ -4,6 +4,7 @@ import {
   Bell,
   Bug,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   Cpu,
@@ -69,6 +70,7 @@ import { useAppLocale } from "../i18n/locale";
 import { useGameDialog } from "./GameDialogProvider";
 import { LogisticsManagementPanel, type LogisticsManagementPanelProps } from "./LogisticsManagementPanel";
 import type { CanvasPerformanceFeatureId, CanvasPerformanceFeatures } from "../game/endgamePerformance";
+import { readSettingsCategoryPreference, writeSettingsCategoryPreference, type SettingsCategory } from "../game/uiPreferences";
 
 export type OperationsTab = "alerts" | "achievements" | "logistics" | "settings" | "performance" | "saves" | "packs" | "support";
 
@@ -90,7 +92,9 @@ interface OperationsWorkspaceProps {
   canvasPerformanceFeatures: CanvasPerformanceFeatures;
   onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void;
   lineFindMode: boolean;
+  showRunLog: boolean;
   onLineFindModeChange: (enabled: boolean) => void;
+  onRunLogChange: (enabled: boolean) => void;
   performanceMonitor: PerformanceMonitorSnapshot;
   onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void;
   onStartPerformanceMonitor: () => void;
@@ -272,10 +276,12 @@ function BufferLimitSetting({ label, value, onChange, presets = BUFFER_LIMIT_PRE
   </section>;
 }
 
-function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, canvasPerformanceFeatures, onEndgameExtremeModeChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
+function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, canvasPerformanceFeatures, onEndgameExtremeModeChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, showRunLog, onRunLogChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; showRunLog: boolean; onRunLogChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
   const { settings } = game;
   const { locale, setLocale } = useAppLocale();
   const gameDialog = useGameDialog();
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>(readSettingsCategoryPreference);
+  useEffect(() => { writeSettingsCategoryPreference(settingsCategory); }, [settingsCategory]);
   const canvasPerformanceCopy = locale === "en"
     ? {
         ariaLabel: "Independent canvas optimization fallbacks",
@@ -306,12 +312,42 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         help: "每项开关都可独立关闭；关闭后回退到当前 React Flow 路径。视觉降级项在极限模式关闭时不会生效。",
       };
   return (
-    <div className="operations-panel operations-settings">
+    <div className="operations-panel operations-settings" data-settings-category={settingsCategory}>
       <header className="operations-section-header">
         <div><span>模拟参数</span><strong>运行设置</strong></div>
         <span className="settings-state"><Gauge size={14} />{settings.simulationSpeed}× 模拟</span>
       </header>
-      <section className="settings-group">
+      <nav className="settings-category-tabs" aria-label="设置分类">
+        {([
+          ["all", "全部"],
+          ["visual", "画面与主题"],
+          ["performance", "终局性能"],
+          ["interaction", "交互与控制"],
+          ["storage", "存档与云同步"],
+          ["statistics", "统计与运行记录"],
+          ["other", "教程、版本与其他"],
+        ] as Array<[SettingsCategory, string]>).map(([id, label]) => <button type="button" className={settingsCategory === id ? "active" : ""} aria-pressed={settingsCategory === id} key={id} onClick={() => setSettingsCategory(id)}>{label}</button>)}
+      </nav>
+      <p className="settings-category-hint">分类只影响本机设置页面的显示，不会改变存档内容；返回后会保留上次分类。</p>
+      {settingsCategory === "all" ? <section className="settings-category-overview" aria-label="设置分类总览">
+        {([
+          ["visual", "画面与主题", "亮色/深色、字体、语言和默认画布显示"],
+          ["performance", "终局性能", "刷新频率、极限模式与独立画布回退开关"],
+          ["interaction", "交互与控制", "线路、缺料跳转、寻线和输入行为"],
+          ["storage", "存档与云同步", "自动保存、资源模式和存档保护"],
+          ["statistics", "统计与运行记录", "性能采样、运行记录和诊断报告"],
+          ["other", "教程、版本与其他", "教程入口、版本记录、难度与社区"],
+        ] as Array<[Exclude<SettingsCategory, "all">, string, string]>).map(([id, label, detail]) => <button type="button" key={id} onClick={() => setSettingsCategory(id)}>
+          <span><strong>{label}</strong><small>{detail}</small></span><ChevronRight size={16} aria-hidden="true" />
+        </button>)}
+        <section className="settings-category-quick" aria-label="界面主题">
+          <header><Palette size={14} /><span>界面主题</span><small>{{ dark: "深色", light: "亮色", system: "跟随系统" }[settings.theme]}</small></header>
+          <div className="settings-segmented" aria-label="主题快速设置">
+            {(["dark", "light", "system"] as const).map((theme) => <button className={settings.theme === theme ? "active" : ""} type="button" key={theme} aria-pressed={settings.theme === theme} onClick={() => onChange({ theme })}>{{ dark: "深色", light: "亮色", system: "跟随系统" }[theme]}</button>)}
+          </div>
+        </section>
+      </section> : <button className="settings-category-back" type="button" onClick={() => setSettingsCategory("all")}><ChevronLeft size={15} />返回设置分类</button>}
+      <section className="settings-group" data-settings-category="visual">
         <header><Zap size={14} /><span>模拟速度</span></header>
         <div className="settings-segmented" aria-label="模拟速度">
           {([1, 2, 4] as SimulationSpeed[]).map((speed) => (
@@ -319,7 +355,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           ))}
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="visual">
         <header><Type size={14} /><span>字体大小</span><small>{Math.round(settings.fontScale * 100)}%</small></header>
         <div className="settings-segmented" aria-label="字体大小">
           {([0.8, 1, 1.25, 1.5, 2] as FontScale[]).map((scale) => (
@@ -327,13 +363,13 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           ))}
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="visual">
         <header><Palette size={14} /><span>界面主题</span><small>{{ dark: "深色", light: "亮色", system: "跟随系统" }[settings.theme]}</small></header>
-        <div className="settings-segmented" aria-label="界面主题">
+        <div className="settings-segmented" aria-label={settingsCategory === "all" ? "界面主题详情" : "界面主题"}>
           {(["dark", "light", "system"] as const).map((theme) => <button className={settings.theme === theme ? "active" : ""} type="button" key={theme} onClick={() => onChange({ theme })}>{{ dark: "深色", light: "亮色", system: "跟随系统" }[theme]}</button>)}
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="visual">
         <header><Languages size={14} /><span>语言</span><small>{locale === "en" ? "English" : "简体中文"}</small></header>
         <div className="settings-segmented" aria-label="语言">
           <button className={locale === "zh-CN" ? "active" : ""} type="button" aria-pressed={locale === "zh-CN"} onClick={() => setLocale("zh-CN")}>简体中文</button>
@@ -341,19 +377,20 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className="settings-help">语言仅保存在当前设备，不会写入游戏存档或云存档。</p>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="visual">
         <header><Settings2 size={14} /><span>科技树布局</span><small>{settings.technologyLayout === "compact" ? "精简" : "标准"}</small></header>
         <div className="settings-segmented" aria-label="科技树布局">
           <button className={settings.technologyLayout === "standard" ? "active" : ""} type="button" onClick={() => onChange({ technologyLayout: "standard" })}>标准模式</button>
           <button className={settings.technologyLayout === "compact" ? "active" : ""} type="button" onClick={() => onChange({ technologyLayout: "compact" })}>精简模式</button>
         </div>
       </section>
-      <section className="settings-group settings-belt-defaults">
+      <section className="settings-group settings-belt-defaults" data-settings-category="visual interaction">
         <header><Settings2 size={14} /><span>新建传送带默认参数</span><small>仅影响新线路</small></header>
         <label><span>货物堆叠</span><div className="settings-segmented" aria-label="新建传送带默认货物堆叠">{([1, 2, 4] as CargoStackSize[]).map((stackSize) => <button className={settings.defaultBeltStackSize === stackSize ? "active" : ""} type="button" disabled={!canSetBeltStackSize(game, stackSize)} key={stackSize} onClick={() => onChange({ defaultBeltStackSize: stackSize })}>×{stackSize}</button>)}</div></label>
         <label><span>线路形状</span><div className="settings-segmented" aria-label="新建传送带默认线路形状">{(["auto", "bezier", "upper", "lower"] as DefaultBeltRouteMode[]).map((mode) => <button className={settings.defaultBeltRouteMode === mode ? "active" : ""} type="button" key={mode} onClick={() => onChange({ defaultBeltRouteMode: mode })}>{{ auto: "自动避让", bezier: "曲线", upper: "上绕", lower: "下绕" }[mode]}</button>)}</div></label>
         <p className="settings-help">蓝图保留自身参数，并行线沿用原线路；未解锁的堆叠等级不可选择。</p>
       </section>
+      <div data-settings-category="performance">
       <BufferLimitSetting label="生产建筑缓存上限" value={settings.productionBufferLimit} onChange={(productionBufferLimit) => onChange({ productionBufferLimit })} />
       <BufferLimitSetting label="仓储与物流建筑缓存上限" value={settings.logisticsBufferLimit} onChange={(logisticsBufferLimit) => onChange({ logisticsBufferLimit })} />
       <BufferLimitSetting label="传送带转运额度上限" value={settings.beltBufferLimit} onChange={(beltBufferLimit) => onChange({ beltBufferLimit })} help="限制大时间步内每条线路累计的转运额度，不改变每秒吞吐，也不是线路中的实际货物库存。" />
@@ -367,7 +404,8 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         validate={validateProliferatorBufferLimitInput}
         help="只限制已安装喷涂机当前等级的增产剂物品；内部喷涂点和既有超额库存不会被删除。"
       />
-      <section className="settings-group settings-production-refresh">
+      </div>
+      <section className="settings-group settings-production-refresh" data-settings-category="performance">
         <header><Gauge size={14} /><span>生产画面刷新频率</span><small>{productionRefreshIntervalMs < 1_000 ? `${productionRefreshIntervalMs} ms` : `${productionRefreshIntervalMs / 1_000} 秒`}</small></header>
         <div className="production-refresh-options" role="radiogroup" aria-label="生产画面刷新频率">
           {PRODUCTION_REFRESH_PROFILES.map((profile) => <button className={productionRefreshPreference === profile.id ? "active" : ""} type="button" role="radio" aria-checked={productionRefreshPreference === profile.id} key={profile.id} onClick={() => onProductionRefreshPreferenceChange(profile.id)}>
@@ -376,7 +414,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className="settings-help">只调整生产画面与状态发布节奏，不改变模拟时间、产量、物流、科研或戴森工程。固定档位不会被自动调节覆盖。</p>
       </section>
-      <section className="settings-group settings-toggle-list settings-endgame-extreme">
+      <section className="settings-group settings-toggle-list settings-endgame-extreme" data-settings-category="performance">
         <ToggleSetting
           checked={endgameExtremeMode}
           label={locale === "en" ? "Endgame Extreme Mode" : "终局优化·极限模式"}
@@ -401,15 +439,16 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className="settings-help">{canvasPerformanceCopy.help}</p>
       </section>
-      <section className="settings-group settings-toggle-list">
+      <section className="settings-group settings-toggle-list" data-settings-category="performance interaction statistics">
         <ToggleSetting checked={settings.performanceMode} label="性能模式" value={settings.performanceMode ? "精简粒子、阴影与线路动画" : "完整视觉特效"} icon={<Cpu size={16} />} onChange={(performanceMode) => onChange({ performanceMode })} />
         <ToggleSetting checked={settings.reducedMotion} label="减少动态效果" value={settings.reducedMotion ? "动态效果关闭" : "动态效果开启"} icon={<Gauge size={16} />} onChange={(reducedMotion) => onChange({ reducedMotion })} />
         <ToggleSetting checked={settings.soundEnabled} label="操作音效" value={settings.soundEnabled ? "声音开启" : "声音关闭"} icon={settings.soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />} onChange={(soundEnabled) => onChange({ soundEnabled })} />
         <ToggleSetting checked={settings.allowDoubleClickZoom} label="允许双击缩放" value={settings.allowDoubleClickZoom ? "双击聚焦画布" : "连续点击不缩放"} icon={<MousePointer2 size={16} />} onChange={(allowDoubleClickZoom) => onChange({ allowDoubleClickZoom })} />
         <ToggleSetting checked={settings.autoShortageNavigation} label="资源不足自动跳转" value={settings.autoShortageNavigation ? "缺料时打开对应配方" : "缺料只提示，主动点击仍可跳转"} icon={<MapPin size={16} />} onChange={(autoShortageNavigation) => onChange({ autoShortageNavigation })} />
         <ToggleSetting checked={lineFindMode} label="寻线模式默认开启" value={lineFindMode ? "选中建筑后追踪上下游" : "保持普通画布显示"} icon={<Route size={16} />} onChange={onLineFindModeChange} />
+        <ToggleSetting checked={showRunLog} label="显示运行记录" value={showRunLog ? "显示运行反馈浮条" : "仅保留错误、成就和诊断"} icon={<Activity size={16} />} onChange={onRunLogChange} />
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="storage">
         <header><Clock3 size={14} /><span>自动保存间隔</span></header>
         <div className="settings-segmented" aria-label="自动保存间隔">
           {([30, 60, 120, 600, 0] as AutosaveIntervalSeconds[]).map((seconds) => (
@@ -418,7 +457,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         {settings.autosaveIntervalSeconds === 0 ? <p className="settings-warning">关闭后，刷新、崩溃或异常退出可能丢失未保存进度；手动保存和云同步保持独立。</p> : null}
       </section>
-      <section className="settings-group">
+      <section className="settings-group" data-settings-category="storage">
         <header><MapPin size={14} /><span>星区与资源</span><small>种子 #{game.galaxy.seed}</small></header>
         <div className="settings-segmented" aria-label="资源模式">
           <button className={settings.resourceMode === "finite" ? "active" : ""} type="button" onClick={async () => {
@@ -439,7 +478,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           }}>无限矿脉</button>
         </div>
       </section>
-      <section className="settings-group settings-difficulty-group">
+      <section className="settings-group settings-difficulty-group" data-settings-category="other">
         <header><Gauge size={14} /><span>工业难度</span><small>{DIFFICULTY_DEFINITIONS.find((definition) => definition.id === settings.difficulty)?.name ?? "标准"}</small></header>
         <div className="settings-segmented settings-difficulty-options" aria-label="工业难度">
           {DIFFICULTY_DEFINITIONS.map((definition) => (
@@ -450,7 +489,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className="settings-help">{DIFFICULTY_DEFINITIONS.find((definition) => definition.id === settings.difficulty)?.summary ?? "按当前原型的默认节奏运行。"}</p>
       </section>
-      <section className="settings-group settings-diagnostics">
+      <section className="settings-group settings-diagnostics" data-settings-category="statistics">
         <header><ShieldCheck size={14} /><span>模拟诊断</span><small>确定性、2/8/24/72 小时挂机与数值平衡</small></header>
         <button type="button" onClick={onRunBenchmark} title="同时执行 2/8/24/72 小时挂机检查"><Gauge size={14} />运行 60 秒基准</button>
         {report ? <div className={`automatic-performance-report${report.benchmark.deterministic && report.idleStress.completed && report.idleStress.integrityPassed ? " automatic-performance-report--passed" : " automatic-performance-report--warning"}`}>
@@ -469,15 +508,15 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div> : null}
       </section>
       <NativeUpdateCard showWebFallback />
-      <section className="settings-group settings-tutorial-entry">
+      <section className="settings-group settings-tutorial-entry" data-settings-category="other">
         <header><GraduationCap size={14} /><span>零基础教程</span><small>桌面与手机通用</small></header>
         <button type="button" onClick={onOpenTutorial} aria-label="打开新手教程"><GraduationCap size={15} /><span><strong>打开完整自然语言教程</strong><small>从采集、传送带到物流、戴森和存档</small></span><ChevronRight size={15} /></button>
       </section>
-      <section className="settings-group settings-release-notes">
+      <section className="settings-group settings-release-notes" data-settings-category="other">
         <header><History size={14} /><span>版本更新记录</span><small>{CURRENT_RELEASE_NOTES.date}</small></header>
         <button type="button" onClick={onOpenReleaseNotes} aria-label="查看版本更新记录"><History size={15} /><span><strong>{CURRENT_RELEASE_NOTES.title}</strong><small>{CURRENT_RELEASE_NOTES.items.length} 项体验更新</small></span></button>
       </section>
-      <section className="settings-group settings-community">
+      <section className="settings-group settings-community" data-settings-category="other">
         <header><MessageSquare size={14} /><span>QQ 交流群</span><small>意见、建议与问题反馈</small></header>
         <div><span>群号</span><strong>1076757280</strong></div>
       </section>
@@ -870,7 +909,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "alerts" ? <AlertsPanel alerts={props.alerts} onSelect={props.onAlertSelect} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "achievements" ? <AchievementsPanel game={props.game} /> : null}
         {props.tab === "logistics" ? <LogisticsManagementPanel game={props.game} {...props.logisticsActions} /> : null}
-        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
+        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
         {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}

@@ -601,7 +601,7 @@ html[data-theme="light"] :is(
   .galaxy-leaderboard-rows > article.galaxy-rank-row--local,
   .galaxy-avatar-picker button.active
 ) {
-  background: var(--theme-selection-bg);
+  background: var(--theme-selection-bg) !important;
 }
 
 html[data-theme="light"] :is(
@@ -654,7 +654,7 @@ html[data-theme="light"] :is(
   .planet-card.active
 ) {
   border-color: var(--theme-accent-border);
-  background: var(--theme-selection-bg);
+  background: var(--theme-selection-bg) !important;
 }
 
 html[data-theme="light"] :is(
@@ -775,6 +775,136 @@ html[data-theme="light"] :is(.factory-node select, .factory-node button, .inspec
   border-color: var(--line);
   background-color: var(--theme-control);
   color: var(--text-soft);
+}
+
+/* Final semantic pass for controls which historically carried dark literals.
+   Keep this list intentionally class-based so new light surfaces inherit the
+   same contrast rules without changing the dark theme. */
+html[data-theme="light"] :is(
+  .item-hover-card,
+  .factory-node,
+  .factory-node--megastructure,
+  .canvas-selection-tools,
+  .selection-toolbar,
+  .interaction-event-feed,
+  .settings-category-tabs,
+  .settings-category-overview button,
+  .settings-category-quick,
+  .settings-category-back,
+  .settings-group,
+  .settings-buffer-custom,
+  .start-menu-message,
+  .start-menu-import-drop,
+  .start-menu-import-result,
+  .start-menu-snapshots,
+  .start-menu-cloud-account,
+  .start-menu-cloud-offline,
+  .save-emergency-warning
+) {
+  border-color: var(--line);
+  background-color: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 24px var(--theme-shadow);
+}
+
+html[data-theme="light"] :is(
+  .item-hover-card > p,
+  .item-hover-line,
+  .item-hover-empty,
+  .interaction-event-feed p,
+  .settings-group small,
+  .settings-help,
+  .start-menu-import-result small,
+  .start-menu-snapshots small,
+  .start-menu-cloud-offline small
+) {
+  color: var(--theme-text-soft);
+}
+
+html[data-theme="light"] :is(
+  .item-hover-actions button,
+  .settings-category-tabs button,
+  .settings-category-overview button,
+  .settings-category-quick,
+  .settings-category-back,
+  .settings-group button,
+  .canvas-selection-tools button,
+  .selection-toolbar button,
+  .start-menu-snapshots > button,
+  .start-menu-import-result footer button
+) {
+  border-color: var(--line);
+  background: var(--theme-control);
+  color: var(--text-soft);
+}
+
+html[data-theme="light"] :is(
+  .item-hover-actions button:hover:not(:disabled),
+  .item-hover-actions button:focus-visible,
+  .settings-category-tabs button:hover,
+  .settings-category-tabs button.active,
+  .settings-category-overview button:hover,
+  .settings-category-overview button:focus-visible,
+  .settings-category-back:hover,
+  .settings-category-back:focus-visible,
+  .settings-group button:hover:not(:disabled),
+  .canvas-selection-tools button:hover,
+  .canvas-selection-tools button.active,
+  .selection-toolbar button:hover:not(:disabled),
+  .start-menu-snapshots > button:hover:not(:disabled)
+) {
+  border-color: var(--theme-accent-border);
+  background: var(--theme-selection-bg);
+  color: var(--cyan-deep);
+}
+
+html[data-theme="light"] :is(
+  .factory-node--selected,
+  .react-flow__node.selected .factory-node,
+  .factory-node--selected.factory-node--megastructure
+) {
+  border-color: var(--theme-focus-ring) !important;
+  background: var(--theme-selection-bg) !important;
+  background-image: none !important;
+  box-shadow: 0 0 0 2px var(--theme-accent-border), 0 10px 28px var(--theme-shadow) !important;
+}
+
+html[data-theme="light"] :is(.factory-node--selected::before, .react-flow__node.selected .factory-node::before) {
+  border-color: var(--theme-accent-border);
+  background: var(--theme-accent-soft);
+  color: var(--cyan-deep);
+}
+
+html[data-theme="light"] :is(.factory-node--selected .factory-node__header, .factory-node--selected .factory-node__footer) {
+  border-color: var(--theme-accent-border);
+  background: var(--theme-accent-soft);
+}
+
+html[data-theme="light"] .item-hover-card > header {
+  border-color: var(--line);
+}
+
+html[data-theme="light"] .item-hover-card > header > i {
+  color: #102018;
+}
+
+html[data-theme="light"] :is(
+  .settings-group input,
+  .settings-group select,
+  .settings-group textarea,
+  .start-menu-settings input,
+  .start-menu-settings select,
+  .start-menu-settings textarea
+) {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(.danger, .danger-command, .save-emergency-warning) {
+  border-color: var(--theme-danger-border);
+  background: var(--theme-danger-bg);
+  color: var(--coral);
 }
 
 /* Logistics controls need explicit interaction states; generic light-theme

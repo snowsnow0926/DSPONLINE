@@ -10,18 +10,26 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-async function seedFactory(page: Page) {
+async function seedFactory(page: Page, buildingCount = 2) {
   // The app migrates the primary save to IndexedDB before mounting. Seed the
   // fixture before boot so the same path is exercised as a real fresh browser.
   await page.goto("/version.json");
-  await page.evaluate(async () => {
+  await page.evaluate(async (count) => {
     const { createInitialState, placeBuilding } = await import("/src/game/engine.ts");
     let state = createInitialState(27_101, false);
     state.paused = true;
-    state.construction.arc_smelter = 12;
+    state.construction.arc_smelter = count + 100;
     state.construction.conveyor_belt_mk1 = 12;
-    state = placeBuilding(state, "arc_smelter", { x: -80, y: -100 });
-    state = placeBuilding(state, "arc_smelter", { x: 80, y: -100 });
+    const columns = Math.min(6, count);
+    const rows = Math.ceil(count / columns);
+    for (let index = 0; index < count; index += 1) {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      state = placeBuilding(state, "arc_smelter", {
+        x: (column - (columns - 1) / 2) * 220,
+        y: (row - (rows - 1) / 2) * 140,
+      });
+    }
     const raw = JSON.stringify({ savedAt: Date.now(), state });
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("dsp-idle-network.local-saves", 1);
@@ -44,7 +52,7 @@ async function seedFactory(page: Page) {
       transaction.onabort = () => reject(transaction.error);
     });
     database.close();
-  });
+  }, buildingCount);
   await page.goto("/");
   await expect(page.locator(".game-shell")).toBeVisible();
 }
@@ -75,20 +83,45 @@ test("desktop mixed selection exposes atomic batch increase controls", async ({ 
   await expect(page.locator(".game-notice, .interaction-burst")).toContainText(/已批量增加/);
 });
 
-test("next mobile selection keeps multiple nodes selected after a canvas refresh", async ({ page }) => {
+test("next mobile selection accepts real taps and survives a canvas refresh", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", "next"));
   await seedFactory(page);
   await page.getByLabel("打开画布工具").click();
   await page.getByRole("button", { name: "逐点多选" }).click();
-  // The mobile shell hides React Flow's visual controls; invoke fit-view
-  // through the existing control so both seeded nodes receive a touch target.
   await page.locator(".react-flow__controls-fitview").evaluate((element) => (element as HTMLButtonElement).click());
   await page.waitForTimeout(120);
-  const nodes = page.locator('.react-flow__node').filter({ hasText: "熔炉" });
+  const nodes = page.locator(".react-flow__node").filter({ has: page.locator(".machine-node") });
   await nodes.nth(0).tap();
   await nodes.nth(1).tap();
   await expect(page.locator(".mobile-mode-status--select")).toContainText("2 节点");
   await page.waitForTimeout(400);
-  await expect(page.locator(".mobile-mode-status--select")).toContainText("2 节点");
+  await expect(page.locator(".react-flow__node.selected")).toHaveCount(2);
 });
+
+for (const selectedCount of [5, 10, 20, 50]) {
+  test(`next mobile selection keeps ${selectedCount} nodes selected after a canvas refresh`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", "next"));
+    await seedFactory(page, selectedCount);
+    await page.getByLabel("打开画布工具").click();
+    await page.getByRole("button", { name: "逐点多选" }).click();
+    // The mobile shell hides React Flow's visual controls; invoke fit-view
+    // through the existing control so every seeded node receives a touch target.
+    await page.locator(".react-flow__controls-fitview").evaluate((element) => (element as HTMLButtonElement).click());
+    await page.waitForTimeout(120);
+    const nodes = page.locator(".react-flow__node").filter({ has: page.locator(".machine-node") });
+    await expect(nodes).toHaveCount(selectedCount);
+    for (let index = 0; index < selectedCount; index += 1) {
+      const node = nodes.nth(index);
+      await node.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: index + 1, isPrimary: true, bubbles: true });
+      await node.dispatchEvent("pointerup", { pointerType: "touch", pointerId: index + 1, isPrimary: true, bubbles: true });
+      await node.dispatchEvent("click", { bubbles: true, detail: 1 });
+    }
+    await expect(page.locator(".mobile-mode-status--select")).toContainText(`${selectedCount} 节点`);
+    await expect(page.locator(".react-flow__node.selected")).toHaveCount(selectedCount);
+    await page.waitForTimeout(400);
+    await expect(page.locator(".mobile-mode-status--select")).toContainText(`${selectedCount} 节点`);
+    await expect(page.locator(".react-flow__node.selected")).toHaveCount(selectedCount);
+  });
+}

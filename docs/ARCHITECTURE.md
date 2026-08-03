@@ -304,6 +304,13 @@ API 表面：
 
 ## 9. 当前结构性问题
 
+### 1.0.27 selection and connection controls
+
+- Connection-point sizing is a device-only `localStorage` preference. The same scale is applied to handle CSS, connection preview circles, React Flow `connectionRadius`, and the spatial-index fallback radius, so the visual target and hit target remain aligned at every zoom level.
+- `setConstructionAutomationTargetsForBuildings` is a pure command that updates unlocked building target stock in one copy. It does not cancel existing automation jobs or WIP, and the final target is still gated by the existing construction-capacity technologies (up to 100,000,000 after capacity II).
+- `batchIncreaseSelection` computes all building and belt deltas and construction-material requirements before copying state. A shortage leaves the entire mixed selection unchanged; building stacks remain capped at `MAX_BUILDING_STACK_COUNT` and belt lanes at `MAX_BELT_LANES`.
+- Mobile selection mode ignores transient React Flow empty-selection events and pane bubbling while selecting. The authoritative selection refs are updated immediately so simulation refreshes and touch timing cannot clear the visible selection or operate on stale IDs.
+
 - `App.tsx` 同时承担会话、画布、工作区和大量命令编排，应逐步拆成运行时 hooks 与工作区控制器。
 - `engine.ts` 包含多个领域，应按“模拟内核、实体命令、电力、物流、科研、戴森”分模块，但保持公共确定性入口。
 - `styles.css` 超过一万行，应按 shell、canvas、workspace、responsive 分层，并保留加载顺序测试。

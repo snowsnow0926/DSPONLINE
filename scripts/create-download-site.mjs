@@ -54,9 +54,9 @@ if (desktopSha !== String(desktopRecord.sha256).toLowerCase()) throw new Error("
 const humanSize = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 const escaped = (value) => String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 const notes = [
-  `${version.version} 亮色主题、设置与交互体验更新`,
-  "统一亮色与深色语义主题，重构设置分类和离线版本历史",
-  "优化科技树滚轮与物品悬浮快捷操作，存档与在线协议不升级",
+  `${version.version} 连接交互与批量建造更新`,
+  "连接点视觉与命中范围可按设备偏好同步放大",
+  "新增建筑制造目标和混合选区原子批量增加，存档与在线协议不升级",
 ].join("；");
 const values = {
   __VERSION__: version.version,

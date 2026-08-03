@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { createInitialState } from "./engine";
+import { serializeEnvelope } from "./storage";
 import {
+  CONNECTION_POINT_SIZE_PREFERENCE_KEY,
   readSettingsCategoryPreference,
   readConnectionPointSize,
   readShowRunLogPreference,
@@ -40,6 +43,10 @@ describe("device-only UI preferences", () => {
       expect(readShowRunLogPreference()).toBe(false);
       expect(readSettingsCategoryPreference()).toBe("statistics");
       expect(readConnectionPointSize()).toBe("large50");
+      const envelope = serializeEnvelope(createInitialState(27_003), 1_754_256_000_000);
+      expect(envelope).not.toContain(CONNECTION_POINT_SIZE_PREFERENCE_KEY);
+      expect(envelope).not.toContain('"connectionPointSize"');
+      expect(envelope).not.toContain('"large50"');
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });
     }

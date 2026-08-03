@@ -6,41 +6,31 @@ import { NATIVE_BACK_EVENT } from "../nativeApp";
 export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
 
 export const CURRENT_RELEASE_NOTES = {
-  id: "2026-08-04-v1.0.26",
+  id: "2026-08-04-v1.0.27",
   date: "2026年8月4日",
-  version: "1.0.26",
-  title: "亮色主题与设置交互更新",
-  summary: "1.0.26 统一亮色与深色语义主题，重构设置分类和版本历史，并优化科技树滚轮与物品悬浮交互。GameState v46、存档 envelope v2 与云 schema v7 不变。",
+  version: "1.0.27",
+  title: "连接交互与批量建造更新",
+  summary: "1.0.27 增加连接点尺寸偏好、建筑制造批量目标和混合选区原子批量增加，并稳定移动端多选。GameState v46、存档 envelope v2 与云 schema v7 不变。",
   items: [
     {
-      id: "semantic-theme",
-      title: "亮色与深色语义主题",
-      description: "工作区、节点、线路、弹窗、表单和移动界面统一使用语义颜色，补齐选中、禁用、危险、悬停和键盘焦点状态。",
+      id: "connection-point-size",
+      title: "连接点尺寸可调",
+      description: "设置提供默认、放大 25% 和放大 50%；端口、连线圆圈、吸附半径与点击范围同步变化，并只保存在当前设备。",
     },
     {
-      id: "device-preferences",
-      title: "设备级界面偏好",
-      description: "主题、运行记录显示和设置分类只保存在当前设备；关闭普通运行记录时，必要错误与成就提示仍会显示。",
+      id: "construction-batch-target",
+      title: "建筑制造批量目标",
+      description: "建筑制造中心可一次为所有已解锁建筑设置库存目标；现有任务和在制品保持不变，并继续受仓储科技上限约束。",
     },
     {
-      id: "settings-navigation",
-      title: "设置分类与二级页面",
-      description: "设置首页改为清晰的分类总览，进入二级页面调整显示、操作和运行选项，返回后保留当前分类。",
+      id: "selection-batch-increase",
+      title: "混合选区批量增加",
+      description: "建筑和传送带混合选区可使用 +1、+10、+100 或自定义数量；先汇总全部材料，缺料时整批保持不变。",
     },
     {
-      id: "release-history",
-      title: "完整版本更新记录",
-      description: "离线内置 1.0.0 至当前版本的分页记录，可查看每版详情；返回列表时保留页码和滚动位置。",
-    },
-    {
-      id: "technology-wheel",
-      title: "科技树滚轮横向浏览",
-      description: "科技树区域内的鼠标滚轮统一转换为横向移动，并阻止页面纵向滚动穿透，轨迹板横向输入继续自然生效。",
-    },
-    {
-      id: "item-reference",
-      title: "物品悬浮与快捷操作",
-      description: "物品卡缩小误触范围，并支持鼠标悬停、键盘焦点、移动端点击与长按；可直接定位产线或打开生产资料库。",
+      id: "mobile-selection",
+      title: "移动端多选稳定性",
+      description: "逐点多选在模拟刷新和画布事件重派生期间保留选区，持续显示选中轮廓和数量，不再因瞬时空选择被清除。",
     },
     {
       id: "release-compatibility",
@@ -51,12 +41,10 @@ export const CURRENT_RELEASE_NOTES = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<(typeof CURRENT_RELEASE_NOTES.items)[number]["id"], LucideIcon> = {
-  "semantic-theme": Layers,
-  "device-preferences": Shield,
-  "settings-navigation": Info,
-  "release-history": History,
-  "technology-wheel": Route,
-  "item-reference": Activity,
+  "connection-point-size": Route,
+  "construction-batch-target": Layers,
+  "selection-batch-increase": Activity,
+  "mobile-selection": Shield,
   "release-compatibility": Check,
 };
 
@@ -72,6 +60,15 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  {
+    id: "2026-08-04-v1.0.26", date: "2026年8月4日", version: "1.0.26", title: "亮色主题与设置交互更新",
+    summary: "1.0.26 统一亮色与深色语义主题，重构设置分类和版本历史，并优化科技树滚轮与物品悬浮交互。GameState v46、存档 envelope v2 与云 schema v7 不变。",
+    items: [
+      { id: "semantic-theme", title: "亮色与深色语义主题", description: "工作区、节点、线路、弹窗、表单和移动界面统一使用语义颜色，补齐选中、禁用、危险、悬停和键盘焦点状态。" },
+      { id: "settings-navigation", title: "设置分类与二级页面", description: "设置首页改为分类总览，版本历史支持离线分页、详情查看和返回位置保留。" },
+      { id: "item-reference", title: "科技树与物品交互", description: "科技树滚轮横向浏览；物品卡支持鼠标、键盘、移动点击与长按，并可定位产线或打开资料库。" },
+    ],
+  },
   {
     id: "2026-08-03-v1.0.25", date: "2026年8月3日", version: "1.0.25", title: "画布交互与设置体验更新",
     summary: "1.0.25 改进建筑选中、上下游寻线、星球统计、自动保存与侧栏布局，并补齐窄屏和大字号设置体验。GameState v46、存档 envelope v2 与云 schema v7 不变。",

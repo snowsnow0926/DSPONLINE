@@ -233,6 +233,7 @@ DSP极简网络是一款以生产网络为主体的 2D 平面挂机游戏。玩�
 - 固定格式控件必须保持稳定尺寸；增大字体时线路端点仍应与真实 handle 对齐。
 - 主菜单说明项目为免费个人交流学习作品，并在首页、主菜单设置和游戏内设置展示 QQ 交流群 `1076757280`；首屏顶部常驻“中文 / English”切换，语言仍是设备级偏好，不进入 GameState 或云存档。
 - 新版本公告按公告 ID 首次自动展示一次；确认后不再自动弹出，但主菜单设置和游戏内设置始终可以重新查看完整更新记录。
+- 1.0.27 release: connection handles and connection-count circles support default/25%/50% device-only sizing, with matching click/snap radii. The construction center can set one target for all unlocked buildings (capacity-II maximum 100,000,000). Mixed building/belt selections can atomically add 1/10/100 or a validated 1-1,000,000 custom amount, consuming construction stock once and preserving the whole selection on shortage. Mobile selection mode keeps its authoritative IDs through transient React Flow refreshes and touch cancellation; selected nodes retain a persistent outline.
 
 ## 12. 内容修改的完成标准
 

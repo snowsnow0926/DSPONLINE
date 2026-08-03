@@ -129,25 +129,25 @@ test("next mobile technology lists all infinite research and exposes real prereq
   await page.screenshot({ path: "artifacts/qa/v104-infinite-tech-mobile-390x844.png", fullPage: true });
 });
 
-test("construction center accepts 100,000 targets, presets and mobile 200 percent text", async ({ page }) => {
+test("construction center accepts 100,000,000 targets, presets and mobile 200 percent text", async ({ page }) => {
   await seedV104Factory(page, { endgame: true });
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFactory(page);
   await page.getByLabel("打开建筑制造中心").click();
   const center = page.getByRole("dialog", { name: "建筑制造中心" });
-  await expect(center.locator(".construction-center-header")).toContainText("库存上限10万");
+  await expect(center.locator(".construction-center-header")).toContainText("库存上限1亿");
   const row = center.locator(".construction-center-row").filter({ hasText: "电弧熔炉" });
   const target = row.getByRole("textbox", { name: "电弧熔炉目标库存" });
-  await target.fill("100000");
+  await target.fill("100000000");
   await target.blur();
-  await expect(target).toHaveValue("100000");
-  await expect(row.getByLabel("电弧熔炉常用目标库存")).toHaveValue("100000");
+  await expect(target).toHaveValue("100000000");
+  await expect(row.getByLabel("电弧熔炉常用目标库存")).toHaveValue("100000000");
 
-  await target.fill("100001");
+  await target.fill("100000001");
   await target.blur();
-  await expect(row.getByRole("alert")).toContainText("当前科技上限为 100,000");
+  await expect(row.getByRole("alert")).toContainText("当前科技上限为 100,000,000");
   await page.screenshot({ path: "artifacts/qa/v104-construction-center-desktop-1440x900.png", fullPage: true });
-  await row.getByLabel("电弧熔炉常用目标库存").selectOption("100000");
+  await row.getByLabel("电弧熔炉常用目标库存").selectOption("100000000");
   await expect(row.getByRole("alert")).toHaveCount(0);
 
   await page.setViewportSize({ width: 390, height: 844 });

@@ -14,6 +14,10 @@ async function dismissOnboarding(page: Page) {
   if (await control.count()) await control.first().click();
 }
 
+async function selectSettingsCategory(operations: Locator, name: string) {
+  await operations.locator(".settings-category-tabs").getByRole("button", { name, exact: true }).click();
+}
+
 const testsManagingOfflineReport = new Set([
   "offline report summarizes production before entering the factory",
   "running equipment uses semantic animation and reduced motion disables it",
@@ -4380,6 +4384,7 @@ test("stellar workspaces stay usable at 150 percent font scale on desktop and mo
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "画面与主题");
   await operations.getByLabel("字体大小").getByRole("button", { name: "150%" }).click();
   await operations.getByLabel("关闭运营中心").click();
 
@@ -4433,6 +4438,7 @@ test("interstellar station exposes relay hub and per-slot route controls on mobi
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "画面与主题");
   await operations.getByLabel("字体大小").getByRole("button", { name: "150%" }).click();
   await operations.getByLabel("关闭运营中心").click();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -4730,6 +4736,7 @@ test("double-click canvas zoom is disabled by default and follows the settings t
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "交互与控制");
   const doubleClickToggle = operations.locator(".setting-row").filter({ hasText: "允许双击缩放" });
   await expect(doubleClickToggle.locator('input[type="checkbox"]')).not.toBeChecked();
   await doubleClickToggle.click();
@@ -4950,7 +4957,9 @@ test("operations settings and local save slots persist across reload", async ({ 
   await page.getByLabel("打开设置").click();
   let operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "教程、版本与其他");
   await expect(operations.locator(".settings-community")).toContainText("1076757280");
+  await selectSettingsCategory(operations, "画面与主题");
   const fontScale = operations.getByLabel("字体大小");
   await expect(fontScale.getByRole("button")).toHaveText(["80%", "100%", "125%", "150%", "200%"]);
   await expect(fontScale.getByRole("button", { name: "100%" })).toHaveAttribute("aria-pressed", "true");
@@ -4969,10 +4978,12 @@ test("operations settings and local save slots persist across reload", async ({ 
   await expect.poll(async () => operations.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await fontScale.getByRole("button", { name: "125%" }).click();
   await operations.getByRole("button", { name: "4×" }).click();
+  await selectSettingsCategory(operations, "交互与控制");
   await operations.locator(".setting-row").filter({ hasText: "性能模式" }).click();
   await operations.locator(".setting-row").filter({ hasText: "减少动态效果" }).click();
   await operations.locator(".setting-row").filter({ hasText: "操作音效" }).click();
   await operations.locator(".setting-row").filter({ hasText: "允许双击缩放" }).click();
+  await selectSettingsCategory(operations, "存档与云同步");
   await operations.getByRole("button", { name: "30 秒" }).click();
   await expect(page.locator(".game-shell")).toHaveAttribute("data-performance-mode", "true");
   await expect(page.locator(".game-shell")).toHaveAttribute("data-reduced-motion", "true");
@@ -5006,7 +5017,10 @@ test("operations settings and local save slots persist across reload", async ({ 
   await page.getByLabel("打开设置").click();
   operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await expect(operations.locator(".operations-settings")).toHaveAttribute("data-settings-category", "storage");
+  await selectSettingsCategory(operations, "画面与主题");
   await expect(operations.getByLabel("字体大小").getByRole("button", { name: "125%" })).toHaveAttribute("aria-pressed", "true");
+  await selectSettingsCategory(operations, "交互与控制");
   await expect(operations.locator(".setting-row").filter({ hasText: "性能模式" }).locator('input[type="checkbox"]')).toBeChecked();
   await expect(operations.locator(".setting-row").filter({ hasText: "减少动态效果" }).locator('input[type="checkbox"]')).toBeChecked();
   await expect(operations.locator(".setting-row").filter({ hasText: "操作音效" }).locator('input[type="checkbox"]')).toBeChecked();
@@ -5061,6 +5075,7 @@ test("font scaling keeps rendered belt endpoints attached to their handles", asy
   await page.locator(".react-flow__controls-fitview").click();
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
+  await selectSettingsCategory(operations, "画面与主题");
   const fontScale = operations.getByLabel("字体大小");
   const endpointDistances = () => page.evaluate(() => {
     const path = document.querySelector<SVGPathElement>(".factory-edge-visual-path");
@@ -5139,6 +5154,7 @@ test("save preview, snapshots, content-pack validation and simulation diagnostic
   await expect(persistedOperations.locator(".content-pack-card--enabled")).toContainText("QA 内容包");
 
   await persistedOperations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(persistedOperations, "统计与运行记录");
   await persistedOperations.getByRole("button", { name: "运行 60 秒基准" }).click();
   await expect(page.locator(".game-notice")).toContainText("自动性能报告通过");
   await expect(persistedOperations.locator(".automatic-performance-report")).toContainText("确定性");
@@ -5173,6 +5189,7 @@ test("running equipment uses semantic animation and reduced motion disables it",
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "交互与控制");
   await operations.locator(".setting-row").filter({ hasText: "减少动态效果" }).click();
   await operations.getByLabel("关闭运营中心").click();
   const durationMs = await runningNode.evaluate((element) => {
@@ -5523,6 +5540,7 @@ test("galaxy endgame campaign routes into the console and difficulty controls st
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(operations, "教程、版本与其他");
   await expect(operations).toContainText("工业难度");
   await operations.getByRole("button", { name: "高压" }).click();
   await expect(operations.getByRole("button", { name: "高压" })).toHaveAttribute("aria-pressed", "true");

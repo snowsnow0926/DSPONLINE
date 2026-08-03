@@ -168,6 +168,7 @@ test("English light next-mobile shell keeps navigation and settings reachable", 
   expect(luminance(await hub.evaluate((element) => getComputedStyle(element).backgroundColor))).toBeGreaterThan(205);
   await hub.getByRole("button", { name: /Game Settings/ }).click();
   const operations = page.getByRole("dialog", { name: "Operations Center" });
+  await operations.getByRole("button", { name: "Display & Theme", exact: true }).first().click();
   await expect(operations.getByLabel("Language")).toBeVisible();
   expect(await visibleHanStrings(operations)).toEqual([]);
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);

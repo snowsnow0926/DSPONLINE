@@ -110,6 +110,7 @@ test("extreme canvas uses true node LOD, batch lines and independent SVG fallbac
   await page.getByLabel("打开设置").click();
   const operations = page.locator(".operations-workspace");
   await expect(operations).toBeVisible();
+  await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
   const canvasFeature = operations.locator("label.setting-row").filter({ hasText: "Canvas 批量线路" });
   await canvasFeature.getByRole("checkbox").evaluate((input: HTMLInputElement) => input.click());
   await page.getByLabel("设置已打开，再次点击返回工厂").click();
@@ -130,6 +131,7 @@ test("turning extreme mode off restores full visuals without writing a GameState
   const viewportBefore = await page.locator(".react-flow__viewport").getAttribute("style");
 
   await page.getByLabel("打开设置").click();
+  await page.locator(".operations-workspace").getByRole("button", { name: "终局性能", exact: true }).first().click();
   const extremeToggle = page.locator("label.setting-row").filter({ hasText: "终局优化·极限模式" });
   await extremeToggle.getByRole("checkbox").evaluate((input: HTMLInputElement) => input.click());
   await page.getByLabel("设置已打开，再次点击返回工厂").click();
@@ -185,6 +187,7 @@ test("minimap throttle can independently fall back without resetting the viewpor
 
   await page.getByLabel("打开设置").click();
   const operations = page.locator(".operations-workspace");
+  await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
   const minimapFeature = operations.locator("label.setting-row").filter({ hasText: "小地图低频快照" });
   await minimapFeature.getByRole("checkbox").evaluate((input: HTMLInputElement) => input.click());
   await page.getByLabel("设置已打开，再次点击返回工厂").click();

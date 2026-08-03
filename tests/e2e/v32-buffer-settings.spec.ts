@@ -32,6 +32,7 @@ async function openSettings(page: Page, mode: "desktop" | "legacy" | "next") {
 
 test("building buffer presets and custom validation persist independently", async ({ page }) => {
   const operations = await openSettings(page, "desktop");
+  await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
   const production = operations.locator(".settings-buffer-limit").filter({ hasText: "生产建筑缓存上限" });
   const logistics = operations.locator(".settings-buffer-limit").filter({ hasText: "仓储与物流建筑缓存上限" });
   const belts = operations.locator(".settings-buffer-limit").filter({ hasText: "传送带转运额度上限" });
@@ -77,7 +78,9 @@ test("buffer controls fit desktop and both mobile settings from 80 to 200 percen
     const sections = operations.locator(".settings-buffer-limit");
     await expect(sections).toHaveCount(4);
     for (const scale of [80, 100, 125, 150, 200] as const) {
+      await operations.getByRole("button", { name: "画面与主题", exact: true }).first().click();
       await fontScale.getByRole("button", { name: `${scale}%` }).click();
+      await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
       await expect(sections.first().getByRole("button", { name: "1万", exact: true })).toBeVisible();
       await expect(sections.first().getByRole("button", { name: "自定义" })).toBeVisible();
       await expect.poll(async () => operations.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

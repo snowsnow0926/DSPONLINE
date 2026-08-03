@@ -252,6 +252,7 @@ async function applyStage(page: Page, stage: typeof STAGES[number]) {
   await page.getByLabel("打开设置").click();
   const operations = page.locator(".operations-workspace");
   await expect(operations).toBeVisible();
+  await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
   for (const [id, label] of Object.entries(FEATURE_LABELS) as Array<[keyof typeof ALL_FEATURES, string]>) {
     const checkbox = operations.locator("label.setting-row").filter({ hasText: label }).getByRole("checkbox");
     if (await checkbox.isChecked() !== stage.features[id]) await checkbox.evaluate((input: HTMLInputElement) => input.click());

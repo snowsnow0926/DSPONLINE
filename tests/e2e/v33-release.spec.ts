@@ -22,6 +22,7 @@ async function openDesktopSettings(page: Page) {
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await expect(operations).toBeVisible();
   await operations.getByRole("tab", { name: "设置" }).click();
+  await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
   return operations;
 }
 
@@ -155,7 +156,9 @@ test("refresh controls remain usable in classic and next mobile shells at 200 pe
     }
     const operations = page.getByRole("dialog", { name: "运营中心" });
     await operations.getByRole("tab", { name: "设置" }).click();
+    await operations.getByRole("button", { name: "画面与主题", exact: true }).first().click();
     await operations.getByLabel("字体大小").getByRole("button", { name: "200%" }).click();
+    await operations.getByRole("button", { name: "终局性能", exact: true }).first().click();
     const refresh = operations.getByRole("radiogroup", { name: "生产画面刷新频率" });
     await refresh.scrollIntoViewIfNeeded();
     await expect(refresh.getByRole("radio")).toHaveCount(7);

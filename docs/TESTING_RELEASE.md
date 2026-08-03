@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **当前发布基线（2026-08-04）**：当前正式版本使用 `1.0.26 / GameState v46`；有效资产的 v43 空间站实验存档拒绝加载。量子网络回归以 GameState v46 语义为基线，并保留传统物流站升级兼容测试。1.0.26 不升级存档 envelope、云 schema 或 SQLite layout。
+> **当前发布基线（2026-08-04）**：当前正式版本使用 `1.0.27 / GameState v46`；有效资产的 v43 空间站实验存档拒绝加载。量子网络回归以 GameState v46 语义为基线，并保留传统物流站升级兼容测试。1.0.27 不升级存档 envelope、云 schema 或 SQLite layout。
 
 ## 1. 当前自动化覆盖
 
@@ -993,3 +993,24 @@ Android `1.0.18 / 1000018` 使用历史长期证书，APK v2/v3 通过，SHA-256
 正式提交为 `f675a6a11025727419a48c50159eaa5973e88eac`，release ID 为 `1.0.26-f675a6a11025`。Android `1.0.26 / 1000026` 使用批准长期证书并通过 APK v2/v3；Windows FileVersion/ProductVersion、正式 API、稳定更新源和隔离启动通过，Authenticode 继续明确为 `NotSigned`，没有创建新证书。
 
 香港、上海 Web/API 与上海下载页均已原子切换到 `1.0.26-f675a6a11025`，三处回滚目标均为 `1.0.25-628369a93ad7`。两地发布前备份、生产依赖、备份副本隔离启动、公网 Build ID、健康接口、Android Origin、云接口未登录读写边界、完整 APK/EXE 下载哈希、Range 206、immutable/no-cache、历史 1.0.25 hashed asset 和四个生产浏览器场景均通过。完整证据见 [releases/1.0.26.md](./releases/1.0.26.md)。
+
+## 42. `1.0.27` / v46 连接交互与批量建造
+
+本版增加连接点尺寸设备偏好、全部建筑制造目标、混合选区原子批量增加和移动端多选刷新稳定性。GameState v46、存档 envelope v2、云 schema v7 和 SQLite layout v2 均未改变。
+
+| 检查 | 正式发布结果 |
+| --- | --- |
+| `npm ci` / `npm run typecheck` | 依赖安装通过；0 个 TypeScript 错误 |
+| `npm test` | 702 项通过、9 项跳过、0 失败 |
+| `npm run test:server` | 本地及香港、上海未激活目录均为 46/46 |
+| `npm run test:ops` | 6/6 |
+| `npm run test:native` | 8/8 |
+| `npm run licenses:check` | 128 个运行时包一致 |
+| `npm run build` | 通过；Vite 转换 1,875 个模块 |
+| `npm run test:e2e` | 226 项通过、6 项显式夹具/基准跳过、0 失败 |
+| Source manifest | 本地及两地未激活目录均为 145/145；聚合 SHA-256 `f6cd0d4ebfdfd21330352b54deb5be8e2ac9d23d99eb6d40ab59a2b51f3e9b83` |
+| Artifact manifest | 12/12；聚合 SHA-256 `7ea4db6a6b1f80b237fd21145c3259d6bea6d4198a7426667e1a91bbba14503a` |
+
+正式提交为 `b8e6c0f01ea31024f36a99fb11a31cbabb6be32f`，release ID 为 `1.0.27-b8e6c0f01ea3`。Android `1.0.27 / 1000027` 使用批准长期证书并通过 APK v2/v3；Windows FileVersion/ProductVersion、正式 API、稳定更新源和隔离启动通过，Authenticode 继续明确为 `NotSigned`，没有创建新证书。
+
+香港、上海 Web/API 与上海下载页均已原子切换到 `1.0.27-b8e6c0f01ea3`，三处回滚目标均为 `1.0.26-f675a6a11025`。两地备份、生产依赖、备份副本隔离启动、公网 Build ID、健康接口、Android Origin、云接口未登录读写边界、完整 APK/EXE 哈希、Range 206、immutable/no-cache、历史 1.0.26 hashed asset 和四个生产浏览器场景均通过。完整证据见 [releases/1.0.27.md](./releases/1.0.27.md)。

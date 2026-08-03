@@ -48,6 +48,7 @@ import { getSaveSummaryRefreshIntervalMs, shouldRefreshSaveSummaries } from "./g
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetSolarPowerMultiplier, getStarSystemDisplayName } from "./game/galaxy";
 import {
   addUnitToEntityGroup,
+  batchIncreaseSelection,
   addCanvasBookmark,
   addCanvasRegion,
   applyStationSlotTemplateToEntities,
@@ -157,6 +158,7 @@ import {
   setBeltStackSize,
   setConstructionAutomationEnabled,
   setConstructionAutomationTarget,
+  setConstructionAutomationTargetsForBuildings,
   setActivePlanet,
   setEntityRecipe,
   setEntitiesRecipe,
@@ -313,7 +315,7 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readShowRunLogPreference, readThemePreference, writeShowRunLogPreference, writeThemePreference } from "./game/uiPreferences";
+import { readConnectionPointSize, readShowRunLogPreference, readThemePreference, writeConnectionPointSize, writeShowRunLogPreference, writeThemePreference, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
 
@@ -665,6 +667,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [game, setGame] = useState(loaded.state);
   const observedGame = useObservedBeltFlowGame(game, !game.paused);
   const [themeMode, setThemeMode] = useState(() => readThemePreference() ?? loaded.state.settings.theme);
+  const [connectionPointSize, setConnectionPointSize] = useState<ConnectionPointSize>(readConnectionPointSize);
+  useEffect(() => { writeConnectionPointSize(connectionPointSize); }, [connectionPointSize]);
   const [showRunLog, setShowRunLog] = useState(readShowRunLogPreference);
   const resolvedTheme = useResolvedTheme(themeMode);
   const [canvasRenderSnapshot, setCanvasRenderSnapshot] = useState<CanvasRenderSnapshot>(() => createCanvasRenderSnapshot(loaded.state));
@@ -907,6 +911,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const viewportCullingFeatureActive = canvasPerformanceFeatureIsActive(canvasPerformanceFeatures, "viewportCulling", endgameExtremeMode);
   const spatialIndexesFeatureActive = canvasPerformanceFeatureIsActive(canvasPerformanceFeatures, "spatialIndexes", endgameExtremeMode);
   const minimapThrottleFeatureActive = canvasPerformanceFeatureIsActive(canvasPerformanceFeatures, "minimapThrottle", endgameExtremeMode);
+  const connectionPointScale = connectionPointSize === "large50" ? 1.5 : connectionPointSize === "large25" ? 1.25 : 1;
+  const connectionHitRadius = (coarsePointer ? 56 : 24) * connectionPointScale;
+  const connectionFlowRadius = (coarsePointer ? 56 : 30) * connectionPointScale;
   const activeMobileCanvasMode: MobileCanvasMode = placement
     ? "place"
     : connectionDraft || clickConnectionPreview
@@ -2280,9 +2287,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       gameRef.current = next;
       return next;
     });
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
     setSelectedEntityIds([]);
     setSelectedBeltId(null);
-    setSelectedBeltIds([]);
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     setPlacement(null);
@@ -3945,7 +3954,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const handle = findConnectionHandleAtPoint(
       point.x,
       point.y,
-      coarsePointer ? 56 : 24,
+      connectionHitRadius,
       (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
       connectionHandleSpatialIndexRef.current,
     );
@@ -3981,7 +3990,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       label: forecast ? `${ITEMS[connectionItem].name} · ${forecast.label}` : `${ITEMS[connectionItem].name} · 可以连接`,
       tone: forecast?.tone === "capacity" || forecast?.tone === "starved" ? "blocked" : "ready",
     });
-  }, [coarsePointer, isValidConnection]);
+  }, [connectionHitRadius, isValidConnection]);
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
     const endPoint = getEventPoint(event);
@@ -3989,7 +3998,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const releaseHandle = getConnectionHandleTarget(event.target) ?? (endPoint ? findConnectionHandleAtPoint(
       endPoint.x,
       endPoint.y,
-      coarsePointer ? 56 : 24,
+      connectionHitRadius,
       draft ? (candidate) => isValidConnection(connectionFromDraft(draft, candidate)) : undefined,
       connectionHandleSpatialIndexRef.current,
     ) : null);
@@ -4056,7 +4065,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const targetHandle = getConnectionHandleTarget(event.target) ?? (point ? findConnectionHandleAtPoint(
       point.x,
       point.y,
-      coarsePointer ? 56 : 24,
+      connectionHitRadius,
       (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
       connectionHandleSpatialIndexRef.current,
     ) : null);
@@ -4181,7 +4190,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const targetHandle = findConnectionHandleAtPoint(
       x,
       y,
-      coarsePointer ? 56 : 24,
+      connectionHitRadius,
       (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
       connectionHandleSpatialIndexRef.current,
     );
@@ -4197,7 +4206,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setClickConnectionSnapPoint(null);
     updateConnectionDraft(null);
     return true;
-  }, [coarsePointer, flowStore, isValidConnection, updateConnectionDraft]);
+  }, [connectionHitRadius, flowStore, isValidConnection, updateConnectionDraft]);
 
   useEffect(() => {
     const completeSnappedConnection = (event: PointerEvent) => {
@@ -4277,6 +4286,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [alignmentSpatialIndex, viewportZoom]);
 
   const onSelectionChange = useCallback(({ nodes: selectedNodes, edges: selectedEdges }: OnSelectionChangeParams<FactoryFlowNode, Edge>) => {
+    if (nextMobileShell && mobileCanvasMode === "select") return;
     const ids = selectedNodes.map((node) => node.id);
     // React Flow can emit a transient empty selection while node objects are
     // replaced by a simulation refresh. Pane clicks remain the explicit
@@ -4287,12 +4297,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     for (const belt of gameRef.current.belts) {
       if (belt.planetId === gameRef.current.activePlanetId && nodeIds.has(belt.source) && nodeIds.has(belt.target)) beltIds.add(belt.id);
     }
+    selectedEntityIdsRef.current = ids;
+    selectedBeltIdsRef.current = [...beltIds];
+    selectedBeltIdRef.current = beltIds.size === 1 ? [...beltIds][0] : null;
     setSelectedEntityIds((current) => current.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids);
     const nextBeltIds = [...beltIds];
     setSelectedBeltIds((current) => current.length === beltIds.size && current.every((id) => beltIds.has(id)) ? current : nextBeltIds);
     if (ids.length > 0 || beltIds.size > 1) setSelectedBeltId(null);
     else if (beltIds.size === 1) setSelectedBeltId([...beltIds][0]);
-  }, []);
+  }, [mobileCanvasMode, nextMobileShell]);
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;
@@ -4334,6 +4347,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       selectedEntityIdsRef.current = nextIds;
       return nextIds;
     });
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     setInspectorTab("inspect");
@@ -4696,11 +4711,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       return;
     }
+    if (nextMobileShell && mobileCanvasMode === "select") return;
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
     setSelectedEntityIds([]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [blueprintPlacementId, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [blueprintPlacementId, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -4770,6 +4789,43 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltId(null);
     setNotice(`已回收 ${preview.entityCount} 个建筑节点和 ${preview.relatedBeltCount} 条相关传送带`);
     playTone("remove");
+  }, [commitGame, gameDialog, playTone]);
+
+  const batchIncreaseSelected = useCallback(async (amount: number) => {
+    const entityIds = [...selectedEntityIdsRef.current];
+    const beltIds = [...new Set([
+      ...selectedBeltIdsRef.current,
+      ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : []),
+    ])];
+    const preview = batchIncreaseSelection(gameRef.current, entityIds, beltIds, amount);
+    if (!preview.ok) {
+      setNotice(preview.label ?? (preview.error === "missing-construction" ? "施工托盘不足，批量增加未执行任何项目" : "批量增加未执行"));
+      playTone("alert");
+      return;
+    }
+    if (preview.changedBuildingCount === 0 && preview.changedBeltCount === 0) {
+      setNotice(`没有可增加的项目${preview.buildingAtLimitCount + preview.beltAtLimitCount > 0 ? ` · ${preview.buildingAtLimitCount + preview.beltAtLimitCount} 项已达到上限` : ""}`);
+      playTone("alert");
+      return;
+    }
+    const required = Object.entries(preview.requiredConstruction)
+      .map(([id, count]) => `${getConstructionDefinition(id as ConstructionId)?.name ?? id} ×${formatQuantityCompact(count ?? 0)}`)
+      .join("、");
+    const confirmed = await gameDialog.confirm(
+      `将为 ${preview.changedBuildingCount} 个建筑和 ${preview.changedBeltCount} 条传送带各增加 ${formatQuantityCompact(amount)}。预计消耗：${required || "无"}${preview.buildingAtLimitCount + preview.beltAtLimitCount > 0 ? `。另有 ${preview.buildingAtLimitCount + preview.beltAtLimitCount} 项达到上限，将保持不变` : ""}。确认执行？`,
+      { confirmLabel: "批量增加" },
+    );
+    if (!confirmed) return;
+    const result = batchIncreaseSelection(gameRef.current, entityIds, beltIds, amount);
+    if (!result.ok) {
+      setNotice(result.label ?? "批量增加失败，状态未改变");
+      playTone("alert");
+      return;
+    }
+    if (result.state !== gameRef.current) commitGame(() => result.state);
+    const limitCount = result.buildingAtLimitCount + result.beltAtLimitCount;
+    setNotice(`已批量增加 ${result.changedBuildingCount} 个建筑、${result.changedBeltCount} 条传送带${limitCount > 0 ? ` · ${limitCount} 项达到上限` : ""}`);
+    playTone("confirm");
   }, [commitGame, gameDialog, playTone]);
 
   const changeRemoteStationSlotItem = useCallback(async (entityId: string, slotIndex: number, itemId: ItemId | null) => {
@@ -5094,6 +5150,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-zoom-lod={viewportZoom < 0.55 ? "compact" : viewportZoom < 0.86 ? "medium" : "full"}
       data-large-factory={largeFactoryMode ? "true" : "false"}
       data-endgame-extreme={endgameExtremeMode ? "true" : "false"}
+      data-connection-point-size={connectionPointSize}
       data-canvas-extreme-visuals={extremeVisualsActive ? "true" : "false"}
       data-canvas-node-lod={nodeLodFeatureActive ? "true" : "false"}
       data-canvas-viewport-culling={viewportCullingFeatureActive ? "true" : "false"}
@@ -5401,6 +5458,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice(`已升级选区内 ${selectedBeltIds.length} 条传送带`);
           playTone("upgrade");
         }}
+        onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
         onLock={() => {
           const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
           commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
@@ -5546,7 +5604,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
             minZoom={0.25}
             maxZoom={1.8}
-            connectionRadius={coarsePointer ? 56 : 30}
+            connectionRadius={connectionFlowRadius}
             snapToGrid
             snapGrid={[FLOW_GRID, FLOW_GRID]}
             autoPanOnConnect={!coarsePointer}
@@ -5744,6 +5802,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               setNotice(`已升级选区内 ${selectedBeltIds.length} 条可升级传送带，原连接保持不变`);
               playTone("upgrade");
             }}
+            onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
             onLock={() => {
               const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
               commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
@@ -6105,6 +6164,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
             onEnabledChange={(enabled) => commitGame((current) => setConstructionAutomationEnabled(current, enabled))}
             onTargetChange={(constructionId: ConstructionAutomationTargetId, target: number) => commitGame((current) => setConstructionAutomationTarget(current, constructionId, target))}
+            onBatchTargetChange={async (target) => {
+              if (!await gameDialog.confirm(`将把所有已解锁建筑的自动补足目标统一设置为 ${target.toLocaleString("zh-CN")}。不会生成建筑，也不会取消现有制造任务。是否继续？`, { confirmLabel: "应用全部目标" })) return;
+              const result = setConstructionAutomationTargetsForBuildings(gameRef.current, target);
+              if (!result.ok) {
+                setNotice(result.label ?? "批量目标设置失败");
+                playTone("alert");
+                return;
+              }
+              if (result.state !== gameRef.current) commitGame(() => result.state);
+              setNotice(`已为 ${result.affectedCount} 种已解锁建筑设置目标 ${target.toLocaleString("zh-CN")}${result.skippedLockedCount > 0 ? ` · 跳过 ${result.skippedLockedCount} 种未解锁建筑` : ""}`);
+              playTone("confirm");
+            }}
           />
         ) : null}
         {galaxyOpen ? (
@@ -6332,10 +6403,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             endgameExtremeMode={endgameExtremeMode}
             canvasPerformanceFeatures={canvasPerformanceFeatures}
             lineFindMode={lineFindMode}
+            connectionPointSize={connectionPointSize}
             showRunLog={showRunLog}
             onEndgameExtremeModeChange={toggleEndgameExtremeMode}
             onCanvasPerformanceFeatureChange={updateCanvasPerformanceFeature}
             onLineFindModeChange={setLineFindMode}
+            onConnectionPointSizeChange={setConnectionPointSize}
             onRunLogChange={updateRunLogPreference}
             onProductionRefreshPreferenceChange={setProductionRefreshPreference}
             onStartPerformanceMonitor={performanceMonitor.start}

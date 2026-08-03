@@ -4,8 +4,10 @@ import type { ThemeMode } from "./types";
 export const UI_THEME_PREFERENCE_KEY = "dsp-idle-network.ui.theme.v1";
 export const SHOW_RUN_LOG_PREFERENCE_KEY = "dsp-idle-network.ui.show-run-log.v1";
 export const SETTINGS_CATEGORY_PREFERENCE_KEY = "dsp-idle-network.ui.settings-category.v1";
+export const CONNECTION_POINT_SIZE_PREFERENCE_KEY = "dsp-idle-network.ui.connection-point-size.v1";
 
 export type SettingsCategory = "all" | "visual" | "performance" | "interaction" | "storage" | "statistics" | "other";
+export type ConnectionPointSize = "default" | "large25" | "large50";
 
 function localStorageOrNull(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -67,6 +69,27 @@ export function writeSettingsCategoryPreference(category: SettingsCategory): voi
   const storage = localStorageOrNull();
   if (!storage) return;
   try { storage.setItem(SETTINGS_CATEGORY_PREFERENCE_KEY, category); } catch { /* optional preference */ }
+}
+
+export function isConnectionPointSize(value: unknown): value is ConnectionPointSize {
+  return value === "default" || value === "large25" || value === "large50";
+}
+
+export function readConnectionPointSize(): ConnectionPointSize {
+  const storage = localStorageOrNull();
+  if (!storage) return "default";
+  try {
+    const value = storage.getItem(CONNECTION_POINT_SIZE_PREFERENCE_KEY);
+    return isConnectionPointSize(value) ? value : "default";
+  } catch {
+    return "default";
+  }
+}
+
+export function writeConnectionPointSize(size: ConnectionPointSize): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  try { storage.setItem(CONNECTION_POINT_SIZE_PREFERENCE_KEY, size); } catch { /* optional preference */ }
 }
 
 /** Apply a saved theme before React mounts, preventing a dark flash on light-mode launches. */

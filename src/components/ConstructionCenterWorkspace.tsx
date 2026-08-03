@@ -54,7 +54,7 @@ function DefinitionIcon({ id }: { id: ConstructionAutomationTargetId }) {
   return <Factory size={16} />;
 }
 
-const TARGET_PRESETS = [0, 100, 500, 2_000, 10_000, 100_000] as const;
+const TARGET_PRESETS = [0, 100, 500, 2_000, 10_000, 100_000, 100_000_000] as const;
 
 function ConstructionTargetControl({ definition, target, stockLimit, unlocked, onChange }: {
   definition: AutomationDisplayDefinition;
@@ -111,15 +111,18 @@ function ConstructionTargetControl({ definition, target, stockLimit, unlocked, o
   </div>;
 }
 
-export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChange, onTargetChange }: {
+export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChange, onTargetChange, onBatchTargetChange }: {
   open: boolean;
   game: GameState;
   onClose: () => void;
   onEnabledChange: (enabled: boolean) => void;
   onTargetChange: (constructionId: ConstructionAutomationTargetId, target: number) => void;
+  onBatchTargetChange: (target: number) => void;
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<CenterCategory>("all");
+  const [batchDraft, setBatchDraft] = useState("");
+  const [batchError, setBatchError] = useState<string | null>(null);
   const centers = game.entities.filter((entity) => entity.buildingId === "construction_center");
   const sourcePlanetId = centers[0]?.planetId ?? game.activePlanetId;
   const sourceTray = sourcePlanetId === game.activePlanetId ? game.tray : game.planetTrays[sourcePlanetId];
@@ -139,6 +142,23 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
     const current = isPortableFleetItem(definition.id) ? game.portableFleet[definition.id] ?? 0 : game.construction[definition.id] ?? 0;
     return target > 0 && current >= target;
   }).length;
+  const unlockedBuildingCount = automationDefinitions().filter((definition) => !isPortableFleetItem(definition.id) && (!definition.requiredTechId || isTechnologyCompleted(game, definition.requiredTechId))).length;
+  const applyBatchTarget = (target: number) => {
+    if (!Number.isSafeInteger(target) || target < 1 || target > 100_000_000) {
+      setBatchError("请输入 1～100,000,000 的正整数");
+      return;
+    }
+    setBatchError(null);
+    onBatchTargetChange(target);
+  };
+  const commitBatchDraft = () => {
+    const value = batchDraft.trim();
+    if (!/^\d+$/.test(value)) {
+      setBatchError("请输入 1～100,000,000 的正整数");
+      return;
+    }
+    applyBatchTarget(Number(value));
+  };
 
   if (!open) return null;
   return (
@@ -162,6 +182,16 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
           {(["all", "power", "production", "logistics", "dyson"] as CenterCategory[]).map((id) => <button className={category === id ? "active" : ""} type="button" key={id} onClick={() => setCategory(id)}>{{ all: "全部", power: "能源", production: "生产", logistics: "物流", dyson: "戴森" }[id]}</button>)}
         </div>
       </div>
+
+      <section className="construction-center-batch-target" aria-label="批量设置建筑制造目标">
+        <div><strong>全部建筑目标</strong><small>一次修改 {unlockedBuildingCount} 种已解锁可制造建筑，不会生成建筑或取消现有任务</small></div>
+        <div className="construction-center-batch-target__actions">
+          {[100, 1_000, 10_000].map((value) => <button type="button" key={value} onClick={() => applyBatchTarget(value)}>{formatQuantityCompact(value)}</button>)}
+          <input inputMode="numeric" pattern="[0-9]*" value={batchDraft} onChange={(event) => { setBatchDraft(event.target.value); setBatchError(null); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitBatchDraft(); } }} placeholder="自定义" aria-label="全部建筑目标数量" />
+          <button type="button" className="primary" onClick={commitBatchDraft}>应用全部</button>
+        </div>
+        {batchError ? <em role="alert">{batchError}</em> : null}
+      </section>
 
       <div className="construction-center-status">
         <span><PackageOpen size={14} />取料行星 <strong>{getPlanet(sourcePlanetId).name}</strong></span>

@@ -2726,7 +2726,10 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 
 .factory-node--selected {
   border-color: var(--cyan);
-  box-shadow: 0 0 0 1px rgba(98, 181, 174, 0.22), 0 10px 28px rgba(0, 0, 0, 0.34);
+  outline: 2px solid color-mix(in srgb, var(--cyan) 72%, transparent);
+  outline-offset: 2px;
+  background: color-mix(in srgb, var(--cyan) 7%, #131917);
+  box-shadow: 0 0 0 1px rgba(98, 181, 174, 0.32), 0 10px 28px rgba(0, 0, 0, 0.34);
 }
 
 .factory-node--placement {
@@ -3796,8 +3799,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 }
 
 .factory-handle {
-  width: 18px;
-  height: 18px;
+  width: calc(18px * var(--connection-point-scale, 1));
+  height: calc(18px * var(--connection-point-scale, 1));
   border: 3px solid #dbe4df;
   background: var(--cyan-deep);
   box-shadow: 0 0 0 3px rgba(98, 181, 174, 0.08);
@@ -3806,7 +3809,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 }
 
 .factory-handle--input {
-  left: 9px;
+  left: calc(9px * var(--connection-point-scale, 1));
 }
 
 .factory-handle--auto {
@@ -3815,7 +3818,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 }
 
 .factory-handle--output {
-  right: 9px;
+  right: calc(9px * var(--connection-point-scale, 1));
   background: #a47a35;
 }
 
@@ -3890,6 +3893,41 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   stroke: #e3fff8;
   stroke-width: 2;
   filter: drop-shadow(0 0 5px rgba(98, 181, 174, 0.72));
+}
+
+.game-shell {
+  --connection-point-scale: 1;
+}
+
+.game-shell[data-connection-point-size="large25"] {
+  --connection-point-scale: 1.25;
+}
+
+.game-shell[data-connection-point-size="large50"] {
+  --connection-point-scale: 1.5;
+}
+
+.game-shell[data-connection-point-size="large25"] .node-port__connections,
+.game-shell[data-connection-point-size="large50"] .node-port__connections {
+  min-width: calc(14px * var(--connection-point-scale));
+  height: calc(14px * var(--connection-point-scale));
+  border-radius: calc(7px * var(--connection-point-scale));
+  font-size: calc(7px * var(--connection-point-scale));
+}
+
+.game-shell[data-connection-point-size="large25"] .node-port--input .node-port__connections,
+.game-shell[data-connection-point-size="large50"] .node-port--input .node-port__connections {
+  left: calc(9px * var(--connection-point-scale));
+}
+
+.game-shell[data-connection-point-size="large25"] .node-port--output .node-port__connections,
+.game-shell[data-connection-point-size="large50"] .node-port--output .node-port__connections {
+  right: calc(9px * var(--connection-point-scale));
+}
+
+.game-shell[data-connection-point-size="large25"] .factory-connection-preview__target,
+.game-shell[data-connection-point-size="large50"] .factory-connection-preview__target {
+  r: calc(7px * var(--connection-point-scale));
 }
 
 .factory-connection-preview--valid .factory-connection-preview__path {
@@ -4848,6 +4886,59 @@ html[data-ui-font-scale="200"] .storage-buffer-node {
 .selection-toolbar button:disabled {
   color: #505b56;
   cursor: default;
+}
+
+.selection-toolbar__batch {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  border-right: 1px solid var(--line);
+}
+
+.selection-toolbar__batch button {
+  width: 42px;
+  gap: 2px;
+  color: var(--green);
+  font-size: 9px;
+}
+
+.selection-toolbar__batch input {
+  width: 72px;
+  height: 28px;
+  margin: 0 3px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  outline: 0;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 9px;
+}
+
+.mobile-selection-context__custom {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 2px;
+  padding: 0 3px;
+  border-right: 1px solid var(--line);
+}
+
+.mobile-selection-context__custom input {
+  width: 68px;
+  height: 34px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.mobile-selection-context__custom button {
+  width: 38px;
+  min-height: 38px;
+  border: 0;
 }
 
 .batch-control {
@@ -19569,8 +19660,8 @@ input:focus-visible,
 
 @media (pointer: coarse) {
   .factory-handle {
-    width: 18px !important;
-    height: 18px !important;
+    width: calc(18px * var(--connection-point-scale, 1)) !important;
+    height: calc(18px * var(--connection-point-scale, 1)) !important;
   }
 
   .node-slot,
@@ -22464,6 +22555,31 @@ input:focus-visible,
   background: #0e1512;
 }
 
+.construction-center-batch-target {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.construction-center-batch-target > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.construction-center-batch-target strong { color: var(--text); font-size: 10px; }
+.construction-center-batch-target small { color: var(--muted); font-size: 8px; }
+.construction-center-batch-target em { grid-column: 1 / -1; color: var(--coral); font-size: 8px; font-style: normal; }
+.construction-center-batch-target__actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; }
+.construction-center-batch-target__actions button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-raised); color: var(--text-soft); cursor: pointer; font-size: 9px; }
+.construction-center-batch-target__actions button.primary { border-color: var(--theme-accent-border, #4c806f); background: var(--theme-accent-soft, #183026); color: var(--green); }
+.construction-center-batch-target__actions input { width: 100px; min-height: 30px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 3px; outline: 0; background: var(--surface-raised); color: var(--text); font-size: 9px; }
+
 .construction-center-toggle {
   display: grid;
   min-width: 168px;
@@ -22965,6 +23081,8 @@ html[data-ui-font-scale="200"] .blueprint-import-open { min-width: 148px; }
   html[data-ui-font-scale="200"] .logistics-station-settings,
   html[data-ui-font-scale="200"] .logistics-slot-grid { grid-template-columns: minmax(0, 1fr); }
   html[data-ui-font-scale="200"] .blueprint-header-actions > .blueprint-import-open { min-width: 132px; }
+  .construction-center-batch-target { grid-template-columns: minmax(0, 1fr); }
+  .construction-center-batch-target__actions { justify-content: flex-start; }
 }
 
 html[data-ui-font-scale="200"] .construction-center-toolbar {

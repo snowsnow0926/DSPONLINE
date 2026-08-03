@@ -70,7 +70,7 @@ import { useAppLocale } from "../i18n/locale";
 import { useGameDialog } from "./GameDialogProvider";
 import { LogisticsManagementPanel, type LogisticsManagementPanelProps } from "./LogisticsManagementPanel";
 import type { CanvasPerformanceFeatureId, CanvasPerformanceFeatures } from "../game/endgamePerformance";
-import { readSettingsCategoryPreference, writeSettingsCategoryPreference, type SettingsCategory } from "../game/uiPreferences";
+import { readSettingsCategoryPreference, writeSettingsCategoryPreference, type ConnectionPointSize, type SettingsCategory } from "../game/uiPreferences";
 
 export type OperationsTab = "alerts" | "achievements" | "logistics" | "settings" | "performance" | "saves" | "packs" | "support";
 
@@ -92,8 +92,10 @@ interface OperationsWorkspaceProps {
   canvasPerformanceFeatures: CanvasPerformanceFeatures;
   onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void;
   lineFindMode: boolean;
+  connectionPointSize: ConnectionPointSize;
   showRunLog: boolean;
   onLineFindModeChange: (enabled: boolean) => void;
+  onConnectionPointSizeChange: (size: ConnectionPointSize) => void;
   onRunLogChange: (enabled: boolean) => void;
   performanceMonitor: PerformanceMonitorSnapshot;
   onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void;
@@ -276,7 +278,7 @@ function BufferLimitSetting({ label, value, onChange, presets = BUFFER_LIMIT_PRE
   </section>;
 }
 
-function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, canvasPerformanceFeatures, onEndgameExtremeModeChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, showRunLog, onRunLogChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; showRunLog: boolean; onRunLogChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
+function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, canvasPerformanceFeatures, onEndgameExtremeModeChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, connectionPointSize, onConnectionPointSizeChange, showRunLog, onRunLogChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; connectionPointSize: ConnectionPointSize; onConnectionPointSizeChange: (size: ConnectionPointSize) => void; showRunLog: boolean; onRunLogChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
   const { settings } = game;
   const { locale, setLocale } = useAppLocale();
   const gameDialog = useGameDialog();
@@ -389,6 +391,19 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         <label><span>货物堆叠</span><div className="settings-segmented" aria-label="新建传送带默认货物堆叠">{([1, 2, 4] as CargoStackSize[]).map((stackSize) => <button className={settings.defaultBeltStackSize === stackSize ? "active" : ""} type="button" disabled={!canSetBeltStackSize(game, stackSize)} key={stackSize} onClick={() => onChange({ defaultBeltStackSize: stackSize })}>×{stackSize}</button>)}</div></label>
         <label><span>线路形状</span><div className="settings-segmented" aria-label="新建传送带默认线路形状">{(["auto", "bezier", "upper", "lower"] as DefaultBeltRouteMode[]).map((mode) => <button className={settings.defaultBeltRouteMode === mode ? "active" : ""} type="button" key={mode} onClick={() => onChange({ defaultBeltRouteMode: mode })}>{{ auto: "自动避让", bezier: "曲线", upper: "上绕", lower: "下绕" }[mode]}</button>)}</div></label>
         <p className="settings-help">蓝图保留自身参数，并行线沿用原线路；未解锁的堆叠等级不可选择。</p>
+      </section>
+      <section className="settings-group" data-settings-category="interaction">
+        <header><MousePointer2 size={14} /><span>建筑连接点与连线圆圈</span><small>视觉尺寸与点击范围同步</small></header>
+        <div className="settings-segmented" role="radiogroup" aria-label="建筑连接点尺寸">
+          {(["default", "large25", "large50"] as const).map((size) => <button
+            type="button"
+            key={size}
+            className={connectionPointSize === size ? "active" : ""}
+            aria-pressed={connectionPointSize === size}
+            onClick={() => onConnectionPointSizeChange(size)}
+          >{size === "default" ? "默认" : size === "large25" ? "放大 25%" : "放大 50%"}</button>)}
+        </div>
+        <p className="settings-help">端口、传送带端点和连接预览会一起放大；仅保存在本机，不进入存档。</p>
       </section>
       <div data-settings-category="performance">
       <BufferLimitSetting label="生产建筑缓存上限" value={settings.productionBufferLimit} onChange={(productionBufferLimit) => onChange({ productionBufferLimit })} />
@@ -909,7 +924,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "alerts" ? <AlertsPanel alerts={props.alerts} onSelect={props.onAlertSelect} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "achievements" ? <AchievementsPanel game={props.game} /> : null}
         {props.tab === "logistics" ? <LogisticsManagementPanel game={props.game} {...props.logisticsActions} /> : null}
-        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
+        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} connectionPointSize={props.connectionPointSize} onConnectionPointSizeChange={props.onConnectionPointSizeChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
         {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}

@@ -1402,7 +1402,7 @@ export const MAX_BUILDING_STACK_COUNT = 100_000_000;
 export const MIN_PROLIFERATOR_BUFFER_LIMIT = 1;
 export const DEFAULT_PROLIFERATOR_BUFFER_LIMIT = 600;
 export const MAX_PROLIFERATOR_BUFFER_LIMIT = 100_000;
-export const MAX_CONSTRUCTION_AUTOMATION_TARGET = 100_000;
+export const MAX_CONSTRUCTION_AUTOMATION_TARGET = 100_000_000;
 
 export type BuildingStackAdditionCheck =
   | { ok: true; amount: number; total: number }
@@ -8585,6 +8585,60 @@ export function setConstructionAutomationTarget(state: GameState, constructionId
   return { ...state, constructionAutomation: { ...state.constructionAutomation, targetStock } };
 }
 
+export interface ConstructionAutomationBatchTargetResult {
+  state: GameState;
+  ok: boolean;
+  changedCount: number;
+  affectedCount: number;
+  skippedLockedCount: number;
+  error?: "invalid-target" | "technology-limit" | "no-unlocked-buildings";
+  label?: string;
+}
+
+/**
+ * Set one target for every unlocked, manufacturable building in one state
+ * update. Existing jobs and WIP are deliberately left untouched: changing a
+ * target is a policy change, not a cancellation or refund operation.
+ */
+export function setConstructionAutomationTargetsForBuildings(state: GameState, target: number): ConstructionAutomationBatchTargetResult {
+  if (!Number.isSafeInteger(target) || target < 1) {
+    return { state, ok: false, changedCount: 0, affectedCount: 0, skippedLockedCount: 0, error: "invalid-target", label: "目标数量必须是正安全整数" };
+  }
+  const stockLimit = getConstructionAutomationStockLimit(state);
+  if (target > stockLimit) {
+    return {
+      state,
+      ok: false,
+      changedCount: 0,
+      affectedCount: 0,
+      skippedLockedCount: 0,
+      error: "technology-limit",
+      label: `当前科技允许的目标上限为 ${stockLimit.toLocaleString("zh-CN")}，完成建筑仓储扩容 II 后可设置到 ${MAX_CONSTRUCTION_AUTOMATION_TARGET.toLocaleString("zh-CN")}`,
+    };
+  }
+  const definitions = getConstructionAutomationTargets();
+  const unlocked = definitions.filter((definition) => definition.kind === "building" && (!definition.requiredTechId || isTechnologyCompleted(state, definition.requiredTechId)));
+  const skippedLockedCount = definitions.filter((definition) => definition.kind === "building" && definition.requiredTechId && !isTechnologyCompleted(state, definition.requiredTechId)).length;
+  if (unlocked.length === 0) {
+    return { state, ok: false, changedCount: 0, affectedCount: 0, skippedLockedCount, error: "no-unlocked-buildings", label: "当前没有已解锁的可制造建筑" };
+  }
+  const targetStock = { ...state.constructionAutomation.targetStock };
+  let changedCount = 0;
+  for (const definition of unlocked) {
+    if ((targetStock[definition.id] ?? 0) === target) continue;
+    targetStock[definition.id] = target;
+    changedCount += 1;
+  }
+  if (changedCount === 0) return { state, ok: true, changedCount: 0, affectedCount: unlocked.length, skippedLockedCount };
+  return {
+    state: { ...state, constructionAutomation: { ...state.constructionAutomation, targetStock } },
+    ok: true,
+    changedCount,
+    affectedCount: unlocked.length,
+    skippedLockedCount,
+  };
+}
+
 interface ConstructionAutomationBlocker {
   itemId: ItemId;
   current: number;
@@ -9571,6 +9625,151 @@ export function setBeltLaneCount(state: GameState, beltId: string, targetLanes: 
   belt.lanes = check.targetLanes;
   next.construction[check.constructionId] = check.available - check.delta;
   return next;
+}
+
+export interface BatchSelectionIncreaseResult {
+  state: GameState;
+  ok: boolean;
+  changedBuildingCount: number;
+  changedBeltCount: number;
+  buildingAtLimitCount: number;
+  beltAtLimitCount: number;
+  skippedLockedCount: number;
+  requiredConstruction: Partial<Record<ConstructionId, number>>;
+  missingConstruction: Partial<Record<ConstructionId, number>>;
+  error?: "invalid-count" | "empty-selection" | "missing-construction";
+  label?: string;
+}
+
+/**
+ * Atomically add the same number of units/lanes to a mixed selection. The
+ * preview data is returned even on failure so the UI can explain shortages
+ * and limit hits without mutating the authoritative state.
+ */
+export function batchIncreaseSelection(
+  state: GameState,
+  entityIds: readonly string[],
+  beltIds: readonly string[],
+  amount: number,
+): BatchSelectionIncreaseResult {
+  const emptyResult = (error?: BatchSelectionIncreaseResult["error"], label?: string): BatchSelectionIncreaseResult => ({
+    state,
+    ok: false,
+    changedBuildingCount: 0,
+    changedBeltCount: 0,
+    buildingAtLimitCount: 0,
+    beltAtLimitCount: 0,
+    skippedLockedCount: 0,
+    requiredConstruction: {},
+    missingConstruction: {},
+    error,
+    label,
+  });
+  if (!Number.isSafeInteger(amount) || amount < 1 || amount > 1_000_000) {
+    return emptyResult("invalid-count", "本次增加量必须是 1～1,000,000 的正整数");
+  }
+  const selectedEntityIdSet = new Set(entityIds);
+  const selectedBeltIdSet = new Set(beltIds);
+  if (selectedEntityIdSet.size === 0 && selectedBeltIdSet.size === 0) return emptyResult("empty-selection", "请先选择建筑或传送带");
+
+  const requiredConstruction: Partial<Record<ConstructionId, number>> = {};
+  const entityUpdates: Array<{ id: string; count: number; constructionId: ConstructionId }> = [];
+  let buildingAtLimitCount = 0;
+  let skippedLockedCount = 0;
+  for (const entity of state.entities) {
+    if (!selectedEntityIdSet.has(entity.id)) continue;
+    if (entity.interactionLocked) { skippedLockedCount += 1; continue; }
+    const buildingId = entity.kind === "vein"
+      ? entity.resourceId ? getExtractorBuildingId(entity.resourceId) : undefined
+      : entity.buildingId;
+    if (!buildingId) { skippedLockedCount += 1; continue; }
+    const definition = getBuilding(buildingId);
+    if (definition.kind === "miner" && entity.kind !== "vein") { skippedLockedCount += 1; continue; }
+    const current = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
+    const check = getBuildingStackAdditionCheck(current, amount, definition.name);
+    if (!check.ok || (definition.stackLimit !== undefined && check.total > definition.stackLimit)) {
+      buildingAtLimitCount += 1;
+      continue;
+    }
+    entityUpdates.push({ id: entity.id, count: check.total, constructionId: buildingId });
+    requiredConstruction[buildingId] = Math.floor((requiredConstruction[buildingId] ?? 0) + amount);
+  }
+
+  const beltUpdates: Array<{ id: string; lanes: number; constructionId: ConstructionId }> = [];
+  let beltAtLimitCount = 0;
+  for (const belt of state.belts) {
+    if (!selectedBeltIdSet.has(belt.id)) continue;
+    const targetLanes = belt.lanes + amount;
+    if (!Number.isSafeInteger(targetLanes) || targetLanes > MAX_BELT_LANES) {
+      beltAtLimitCount += 1;
+      continue;
+    }
+    const constructionId = getBeltConstructionId(belt.tier);
+    beltUpdates.push({ id: belt.id, lanes: targetLanes, constructionId });
+    requiredConstruction[constructionId] = Math.floor((requiredConstruction[constructionId] ?? 0) + amount);
+  }
+
+  const missingConstruction: Partial<Record<ConstructionId, number>> = {};
+  for (const [constructionId, required] of Object.entries(requiredConstruction) as Array<[ConstructionId, number]>) {
+    const available = Math.max(0, Math.floor(state.construction[constructionId] ?? 0));
+    const missing = Math.max(0, required - available);
+    if (missing > 0) missingConstruction[constructionId] = missing;
+  }
+  const hasChanges = entityUpdates.length > 0 || beltUpdates.length > 0;
+  if (Object.keys(missingConstruction).length > 0) {
+    return {
+      state,
+      ok: false,
+      changedBuildingCount: 0,
+      changedBeltCount: 0,
+      buildingAtLimitCount,
+      beltAtLimitCount,
+      skippedLockedCount,
+      requiredConstruction,
+      missingConstruction,
+      error: "missing-construction",
+      label: "施工托盘不足，批量增加未执行任何项目",
+    };
+  }
+  if (!hasChanges) {
+    return {
+      state,
+      ok: true,
+      changedBuildingCount: 0,
+      changedBeltCount: 0,
+      buildingAtLimitCount,
+      beltAtLimitCount,
+      skippedLockedCount,
+      requiredConstruction,
+      missingConstruction,
+      label: "所选项目均已达到上限或不可堆叠",
+    };
+  }
+  const next = copyState(state);
+  for (const update of entityUpdates) {
+    const entity = next.entities.find((candidate) => candidate.id === update.id);
+    if (!entity) continue;
+    if (entity.kind === "vein") entity.minerCount = update.count;
+    else entity.machineCount = update.count;
+  }
+  for (const update of beltUpdates) {
+    const belt = next.belts.find((candidate) => candidate.id === update.id);
+    if (belt) belt.lanes = update.lanes;
+  }
+  for (const [constructionId, required] of Object.entries(requiredConstruction) as Array<[ConstructionId, number]>) {
+    next.construction[constructionId] = Math.max(0, Math.floor((next.construction[constructionId] ?? 0) - required));
+  }
+  return {
+    state: next,
+    ok: true,
+    changedBuildingCount: entityUpdates.length,
+    changedBeltCount: beltUpdates.length,
+    buildingAtLimitCount,
+    beltAtLimitCount,
+    skippedLockedCount,
+    requiredConstruction,
+    missingConstruction,
+  };
 }
 
 export function setBeltPriority(state: GameState, beltId: string, priority: 0 | 1 | 2): GameState {

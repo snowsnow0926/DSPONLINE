@@ -501,7 +501,7 @@ export function MobilePlacementBar({ mode, buildingId, inventory, placementCount
   return <div className={`mobile-mode-status mobile-mode-status--${mode}`}>{mode === "layout" ? <LayoutTemplate size={20} /> : <Zap size={20} />}<span><small>{mode === "layout" ? "布局模式" : "生产区域"}</small><strong>{labels[mode]}</strong></span><button type="button" onClick={onDone}>完成</button></div>;
 }
 
-export function MobileSelectionContextBar({ selectedCount, beltCount, canUpgrade, canUpgradeBelts, canLock, canUnlock, onFocus, onCopy, onUpgrade, onUpgradeBelts, onLock, onUnlock, onRemove, onClear }: {
+export function MobileSelectionContextBar({ selectedCount, beltCount, canUpgrade, canUpgradeBelts, canLock, canUnlock, onFocus, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear }: {
   selectedCount: number;
   beltCount: number;
   canUpgrade: boolean;
@@ -512,13 +512,20 @@ export function MobileSelectionContextBar({ selectedCount, beltCount, canUpgrade
   onCopy: () => void;
   onUpgrade: () => void;
   onUpgradeBelts: () => void;
+  onBatchIncrease: (amount: number) => void;
   onLock: () => void;
   onUnlock: () => void;
   onRemove: () => void;
   onClear: () => void;
 }) {
+  const [customIncrease, setCustomIncrease] = useState("");
+  const applyCustomIncrease = () => {
+    if (!/^\d+$/.test(customIncrease.trim())) return;
+    const amount = Number(customIncrease.trim());
+    if (Number.isSafeInteger(amount) && amount >= 1 && amount <= 1_000_000) onBatchIncrease(amount);
+  };
   if (selectedCount + beltCount === 0) return null;
-  return <div className="mobile-selection-context" role="toolbar" aria-label="选区快捷操作"><span><Check size={18} /><strong>{selectedCount}</strong> 节点 · <strong>{beltCount}</strong> 线路</span><nav><button type="button" onClick={onFocus} disabled={selectedCount === 0}><Focus size={18} /><small>定位</small></button><button type="button" onClick={onCopy} disabled={selectedCount === 0}><LayoutTemplate size={18} /><small>蓝图</small></button><button type="button" onClick={selectedCount > 0 ? onUpgrade : onUpgradeBelts} disabled={selectedCount > 0 ? !canUpgrade : !canUpgradeBelts}><Sparkles size={18} /><small>升级</small></button><button type="button" onClick={onLock} disabled={!canLock}><Lock size={18} /><small>锁定</small></button><button type="button" onClick={onUnlock} disabled={!canUnlock}><Unlock size={18} /><small>解锁</small></button><button className="danger" type="button" onClick={onRemove}><Trash2 size={18} /><small>回收</small></button><button type="button" onClick={onClear}><X size={18} /><small>清除</small></button></nav></div>;
+  return <div className="mobile-selection-context" role="toolbar" aria-label="选区快捷操作"><span><Check size={18} /><strong>{selectedCount}</strong> 节点 · <strong>{beltCount}</strong> 线路</span><nav><button type="button" onClick={onFocus} disabled={selectedCount === 0}><Focus size={18} /><small>定位</small></button><button type="button" onClick={onCopy} disabled={selectedCount === 0}><LayoutTemplate size={18} /><small>蓝图</small></button><button type="button" onClick={selectedCount > 0 ? onUpgrade : onUpgradeBelts} disabled={selectedCount > 0 ? !canUpgrade : !canUpgradeBelts}><Sparkles size={18} /><small>升级</small></button>{[1, 10, 100].map((amount) => <button type="button" key={amount} onClick={() => onBatchIncrease(amount)}><Plus size={18} /><small>+{amount}</small></button>)}<label className="mobile-selection-context__custom"><input value={customIncrease} onChange={(event) => setCustomIncrease(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyCustomIncrease(); } }} inputMode="numeric" pattern="[0-9]*" min={1} max={1_000_000} placeholder="自定义" aria-label="自定义批量增加量" /><button type="button" onClick={applyCustomIncrease} aria-label="应用自定义批量增加量"><Check size={16} /></button></label><button type="button" onClick={onLock} disabled={!canLock}><Lock size={18} /><small>锁定</small></button><button type="button" onClick={onUnlock} disabled={!canUnlock}><Unlock size={18} /><small>解锁</small></button><button className="danger" type="button" onClick={onRemove}><Trash2 size={18} /><small>回收</small></button><button type="button" onClick={onClear}><X size={18} /><small>清除</small></button></nav></div>;
 }
 
 export function MobileConnectionNotice({ label, tone }: { label: string; tone: "ready" | "blocked" | "warning" }) {

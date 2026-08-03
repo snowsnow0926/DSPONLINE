@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-03-v1.0.25";
+const RELEASE_NOTE_ID = "2026-08-04-v1.0.26";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -109,9 +109,9 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Canvas Interaction & Settings Update" });
+  const dialog = page.getByRole("dialog", { name: "Light Theme & Settings Interaction Update" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.0.25");
+  await expect(dialog).toContainText("1.0.26");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

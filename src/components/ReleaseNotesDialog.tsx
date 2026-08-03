@@ -1,55 +1,46 @@
-import { Activity, Check, ChevronLeft, ChevronRight, Gauge, History, Info, Layers, MessageCircle, RefreshCw, Route, Shield, ShieldCheck, X, type LucideIcon } from "lucide-react";
+import { Activity, Check, ChevronLeft, ChevronRight, History, Info, Layers, MessageCircle, Route, Shield, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useAppLocale } from "../i18n/locale";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 
 export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
 
 export const CURRENT_RELEASE_NOTES = {
-  id: "2026-08-03-v1.0.25",
-  date: "2026年8月3日",
-  version: "1.0.25",
-  title: "画布交互与设置体验更新",
-  summary: "1.0.25 改进建筑选中、上下游寻线、星球统计、自动保存与侧栏布局，并补齐窄屏和大字号设置体验。GameState v46、存档 envelope v2 与云 schema v7 不变。",
+  id: "2026-08-04-v1.0.26",
+  date: "2026年8月4日",
+  version: "1.0.26",
+  title: "亮色主题与设置交互更新",
+  summary: "1.0.26 统一亮色与深色语义主题，重构设置分类和版本历史，并优化科技树滚轮与物品悬浮交互。GameState v46、存档 envelope v2 与云 schema v7 不变。",
   items: [
     {
-      id: "stable-selection",
-      title: "建筑选中稳定高亮",
-      description: "模拟刷新、性能模式和 Worker 状态发布不再清空当前建筑选择；选中边框、底色和标记在缩小视图中仍保持可见。",
+      id: "semantic-theme",
+      title: "亮色与深色语义主题",
+      description: "工作区、节点、线路、弹窗、表单和移动界面统一使用语义颜色，补齐选中、禁用、危险、悬停和键盘焦点状态。",
     },
     {
-      id: "shortage-navigation",
-      title: "资源不足跳转可控",
-      description: "新增资源不足自动跳转开关，默认关闭；关闭时只显示缺料提示，主动点击缺料文字、图标或锤子仍可打开对应配方。",
+      id: "device-preferences",
+      title: "设备级界面偏好",
+      description: "主题、运行记录显示和设置分类只保存在当前设备；关闭普通运行记录时，必要错误与成就提示仍会显示。",
     },
     {
-      id: "planet-statistics",
-      title: "生产统计按星球筛选",
-      description: "生产统计可查看全部星球或指定星球，库存、生产消耗、异常和用电设备随范围过滤，搜索、排序和时间窗口保持不变。",
+      id: "settings-navigation",
+      title: "设置分类与二级页面",
+      description: "设置首页改为清晰的分类总览，进入二级页面调整显示、操作和运行选项，返回后保留当前分类。",
     },
     {
-      id: "line-trace",
-      title: "建筑上下游寻线",
-      description: "画布可双向追踪当前星球物理传送带的上游、下游、分支、汇流与循环，并用不同颜色突出中心和关联线路。",
+      id: "release-history",
+      title: "完整版本更新记录",
+      description: "离线内置 1.0.0 至当前版本的分页记录，可查看每版详情；返回列表时保留页码和滚动位置。",
     },
     {
-      id: "autosave-options",
-      title: "自动保存增加 10 分钟与关闭",
-      description: "周期自动保存新增 10 分钟和关闭选项；关闭后仍保留页面隐藏、退出、返回主菜单等紧急保存，以及手动保存和云上传。",
+      id: "technology-wheel",
+      title: "科技树滚轮横向浏览",
+      description: "科技树区域内的鼠标滚轮统一转换为横向移动，并阻止页面纵向滚动穿透，轨迹板横向输入继续自然生效。",
     },
     {
-      id: "endgame-node-title",
-      title: "终局节点标题更明确",
-      description: "极限模式优先显示配方、主要产物或当前科技，未配置机器会明确提示；建筑类型保留为次级信息。",
-    },
-    {
-      id: "responsive-settings",
-      title: "窄屏与大字号设置布局",
-      description: "设置页在窄屏、手机与 200% 字号下自动切换稳定单列布局，标题、说明、按钮和开关不再重叠或逐字断行。",
-    },
-    {
-      id: "independent-sidebars",
-      title: "左右侧栏独立收起",
-      description: "物资侧栏和检查器都可从画布边缘独立收起与展开，画布会回收空间，同时保留选择、标签页、滚动位置和模拟状态。",
+      id: "item-reference",
+      title: "物品悬浮与快捷操作",
+      description: "物品卡缩小误触范围，并支持鼠标悬停、键盘焦点、移动端点击与长按；可直接定位产线或打开生产资料库。",
     },
     {
       id: "release-compatibility",
@@ -60,14 +51,12 @@ export const CURRENT_RELEASE_NOTES = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<(typeof CURRENT_RELEASE_NOTES.items)[number]["id"], LucideIcon> = {
-  "stable-selection": Activity,
-  "shortage-navigation": Shield,
-  "planet-statistics": Gauge,
-  "line-trace": Route,
-  "autosave-options": RefreshCw,
-  "endgame-node-title": Info,
-  "responsive-settings": ShieldCheck,
-  "independent-sidebars": Layers,
+  "semantic-theme": Layers,
+  "device-preferences": Shield,
+  "settings-navigation": Info,
+  "release-history": History,
+  "technology-wheel": Route,
+  "item-reference": Activity,
   "release-compatibility": Check,
 };
 
@@ -83,6 +72,15 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  {
+    id: "2026-08-03-v1.0.25", date: "2026年8月3日", version: "1.0.25", title: "画布交互与设置体验更新",
+    summary: "1.0.25 改进建筑选中、上下游寻线、星球统计、自动保存与侧栏布局，并补齐窄屏和大字号设置体验。GameState v46、存档 envelope v2 与云 schema v7 不变。",
+    items: [
+      { id: "stable-selection", title: "建筑选中稳定高亮", description: "模拟刷新、性能模式和 Worker 状态发布不再清空当前建筑选择；选中边框、底色和标记在缩小视图中仍保持可见。" },
+      { id: "planet-statistics", title: "生产统计按星球筛选", description: "生产统计可查看全部星球或指定星球，库存、生产消耗、异常和用电设备随范围过滤，搜索、排序和时间窗口保持不变。" },
+      { id: "independent-sidebars", title: "左右侧栏独立收起", description: "物资侧栏和检查器都可从画布边缘独立收起与展开，画布会回收空间，同时保留选择、标签页、滚动位置和模拟状态。" },
+    ],
+  },
   {
     id: "2026-08-03-v1.0.24", date: "2026年8月3日", version: "1.0.24", title: "工厂管理与画布性能更新",
     summary: "新增物流管理、精确线路选择、批量回收、物品快捷操作和手机蓝图导入；保留 GameState v46 与存档兼容。",
@@ -330,6 +328,7 @@ export function markCurrentReleaseNotesSeen(): void {
 }
 
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { locale } = useAppLocale();
   const backdropRef = useRef<HTMLDivElement>(null);
   const releaseScrollRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -414,7 +413,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
         </header>
         <div className="release-notes-history-toolbar" aria-label="版本历史分页">
           <button type="button" onClick={historyOpen ? () => showRelease(CURRENT_RELEASE_NOTES.id) : showHistory}>{historyOpen ? <><ChevronLeft size={14} />返回当前版本</> : <><History size={14} />查看历史版本</>}</button>
-          <span>第 {historyPage + 1} / {pageCount} 页</span>
+          <span>{locale === "en" ? `Page ${historyPage + 1} / ${pageCount}` : `第 ${historyPage + 1} / ${pageCount} 页`}</span>
           <button type="button" disabled={historyPage <= 0} onClick={() => setHistoryPage((page) => Math.max(0, page - 1))} aria-label="上一页版本"><ChevronLeft size={14} />上一页</button>
           <button type="button" disabled={historyPage >= pageCount - 1} onClick={() => setHistoryPage((page) => Math.min(pageCount - 1, page + 1))} aria-label="下一页版本">下一页<ChevronRight size={14} /></button>
         </div>

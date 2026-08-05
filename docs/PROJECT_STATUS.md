@@ -1,12 +1,12 @@
 # DSP极简网络项目现状
 
-> **方向变更（2026-07-31）**：量子物流网络当前以 `1.0.29 / GameState v46` 为生产基线，`1.0.30` 为待发布候选。旧 v43 空间站实验存档若包含有效空间站资产会被拒绝加载，不能合并到量子共享库存；代码仍保留传统物流站 Mk.I→Mk.II 的兼容升级入口，供现有站点和本地批量升级测试使用。
+> **方向变更（2026-07-31）**：量子物流网络当前以 `1.0.30 / GameState v46` 为生产基线。旧 v43 空间站实验存档若包含有效空间站资产会被拒绝加载，不能合并到量子共享库存；代码仍保留传统物流站 Mk.I→Mk.II 的兼容升级入口，供现有站点和本地批量升级测试使用。
 
 > 基线日期：2026-08-05
 > 产品阶段：首个公网版本已上线，当前更准确的定位是“公开测试版”。
 > 事实来源：当前工作区代码、自动化测试、部署配置和线上只读检查。
 
-> `1.0.30` 发布候选新增默认尝试、严格验证失败后自动精确回退的 `fast-30s-v1` 离线结算，以及仅供新建工厂选择的 `speedrun-v1 / season_01` 速通模式和独立服务端验证排行榜。快速离线偏好只保存在当前设备；普通存档和普通排行榜不会转为速通。候选不承诺任意复杂存档在 30 秒内完成，现有真实存档门禁失败时继续使用精确 Worker。GameState v46、存档 envelope v2、云 schema v7 和 SQLite layout v2 均未变化；香港、上海和下载页在完成 clean 提交、不可变制品、签名、备份与完整发布验证前仍保持 `1.0.29`。
+> `1.0.30` 已完成香港、上海 Web/API 和上海下载页生产发布，构建 `1.0.30+c6d896ae6911`（提交 `c6d896ae691147c671ab784eccaf704b23a6609b`）。本版上线默认尝试、严格验证失败后自动精确回退的 `fast-30s-v1` 离线结算，以及仅供新建工厂选择的 `speedrun-v1 / season_01` 速通模式和独立服务端验证排行榜。复杂终局仍会安全回退，不能承诺任意存档 30 秒硬上限；GameState v46、存档 envelope v2、云 schema v7 和 SQLite layout v2 均未变化。发布清单 147/147，聚合 SHA-256 `437958ae8390b8d8ec5ec46dca921313af822bb54f6e49c391d89441df61a7d0`；Vitest 758/15、服务端 49/49、运维 6/6、原生工具 8/8、Playwright 236/3。香港、上海 Web/API 和上海下载页均已完成备份、隔离验证、原子切换、公网健康、完整 APK/EXE 哈希、Range 和缓存验收。Android `1.0.30 / 1000030` 保持批准长期证书；Windows 明确为 `NotSigned`。详见 [releases/1.0.30.md](./releases/1.0.30.md)。
 
 > `1.0.29` 已完成香港、上海 Web/API 和上海下载页生产发布，构建 `1.0.29+d9aa7d7921b0`（提交 `d9aa7d7921b033260d14bcc6bf7c1ee4758e272e`）。本版修复高堆叠建筑制造中心阻塞全局模拟、普通/时间扭曲 Worker 切片积压和停止超时恢复；GameState v46、存档 envelope v2、云 schema v7 和 SQLite layout v2 不变。不可变清单 147/147、聚合 SHA-256 `eb28dd72aed2d8645dca290fa9539fa9578f5d5e1fbc7e4ba3045cd577f51b8e`；Vitest 744 通过/14 跳过（86 个文件通过、3 个跳过）、服务端 47/47、运维 6/6、原生工具 8/8、Playwright 237 个场景完成且 3 个显式跳过。香港、上海 Web/API 与上海下载页均通过备份、隔离启动、原子切换、公网健康、完整安装包摘要、Range 和缓存验收。Android `1.0.29 / 1000029` 使用批准长期证书；Windows `1.0.29` 明确为 `NotSigned`。详见 [releases/1.0.29.md](./releases/1.0.29.md)。
 
@@ -409,8 +409,8 @@
 
 | 概念 | 当前值 | 用途 |
 | --- | --- | --- |
-| npm 应用版本 | 工作区、香港与上海 Web/API 为 `1.0.28`；Windows 为 1.0.28，Android 正式包为 1.0.28 / 1000028 | 两类原生清单与文件由上海下载节点提供 |
-| 游戏状态版本 | 工作区、香港与上海均为 `46` | 1.0.28 不升级 GameState，继续保留旧版本迁移链 |
+| npm 应用版本 | 发布工作区、香港与上海 Web/API 为 `1.0.30`；Windows 为 1.0.30，Android 正式包为 1.0.30 / 1000030 | 两类原生清单与文件由上海下载节点提供 |
+| 游戏状态版本 | 工作区、香港与上海均为 `46` | 1.0.30 不升级 GameState，继续保留旧版本迁移链 |
 | 存档封装版本 | `2` | 校验和、元数据和导入导出格式 |
 | 云服务 schema | 工作区与线上 `7`，SQLite layout `2` | v7 增加唯一用户名；layout v2 拆分云存档正文 |
 | 本地身份 schema | `2` | 本地排行账本和可选云账号绑定，不属于 `GameState` |
@@ -419,9 +419,9 @@
 
 不要把“v33 存档状态”当作产品版本。每个正式发布都应先确定 SemVer，再生成可追溯构建 ID 和 Git 标签。
 
-香港和上海 Web/API 当前为 `1.0.28-471529b431b8`，构建 ID 为 `1.0.28+471529b431b8`。上海下载页和 Windows/Android 稳定清单均为 `1.0.28`，Android versionCode 为 `1000028`。1.0.28 Web/API、下载页、备份、回滚与公网证据见 [releases/1.0.28.md](./releases/1.0.28.md)，上一版证据见 [releases/1.0.27.md](./releases/1.0.27.md)。
+香港和上海 Web/API 当前为 `1.0.30-c6d896ae6911`，构建 ID 为 `1.0.30+c6d896ae6911`。上海下载页和 Windows/Android 稳定清单均为 `1.0.30`，Android versionCode 为 `1000030`。1.0.30 Web/API、下载页、备份、回滚与公网证据见 [releases/1.0.30.md](./releases/1.0.30.md)，上一版证据见 [releases/1.0.29.md](./releases/1.0.29.md)。
 
-香港与上海 Web/API 回滚目标为 `1.0.27-b8e6c0f01ea3`；上海下载站回滚目标同为 `1.0.27-b8e6c0f01ea3`。旧版安装包和目录继续保留。固定 Web/API 切换工具路径为 `/usr/local/sbin/dsp-idle-switch-release`，下载页回滚目标记录在 `/var/lib/dsp-idle-cloud/release-state/previous-download-release`，回滚不得恢复数据库。两地 Nginx 应用规则均使用 40 MiB 上传边界和 `/var/www/dsp-idle/shared/assets` 历史 hashed-asset 回退。
+香港与上海 Web/API 回滚目标为 `1.0.29-d9aa7d7921b0`；上海下载站回滚目标为 `download-site-1.0.29-d9aa7d7921b0-r2`。旧版安装包和目录继续保留。固定 Web/API 切换工具路径为 `/usr/local/sbin/dsp-idle-switch-release`，下载页回滚目标记录在 `/var/lib/dsp-idle-cloud/release-state/previous-download-release`，回滚不得恢复数据库。两地 Nginx 应用规则均使用 40 MiB 上传边界和 `/var/www/dsp-idle/shared/assets` 历史 hashed-asset 回退。
 
 首个公网源码快照冻结为 Git 提交 `9acd4460868a4328a1b5e8bb3afbe736c7857e09` 并标记 `v0.1.0`。该标签继续用于追溯原始线上源码；从 `v0.2.0` 起，正式发布使用“产品版本 + Git SHA”的确定性构建 ID。首版证据见 [releases/0.1.0.md](./releases/0.1.0.md)。
 
@@ -429,6 +429,9 @@
 
 | 检查 | 基线结果 |
 | --- | --- |
+| `1.0.30` / v46 正式发布 | 87 个测试文件通过、4 个可选文件跳过；758 项 Vitest 通过、15 项跳过；Playwright 236 项通过、3 项显式跳过；服务端 49/49、运维 6/6、原生工具 8/8、147 文件发布清单、类型检查、128 个运行时许可证和生产构建通过；双节点、Android/Windows 制品、上海下载页、备份、完整下载哈希、Range、缓存和历史 chunk 回退验收通过 |
+| Android `1.0.30 / 1000030` | APK v2/v3、批准长期证书、稳定清单 no-cache、APK immutable/Range 206 和公网 SHA-256 通过；最低支持代码仍为 `1000002` |
+| Windows `1.0.30` | FileVersion/ProductVersion、官方云地址、稳定更新源、隔离启动、YAML/blockmap 和公网 SHA-256 通过；Authenticode 为 `NotSigned`，没有创建新证书 |
 | `1.0.28` / v46 正式发布 | 85 个测试文件通过、3 个可选文件跳过；738 项 Vitest 通过、12 项跳过；Playwright 228 项通过、6 项显式本地夹具/基准跳过；服务端 47/47、运维 6/6、原生工具 8/8、147 文件发布清单、类型检查、128 个运行时许可证和生产构建通过；双节点、Android/Windows 制品、上海下载页、备份、完整下载哈希、Range、缓存和历史 chunk 回退验收通过 |
 | Android `1.0.28 / 1000028` | APK v2/v3、批准长期证书、稳定清单 no-cache、APK immutable/Range 206 和公网 SHA-256 通过；最低支持代码仍为 `1000002` |
 | Windows `1.0.28` | FileVersion/ProductVersion、官方云地址、稳定更新源、隔离启动、YAML/blockmap 和公网 SHA-256 通过；Authenticode 为 `NotSigned`，没有创建新证书 |

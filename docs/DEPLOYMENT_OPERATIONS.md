@@ -15,7 +15,9 @@
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
 
-> 当前生产状态（2026-08-11）：香港、上海 Web/API 均运行 `1.0.39-fb54f2148dd6`，构建 ID 为 `1.0.39+fb54f2148dd6`；上海下载页和 Android/Windows stable 保持 `1.0.38`。Web/API 直接代码回滚为 1.0.38；下载页直接回滚和香港公开 previous-stable 仍为完整 1.0.37。两地数据库继续独立使用 schema v7 / SQLite layout v2。香港 `/canary/previous/` 302 到不可变 `/canary/1.0.37-853ecdb12795/`，退役 1.0.36 固定路径返回 `410`。发布前备份、未激活目录复验、原子切换、真实云 PUT 观察、公网完整哈希、Range、缓存、6 场 Chrome 和回退 PWA 隔离证据见 [releases/1.0.39.md](./releases/1.0.39.md)。
+> 当前生产状态（2026-08-13）：香港、上海 Web/API 均运行 `1.0.39-fb54f2148dd6`，构建 ID 为 `1.0.39+fb54f2148dd6`；上海下载页和 Android/Windows stable 保持 `1.0.38`。Web/API 直接代码回滚为 1.0.38；下载页直接回滚和香港公开 previous-stable 仍为完整 1.0.37。两地数据库继续独立使用 schema v7 / SQLite layout v2。香港 `/canary/previous/` 302 到不可变 `/canary/1.0.37-853ecdb12795/`，退役 1.0.36 固定路径返回 `410`。1.0.39 正式发布证据见 [releases/1.0.39.md](./releases/1.0.39.md)，1.0.40 门禁失败、恢复和当前状态见 [releases/1.0.40-no-go-2026-08-13.md](./releases/1.0.40-no-go-2026-08-13.md)。
+
+> **1.0.40 发布阻断（2026-08-13）**：精确候选 `1.0.40-58d3e6f986ec` 在真实 Linux/systemd/Nginx 门禁中因 proxy 软链接入口、共享 RuntimeDirectory 生命周期、writer lock 所有权、旧版 ready/备份窗口和 ext4 大备份复制策略失败，香港灰度未成功且产生用户可见 503/504。两节点已恢复发布前 Nginx、直接 4320、1.0.39 current 和原 timers；1.0.40 proxy/active/preflight units 与运行时状态已清除，数据库未回滚。香港保留 `dsp-idle-cloud.service.d/10-release-backup-window.conf`，把旧版大快照限制在 `03:00-04:00`，避免普通重启立即写约 3.2 GB COS 快照。不得再次部署此精确候选；开发返修与完整证据见 [releases/1.0.40-no-go-2026-08-13.md](./releases/1.0.40-no-go-2026-08-13.md)。
 
 > 1.0.39 API 优先 P0 已发布，1.0.38 Web/Android/Windows 无需清缓存或重装即可恢复上传。Release Agent 已分别创建并验证两节点快照，用各自备份副本合成验证 v46 稀疏普通/速通 main 与手动槽、原始正文/校验/revision、历史恢复、服务重启、v45 稠密兼容与非法值拒绝；普通/速通复核阈值独立、隐藏状态和永久冻结由完整远端服务测试与香港隔离副本覆盖。本版没有 schema/layout migration；回滚只切回 1.0.38 代码并重启，绝不恢复生产数据库。
 
@@ -38,7 +40,7 @@
 
 服务端绑定 `127.0.0.1:4320`，公网只通过 Nginx 的 `/api` 访问。仓库里的 systemd 和 Nginx 文件是模板，实际安装前必须对照目标节点，不能把香港 Origin 或证书路径直接覆盖到上海。
 
-香港、上海 Web/API 已切换到 `1.0.39-fb54f2148dd6`，上海下载站保持不可变目录 `download-site-1.0.38-351c649af9ee`；Web/API 构建为 `1.0.39+fb54f2148dd6` / GameState v46。两地继续使用云 schema v7 和 SQLite layout v2，代码回滚不得恢复数据库；香港 `/downloads/*` 仍 302 到上海下载域名。香港 Web-only 稳定入口 `/canary/previous/` 按用户要求继续指向 `web-1.0.37-853ecdb12795`，使用当前 1.0.39 API。Android 1.0.38 SHA-256 为 `9e04137021c90400ed6b547fce0e982c2f3a737b58439ad27618b47841c825c6`，Windows 1.0.38 SHA-256 为 `79162042993d9f37445516a6e4cd46dbb1a7b837fc7df4b97ea21f2a3ecfd8e4`（Authenticode `NotSigned`），blockmap SHA-256 为 `f9d2d8192f5ad0337a4bf60904a0d582e0a3ead7a2d66c7ae6fed4be56d17156`。1.0.39 香港发布前备份为 3,174,580,224 字节、上海为 217,088 字节，均为 `0600` 并通过 `quick_check`、完整性和 schema v7/layout v2；Web/API 代码回滚目标为 1.0.38，下载页直接回滚为 1.0.37。公网健康、下载 9/9、Range、缓存头、当前/上一版 hashed asset、CORS、6 场浏览器 smoke 和 1.0.37 回退 PWA 隔离均已复验。两地服务 active、`NRestarts=0`；发布收口磁盘约为香港 79%、上海 85%，不得删除当前版、回滚版或未证明已异地归档的有效备份。完整证据见 [releases/1.0.39.md](./releases/1.0.39.md)。
+香港、上海 Web/API 当前为 `1.0.39-fb54f2148dd6`，上海下载站保持不可变目录 `download-site-1.0.38-351c649af9ee`；Web/API 构建为 `1.0.39+fb54f2148dd6` / GameState v46。两地继续使用云 schema v7 和 SQLite layout v2，代码回滚不得恢复数据库；香港 `/downloads/*` 仍 302 到上海下载域名。香港 Web-only 稳定入口 `/canary/previous/` 按用户要求继续指向 `web-1.0.37-853ecdb12795`，使用当前 1.0.39 API。Android 1.0.38 SHA-256 为 `9e04137021c90400ed6b547fce0e982c2f3a737b58439ad27618b47841c825c6`，Windows 1.0.38 SHA-256 为 `79162042993d9f37445516a6e4cd46dbb1a7b837fc7df4b97ea21f2a3ecfd8e4`（Authenticode `NotSigned`），blockmap SHA-256 为 `f9d2d8192f5ad0337a4bf60904a0d582e0a3ead7a2d66c7ae6fed4be56d17156`。1.0.39 香港发布前备份为 3,174,580,224 字节、上海为 217,088 字节，均为 `0600` 并通过 `quick_check`、完整性和 schema v7/layout v2；Web/API 代码回滚目标为 1.0.38，下载页直接回滚为 1.0.37。1.0.40 No-Go 恢复后，两地服务 active、`NRestarts=0`，收口磁盘约为香港 69%、上海 75%；不得删除当前版、回滚版或未证明已异地归档的有效备份。完整正式发布证据见 [releases/1.0.39.md](./releases/1.0.39.md)，No-Go 恢复证据见 [releases/1.0.40-no-go-2026-08-13.md](./releases/1.0.40-no-go-2026-08-13.md)。
 
 `1.0.13` 两节点发布都只切换 Web/API 代码，未执行数据库迁移。香港发布前后 Backup API 快照均通过 `quick_check`；前备份为 887,271,424 字节，后备份为 888,795,136 字节。上海发布前后备份均为 122,880 字节并通过 `quick_check`；发布前 SHA-256 为 `a8af0eec173e6f8aad36af09b7e6d8c56b2b00014d76efd53124ddfb81b7e6a7`，发布后为 `8cb0c7bbbb270ac804b7c16909fc1b4274d0b2aed34a4ae7f379f333596cd737`。上海 0 个账号、0 个主云档、24 条玩家记录和 23 条错误记录均未减少，服务 `NRestarts=0`。受限备份传输账号仍只用于异地备份，代码发布使用独立的 `ubuntu` 授权。
 
@@ -183,7 +185,7 @@ Get-FileHash release/download-site-<build-id>/downloads/desktop/stable/*.exe -Al
 
 前端回滚只需把 `current` 切回上一发布目录，不触碰数据库。
 
-仓库提供 `deploy/switch-release.sh` 切换前端与后端代码并保存上一次代码指向。1.0.40 候选增加稳定交接代理：Nginx 固定指向 `127.0.0.1:4330`；代理先让已有上传和导出完成并排队新写请求，再短暂排队全部请求。旧写实例释放共享 `flock` 后，新实例才可在 4321/4322 之一接触生产 SQLite。候选预热只允许使用已经验证的发布前备份克隆，不允许两个写实例同时打开生产库。正式安装时须把控制文件放入不可变 `/usr/local/lib/dsp-idle-release/<build-id>/`，再原子更新 `/usr/local/lib/dsp-idle-release/current`，不得覆盖正在运行的控制文件。
+仓库提供 `deploy/switch-release.sh` 切换前端与后端代码并保存上一次代码指向。以下 1.0.40 handoff 设计已在真实 Linux 门禁中失败并撤销，**只能作为事故分析背景，不得照此执行生产切换**：Nginx 固定指向 `127.0.0.1:4330`；代理先让已有上传和导出完成并排队新写请求，再短暂排队全部请求。旧写实例释放共享 `flock` 后，新实例才可在 4321/4322 之一接触生产 SQLite。候选预热只允许使用已经验证的发布前备份克隆，不允许两个写实例同时打开生产库。返修必须把控制文件放入不可变 `/usr/local/lib/dsp-idle-release/<build-id>/`，再原子更新 `/usr/local/lib/dsp-idle-release/current`，并修复 No-Go 记录列出的软链接入口、RuntimeDirectory、锁文件权限、旧版恢复和大库复制问题。
 
 API 切换必须提供与不可变 SQLite Backup API 快照绑定的证据。证据锁定绝对路径、大小、mtime、SHA-256、`quick_check`、schema 和 SQLite layout；切换器会再次计算 SHA-256。`--dry-run` 执行同样的证据与目标校验，但不启动服务、不 reload Nginx、不改软链。节点级非密钥配置从 `deploy/dsp-idle-runtime.env.example` 安装到 `/etc/dsp-idle-cloud/runtime.env`；真实凭据仍只放 `admin.env`。
 

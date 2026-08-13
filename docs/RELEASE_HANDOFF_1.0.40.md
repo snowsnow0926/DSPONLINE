@@ -5,15 +5,29 @@
 > Build ID：`1.0.40+58d3e6f986ec`
 > 开发分支：`codex/1.0.40-leaderboard-ranking`
 > 当前生产：Web/API `1.0.39+fb54f2148dd6`；Android/Windows stable `1.0.38`
-> 发布状态：开发候选完成，未部署，尚未获得生产切换授权
+> 发布状态：**2026-08-13 生产发布 No-Go；精确候选 `1.0.40-58d3e6f986ec` 已撤销，禁止重试**
+
+> Release Agent 于 2026-08-13 获得用户授权后完成本地/远端候选复验、双节点备份和真实 Linux/systemd/Nginx 演练。演练发现发布切换实现存在阻断缺陷；香港灰度未成功激活 1.0.40，并出现用户可见 503/504。两地已完整恢复并复验为 Web/API 1.0.39，上海下载页与原生 stable 仍为 1.0.38，香港 `/canary/previous/` 仍固定指向 1.0.37。完整脱敏证据见 [1.0.40 发布 No-Go 记录](./releases/1.0.40-no-go-2026-08-13.md)。任何修复都会改变运行时源码，必须生成新 Git SHA、新 Build ID、新制品和新交接，不能继续使用本文列出的固定候选。
 
 ## 1. 交接结论
 
 1.0.40 总纲中的 BASE、P0、P1、P2、P3 和开发侧 FINAL-01 已全部完成。固定运行时提交来自 clean 工作树，完整自动化为 0 失败；Web/API/source、Windows unpacked 诊断包、Android unsigned APK/AAB、source manifest、候选 SHA-256 清单、CycloneDX SBOM 和 in-toto provenance 均已生成并复验。
 
-开发 Agent 没有连接或写入生产服务器/数据库，没有使用真实玩家账号或玩家存档做写入测试，没有修改排行榜 submission/历史，没有部署、切流、更新下载站或覆盖任何既有制品。Release Agent 必须继续遵守这些边界，直到用户明确授权发布。
+开发 Agent 阶段没有连接或写入生产服务器/数据库，没有使用真实玩家账号或玩家存档做写入测试，没有修改排行榜 submission/历史，也没有部署、切流、更新下载站或覆盖任何既有制品。Release Agent 后续获得授权并执行了生产门禁；结果是本候选 No-Go，生产数据仍未恢复、替换或用于玩家写入测试。
 
 交接文档位于固定运行时提交之后的纯文档提交。**任何二进制都必须绑定 `58d3e6f986ec…`，不能把后续文档 SHA 当作运行时 SHA，也不能沿用本 Build ID 重建不同源码。**
+
+### Release Agent 生产门禁结论（2026-08-13）
+
+开发侧自动化结论仍然有效，但真实 Linux 发布门禁证明当前发布实现不可用于生产：
+
+1. `api-handoff-proxy.mjs` 通过 `/usr/local/lib/dsp-idle-release/current` 软链接启动时，`directInvocation()` 只比较 `path.resolve`，进程会把自己当作被导入模块并以 0 静默退出。
+2. handoff 单元共享 `/run/dsp-idle-cloud`，但没有可靠保留待切换状态；停止旧 writer 后 `active-start.json` 可消失，新 active entry 随后读取尚未发布的 `switch-state.json` 并退出。
+3. `release-switch.mjs` 以 root 执行 `flock` 可创建 `root:root 0644` 的 `writer.lock`，而新 writer 以 `ubuntu` 运行，打开锁文件得到 `Permission denied`；`Restart=on-failure` 又造成快速重启循环。
+4. 从无 `/api/ready` 的 1.0.39 回退时，恢复路径先等待完整 ready 超时，不能立即按旧版 health 兼容恢复；旧 1.0.39 重启还会触发即时大库 COS 快照，放大不可用窗口。
+5. ext4 不支持 reflink 时，preflight 会对约 3.2 GB 备份执行第二次无上限完整复制；实际在线 Backup API 与过慢备份分别造成 I/O 饥饿和 WAL 保留，不能作为香港大库的默认流程。
+
+精确候选没有成功成为任一节点 current；不得把候选目录存在、preflight 通过或 Nginx 曾短暂引导到 handoff proxy 描述为 1.0.40 已发布。开发返修必须覆盖以上五项，并在隔离 Linux 上用真实 systemd/Nginx、真实权限模型和合成大库完成正常切换、全部失败回滚、重复执行和旧版兼容回滚，持续请求 502/503/504 必须为 0。
 
 ## 2. 本版功能与修复
 
@@ -235,7 +249,9 @@ Android `aapt`：`cn.dsponline.network / 1.0.40 / 1000040 / minSdk 24 / targetSd
 
 不要整体 revert 数据安全工作包后直接启动旧 API；按依赖从最末工作包逆序回滚，并先用临时 SQLite/合成档通过双读验证。
 
-## 11. Release Agent 必做步骤
+## 11. Release Agent 原始必做步骤（已停止）
+
+> 本节保留候选交接时的原始发布清单，仅用于审计。2026-08-13 已在第 3～4 步的真实 Linux 门禁中触发 No-Go；不得继续执行后续步骤，也不得用同一 SHA/Build ID 重试。
 
 1. 从 `58d3e6f986ec098061a0a2109e149e1065a12c48` 创建全新 clean worktree；复验 source manifest、candidate manifest、6/6 制品、SBOM 和 provenance。禁止从文档提交重建并复用 Build ID。
 2. 把 Web/API 只解包到香港、上海不可变未激活目录；安装 API 生产依赖并使用临时 SQLite 检查 `/api/health`、`/api/ready`、schema 7/layout 2、邮件未配置状态和 activity 配置。
@@ -292,7 +308,7 @@ Android `aapt`：`cn.dsponline.network / 1.0.40 / 1000040 / minSdk 24 / targetSd
 - Android 实体设备、批准证书签名连续性和覆盖升级尚未执行；Windows 低配设备/正式 setup 覆盖升级尚未执行。
 - Windows 仍按历史策略 `NotSigned`，会触发未知发布者/SmartScreen；不能描述为可信签名版。
 - 28 MiB 八路解析虽有界，但本机 event-loop max/P99 约 470/446 ms；灰度需监控，不承诺生产网络 30 MiB 全链路耗时。
-- 发布切换自动化在 Windows/Node 合成环境通过；真实 Linux systemd/Nginx 仍是发布阻断门禁。
+- 发布切换自动化在 Windows/Node 合成环境通过，但真实 Linux systemd/Nginx 门禁已经执行并失败；软链接入口、RuntimeDirectory 生命周期、writer lock 权限、旧版恢复和大库复制策略均需开发返修。
 - 账号最大理论逻辑配额 1 GiB；内容去重降低物理占用但不替代磁盘预留、清理策略和备份容量监控。
 - 旧 Bearer 是兼容面，不应无限期保留；正式稳定后需要另版给出迁移率与退役计划。
 - 排行榜仍是存档结构/相邻 revision 推导，不是完整服务器重演模拟，不能防御所有经过构造但结构合法的数据。
@@ -300,6 +316,8 @@ Android `aapt`：`cn.dsponline.network / 1.0.40 / 1000040 / minSdk 24 / targetSd
 - 真实玩家夹具的 construction stability、终局多 Worker、画布、约一小时离线/纯挂机条件测试按约束未执行；Release Agent 必须使用明确授权的只读副本或实体设备完成，不能把 skip 当 pass。
 
 ## 15. 可直接交给 Release Agent 的提示词
+
+> 以下为开发交接时的历史提示词，已由本次 No-Go 作废。不得再次执行；返修后必须生成新的交接提示词。
 
 ```text
 请复验 DSPidle2 1.0.40 开发候选；在用户明确授权前不要部署或写生产数据。

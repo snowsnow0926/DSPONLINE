@@ -6,9 +6,11 @@
 > 产品阶段：首个公网版本已上线，当前更准确的定位是“公开测试版”。
 > 事实来源：当前工作区代码、自动化测试、部署配置和线上只读检查。
 
+> **1.0.40 发布 No-Go（2026-08-13）**：Release Agent 在用户授权后复验精确候选 `1.0.40-58d3e6f986ec`，本地与两台 Linux API 自动化均 0 失败，但真实 systemd/Nginx 切换发现 proxy 软链接入口、共享 RuntimeDirectory、writer lock UID/GID、旧版 ready/备份窗口和 ext4 大副本五类阻断缺陷。香港灰度没有成功激活 1.0.40，并出现用户可见 503/504；两节点已经恢复、验收并保持 1.0.39，下载/native 保持 1.0.38，香港 previous-stable 保持 1.0.37。精确候选已撤销，修复必须使用新 SHA、新 Build ID 和新交接；完整证据与开发硬门禁见 [1.0.40 发布 No-Go 记录](./releases/1.0.40-no-go-2026-08-13.md)。
+
 > `1.0.40` 开发批次第 1 项已在隔离分支完成实现并通过完整门禁：匿名 `GET /api/leaderboard` 继续只返回公开 Top 100，新增认证只读 `GET /api/leaderboard/me` 在完整公开 submission 集合中返回当前账号真实名次，并区分缺普通主云档、缺相邻修订、59 秒窗口、计时不增长、有效零产出、复核等待、隐藏和限制。UI 将服务器认证成绩与本地 60 秒最佳值分栏，白糖未知显示 `--`，Top 100 外显示真实 `#N`。本项不改变存档、云 revision、submission、排行榜历史、GameState v46、envelope v2、云 schema v7 或 SQLite layout v2，尚未部署生产环境；开发证据见 [1.0.40 银河排行榜“未上榜”状态修复](./feedback/2026-08-12-1.0.40-银河排行榜未上榜-Bug.md)。
 
-> 2026-08-13 的 1.0.40 隔离开发分支已完成 [大版本开发总纲](./1.0.40_MAJOR_DEVELOPMENT_PLAN.md) 中 BASE、P0、P1、P2、P3 与开发侧 FINAL-01。固定运行时源码为 `58d3e6f986ec098061a0a2109e149e1065a12c48`，Build ID 为 `1.0.40+58d3e6f986ec`；Vitest 1180/18、server 343/2、ops 34/34、native 24/24、Chromium 327/2、Firefox/WebKit 2/2、生产预览 PWA 1/1，均 0 失败。Web/API/source、6 个候选制品、206 文件 manifest、SBOM 和 provenance 已复验；Android/Windows 仅为未签名诊断制品。这里描述的是尚未部署的开发候选；线上 Web/API 仍为 1.0.39，开发过程没有连接生产写入、覆盖玩家存档或修改排行榜历史。完整证据见 [1.0.40 候选记录](./releases/1.0.40-candidate.md) 和 [Release Agent 交接](./RELEASE_HANDOFF_1.0.40.md)。
+> 2026-08-13 的 1.0.40 隔离开发分支已完成 [大版本开发总纲](./1.0.40_MAJOR_DEVELOPMENT_PLAN.md) 中 BASE、P0、P1、P2、P3 与开发侧 FINAL-01。固定运行时源码为 `58d3e6f986ec098061a0a2109e149e1065a12c48`，Build ID 为 `1.0.40+58d3e6f986ec`；Vitest 1180/18、server 343/2、ops 34/34、native 24/24、Chromium 327/2、Firefox/WebKit 2/2、生产预览 PWA 1/1，均 0 失败。Web/API/source、6 个候选制品、206 文件 manifest、SBOM 和 provenance 已复验；Android/Windows 仅为未签名诊断制品。这里描述的是**已撤销、未部署的开发候选**；真实 Linux 发布门禁已证明其切换拓扑不可用，线上 Web/API 仍为 1.0.39。完整开发证据见 [1.0.40 候选记录](./releases/1.0.40-candidate.md) 和 [Release Agent 交接](./RELEASE_HANDOFF_1.0.40.md)，生产 No-Go 证据见 [失败发布记录](./releases/1.0.40-no-go-2026-08-13.md)。
 
 > 1.0.40 本地急救保存补充了刷新写入链证明：页面生命周期的同步镜像使用独立 payload/metadata 键，只有 writerId、fencing token、逐键 revision、模式、savedAt、checksum 与持久租约全部连续时才自动提交；崩溃在两次 localStorage 写入之间、元数据损坏、其他标签页来源或候选 checksum/模式不一致时均保留 candidate/persisted 两份原文并要求玩家选择。可信刷新、半写崩溃、损坏候选、普通/速通槽位和租约接管 Chromium 13/13 通过；不会凭时间戳静默删除未知镜像。
 
@@ -100,7 +102,7 @@
 
 > 香港正式节点已按 verified backup → dry-run → stopped-service transaction → post-check 顺序完成一次排行榜完整性处置。只删除 1 条公开 submission 并写入 1 条内部限制；账号、主云档、历史正文和其他同名账号均未删除或改写。上海没有执行该数据处置。
 
-> 香港与上海线上 Web/API 当前为 `1.0.39-fb54f2148dd6`，公网 Build ID 为 `1.0.39+fb54f2148dd6`；上海下载站为不可变目录 `download-site-1.0.38-351c649af9ee`。两地服务和对应定时器 active、`NRestarts=0`。Web/API 直接代码回滚为 1.0.38；上海下载站直接回滚和香港公开 `/canary/previous/` 仍为不可变 1.0.37。两地发布前快照均为 `0600`、`quick_check=ok`、schema v7/layout v2；数据库没有跨节点复制、恢复、替换或初始化。完整证据见 [releases/1.0.39.md](./releases/1.0.39.md)。
+> 香港与上海线上 Web/API 当前为 `1.0.39-fb54f2148dd6`，公网 Build ID 为 `1.0.39+fb54f2148dd6`；上海下载站为不可变目录 `download-site-1.0.38-351c649af9ee`。两地服务和对应定时器 active、`NRestarts=0`。Web/API 直接代码回滚为 1.0.38；上海下载站直接回滚和香港公开 `/canary/previous/` 仍为不可变 1.0.37。1.0.40 门禁使用的两地快照均为 `0600`、`quick_check=ok`、schema v7/layout v2；数据库没有跨节点复制、恢复、替换或初始化。当前收口磁盘约为香港 69%、上海 75%。1.0.39 正式发布证据见 [releases/1.0.39.md](./releases/1.0.39.md)，1.0.40 失败与恢复证据见 [releases/1.0.40-no-go-2026-08-13.md](./releases/1.0.40-no-go-2026-08-13.md)。
 
 ### `1.0.16` 存档冻结修复（双节点已上线）
 
@@ -461,7 +463,7 @@
 
 香港和上海 Web/API 当前为 `1.0.39-fb54f2148dd6`，构建 ID 为 `1.0.39+fb54f2148dd6`。上海下载页和 Windows/Android 稳定清单均保持 `1.0.38`，Android versionCode 为 `1000038`。1.0.39 Web/API、备份、回滚与公网证据见 [releases/1.0.39.md](./releases/1.0.39.md)。
 
-香港与上海 Web/API 直接代码回滚目标为 `1.0.38-351c649af9ee`；上海下载站直接回滚目标为 `download-site-1.0.37-853ecdb12795`。旧版安装包和目录继续保留。固定 Web/API 切换工具路径为 `/usr/local/sbin/dsp-idle-switch-release`，下载页回滚目标记录在 `/var/www/dsp-idle-downloads/release-state/previous-release`，回滚不得恢复数据库。两地 Nginx 应用规则均使用 40 MiB 上传边界、`version.json` no-cache 和 `/var/www/dsp-idle/shared/assets` 历史 hashed-asset 回退；香港 `/canary/previous/` 按用户要求继续指向不可变 1.0.37 Web，退役 1.0.36 fallback 返回 `410`。发布收口磁盘使用率约为香港 79%、上海 85%，继续按 80% 告警、90% 保护阈值监控。
+香港与上海 Web/API 直接代码回滚目标为 `1.0.38-351c649af9ee`；上海下载站直接回滚目标为 `download-site-1.0.37-853ecdb12795`。旧版安装包和目录继续保留。固定 Web/API 切换工具路径为 `/usr/local/sbin/dsp-idle-switch-release`，但 1.0.40 已证明的实现不得再次执行，必须先按 No-Go 记录返修并生成新候选。下载页回滚目标记录在 `/var/www/dsp-idle-downloads/release-state/previous-release`，回滚不得恢复数据库。两地 Nginx 应用规则均使用 40 MiB 上传边界、`version.json` no-cache 和 `/var/www/dsp-idle/shared/assets` 历史 hashed-asset 回退；香港 `/canary/previous/` 按用户要求继续指向不可变 1.0.37 Web，退役 1.0.36 fallback 返回 `410`。2026-08-13 No-Go 收口磁盘使用率约为香港 69%、上海 75%，继续按 80% 告警、90% 保护阈值监控。
 
 首个公网源码快照冻结为 Git 提交 `9acd4460868a4328a1b5e8bb3afbe736c7857e09` 并标记 `v0.1.0`。该标签继续用于追溯原始线上源码；从 `v0.2.0` 起，正式发布使用“产品版本 + Git SHA”的确定性构建 ID。首版证据见 [releases/0.1.0.md](./releases/0.1.0.md)。
 
@@ -469,7 +471,7 @@
 
 | 检查 | 基线结果 |
 | --- | --- |
-| `1.0.40` / v46 开发候选 | 固定运行时 SHA `58d3e6f986ec…`；129 个 Vitest 文件通过/6 跳过，1180 项通过/18 项跳过；Chromium 327/2、Firefox/WebKit 2/2、生产预览 PWA 1/1；server 343/2、ops 34/34、native 24/24；206 文件 source manifest、6 个候选制品、CycloneDX 1.5 SBOM、3-subject provenance、类型检查、125 个运行时许可证、生产构建和根/server 生产依赖审计 0 通过。尚未部署；原生正式签名、实体设备、隔离 Linux 和生产备份副本仍是 Release Agent 门禁 |
+| `1.0.40` / v46 撤销候选 | 固定运行时 SHA `58d3e6f986ec…`；129 个 Vitest 文件通过/6 跳过，1180 项通过/18 项跳过；Chromium 327/2、Firefox/WebKit 2/2、生产预览 PWA 1/1；server 343/2、ops 34/34、native 24/24；206 文件 source manifest、6 个候选制品、CycloneDX 1.5 SBOM、3-subject provenance、类型检查、125 个运行时许可证、生产构建和根/server 生产依赖审计 0 通过。真实 Linux/systemd/Nginx 门禁失败，候选未部署并永久 No-Go；原生正式签名与实体设备步骤未执行 |
 | `1.0.39` / v46 Web/API 正式发布 | 107 个测试文件通过、6 个跳过；950 项 Vitest 通过、18 项跳过；Playwright 282 项通过、11 项条件夹具跳过；服务端 75/2、运维 6/6、原生工具 8/8、163 文件 source manifest、2 文件 candidate manifest、Web 128、API 35、类型检查、128 个运行时许可证和生产构建通过；双节点备份、独立副本隔离、原子切换、真实云 PUT 观察、完整下载 9/9、Range/cache、当前/历史资源、6 场 Chrome 和 1.0.37 PWA 隔离通过；下载与 native stable 保持 1.0.38 |
 | `1.0.38` / v46 正式发布 | 107 个测试文件通过、6 个跳过；950 项 Vitest 通过、18 项跳过；Playwright 280 项通过、11 项条件夹具跳过；服务端 70/2、运维 6/6、原生工具 8/8、161 文件 source manifest、9 文件下载 manifest、10 文件 bundle、类型检查、128 个运行时许可证和生产构建通过；双节点、Android/Windows、下载页、备份、完整哈希、Range、缓存、上一版 chunk、6 场 Chrome smoke 和上一稳定版 PWA 隔离均通过；真机/低配 Windows/Windows 覆盖升级/后台门禁与交接性能残余风险由用户只对本候选明确豁免/接受 |
 | Android `1.0.38 / 1000038` | APK v2/v3、zipalign、批准长期证书连续性、模拟器 `1.0.37 → 1.0.38` 覆盖升级、stable feed、immutable/Range 206 和公网 SHA-256 通过；最低支持代码仍为 `1000002`，未声称物理真机或约一小时后台通过 |

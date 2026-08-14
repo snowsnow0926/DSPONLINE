@@ -4,6 +4,7 @@ import { createInitialState } from "./engine";
 import { createSimulationCommandPatch, serializeSimulationStateForTransfer } from "./simulationRuntimeProtocol";
 import {
   SIMULATION_RUNTIME_RECOVERY_MAX_OPERATIONS,
+  SIMULATION_RUNTIME_RECOVERY_MAX_COMMANDS,
   computeSimulationStateTransferSha256,
   getSimulationRuntimeRecoveryJournalStats,
   shouldRollSimulationRuntimeRecoveryCheckpoint,
@@ -98,9 +99,18 @@ describe("simulation runtime durable recovery semantics", () => {
   });
 
   it("rejects journals beyond the crash-replay bound", async () => {
-    const { checkpoint } = await fixture();
+    const { state, checkpoint } = await fixture();
     const operations = Array.from({ length: SIMULATION_RUNTIME_RECOVERY_MAX_OPERATIONS + 1 }, (_, index) =>
       operation(checkpoint, index + 1, index + 1, { simulationSeconds: 0.5 }));
     expect(validateSimulationRuntimeRecoveryRecord({ checkpoint, operations })).toBe("journal-bound-exceeded");
+
+    const edited = { ...structuredClone(state), paused: !state.paused };
+    const command = createSimulationCommandPatch(state, edited, 1)!;
+    const commandOverflow = Array.from({ length: SIMULATION_RUNTIME_RECOVERY_MAX_COMMANDS + 1 }, (_, index) =>
+      operation(checkpoint, index + 1, index + 1, {
+        command: { ...command, baseRevision: index + 1 },
+        simulationSeconds: 0,
+      }));
+    expect(validateSimulationRuntimeRecoveryRecord({ checkpoint, operations: commandOverflow })).toBe("journal-bound-exceeded");
   });
 });

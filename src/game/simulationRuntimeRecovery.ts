@@ -133,8 +133,10 @@ export function validateSimulationRuntimeRecoveryRecord(
     sequence = operation.sequence;
     revision = operation.nextStateRevision;
   }
+  const stats = getSimulationRuntimeRecoveryJournalStats(checkpoint, operations);
   if (operations.length > SIMULATION_RUNTIME_RECOVERY_MAX_OPERATIONS ||
-    getSimulationRuntimeRecoveryJournalStats(checkpoint, operations).simulationSeconds > SIMULATION_RUNTIME_RECOVERY_MAX_SIMULATION_SECONDS + Number.EPSILON) {
+    stats.commandCount > SIMULATION_RUNTIME_RECOVERY_MAX_COMMANDS ||
+    stats.simulationSeconds > SIMULATION_RUNTIME_RECOVERY_MAX_SIMULATION_SECONDS + Number.EPSILON) {
     return "journal-bound-exceeded";
   }
   return null;

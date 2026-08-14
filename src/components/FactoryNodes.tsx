@@ -55,6 +55,7 @@ import type { CanvasLod } from "../game/canvasPerformance";
 
 export interface FactoryNodeData extends Record<string, unknown> {
   visualSignature: string;
+  presentationSignature: string;
   entity: FactoryEntity;
   cargo: CargoStack | null;
   placement: BuildingId | null;
@@ -100,6 +101,7 @@ export interface FactoryNodeData extends Record<string, unknown> {
   extremeVisuals: boolean;
   acceptedInputItemIds: readonly ItemId[];
   producedOutputItemIds: readonly ItemId[];
+  connectionViewportFull: boolean;
 }
 
 export type FactoryFlowNode = Node<FactoryNodeData, EntityKind>;
@@ -989,6 +991,7 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
   return previous.id === next.id &&
     previous.selected === next.selected &&
     previous.data.visualSignature === next.data.visualSignature &&
+    previous.data.presentationSignature === next.data.presentationSignature &&
     previous.data.entity.position.x === next.data.entity.position.x &&
     previous.data.entity.position.y === next.data.entity.position.y;
 }

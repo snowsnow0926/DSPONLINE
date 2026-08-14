@@ -1254,3 +1254,18 @@ Android `1.0.18 / 1000018` 使用历史长期证书，APK v2/v3 通过，SHA-256
 正式附件还暴露出本热修范围外的运行态 P0：受控 Continue→Pause 为 20,887 ms，Long Task 峰值 20,291 ms。1.0.43 只证明迁移/初次进入、保存和返回持久化链正确且显著有界，不能据此宣称主动模拟可玩性已恢复；1.0.44 必须以 P0 继续优化。
 
 香港 `manifest.webmanifest` 仍继承 1.0.42 的精确响应契约：HTTP 200、413 B、SHA-256 `fc70a386379d0a32eb71fc17a0694d40ad3b1a5ac9b0b61e81a4aa16da0536bf`、`Cache-Control: no-cache`、`Content-Type: application/octet-stream`。Chrome `Page.getAppManifest` 无错误且 PWA ready/controller/offline/update 通过；这不是 `application/manifest+json`，须作为独立 Nginx 技术债修正，不能改写本次既有生产事实。完整证据与回滚状态见 [1.0.43 正式发布记录](./releases/1.0.43.md)。
+
+## 54. `1.0.44` 连线视口呈现专项（开发态）
+
+本项只使用确定性匿名引擎夹具，不读取玩家附件、账号或生产服务。设备偏好测试覆盖缺失、损坏、写入、重载持久化及 GameState 正文不含该键；功能测试覆盖普通 Ctrl 10 节点、极限 Shift 100 节点、source、candidate、viewport、Enter、Escape、移动长按、完整逻辑节点、实际 DOM 和 Handle 数量，以及 expand-all 只等于活动行星节点数。
+
+门禁结果：focused Vitest 10/10，typecheck 通过；新 Chromium 功能项 3/3（开发服务器，性能项按设计跳过），既有 `v127-selection-batch` 14/14，既有 game-flow 连线回归 4/4。production build 为 1,930 modules，startup 总 gzip 185,978 B、JS 94,813 B、CSS 91,165 B，预算通过。既有 `v124-canvas-performance` 在 production preview 为 4/5：四条画布/监控/小地图/回退用例通过，唯一失败是旧测试仍从已迁移清空的 localStorage 读取 GameState 并得到 `missing`，属于 preview harness 不兼容而非运行时断言失败，未据此修改旧测试。
+
+production-preview Chrome 的匿名活动行星为 106 节点，默认与 expand-all 各运行三轮：
+
+| 模式 | entry ms | frame P95 ms | frame max ms | >50ms | logical full | viewport full | rendered full | Handles |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 默认 viewport | 37.1 / 35.3 / 36.4 | 13.9 / 14.0 / 13.9 | 69.6 / 69.5 / 76.4 | 2 / 2 / 2 | 15 / 15 / 15 | 15 / 15 / 15 | 10 / 15 / 10 | 18 / 33 / 18 |
+| expand-all | 16.8 / 15.7 / 15.7 | 7.1 / 7.0 / 7.0 | 111.2 / 111.2 / 111.1 | 1 / 1 / 1 | 106 / 106 / 106 | 18 / 18 / 18 | 10 / 10 / 10 | 18 / 18 / 18 |
+
+默认路径硬门禁为 entry ≤50 ms、组合进入/平移/缩放/取消的 frame P95 ≤33 ms，三轮均通过。max 与 >50ms 保留为原始抖动证据，不以 P95 掩盖；expand-all 逻辑模型明显扩大，设置页必须持续显示卡顿警告，不把该显式兼容路径宣称为性能优化。开发 React validation build 的 entry 为 129～143 ms，因此性能硬门禁只在 production preview 执行，开发服务器仍运行全部功能断言。

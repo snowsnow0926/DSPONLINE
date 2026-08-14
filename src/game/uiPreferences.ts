@@ -9,6 +9,7 @@ export const CONNECTION_POINT_SIZE_PREFERENCE_KEY = "dsp-idle-network.ui.connect
 export const CONNECTION_HIT_AREA_PREFERENCE_KEY = "dsp-idle-network.ui.connection-hit-area.v1";
 export const SPEEDRUN_PANEL_COLLAPSED_PREFERENCE_KEY = "dsp-idle-network.ui.speedrun-panel-collapsed.v1";
 export const DEFAULT_BELT_LANES_PREFERENCE_KEY = "dsp-idle-network.ui.default-belt-lanes.v1";
+export const CONNECT_EXPAND_ALL_PREFERENCE_KEY = "dsp-idle-network.ui.connect-expand-all.v1";
 
 export type SettingsCategory = "all" | "visual" | "performance" | "interaction" | "storage" | "statistics" | "other";
 export type ConnectionPointSize = "default" | "large25" | "large50";
@@ -151,6 +152,23 @@ export function writeDefaultBeltLanesPreference(lanes: number): void {
   const storage = localStorageOrNull();
   if (!storage || !Number.isSafeInteger(lanes) || lanes < 1 || lanes > 4_096) return;
   try { storage.setItem(DEFAULT_BELT_LANES_PREFERENCE_KEY, String(lanes)); } catch { /* optional preference */ }
+}
+
+/** Expand every active-planet node only while connecting. Never persisted in a save. */
+export function readConnectExpandAllPreference(): boolean {
+  const storage = localStorageOrNull();
+  if (!storage) return false;
+  try {
+    return storage.getItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function writeConnectExpandAllPreference(enabled: boolean): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  try { storage.setItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
 }
 
 /** The speedrun panel is expanded by default and is never part of a save. */

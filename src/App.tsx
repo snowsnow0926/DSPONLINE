@@ -341,6 +341,17 @@ import { useSwipeDismiss } from "./hooks/useSwipeDismiss";
 import { useAppLocale } from "./i18n/locale";
 import { createAutomaticRefreshState, resolveProductionRefreshInterval, updateAutomaticRefreshState } from "./game/productionRefresh";
 import { getCanvasLod, shouldAutoOptimizeDenseCanvas, shouldVirtualizeCanvas, type CanvasLod } from "./game/canvasPerformance";
+import {
+  connectionViewportBoundsEqual,
+  createLatestFramePublisher,
+  getConnectionViewportBounds,
+  getNodeConnectionPresentationToken,
+  nodeIsInsideConnectionViewport,
+  resolveNodeConnectionPresentation,
+  type CanvasViewportSize,
+  type ConnectionViewportBounds,
+  type LatestFramePublisher,
+} from "./game/canvasConnectionPresentation";
 import { buildAlignmentSpatialIndex, findAlignmentGuides, type AlignmentSpatialIndex } from "./game/alignmentGuides";
 import { synchronizeGalacticActivity, type GalacticActivityPublicStatus } from "./game/galacticActivity";
 import { TutorialWorkspace } from "./components/TutorialWorkspace";
@@ -362,7 +373,7 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import { readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
 
@@ -781,6 +792,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setDefaultBeltLanes(lanes);
     writeDefaultBeltLanesPreference(lanes);
   }, []);
+  const [connectExpandAll, setConnectExpandAll] = useState(readConnectExpandAllPreference);
+  useEffect(() => { writeConnectExpandAllPreference(connectExpandAll); }, [connectExpandAll]);
   const [showRunLog, setShowRunLog] = useState(readShowRunLogPreference);
   const [showItemHover, setShowItemHover] = useState(readShowItemHoverPreference);
   useEffect(() => { writeShowItemHoverPreference(showItemHover); }, [showItemHover]);
@@ -872,6 +885,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [miningEntityId, setMiningEntityId] = useState<string | null>(null);
   const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuides>({ x: null, y: null });
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
+  const [connectionCandidateNodeId, setConnectionCandidateNodeId] = useState<string | null>(null);
   const [clickConnectionPreview, setClickConnectionPreview] = useState<ClickConnectionPreviewState | null>(null);
   const [clickConnectionTone, setClickConnectionTone] = useState<CanvasConnectionPreviewTone>("pending");
   const [clickConnectionSnapPoint, setClickConnectionSnapPoint] = useState<{ x: number; y: number } | null>(null);
@@ -887,7 +901,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [minimapCanvasFailed, setMinimapCanvasFailed] = useState(false);
   const [pendingBlueprintViewport, setPendingBlueprintViewport] = useState<CanvasViewport>({ ...initialViewport });
   const [minimapViewport, setMinimapViewport] = useState<CanvasViewport>({ ...initialViewport });
-  const [canvasViewportSize, setCanvasViewportSize] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const [canvasViewportSize, setCanvasViewportSize] = useState<CanvasViewportSize>(() => ({ width: window.innerWidth, height: window.innerHeight }));
   const [highlightedTaskId, setHighlightedTaskId] = useState<CampaignTaskId | null>(null);
   const [rewardFlights, setRewardFlights] = useState<RewardFlight[]>([]);
   const [planetTransition, setPlanetTransition] = useState<PlanetTransition | null>(null);
@@ -954,6 +968,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const syntheticTouchCancelRef = useRef(false);
   const connectRequestRef = useRef<(connection: Connection, tier?: BeltTier) => void>(() => undefined);
   const connectionDraftRef = useRef<ConnectionDraft | null>(null);
+  const connectionCandidateNodeIdRef = useRef<string | null>(null);
   const suppressConnectionClickRef = useRef(false);
   const suppressConnectionClickTimerRef = useRef(0);
   const viewportRef = useRef<CanvasViewport>({ ...initialViewport });
@@ -1020,6 +1035,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
   const { screenToFlowPosition, setCenter, setViewport, fitView, getViewport, zoomIn, zoomOut } = useReactFlow();
   const flowStore = useStoreApi<FactoryFlowNode, FactoryFlowEdge>();
+  const updateConnectionCandidateNode = useCallback((nodeId: string | null) => {
+    if (connectionCandidateNodeIdRef.current === nodeId) return;
+    connectionCandidateNodeIdRef.current = nodeId;
+    setConnectionCandidateNodeId(nodeId);
+  }, []);
   useEffect(() => {
     const resetAfterDialog = () => {
       const capture = canvasPointerCaptureRef.current;
@@ -1050,6 +1070,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setClickConnectionSnapPoint(null);
       connectionDraftRef.current = null;
       setConnectionDraft(null);
+      connectionCandidateNodeIdRef.current = null;
+      setConnectionCandidateNodeId(null);
       setConnectionHint(null);
     };
     window.addEventListener(GAME_DIALOG_CLOSED_EVENT, resetAfterDialog);
@@ -1156,7 +1178,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const updateConnectionDraft = useCallback((draft: ConnectionDraft | null) => {
     connectionDraftRef.current = draft;
     setConnectionDraft(draft);
-  }, []);
+    if (!draft) updateConnectionCandidateNode(null);
+  }, [updateConnectionCandidateNode]);
   useEffect(() => {
     if (!canvasWorkspaceHidden || (!connectionDraftRef.current && !clickConnectionPreviewRef.current)) return;
     flowStore.getState().cancelConnection();
@@ -4776,6 +4799,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const denseNodeLodActive = nodeLodFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.nodeLod);
   const denseViewportCullingActive = viewportCullingFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.viewportCulling);
   const denseMinimapThrottleActive = minimapThrottleFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.minimapThrottle);
+  const [connectionViewportBounds, setConnectionViewportBounds] = useState<ConnectionViewportBounds>(() =>
+    getConnectionViewportBounds(initialViewport, { width: window.innerWidth, height: window.innerHeight }));
+  const connectionViewportPublisherRef = useRef<LatestFramePublisher<{ viewport: CanvasViewport; size: CanvasViewportSize }> | null>(null);
+  if (!connectionViewportPublisherRef.current) {
+    connectionViewportPublisherRef.current = createLatestFramePublisher(
+      (callback) => window.requestAnimationFrame(callback),
+      (handle) => window.cancelAnimationFrame(handle),
+      ({ viewport, size }) => {
+        const next = getConnectionViewportBounds(viewport, size);
+        setConnectionViewportBounds((current) => connectionViewportBoundsEqual(current, next) ? current : next);
+      },
+    );
+  }
+  const scheduleConnectionViewport = useCallback((viewport: CanvasViewport, size: CanvasViewportSize) => {
+    connectionViewportPublisherRef.current?.push({ viewport, size });
+  }, []);
+  useEffect(() => () => connectionViewportPublisherRef.current?.cancel(), []);
+  useEffect(() => {
+    if (!connectionDraft) {
+      connectionViewportPublisherRef.current?.cancel();
+      return;
+    }
+    scheduleConnectionViewport(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize);
+  }, [canvasGame.activePlanetId, canvasViewportSize, connectionDraft, scheduleConnectionViewport]);
+  const selectedEntityIdSet = useMemo(() => new Set(selectedEntityIds), [selectedEntityIds]);
+  const activeConnectionViewportBounds = useMemo(() => connectionDraft
+    ? getConnectionViewportBounds(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize)
+    : connectionViewportBounds,
+  [canvasViewportSize, connectionDraft, connectionViewportBounds]);
   const canvasBatchRendererEnabled = (canvasBeltsFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.canvasBelts)) &&
     !canvasBatchFailed && activePlanetBelts.length >= 180;
   const canvasDisplayLookup = useMemo(
@@ -4888,7 +4940,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return { entityIds, beltIds, itemIds };
   }, [activePlanetBelts, activePlanetEntities, canvasGame, highlightedTaskId]);
 
-  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds">>(() => {
+  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
     const planetProfile = getPlanetIndustrialProfile(canvasGame, canvasGame.activePlanetId);
@@ -4921,14 +4973,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       windGenerationMultiplier: planetProfile.windMultiplier,
       geothermalGenerationMultiplier: planetProfile.geothermalMultiplier,
       activeLogisticsEntityIds: beltNodeIndex.activeEntityIds,
-      connectionDraft,
       dysonSwarm: canvasGame.dysonSwarm,
       dysonSphere: canvasGame.dysonSphere,
       timeWarp: canvasGame.timeWarp,
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, connectionDraft, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
 
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
@@ -4949,11 +5000,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const status = getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
           const outputCapacity = getEntityOutputCapacity(canvasGame, entity);
           const cycleRatePerSecond = getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
-          const selected = selectedEntityIds.includes(entity.id);
+          const selected = selectedEntityIdSet.has(entity.id);
           const preserveMobileConstructionCenterDetail = nextMobileShell && game.settings.fontScale >= 2 && entity.buildingId === "construction_center";
-          const interactionNeedsFullNode = selected || preserveMobileConstructionCenterDetail || !denseNodeLodActive || Boolean(placement || blueprintPlacementId || connectionDraft);
-          const zoomLod = getCanvasLod(viewportZoom);
-          const lod: CanvasLod = interactionNeedsFullNode ? "full" : zoomLod === "full" ? "medium" : zoomLod;
+          const connectionViewportFull = Boolean(connectionDraft) && nodeIsInsideConnectionViewport({
+            x: entity.position.x,
+            y: entity.position.y,
+            width: previous?.measured?.width,
+            height: previous?.measured?.height,
+          }, activeConnectionViewportBounds, previous?.data.connectionViewportFull ?? false);
+          const connectionPresentation = resolveNodeConnectionPresentation({
+            connectionActive: Boolean(connectionDraft),
+            expandAll: connectExpandAll,
+            source: connectionDraft?.nodeId === entity.id,
+            selected,
+            candidate: connectionCandidateNodeId === entity.id,
+            viewport: connectionViewportFull,
+            preserveFullDetail: preserveMobileConstructionCenterDetail,
+            blockingInteraction: Boolean(placement || blueprintPlacementId),
+            denseNodeLodActive,
+            zoom: viewportZoom,
+          });
+          const lod: CanvasLod = connectionPresentation.lod;
+          const nodeConnectionDraft = connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
           const acceptedInputItemIds = getAcceptedInputs(entity, canvasGame);
           const producedOutputItemIds = getProducedOutputs(entity);
           const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
@@ -4972,20 +5040,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             : focusedBeltNetwork
               ? focusedNetworkEntityIds.has(entity.id) ? "factory-flow-node--network-focus" : "factory-flow-node--network-dim"
               : undefined;
-          const connectionClassName = connectionDraft
-            ? entity.id === connectionDraft.nodeId
+          const connectionClassName = nodeConnectionDraft
+            ? entity.id === nodeConnectionDraft.nodeId
               ? "factory-flow-node--connection-origin"
-              : connectionDraft.handleType === "source"
-                ? connectionDraft.itemId && canEntityAcceptBeltItem(canvasGame, entity, connectionDraft.itemId)
+              : nodeConnectionDraft.handleType === "source"
+                ? nodeConnectionDraft.itemId && canEntityAcceptBeltItem(canvasGame, entity, nodeConnectionDraft.itemId)
                   ? "factory-flow-node--connection-candidate"
                   : undefined
-                : connectionDraft.itemId === null
+                : nodeConnectionDraft.itemId === null
                   ? producedOutputItemIds.length > 0 ? "factory-flow-node--connection-candidate" : undefined
-                  : producedOutputItemIds.includes(connectionDraft.itemId)
+                  : producedOutputItemIds.includes(nodeConnectionDraft.itemId)
                     ? "factory-flow-node--connection-candidate"
                     : undefined
             : undefined;
-          const className = [focusClassName, connectionClassName].filter(Boolean).join(" ") || undefined;
+          const className = [`factory-flow-node--lod-${lod}`, focusClassName, connectionClassName].filter(Boolean).join(" ");
           const draggable = !placement && !blueprintPlacementId && !entity.interactionLocked;
           const visualSignature = [
             visualEntitySignature(entity),
@@ -5005,7 +5073,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             commonNodeData.miningEntityId === entity.id,
             commonNodeData.paused,
             commonNodeData.simulationMultiplier,
-            commonNodeData.connectionDraft,
             activeLogisticsEntityIdSet.has(entity.id),
             entity.kind === "machine" || entity.kind === "power" ? commonNodeData.completedTechIds : null,
             entity.recipeId === "matrix_research" ? [commonNodeData.researchLabel, commonNodeData.researchCosts] : null,
@@ -5014,15 +5081,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             entity.buildingId === "time_warp_device" ? commonNodeData.timeWarp : null,
             entity.kind === "power" ? [commonNodeData.solarGenerationMultiplier, commonNodeData.windGenerationMultiplier, commonNodeData.geothermalGenerationMultiplier] : null,
             commonNodeData.powerDemandMultiplier,
+            acceptedInputItemIds,
+            producedOutputItemIds,
+          ].join("|");
+          const presentationSignature = [
+            getNodeConnectionPresentationToken(nodeConnectionDraft, entity.id, connectionPresentation.exposeConnectionDraft),
             selected,
             className,
             draggable,
             lod,
             commonNodeData.extremeVisuals,
-            acceptedInputItemIds,
-            producedOutputItemIds,
           ].join("|");
-          if (previous?.data.visualSignature === visualSignature &&
+          if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.selected === selected && previous.className === className && previous.draggable === draggable) return previous;
           return {
@@ -5033,6 +5103,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             data: {
               ...commonNodeData,
               visualSignature,
+              presentationSignature,
               entity,
               connectedInputItemIds,
               inputBeltCounts,
@@ -5045,6 +5116,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               outputCapacity,
               cycleRatePerSecond,
               lod,
+              connectionDraft: nodeConnectionDraft,
+              connectionViewportFull,
               acceptedInputItemIds,
               producedOutputItemIds,
             } as unknown as FactoryNodeData,
@@ -5063,7 +5136,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasDisplayLookup, canvasGame, canvasTopology.targetPortItemsByEntity, commonNodeData, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIds, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasDisplayLookup, canvasGame, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   const handleNodesChange = useCallback((changes: Parameters<typeof onNodesChange>[0]) => {
     onNodesChange(changes);
@@ -5489,16 +5562,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const handleCanvasPointerPosition = useCallback((point: { x: number; y: number }) => {
     pointerRef.current = point;
     const preview = clickConnectionPreviewRef.current;
-    if (!preview) return;
+    const draft = preview?.draft ?? connectionDraftRef.current;
+    if (!draft) {
+      updateConnectionCandidateNode(null);
+      return;
+    }
     const handle = findConnectionHandleAtPoint(
       point.x,
       point.y,
       connectionHitRadius,
-      (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
+      (candidate) => isValidConnection(connectionFromDraft(draft, candidate)),
       connectionHandleSpatialIndexRef.current,
     );
-    const overOrigin = handle?.nodeId === preview.draft.nodeId && handle.handleType === preview.draft.handleType &&
-      handle.handleId === preview.draft.handleId;
+    const overOrigin = handle?.nodeId === draft.nodeId && handle.handleType === draft.handleType &&
+      handle.handleId === draft.handleId;
+    updateConnectionCandidateNode(overOrigin ? null : handle?.nodeId ?? null);
+    if (!preview) return;
     const tone = !handle || overOrigin
       ? "pending"
       : isValidConnection(connectionFromDraft(preview.draft, handle)) ? "valid" : "invalid";
@@ -5529,7 +5608,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       label: forecast ? `${ITEMS[connectionItem].name} · ${forecast.label}` : `${ITEMS[connectionItem].name} · 可以连接`,
       tone: forecast?.tone === "capacity" || forecast?.tone === "starved" ? "blocked" : "ready",
     });
-  }, [connectionHitRadius, isValidConnection]);
+  }, [connectionHitRadius, isValidConnection, updateConnectionCandidateNode]);
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
     const endPoint = getEventPoint(event);
@@ -6718,6 +6797,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const mobileSheetSnap = mobileNavigation.overlay?.kind === "sheet" ? mobileNavigation.overlay.snap : "none";
   const mobileRouteId = mobileNavigation.route.kind;
   const mobileWorkspaceSubview = mobileNavigation.route.kind === "workspace" ? mobileNavigation.route.subview ?? null : null;
+  const connectionFullLogicalCount = useMemo(
+    () => nodes.reduce((count, node) => count + (node.data.lod === "full" ? 1 : 0), 0),
+    [nodes],
+  );
+  const connectionViewportLogicalCount = useMemo(
+    () => nodes.reduce((count, node) => count + (node.data.connectionViewportFull ? 1 : 0), 0),
+    [nodes],
+  );
+  const connectionViewportToken = [
+    activeConnectionViewportBounds.enter.left,
+    activeConnectionViewportBounds.enter.top,
+    activeConnectionViewportBounds.enter.right,
+    activeConnectionViewportBounds.enter.bottom,
+  ].map((value) => value.toFixed(2)).join(":");
   const headerActiveWorkspace = operationsOpen && operationsTab === "settings" ? "settings"
     : galaxyOpen ? "galaxy"
       : campaignOpen ? "campaign"
@@ -6769,6 +6862,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-connection-point-size={connectionPointSize}
       data-connection-hit-area={connectionHitArea}
       data-connection-hit-diameter={connectionHitDiameter}
+      data-connect-expand-all={connectExpandAll ? "true" : "false"}
+      data-connection-active={connectionDraft ? "true" : "false"}
+      data-connection-candidate-node={connectionCandidateNodeId ?? "none"}
+      data-connection-full-logical-count={connectionFullLogicalCount}
+      data-connection-viewport-logical-count={connectionViewportLogicalCount}
+      data-connection-viewport-token={connectionViewportToken}
+      data-active-planet-node-count={activePlanetEntities.length}
       data-canvas-extreme-visuals={extremeVisualsActive ? "true" : "false"}
       data-canvas-node-lod={denseNodeLodActive ? "true" : "false"}
       data-canvas-viewport-culling={denseViewportCullingActive ? "true" : "false"}
@@ -7280,6 +7380,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               viewportRef.current = viewport;
               if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
               canvasBeltLayerRef.current?.setViewport(viewport);
+              if (connectionDraftRef.current) scheduleConnectionViewport(viewport, canvasSizeRef.current ?? canvasViewportSize);
               if (blueprintPlacementId) setPendingBlueprintViewport(viewport);
               const currentLod = getCanvasLod(viewportZoom);
               const nextLod = getCanvasLod(viewport.zoom);
@@ -7289,6 +7390,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onMoveEnd={(_event, viewport) => {
               viewportRef.current = viewport;
               if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
+              if (connectionDraftRef.current) scheduleConnectionViewport(viewport, canvasSizeRef.current ?? canvasViewportSize);
               canvasPinchLodRef.current = getCanvasLod(viewport.zoom);
               setViewportZoom(viewport.zoom);
               setPendingBlueprintViewport(viewport);
@@ -8077,6 +8179,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             productionRefreshPreference={productionRefreshPreference}
             productionRefreshIntervalMs={productionRefreshIntervalMs}
             endgameExtremeMode={endgameExtremeMode}
+            connectExpandAll={connectExpandAll}
             canvasPerformanceFeatures={canvasPerformanceFeatures}
             lineFindMode={lineFindMode}
             connectionPointSize={connectionPointSize}
@@ -8085,6 +8188,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             showRunLog={showRunLog}
             showItemHover={showItemHover}
             onEndgameExtremeModeChange={toggleEndgameExtremeMode}
+            onConnectExpandAllChange={setConnectExpandAll}
             onCanvasPerformanceFeatureChange={updateCanvasPerformanceFeature}
             onLineFindModeChange={setLineFindMode}
             onConnectionPointSizeChange={setConnectionPointSize}

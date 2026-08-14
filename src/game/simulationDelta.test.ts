@@ -25,6 +25,23 @@ describe("experimental simulation delta protocol", () => {
     expect(applied.entities.filter((entity) => entity.id === "new-entity")).toHaveLength(1);
   });
 
+  it("never duplicates entity or belt arrays inside top-level fields", () => {
+    const previous = createInitialState();
+    const current = structuredClone(previous);
+    current.entities[0].progress = 0.5;
+    const delta = createSimulationStateDelta(previous, current, 2, 3);
+    expect(delta.topLevel).not.toHaveProperty("entities");
+    expect(delta.topLevel).not.toHaveProperty("belts");
+  });
+
+  it("detects mutations when callers capture an alias-safe pre-step snapshot", () => {
+    const runtime = createInitialState();
+    const previous = structuredClone(runtime);
+    runtime.entities[0].progress = 0.875;
+    const delta = createSimulationStateDelta(previous, runtime, 3, 4);
+    expect(delta.changedEntities.map((entity) => entity.id)).toContain(runtime.entities[0].id);
+  });
+
   it("rejects a delta when changing most records would be larger than full state", () => {
     const previous = createInitialState();
     previous.entities = Array.from({ length: 96 }, (_, index) => ({

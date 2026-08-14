@@ -43,7 +43,12 @@ export function createSimulationStateDelta(previous: GameState, current: GameSta
   const entities = changedRecords(previous.entities, current.entities);
   const belts = changedRecords(previous.belts, current.belts);
   const topLevel = {} as SimulationStateDelta["topLevel"];
-  for (const key of Object.keys(current) as Array<keyof Omit<GameState, "entities" | "belts">>) {
+  // The type assertion used by the original experimental implementation did
+  // not filter runtime keys. At runtime `Object.keys` still contains the two
+  // large record arrays, duplicating them inside `topLevel` and defeating the
+  // delta protocol entirely.
+  for (const key of Object.keys(current) as Array<keyof GameState>) {
+    if (key === "entities" || key === "belts") continue;
     if (serialized(previous[key]) !== serialized(current[key])) {
       (topLevel as Record<string, unknown>)[key] = current[key];
     }

@@ -6,6 +6,7 @@ import {
 } from "./localSaveCoordination";
 import {
   localSaveCatalogRecordKey,
+  parseLocalSaveCatalog,
   serializeLocalSaveCatalog,
   type LocalSaveCatalog,
 } from "./localSaveCatalog";
@@ -73,15 +74,15 @@ export async function indexLegacyLocalSaveCatalog(
   const readTransaction = database.transaction(storeName, "readonly");
   const readDone = transactionDone(readTransaction);
   const readStore = readTransaction.objectStore(storeName);
-  const [payloadRecord, existingCatalog, revisionRecord] = await Promise.all([
+  const [payloadRecord, revisionRecord] = await Promise.all([
     requestResult(readStore.get(key) as IDBRequest<StoredRecord | undefined>),
-    requestResult(readStore.get(localSaveCatalogRecordKey(key)) as IDBRequest<StoredRecord | undefined>),
     requestResult(readStore.get(localSaveRevisionKey(key)) as IDBRequest<StoredRecord | undefined>),
   ]);
   await readDone;
-  if (!payloadRecord || existingCatalog) return null;
+  if (!payloadRecord) return null;
   const revision = parseLocalSaveRevision(revisionRecord?.value);
   const built = await buildOffMain(key, payloadRecord.value, revision?.revision ?? 0);
+  const expectedCatalogValue = serializeLocalSaveCatalog(built.catalog);
 
   const writeTransaction = database.transaction(storeName, "readwrite");
   const writeDone = transactionDone(writeTransaction);
@@ -96,14 +97,26 @@ export async function indexLegacyLocalSaveCatalog(
   const lease = parseLocalSaveWriterLease(leaseRecord?.value);
   const unchangedRevision = (currentRevision?.revision ?? 0) === (revision?.revision ?? 0) &&
     (currentRevision?.checksum ?? null) === (revision?.checksum ?? null) &&
-    (currentRevision?.savedAt ?? 0) === (revision?.savedAt ?? 0);
+    (currentRevision?.savedAt ?? 0) === (revision?.savedAt ?? 0) &&
+    (currentRevisionRecord?.value ?? null) === (revisionRecord?.value ?? null);
   const leaseMatches = lease?.ownerId === writer.writerId && lease.fencingToken === writer.fencingToken && lease.expiresAt > Date.now();
-  if (!currentPayload || currentCatalog || currentPayload.value !== payloadRecord.value || !unchangedRevision || !leaseMatches) {
+  if (!currentPayload || currentPayload.value !== payloadRecord.value || !unchangedRevision || !leaseMatches) {
     await writeDone;
     return null;
   }
-  const value = serializeLocalSaveCatalog(built.catalog);
+  const parsedCurrentCatalog = parseLocalSaveCatalog(currentCatalog?.value, key);
+  if (parsedCurrentCatalog && currentCatalog?.value === expectedCatalogValue) {
+    await writeDone;
+    return { catalog: parsedCurrentCatalog, updatedAt: currentPayload.updatedAt, worker: built.worker };
+  }
+  const value = expectedCatalogValue;
   writeStore.put({ key: localSaveCatalogRecordKey(key), value, updatedAt: Date.now(), bytes: new TextEncoder().encode(value).byteLength } satisfies StoredRecord);
+  const readback = await requestResult(writeStore.get(localSaveCatalogRecordKey(key)) as IDBRequest<StoredRecord | undefined>);
+  if (readback?.value !== value) {
+    writeTransaction.abort();
+    void writeDone.catch(() => undefined);
+    throw new DOMException("IndexedDB catalog repair read-back failed", "DataError");
+  }
   await writeDone;
   return { catalog: built.catalog, updatedAt: payloadRecord.updatedAt, worker: built.worker };
 }

@@ -3,6 +3,8 @@ import {
   SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_JOURNAL_BYTES,
   SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_STAGED_INTENT_BYTES,
   SIMULATION_RUNTIME_DURABLE_RECOVERY_GZIP_BYTES_PER_HOUR,
+  SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS,
+  SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_TRANSFER_CADENCE_EVENTS,
   SIMULATION_RUNTIME_DURABLE_RECOVERY_MIN_TRANSFER_INTERVAL_MS,
   SIMULATION_RUNTIME_DURABLE_RECOVERY_RAW_BYTES_PER_HOUR,
   SIMULATION_RUNTIME_DURABLE_RECOVERY_TRANSFER_WINDOW_MS,
@@ -46,8 +48,6 @@ const JOURNAL_RECORD_PREFIX = `${SIMULATION_RUNTIME_RECOVERY_RECORD_PREFIX}.jour
 const PENDING_INTENT_RECORD_PREFIX = `${SIMULATION_RUNTIME_RECOVERY_RECORD_PREFIX}.pending-intent.`;
 const BACKOFF_STORAGE_MS = 5_000;
 const BACKOFF_QUOTA_MS = 30_000;
-const MAX_TRANSFER_CADENCE_EVENTS = 32;
-const MAX_PRIMARY_REBASE_CADENCE_EVENTS = 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -83,6 +83,7 @@ export interface SimulationRuntimeRecoveryDurableProof {
   resultStateRevision?: number;
   requiresCheckpointBarrier?: boolean;
   recoveredFromPrevious?: true;
+  quarantinedCorruptRecovery?: true;
 }
 
 export interface SimulationRuntimeRecoveryPreparedIntent {
@@ -138,6 +139,7 @@ export type SimulationRuntimeRecoveryReadResult =
       ok: true;
       recovery: SimulationRuntimeDurableRecoveryReadRecord | null;
       proof: SimulationRuntimeRecoveryDurableProof | null;
+      diagnostic?: "corrupt-recovery-quarantined";
     }
   | SimulationRuntimeRecoveryFailure;
 
@@ -150,6 +152,7 @@ export type SimulationRuntimeRecoveryClearResult =
       ok: true;
       cleared: boolean;
       proof: SimulationRuntimeRecoveryDurableProof | null;
+      diagnostic?: "corrupt-recovery-quarantined";
     }
   | SimulationRuntimeRecoveryFailure;
 
@@ -357,20 +360,26 @@ async function durablePrimaryMatchesBase(
   store: IDBObjectStore,
   baseIdentity: SimulationRuntimeRecoveryBaseIdentity,
 ): Promise<boolean> {
-  const saveKey = primarySaveKey(baseIdentity.mode);
+  const current = await readDurablePrimaryIdentity(store, baseIdentity.mode);
+  return Boolean(current && sameBaseIdentity(current, baseIdentity));
+}
+
+async function readDurablePrimaryIdentity(
+  store: IDBObjectStore,
+  mode: SaveMode,
+): Promise<SimulationRuntimeRecoveryBaseIdentity | null> {
+  const saveKey = primarySaveKey(mode);
   const [catalogRecord, revisionRecord] = await Promise.all([
     requestResult(store.get(localSaveCatalogRecordKey(saveKey)) as IDBRequest<StoredStringRecord | undefined>),
     requestResult(store.get(localSaveRevisionKey(saveKey)) as IDBRequest<StoredStringRecord | undefined>),
   ]);
   const catalog = parseLocalSaveCatalog(catalogRecord?.value, saveKey);
   const revision = parseLocalSaveRevision(revisionRecord?.value);
-  const revisionMatches = revision
-    ? revision.saveKey === saveKey && !revision.deleted && revision.revision === baseIdentity.revision &&
-      revision.savedAt === baseIdentity.savedAt && revision.checksum === baseIdentity.checksum
-    : baseIdentity.revision === 0;
-  return Boolean(catalog && catalog.mode === baseIdentity.mode && catalog.savedAt === baseIdentity.savedAt &&
-    catalog.stateChecksum === baseIdentity.checksum && catalog.integrity === "valid" &&
-    catalog.revision === baseIdentity.revision && revisionMatches);
+  if (!catalog || catalog.mode !== mode || catalog.kind !== "primary" || catalog.integrity !== "valid" ||
+    !catalog.stateChecksum || (revision ? revision.saveKey !== saveKey || revision.deleted ||
+      revision.revision !== catalog.revision || revision.savedAt !== catalog.savedAt ||
+      revision.checksum !== catalog.stateChecksum : catalog.revision !== 0)) return null;
+  return { mode, savedAt: catalog.savedAt, checksum: catalog.stateChecksum, revision: catalog.revision };
 }
 
 async function durablePrimaryMatchesBaseInDatabase(
@@ -397,11 +406,13 @@ function validCadence(value: unknown): value is SimulationRuntimeDurableCheckpoi
   const cadence = value as Partial<SimulationRuntimeDurableCheckpointCadence>;
   if (!(typeof cadence.windowStartedAtMs === "number" && Number.isFinite(cadence.windowStartedAtMs) &&
     typeof cadence.lastTransferAtMs === "number" && Number.isFinite(cadence.lastTransferAtMs) &&
-    Array.isArray(cadence.transferEvents) && cadence.transferEvents.length <= MAX_TRANSFER_CADENCE_EVENTS &&
+    Array.isArray(cadence.transferEvents) &&
+    cadence.transferEvents.length <= SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_TRANSFER_CADENCE_EVENTS &&
     cadence.transferEvents.every((event) => event &&
       typeof event.committedAtMs === "number" && Number.isFinite(event.committedAtMs) &&
       (event.encoding === "raw" || event.encoding === "gzip") && Number.isSafeInteger(event.bytes) && event.bytes >= 0) &&
-    Array.isArray(cadence.primaryRebaseEventsMs) && cadence.primaryRebaseEventsMs.length <= MAX_PRIMARY_REBASE_CADENCE_EVENTS &&
+    Array.isArray(cadence.primaryRebaseEventsMs) &&
+    cadence.primaryRebaseEventsMs.length <= SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS &&
     cadence.primaryRebaseEventsMs.every((time) => typeof time === "number" && Number.isFinite(time)) &&
     Number.isSafeInteger(cadence.transferCountInWindow) && cadence.transferCountInWindow! >= 0 &&
     Number.isSafeInteger(cadence.primaryRebaseCountInWindow) && cadence.primaryRebaseCountInWindow! >= 0 &&
@@ -734,6 +745,75 @@ async function readLeaseAndHead(
   const head = parseHead(raw, mode);
   if (raw && !head) throw new RecoveryStoreError("corrupt", "模拟恢复 head 已损坏", true);
   return { raw, head };
+}
+
+async function quarantineCorruptRecoveryHead(
+  db: IDBDatabase,
+  mode: SaveMode,
+  expectedRaw: string,
+  fence: SimulationRuntimeRecoveryWriterFence,
+  expectedBase?: SimulationRuntimeRecoveryBaseIdentity,
+): Promise<boolean> {
+  const transaction = db.transaction(RECORD_STORE, "readwrite");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const now = Date.now();
+  if (!await renewLeaseInStore(store, fence, now)) {
+    await done;
+    throw new RecoveryStoreError("lease-lost", "隔离损坏 recovery head 前 writer lease 已失效");
+  }
+  const [currentHead, primaryIdentity, keys] = await Promise.all([
+    requestResult(store.get(headKey(mode)) as IDBRequest<StoredStringRecord | undefined>),
+    readDurablePrimaryIdentity(store, mode),
+    requestResult(store.getAllKeys() as IDBRequest<IDBValidKey[]>),
+  ]);
+  if (currentHead?.value !== expectedRaw || parseHead(currentHead.value, mode) !== null) {
+    await done;
+    return false;
+  }
+  if (!primaryIdentity || expectedBase && !sameBaseIdentity(primaryIdentity, expectedBase)) {
+    await done;
+    throw new RecoveryStoreError("cas-mismatch", "损坏 recovery head 与当前有效 primary BaseIdentity 无法绑定");
+  }
+  store.delete(headKey(mode));
+  store.delete(pendingIntentKey(mode));
+  for (const key of keys) {
+    if (typeof key === "string" && isGenerationRecordForMode(key, mode)) store.delete(key);
+  }
+  const [headReadback, pendingReadback, keysReadback] = await Promise.all([
+    requestResult(store.get(headKey(mode)) as IDBRequest<StoredStringRecord | undefined>),
+    requestResult(store.get(pendingIntentKey(mode)) as IDBRequest<StoredPendingIntentRecord | undefined>),
+    requestResult(store.getAllKeys() as IDBRequest<IDBValidKey[]>),
+  ]);
+  if (headReadback !== undefined || pendingReadback !== undefined || keysReadback.some((key) =>
+    typeof key === "string" && isGenerationRecordForMode(key, mode))) {
+    transaction.abort();
+    void done.catch(() => undefined);
+    throw new RecoveryStoreError("readback-failed", "损坏 recovery 记录隔离事务内回读失败", true);
+  }
+  await done;
+  if (await readRawHead(db, mode) !== null) {
+    throw new RecoveryStoreError("readback-failed", "损坏 recovery head 隔离提交后回读失败", true);
+  }
+  return true;
+}
+
+async function readLeaseAndRecoverableHead(
+  db: IDBDatabase,
+  mode: SaveMode,
+  fence: SimulationRuntimeRecoveryWriterFence,
+  expectedBase?: SimulationRuntimeRecoveryBaseIdentity,
+): Promise<HeadSnapshot & { quarantined: boolean }> {
+  try {
+    return { ...await readLeaseAndHead(db, mode, fence), quarantined: false };
+  } catch (error) {
+    if (!(error instanceof RecoveryStoreError) || error.reason !== "corrupt") throw error;
+    const raw = await readRawHead(db, mode);
+    if (!raw) return { raw: null, head: null, quarantined: false };
+    const quarantined = await quarantineCorruptRecoveryHead(db, mode, raw, fence, expectedBase);
+    if (!quarantined) return { ...await readLeaseAndHead(db, mode, fence), quarantined: false };
+    return { raw: null, head: null, quarantined: true };
+  }
 }
 
 async function readLeaseAndSessionHead(
@@ -1555,7 +1635,11 @@ export async function readSimulationRuntimeRecovery(
   try {
     validatePublicInputs(fence, baseIdentity);
     const db = await openRecoveryDatabase();
-    const snapshot = await readLeaseAndHead(db, baseIdentity.mode, fence);
+    const snapshot = await readLeaseAndRecoverableHead(db, baseIdentity.mode, fence, baseIdentity);
+    if (snapshot.quarantined) {
+      clearBackoff();
+      return { ok: true, recovery: null, proof: null, diagnostic: "corrupt-recovery-quarantined" };
+    }
     if (!await durablePrimaryMatchesBaseInDatabase(db, baseIdentity) || !snapshot.head ||
       !sameBaseIdentity(snapshot.head.active.baseIdentity, baseIdentity)) {
       return { ok: true, recovery: null, proof: null };
@@ -1620,7 +1704,7 @@ export async function initializeSimulationRuntimeRecovery(
     validatePublicInputs(fence, checkpoint.baseIdentity);
     if (checkpoint.generation !== 1) throw new RecoveryStoreError("invalid", "initialize 只接受 generation 1");
     const db = await openRecoveryDatabase();
-    const snapshot = await readLeaseAndHead(db, checkpoint.baseIdentity.mode, fence);
+    const snapshot = await readLeaseAndRecoverableHead(db, checkpoint.baseIdentity.mode, fence, checkpoint.baseIdentity);
     const prepared = await prepareCheckpoint(checkpoint, fence, undefined);
     let replacingStaleBase = false;
     if (snapshot.head) {
@@ -1667,6 +1751,7 @@ export async function initializeSimulationRuntimeRecovery(
       "any",
     );
     await clearPendingIntentForPublishedCheckpoint(db, checkpoint.baseIdentity.mode, prepared.reference, "any", fence);
+    if (snapshot.quarantined) result.proof.quarantinedCorruptRecovery = true;
     clearBackoff();
     return result;
   } catch (error) {
@@ -1924,9 +2009,12 @@ export async function commitSimulationRuntimeRecoveryCheckpoint(
       throw new RecoveryStoreError("invalid", "下一恢复 generation 必须精确递增 1");
     }
     const db = await openRecoveryDatabase();
-    const snapshot = await readLeaseAndHead(db, nextCheckpoint.baseIdentity.mode, fence);
+    const snapshot = await readLeaseAndRecoverableHead(db, nextCheckpoint.baseIdentity.mode, fence, nextCheckpoint.baseIdentity);
+    if (!snapshot.head) throw new RecoveryStoreError(
+      "cas-mismatch",
+      snapshot.quarantined ? "损坏 recovery 已隔离且主存档未改动；请从primary重新初始化恢复会话" : "滚动恢复 checkpoint 时 head 不存在",
+    );
     const prepared = await prepareCheckpoint(nextCheckpoint, fence, absorbedIntent);
-    if (!snapshot.head) throw new RecoveryStoreError("cas-mismatch", "滚动恢复 checkpoint 时 head 不存在");
 
     // A transaction may have committed before the Worker received its result.
     // Re-validate the active generation and return the same proof instead of
@@ -2068,7 +2156,12 @@ export async function clearSimulationRuntimeRecovery(
       throw new RecoveryStoreError("invalid", "clear session identity 无效");
     }
     const db = await openRecoveryDatabase();
-    const snapshot = await readLeaseAndHead(db, target.mode, fence);
+    const snapshot = await readLeaseAndRecoverableHead(
+      db,
+      target.mode,
+      fence,
+      "sessionId" in target ? undefined : target,
+    );
     if (!snapshot.head) {
       const transaction = db.transaction(RECORD_STORE, "readwrite");
       const done = transactionDone(transaction);
@@ -2105,7 +2198,12 @@ export async function clearSimulationRuntimeRecovery(
       }
       await done;
       clearBackoff();
-      return { ok: true, cleared, proof: null };
+      return {
+        ok: true,
+        cleared: cleared || snapshot.quarantined,
+        proof: null,
+        ...(snapshot.quarantined ? { diagnostic: "corrupt-recovery-quarantined" as const } : {}),
+      };
     }
     const matches = "sessionId" in target
       ? snapshot.head.active.sessionId === target.sessionId

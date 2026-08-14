@@ -14,6 +14,8 @@ export const SIMULATION_RUNTIME_DURABLE_RECOVERY_MIN_TRANSFER_INTERVAL_MS = 5 * 
 export const SIMULATION_RUNTIME_DURABLE_RECOVERY_TRANSFER_WINDOW_MS = 60 * 60_000;
 export const SIMULATION_RUNTIME_DURABLE_RECOVERY_GZIP_BYTES_PER_HOUR = 64 * 1024 * 1024;
 export const SIMULATION_RUNTIME_DURABLE_RECOVERY_RAW_BYTES_PER_HOUR = 128 * 1024 * 1024;
+export const SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_TRANSFER_CADENCE_EVENTS = 32;
+export const SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS = 1024;
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -525,8 +527,11 @@ export function advanceSimulationRuntimeDurableCheckpointCadence(
   now = Date.now(),
 ): SimulationRuntimeDurableCheckpointCadence {
   const cutoff = now - SIMULATION_RUNTIME_DURABLE_RECOVERY_TRANSFER_WINDOW_MS;
-  const transferEvents = (previous?.transferEvents ?? []).filter((event) => event.committedAtMs > cutoff && event.committedAtMs <= now);
-  const primaryRebaseEventsMs = (previous?.primaryRebaseEventsMs ?? []).filter((committedAtMs) => committedAtMs > cutoff && committedAtMs <= now);
+  const transferEvents = (previous?.transferEvents ?? []).filter((event) => event.committedAtMs > cutoff && event.committedAtMs <= now)
+    .slice(-(SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_TRANSFER_CADENCE_EVENTS - 1));
+  const primaryRebaseEventsMs = (previous?.primaryRebaseEventsMs ?? [])
+    .filter((committedAtMs) => committedAtMs > cutoff && committedAtMs <= now)
+    .slice(-(SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS - 1));
   const base = {
     windowStartedAtMs: Math.max(0, cutoff),
     lastTransferAtMs: previous?.lastTransferAtMs ?? 0,
@@ -567,7 +572,16 @@ export function validateSimulationRuntimeDurableCheckpointCadence(
   checkpoint: SimulationRuntimeDurableCheckpoint,
   now = Date.now(),
 ): string | null {
-  if (checkpoint.source === "primary") return null;
+  if (previous && (previous.transferEvents.length > SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_TRANSFER_CADENCE_EVENTS ||
+    previous.primaryRebaseEventsMs.length > SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS)) {
+    return "invalid-cadence-event-bound";
+  }
+  if (checkpoint.source === "primary") {
+    const next = advanceSimulationRuntimeDurableCheckpointCadence(previous, checkpoint, now);
+    return next.primaryRebaseEventsMs.length <= SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_PRIMARY_REBASE_CADENCE_EVENTS
+      ? null
+      : "primary-rebase-event-bound-exceeded";
+  }
   const hourlyBudget = checkpoint.transfer.encoding === "gzip"
     ? SIMULATION_RUNTIME_DURABLE_RECOVERY_GZIP_BYTES_PER_HOUR
     : SIMULATION_RUNTIME_DURABLE_RECOVERY_RAW_BYTES_PER_HOUR;

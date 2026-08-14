@@ -277,4 +277,25 @@ describe("durable simulation runtime recovery contract", () => {
       boundaryStart + 2_000,
     )).toBe("transfer-checkpoint-too-frequent");
   });
+
+  it("keeps primary rebase cadence bounded and rejects malicious oversized metadata", () => {
+    const startedAt = 1_786_377_600_000;
+    let cadence = advanceSimulationRuntimeDurableCheckpointCadence(null, primaryCheckpoint(), startedAt);
+    for (let index = 1; index <= 1_024; index += 1) {
+      cadence = advanceSimulationRuntimeDurableCheckpointCadence(cadence, primaryCheckpoint(), startedAt + index);
+    }
+    expect(cadence.primaryRebaseEventsMs).toHaveLength(1_024);
+    expect(validateSimulationRuntimeDurableCheckpointCadence(cadence, primaryCheckpoint(), startedAt + 1_025)).toBeNull();
+    const afterWindow = advanceSimulationRuntimeDurableCheckpointCadence(
+      cadence,
+      primaryCheckpoint(),
+      startedAt + 60 * 60_000 + 2_000,
+    );
+    expect(afterWindow.primaryRebaseEventsMs).toEqual([startedAt + 60 * 60_000 + 2_000]);
+    expect(validateSimulationRuntimeDurableCheckpointCadence({
+      ...cadence,
+      primaryRebaseEventsMs: [...cadence.primaryRebaseEventsMs, startedAt + 1_026],
+      primaryRebaseCountInWindow: 1_025,
+    }, primaryCheckpoint(), startedAt + 1_027)).toBe("invalid-cadence-event-bound");
+  });
 });

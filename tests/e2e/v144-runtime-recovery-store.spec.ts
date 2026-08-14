@@ -686,6 +686,115 @@ test("quota and transaction abort preserve primary/old head while clear bypasses
   expect(result.primaryExists).toBe(true);
 });
 
+test("corrupt recovery heads are fenced, quarantined per mode, and never touch the primary save", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_645_000, 1, "head-quarantine");
+  await seedPrimaryAndLease(page, primary);
+  const result = await page.evaluate(async ({ baseIdentity, primaryRaw, leaseKey }) => {
+    const store: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeRecoveryStore.ts");
+    const fence = { ownerId: "tab_recovery_test", fencingToken: 7 };
+    const headKey = "dsp-idle-network.runtime-recovery.v1.head.normal";
+    const pendingKey = "dsp-idle-network.runtime-recovery.v1.pending-intent.normal";
+    const generationKeys = [
+      "dsp-idle-network.runtime-recovery.v1.checkpoint.normal.corrupt.1",
+      "dsp-idle-network.runtime-recovery.v1.journal.normal.corrupt.1",
+    ];
+    const otherModeKey = "dsp-idle-network.runtime-recovery.v1.checkpoint.speedrun.keep.1";
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const write = (callback: (objectStore: IDBObjectStore) => void) => new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("records", "readwrite");
+      callback(transaction.objectStore("records"));
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    const allKeys = () => new Promise<string[]>((resolve, reject) => {
+      const request = database.transaction("records", "readonly").objectStore("records").getAllKeys();
+      request.onsuccess = () => resolve(request.result.filter((key): key is string => typeof key === "string"));
+      request.onerror = () => reject(request.error);
+    });
+    const readValue = (key: string) => new Promise<any>((resolve, reject) => {
+      const request = database.transaction("records", "readonly").objectStore("records").get(key);
+      request.onsuccess = () => resolve(request.result?.value ?? null);
+      request.onerror = () => reject(request.error);
+    });
+    const record = (key: string, value: any) => ({ key, value, updatedAt: Date.now(), bytes: 1 });
+    await write((objectStore) => {
+      objectStore.put(record(headKey, "{truncated"));
+      objectStore.put(record(pendingKey, { malformed: true }));
+      for (const key of generationKeys) objectStore.put(record(key, "orphan"));
+      objectStore.put(record(otherModeKey, "other-mode"));
+    });
+    const quarantined = await store.readSimulationRuntimeRecovery(baseIdentity, fence);
+    const keysAfter = await allKeys();
+    const primaryAfter = await readValue("dsp-idle-network.save.v1");
+
+    await write((objectStore) => {
+      objectStore.put(record(headKey, JSON.stringify({ schemaVersion: 99, mode: "normal" })));
+      const now = Date.now();
+      const lease = JSON.stringify({ schemaVersion: 1, ownerId: "takeover", fencingToken: 8,
+        heartbeatAt: now, expiresAt: now + 60_000 });
+      objectStore.put(record(leaseKey, lease));
+    });
+    const loser = await store.readSimulationRuntimeRecovery(baseIdentity, fence);
+    const headAfterLoser = await readValue(headKey);
+    const takeoverFence = { ownerId: "takeover", fencingToken: 8 };
+    const takeover = await store.readSimulationRuntimeRecovery(baseIdentity, takeoverFence);
+
+    await write((objectStore) => objectStore.put(record(headKey, "{abort-me")));
+    const nativeDelete = IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete = function (query: IDBValidKey | IDBKeyRange) {
+      const request = nativeDelete.call(this, query);
+      if (query === headKey) {
+        const transaction = this.transaction;
+        request.addEventListener("success", () => {
+          try { transaction.abort(); } catch { /* already complete */ }
+        }, { once: true });
+      }
+      return request;
+    };
+    const aborted = await store.readSimulationRuntimeRecovery(baseIdentity, takeoverFence);
+    IDBObjectStore.prototype.delete = nativeDelete;
+    const headAfterAbort = await readValue(headKey);
+    database.close();
+    return {
+      quarantined,
+      keysAfter,
+      primaryUnchanged: primaryAfter === primaryRaw,
+      loser,
+      headAfterLoser,
+      takeover,
+      aborted,
+      headAfterAbort,
+      headKey,
+      pendingKey,
+      generationKeys,
+      otherModeKey,
+    };
+  }, { baseIdentity: primary.baseIdentity, primaryRaw: primary.raw, leaseKey: LOCAL_SAVE_WRITER_LEASE_KEY });
+
+  expect(result.quarantined).toMatchObject({
+    ok: true,
+    recovery: null,
+    proof: null,
+    diagnostic: "corrupt-recovery-quarantined",
+  });
+  expect(result.primaryUnchanged).toBe(true);
+  expect(result.keysAfter).not.toContain(result.headKey);
+  expect(result.keysAfter).not.toContain(result.pendingKey);
+  for (const key of result.generationKeys) expect(result.keysAfter).not.toContain(key);
+  expect(result.keysAfter).toContain(result.otherModeKey);
+  expect(result.loser).toMatchObject({ ok: false, reason: "lease-lost" });
+  expect(result.headAfterLoser).not.toBeNull();
+  expect(result.takeover).toMatchObject({ ok: true, diagnostic: "corrupt-recovery-quarantined" });
+  expect(result.aborted).toMatchObject({ ok: false, reason: "transaction-aborted", degraded: true });
+  expect(result.headAfterAbort).toBe("{abort-me");
+});
+
 test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-checkpoint writes", async ({ page }) => {
   test.setTimeout(60_000);
   await openBarePage(page);

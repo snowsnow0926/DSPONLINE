@@ -902,6 +902,99 @@ test("physically present non-string heads quarantine, while a concurrent valid r
   expect(result.validHeadPreserved).toBe(true);
 });
 
+test("persistence Worker returns checkpoint ownership and never reports failed fencing as verified", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_648_000, 1, "persistence-worker");
+  await seedPrimaryAndLease(page, primary);
+  const result = await page.evaluate(async (baseIdentity) => {
+    const client: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeRecoveryPersistenceClient.ts");
+    const durable: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeDurableRecovery.ts");
+    const packs: any = await import(/* @vite-ignore */ "/src/game/contentPacks.ts");
+    const registry = packs.createContentPackRuntimeSnapshot(packs.createContentPackRegistry());
+    const bytes = Uint8Array.from([21, 22, 23, 24]);
+    const sha256 = await durable.computeSimulationRuntimeDurableBytesSha256(bytes.buffer);
+    const checkpoint = {
+      schemaVersion: 1,
+      sessionId: "session-persistence-worker",
+      generation: 1,
+      lastSequence: 0,
+      stateRevision: 0,
+      registryFingerprint: registry.fingerprint,
+      registry,
+      committedAtMs: Date.now(),
+      baseIdentity,
+      source: "transfer",
+      transfer: {
+        protocolVersion: 1,
+        encoding: "raw",
+        buffer: bytes.buffer,
+        storedByteLength: bytes.byteLength,
+        originalByteLength: bytes.byteLength,
+        storedSha256: sha256,
+        originalSha256: sha256,
+      },
+    };
+    const successProgress: string[] = [];
+    const initialization = client.initializeSimulationRuntimeRecoveryInPersistenceWorker(
+      checkpoint,
+      { ownerId: "tab_recovery_test", fencingToken: 7 },
+      (progress: { stage: string }) => successProgress.push(progress.stage),
+    );
+    const successDetachedAfterSend = checkpoint.transfer.buffer.byteLength === 0;
+    const initialized = await initialization;
+    const successBytes = [...new Uint8Array(checkpoint.transfer.buffer)];
+
+    const failedBytes = Uint8Array.from([31, 32, 33]);
+    const failedSha256 = await durable.computeSimulationRuntimeDurableBytesSha256(failedBytes.buffer);
+    const failedCheckpoint = {
+      ...checkpoint,
+      generation: 2,
+      committedAtMs: Date.now() + 1,
+      transfer: {
+        ...checkpoint.transfer,
+        buffer: failedBytes.buffer,
+        storedByteLength: failedBytes.byteLength,
+        originalByteLength: failedBytes.byteLength,
+        storedSha256: failedSha256,
+        originalSha256: failedSha256,
+      },
+    };
+    const failureProgress: string[] = [];
+    const failedCommitPromise = client.commitSimulationRuntimeRecoveryCheckpointInPersistenceWorker(
+      failedCheckpoint,
+      1,
+      { ownerId: "stale-owner", fencingToken: 6 },
+      undefined,
+      (progress: { stage: string }) => failureProgress.push(progress.stage),
+    );
+    const failureDetachedAfterSend = failedCheckpoint.transfer.buffer.byteLength === 0;
+    const failedCommit = await failedCommitPromise;
+    const failureBytes = [...new Uint8Array(failedCheckpoint.transfer.buffer)];
+    client.terminateSimulationRuntimeRecoveryPersistenceWorker();
+    return {
+      successDetachedAfterSend,
+      initialized,
+      successBytes,
+      successProgress,
+      failureDetachedAfterSend,
+      failedCommit,
+      failureBytes,
+      failureProgress,
+    };
+  }, primary.baseIdentity);
+
+  expect(result.successDetachedAfterSend).toBe(true);
+  expect(result.initialized.result).toMatchObject({ ok: true });
+  expect(result.successBytes).toEqual([21, 22, 23, 24]);
+  expect(result.successProgress).toContain("verified");
+  expect(result.successProgress).not.toContain("failed");
+  expect(result.failureDetachedAfterSend).toBe(true);
+  expect(result.failedCommit.result).toMatchObject({ ok: false, reason: "lease-lost" });
+  expect(result.failureBytes).toEqual([31, 32, 33]);
+  expect(result.failureProgress).toContain("failed");
+  expect(result.failureProgress).not.toContain("verified");
+});
+
 test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-checkpoint writes", async ({ page }) => {
   test.setTimeout(60_000);
   await openBarePage(page);

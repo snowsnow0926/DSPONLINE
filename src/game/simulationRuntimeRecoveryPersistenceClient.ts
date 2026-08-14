@@ -117,6 +117,7 @@ export class SimulationRuntimeRecoveryPersistenceClient {
       );
     }
     active.onmessage = (event: MessageEvent<SimulationRuntimeRecoveryPersistenceResponse>) => {
+      if (this.worker !== active) return;
       const request = this.pending.get(event.data.id);
       if (!request || this.inflightId !== event.data.id) return;
       if (event.data.type === "progress") {
@@ -131,10 +132,12 @@ export class SimulationRuntimeRecoveryPersistenceClient {
       this.dispatchNext();
     };
     active.onerror = (event) => {
+      if (this.worker !== active) return;
       event.preventDefault?.();
       this.failAll("worker-crash", event.message || "runtime recovery persistence Worker 崩溃");
     };
     active.onmessageerror = () => {
+      if (this.worker !== active) return;
       this.failAll("worker-crash", "runtime recovery persistence Worker 响应无法反序列化");
     };
     this.worker = active;
@@ -152,8 +155,14 @@ export class SimulationRuntimeRecoveryPersistenceClient {
     message: string,
     timedOutRequestId?: number,
   ): void {
-    this.worker?.terminate();
+    const active = this.worker;
     this.worker = null;
+    if (active) {
+      active.onmessage = null;
+      active.onerror = null;
+      active.onmessageerror = null;
+      active.terminate();
+    }
     for (const [id, request] of this.pending) {
       this.clearPending(id, request);
       const requestCode = timedOutRequestId !== undefined && id !== timedOutRequestId ? "worker-crash" : code;
@@ -382,7 +391,10 @@ export class SimulationRuntimeRecoveryPersistenceClient {
     fence: SimulationRuntimeRecoveryWriterFence,
     onProgress?: SimulationRuntimeRecoveryProgressListener,
   ): Promise<SimulationRuntimeRecoveryReadResult> {
-    const response = await this.request({ type: "read", baseIdentity, fence }, { onProgress });
+    const response = await this.request(
+      { type: "read", baseIdentity, fence },
+      { onProgress, timeoutMs: this.transferCheckpointTimeoutMs },
+    );
     if (response.type === "error") throw this.workerOperationError(response, false);
     if (response.type !== "result" || response.operation !== "read") {
       throw new SimulationRuntimeRecoveryPersistenceClientError(

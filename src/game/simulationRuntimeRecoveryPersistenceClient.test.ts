@@ -167,6 +167,8 @@ describe("SimulationRuntimeRecoveryPersistenceClient", () => {
     const checkpoint = transferCheckpoint([10]);
     const transferPromise = client.initialize(checkpoint, fence);
     const readPromise = client.read(checkpoint.baseIdentity, fence);
+    const staleOnError = workers[0].onerror;
+    const staleOnMessageError = workers[0].onmessageerror;
     const transferExpectation = expect(transferPromise).rejects.toMatchObject({
       code: "timeout",
       ownershipLost: true,
@@ -193,6 +195,9 @@ describe("SimulationRuntimeRecoveryPersistenceClient", () => {
     });
     const next = client.read(checkpoint.baseIdentity, fence);
     expect(workers).toHaveLength(2);
+    staleOnError?.({ message: "late crash", preventDefault: () => undefined } as ErrorEvent);
+    staleOnMessageError?.({ data: "late malformed response" } as MessageEvent);
+    expect(workers[1].terminateCount).toBe(0);
     const nextRequest = workers[1].requests[0];
     workers[1].respond({
       id: nextRequest.id,
@@ -201,6 +206,24 @@ describe("SimulationRuntimeRecoveryPersistenceClient", () => {
       result: { ok: true, recovery: null, proof: null },
     });
     await expect(next).resolves.toMatchObject({ ok: true, recovery: null });
+  });
+
+  it("gives recovery reads the transfer-checkpoint timeout instead of the 30-second small-operation timeout", async () => {
+    vi.useFakeTimers();
+    const fake = new FakeWorker();
+    const client = new SimulationRuntimeRecoveryPersistenceClient({ workerFactory: () => fake as unknown as Worker });
+    const checkpoint = transferCheckpoint([17]);
+    const read = client.read(checkpoint.baseIdentity, fence);
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(fake.terminateCount).toBe(0);
+    const request = fake.requests[0];
+    fake.respond({
+      id: request.id,
+      type: "result",
+      operation: "read",
+      result: { ok: true, recovery: null, proof: null },
+    });
+    await expect(read).resolves.toMatchObject({ ok: true, recovery: null });
   });
 
   it("starts timeouts only after FIFO dispatch so a queued small request cannot kill a long transfer", async () => {

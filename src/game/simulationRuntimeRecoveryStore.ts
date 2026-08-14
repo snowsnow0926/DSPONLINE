@@ -278,6 +278,19 @@ interface HeadSnapshot {
   head: StoredRecoveryHead | null;
 }
 
+interface CorruptHeadRecordFingerprint {
+  recordKeys: string[];
+  keyShape: string;
+  valueShape: string;
+  updatedAtShape: string;
+  bytesShape: string;
+}
+
+type HeadRecordInspection =
+  | { kind: "absent" }
+  | { kind: "valid"; raw: string; head: StoredRecoveryHead }
+  | { kind: "corrupt"; fingerprint: CorruptHeadRecordFingerprint };
+
 class RecoveryStoreError extends Error {
   constructor(
     readonly reason: SimulationRuntimeRecoveryFailureReason,
@@ -476,6 +489,56 @@ function parseHead(raw: string | null, mode: SaveMode): StoredRecoveryHead | nul
   } catch {
     return null;
   }
+}
+
+function corruptRecordValueShape(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return `string:${value}`;
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return "number:NaN";
+    if (Object.is(value, -0)) return "number:-0";
+    return `number:${String(value)}`;
+  }
+  if (typeof value === "bigint" || typeof value === "boolean" || typeof value === "undefined") {
+    return `${typeof value}:${String(value)}`;
+  }
+  if (Array.isArray(value)) return `array:${value.length}:${Object.keys(value).sort().join(",")}`;
+  if (value instanceof ArrayBuffer) return `array-buffer:${value.byteLength}`;
+  if (ArrayBuffer.isView(value)) return `array-buffer-view:${value.constructor.name}:${value.byteLength}`;
+  if (typeof value === "object") {
+    const tag = Object.prototype.toString.call(value);
+    return `object:${tag}:${Object.keys(value as object).sort().join(",")}`;
+  }
+  return typeof value;
+}
+
+function inspectHeadRecord(record: unknown, mode: SaveMode): HeadRecordInspection {
+  if (record === undefined) return { kind: "absent" };
+  const candidate = record && typeof record === "object" ? record as Record<string, unknown> : null;
+  if (candidate && typeof candidate.value === "string") {
+    const head = parseHead(candidate.value, mode);
+    if (head) return { kind: "valid", raw: candidate.value, head };
+  }
+  return {
+    kind: "corrupt",
+    fingerprint: {
+      recordKeys: candidate ? Object.keys(candidate).sort() : [],
+      keyShape: corruptRecordValueShape(candidate?.key),
+      valueShape: corruptRecordValueShape(candidate?.value),
+      updatedAtShape: corruptRecordValueShape(candidate?.updatedAt),
+      bytesShape: corruptRecordValueShape(candidate?.bytes),
+    },
+  };
+}
+
+function sameCorruptHeadFingerprint(
+  left: CorruptHeadRecordFingerprint,
+  right: CorruptHeadRecordFingerprint,
+): boolean {
+  return left.keyShape === right.keyShape && left.valueShape === right.valueShape &&
+    left.updatedAtShape === right.updatedAtShape && left.bytesShape === right.bytesShape &&
+    left.recordKeys.length === right.recordKeys.length &&
+    left.recordKeys.every((key, index) => key === right.recordKeys[index]);
 }
 
 function serializeHead(head: StoredRecoveryHead): string {
@@ -734,23 +797,24 @@ async function readLeaseAndHead(
   const store = transaction.objectStore(RECORD_STORE);
   const [leaseRecord, headRecord] = await Promise.all([
     requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredStringRecord | undefined>),
-    requestResult(store.get(headKey(mode)) as IDBRequest<StoredStringRecord | undefined>),
+    requestResult(store.get(headKey(mode)) as IDBRequest<unknown>),
   ]);
   await done;
   const lease = parseLocalSaveWriterLease(leaseRecord?.value);
   if (!leaseMatchesFence(lease, fence, Date.now())) {
     throw new RecoveryStoreError("lease-lost", "本地存档 writer lease 已失效或被其他页面接管");
   }
-  const raw = typeof headRecord?.value === "string" ? headRecord.value : null;
-  const head = parseHead(raw, mode);
-  if (raw && !head) throw new RecoveryStoreError("corrupt", "模拟恢复 head 已损坏", true);
-  return { raw, head };
+  const inspection = inspectHeadRecord(headRecord, mode);
+  if (inspection.kind === "corrupt") throw new RecoveryStoreError("corrupt", "模拟恢复 head 已损坏", true);
+  return inspection.kind === "absent"
+    ? { raw: null, head: null }
+    : { raw: inspection.raw, head: inspection.head };
 }
 
 async function quarantineCorruptRecoveryHead(
   db: IDBDatabase,
   mode: SaveMode,
-  expectedRaw: string,
+  expectedFingerprint: CorruptHeadRecordFingerprint,
   fence: SimulationRuntimeRecoveryWriterFence,
   expectedBase?: SimulationRuntimeRecoveryBaseIdentity,
 ): Promise<boolean> {
@@ -763,11 +827,13 @@ async function quarantineCorruptRecoveryHead(
     throw new RecoveryStoreError("lease-lost", "隔离损坏 recovery head 前 writer lease 已失效");
   }
   const [currentHead, primaryIdentity, keys] = await Promise.all([
-    requestResult(store.get(headKey(mode)) as IDBRequest<StoredStringRecord | undefined>),
+    requestResult(store.get(headKey(mode)) as IDBRequest<unknown>),
     readDurablePrimaryIdentity(store, mode),
     requestResult(store.getAllKeys() as IDBRequest<IDBValidKey[]>),
   ]);
-  if (currentHead?.value !== expectedRaw || parseHead(currentHead.value, mode) !== null) {
+  const currentInspection = inspectHeadRecord(currentHead, mode);
+  if (currentInspection.kind !== "corrupt" ||
+    !sameCorruptHeadFingerprint(currentInspection.fingerprint, expectedFingerprint)) {
     await done;
     return false;
   }
@@ -792,7 +858,7 @@ async function quarantineCorruptRecoveryHead(
     throw new RecoveryStoreError("readback-failed", "损坏 recovery 记录隔离事务内回读失败", true);
   }
   await done;
-  if (await readRawHead(db, mode) !== null) {
+  if (await readHeadRecord(db, mode) !== undefined) {
     throw new RecoveryStoreError("readback-failed", "损坏 recovery head 隔离提交后回读失败", true);
   }
   return true;
@@ -808,9 +874,10 @@ async function readLeaseAndRecoverableHead(
     return { ...await readLeaseAndHead(db, mode, fence), quarantined: false };
   } catch (error) {
     if (!(error instanceof RecoveryStoreError) || error.reason !== "corrupt") throw error;
-    const raw = await readRawHead(db, mode);
-    if (!raw) return { raw: null, head: null, quarantined: false };
-    const quarantined = await quarantineCorruptRecoveryHead(db, mode, raw, fence, expectedBase);
+    const inspection = inspectHeadRecord(await readHeadRecord(db, mode), mode);
+    if (inspection.kind === "absent") return { raw: null, head: null, quarantined: false };
+    if (inspection.kind === "valid") return { ...await readLeaseAndHead(db, mode, fence), quarantined: false };
+    const quarantined = await quarantineCorruptRecoveryHead(db, mode, inspection.fingerprint, fence, expectedBase);
     if (!quarantined) return { ...await readLeaseAndHead(db, mode, fence), quarantined: false };
     return { raw: null, head: null, quarantined: true };
   }
@@ -1159,11 +1226,18 @@ async function verifyPreparedCheckpoint(
 }
 
 async function readRawHead(db: IDBDatabase, mode: SaveMode): Promise<string | null> {
+  const record = await readHeadRecord(db, mode);
+  return record && typeof (record as { value?: unknown }).value === "string"
+    ? (record as { value: string }).value
+    : null;
+}
+
+async function readHeadRecord(db: IDBDatabase, mode: SaveMode): Promise<unknown> {
   const transaction = db.transaction(RECORD_STORE, "readonly");
   const done = transactionDone(transaction);
-  const record = await requestResult(transaction.objectStore(RECORD_STORE).get(headKey(mode)) as IDBRequest<StoredStringRecord | undefined>);
+  const record = await requestResult(transaction.objectStore(RECORD_STORE).get(headKey(mode)) as IDBRequest<unknown>);
   await done;
-  return typeof record?.value === "string" ? record.value : null;
+  return record;
 }
 
 async function rollbackPublishedHead(

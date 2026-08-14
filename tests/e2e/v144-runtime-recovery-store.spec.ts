@@ -795,6 +795,113 @@ test("corrupt recovery heads are fenced, quarantined per mode, and never touch t
   expect(result.headAfterAbort).toBe("{abort-me");
 });
 
+test("physically present non-string heads quarantine, while a concurrent valid replacement is preserved", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_647_000, 1, "head-shapes");
+  await seedPrimaryAndLease(page, primary);
+  const result = await page.evaluate(async ({ baseIdentity, leaseKey }) => {
+    const store: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeRecoveryStore.ts");
+    const packs: any = await import(/* @vite-ignore */ "/src/game/contentPacks.ts");
+    const registry = packs.createContentPackRuntimeSnapshot(packs.createContentPackRegistry());
+    const fence = { ownerId: "tab_recovery_test", fencingToken: 7 };
+    const headKey = "dsp-idle-network.runtime-recovery.v1.head.normal";
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const writeRecord = (record: Record<string, unknown>) => new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("records", "readwrite");
+      transaction.objectStore("records").put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    const readRecord = (key: string) => new Promise<any>((resolve, reject) => {
+      const request = database.transaction("records", "readonly").objectStore("records").get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const malformedRecords = [
+      { key: headKey, value: { malformed: true }, updatedAt: 101, bytes: 1 },
+      { key: headKey, value: 42, updatedAt: 102, bytes: 2 },
+      { key: headKey, updatedAt: 103, bytes: 0 },
+      { key: headKey, value: "", updatedAt: 104, bytes: 0 },
+    ];
+    const shapeResults: Array<{ result: unknown; physicallyAbsent: boolean }> = [];
+    for (const malformed of malformedRecords) {
+      await writeRecord(malformed);
+      const readResult = await store.readSimulationRuntimeRecovery(baseIdentity, fence);
+      shapeResults.push({ result: readResult, physicallyAbsent: await readRecord(headKey) === undefined });
+    }
+
+    const checkpoint = {
+      schemaVersion: 1,
+      sessionId: "session-head-cas",
+      generation: 1,
+      lastSequence: 0,
+      stateRevision: 0,
+      registryFingerprint: registry.fingerprint,
+      registry,
+      committedAtMs: Date.now(),
+      baseIdentity,
+      source: "primary",
+      primaryStateChecksum: baseIdentity.checksum,
+      primaryRevision: baseIdentity.revision,
+    };
+    const initialized = await store.initializeSimulationRuntimeRecovery(checkpoint, fence);
+    const validHeadRecord = await readRecord(headKey);
+    await writeRecord({ key: headKey, value: { replaced: "before-quarantine" }, updatedAt: 105, bytes: 1 });
+
+    const nativePut = IDBObjectStore.prototype.put;
+    let injectedValidHead = false;
+    IDBObjectStore.prototype.put = function (value: any, key?: IDBValidKey) {
+      const request = nativePut.call(this, value, key);
+      if (!injectedValidHead && value?.key === leaseKey && this.transaction.mode === "readwrite") {
+        injectedValidHead = true;
+        nativePut.call(this, validHeadRecord);
+      }
+      return request;
+    };
+    let concurrentRead: unknown;
+    try {
+      concurrentRead = await store.readSimulationRuntimeRecovery(baseIdentity, fence);
+    } finally {
+      IDBObjectStore.prototype.put = nativePut;
+    }
+    const headAfterConcurrentReplace = await readRecord(headKey);
+    let validHeadPreserved = false;
+    try {
+      validHeadPreserved = typeof headAfterConcurrentReplace?.value === "string" &&
+        JSON.parse(headAfterConcurrentReplace.value).active?.sessionId === "session-head-cas";
+    } catch {
+      validHeadPreserved = false;
+    }
+    database.close();
+    return {
+      shapeResults,
+      initialized,
+      injectedValidHead,
+      concurrentRead,
+      validHeadPreserved,
+    };
+  }, { baseIdentity: primary.baseIdentity, leaseKey: LOCAL_SAVE_WRITER_LEASE_KEY });
+
+  for (const shape of result.shapeResults) {
+    expect(shape.result).toMatchObject({
+      ok: true,
+      recovery: null,
+      proof: null,
+      diagnostic: "corrupt-recovery-quarantined",
+    });
+    expect(shape.physicallyAbsent).toBe(true);
+  }
+  expect(result.initialized).toMatchObject({ ok: true });
+  expect(result.injectedValidHead).toBe(true);
+  expect(result.concurrentRead).toMatchObject({ ok: true, recovery: { checkpoint: { sessionId: "session-head-cas" } } });
+  expect(result.validHeadPreserved).toBe(true);
+});
+
 test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-checkpoint writes", async ({ page }) => {
   test.setTimeout(60_000);
   await openBarePage(page);

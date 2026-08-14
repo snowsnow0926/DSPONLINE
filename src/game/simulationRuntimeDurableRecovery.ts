@@ -170,12 +170,30 @@ function validBaseIdentity(value: SimulationRuntimeRecoveryBaseIdentity): boolea
     Number.isSafeInteger(value.revision) && value.revision >= 0;
 }
 
-function stableComparable(value: unknown): string {
-  if (value === undefined) return "undefined";
+function stableComparableValue(value: unknown, key: string, arrayElement: boolean): string | undefined {
+  if (value && typeof value === "object" && typeof (value as { toJSON?: unknown }).toJSON === "function") {
+    value = ((value as { toJSON: (key: string) => unknown }).toJSON)(key);
+  }
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    return arrayElement ? "null" : undefined;
+  }
+  if (typeof value === "number" && !Number.isFinite(value)) return "null";
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableComparable).join(",")}]`;
+  if (Array.isArray(value)) {
+    return `[${Array.from({ length: value.length }, (_, index) =>
+      stableComparableValue(value[index], String(index), true) ?? "null").join(",")}]`;
+  }
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableComparable(record[key])}`).join(",")}}`;
+  const properties: string[] = [];
+  for (const propertyKey of Object.keys(record).sort()) {
+    const comparable = stableComparableValue(record[propertyKey], propertyKey, false);
+    if (comparable !== undefined) properties.push(`${JSON.stringify(propertyKey)}:${comparable}`);
+  }
+  return `{${properties.join(",")}}`;
+}
+
+function stableComparable(value: unknown): string {
+  return stableComparableValue(value, "", true) ?? "null";
 }
 
 function bytesToHex(bytes: Uint8Array): string {

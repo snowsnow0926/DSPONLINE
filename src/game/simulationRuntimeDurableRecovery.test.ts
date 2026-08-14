@@ -135,6 +135,40 @@ describe("durable simulation runtime recovery contract", () => {
     expect(await validateSimulationRuntimeDurableJournalEntryDigests(corrupted)).toBe("passive-segment-digest-mismatch");
   });
 
+  it("keeps intent digests stable across the exact JSON side-record roundtrip", async () => {
+    const original = await intent(1);
+    const roundTripped = JSON.parse(JSON.stringify(original)) as SimulationRuntimeDurableOperationIntent;
+    const { intentSha256: _intentSha256, ...unsigned } = roundTripped;
+    expect(await computeSimulationRuntimeDurableIntentSha256(unsigned)).toBe(original.intentSha256);
+  });
+
+  it("matches JSON omission/null semantics for malformed object and array edges", async () => {
+    const original = await intent(1, { command: true });
+    const { intentSha256: _intentSha256, ...unsigned } = original;
+    const edgeArray = [undefined, () => "ignored", Symbol("ignored"), Number.NaN, Infinity, -Infinity] as unknown[];
+    edgeArray.length = 7; // The trailing sparse slot serializes as null too.
+    (unsigned.command!.topLevelChanges[0] as any) = {
+      path: ["edge"],
+      operation: "set",
+      value: {
+        omittedUndefined: undefined,
+        omittedFunction: () => "ignored",
+        omittedSymbol: Symbol("ignored"),
+        edgeArray,
+      },
+    };
+    const before = await computeSimulationRuntimeDurableIntentSha256(unsigned);
+    const roundTripped = JSON.parse(JSON.stringify(unsigned)) as typeof unsigned;
+    const after = await computeSimulationRuntimeDurableIntentSha256(roundTripped);
+    expect(after).toBe(before);
+    expect((roundTripped.command!.topLevelChanges[0] as any).value).toEqual({
+      edgeArray: [null, null, null, null, null, null, null],
+    });
+
+    const malformed = { ...unsigned, simulationSeconds: 1n } as unknown as typeof unsigned;
+    await expect(computeSimulationRuntimeDurableIntentSha256(malformed)).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("keeps commands atomic, exposes the soft barrier, and enforces the hard entry bound", async () => {
     const checkpoint = primaryCheckpoint();
     let entries: SimulationRuntimeDurableRecoveryRecord["entries"] = [];

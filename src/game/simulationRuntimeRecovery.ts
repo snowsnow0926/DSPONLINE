@@ -40,6 +40,8 @@ export interface SimulationRuntimeRecoveryOperation {
   sessionId: string;
   generation: number;
   sequence: number;
+  /** Stable exactly-once identity, excluding this field itself. */
+  operationSha256: string;
   baseStateRevision: number;
   nextStateRevision: number;
   command: SimulationCommandPatch | null;
@@ -125,6 +127,7 @@ export function validateSimulationRuntimeRecoveryRecord(
   for (const operation of operations) {
     if (operation.schemaVersion !== SIMULATION_RUNTIME_RECOVERY_SCHEMA_VERSION ||
       operation.sessionId !== checkpoint.sessionId || operation.generation !== checkpoint.generation) return "operation-session-mismatch";
+    if (!/^[0-9a-f]{64}$/.test(operation.operationSha256)) return "invalid-operation-digest";
     if (operation.sequence !== sequence + 1 || operation.baseStateRevision !== revision ||
       !Number.isSafeInteger(operation.nextStateRevision) || operation.nextStateRevision < operation.baseStateRevision) return "operation-order-mismatch";
     if (operation.command && operation.command.baseRevision !== operation.baseStateRevision) return "command-revision-mismatch";
@@ -154,4 +157,30 @@ export async function computeSimulationStateTransferSha256(transfer: SimulationS
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) throw new Error("当前环境不支持恢复检查点 SHA-256 校验");
   return bytesToHex(new Uint8Array(await subtle.digest("SHA-256", transfer.buffer)));
+}
+
+function canonicalizeRecoveryDigestValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRecoveryDigestValue);
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    if (source[key] !== undefined) result[key] = canonicalizeRecoveryDigestValue(source[key]);
+  }
+  return result;
+}
+
+/**
+ * Bind one journal sequence to exactly one deterministic operation. Storage
+ * uses this digest to return the original proof when an IndexedDB commit
+ * succeeded but its response was lost, while rejecting a different retry at
+ * the same sequence.
+ */
+export async function computeSimulationRuntimeRecoveryOperationSha256(
+  operation: Omit<SimulationRuntimeRecoveryOperation, "operationSha256">,
+): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("当前环境不支持恢复日志 SHA-256 校验");
+  const payload = new TextEncoder().encode(JSON.stringify(canonicalizeRecoveryDigestValue(operation)));
+  return bytesToHex(new Uint8Array(await subtle.digest("SHA-256", payload)));
 }

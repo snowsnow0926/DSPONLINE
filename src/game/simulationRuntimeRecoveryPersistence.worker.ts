@@ -2,6 +2,11 @@
 
 import { computeSimulationRuntimeDurableIntentSha256 } from "./simulationRuntimeDurableRecovery";
 import {
+  preferGzipSimulationRuntimeRecoveryCheckpoint,
+  type SimulationRuntimeRecoveryCheckpointCompressionMetrics,
+  type SimulationRuntimeRecoveryRawTransferCheckpoint,
+} from "./simulationRuntimeRecoveryCheckpointCompression";
+import {
   clearSimulationRuntimeRecovery,
   commitSimulationRuntimeRecoveryCheckpoint,
   finalizeSimulationRuntimeRecoveryIntent,
@@ -54,6 +59,7 @@ function resultFailureReason(response: SimulationRuntimeRecoveryPersistenceRespo
 async function handle(request: SimulationRuntimeRecoveryPersistenceRequest): Promise<void> {
   const { id } = request;
   const checkpointTransfer = sourceCheckpointTransfer(request);
+  let checkpointMetrics: SimulationRuntimeRecoveryCheckpointCompressionMetrics | undefined;
   progress(id, { stage: "queued" });
   try {
     let response: SimulationRuntimeRecoveryPersistenceResponse;
@@ -83,14 +89,31 @@ async function handle(request: SimulationRuntimeRecoveryPersistenceRequest): Pro
           generation: request.checkpoint.generation,
           totalBytes: request.checkpoint.source === "transfer" ? request.checkpoint.transfer.storedByteLength : 0,
         });
-        progress(id, { stage: "committing-checkpoint", generation: request.checkpoint.generation });
-        const result = await initializeSimulationRuntimeRecovery(request.checkpoint, request.fence);
+        let checkpoint = request.checkpoint;
+        if (request.preferGzip) {
+          if (checkpoint.source !== "transfer" || checkpoint.transfer.encoding !== "raw") {
+            throw new Error("prefer-gzip initialize 仅接受 raw transfer checkpoint");
+          }
+          progress(id, {
+            stage: "compressing-checkpoint",
+            generation: checkpoint.generation,
+            totalBytes: checkpoint.transfer.originalByteLength,
+          });
+          const prepared = await preferGzipSimulationRuntimeRecoveryCheckpoint(
+            checkpoint as SimulationRuntimeRecoveryRawTransferCheckpoint,
+          );
+          checkpoint = prepared.checkpoint;
+          checkpointMetrics = prepared.metrics;
+        }
+        progress(id, { stage: "committing-checkpoint", generation: checkpoint.generation });
+        const result = await initializeSimulationRuntimeRecovery(checkpoint, request.fence);
         response = {
           id,
           type: "result",
           operation: request.type,
           result,
           ...(checkpointTransfer ? { sourceCheckpointTransfer: checkpointTransfer } : {}),
+          ...(checkpointMetrics ? { checkpointMetrics } : {}),
         };
         break;
       }
@@ -113,9 +136,25 @@ async function handle(request: SimulationRuntimeRecoveryPersistenceRequest): Pro
           generation: request.checkpoint.generation,
           totalBytes: request.checkpoint.source === "transfer" ? request.checkpoint.transfer.storedByteLength : 0,
         });
-        progress(id, { stage: "committing-checkpoint", generation: request.checkpoint.generation });
+        let checkpoint = request.checkpoint;
+        if (request.preferGzip) {
+          if (checkpoint.source !== "transfer" || checkpoint.transfer.encoding !== "raw") {
+            throw new Error("prefer-gzip commit 仅接受 raw transfer checkpoint");
+          }
+          progress(id, {
+            stage: "compressing-checkpoint",
+            generation: checkpoint.generation,
+            totalBytes: checkpoint.transfer.originalByteLength,
+          });
+          const prepared = await preferGzipSimulationRuntimeRecoveryCheckpoint(
+            checkpoint as SimulationRuntimeRecoveryRawTransferCheckpoint,
+          );
+          checkpoint = prepared.checkpoint;
+          checkpointMetrics = prepared.metrics;
+        }
+        progress(id, { stage: "committing-checkpoint", generation: checkpoint.generation });
         const result = await commitSimulationRuntimeRecoveryCheckpoint(
-          request.checkpoint,
+          checkpoint,
           request.expectedGeneration,
           request.fence,
           request.absorbedIntent,
@@ -126,6 +165,7 @@ async function handle(request: SimulationRuntimeRecoveryPersistenceRequest): Pro
           operation: request.type,
           result,
           ...(checkpointTransfer ? { sourceCheckpointTransfer: checkpointTransfer } : {}),
+          ...(checkpointMetrics ? { checkpointMetrics } : {}),
         };
         break;
       }
@@ -163,6 +203,7 @@ async function handle(request: SimulationRuntimeRecoveryPersistenceRequest): Pro
       operation: request.type,
       message: error instanceof Error ? error.message : "runtime recovery persistence Worker 失败",
       ...(checkpointTransfer ? { sourceCheckpointTransfer: checkpointTransfer } : {}),
+      ...(checkpointMetrics ? { checkpointMetrics } : {}),
     });
   }
 }

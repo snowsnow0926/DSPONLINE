@@ -17,6 +17,10 @@ import type {
   SimulationRuntimeRecoveryPersistenceResponse,
   SimulationRuntimeRecoveryUnsignedIntent,
 } from "./simulationRuntimeRecoveryPersistenceProtocol";
+import type {
+  SimulationRuntimeRecoveryCheckpointCompressionMetrics,
+  SimulationRuntimeRecoveryRawTransferCheckpoint,
+} from "./simulationRuntimeRecoveryCheckpointCompression";
 
 const SMALL_OPERATION_TIMEOUT_MS = 30_000;
 const TRANSFER_CHECKPOINT_TIMEOUT_MS = 120_000;
@@ -49,6 +53,7 @@ export interface SimulationRuntimeRecoveryCheckpointPersistenceResult {
   result: SimulationRuntimeRecoveryMutationResult;
   /** Same zero-copy buffer returned by the Worker; the checkpoint is restored to this buffer too. */
   sourceCheckpointTransfer?: ArrayBuffer;
+  checkpointMetrics?: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
 }
 
 interface PendingRequest {
@@ -289,6 +294,24 @@ export class SimulationRuntimeRecoveryPersistenceClient {
     return this.checkpointRequest({ type: "initialize", checkpoint, fence }, checkpoint, onProgress);
   }
 
+  async initializeRawPreferredGzip(
+    checkpoint: SimulationRuntimeRecoveryRawTransferCheckpoint,
+    fence: SimulationRuntimeRecoveryWriterFence,
+    onProgress?: SimulationRuntimeRecoveryProgressListener,
+  ): Promise<SimulationRuntimeRecoveryCheckpointPersistenceResult & {
+    checkpointMetrics: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
+  }> {
+    const result = await this.checkpointRequest(
+      { type: "initialize", checkpoint, preferGzip: true, fence }, checkpoint, onProgress,
+    );
+    if (!result.checkpointMetrics) {
+      throw new SimulationRuntimeRecoveryPersistenceClientError(
+        "protocol", "prefer-gzip initialize 未返回压缩指标", false, "initialize",
+      );
+    }
+    return { ...result, checkpointMetrics: result.checkpointMetrics };
+  }
+
   async finalizeIntent(
     sessionId: string,
     generation: number,
@@ -332,6 +355,31 @@ export class SimulationRuntimeRecoveryPersistenceClient {
     }, checkpoint, onProgress);
   }
 
+  async commitRawPreferredGzip(
+    checkpoint: SimulationRuntimeRecoveryRawTransferCheckpoint,
+    expectedGeneration: number,
+    fence: SimulationRuntimeRecoveryWriterFence,
+    absorbedIntent?: SimulationRuntimeRecoveryAbsorbedIntent,
+    onProgress?: SimulationRuntimeRecoveryProgressListener,
+  ): Promise<SimulationRuntimeRecoveryCheckpointPersistenceResult & {
+    checkpointMetrics: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
+  }> {
+    const result = await this.checkpointRequest({
+      type: "commit-checkpoint",
+      checkpoint,
+      expectedGeneration,
+      ...(absorbedIntent ? { absorbedIntent } : {}),
+      preferGzip: true,
+      fence,
+    }, checkpoint, onProgress);
+    if (!result.checkpointMetrics) {
+      throw new SimulationRuntimeRecoveryPersistenceClientError(
+        "protocol", "prefer-gzip commit 未返回压缩指标", false, "commit-checkpoint",
+      );
+    }
+    return { ...result, checkpointMetrics: result.checkpointMetrics };
+  }
+
   private async checkpointRequest(
     body: Extract<PersistenceRequestBody, { type: "initialize" | "commit-checkpoint" }>,
     checkpoint: SimulationRuntimeDurableCheckpoint,
@@ -364,7 +412,11 @@ export class SimulationRuntimeRecoveryPersistenceClient {
         "protocol", "persistence Worker 未返还 checkpoint buffer ownership", true, body.type,
       );
     }
-    return { result: response.result, ...(returned ? { sourceCheckpointTransfer: returned } : {}) };
+    return {
+      result: response.result,
+      ...(returned ? { sourceCheckpointTransfer: returned } : {}),
+      ...(response.checkpointMetrics ? { checkpointMetrics: response.checkpointMetrics } : {}),
+    };
   }
 
   async rebasePrimary(
@@ -442,6 +494,16 @@ export function initializeSimulationRuntimeRecoveryInPersistenceWorker(
   return defaultClient.initialize(checkpoint, fence, onProgress);
 }
 
+export function initializeRawSimulationRuntimeRecoveryCheckpointInPersistenceWorker(
+  checkpoint: SimulationRuntimeRecoveryRawTransferCheckpoint,
+  fence: SimulationRuntimeRecoveryWriterFence,
+  onProgress?: SimulationRuntimeRecoveryProgressListener,
+): Promise<SimulationRuntimeRecoveryCheckpointPersistenceResult & {
+  checkpointMetrics: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
+}> {
+  return defaultClient.initializeRawPreferredGzip(checkpoint, fence, onProgress);
+}
+
 export function finalizeSimulationRuntimeRecoveryIntentInPersistenceWorker(
   sessionId: string,
   generation: number,
@@ -464,6 +526,18 @@ export function commitSimulationRuntimeRecoveryCheckpointInPersistenceWorker(
   onProgress?: SimulationRuntimeRecoveryProgressListener,
 ): Promise<SimulationRuntimeRecoveryCheckpointPersistenceResult> {
   return defaultClient.commitCheckpoint(checkpoint, expectedGeneration, fence, absorbedIntent, onProgress);
+}
+
+export function commitRawSimulationRuntimeRecoveryCheckpointInPersistenceWorker(
+  checkpoint: SimulationRuntimeRecoveryRawTransferCheckpoint,
+  expectedGeneration: number,
+  fence: SimulationRuntimeRecoveryWriterFence,
+  absorbedIntent?: SimulationRuntimeRecoveryAbsorbedIntent,
+  onProgress?: SimulationRuntimeRecoveryProgressListener,
+): Promise<SimulationRuntimeRecoveryCheckpointPersistenceResult & {
+  checkpointMetrics: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
+}> {
+  return defaultClient.commitRawPreferredGzip(checkpoint, expectedGeneration, fence, absorbedIntent, onProgress);
 }
 
 export function rebaseSimulationRuntimeRecoveryToPrimaryInPersistenceWorker(

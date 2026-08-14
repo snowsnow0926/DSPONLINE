@@ -995,6 +995,93 @@ test("persistence Worker returns checkpoint ownership and never reports failed f
   expect(result.failureProgress).not.toContain("verified");
 });
 
+test("persistence Worker prefers gzip for raw checkpoint bytes and preserves exact dual proof", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_649_000, 1, "persistence-gzip");
+  await seedPrimaryAndLease(page, primary);
+  const result = await page.evaluate(async (baseIdentity) => {
+    const client: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeRecoveryPersistenceClient.ts");
+    const durable: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeDurableRecovery.ts");
+    const packs: any = await import(/* @vite-ignore */ "/src/game/contentPacks.ts");
+    const registry = packs.createContentPackRuntimeSnapshot(packs.createContentPackRegistry());
+    const original = new Uint8Array(64 * 1024).fill(65);
+    const originalBuffer = original.buffer;
+    const originalSha256 = await durable.computeSimulationRuntimeDurableBytesSha256(originalBuffer);
+    const checkpoint = {
+      schemaVersion: 1,
+      sessionId: "session-persistence-gzip",
+      generation: 1,
+      lastSequence: 0,
+      stateRevision: 0,
+      registryFingerprint: registry.fingerprint,
+      registry,
+      committedAtMs: Date.now(),
+      baseIdentity,
+      source: "transfer",
+      transfer: {
+        protocolVersion: 1,
+        encoding: "raw",
+        buffer: originalBuffer,
+        storedByteLength: original.byteLength,
+        originalByteLength: original.byteLength,
+        storedSha256: originalSha256,
+        originalSha256,
+      },
+    };
+    const progress: string[] = [];
+    const initialization = client.initializeRawSimulationRuntimeRecoveryCheckpointInPersistenceWorker(
+      checkpoint,
+      { ownerId: "tab_recovery_test", fencingToken: 7 },
+      (value: { stage: string }) => progress.push(value.stage),
+    );
+    const detachedAfterSend = checkpoint.transfer.buffer.byteLength === 0;
+    const initialized = await initialization;
+    const returnedOriginalBytes = [...new Uint8Array(checkpoint.transfer.buffer)];
+    const recovery = await client.readSimulationRuntimeRecoveryInPersistenceWorker(
+      baseIdentity,
+      { ownerId: "tab_recovery_test", fencingToken: 7 },
+    );
+    const storedCheckpoint = recovery.recovery?.checkpoint;
+    let restoredBytes: number[] = [];
+    if (storedCheckpoint?.source === "transfer" && storedCheckpoint.transfer.encoding === "gzip") {
+      const restored = await new Response(
+        new Blob([storedCheckpoint.transfer.buffer]).stream().pipeThrough(new DecompressionStream("gzip")),
+      ).arrayBuffer();
+      restoredBytes = [...new Uint8Array(restored)];
+    }
+    client.terminateSimulationRuntimeRecoveryPersistenceWorker();
+    return {
+      detachedAfterSend,
+      initialized,
+      returnedOriginalBytes,
+      progress,
+      storedEncoding: storedCheckpoint?.source === "transfer" ? storedCheckpoint.transfer.encoding : null,
+      metrics: initialized.checkpointMetrics,
+      restoredBytes,
+      proof: recovery.proof,
+    };
+  }, primary.baseIdentity);
+
+  expect(result.detachedAfterSend).toBe(true);
+  expect(result.initialized.result).toMatchObject({ ok: true });
+  expect(result.returnedOriginalBytes.length).toBe(64 * 1024);
+  expect(result.returnedOriginalBytes.every((value: number) => value === 65)).toBe(true);
+  expect(result.progress).toContain("compressing-checkpoint");
+  expect(result.progress).toContain("verified");
+  expect(result.metrics).toMatchObject({
+    compressionAttempted: true,
+    committedEncoding: "gzip",
+    originalByteLength: 64 * 1024,
+  });
+  expect(result.metrics.originalSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(result.metrics.storedSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(result.metrics.storedByteLength).toBeLessThan(64 * 1024);
+  expect(result.storedEncoding).toBe("gzip");
+  expect(result.restoredBytes.length).toBe(64 * 1024);
+  expect(result.restoredBytes.every((value: number) => value === 65)).toBe(true);
+  expect(result.proof).toMatchObject({ checkpointSource: "transfer", transferEncoding: "gzip" });
+});
+
 test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-checkpoint writes", async ({ page }) => {
   test.setTimeout(60_000);
   await openBarePage(page);

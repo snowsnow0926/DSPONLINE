@@ -12,6 +12,7 @@ import type {
   SimulationRuntimeRecoveryReadResult,
   SimulationRuntimeRecoveryWriterFence,
 } from "./simulationRuntimeRecoveryStore";
+import type { SimulationRuntimeRecoveryCheckpointCompressionMetrics } from "./simulationRuntimeRecoveryCheckpointCompression";
 
 export type SimulationRuntimeRecoveryUnsignedIntent = Omit<SimulationRuntimeDurableOperationIntent, "intentSha256">;
 
@@ -21,6 +22,7 @@ export type SimulationRuntimeRecoveryPersistenceStage =
   | "staging-intent"
   | "finalizing-intent"
   | "validating-checkpoint"
+  | "compressing-checkpoint"
   | "committing-checkpoint"
   | "reading-recovery"
   | "clearing-recovery"
@@ -46,6 +48,7 @@ export type SimulationRuntimeRecoveryPersistenceRequest =
       id: number;
       type: "initialize";
       checkpoint: SimulationRuntimeDurableCheckpoint;
+      preferGzip?: true;
       fence: SimulationRuntimeRecoveryWriterFence;
     }
   | {
@@ -64,6 +67,7 @@ export type SimulationRuntimeRecoveryPersistenceRequest =
       checkpoint: SimulationRuntimeDurableCheckpoint;
       expectedGeneration: number;
       absorbedIntent?: SimulationRuntimeRecoveryAbsorbedIntent;
+      preferGzip?: true;
       fence: SimulationRuntimeRecoveryWriterFence;
     }
   | {
@@ -101,6 +105,7 @@ export type SimulationRuntimeRecoveryPersistenceSuccess =
       result: SimulationRuntimeRecoveryMutationResult;
       /** Ownership is transferred back on both durable success and failure. */
       sourceCheckpointTransfer?: ArrayBuffer;
+      checkpointMetrics?: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
     }
   | {
       id: number;
@@ -135,4 +140,5 @@ export type SimulationRuntimeRecoveryPersistenceResponse =
       message: string;
       /** Present when an input checkpoint buffer is still owned by the Worker. */
       sourceCheckpointTransfer?: ArrayBuffer;
+      checkpointMetrics?: SimulationRuntimeRecoveryCheckpointCompressionMetrics;
     };

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Activity,
   ArrowRight,
@@ -60,24 +60,21 @@ import {
   uploadCloudSaveWithOptions,
   verifyCloudEmail,
   type CloudSaveMetadata,
+  type CloudSaveSummary,
   type CloudSaveSlot,
   type CloudSyncState,
   type CloudSession,
   type CloudUploadStage,
 } from "../game/cloud";
 import { trackAnalyticsEvent } from "../game/analytics";
-import { getMenuContinueSave, getMenuPlanetName, getMenuSlotSummaries, getMenuSnapshotSummaries, type MenuContinueSave, type MenuSaveSource } from "../game/savePreview";
+import type { MenuContinueSave, MenuSaveSource, MenuSlotSummary, MenuSnapshotSummary } from "../game/savePreview";
 import type { DeferredLoadedGame, LoadedGame, SaveInspection, SaveSlotId } from "../game/storage";
-import type { AutosaveIntervalSeconds, FontScale, GameSettings, SaveMode, SimulationSpeed } from "../game/types";
+import type { AutosaveIntervalSeconds, FontScale, GameSettings, PlanetId, SaveMode, SimulationSpeed } from "../game/types";
 import { getDesktopBridge } from "../desktop";
 import { getCurrentReleaseNotes } from "../i18n/releaseNotes";
 import { importWithRecovery } from "../game/dynamicImportRecovery";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
-import { CloudAccountSecurity } from "./CloudAccountSecurity";
-import { CloudSaveConflictDialog } from "./CloudSaveConflictDialog";
-import { CloudSaveSlotsPanel } from "./CloudSaveSlotsPanel";
-import { CloudSaveStatusCenter } from "./CloudSaveStatusCenter";
 import { StableTextInput } from "./CompositionSafeInput";
 import { SaveDeleteDialog, type SaveDeleteTarget } from "./SaveDeleteDialog";
 import { SpeedrunCopyDialog } from "./SpeedrunCopyDialog";
@@ -98,10 +95,20 @@ import {
   type OfflineSettlementPreference,
 } from "../game/offlineSettlementStrategy";
 import { readShowRunLogPreference, readThemePreference, writeShowRunLogPreference, writeThemePreference } from "../game/uiPreferences";
+import { retainLocalSavePayload, subscribeLocalSaveStorageStatus } from "../game/localSaveStore";
+
+const resolveMenuContinueSave = (mode: SaveMode) => import("../game/savePreviewPayload").then((module) => module.resolveMenuContinueSave(mode));
+const readMenuSavePayload = (key: string) => import("../game/savePreviewPayload").then((module) => module.readMenuSavePayload(key));
+const resolveMenuSavePayload = (key: string, mode: SaveMode) => import("../game/savePreviewPayload").then((module) => module.resolveMenuSavePayload(key, mode));
+const loadMenuSaveIndex = () => import("../game/savePreview");
+const CloudAccountSecurity = lazy(() => import("./CloudAccountSecurity").then((module) => ({ default: module.CloudAccountSecurity })));
+const CloudSaveConflictDialog = lazy(() => import("./CloudSaveConflictDialog").then((module) => ({ default: module.CloudSaveConflictDialog })));
+const CloudSaveSlotsPanel = lazy(() => import("./CloudSaveSlotsPanel").then((module) => ({ default: module.CloudSaveSlotsPanel })));
+const CloudSaveStatusCenter = lazy(() => import("./CloudSaveStatusCenter").then((module) => ({ default: module.CloudSaveStatusCenter })));
 import { inspectPureIdleRecovery, matchesPureIdleRecoveryCheckpoint } from "../game/pureIdleRecovery";
 import { hasUncommittedTimeWarpTransaction, recoverOrphanedTimeWarpForOffline } from "../game/offlineTimeWarpRecovery";
 import type { OfflineSimulationPhase, OfflineSimulationProgress } from "../game/offlineSimulation";
-import { assessSavePayloadSize, utf8Bytes } from "../game/saveSizePolicy";
+import { assessSavePayloadSize } from "../game/saveSizePolicy";
 import { cloudSaveCapacityDetails, type CloudSaveCapacityDetails } from "../game/cloudSaveCapacity";
 import { cloudSyncStatusFromUpload, writeCloudSyncStatus } from "../game/cloudSyncStatus";
 
@@ -167,6 +174,13 @@ const NATIVE_DOWNLOAD_URL = "https://download.dsponline.cn/";
 const FONT_SCALES: FontScale[] = [0.8, 1, 1.25, 1.5, 2];
 const SIMULATION_SPEEDS: SimulationSpeed[] = [1, 2, 4];
 const AUTOSAVE_INTERVALS: AutosaveIntervalSeconds[] = [30, 60, 120, 600, 1800, 0];
+const MENU_PLANET_NAMES: Record<PlanetId, string> = {
+  home: "澄海 I", ashen: "烬原 II", giant: "苍岚 III", frost: "霜原 I", boreal_giant: "青冥 II",
+  magnetar: "极夜 I", verdant: "翠环 I", pelagic: "澜渊 II", aurora_giant: "天穹 III", dune: "赤砂 I",
+  cinder: "灰烬 II", ember_giant: "红飓 III", crystal: "晶穹 I", prairie: "牧云 II", sirius_giant: "银冠 III",
+  salt: "白盐 I", obsidian: "黑曜 II", white_giant: "苍白 III", tempest: "风暴 I", inferno: "炽核 II",
+  abyss: "幽冥 III", azure_giant: "蓝穹 IV",
+};
 const DEFAULT_MENU_SETTINGS: GameSettings = {
   simulationSpeed: 1,
   fontScale: 1,
@@ -308,15 +322,13 @@ function readRegistrationDraft(): { identifier: string; displayName: string } {
 export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
   const { locale, setLocale } = useAppLocale();
   const currentReleaseNotes = getCurrentReleaseNotes(locale);
-  const initialContinueSave = useMemo(() => getMenuContinueSave("normal"), []);
-  const initialSpeedrunContinueSave = useMemo(() => getMenuContinueSave("speedrun"), []);
-  const defaultSettings = { ...DEFAULT_MENU_SETTINGS, ...initialContinueSave?.settings };
   const [view, setView] = useState<StartMenuView>("overview");
-  const [continueSave, setContinueSave] = useState<MenuContinueSave | null>(initialContinueSave);
-  const [speedrunContinueSave, setSpeedrunContinueSave] = useState<MenuContinueSave | null>(initialSpeedrunContinueSave);
-  const [slots, setSlots] = useState(() => (["normal", "speedrun"] as SaveMode[]).flatMap((mode) => getMenuSlotSummaries(mode)));
-  const [snapshots, setSnapshots] = useState(() => (["normal", "speedrun"] as SaveMode[]).flatMap((mode) => getMenuSnapshotSummaries(mode)));
-  const [settings, setSettings] = useState<GameSettings>(() => readMenuSettings(defaultSettings));
+  const [continueSave, setContinueSave] = useState<MenuContinueSave | null>(null);
+  const [speedrunContinueSave, setSpeedrunContinueSave] = useState<MenuContinueSave | null>(null);
+  const [slots, setSlots] = useState<MenuSlotSummary[]>([]);
+  const [snapshots, setSnapshots] = useState<MenuSnapshotSummary[]>([]);
+  const [localSaveIndexReady, setLocalSaveIndexReady] = useState(false);
+  const [settings, setSettings] = useState<GameSettings>(() => readMenuSettings(DEFAULT_MENU_SETTINGS));
   const [newFactoryMode, setNewFactoryMode] = useState<"normal" | "speedrun">("normal");
   const [showRunLog, setShowRunLog] = useState(readShowRunLogPreference);
   const [offlineSettlementPreference, setOfflineSettlementPreference] = useState<OfflineSettlementPreference>(readOfflineSettlementPreference);
@@ -360,6 +372,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
   const offlineDecisionCancelRef = useRef<HTMLButtonElement>(null);
   const cloudUploadAbortRef = useRef<AbortController | null>(null);
   const cloudUploadSkipOfflineRef = useRef(false);
+  const catalogSettingsAppliedRef = useRef(false);
   const cloudAuthAllowed = isSecureCloudClient();
   const cloudMailAvailable = cloudSession.mailAvailable;
   const brandIconUrl = `${import.meta.env.BASE_URL}icon.svg`;
@@ -417,12 +430,22 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     return () => window.removeEventListener(NATIVE_BACK_EVENT, onNativeBack);
   }, [cloudConflict, cloudDeleteRequest, deleteRequest, offlineDecision, speedrunCopyRequest, timeWarpRecoveryPrompt, view]);
 
-  const refreshLocalSaves = () => {
-    setContinueSave(getMenuContinueSave("normal"));
-    setSpeedrunContinueSave(getMenuContinueSave("speedrun"));
-    setSlots((["normal", "speedrun"] as SaveMode[]).flatMap((mode) => getMenuSlotSummaries(mode)));
-    setSnapshots((["normal", "speedrun"] as SaveMode[]).flatMap((mode) => getMenuSnapshotSummaries(mode)));
+  const refreshLocalSaves = async () => {
+    const index = await loadMenuSaveIndex();
+    const normal = index.getMenuContinueSave("normal");
+    setContinueSave(normal);
+    setSpeedrunContinueSave(index.getMenuContinueSave("speedrun"));
+    setSlots((["normal", "speedrun"] as SaveMode[]).flatMap((mode) => index.getMenuSlotSummaries(mode)));
+    setSnapshots((["normal", "speedrun"] as SaveMode[]).flatMap((mode) => index.getMenuSnapshotSummaries(mode)));
+    if (!catalogSettingsAppliedRef.current) {
+      catalogSettingsAppliedRef.current = true;
+      setSettings(readMenuSettings({ ...DEFAULT_MENU_SETTINGS, ...normal?.settings }));
+    }
+    setLocalSaveIndexReady(true);
   };
+
+  useEffect(() => { void refreshLocalSaves(); }, []);
+  useEffect(() => subscribeLocalSaveStorageStatus(() => { void refreshLocalSaves(); }), []);
 
   useEffect(() => {
     const bridge = getDesktopBridge();
@@ -498,7 +521,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
 
   const preserveCurrentSave = async (reason: string, storage?: StorageModule, mode: SaveMode = "normal") => {
     const activeStorage = storage ?? await loadStorageModule();
-    const state = activeStorage.inspectContinueSave(mode)?.inspection.state;
+    const state = (await resolveMenuContinueSave(mode))?.inspection.state;
     if (state) await activeStorage.saveGameSnapshotVerified(state, reason);
   };
 
@@ -792,7 +815,13 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     try {
       const storage = await loadStorageModule();
       trackAnalyticsEvent("continue_game");
-      const loaded = storage.loadGameDeferredOffline(mode);
+      const resolved = await resolveMenuContinueSave(mode);
+      const loaded = resolved
+        ? storage.loadInspectedGameDeferredOffline(resolved.inspection, mode, resolved.save.source)
+        : null;
+      if (!loaded) throw new Error("本地存档不可用");
+      if (resolved) retainLocalSavePayload(resolved.save.key, resolved.raw);
+      if (resolved) mode === "normal" ? setContinueSave(resolved.save) : setSpeedrunContinueSave(resolved.save);
       const label = mode === "speedrun" ? "恢复速通工厂" : "恢复最近工厂";
       const prepared = await prepareTimeWarpDeferredLoad(loaded, label, undefined, mode === "normal");
       if (!prepared) return;
@@ -825,8 +854,10 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     }
   };
 
-  const requestNewGame = (forceModeSelection = false) => {
-    if (continueSave || forceModeSelection) setView("new");
+  const requestNewGame = async (forceModeSelection = false) => {
+    const indexedContinue = continueSave ?? (await loadMenuSaveIndex()).getMenuContinueSave("normal");
+    if (indexedContinue) setContinueSave(indexedContinue);
+    if (indexedContinue || forceModeSelection) setView("new");
     else void startNewGame();
   };
 
@@ -835,7 +866,9 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setMessage(null);
     try {
       const storage = await loadStorageModule();
-      const loaded = storage.loadGameSlotDeferredOffline(slotId, mode);
+      const selected = slots.find((slot) => slot.slotId === slotId && slot.mode === mode);
+      const resolved = selected ? await resolveMenuSavePayload(selected.key, mode) : null;
+      const loaded = resolved ? storage.loadInspectedGameDeferredOffline(resolved.inspection, mode) : null;
       if (!loaded) {
         setMessage({ tone: "error", text: `${mode === "speedrun" ? "速通" : "普通"}模式槽位 ${slotId} 无法载入` });
         return;
@@ -859,7 +892,9 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setBusy(true);
     try {
       const storage = await loadStorageModule();
-      const state = storage.loadSaveSnapshot(snapshotId, mode);
+      const selected = snapshots.find((snapshot) => snapshot.id === snapshotId && snapshot.mode === mode);
+      const resolved = selected ? await resolveMenuSavePayload(selected.key, mode) : null;
+      const state = resolved?.inspection.state ?? null;
       if (!state) {
         setMessage({ tone: "error", text: "自动快照无法载入" });
         return;
@@ -888,9 +923,19 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setMessage(null);
     try {
       const storage = await loadStorageModule();
-      const result = request.source === "main"
-        ? await storage.copySpeedrunPrimaryToNormalSlot(targetSlot)
-        : await storage.copySpeedrunSlotToNormalSlot(request.source, targetSlot);
+      const targetExists = (await loadMenuSaveIndex()).getMenuSlotSummaries("normal").some((slot) => slot.slotId === targetSlot);
+      if (targetExists) throw new Error(`普通模式槽位 ${targetSlot} 已有存档，未执行覆盖`);
+      const source = request.source === "main"
+        ? (await resolveMenuContinueSave("speedrun"))?.inspection.state ?? null
+        : (await resolveMenuSavePayload(
+          slots.find((slot) => slot.mode === "speedrun" && slot.slotId === request.source)?.key ?? "",
+          "speedrun",
+        ))?.inspection.state ?? null;
+      if (!source || source.mode !== "speedrun") throw new Error("找不到可复制的速通存档");
+      const copy = structuredClone(source);
+      copy.mode = "normal";
+      copy.speedrun = undefined;
+      const result = await storage.saveGameSlotVerified(targetSlot, copy);
       if (!result.success) throw new Error(result.message);
       refreshLocalSaves();
       setSpeedrunCopyRequest(null);
@@ -1069,11 +1114,14 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
       const storage = await loadStorageModule();
       const { prepareCloudUploadInWorker } = await importWithRecovery(() => import("../game/offlineSimulation"), "云存档后台模块");
-      const prepare = (skipOffline = false) => prepareCloudUploadInWorker(continueSave.raw, {
+      const resolvedLocal = await resolveMenuContinueSave("normal");
+      if (!resolvedLocal) throw new Error("本地主存档不可用");
+      setContinueSave(resolvedLocal.save);
+      const prepare = (skipOffline = false) => prepareCloudUploadInWorker(resolvedLocal.raw, {
         signal: controller.signal,
         now: Date.now(),
         menuSettings: settings,
-        returningRewardClaimed: storage.hasReturningRewardClaim(continueSave.summary.savedAt),
+        returningRewardClaimed: storage.hasReturningRewardClaim(resolvedLocal.save.summary.savedAt),
         skipOffline,
         onProgress: (progress) => {
           if (progress.totalSeconds > 0) {
@@ -1158,18 +1206,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
       }));
       trackAnalyticsEvent("cloud_upload");
       updateCloudSlot("main", cloudSave);
-      setContinueSave((current) => current ? {
-        ...current,
-        raw: prepared.payload,
-        summary: {
-          mode: prepared.summary.mode,
-          savedAt: prepared.summary.savedAt,
-          elapsedSeconds: prepared.summary.elapsedSeconds,
-          completedTechCount: prepared.summary.completedTechCount,
-          structurePoints: prepared.summary.structurePoints,
-          activePlanetId: prepared.summary.activePlanetId as MenuContinueSave["summary"]["activePlanetId"],
-        },
-      } : current);
+      refreshLocalSaves();
       setMessage({ tone: "ready", text: `云存档已更新到修订 ${cloudSave.revision}` });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -1243,8 +1280,8 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setBusy(true);
     setMessage(null);
     try {
-      const storage = await loadStorageModule();
-      const localPayload = storage.exportGameSlot(slotId);
+      const localKey = slots.find((entry) => entry.mode === "normal" && entry.slotId === slotId)?.key;
+      const localPayload = localKey ? await readMenuSavePayload(localKey) : null;
       if (!localPayload) throw new Error(`本地槽位 ${slot} 为空或校验失败`);
       const remote = cloudSession.cloudSaves?.[slot] ?? null;
       const comparison = compareCloudSave(cloudSession.user.id, localPayload, remote, slot);
@@ -1262,8 +1299,8 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
       setMessage({ tone: "ready", text: `本地槽位 ${slot} 已上传为云端修订 ${cloudSave.revision}` });
     } catch (error) {
       if (error instanceof CloudApiError && error.status === 409 && error.payload.cloudSave) {
-        const storage = await loadStorageModule();
-        const localPayload = storage.exportGameSlot(slotId);
+        const localKey = slots.find((entry) => entry.mode === "normal" && entry.slotId === slotId)?.key;
+        const localPayload = localKey ? await readMenuSavePayload(localKey) : null;
         if (localPayload) setCloudConflict({ slot, localPayload, remote: error.payload.cloudSave as CloudSaveMetadata });
       }
       setMessage({ tone: "error", text: error instanceof Error ? error.message : `云端槽位 ${slot} 上传失败` });
@@ -1280,7 +1317,8 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setMessage(null);
     try {
       const storage = await loadStorageModule();
-      const localPayload = storage.exportGameSlot(Number(slot) as SaveSlotId);
+      const localKey = slots.find((entry) => entry.mode === "normal" && entry.slotId === Number(slot))?.key;
+      const localPayload = localKey ? await readMenuSavePayload(localKey) : null;
       const comparison = compareCloudSave(cloudSession.user.id, localPayload, remote, slot);
       if (localPayload && comparison.state !== "synced") {
         setCloudConflict({ slot, localPayload, remote });
@@ -1434,13 +1472,19 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
   };
 
   const summary = continueSave?.summary;
-  const continueSaveSize = continueSave ? assessSavePayloadSize(utf8Bytes(continueSave.raw)) : null;
-  const summaryPlanet = summary ? getMenuPlanetName(summary.activePlanetId) : null;
+  const continueSaveSize = continueSave ? assessSavePayloadSize(continueSave.byteLength) : null;
+  const summaryPlanet = summary ? MENU_PLANET_NAMES[summary.activePlanetId] : null;
   const cloudStateLabel = cloudSession.status === "authenticated" ? "云端已登录" : cloudSession.status === "offline" ? "云端离线" : cloudSession.status === "checking" ? "连接云节点" : "云端未登录";
-  const comparisonPayload = continueSave?.raw ?? null;
   const cloudComparison = cloudSession.status === "authenticated" && cloudSession.user
-    ? compareCloudSave(cloudSession.user.id, comparisonPayload, cloudSession.cloudSave)
+    ? compareCloudSaveSummary(cloudSession.user.id, summary ? {
+      stateChecksum: summary.stateChecksum,
+    } as CloudSaveSummary : null, cloudSession.cloudSave)
     : null;
+
+  const exportLocalCloudBackup = () => resolveMenuContinueSave("normal").then((resolved) => resolved && exportTextFile({
+    contents: resolved.raw,
+    fileName: "dsp-idle-local-backup.json",
+  }));
 
   return (
     <main className="start-menu" data-reduced-motion={settings.reducedMotion ? "true" : "false"}>
@@ -1571,14 +1615,14 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             <small>{summary ? `${summaryPlanet ?? "未知行星"} · ${formatRuntime(summary.elapsedSeconds)} · 科技 ${summary.completedTechCount}` : "初始建设物资已装载"}</small>
           </div>
 
-          <button className="start-menu-primary" type="button" disabled={busy} onClick={continueSave ? () => void continueGame() : () => requestNewGame()}>
+          <button className="start-menu-primary" type="button" disabled={busy || !localSaveIndexReady} onClick={continueSave ? () => void continueGame() : () => void requestNewGame()}>
             {busy ? <Activity size={19} /> : <Play size={19} />}
             <span><small>{continueSave ? "恢复最近工厂" : "建立母星节点"}</small><strong>{continueSave ? "继续游戏" : "开始游戏"}</strong></span>
             <ArrowRight size={19} />
           </button>
 
           <nav className="start-menu-nav" aria-label="主菜单">
-            <button className={view === "new" ? "active" : ""} type="button" onClick={() => requestNewGame(true)}><Plus size={17} /><span>新建游戏</span></button>
+            <button className={view === "new" ? "active" : ""} type="button" disabled={!localSaveIndexReady} onClick={() => void requestNewGame(true)}><Plus size={17} /><span>新建游戏</span></button>
             <button className={view === "saves" ? "active" : ""} type="button" onClick={() => { setView("saves"); setMessage(null); }}><HardDrive size={17} /><span>加载存档</span><em>{slots.length}</em></button>
             <button className={view === "cloud" ? "active" : ""} type="button" onClick={() => { setView("cloud"); setMessage(null); }}><Cloud size={17} /><span>登录与云存档</span></button>
             <button className={view === "import" ? "active" : ""} type="button" onClick={() => fileInputRef.current?.click()}><FileUp size={17} /><span>导入存档</span></button>
@@ -1610,7 +1654,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
               <p>强烈推荐您在体验本项目之前，购买并游玩《戴森球计划》，相信它会为您带来更加丰富而精彩的游戏体验。</p>
               <p>进入工厂后会使用本机生成的匿名标识统计游玩与在线人数，不采集完整存档或设备指纹。</p>
             </section>
-            <footer><button type="button" onClick={() => setView("saves")}><History size={15} />查看存档记录</button><button className="primary" type="button" disabled={busy} onClick={continueSave ? () => void continueGame() : () => requestNewGame()}><Play size={15} />{continueSave ? "进入工厂" : "建立工厂"}</button></footer>
+            <footer><button type="button" onClick={() => setView("saves")}><History size={15} />查看存档记录</button><button className="primary" type="button" disabled={busy || !localSaveIndexReady} onClick={continueSave ? () => void continueGame() : () => void requestNewGame()}><Play size={15} />{continueSave ? "进入工厂" : "建立工厂"}</button></footer>
           </div> : null}
 
           {view === "new" ? <div className="start-menu-new">
@@ -1629,17 +1673,17 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             <header><span><small>本地数据</small><strong>加载存档</strong></span><em>{slots.length + snapshots.length + (continueSave ? 1 : 0) + (speedrunContinueSave ? 1 : 0)} 个恢复点</em></header>
             <div className="start-menu-save-list">
               {continueSave ? <article className="primary"><i><Save size={16} /></i><span><strong>普通模式 · {sourceLabel(continueSave.source)}</strong><small>{formatSavedAt(summary?.savedAt)} · {summaryPlanet} · 科技 {summary?.completedTechCount}</small></span><em>{formatRuntime(summary?.elapsedSeconds ?? 0)}</em><button type="button" disabled={busy} onClick={() => void continueGame()}><Play size={14} />载入</button></article> : null}
-              {speedrunContinueSave ? <article className="primary"><i><Gauge size={16} /></i><span><strong>速通模式 · {sourceLabel(speedrunContinueSave.source)}</strong><small>{formatSavedAt(speedrunContinueSave.summary.savedAt)} · {getMenuPlanetName(speedrunContinueSave.summary.activePlanetId)} · 科技 {speedrunContinueSave.summary.completedTechCount}</small></span><em>{formatRuntime(speedrunContinueSave.summary.elapsedSeconds)}</em><div className="start-menu-save-actions"><button type="button" disabled={busy} onClick={() => void continueGame("speedrun")}><Play size={14} />载入</button><button type="button" disabled={busy} onClick={() => setSpeedrunCopyRequest({ source: "main", label: "速通模式主存档" })} title="复制速通主存档为普通存档"><Copy size={14} />复制为普通</button></div></article> : null}
+              {speedrunContinueSave ? <article className="primary"><i><Gauge size={16} /></i><span><strong>速通模式 · {sourceLabel(speedrunContinueSave.source)}</strong><small>{formatSavedAt(speedrunContinueSave.summary.savedAt)} · {MENU_PLANET_NAMES[speedrunContinueSave.summary.activePlanetId]} · 科技 {speedrunContinueSave.summary.completedTechCount}</small></span><em>{formatRuntime(speedrunContinueSave.summary.elapsedSeconds)}</em><div className="start-menu-save-actions"><button type="button" disabled={busy} onClick={() => void continueGame("speedrun")}><Play size={14} />载入</button><button type="button" disabled={busy} onClick={() => setSpeedrunCopyRequest({ source: "main", label: "速通模式主存档" })} title="复制速通主存档为普通存档"><Copy size={14} />复制为普通</button></div></article> : null}
               {(["normal", "speedrun"] as SaveMode[]).flatMap((mode) => ([1, 2, 3] as SaveSlotId[]).map((slotId) => {
                 const slot = slots.find((candidate) => candidate.mode === mode && candidate.slotId === slotId);
                 const modeLabel = mode === "speedrun" ? "速通模式" : "普通模式";
-                return <article className={slot ? "" : "empty"} key={`${mode}-${slotId}`}><i><HardDrive size={16} /></i><span><strong>{modeLabel} · 本地槽位 {slotId}</strong><small>{slot ? `${formatSavedAt(slot.savedAt)} · ${getMenuPlanetName(slot.activePlanetId)} · 科技 ${slot.completedTechCount}` : "空槽位"}</small></span><em>{slot ? formatRuntime(slot.elapsedSeconds) : "--"}</em><div className="start-menu-save-actions"><button type="button" disabled={busy || !slot?.valid} onClick={() => void loadSlot(slotId, mode)}><Upload size={14} />载入</button>{mode === "speedrun" && slot?.valid ? <button type="button" disabled={busy} onClick={() => setSpeedrunCopyRequest({ source: slotId, label: `速通模式槽位 ${slotId}` })} title={`复制速通模式槽位 ${slotId} 为普通存档`}><Copy size={14} />复制为普通</button> : null}<button className="danger" type="button" disabled={busy || !slot} onClick={() => slot && setDeleteRequest({ slotId, mode, label: `${modeLabel}槽位 ${slotId}`, details: `${formatSavedAt(slot.savedAt)} · ${getMenuPlanetName(slot.activePlanetId)} · 运行 ${formatRuntime(slot.elapsedSeconds)} · 科技 ${slot.completedTechCount}` })} title={`删除${modeLabel}槽位 ${slotId}`} aria-label={`删除${modeLabel}槽位 ${slotId}`}><Trash2 size={14} /></button></div></article>;
+                return <article className={slot ? "" : "empty"} key={`${mode}-${slotId}`}><i><HardDrive size={16} /></i><span><strong>{modeLabel} · 本地槽位 {slotId}</strong><small>{slot ? `${formatSavedAt(slot.savedAt)} · ${MENU_PLANET_NAMES[slot.activePlanetId]} · 科技 ${slot.completedTechCount}` : "空槽位"}</small></span><em>{slot ? formatRuntime(slot.elapsedSeconds) : "--"}</em><div className="start-menu-save-actions"><button type="button" disabled={busy || !slot?.valid} onClick={() => void loadSlot(slotId, mode)}><Upload size={14} />载入</button>{mode === "speedrun" && slot?.valid ? <button type="button" disabled={busy} onClick={() => setSpeedrunCopyRequest({ source: slotId, label: `速通模式槽位 ${slotId}` })} title={`复制速通模式槽位 ${slotId} 为普通存档`}><Copy size={14} />复制为普通</button> : null}<button className="danger" type="button" disabled={busy || !slot} onClick={() => slot && setDeleteRequest({ slotId, mode, label: `${modeLabel}槽位 ${slotId}`, details: `${formatSavedAt(slot.savedAt)} · ${MENU_PLANET_NAMES[slot.activePlanetId]} · 运行 ${formatRuntime(slot.elapsedSeconds)} · 科技 ${slot.completedTechCount}` })} title={`删除${modeLabel}槽位 ${slotId}`} aria-label={`删除${modeLabel}槽位 ${slotId}`}><Trash2 size={14} /></button></div></article>;
               }))}
             </div>
               {snapshots.length > 0 ? <section className="start-menu-snapshots"><header><History size={14} /><strong>最近快照</strong><small>自动 {automaticSnapshotCount}/2 · 手动 {manualSnapshotCount}</small></header>{snapshots.slice(0, 6).map((snapshot) => <button type="button" disabled={busy || !snapshot.valid} onClick={() => void loadSnapshot(snapshot.id, snapshot.mode)} key={`${snapshot.mode}-${snapshot.id}`}><span><strong>{snapshot.mode === "speedrun" ? "速通模式 · " : "普通模式 · "}{snapshot.reason}</strong><small>{formatSavedAt(snapshot.savedAt)} · 科技 {snapshot.completedTechCount}</small></span><em>{formatRuntime(snapshot.elapsedSeconds)}</em><RefreshCw size={13} /></button>)}</section> : null}
           </div> : null}
 
-          {view === "cloud" ? <div className="start-menu-cloud">
+          {view === "cloud" ? <Suspense fallback={<div className="start-menu-cloud"><div className="start-menu-cloud-offline"><Activity size={24} /><span><strong>正在载入云存档面板</strong><small>本地存档保持可用</small></span></div></div>}><div className="start-menu-cloud">
             <header><span><small>银河数据节点</small><strong>账户与云存档</strong></span><em className={`cloud-${cloudSession.status}`}>{cloudStateLabel}</em></header>
             {!cloudAuthAllowed ? <div className="start-menu-cloud-offline"><ShieldCheck size={24} /><span><strong>需要 HTTPS 安全入口</strong><small>请使用 HTTPS 或本地开发入口</small></span></div> : null}
             {cloudAuthAllowed && cloudSession.status === "checking" ? <div className="start-menu-cloud-offline"><Activity size={24} /><span><strong>正在连接云节点</strong><small>验证服务状态与登录令牌</small></span></div> : null}
@@ -1666,12 +1710,12 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             </form> : null}
             {cloudSession.status === "authenticated" && cloudSession.user ? <div className="start-menu-cloud-account">
               <section className="start-menu-cloud-user"><i>{cloudSession.user.displayName.slice(0, 1).toUpperCase()}</i><span><strong>{cloudSession.user.displayName}</strong><small>@{cloudSession.user.username}{cloudSession.user.email ? ` · ${cloudSession.user.email}` : ""}</small></span><button type="button" title="退出云账户" aria-label="退出云账户" onClick={() => { setBusy(true); void logoutCloudAccount().then(() => setCloudSession((current) => ({ status: "anonymous", user: null, cloudSave: null, mailAvailable: current.mailAvailable, message: null }))).finally(() => setBusy(false)); }}><LogOut size={15} /></button></section>
-              <section className="start-menu-cloud-save"><header><Cloud size={18} /><span><small>普通模式 · 当前主存档</small><strong>{cloudSession.cloudSave ? `修订 ${cloudSession.cloudSave.revision}` : "尚未上传"}</strong></span><em>{cloudSession.cloudSave ? formatSavedAt(cloudSession.cloudSave.updatedAt) : "--"}</em></header>{cloudComparison ? <p className={`cloud-sync-state cloud-sync-state--${cloudComparison.state}`}>{cloudSyncLabel(cloudComparison.state)}</p> : null}{continueSaveSize?.warning ? <p className="settings-warning">{continueSaveSize.warning}（当前约 {continueSaveSize.mebibytes.toFixed(1)} MiB）</p> : null}<dl className="cloud-sync-summary"><div><dt>本地进度</dt><dd>{comparisonPayload ? `${formatRuntime(cloudComparison?.local?.elapsedSeconds ?? 0)} · 科技 ${cloudComparison?.local?.completedTechCount ?? 0}` : "无本地存档"}</dd></div><div><dt>云端进度</dt><dd>{cloudSession.cloudSave?.summary ? `${formatRuntime(cloudSession.cloudSave.summary.elapsedSeconds)} · 科技 ${cloudSession.cloudSave.summary.completedTechCount}` : cloudSession.cloudSave ? "旧版摘要待更新" : "无云存档"}</dd></div></dl><div><button type="button" disabled={busy || !continueSave} onClick={() => void uploadLocalSave()}><Upload size={14} />上传本地存档</button>{cloudUploadActive && cloudUploadOfflineStage ? <button type="button" onClick={skipCloudUploadOffline}><SkipForward size={14} />跳过离线并继续上传</button> : null}{cloudUploadActive ? <button type="button" onClick={cancelCloudUpload}><CloudOff size={14} />取消上传</button> : null}<button className="primary" type="button" disabled={busy || !cloudSession.cloudSave} onClick={() => void downloadAndEnterCloudSave()}><Download size={14} />下载并进入</button><button className="danger" type="button" disabled={busy || !cloudSession.cloudSave} onClick={() => cloudSession.cloudSave && setCloudDeleteRequest({ slot: "main", metadata: cloudSession.cloudSave, scope: "cloud", label: "普通模式云端主存档", details: `修订 ${cloudSession.cloudSave.revision} · ${formatSavedAt(cloudSession.cloudSave.updatedAt)}` })}><Trash2 size={14} />删除云存档</button></div><CloudSaveStatusCenter userId={cloudSession.user.id} mode="normal" slot="main" localRevision={continueSave?.localRevision ?? null} cloud={cloudSession.cloudSave} comparison={cloudComparison?.state ?? null} active={cloudUploadActive} message={message?.text ?? null} errorCode={cloudUploadErrorCode} capacity={cloudUploadCapacity} onRetry={continueSave ? () => void uploadLocalSave() : undefined} onCancel={cloudUploadActive ? cancelCloudUpload : undefined} onExportLocal={continueSave ? () => void exportTextFile({ contents: continueSave.raw, fileName: `dsp-idle-local-backup-${new Date().toISOString().slice(0, 10)}.json`, title: "导出本地云同步前备份" }) : undefined} onExportCloud={cloudSession.cloudSave ? () => void downloadCloudSave(undefined, "main", "normal").then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-cloud-r${save.revision}-${new Date().toISOString().slice(0, 10)}.json`, title: "导出云端存档副本" })).catch((error) => setMessage({ tone: "error", text: error instanceof Error ? error.message : "云端副本导出失败" })) : undefined} /></section>
+              <section className="start-menu-cloud-save"><header><Cloud size={18} /><span><small>普通模式 · 当前主存档</small><strong>{cloudSession.cloudSave ? `修订 ${cloudSession.cloudSave.revision}` : "尚未上传"}</strong></span><em>{cloudSession.cloudSave ? formatSavedAt(cloudSession.cloudSave.updatedAt) : "--"}</em></header>{cloudComparison ? <p className={`cloud-sync-state cloud-sync-state--${cloudComparison.state}`}>{cloudSyncLabel(cloudComparison.state)}</p> : null}{continueSaveSize?.warning ? <p className="settings-warning">{continueSaveSize.warning}（当前约 {continueSaveSize.mebibytes.toFixed(1)} MiB）</p> : null}<dl className="cloud-sync-summary"><div><dt>本地进度</dt><dd>{summary ? `${formatRuntime(summary.elapsedSeconds)} · 科技 ${summary.completedTechCount}` : "无本地存档"}</dd></div><div><dt>云端进度</dt><dd>{cloudSession.cloudSave?.summary ? `${formatRuntime(cloudSession.cloudSave.summary.elapsedSeconds)} · 科技 ${cloudSession.cloudSave.summary.completedTechCount}` : cloudSession.cloudSave ? "旧版摘要待更新" : "无云存档"}</dd></div></dl><div><button type="button" disabled={busy || !continueSave} onClick={() => void uploadLocalSave()}><Upload size={14} />上传本地存档</button>{cloudUploadActive && cloudUploadOfflineStage ? <button type="button" onClick={skipCloudUploadOffline}><SkipForward size={14} />跳过离线并继续上传</button> : null}{cloudUploadActive ? <button type="button" onClick={cancelCloudUpload}><CloudOff size={14} />取消上传</button> : null}<button className="primary" type="button" disabled={busy || !cloudSession.cloudSave} onClick={() => void downloadAndEnterCloudSave()}><Download size={14} />下载并进入</button><button className="danger" type="button" disabled={busy || !cloudSession.cloudSave} onClick={() => cloudSession.cloudSave && setCloudDeleteRequest({ slot: "main", metadata: cloudSession.cloudSave, scope: "cloud", label: "普通模式云端主存档", details: `修订 ${cloudSession.cloudSave.revision} · ${formatSavedAt(cloudSession.cloudSave.updatedAt)}` })}><Trash2 size={14} />删除云存档</button></div><CloudSaveStatusCenter userId={cloudSession.user.id} mode="normal" slot="main" localRevision={continueSave?.localRevision ?? null} cloud={cloudSession.cloudSave} comparison={cloudComparison?.state ?? null} active={cloudUploadActive} message={message?.text ?? null} errorCode={cloudUploadErrorCode} capacity={cloudUploadCapacity} onRetry={continueSave ? () => void uploadLocalSave() : undefined} onCancel={cloudUploadActive ? cancelCloudUpload : undefined} onExportLocal={continueSave ? () => void exportLocalCloudBackup() : undefined} onExportCloud={cloudSession.cloudSave ? () => void downloadCloudSave(undefined, "main", "normal").then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-cloud-r${save.revision}-${new Date().toISOString().slice(0, 10)}.json`, title: "导出云端存档副本" })).catch((error) => setMessage({ tone: "error", text: error instanceof Error ? error.message : "云端副本导出失败" })) : undefined} /></section>
               <CloudSaveSlotsPanel mode="normal" cloudSaves={cloudSession.cloudSaves} localSlots={slots.filter((slot) => slot.mode === "normal")} busySlot={busy ? "main" : null} uploadDisabled={false} onUpload={(slot) => void uploadManualCloudSlot(slot)} onDownload={(slot) => void downloadManualCloudSlot(slot)} onDelete={(slot, metadata) => setCloudDeleteRequest({ slot, metadata, scope: "cloud", label: `普通模式云端槽位 ${slot}`, details: `修订 ${metadata.revision} · ${formatSavedAt(metadata.updatedAt)}` })} />
               <CloudAccountSecurity user={cloudSession.user} mailAvailable={cloudMailAvailable} onUserChange={(user) => setCloudSession((current) => ({ ...current, user }))} onLoggedOut={() => setCloudSession((current) => ({ status: "anonymous", user: null, cloudSave: null, mailAvailable: current.mailAvailable, message: null }))} />
             </div> : null}
             {cloudConflict ? <CloudSaveConflictDialog local={summarizeCloudPayload(cloudConflict.localPayload)} cloud={cloudConflict.remote} slot={cloudConflict.slot} busy={busy} onUseCloud={() => void useCloudConflictVersion()} onKeepLocal={() => void keepLocalConflictVersion()} onExportLocal={() => void exportTextFile({ contents: cloudConflict.localPayload, fileName: `dsp-idle-${cloudConflict.remote.mode ?? "normal"}-${cloudConflict.slot}-local-conflict.json`, title: "导出冲突本地副本" })} onExportCloud={() => void downloadCloudSave(cloudConflict.remote.revision, cloudConflict.slot, cloudConflict.remote.mode ?? "normal").then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${save.mode}-${save.slot}-cloud-r${save.revision}.json`, title: "导出冲突云端副本" })).catch((error) => setMessage({ tone: "error", text: error instanceof Error ? error.message : "冲突云端副本导出失败" }))} onCancel={() => setCloudConflict(null)} /> : null}
-          </div> : null}
+          </div></Suspense> : null}
 
           {view === "import" ? <div className="start-menu-import">
             <header><FileUp size={22} /><span><small>外部数据</small><strong>导入存档</strong></span></header>

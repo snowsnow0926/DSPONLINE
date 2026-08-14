@@ -246,9 +246,11 @@ test("BroadcastChannel refreshes a secondary tab after the primary commits", asy
   expect(saved.success).toBe(true);
   await expect.poll(() => secondary.evaluate(async () => {
     const store = await import("/src/game/localSaveStore.ts");
-    const raw = store.getLocalSaveValue("dsp-idle-network.save.v1");
-    return raw ? JSON.parse(raw).state.elapsedSeconds : null;
-  })).toBe(444);
+    return {
+      elapsedSeconds: store.getLocalSaveCatalog("dsp-idle-network.save.v1")?.elapsedSeconds ?? null,
+      rawCacheEntries: store.getLocalSaveRawCacheSize(),
+    };
+  })).toEqual({ elapsedSeconds: 444, rawCacheEntries: 0 });
 });
 
 test("same-tab navigation keeps its writer chain while an opened copy becomes secondary", async ({ page, context }) => {

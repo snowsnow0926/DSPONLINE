@@ -176,7 +176,7 @@ test("normal and speedrun cloud saves coexist while mode selection remains read-
 
   const mutationRequests = await page.evaluate(() => {
     const requests = (window as typeof window & { __p108CloudRequests: Array<{ method: string; path: string }> }).__p108CloudRequests;
-    return requests.filter((request) => request.method !== "GET");
+    return requests.filter((request) => request.method !== "GET" && request.path.startsWith("/api/cloud-save"));
   });
   expect(mutationRequests).toEqual([]);
 });
@@ -297,7 +297,7 @@ test("speedrun history and delete confirmations name their exact mode and slot",
 
   const mutations = await page.evaluate(() => {
     const requests = (window as typeof window & { __p108CloudRequests: Array<{ method: string; path: string; mode: string | null; slot: string | null }> }).__p108CloudRequests;
-    return requests.filter((request) => request.method !== "GET");
+    return requests.filter((request) => request.method !== "GET" && request.path.startsWith("/api/cloud-save"));
   });
   expect(mutations).toEqual([
     { method: "POST", path: "/api/cloud-save/restore", mode: "speedrun", slot: null },

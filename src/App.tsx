@@ -258,7 +258,7 @@ import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, up
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
 import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncCampaignProgress, type CampaignNavigation } from "./game/campaign";
 import { inspectSaveInWorker } from "./game/saveInspection";
-import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlot, loadSaveSnapshot, repairSave, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
+import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
 import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./game/blueprintExchange";
 import { exportTextFile } from "./game/fileExport";
@@ -4388,7 +4388,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [playTone, refreshSaveData]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
-    const slot = loadGameSlot(slotId, gameRef.current.mode);
+    const slot = await loadGameSlotFromPersistence(slotId, gameRef.current.mode);
     if (!slot) {
       setNotice(`槽位 ${slotId} 没有可用存档`);
       return;
@@ -4468,7 +4468,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, gameDialog, persistPrimarySave, playTone, refreshSaveData, unipolarExpansionBusy]);
 
   const loadSnapshot = useCallback(async (snapshotId: string) => {
-    const state = loadSaveSnapshot(snapshotId, gameRef.current.mode);
+    const state = await loadSaveSnapshotFromPersistence(snapshotId, gameRef.current.mode);
     if (!state) {
       setNotice("快照不可用，可能已损坏");
       playTone("alert");

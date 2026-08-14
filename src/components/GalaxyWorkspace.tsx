@@ -36,7 +36,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ACCOUNT_AVATARS, getActiveAccount, getGalacticThroughputSnapshot, type AccountProfileChanges, type AccountState } from "../game/account";
 import { CloudApiError, clearCloudSyncMarker, compareCloudSave, deleteCloudSave, describeCloudUploadError, downloadCloudSave, fetchCloudLeaderboard, fetchCloudLeaderboardMe, fetchCloudSaveHistory, fetchSpeedrunLeaderboard, loginCloudAccount, logoutCloudAccount, markCloudSaveSynchronized, refreshCloudSaveMetadata, registerCloudAccount, restoreCloudSaveRevision, resumeCloudSession, setCloudLeaderboardVisibility, submitCloudLeaderboard, submitSpeedrunResult, summarizeCloudPayload, uploadCloudSave, type CloudLeaderboardEntry, type CloudLeaderboardMe, type CloudLeaderboardMetricWindow, type CloudSave, type CloudSaveMetadata, type CloudSaveSlot, type CloudSession, type CloudSyncState, type CloudUploadDiagnostics, type CloudUploadStage, type SpeedrunLeaderboardEntry } from "../game/cloud";
-import { exportGame, exportGameSlot, getSaveSlotSummaries, inspectSave, saveGameSlotVerified, type SaveSlotId } from "../game/storage";
+import { exportGame, exportGameSlotFromPersistence, getSaveSlotSummaries, inspectSave, saveGameSlotVerified, type SaveSlotId } from "../game/storage";
 import {
   LEADERBOARD_CATEGORIES,
   LEADERBOARD_SEASONS,
@@ -549,7 +549,7 @@ export function GalaxyWorkspace({
 
   const uploadManualCloudSlot = async (slot: Exclude<CloudSaveSlot, "main">) => {
     if (cloudSession.status !== "authenticated" || !cloudSession.user) return;
-    const localPayload = exportGameSlot(Number(slot) as SaveSlotId, game.mode);
+    const localPayload = await exportGameSlotFromPersistence(Number(slot) as SaveSlotId, game.mode);
     if (!localPayload) {
       setCloudMessage(`本地槽位 ${slot} 为空或校验失败`);
       return;
@@ -585,7 +585,7 @@ export function GalaxyWorkspace({
     if (cloudSession.status !== "authenticated" || !cloudSession.user) return;
     const remote = cloudSession.cloudSaves?.[slot] ?? null;
     if (!remote) return;
-    const localPayload = exportGameSlot(Number(slot) as SaveSlotId, game.mode);
+    const localPayload = await exportGameSlotFromPersistence(Number(slot) as SaveSlotId, game.mode);
     const comparison = compareCloudSave(cloudSession.user.id, localPayload, remote, slot, game.mode);
     if (localPayload && comparison.state !== "synced") {
       setCloudConflict({ slot, localPayload, remote });

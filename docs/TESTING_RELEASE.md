@@ -1260,3 +1260,11 @@ Android `1.0.18 / 1000018` 使用历史长期证书，APK v2/v3 通过，SHA-256
 本开发项不升级 GameState v46、envelope v2、cloud schema v7、SQLite layout v2 或 IndexedDB version 2。共享 `station-slot` 契约覆盖本地/远程模式、最低装载率、库存上下限、优先级、中转策略和翘曲器预算；只有缺失字段读取默认值，显式 `null`、错误类型与越界值继续由服务端拒绝。
 
 聚焦门禁覆盖默认字段省略、非默认/`null` 保留、中间空槽不折叠、尾部空槽裁剪、加载补足五槽、client/server 契约一致、dense/sparse 精确重载及 1,000 秒玩法哈希/逐字段等价。匿名 lean 语义夹具为 54,306 实体、97,834 条线路、21,186 座物流站，稀疏正文 29,175,494 bytes；它用于确定性兼容与守恒回归，不作为玩家同形容量证据。可选只读真实派生门禁在内存中做确定性 ID/reference remap，得到 54,306 实体、97,834 条线路、20,138 座物流站的独立 2x 形状，稀疏正文 58,857,707 bytes，低于 60 MiB。原只读玩家附件由 36,704,109 bytes 投影为 29,572,337 bytes；源文件 bytes、mtime 与 SHA-256 `cd2356ea2b9a90a47cfa32ed9533e7056bfc4202f6af777fc4f3b98faa9a81b1` 前后不变，附件未进入 Git 或制品。
+
+## 55. `1.0.44` IndexedDB catalog 与正文惰性读取开发门禁
+
+本开发项保持 IndexedDB version 2、`records` store、存档逻辑 key 与 `value: string` 正文格式不变。catalog side-record 必须在正文/revision 同一事务写入，且绑定精确 payload checksum、UTF-8 byte length 与 revision；单项序列化小于 4 KiB，当前匿名门禁总 catalog 为 398 bytes，小于 1 MiB。冷主页不得调用 `records.getAll()`、不得读取未选 payload、不得在主线程解析 MiB 级正文，idle raw cache 必须为 0。旧记录只允许按 key 顺序读入专用 Worker 做完整 `JSON.parse` 与 checksum，禁止 `indexOf`、花括号扫描或局部 JSON 近似；duplicate key、nested same-name、malformed/truncated 和 checksum-bound 同长度损坏均有专项回归。
+
+匿名 byte-shape 性能夹具分别为 31,142,707 和 62,285,414 bytes；后者低于 64 MiB 云正文边界，但两者只用于 catalog/惰性读取性能，不是第 54 节的玩家同形容量证据。Chromium 各冷重载五轮并等待真实“继续游戏”摘要可见的合并 p95 为 220 ms：catalog-backed 两种尺寸均为 payload get 0、`getAll` 0、主线程大正文 `JSON.parse` 0、raw cache 0；35 MiB legacy 建索引为严格串行两次 payload get（Worker 输入与提交前精确复核）、主线程大正文解析 0、同步 fallback 0。损坏 primary 只读一次后按原顺序读取 backup 并选中正确状态；冷启动槽位/快照摘要不读正文，玩家选择后各只读对应 payload 一次且 raw cache 仍为 0。
+
+开发侧门禁为 catalog/store/preview/mode/transfer Vitest 31/31、完整 storage/mode Vitest 107/107、catalog Chromium 4/4、既有 IndexedDB v1→v2、lease/fencing/CAS/conflict/35 MiB readback Chromium 18/18、速通云恢复 7/7，以及既有快照批量管理 1/1；typecheck、启动长任务门禁与生产 build 全部通过。catalog key 明确位于 1.0.43 精确 payload key 命名空间之外；回滚客户端的旧 `isSaveKey` 对 primary/backup/slot/snapshot/conflict catalog 均返回 false，旧版不会将 side-record 误当存档、槽位、快照或正文缓存。最终菜单静态闭包为 267,852 gzip bytes，低于 286,720-byte 预算 18,868 bytes；无 budget 放宽。测试仅使用匿名运行时夹具和浏览器临时 IndexedDB，未部署、未写入玩家数据。

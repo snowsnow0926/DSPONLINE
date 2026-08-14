@@ -47,10 +47,12 @@ import { projectPersistentSaveState } from "./saveProjection";
 import {
   clearPrimarySaveEmergencyMirror,
   flushLocalSaveWrites,
+  getLocalSaveCatalog,
   getLocalSaveStorageEstimate,
   getLocalSaveValue,
   hasLocalSaveCapacity,
   listLocalSaveKeys,
+  readLocalSavePayload,
   readPersistedLocalSaveValue,
   reloadLocalSaveCache,
   removeLocalSaveValue,
@@ -2659,6 +2661,29 @@ function parseDeferredEnvelope(raw: string): DeferredLoadedGame | null {
   return { state, savedAt, offlineSeconds, offlineReport: null };
 }
 
+export function loadInspectedGameDeferredOffline(
+  inspection: SaveInspection,
+  mode: SaveMode = "normal",
+  source: SaveRecovery["source"] = "primary",
+): DeferredLoadedGame | null {
+  if (!inspection.valid || !inspection.state || inspection.mode !== mode || saveModeForState(inspection.state) !== mode) return null;
+  const state = inspection.state;
+  const savedAt = inspection.savedAt ?? Date.now();
+  const loaded: DeferredLoadedGame = {
+    state,
+    savedAt,
+    offlineSeconds: !state.paused
+      ? Math.min(getOfflineSimulationLimitSeconds(state), Math.max(0, (Date.now() - savedAt) / 1000))
+      : 0,
+    offlineReport: null,
+  };
+  if (source !== "primary") loaded.recovery = {
+    source,
+    issues: [source === "backup" ? "主存档校验失败，已回退到最近一次有效备份" : "主存档不可用，已回退到自动快照"],
+  };
+  return loaded;
+}
+
 export function finalizeDeferredOfflineGame(
   loaded: DeferredLoadedGame,
   advancedState: GameState,
@@ -3021,7 +3046,7 @@ export async function saveVerifiedPayload(
   const mode = options.mode ?? payloadMode;
   const primaryKey = primarySaveKey(mode);
   const backupKey = backupSaveKey(mode);
-  const previous = getLocalSaveValue(primaryKey);
+  const previous = await readPersistedLocalSaveValue(primaryKey);
   const capacity = await hasLocalSaveCapacity(primaryKey, raw);
   if (!capacity.ok) return failedSave("quota", "本地存储空间不足，当前进度尚未保存。请先管理快照或导出存档。", bytes);
   if (!await preserveLegacyModeMigrationBackup(previous, mode)) {
@@ -3111,7 +3136,7 @@ async function saveGameVerifiedOnce(state: GameState): Promise<SaveGameResult> {
   const serializeMs = Math.max(0, monotonicNow() - serializeStartedAt);
 
   const bytes = utf8ByteLength(raw);
-  const previous = getLocalSaveValue(primaryKey);
+  const previous = await readPersistedLocalSaveValue(primaryKey);
   const snapshotScanStartedAt = monotonicNow();
   let removedAutomaticSnapshots = prepareAutomaticSnapshotsForPrimarySave(mode);
   const snapshotScanMs = Math.max(0, monotonicNow() - snapshotScanStartedAt);
@@ -3353,6 +3378,16 @@ export function loadGameSlot(slotId: SaveSlotId, mode: SaveMode = "normal"): Loa
   }
 }
 
+export async function loadGameSlotFromPersistence(slotId: SaveSlotId, mode: SaveMode = "normal"): Promise<LoadedGame | null> {
+  try {
+    const raw = await readLocalSavePayload(saveSlotKey(slotId, mode));
+    const loaded = raw ? parseEnvelope(raw, true) : null;
+    return loaded && saveModeForState(loaded.state) === mode ? loaded : null;
+  } catch {
+    return null;
+  }
+}
+
 export function loadGameSlotDeferredOffline(slotId: SaveSlotId, mode: SaveMode = "normal"): DeferredLoadedGame | null {
   try {
     const raw = getLocalSaveValue(saveSlotKey(slotId, mode));
@@ -3367,6 +3402,20 @@ export function loadGameSlotDeferredOffline(slotId: SaveSlotId, mode: SaveMode =
 export function exportGameSlot(slotId: SaveSlotId, mode: SaveMode = "normal"): string | null {
   try {
     const raw = getLocalSaveValue(saveSlotKey(slotId, mode));
+    if (!raw) return null;
+    const inspection = inspectSave(raw);
+    const parsed = JSON.parse(raw) as Partial<SaveEnvelope>;
+    return inspection.valid && inspection.state && inspection.mode === mode && (parsed.slot === undefined || inspection.slot === slotId)
+      ? serializeEnvelope(inspection.state, inspection.savedAt ?? Date.now(), "slot", undefined, loadContentPackRegistry(), slotId)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function exportGameSlotFromPersistence(slotId: SaveSlotId, mode: SaveMode = "normal"): Promise<string | null> {
+  try {
+    const raw = await readLocalSavePayload(saveSlotKey(slotId, mode));
     if (!raw) return null;
     const inspection = inspectSave(raw);
     const parsed = JSON.parse(raw) as Partial<SaveEnvelope>;
@@ -3395,6 +3444,35 @@ export async function clearGameSlotVerified(slotId: SaveSlotId, mode: SaveMode =
   }
 }
 
+function catalogPlanetId(value: string): PlanetId {
+  return PLANET_LIST.some((planet) => planet.id === value) ? value as PlanetId : "home";
+}
+
+function catalogIntegrity(status: "valid" | "missing" | "invalid"): SaveIntegrityStatus {
+  return status === "valid" ? "valid" : status === "missing" ? "legacy" : "corrupt";
+}
+
+function catalogSlotSummary(key: string, slotId: SaveSlotId, mode: SaveMode): SaveSlotSummary | null {
+  const catalog = getLocalSaveCatalog(key);
+  if (!catalog) return null;
+  const modeMatches = catalog.mode === mode;
+  const slotMatches = catalog.slot === slotId;
+  return {
+    slotId,
+    mode,
+    savedAt: catalog.savedAt,
+    elapsedSeconds: catalog.elapsedSeconds,
+    completedTechCount: catalog.completedTechCount,
+    structurePoints: catalog.structurePoints,
+    activePlanetId: catalogPlanetId(catalog.activePlanetId),
+    integrity: catalogIntegrity(catalog.integrity),
+    valid: catalog.integrity !== "invalid" && modeMatches && slotMatches,
+    issues: !modeMatches ? ["存档模式与槽位命名空间不一致"] :
+      !slotMatches ? ["存档槽位标记与实际槽位不一致"] :
+        catalog.integrity === "invalid" ? ["存档完整性校验失败"] : [],
+  };
+}
+
 export function getSaveSlotSummaries(mode: SaveMode = "normal"): SaveSlotSummary[] {
   const keys = ([1, 2, 3] as SaveSlotId[]).map((slotId) => saveSlotKey(slotId, mode));
   pruneSaveSummaryCache(keys, "slots");
@@ -3402,7 +3480,10 @@ export function getSaveSlotSummaries(mode: SaveMode = "normal"): SaveSlotSummary
     const key = saveSlotKey(slotId, mode);
     try {
       const raw = getLocalSaveValue(key);
-      if (!raw) return [];
+      if (!raw) {
+        const catalog = catalogSlotSummary(key, slotId, mode);
+        return catalog ? [catalog] : [];
+      }
       const cached = saveSummaryCache.get(key);
       if (cached?.raw === raw) return [cached.summary as SaveSlotSummary];
       const inspection = inspectSave(raw);
@@ -3468,7 +3549,17 @@ function storedSnapshotEntries(mode: SaveMode = "normal"): StoredSnapshotEntry[]
   return keys.flatMap((key) => {
     try {
       const raw = getLocalSaveValue(key);
-      if (!raw) return [];
+      if (!raw) {
+        const catalog = getLocalSaveCatalog(key);
+        if (!catalog) return [];
+        return [{
+          key,
+          savedAt: catalog.savedAt,
+          elapsedSeconds: catalog.elapsedSeconds,
+          automatic: !catalog.reason || catalog.reason === "自动快照",
+          hasPersistedProductionHistory: false,
+        } satisfies StoredSnapshotEntry];
+      }
       const cached = snapshotMetadataCache.get(key);
       if (cached?.raw === raw) return cached.entry ? [cached.entry] : [];
       const parsed = JSON.parse(raw) as unknown;
@@ -3564,7 +3655,26 @@ async function maybeSaveAutomaticSnapshotVerified(state: GameState, mode = saveM
 }
 
 function getSnapshotSummaryForKey(key: string, raw = getLocalSaveValue(key), mode: SaveMode = "normal"): SaveSnapshotSummary | null {
-  if (!raw) return null;
+  if (!raw) {
+    const catalog = getLocalSaveCatalog(key);
+    if (!catalog) return null;
+    const modeMatches = catalog.mode === mode;
+    return {
+      id: key.startsWith(`${snapshotSavePrefix(mode)}.`)
+        ? key.slice(`${snapshotSavePrefix(mode)}.`.length)
+        : key.slice(`${SAVE_SNAPSHOT_KEY_PREFIX}.`.length),
+      mode,
+      savedAt: catalog.savedAt,
+      elapsedSeconds: catalog.elapsedSeconds,
+      completedTechCount: catalog.completedTechCount,
+      structurePoints: catalog.structurePoints,
+      activePlanetId: catalogPlanetId(catalog.activePlanetId),
+      reason: catalog.reason ?? "自动快照",
+      integrity: catalogIntegrity(catalog.integrity),
+      valid: catalog.integrity !== "invalid" && modeMatches,
+      issues: !modeMatches ? ["快照模式与命名空间不一致"] : catalog.integrity === "invalid" ? ["快照完整性校验失败"] : [],
+    };
+  }
   const cached = saveSummaryCache.get(key);
   if (cached?.raw === raw) return cached.summary as SaveSnapshotSummary;
   const inspection = inspectSave(raw);
@@ -3661,8 +3771,7 @@ export function getSaveSnapshotSummaries(mode: SaveMode = "normal"): SaveSnapsho
   return keys.flatMap((key) => {
     try {
       const raw = getLocalSaveValue(key);
-      if (!raw) return [];
-      const summary = getSnapshotSummaryForKey(key, raw, mode);
+      const summary = getSnapshotSummaryForKey(key, raw ?? undefined, mode);
       return summary ? [summary] : [];
     } catch {
       return [];
@@ -3742,7 +3851,7 @@ export function getLocalSaveSummaryMetrics(): LocalSaveSummaryMetrics {
   let snapshotCount = 0;
   for (const key of keys) {
     const raw = getLocalSaveValue(key);
-    if (raw !== null) totalBytes += utf8ByteLength(raw);
+    totalBytes += raw !== null ? utf8ByteLength(raw) : getLocalSaveCatalog(key)?.byteLength ?? 0;
     if (key.startsWith(`${SAVE_SLOT_KEY_PREFIX}.`)) slotCount += 1;
     if (key.startsWith(`${SAVE_SNAPSHOT_KEY_PREFIX}.`)) snapshotCount += 1;
   }
@@ -3753,6 +3862,18 @@ export function loadSaveSnapshot(id: string, mode: SaveMode = "normal"): GameSta
   try {
     const raw = getLocalSaveValue(`${snapshotSavePrefix(mode)}.${id}`) ??
       (mode === "normal" ? getLocalSaveValue(`${SAVE_SNAPSHOT_KEY_PREFIX}.${id}`) : null);
+    const state = raw ? parseEnvelope(raw, false)?.state ?? null : null;
+    return state && saveModeForState(state) === mode ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function loadSaveSnapshotFromPersistence(id: string, mode: SaveMode = "normal"): Promise<GameState | null> {
+  try {
+    const key = `${snapshotSavePrefix(mode)}.${id}`;
+    const raw = await readLocalSavePayload(key) ??
+      (mode === "normal" ? await readLocalSavePayload(`${SAVE_SNAPSHOT_KEY_PREFIX}.${id}`) : null);
     const state = raw ? parseEnvelope(raw, false)?.state ?? null : null;
     return state && saveModeForState(state) === mode ? state : null;
   } catch {

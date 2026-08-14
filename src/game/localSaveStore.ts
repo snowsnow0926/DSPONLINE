@@ -35,6 +35,15 @@ import {
   type LocalSaveWriterStatus,
 } from "./localSaveCoordination";
 import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
+import {
+  LOCAL_SAVE_CATALOG_RECORD_PREFIX,
+  localSaveCatalogRecordKey,
+  parseLocalSaveCatalog,
+  payloadKeyFromLocalSaveCatalogRecord,
+  serializeLocalSaveCatalog,
+  type LocalSaveCatalog,
+} from "./localSaveCatalog";
+import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 
 const DATABASE_NAME = "dsp-idle-network.local-saves";
 const DATABASE_VERSION = 2;
@@ -184,6 +193,8 @@ class LocalSaveConflictResolutionError extends Error {
 }
 
 const cache = new Map<string, string>();
+const knownSaveKeys = new Set<string>();
+const catalogCache = new Map<string, LocalSaveCatalog>();
 const revisionCache = new Map<string, number>();
 const storageEntryCache = new Map<string, LocalSaveStorageEntry & { checksum: string | null }>();
 let backend: LocalSaveBackend = "memory";
@@ -243,6 +254,10 @@ const saveChangeListeners = new Set<(message: LocalSaveBroadcastMessage) => void
 const storageStatusListeners = new Set<() => void>();
 let recoveryPrompt: LocalSaveRecoveryPrompt | null = null;
 let lastPersistenceStatus: LocalSavePersistenceStatus | null = null;
+let legacyCatalogIndexQueue: string[] = [];
+let legacyCatalogIndexScheduled = false;
+const RAW_CACHE_LIMIT = 2;
+let synchronousFallbackInitialized = false;
 
 function markSameTabWriterContinuation(): void {
   if (typeof window === "undefined") return;
@@ -276,6 +291,10 @@ function isSaveKey(key: string): boolean {
     key.startsWith(`${SAVE_KEY}.normal`) || key.startsWith(`${SAVE_KEY}.speedrun`) ||
     key.startsWith(`${SAVE_KEY}.snapshot.`) || key.startsWith(IMPORT_CACHE_KEY_PREFIX) ||
     key.startsWith(LOCAL_SAVE_CONFLICT_KEY_PREFIX) || key.startsWith(SLOT_KEY_PREFIX);
+}
+
+function isCatalogedSaveKey(key: string): boolean {
+  return isSaveKey(key) && !key.endsWith(".snapshot.sequence") && !key.endsWith(".snapshot.speedrun.sequence");
 }
 
 function byteLength(value: string): number {
@@ -406,6 +425,40 @@ function updateStorageEntry(record: StoredSaveRecord): void {
   });
 }
 
+function updateStorageEntryFromCatalog(catalog: LocalSaveCatalog, updatedAt = catalog.savedAt): void {
+  const classified = classifySaveRecord(catalog.key, JSON.stringify({
+    kind: catalog.kind === "snapshot" ? "snapshot" : catalog.kind === "slot" ? "slot" : "primary",
+    reason: catalog.reason,
+    savedAt: catalog.savedAt,
+    mode: catalog.mode,
+    slot: catalog.slot,
+    checksum: catalog.stateChecksum,
+  }));
+  const summary: StoredSaveSummary = {
+    ...classified,
+    savedAt: catalog.savedAt,
+    mode: catalog.mode,
+    slot: catalog.slot,
+    reason: catalog.reason,
+    checksum: catalog.stateChecksum,
+  };
+  storageEntryCache.set(catalog.key, {
+    key: catalog.key,
+    label: entryLabel(catalog.key, summary),
+    bytes: catalog.byteLength,
+    updatedAt,
+    savedAt: catalog.savedAt,
+    mode: catalog.mode,
+    category: summary.category,
+    slot: catalog.slot,
+    source: entrySource(summary),
+    reason: catalog.reason,
+    automatic: summary.automatic,
+    protected: summary.protected,
+    checksum: catalog.stateChecksum,
+  });
+}
+
 function notifyStorageStatus(): void {
   storageStatusListeners.forEach((listener) => listener());
 }
@@ -414,9 +467,57 @@ function removeStorageEntry(key: string): void {
   if (storageEntryCache.delete(key)) notifyStorageStatus();
 }
 
+function trimRawCache(): void {
+  while ([...cache.keys()].filter(isCatalogedSaveKey).length > RAW_CACHE_LIMIT) {
+    const oldest = [...cache.keys()].find(isCatalogedSaveKey);
+    if (!oldest) return;
+    cache.delete(oldest);
+  }
+}
+
+function buildFallbackCatalog(key: string, value: string): LocalSaveCatalog {
+  let parsed: Record<string, any> | null = null;
+  try { parsed = JSON.parse(value) as Record<string, any>; } catch { /* invalid fallback payload */ }
+  const state = parsed?.state && typeof parsed.state === "object" ? parsed.state as Record<string, any> : null;
+  const parsedSlot = parsed?.slot;
+  const summary = classifySaveRecord(key, value);
+  const payloadIdentity = computeSavePayloadTextChecksum(value);
+  return {
+    schemaVersion: 1,
+    key,
+    mode: state?.mode === "normal" || state?.mode === "speedrun" ? state.mode :
+      parsed?.mode === "normal" || parsed?.mode === "speedrun" ? parsed.mode : summary.mode,
+    kind: summary.category === "backup" ? "backup" : summary.category === "slot" ? "slot" :
+      summary.category.includes("snapshot") ? "snapshot" : summary.category === "primary" ? "primary" :
+        summary.category === "import-cache" ? "import-cache" : "protected",
+    slot: parsedSlot === "main" || [1, 2, 3].includes(parsedSlot) ? parsedSlot : summary.slot,
+    savedAt: typeof parsed?.savedAt === "number" ? Math.max(0, Math.floor(parsed.savedAt)) : 0,
+    byteLength: payloadIdentity.byteLength, payloadChecksum: payloadIdentity.checksum, revision: revisionCache.get(key) ?? 0,
+    stateVersion: typeof state?.version === "number" ? Math.max(0, Math.floor(state.version)) : 0,
+    entityCount: Array.isArray(state?.entities) ? state.entities.length : 0,
+    beltCount: Array.isArray(state?.belts) ? state.belts.length : 0,
+    elapsedSeconds: typeof state?.elapsedSeconds === "number" ? Math.max(0, Math.floor(state.elapsedSeconds)) : 0,
+    completedTechCount: Array.isArray(state?.research?.completedTechIds) ? state.research.completedTechIds.length : 0,
+    activePlanetId: typeof state?.activePlanetId === "string" ? state.activePlanetId : "home",
+    structurePoints: typeof state?.dysonSphere?.structurePoints === "number" ? Math.max(0, Math.floor(state.dysonSphere.structurePoints)) : 0,
+    integrity: parsed ? "missing" : "invalid", stateChecksum: typeof parsed?.checksum === "string" ? parsed.checksum : null,
+    reason: typeof parsed?.reason === "string" ? parsed.reason : null,
+    settings: state?.settings && typeof state.settings === "object" ? state.settings : null,
+  };
+}
+
 function putCacheValue(key: string, value: string, now = Date.now()): void {
+  cache.delete(key);
   cache.set(key, value);
-  updateStorageEntry({ key, value, updatedAt: now, bytes: byteLength(value), summary: classifySaveRecord(key, value) });
+  knownSaveKeys.add(key);
+  if (backend === "indexeddb") trimRawCache();
+  if (isCatalogedSaveKey(key) && backend !== "indexeddb") {
+    const catalog = buildFallbackCatalog(key, value);
+    catalogCache.set(key, catalog);
+    updateStorageEntryFromCatalog(catalog, now);
+  } else if (!isCatalogedSaveKey(key)) {
+    updateStorageEntry({ key, value, updatedAt: now, bytes: byteLength(value), summary: classifySaveRecord(key, value) });
+  }
   notifyStorageStatus();
 }
 
@@ -477,14 +578,27 @@ function enforceAutomaticSnapshotLimit(mode: LocalSaveMode): void {
   }
 }
 
-function restoreCachedValueAfterFailedCommit(key: string, baseValue: string | null, expectedRevision: number): void {
+function restoreCachedValueAfterFailedCommit(
+  key: string,
+  baseValue: string | null,
+  baseKnown: boolean,
+  baseCatalog: LocalSaveCatalog | null,
+  expectedRevision: number,
+): void {
   revisionCache.set(key, expectedRevision);
-  if (baseValue === null) {
+  if (!baseKnown) {
     cache.delete(key);
+    knownSaveKeys.delete(key);
+    catalogCache.delete(key);
     removeStorageEntry(key);
     return;
   }
-  cache.set(key, baseValue);
+  knownSaveKeys.add(key);
+  if (baseValue !== null) cache.set(key, baseValue);
+  if (baseCatalog) {
+    catalogCache.set(key, baseCatalog);
+    updateStorageEntryFromCatalog(baseCatalog);
+  }
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -522,12 +636,28 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-async function readAllStoredRecords(db: IDBDatabase): Promise<StoredSaveRecord[]> {
+async function readAllStoredKeys(db: IDBDatabase): Promise<string[]> {
   const transaction = db.transaction(RECORD_STORE, "readonly");
   const done = transactionDone(transaction);
-  const records = await requestResult(transaction.objectStore(RECORD_STORE).getAll() as IDBRequest<StoredSaveRecord[]>);
+  const store = transaction.objectStore(RECORD_STORE);
+  const keys = await requestResult(store.getAllKeys() as IDBRequest<IDBValidKey[]>);
   await done;
-  return records.filter((record) => record && typeof record.key === "string" && typeof record.value === "string");
+  return keys.filter((key): key is string => typeof key === "string");
+}
+
+async function readStoredRecordsByKey(db: IDBDatabase, keys: readonly string[]): Promise<StoredSaveRecord[]> {
+  if (keys.length === 0) return [];
+  const transaction = db.transaction(RECORD_STORE, "readonly");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const records = await Promise.all(keys.map((key) => requestResult(store.get(key) as IDBRequest<StoredSaveRecord | undefined>)));
+  await done;
+  return records.filter((record): record is StoredSaveRecord => Boolean(record && typeof record.key === "string" && typeof record.value === "string"));
+}
+
+function recordUpdatedAt(records: readonly StoredSaveRecord[], key: string, fallback: number): number {
+  const updatedAt = records.find((record) => record.key === key)?.updatedAt;
+  return typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : fallback;
 }
 
 async function readRecord(db: IDBDatabase, key: string): Promise<StoredSaveRecord | undefined> {
@@ -546,15 +676,45 @@ function putStoredValue(store: IDBObjectStore, key: string, value: string, now =
   store.put({ key, value, updatedAt: now, bytes: byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
 }
 
+function putCatalogRecord(store: IDBObjectStore, catalog: LocalSaveCatalog, now = Date.now()): void {
+  const value = serializeLocalSaveCatalog(catalog);
+  store.put({ key: localSaveCatalogRecordKey(catalog.key), value, updatedAt: now, bytes: byteLength(value) } satisfies StoredSaveRecord);
+}
+
+function putSaveValueAndCatalog(
+  store: IDBObjectStore,
+  key: string,
+  value: string,
+  revision: number,
+  now = Date.now(),
+  preparedCatalog?: LocalSaveCatalog,
+): LocalSaveCatalog | null {
+  putStoredValue(store, key, value, now);
+  if (!isCatalogedSaveKey(key)) return null;
+  if (!preparedCatalog || preparedCatalog.key !== key) throw new Error("Catalog is required for save payload writes");
+  const catalog = { ...preparedCatalog, revision };
+  putCatalogRecord(store, catalog, now);
+  return catalog;
+}
+
 async function writeRecord(db: IDBDatabase, key: string, value: string): Promise<void> {
+  const catalog = isCatalogedSaveKey(key)
+    ? (await import("./localSaveCatalogBuild")).buildLocalSaveCatalog(key, value, revisionCache.get(key) ?? 0)
+    : null;
   const transaction = db.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const now = Date.now();
-  transaction.objectStore(RECORD_STORE).put({ key, value, updatedAt: now, bytes: byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
+  const store = transaction.objectStore(RECORD_STORE);
+  putStoredValue(store, key, value, now);
+  if (catalog) putCatalogRecord(store, catalog, now);
   await done;
   const stored = await readRecord(db, key);
   if (!stored || stored.value !== value) throw new DOMException("IndexedDB read-back verification failed", "DataError");
-  updateStorageEntry(stored);
+  if (catalog) {
+    knownSaveKeys.add(key);
+    catalogCache.set(key, catalog);
+    updateStorageEntryFromCatalog(catalog, stored.updatedAt);
+  } else updateStorageEntry(stored);
   notifyStorageStatus();
 }
 
@@ -563,6 +723,7 @@ function publishWriterStatus(next: LocalSaveWriterStatus): void {
     writerStatus.leaseExpiresAt !== next.leaseExpiresAt || writerStatus.reason !== next.reason ||
     writerStatus.conflictId !== next.conflictId;
   writerStatus = next;
+  if (next.role === "primary") scheduleLegacyCatalogIndex();
   if (changed) writerStatusListeners.forEach((listener) => listener({ ...writerStatus }));
 }
 
@@ -698,11 +859,12 @@ function preserveWriteConflict(
   persisted: string | null,
   fencingToken: number,
   now: number,
+  buildCatalog: (key: string, value: string, revision: number) => LocalSaveCatalog,
 ): string {
   const conflictId = createLocalSaveConflictId(now, writerId);
   const keys = localSaveConflictKeys(conflictId);
-  if (candidate !== null) putStoredValue(store, keys.candidate, candidate, now);
-  if (persisted !== null) putStoredValue(store, keys.persisted, persisted, now);
+  if (candidate !== null) putSaveValueAndCatalog(store, keys.candidate, candidate, 0, now, buildCatalog(keys.candidate, candidate, 0));
+  if (persisted !== null) putSaveValueAndCatalog(store, keys.persisted, persisted, 0, now, buildCatalog(keys.persisted, persisted, 0));
   const metadata = {
     schemaVersion: 1,
     conflictId,
@@ -724,10 +886,16 @@ async function commitCoordinatedRecord(
   key: string,
   value: string | null,
   baseValue: string | null,
+  baseKnown: boolean,
+  baseCatalog: LocalSaveCatalog | null,
   expectedRevision: number,
 ): Promise<LocalSaveRevision> {
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
+  const { buildLocalSaveCatalog, catalogMatchesPayload } = await import("./localSaveCatalogBuild");
   const now = Date.now();
+  const preparedCatalog = value !== null && isCatalogedSaveKey(key)
+    ? buildLocalSaveCatalog(key, value, expectedRevision + 1)
+    : null;
   const transaction = db.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const store = transaction.objectStore(RECORD_STORE);
@@ -738,20 +906,40 @@ async function commitCoordinatedRecord(
   const revisionRecord = await requestResult(store.get(localSaveRevisionKey(key)) as IDBRequest<StoredSaveRecord | undefined>);
   const revision = parseLocalSaveRevision(revisionRecord?.value);
   const currentRecord = await requestResult(store.get(key) as IDBRequest<StoredSaveRecord | undefined>);
+  const currentCatalogRecord = isCatalogedSaveKey(key)
+    ? await requestResult(store.get(localSaveCatalogRecordKey(key)) as IDBRequest<StoredSaveRecord | undefined>)
+    : undefined;
   const persisted = currentRecord?.value ?? null;
-  const baseIdentity = inspectLocalSaveIdentity(baseValue);
+  const currentCatalog = parseLocalSaveCatalog(currentCatalogRecord?.value, key);
+  const baseIdentity = baseValue !== null
+    ? inspectLocalSaveIdentity(baseValue)
+    : { savedAt: baseCatalog?.savedAt ?? 0, checksum: baseCatalog?.stateChecksum ?? null };
   const revisionMatches = (revision?.revision ?? 0) === expectedRevision &&
-    (!revision || revision.saveKey === key && revision.deleted === (baseValue === null) &&
+    (!revision || revision.saveKey === key && revision.deleted === !baseKnown &&
       revision.savedAt === baseIdentity.savedAt && revision.checksum === baseIdentity.checksum);
   const leaseMatches = renewedLease !== null;
-  const legacyBaseMatches = !revision && expectedRevision === 0 && persisted === baseValue;
-  const persistedMatches = persisted === baseValue;
+  const catalogProofMatches = persisted !== null && baseCatalog !== null && currentCatalog !== null &&
+    currentCatalog.payloadChecksum === baseCatalog.payloadChecksum && currentCatalog.byteLength === baseCatalog.byteLength &&
+    currentCatalog.revision === baseCatalog.revision && catalogMatchesPayload(baseCatalog, persisted);
+  const persistedMatches = baseValue !== null ? persisted === baseValue : baseKnown ? catalogProofMatches : persisted === null;
+  const legacyBaseMatches = !revision && expectedRevision === 0 && persistedMatches;
   if (!leaseMatches || !persistedMatches || !(revisionMatches && (revision !== null || legacyBaseMatches))) {
-    const conflictId = preserveWriteConflict(store, key, value, persisted, writerStatus.fencingToken, now);
+    const conflictId = preserveWriteConflict(store, key, value, persisted, writerStatus.fencingToken, now, buildLocalSaveCatalog);
     await done;
     cache.delete(key);
+    catalogCache.delete(key);
     removeStorageEntry(key);
-    if (persisted !== null) putCacheValue(key, persisted, currentRecord?.updatedAt ?? now);
+    if (persisted !== null) {
+      cache.set(key, persisted);
+      knownSaveKeys.add(key);
+      trimRawCache();
+      const restoredCatalog = currentCatalog && currentCatalog.revision === (revision?.revision ?? 0) && catalogMatchesPayload(currentCatalog, persisted)
+        ? currentCatalog
+        : buildLocalSaveCatalog(key, persisted, revision?.revision ?? 0);
+      catalogCache.set(key, restoredCatalog);
+      updateStorageEntryFromCatalog(restoredCatalog, currentRecord?.updatedAt ?? now);
+    } else knownSaveKeys.delete(key);
+    notifyStorageStatus();
     revisionCache.set(key, revision?.revision ?? 0);
     publishWriterStatus({
       role: "conflict",
@@ -772,17 +960,37 @@ async function commitCoordinatedRecord(
     fencingToken: renewedLease!.fencingToken,
     now,
   });
-  if (value === null) store.delete(key);
-  else putStoredValue(store, key, value, now);
+  let committedCatalog: LocalSaveCatalog | null = null;
+  if (value === null) {
+    store.delete(key);
+    if (isCatalogedSaveKey(key)) store.delete(localSaveCatalogRecordKey(key));
+  } else committedCatalog = putSaveValueAndCatalog(store, key, value, nextRevision.revision, now, preparedCatalog ?? undefined);
   putStoredValue(store, localSaveRevisionKey(key), JSON.stringify(nextRevision), now);
   await done;
   if (writerStatus.role === "primary" && writerStatus.fencingToken === renewedLease!.fencingToken) {
     publishWriterStatus({ ...writerStatus, leaseExpiresAt: renewedLease!.expiresAt, reason: "当前标签页负责本地存档" });
   }
-  const stored = await readRecord(db, key);
+  const [stored, storedCatalogRecord] = await Promise.all([
+    readRecord(db, key),
+    isCatalogedSaveKey(key) ? readRecord(db, localSaveCatalogRecordKey(key)) : Promise.resolve(undefined),
+  ]);
   if ((stored?.value ?? null) !== value) throw new DOMException("IndexedDB coordinated read-back verification failed", "DataError");
-  if (stored) updateStorageEntry(stored);
-  else removeStorageEntry(key);
+  const storedCatalog = parseLocalSaveCatalog(storedCatalogRecord?.value, key);
+  if (value !== null && committedCatalog && (!storedCatalog || storedCatalog.revision !== nextRevision.revision || !catalogMatchesPayload(storedCatalog, value))) {
+    throw new DOMException("IndexedDB catalog read-back verification failed", "DataError");
+  }
+  if (stored && storedCatalog) {
+    knownSaveKeys.add(key);
+    catalogCache.set(key, storedCatalog);
+    updateStorageEntryFromCatalog(storedCatalog, stored.updatedAt);
+  } else if (stored && !isCatalogedSaveKey(key)) {
+    knownSaveKeys.add(key);
+    updateStorageEntry(stored);
+  } else {
+    knownSaveKeys.delete(key);
+    catalogCache.delete(key);
+    removeStorageEntry(key);
+  }
   notifyStorageStatus();
   revisionCache.set(key, Math.max(revisionCache.get(key) ?? 0, nextRevision.revision));
   postCoordinationMessage({
@@ -896,16 +1104,60 @@ function clearEmergencyMirror(mode: LocalSaveMode): void {
   }
 }
 
+function scheduleLegacyCatalogIndex(): void {
+  if (legacyCatalogIndexScheduled || legacyCatalogIndexQueue.length === 0 || backend !== "indexeddb" || !database) return;
+  legacyCatalogIndexScheduled = true;
+  const run = () => {
+    legacyCatalogIndexScheduled = false;
+    const key = legacyCatalogIndexQueue.shift();
+    if (!key || backend !== "indexeddb" || !database) return;
+    if (writerStatus.role !== "primary") {
+      legacyCatalogIndexQueue.unshift(key);
+      if (writerStatus.role === "initializing") window.setTimeout(scheduleLegacyCatalogIndex, 250);
+      return;
+    }
+    void (async () => {
+      const { indexLegacyLocalSaveCatalog } = await import("./localSaveCatalogIndex");
+      const indexed = await indexLegacyLocalSaveCatalog(database!, RECORD_STORE, key, {
+        writerId,
+        fencingToken: writerStatus.fencingToken,
+      });
+      if (!indexed) return;
+      if (!indexed.worker) performance.mark("local-save-catalog-sync-fallback");
+      if (knownSaveKeys.has(key)) {
+        catalogCache.set(key, indexed.catalog);
+        updateStorageEntryFromCatalog(indexed.catalog, indexed.updatedAt);
+        notifyStorageStatus();
+      }
+    })().catch(() => undefined).finally(() => scheduleLegacyCatalogIndex());
+  };
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run, { timeout: 5_000 });
+  else window.setTimeout(run, 1_000);
+}
+
 async function initializeIndexedDb(): Promise<void> {
   const db = await openDatabase();
   database = db;
   backend = "indexeddb";
-  const records = await readAllStoredRecords(db);
+  cache.clear();
+  knownSaveKeys.clear();
+  catalogCache.clear();
+  revisionCache.clear();
+  storageEntryCache.clear();
+  const keys = await readAllStoredKeys(db);
+  for (const key of keys) if (isSaveKey(key)) knownSaveKeys.add(key);
+  const records = await readStoredRecordsByKey(db, keys.filter((key) =>
+    !isSaveKey(key) || key.endsWith(".snapshot.sequence") || key.endsWith(".snapshot.speedrun.sequence"),
+  ));
+  const pendingCatalogs: LocalSaveCatalog[] = [];
   for (const record of records) {
-    if (isSaveKey(record.key)) {
-      cache.set(record.key, record.value);
-      updateStorageEntry(record);
+    const catalogPayloadKey = payloadKeyFromLocalSaveCatalogRecord(record.key);
+    if (catalogPayloadKey) {
+      const catalog = parseLocalSaveCatalog(record.value, catalogPayloadKey);
+      if (catalog) pendingCatalogs.push(catalog);
+      continue;
     }
+    if (record.key.endsWith(".snapshot.sequence") || record.key.endsWith(".snapshot.speedrun.sequence")) cache.set(record.key, record.value);
     if (record.key.startsWith(LOCAL_SAVE_REVISION_KEY_PREFIX)) {
       const revision = parseLocalSaveRevision(record.value);
       if (revision) revisionCache.set(revision.saveKey, revision.revision);
@@ -918,13 +1170,21 @@ async function initializeIndexedDb(): Promise<void> {
       }
     }
   }
+  for (const catalog of pendingCatalogs) {
+    if (!knownSaveKeys.has(catalog.key) || catalog.revision !== (revisionCache.get(catalog.key) ?? 0)) continue;
+    catalogCache.set(catalog.key, catalog);
+    updateStorageEntryFromCatalog(catalog, recordUpdatedAt(records, localSaveCatalogRecordKey(catalog.key), catalog.savedAt));
+  }
+  legacyCatalogIndexQueue = [...knownSaveKeys].filter((key) => isCatalogedSaveKey(key) && !catalogCache.has(key));
+  scheduleLegacyCatalogIndex();
 
   const durableLease = parseLocalSaveWriterLease(await readCoordinationValue(db, LOCAL_SAVE_WRITER_LEASE_KEY));
   for (const mode of ["normal", "speedrun"] as const) {
     const mirror = readEmergencyMirror(mode);
     if (!mirror) continue;
     const key = primaryKeyForMode(mode);
-    const existing = cache.get(key) ?? null;
+    const existingRecord = knownSaveKeys.has(key) ? await readRecord(db, key) : undefined;
+    const existing = existingRecord?.value ?? null;
     const revision = parseLocalSaveRevision(await readCoordinationValue(db, localSaveRevisionKey(key)));
     const payloadIdentity = inspectLocalSaveIdentity(mirror.payload);
     const integrity = inspectSaveEnvelopeChecksum(mirror.payload);
@@ -939,10 +1199,11 @@ async function initializeIndexedDb(): Promise<void> {
       durableLease,
     })) {
       const now = Date.now();
+      const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
+      const mirrorCatalog = buildLocalSaveCatalog(key, mirror.payload, (revision?.revision ?? 0) + 1);
       const transaction = db.transaction(RECORD_STORE, "readwrite");
       const done = transactionDone(transaction);
       const store = transaction.objectStore(RECORD_STORE);
-      putStoredValue(store, key, mirror.payload, now);
       const nextRevision = createLocalSaveRevision({
         saveKey: key,
         previousRevision: revision?.revision ?? 0,
@@ -951,10 +1212,11 @@ async function initializeIndexedDb(): Promise<void> {
         fencingToken: mirror.metadata.fencingToken,
         now,
       });
+      putSaveValueAndCatalog(store, key, mirror.payload, nextRevision.revision, now, mirrorCatalog);
       putStoredValue(store, localSaveRevisionKey(key), JSON.stringify(nextRevision), now);
       await done;
-      putCacheValue(key, mirror.payload, now);
       revisionCache.set(key, nextRevision.revision);
+      putCacheValue(key, mirror.payload, now);
       clearEmergencyMirror(mode);
       // A legacy same-name normal mirror may remain from older code. Remove it
       // only when it is byte-identical to the proven mirror just committed.
@@ -965,6 +1227,7 @@ async function initializeIndexedDb(): Promise<void> {
     }
     if (existing !== mirror.payload) {
       const now = Date.now();
+      const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
       const transaction = db.transaction(RECORD_STORE, "readwrite");
       const done = transactionDone(transaction);
       const store = transaction.objectStore(RECORD_STORE);
@@ -975,6 +1238,7 @@ async function initializeIndexedDb(): Promise<void> {
         existing,
         mirror.metadata?.fencingToken ?? revision?.fencingToken ?? durableLease?.fencingToken ?? 1,
         now,
+        buildLocalSaveCatalog,
       );
       await done;
       startupConflictId = conflictId;
@@ -985,7 +1249,8 @@ async function initializeIndexedDb(): Promise<void> {
 
   const legacy = legacyEntries();
   for (const [key, value] of legacy) {
-    const existing = cache.get(key) ?? null;
+    const existingRecord = knownSaveKeys.has(key) ? await readRecord(db, key) : undefined;
+    const existing = existingRecord?.value ?? null;
     const revision = parseLocalSaveRevision(await readCoordinationValue(db, localSaveRevisionKey(key)));
     let selected: string | null = existing && savedAt(existing) >= savedAt(value) ? existing : value;
     if (revision && existing !== value && preserveDevelopmentMirror()) {
@@ -1004,10 +1269,11 @@ async function initializeIndexedDb(): Promise<void> {
       // have come from a stale pagehide handler. Preserve both copies instead
       // of letting wall-clock savedAt choose a winner.
       const now = Date.now();
+      const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
       const transaction = db.transaction(RECORD_STORE, "readwrite");
       const done = transactionDone(transaction);
       const store = transaction.objectStore(RECORD_STORE);
-      const conflictId = preserveWriteConflict(store, key, value, existing, revision.fencingToken, now);
+      const conflictId = preserveWriteConflict(store, key, value, existing, revision.fencingToken, now, buildLocalSaveCatalog);
       await done;
       selected = existing;
       startupConflictId = conflictId;
@@ -1028,6 +1294,9 @@ async function initializeIndexedDb(): Promise<void> {
       }
     }
   }
+  // Startup and menu summaries are catalog-backed. Emergency/legacy
+  // reconciliation may transiently hydrate raw strings, but none remain idle.
+  for (const key of [...cache.keys()]) if (isCatalogedSaveKey(key)) cache.delete(key);
 }
 
 function initializeFallback(): void {
@@ -1042,10 +1311,12 @@ function initializeFallback(): void {
     backend = "memory";
   }
   publishWriterStatus({ role: "primary", writerId, fencingToken: 1, leaseExpiresAt: Number.MAX_SAFE_INTEGER, reason: "当前环境使用兼容存储后端" });
+  synchronousFallbackInitialized = true;
 }
 
 export function initializeLocalSaveStore(): Promise<void> {
   if (initialization) return initialization;
+  if (synchronousFallbackInitialized) return Promise.resolve();
   initialization = (async () => {
     if (typeof window === "undefined" || !window.indexedDB) {
       initializeFallback();
@@ -1100,25 +1371,33 @@ export function canWriteLocalSaves(): boolean {
 export async function getLocalSaveConflicts(): Promise<LocalSaveConflictSummary[]> {
   await initializeLocalSaveStore();
   if (backend !== "indexeddb" || !database) return [];
-  const records = await readAllStoredRecords(database);
-  const byKey = new Map(records.map((record) => [record.key, record.value]));
-  return records
-    .filter((record) => record.key.startsWith(`${LOCAL_SAVE_COORDINATION_PREFIX}.conflict.`))
-    .flatMap((record) => {
-      const conflict = parseLocalSaveConflictRecord(record.value);
-      if (!conflict || conflict.resolvedAt !== undefined) return [];
-      const candidate = byKey.get(conflict.candidateKey) ?? null;
-      const persisted = byKey.get(conflict.persistedKey) ?? null;
-      const candidateIdentity = inspectLocalSaveIdentity(candidate);
-      const persistedIdentity = inspectLocalSaveIdentity(persisted);
+  const keys = await readAllStoredKeys(database);
+  const records = await readStoredRecordsByKey(database, keys.filter((key) => key.startsWith(`${LOCAL_SAVE_COORDINATION_PREFIX}.conflict.`)));
+  const conflicts = records.flatMap((record) => {
+    const conflict = parseLocalSaveConflictRecord(record.value);
+    return conflict && conflict.resolvedAt === undefined ? [conflict] : [];
+  });
+  const catalogRecords = await readStoredRecordsByKey(database, conflicts.flatMap((conflict) => [
+    localSaveCatalogRecordKey(conflict.candidateKey),
+    localSaveCatalogRecordKey(conflict.persistedKey),
+  ]));
+  const catalogs = new Map(catalogRecords.flatMap((record) => {
+    const payloadKey = payloadKeyFromLocalSaveCatalogRecord(record.key);
+    const catalog = payloadKey ? parseLocalSaveCatalog(record.value, payloadKey) : null;
+    return payloadKey && catalog ? [[payloadKey, catalog] as const] : [];
+  }));
+  return conflicts
+    .map((conflict) => {
+      const candidateCatalog = catalogs.get(conflict.candidateKey) ?? null;
+      const persistedCatalog = catalogs.get(conflict.persistedKey) ?? null;
       return [{
         conflictId: conflict.conflictId,
         saveKey: conflict.saveKey,
         createdAt: conflict.createdAt,
-        candidate: { available: candidate !== null, deleted: conflict.candidateDeleted, ...candidateIdentity },
-        persisted: { available: persisted !== null, missing: conflict.persistedMissing, ...persistedIdentity },
+        candidate: { available: keys.includes(conflict.candidateKey), deleted: conflict.candidateDeleted, savedAt: candidateCatalog?.savedAt ?? 0, checksum: candidateCatalog?.stateChecksum ?? null },
+        persisted: { available: keys.includes(conflict.persistedKey), missing: conflict.persistedMissing, savedAt: persistedCatalog?.savedAt ?? 0, checksum: persistedCatalog?.stateChecksum ?? null },
       } satisfies LocalSaveConflictSummary];
-    })
+    }).flat()
     .sort((left, right) => right.createdAt - left.createdAt);
 }
 
@@ -1192,6 +1471,7 @@ export async function resolveLocalSaveConflictDetailed(
   }
   const leaseFailure = await requireConflictResolutionLease(startedAt);
   if (leaseFailure) return leaseFailure;
+  const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
 
   let transaction: IDBTransaction | null = null;
   let done: Promise<void> | null = null;
@@ -1261,8 +1541,17 @@ export async function resolveLocalSaveConflictDetailed(
         fencingToken: renewedLease.fencingToken,
         now,
       });
-      if (selected === null) store.delete(conflict.saveKey);
-      else putStoredValue(store, conflict.saveKey, selected, now);
+      if (selected === null) {
+        store.delete(conflict.saveKey);
+        if (isCatalogedSaveKey(conflict.saveKey)) store.delete(localSaveCatalogRecordKey(conflict.saveKey));
+      } else putSaveValueAndCatalog(
+        store,
+        conflict.saveKey,
+        selected,
+        revision.revision,
+        now,
+        buildLocalSaveCatalog(conflict.saveKey, selected, revision.revision),
+      );
       putStoredValue(store, localSaveRevisionKey(conflict.saveKey), JSON.stringify(revision), now);
     }
     await done;
@@ -1315,6 +1604,8 @@ export async function resolveLocalSaveConflictDetailed(
     }
     cleanupStore.delete(conflict.candidateKey);
     cleanupStore.delete(conflict.persistedKey);
+    cleanupStore.delete(localSaveCatalogRecordKey(conflict.candidateKey));
+    cleanupStore.delete(localSaveCatalogRecordKey(conflict.persistedKey));
     putStoredValue(cleanupStore, localSaveConflictMetadataKey(conflictId), JSON.stringify({ ...latestConflict, resolvedAt: finalizedAt, resolution }), finalizedAt);
     await done;
     transaction = null;
@@ -1382,7 +1673,88 @@ export function getLocalSaveValue(key: string): string | null {
 export function listLocalSaveKeys(): string[] {
   ensureSynchronousFallback();
   if (backend === "local-storage") return Object.keys(window.localStorage).filter(isSaveKey);
-  return [...cache.keys()].filter(isSaveKey);
+  return [...new Set([...knownSaveKeys, ...[...cache.keys()].filter(isSaveKey)])];
+}
+
+function provisionalCatalog(key: string): LocalSaveCatalog {
+  const mode = modeFromKey(key);
+  const slot = slotFromKey(key);
+  const category = classifySaveRecord(key, JSON.stringify({ savedAt: 0, mode, slot }));
+  return {
+    schemaVersion: 1,
+    key,
+    mode,
+    kind: category.category === "backup" ? "backup" : category.category === "slot" ? "slot" :
+      category.category === "automatic-snapshot" || category.category === "manual-snapshot" ? "snapshot" :
+        category.category === "protected" ? "protected" : category.category === "import-cache" ? "import-cache" : "primary",
+    slot,
+    savedAt: 0,
+    byteLength: 0,
+    payloadChecksum: "00000000",
+    revision: revisionCache.get(key) ?? 0,
+    stateVersion: 0,
+    entityCount: 0,
+    beltCount: 0,
+    elapsedSeconds: 0,
+    completedTechCount: 0,
+    activePlanetId: "home",
+    structurePoints: 0,
+    integrity: "missing",
+    stateChecksum: null,
+    reason: null,
+    settings: null,
+  };
+}
+
+/** Small startup-safe metadata; never hydrates the corresponding payload. */
+export function getLocalSaveCatalog(key: string): LocalSaveCatalog | null {
+  ensureSynchronousFallback();
+  if (backend === "local-storage") {
+    const value = window.localStorage.getItem(key);
+    if (value === null) {
+      cache.delete(key);
+      knownSaveKeys.delete(key);
+      catalogCache.delete(key);
+      removeStorageEntry(key);
+      return null;
+    }
+    if (cache.get(key) !== value) putCacheValue(key, value);
+  }
+  const catalog = catalogCache.get(key);
+  if (catalog) return structuredClone(catalog);
+  return listLocalSaveKeys().includes(key) && isCatalogedSaveKey(key) ? provisionalCatalog(key) : null;
+}
+
+export function listLocalSaveCatalogs(): LocalSaveCatalog[] {
+  return listLocalSaveKeys().filter(isCatalogedSaveKey).map((key) => getLocalSaveCatalog(key)!).filter(Boolean);
+}
+
+/** Read one selected payload without retaining it in the menu cache. */
+export async function readLocalSavePayload(key: string): Promise<string | null> {
+  await initializeLocalSaveStore();
+  let value: string | null;
+  if (backend === "indexeddb" && database) {
+    value = (await readRecord(database, key))?.value ?? null;
+  }
+  else if (backend === "local-storage") value = window.localStorage.getItem(key);
+  else value = cache.get(key) ?? null;
+  if (value === null) return null;
+  const catalog = catalogCache.get(key);
+  if (catalog?.integrity === "invalid") return null;
+  return value;
+}
+
+/** Keep a user-selected payload available to synchronous lifecycle saves. */
+export function retainLocalSavePayload(key: string, value: string): boolean {
+  cache.delete(key);
+  cache.set(key, value);
+  knownSaveKeys.add(key);
+  if (backend === "indexeddb") trimRawCache();
+  return true;
+}
+
+export function getLocalSaveRawCacheSize(): number {
+  return [...cache.entries()].filter(([key]) => isCatalogedSaveKey(key)).length;
 }
 
 function enqueue(operation: () => Promise<void>, key?: string): void {
@@ -1398,15 +1770,17 @@ export function setLocalSaveValue(key: string, value: string): void {
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
   if (backend === "indexeddb" && database) {
     const baseValue = cache.get(key) ?? null;
+    const baseKnown = knownSaveKeys.has(key);
+    const baseCatalog = catalogCache.get(key) ?? null;
     const expectedRevision = revisionCache.get(key) ?? 0;
-    cache.set(key, value);
+    putCacheValue(key, value);
     revisionCache.set(key, expectedRevision + 1);
-    enqueue(() => commitCoordinatedRecord(database!, key, value, baseValue, expectedRevision).then(() => {
+    enqueue(() => commitCoordinatedRecord(database!, key, value, baseValue, baseKnown, baseCatalog, expectedRevision).then(() => {
       clearRecoveredQuotaPrompt(key);
       const summary = classifySaveRecord(key, value);
       if (summary.category === "automatic-snapshot") enforceAutomaticSnapshotLimit(summary.mode);
     }).catch((error) => {
-      if (!(error instanceof LocalSaveConflictError)) restoreCachedValueAfterFailedCommit(key, baseValue, expectedRevision);
+      if (!(error instanceof LocalSaveConflictError)) restoreCachedValueAfterFailedCommit(key, baseValue, baseKnown, baseCatalog, expectedRevision);
       throw error;
     }), key);
     if (preserveDevelopmentMirror()) {
@@ -1434,11 +1808,15 @@ export function removeLocalSaveValue(key: string): void {
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
   if (backend === "indexeddb" && database) {
     const baseValue = cache.get(key) ?? null;
+    const baseKnown = knownSaveKeys.has(key);
+    const baseCatalog = catalogCache.get(key) ?? null;
     const expectedRevision = revisionCache.get(key) ?? 0;
     cache.delete(key);
+    knownSaveKeys.delete(key);
+    catalogCache.delete(key);
     revisionCache.set(key, expectedRevision + 1);
-    enqueue(() => commitCoordinatedRecord(database!, key, null, baseValue, expectedRevision).then(() => undefined).catch((error) => {
-      if (!(error instanceof LocalSaveConflictError)) restoreCachedValueAfterFailedCommit(key, baseValue, expectedRevision);
+    enqueue(() => commitCoordinatedRecord(database!, key, null, baseValue, baseKnown, baseCatalog, expectedRevision).then(() => undefined).catch((error) => {
+      if (!(error instanceof LocalSaveConflictError)) restoreCachedValueAfterFailedCommit(key, baseValue, baseKnown, baseCatalog, expectedRevision);
       throw error;
     }), key);
     if (preserveDevelopmentMirror()) {
@@ -1447,6 +1825,8 @@ export function removeLocalSaveValue(key: string): void {
     return;
   }
   cache.delete(key);
+  knownSaveKeys.delete(key);
+  catalogCache.delete(key);
   removeStorageEntry(key);
   if (backend === "local-storage") window.localStorage.removeItem(key);
 }
@@ -1535,18 +1915,36 @@ export async function readPersistedLocalSaveValue(key: string): Promise<string |
 export async function reloadLocalSaveCache(): Promise<void> {
   if (backend !== "indexeddb" || !database) return;
   cache.clear();
+  knownSaveKeys.clear();
+  catalogCache.clear();
   revisionCache.clear();
   storageEntryCache.clear();
-  for (const record of await readAllStoredRecords(database)) {
-    if (isSaveKey(record.key)) {
-      cache.set(record.key, record.value);
-      updateStorageEntry(record);
+  const keys = await readAllStoredKeys(database);
+  for (const key of keys) if (isSaveKey(key)) knownSaveKeys.add(key);
+  const records = await readStoredRecordsByKey(database, keys.filter((key) =>
+    !isSaveKey(key) || key.endsWith(".snapshot.sequence") || key.endsWith(".snapshot.speedrun.sequence"),
+  ));
+  const catalogs: LocalSaveCatalog[] = [];
+  for (const record of records) {
+    const payloadKey = payloadKeyFromLocalSaveCatalogRecord(record.key);
+    if (payloadKey) {
+      const catalog = parseLocalSaveCatalog(record.value, payloadKey);
+      if (catalog) catalogs.push(catalog);
+      continue;
     }
+    if (record.key.endsWith(".snapshot.sequence") || record.key.endsWith(".snapshot.speedrun.sequence")) cache.set(record.key, record.value);
     if (record.key.startsWith(LOCAL_SAVE_REVISION_KEY_PREFIX)) {
       const revision = parseLocalSaveRevision(record.value);
       if (revision) revisionCache.set(revision.saveKey, revision.revision);
     }
   }
+  for (const catalog of catalogs) {
+    if (!knownSaveKeys.has(catalog.key) || catalog.revision !== (revisionCache.get(catalog.key) ?? 0)) continue;
+    catalogCache.set(catalog.key, catalog);
+    updateStorageEntryFromCatalog(catalog, recordUpdatedAt(records, localSaveCatalogRecordKey(catalog.key), catalog.savedAt));
+  }
+  legacyCatalogIndexQueue = [...knownSaveKeys].filter((key) => isCatalogedSaveKey(key) && !catalogCache.has(key));
+  scheduleLegacyCatalogIndex();
   notifyStorageStatus();
 }
 

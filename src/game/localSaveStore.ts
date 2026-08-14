@@ -44,6 +44,7 @@ import {
   type LocalSaveCatalog,
 } from "./localSaveCatalog";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
+import type { SimulationRuntimeRecoveryBaseIdentity } from "./simulationRuntimeRecovery";
 
 const DATABASE_NAME = "dsp-idle-network.local-saves";
 const DATABASE_VERSION = 2;
@@ -536,6 +537,28 @@ function primaryKeyForMode(mode: LocalSaveMode): string {
 export function getPrimaryLocalSaveRevision(mode: LocalSaveMode = "normal"): number {
   ensureSynchronousFallback();
   return revisionCache.get(primaryKeyForMode(mode)) ?? 0;
+}
+
+/**
+ * Exact primary identity for binding an authoritative runtime checkpoint.
+ * `checksum` is the catalog's verified save-envelope/state checksum, not the
+ * catalog's separate UTF-8 payload checksum. No primary payload is parsed.
+ */
+export function getPrimaryLocalSaveRecoveryIdentity(
+  mode: LocalSaveMode = "normal",
+): SimulationRuntimeRecoveryBaseIdentity | null {
+  ensureSynchronousFallback();
+  const key = primaryKeyForMode(mode);
+  const catalog = catalogCache.get(key);
+  const revision = revisionCache.get(key) ?? 0;
+  if (!catalog || catalog.key !== key || catalog.mode !== mode || catalog.integrity !== "valid" ||
+    !catalog.stateChecksum || catalog.revision !== revision) return null;
+  return {
+    mode,
+    savedAt: catalog.savedAt,
+    checksum: catalog.stateChecksum,
+    revision,
+  };
 }
 
 function recordQuotaRecoveryPrompt(key: string): void {

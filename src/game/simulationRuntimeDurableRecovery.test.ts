@@ -74,6 +74,11 @@ async function intent(
 }
 
 describe("durable simulation runtime recovery contract", () => {
+  it("keeps the per-operation registry binding and passive intent bounded", async () => {
+    const sample = await intent(1);
+    expect(new TextEncoder().encode(JSON.stringify(registry)).byteLength).toBe(82);
+    expect(new TextEncoder().encode(JSON.stringify(sample)).byteLength).toBe(378);
+  });
   it("keeps 450 eight-second boundaries as one RLE segment without a durable eight-second rollover", async () => {
     const checkpoint = primaryCheckpoint();
     let entries: SimulationRuntimeDurableRecoveryRecord["entries"] = [];

@@ -73,6 +73,7 @@ import { LogisticsManagementPanel, type LogisticsManagementPanelProps } from "./
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { StableTextArea, clearStableTextDraft } from "./CompositionSafeInput";
 import type { CanvasPerformanceFeatureId, CanvasPerformanceFeatures } from "../game/endgamePerformance";
+import type { CanvasDetailPreference, CanvasDetailStage } from "../game/canvasDensityPresentation";
 import { readSettingsCategoryPreference, writeSettingsCategoryPreference, type ConnectionHitArea, type ConnectionPointSize, type SettingsCategory } from "../game/uiPreferences";
 import { deleteLocalSaveManagedEntries, dismissLocalSaveRecoveryPrompt, requestLocalSavePersistentStorage, subscribeLocalSaveStorageStatus } from "../game/localSaveStore";
 
@@ -95,6 +96,14 @@ interface OperationsWorkspaceProps {
   onEndgameExtremeModeChange: (enabled: boolean) => void;
   connectExpandAll: boolean;
   onConnectExpandAllChange: (enabled: boolean) => void;
+  blueprintAllowOverlap: boolean;
+  onBlueprintAllowOverlapChange: (enabled: boolean) => void;
+  canvasDetailPreference: CanvasDetailPreference;
+  canvasDetailStage: CanvasDetailStage;
+  canvasVisibleNodeCount: number;
+  canvasStackGroupCount: number;
+  canvasStackHiddenCount: number;
+  onCanvasDetailPreferenceChange: (preference: CanvasDetailPreference) => void;
   canvasPerformanceFeatures: CanvasPerformanceFeatures;
   onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void;
   lineFindMode: boolean;
@@ -327,7 +336,7 @@ function DefaultBeltLanesSetting({ value, onChange }: { value: number; onChange:
   </div>;
 }
 
-function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, connectExpandAll, canvasPerformanceFeatures, onEndgameExtremeModeChange, onConnectExpandAllChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, connectionPointSize, onConnectionPointSizeChange, connectionHitArea, onConnectionHitAreaChange, defaultBeltLanes, onDefaultBeltLanesChange, showRunLog, onRunLogChange, showItemHover, onItemHoverChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; connectExpandAll: boolean; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onConnectExpandAllChange: (enabled: boolean) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; connectionPointSize: ConnectionPointSize; onConnectionPointSizeChange: (size: ConnectionPointSize) => void; connectionHitArea: ConnectionHitArea; onConnectionHitAreaChange: (size: ConnectionHitArea) => void; defaultBeltLanes: number; onDefaultBeltLanesChange: (lanes: number) => void; showRunLog: boolean; onRunLogChange: (enabled: boolean) => void; showItemHover: boolean; onItemHoverChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
+function SettingsPanel({ game, report, productionRefreshPreference, productionRefreshIntervalMs, endgameExtremeMode, connectExpandAll, blueprintAllowOverlap, canvasDetailPreference, canvasDetailStage, canvasVisibleNodeCount, canvasStackGroupCount, canvasStackHiddenCount, canvasPerformanceFeatures, onEndgameExtremeModeChange, onConnectExpandAllChange, onBlueprintAllowOverlapChange, onCanvasDetailPreferenceChange, onCanvasPerformanceFeatureChange, lineFindMode, onLineFindModeChange, connectionPointSize, onConnectionPointSizeChange, connectionHitArea, onConnectionHitAreaChange, defaultBeltLanes, onDefaultBeltLanesChange, showRunLog, onRunLogChange, showItemHover, onItemHoverChange, onProductionRefreshPreferenceChange, onChange, onRunBenchmark, onOpenReleaseNotes, onOpenTutorial }: { game: GameState; report: AutomaticPerformanceReport | null; productionRefreshPreference: ProductionRefreshPreference; productionRefreshIntervalMs: number; endgameExtremeMode: boolean; connectExpandAll: boolean; blueprintAllowOverlap: boolean; canvasDetailPreference: CanvasDetailPreference; canvasDetailStage: CanvasDetailStage; canvasVisibleNodeCount: number; canvasStackGroupCount: number; canvasStackHiddenCount: number; canvasPerformanceFeatures: CanvasPerformanceFeatures; onEndgameExtremeModeChange: (enabled: boolean) => void; onConnectExpandAllChange: (enabled: boolean) => void; onBlueprintAllowOverlapChange: (enabled: boolean) => void; onCanvasDetailPreferenceChange: (preference: CanvasDetailPreference) => void; onCanvasPerformanceFeatureChange: (id: CanvasPerformanceFeatureId, enabled: boolean) => void; lineFindMode: boolean; onLineFindModeChange: (enabled: boolean) => void; connectionPointSize: ConnectionPointSize; onConnectionPointSizeChange: (size: ConnectionPointSize) => void; connectionHitArea: ConnectionHitArea; onConnectionHitAreaChange: (size: ConnectionHitArea) => void; defaultBeltLanes: number; onDefaultBeltLanesChange: (lanes: number) => void; showRunLog: boolean; onRunLogChange: (enabled: boolean) => void; showItemHover: boolean; onItemHoverChange: (enabled: boolean) => void; onProductionRefreshPreferenceChange: (preference: ProductionRefreshPreference) => void; onChange: (settings: Partial<GameSettings>) => void; onRunBenchmark: () => void; onOpenReleaseNotes: () => void; onOpenTutorial: () => void }) {
   const { settings } = game;
   const { locale, setLocale } = useAppLocale();
   const currentReleaseNotes = getCurrentReleaseNotes(locale);
@@ -461,6 +470,20 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className="settings-help">透明命中区域不会遮挡建筑文字。自动档随缩放扩大；触控设备始终保证至少 56px 命中直径。</p>
       </section>
+      <section className="settings-group settings-toggle-list" data-settings-category="interaction">
+        <ToggleSetting
+          checked={blueprintAllowOverlap}
+          label={locale === "en" ? "Allow overlapping placement" : "允许重叠放置"}
+          value={blueprintAllowOverlap
+            ? locale === "en" ? "Blueprints and dragging may share the same snapped position" : "蓝图与拖动均可使用同一吸附坐标"
+            : locale === "en" ? "Blueprints and dragging both reject exact overlaps" : "蓝图与拖动均拒绝精确重叠"}
+          icon={<MousePointer2 size={16} />}
+          onChange={onBlueprintAllowOverlapChange}
+        />
+        <p className={blueprintAllowOverlap ? "settings-warning" : "settings-help"} role={blueprintAllowOverlap ? "alert" : undefined}>{locale === "en"
+          ? "Device-only and off by default. Overlapping buildings remain separate entities and may appear as a canvas stack; saves and machine counts are never merged."
+          : "仅保存在当前设备且默认关闭。重叠建筑仍是独立实体，画布可能将其显示为堆叠；不会合并存档或机器数量。"}</p>
+      </section>
       <div data-settings-category="performance">
       <BufferLimitSetting label="生产建筑缓存上限" value={settings.productionBufferLimit} onChange={(productionBufferLimit) => onChange({ productionBufferLimit })} />
       <BufferLimitSetting label="仓储与物流建筑缓存上限" value={settings.logisticsBufferLimit} onChange={(logisticsBufferLimit) => onChange({ logisticsBufferLimit })} />
@@ -484,6 +507,30 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           </button>)}
         </div>
         <p className="settings-help">只调整生产画面与状态发布节奏，不改变模拟时间、产量、物流、科研或戴森工程。固定档位不会被自动调节覆盖。</p>
+      </section>
+      <section className="settings-group settings-canvas-detail" data-settings-category="performance visual">
+        <header><Gauge size={14} /><span>{locale === "en" ? "Canvas detail" : "画布细节"}</span><small>{canvasDetailStage === "full" ? locale === "en" ? "Full" : "完整" : canvasDetailStage === "medium" ? locale === "en" ? "Medium" : "中等" : locale === "en" ? "Compact" : "紧凑"}</small></header>
+        <div className="settings-segmented" role="radiogroup" aria-label={locale === "en" ? "Canvas detail preference" : "画布细节偏好"}>
+          {(["auto", "full", "minimal"] as CanvasDetailPreference[]).map((preference) => <button
+            type="button"
+            role="radio"
+            aria-checked={canvasDetailPreference === preference}
+            className={canvasDetailPreference === preference ? "active" : ""}
+            onClick={() => onCanvasDetailPreferenceChange(preference)}
+            key={preference}
+          >{preference === "auto" ? locale === "en" ? "Auto" : "自动（推荐）" : preference === "full" ? locale === "en" ? "Full" : "完整" : locale === "en" ? "Minimal" : "最简"}</button>)}
+        </div>
+        <dl className="canvas-detail-diagnostics" aria-label={locale === "en" ? "Canvas detail diagnostics" : "画布细节诊断"}>
+          <div><dt>{locale === "en" ? "Visible nodes" : "视口可见"}</dt><dd>{canvasVisibleNodeCount.toLocaleString(locale)}</dd></div>
+          <div><dt>{locale === "en" ? "Current stage" : "当前阶段"}</dt><dd>{canvasDetailStage}</dd></div>
+          <div><dt>{locale === "en" ? "Overlap stacks" : "重叠分组"}</dt><dd>{canvasStackGroupCount} / {canvasStackHiddenCount}</dd></div>
+        </dl>
+        <p className="settings-help">{locale === "en"
+          ? "Auto uses the number visible in the viewport, with hysteresis, to reduce cards, progress interpolation, shadows and pulses. Selected, focused, hovered, dragged and connection targets stay expanded. This device-only setting never enters saves."
+          : "自动档按视口可见数量并带迟滞切换卡片层级，同时减少进度插值、阴影与脉冲；选中、聚焦、悬停、拖动和连线目标仍保持展开。仅保存在本机，不进入存档。"}</p>
+        {canvasDetailPreference === "full" ? <p className="settings-warning" role="alert">{locale === "en"
+          ? "Warning: Full detail keeps every logical active-planet node eligible for heavy cards and live progress. Dense or paused factories can stutter; overlap grouping still caps identical stacks."
+          : "警告：完整档会让活动行星全部逻辑节点保留重卡片与实时进度资格，密集或暂停工厂可能卡顿；完全重叠的建筑仍会由界面分组限制特效数量。"}</p> : null}
       </section>
       <section className="settings-group settings-toggle-list settings-endgame-extreme" data-settings-category="performance">
         <ToggleSetting
@@ -1057,7 +1104,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "alerts" ? <AlertsPanel alerts={props.alerts} onSelect={props.onAlertSelect} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "achievements" ? <AchievementsPanel game={props.game} /> : null}
         {props.tab === "logistics" ? <LogisticsManagementPanel game={props.game} {...props.logisticsActions} /> : null}
-        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} connectExpandAll={props.connectExpandAll} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onConnectExpandAllChange={props.onConnectExpandAllChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} connectionPointSize={props.connectionPointSize} onConnectionPointSizeChange={props.onConnectionPointSizeChange} connectionHitArea={props.connectionHitArea} onConnectionHitAreaChange={props.onConnectionHitAreaChange} defaultBeltLanes={props.defaultBeltLanes} onDefaultBeltLanesChange={props.onDefaultBeltLanesChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} showItemHover={props.showItemHover} onItemHoverChange={props.onItemHoverChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
+        {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} connectExpandAll={props.connectExpandAll} blueprintAllowOverlap={props.blueprintAllowOverlap} canvasDetailPreference={props.canvasDetailPreference} canvasDetailStage={props.canvasDetailStage} canvasVisibleNodeCount={props.canvasVisibleNodeCount} canvasStackGroupCount={props.canvasStackGroupCount} canvasStackHiddenCount={props.canvasStackHiddenCount} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onConnectExpandAllChange={props.onConnectExpandAllChange} onBlueprintAllowOverlapChange={props.onBlueprintAllowOverlapChange} onCanvasDetailPreferenceChange={props.onCanvasDetailPreferenceChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} connectionPointSize={props.connectionPointSize} onConnectionPointSizeChange={props.onConnectionPointSizeChange} connectionHitArea={props.connectionHitArea} onConnectionHitAreaChange={props.onConnectionHitAreaChange} defaultBeltLanes={props.defaultBeltLanes} onDefaultBeltLanesChange={props.onDefaultBeltLanesChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} showItemHover={props.showItemHover} onItemHoverChange={props.onItemHoverChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
         {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}

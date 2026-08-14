@@ -2274,7 +2274,7 @@ describe("game storage", () => {
     state.blueprints[0].entities[0].machineCount = 2;
     state.blueprints[0].revision = 3;
     state.construction.assembling_machine_mk1 = 1;
-    state = queueBlueprint(state, blueprintId, { x: 640, y: 320 });
+    state = queueBlueprint(state, blueprintId, { x: 640, y: 320 }, { allowExactOverlap: true });
     const orderId = state.constructionQueue[0].id;
     state = fundConstructionQueueEntry(state, orderId, "construction");
     state = createProductionPlan(state, "magnetic_coil", 90, "home");
@@ -2300,6 +2300,7 @@ describe("game storage", () => {
       mirror: "horizontal",
       status: "pending-materials",
       reservedConstruction: { assembling_machine_mk1: 1 },
+      allowExactOverlap: true,
     });
     expect(loaded.blueprintVersions).toHaveLength(1);
     expect(loaded.blueprintVersions[0]).toMatchObject({ blueprintId, revision: 3, definition: { entities: [expect.objectContaining({ machineCount: 2 })] } });
@@ -2327,6 +2328,7 @@ describe("game storage", () => {
     delete legacy.constructionQueue[0].reservedConstruction;
     delete legacy.constructionQueue[0].reservedFleet;
     delete legacy.constructionQueue[0].placedEntityIdsByKey;
+    legacy.constructionQueue[0].allowExactOverlap = "damaged";
 
     const migrated = migrateGame(legacy)!;
     expect(migrated.version).toBe(46);
@@ -2340,6 +2342,7 @@ describe("game storage", () => {
       reservedFleet: {},
       placedEntityIdsByKey: {},
     });
+    expect(migrated.constructionQueue[0].allowExactOverlap).toBeUndefined();
   });
 
   it("migrates legacy saves into the endgame protocol and round-trips its controls", () => {

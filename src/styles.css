@@ -2515,6 +2515,11 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   background: #0b100e;
 }
 
+.factory-canvas[data-detail-stage="compact"] .react-flow__viewport {
+  contain: layout style paint;
+  will-change: transform;
+}
+
 /* P5 keeps React Flow's invisible edge hit paths; only ordinary visuals move
    into this single Canvas surface. Selected and hovered lines stay in SVG. */
 
@@ -2588,6 +2593,273 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 .factory-node-lod__handle {
   width: 14px;
   height: 14px;
+}
+
+.factory-node-compact {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 96px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-color: rgba(101, 200, 184, .38);
+  border-radius: 4px;
+  background: rgba(13, 22, 19, .94);
+  box-shadow: none;
+  filter: none;
+}
+
+.factory-node-compact > span {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  font-size: 8px;
+  line-height: 1;
+}
+
+.factory-node-compact > span > strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.factory-node-compact > span > small {
+  flex: none;
+  color: var(--muted);
+  font-size: 7px;
+}
+
+.factory-node-compact .factory-node-lod__handle {
+  width: 10px;
+  height: 10px;
+}
+
+.factory-node-stack-proxy {
+  position: relative;
+  width: 96px;
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none !important;
+  filter: none !important;
+  color: transparent;
+  pointer-events: none;
+  opacity: 0 !important;
+  contain: layout style paint;
+}
+
+.factory-node-stack-proxy--wide {
+  width: 96px;
+  min-height: 32px;
+}
+
+.factory-node-stack-proxy .factory-handle {
+  pointer-events: none;
+  opacity: 0;
+}
+
+.factory-node-stack-halo {
+  position: absolute;
+  z-index: -1;
+  inset: -7px;
+  border: 1px solid rgba(98, 181, 174, .3);
+  border-radius: 9px;
+  box-shadow: 0 0 18px rgba(98, 181, 174, .24);
+  pointer-events: none;
+}
+
+.factory-node-stack-badge {
+  position: absolute;
+  z-index: 12;
+  top: -12px;
+  right: -12px;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 72%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-raised);
+  box-shadow: 0 3px 9px rgba(0, 0, 0, .3);
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.factory-node-stack-halo--alert {
+  border-color: rgba(255, 177, 72, .92);
+  box-shadow: 0 0 0 2px rgba(255, 177, 72, .28), 0 0 18px rgba(255, 121, 72, .3);
+}
+
+.factory-node-stack-badge--alert {
+  border-color: rgba(255, 177, 72, .9);
+  color: #ffe0a3;
+}
+
+.factory-flow-node--effects-static .factory-node,
+.factory-flow-node--effects-static .node-icon,
+.factory-flow-node--effects-static .status-dot {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.factory-flow-node--effects-static .factory-node::before,
+.factory-flow-node--effects-static .factory-node::after,
+.factory-flow-node--effects-static .work-cycle > i,
+.factory-flow-node--effects-static .orbital-launch-track *,
+.factory-flow-node--effects-static .manual-mine > i {
+  animation: none !important;
+  transition: none !important;
+}
+
+.factory-flow-node--effects-static .node-input-arrival,
+.factory-flow-node--effects-static .node-output-pulse {
+  display: none !important;
+}
+
+.canvas-density-status {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 10px;
+  min-width: 170px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--surface-raised) 90%, transparent);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, .18);
+  color: var(--muted);
+  font-size: 8px;
+  pointer-events: none;
+  backdrop-filter: blur(7px);
+}
+
+.canvas-density-status > strong {
+  justify-self: end;
+  color: var(--text-soft);
+}
+
+.canvas-density-status > i {
+  grid-column: 1 / -1;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.canvas-density-status > i > b {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  background: var(--cyan);
+}
+
+.canvas-density-status > small {
+  grid-column: 1 / -1;
+}
+
+.canvas-detail-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.canvas-detail-diagnostics > div {
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+}
+
+.canvas-detail-diagnostics dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.canvas-detail-diagnostics dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.canvas-placement-options {
+  position: absolute;
+  z-index: 18;
+  left: 50%;
+  bottom: 14px;
+  width: min(360px, calc(100% - 28px));
+  transform: translateX(-50%);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  backdrop-filter: blur(8px);
+}
+
+.canvas-placement-options > label {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+
+.canvas-placement-options input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--cyan);
+}
+
+.canvas-placement-options label > span {
+  display: grid;
+  gap: 2px;
+}
+
+.canvas-placement-options label strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.canvas-placement-options label small,
+.canvas-placement-options > p {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.canvas-placement-options > p {
+  margin: 0;
+  padding: 7px 11px;
+  border-top: 1px solid var(--line);
+  color: var(--yellow);
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+  .canvas-density-status {
+    top: 8px;
+    right: 8px;
+    min-width: 142px;
+    padding: 6px 8px;
+  }
+
+  .factory-node-stack-badge {
+    min-width: 44px;
+    min-height: 44px;
+    top: -22px;
+    right: -22px;
+  }
 }
 
 .game-shell[data-canvas-extreme-visuals="true"] .factory-node:not(.factory-node--selected),

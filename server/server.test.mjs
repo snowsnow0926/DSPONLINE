@@ -2207,6 +2207,15 @@ test("validates v34 time warp and accepts Android v35 through current v46 saves"
     body: JSON.stringify({ payload: historicalOversizedStacks, expectedRevision: 16 }),
   });
   assert.equal(acceptedHistoricalOversizedStacks.response.status, 200, JSON.stringify(acceptedHistoricalOversizedStacks.body));
+  const exactOverlapQueueIntent = v46PayloadFor((state) => {
+    state.constructionQueue[0].allowExactOverlap = true;
+  });
+  const acceptedExactOverlapQueueIntent = await request("/api/cloud-save?slot=3", {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ payload: exactOverlapQueueIntent, expectedRevision: 17 }),
+  });
+  assert.equal(acceptedExactOverlapQueueIntent.response.status, 200, JSON.stringify(acceptedExactOverlapQueueIntent.body));
   for (const invalid of [
     v46PayloadFor((state) => { state.entities[2].machineCount = Number.MAX_SAFE_INTEGER + 1; }),
     v46PayloadFor((state) => { state.blueprints[0].entities[0].machineCount = Number.MAX_SAFE_INTEGER + 1; }),
@@ -2215,7 +2224,7 @@ test("validates v34 time warp and accepts Android v35 through current v46 saves"
     v46PayloadFor((state) => { state.constructionQueue[0].reservedConstruction.storage_mk1 = -1; }),
     v46PayloadFor((state) => { state.constructionQueue[0].status = "waiting-fleet"; state.constructionQueue[0].buildingCompletedAt = 123; }),
   ]) {
-    const rejected = await request("/api/cloud-save?slot=3", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: invalid, expectedRevision: 17 }) });
+    const rejected = await request("/api/cloud-save?slot=3", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: invalid, expectedRevision: 18 }) });
     assert.equal(rejected.response.status, 400);
   }
 });

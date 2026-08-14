@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   CONNECT_EXPAND_ALL_PREFERENCE_KEY,
+  CANVAS_DETAIL_PREFERENCE_KEY,
+  BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY,
   DEFAULT_BELT_LANES_PREFERENCE_KEY,
   readConnectExpandAllPreference,
+  readCanvasDetailPreference,
+  readBlueprintAllowOverlapPreference,
   readDefaultBeltLanesPreference,
   readSettingsCategoryPreference,
   readConnectionPointSize,
@@ -17,6 +21,8 @@ import {
   writeThemePreference,
   writeConnectionPointSize,
   writeConnectExpandAllPreference,
+  writeCanvasDetailPreference,
+  writeBlueprintAllowOverlapPreference,
   writeDefaultBeltLanesPreference,
 } from "./uiPreferences";
 
@@ -46,6 +52,8 @@ describe("device-only UI preferences", () => {
       expect(readSpeedrunPanelCollapsedPreference()).toBe(false);
       expect(readDefaultBeltLanesPreference()).toBe(1);
       expect(readConnectExpandAllPreference()).toBe(false);
+      expect(readCanvasDetailPreference()).toBe("auto");
+      expect(readBlueprintAllowOverlapPreference()).toBe(false);
       writeThemePreference("light");
       writeShowRunLogPreference(false);
       writeShowItemHoverPreference(false);
@@ -54,6 +62,8 @@ describe("device-only UI preferences", () => {
       writeSpeedrunPanelCollapsedPreference(true);
       writeDefaultBeltLanesPreference(4_096);
       writeConnectExpandAllPreference(true);
+      writeCanvasDetailPreference("minimal");
+      writeBlueprintAllowOverlapPreference(true);
       expect(readThemePreference()).toBe("light");
       expect(readShowRunLogPreference()).toBe(false);
       expect(readShowItemHoverPreference()).toBe(false);
@@ -62,8 +72,12 @@ describe("device-only UI preferences", () => {
       expect(readSpeedrunPanelCollapsedPreference()).toBe(true);
       expect(readDefaultBeltLanesPreference()).toBe(4_096);
       expect(readConnectExpandAllPreference()).toBe(true);
+      expect(readCanvasDetailPreference()).toBe("minimal");
+      expect(readBlueprintAllowOverlapPreference()).toBe(true);
       expect(storage.getItem(DEFAULT_BELT_LANES_PREFERENCE_KEY)).toBe("4096");
       expect(storage.getItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY)).toBe("true");
+      expect(storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY)).toBe("minimal");
+      expect(storage.getItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY)).toBe("true");
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });
     }
@@ -79,6 +93,8 @@ describe("device-only UI preferences", () => {
     storage.setItem("dsp-idle-network.ui.speedrun-panel-collapsed.v1", "maybe");
     storage.setItem(DEFAULT_BELT_LANES_PREFERENCE_KEY, "4097");
     storage.setItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY, "damaged");
+    storage.setItem(CANVAS_DETAIL_PREFERENCE_KEY, "damaged");
+    storage.setItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY, "damaged");
     const original = globalThis.window;
     Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }) } });
     try {
@@ -90,6 +106,8 @@ describe("device-only UI preferences", () => {
       expect(readSpeedrunPanelCollapsedPreference()).toBe(false);
       expect(readDefaultBeltLanesPreference()).toBe(1);
       expect(readConnectExpandAllPreference()).toBe(false);
+      expect(readCanvasDetailPreference()).toBe("auto");
+      expect(readBlueprintAllowOverlapPreference()).toBe(false);
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });
     }

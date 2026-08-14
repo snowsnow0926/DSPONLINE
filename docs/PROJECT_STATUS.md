@@ -8,6 +8,8 @@
 
 > **1.0.44 画布连线 LOD 开发项（2026-08-15，未部署）**：普通与终局极限画布进入连线后，完整建筑卡片只保留给 source、已选节点、当前 hover/snap 候选及纯世界坐标 viewport 加 300px overscan 的节点；380px 退出边界提供迟滞。持续 Ctrl/Shift 草稿不再把活动行星全部逻辑节点的 `connectionDraft` 写入每节点签名；内容签名与逐节点 presentation token 分离，只有实际 LOD 变化才丢弃 measured geometry。设备级偏好 `dsp-idle-network.ui.connect-expand-all.v1` 默认/缺失/损坏均为 false；明确开启时只展开活动行星，并显示超大工厂卡顿警告。该偏好不进入 GameState v46、envelope v2、云 schema v7、hash 或云同步。匿名 106 节点 production-preview 最终三轮中，默认路径完整逻辑节点固定 15，进入为 37.1/35.3/36.4 ms，组合平移/缩放/取消帧 P95 为 13.9/14.0/13.9 ms；全星球开关路径完整逻辑节点为 106，仍只渲染可见 DOM。专项尚未合并或部署，不能改写顶部生产版本事实。
 
+> **1.0.44 密集画布自适应与重叠一致性开发项（2026-08-15，未部署）**：暂停或运行的大视野按世界 viewport 内原始可见建筑数自动选择 full/medium/compact，并以 140/100 与 480/360 两组进入/退出阈值防止边界抖动；本机偏好 `dsp-idle-network.ui.canvas-detail.v1` 支持自动（默认）、完整与最简。compact 视口复用稳定 Node/Edge 及 React Flow 提交边界，视口外和完全遮挡成员不订阅工作周期，也不生成完整卡片、SVG 状态、阴影、动画或多重光晕。近同坐标建筑只做 UI 空间分组：唯一代表卡、封顶一次 halo 与数量/告警徽标，后层保留不可见 edge/handle 几何；选择、键盘循环、定位、告警、拖动和连线目标会展开对应成员，绝不合并 GameState 实体或 `machineCount`。本机偏好 `dsp-idle-network.ui.blueprint-allow-overlap.v1` 默认/缺失/损坏均为 false，并在设置与蓝图放置浮层提供同一“允许重叠放置”开关；默认时蓝图与单/多选拖动复用精确吸附坐标冲突检查，显式开启后两者均允许。排队订单只以可选字面值 `allowExactOverlap: true` 保存当次意图，保持原 `blueprintVersionId`、实体、线路和库存语义；未升级 GameState v46、envelope v2、云 schema v7 或 SQLite layout v2。
+
 > **方向变更（2026-07-31，兼容边界延续至 1.0.43）**：量子物流网络当前以 GameState v46 为 Web/API 数据基线。旧 v43 空间站实验存档若包含有效空间站资产会被拒绝加载，不能合并到量子共享库存；代码仍保留传统物流站 Mk.I→Mk.II 的兼容升级入口，供现有站点和本地批量升级测试使用。
 
 > 基线日期：2026-08-15

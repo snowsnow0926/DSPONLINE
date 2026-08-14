@@ -1802,6 +1802,7 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
         reservedFleet,
         placedEntityIdsByKey,
         buildingCompletedAt: status === "waiting-fleet" ? nonNegativeNumber(entry.buildingCompletedAt) : undefined,
+        allowExactOverlap: entry.allowExactOverlap === true ? true : undefined,
       }];
     })
     : [];

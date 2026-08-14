@@ -1376,6 +1376,8 @@ export interface ConstructionQueueEntry {
   reservedFleet?: Partial<Record<PortableFleetItemId, number>>;
   placedEntityIdsByKey?: Record<string, string>;
   buildingCompletedAt?: number;
+  /** Command policy captured only for an explicitly opted-in overlapping placement. */
+  allowExactOverlap?: true;
 }
 
 export interface HandcraftQueueEntry {

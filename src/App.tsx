@@ -17,7 +17,7 @@ import {
   type OnConnectStartParams,
   type OnSelectionChangeParams,
 } from "@xyflow/react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronLeft, ChevronRight, Copy, Download, Focus, Map as MapIcon, PanelRightClose, Route, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import {
   ConstructionDock,
@@ -121,6 +121,8 @@ import {
   getStationSlots,
   getTechnologyConstructionRewards,
   handcraftRecipeWithUpstream,
+  hasBlueprintExactOverlap,
+  hasExactEntityPositionOverlap,
   installSprayCoater,
   installSprayCoaters,
   installMiner,
@@ -344,6 +346,7 @@ import { getCanvasLod, shouldAutoOptimizeDenseCanvas, shouldVirtualizeCanvas, ty
 import {
   connectionViewportBoundsEqual,
   createLatestFramePublisher,
+  getCanvasWorldRectangle,
   getConnectionViewportBounds,
   getNodeConnectionPresentationToken,
   nodeIsInsideConnectionViewport,
@@ -352,6 +355,14 @@ import {
   type ConnectionViewportBounds,
   type LatestFramePublisher,
 } from "./game/canvasConnectionPresentation";
+import {
+  canvasDetailProgress,
+  canvasNodeIntersectsWorldRectangle,
+  countVisibleCanvasNodes,
+  groupCanvasNodeStacks,
+  resolveCanvasDetailStage,
+  type CanvasDetailStage,
+} from "./game/canvasDensityPresentation";
 import { buildAlignmentSpatialIndex, findAlignmentGuides, type AlignmentSpatialIndex } from "./game/alignmentGuides";
 import { synchronizeGalacticActivity, type GalacticActivityPublicStatus } from "./game/galacticActivity";
 import { TutorialWorkspace } from "./components/TutorialWorkspace";
@@ -373,9 +384,25 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import type { CanvasDetailPreference } from "./game/canvasDensityPresentation";
 
 type InspectorTab = "inspect" | "fabricate";
+
+const CanvasFlowCommitBoundary = memo(function CanvasFlowCommitBoundary({ children }: {
+  children: ReactNode;
+  nodes: readonly FactoryFlowNode[];
+  edges: readonly FactoryFlowEdge[];
+  compactStatic: boolean;
+  presentationToken: string;
+  interactionHandlers: readonly unknown[];
+}) {
+  return <>{children}</>;
+}, (previous, next) => previous.compactStatic && next.compactStatic &&
+  previous.nodes === next.nodes && previous.edges === next.edges &&
+  previous.presentationToken === next.presentationToken &&
+  previous.interactionHandlers.length === next.interactionHandlers.length &&
+  previous.interactionHandlers.every((handler, index) => handler === next.interactionHandlers[index]));
 
 // Run-log visibility is a presentation preference. Keep safety-critical
 // feedback visible when the routine event feed is disabled, while allowing
@@ -794,6 +821,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
   const [connectExpandAll, setConnectExpandAll] = useState(readConnectExpandAllPreference);
   useEffect(() => { writeConnectExpandAllPreference(connectExpandAll); }, [connectExpandAll]);
+  const [canvasDetailPreference, setCanvasDetailPreference] = useState<CanvasDetailPreference>(readCanvasDetailPreference);
+  useEffect(() => { writeCanvasDetailPreference(canvasDetailPreference); }, [canvasDetailPreference]);
+  const [blueprintAllowOverlap, setBlueprintAllowOverlap] = useState(readBlueprintAllowOverlapPreference);
+  useEffect(() => { writeBlueprintAllowOverlapPreference(blueprintAllowOverlap); }, [blueprintAllowOverlap]);
   const [showRunLog, setShowRunLog] = useState(readShowRunLogPreference);
   const [showItemHover, setShowItemHover] = useState(readShowItemHoverPreference);
   useEffect(() => { writeShowItemHoverPreference(showItemHover); }, [showItemHover]);
@@ -897,11 +928,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [viewportZoom, setViewportZoom] = useState(initialViewport.zoom);
   const [canvasGeometryRevision, setCanvasGeometryRevision] = useState(0);
   const [hoveredBeltId, setHoveredBeltId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [draggedEntityIds, setDraggedEntityIds] = useState<string[]>([]);
   const [canvasBatchFailed, setCanvasBatchFailed] = useState(false);
   const [minimapCanvasFailed, setMinimapCanvasFailed] = useState(false);
   const [pendingBlueprintViewport, setPendingBlueprintViewport] = useState<CanvasViewport>({ ...initialViewport });
   const [minimapViewport, setMinimapViewport] = useState<CanvasViewport>({ ...initialViewport });
   const [canvasViewportSize, setCanvasViewportSize] = useState<CanvasViewportSize>(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const [canvasVisibleRectangle, setCanvasVisibleRectangle] = useState(() =>
+    getCanvasWorldRectangle(initialViewport, { width: window.innerWidth, height: window.innerHeight }));
+  const [canvasPresentationZoom, setCanvasPresentationZoom] = useState(initialViewport.zoom);
+  const [canvasDetailStage, setCanvasDetailStage] = useState<CanvasDetailStage>(() => canvasDetailPreference === "full" ? "full" : "compact");
+  const canvasStackMembershipRef = useRef<ReadonlyMap<string, string>>(new Map());
+  const canvasNodeCommitStartedAtRef = useRef(0);
+  const canvasDragStopCountRef = useRef(0);
+  const multiDragStartRef = useRef<{
+    primaryId: string;
+    primaryPosition: { x: number; y: number };
+    members: Array<{ id: string; position: { x: number; y: number } }>;
+  } | null>(null);
+  const canvasNodeLayoutFrameRef = useRef<number | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<CampaignTaskId | null>(null);
   const [rewardFlights, setRewardFlights] = useState<RewardFlight[]>([]);
   const [planetTransition, setPlanetTransition] = useState<PlanetTransition | null>(null);
@@ -934,6 +981,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasTopologyRef = useRef<FactoryCanvasTopology | null>(null);
   const edgeRouteCacheRef = useRef<{ topologyRevision: number; geometryRevision: number; simplified: boolean; centers: ReadonlyMap<string, number | undefined> } | null>(null);
   const edgeRenderCacheRef = useRef<Map<string, FactoryFlowEdge>>(new Map());
+  const edgeRenderArrayRef = useRef<FactoryFlowEdge[]>([]);
   const accountStateRef = useRef(accountState);
   const completedTechCountRef = useRef(game.research.completedTechIds.length);
   const achievementCountRef = useRef(game.achievements.unlockedIds.length);
@@ -4809,6 +4857,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ({ viewport, size }) => {
         const next = getConnectionViewportBounds(viewport, size);
         setConnectionViewportBounds((current) => connectionViewportBoundsEqual(current, next) ? current : next);
+        const nextVisible = getCanvasWorldRectangle(viewport, size);
+        setCanvasVisibleRectangle((current) =>
+          Math.abs(current.left - nextVisible.left) <= 0.01 &&
+          Math.abs(current.top - nextVisible.top) <= 0.01 &&
+          Math.abs(current.right - nextVisible.right) <= 0.01 &&
+          Math.abs(current.bottom - nextVisible.bottom) <= 0.01
+            ? current
+            : nextVisible);
+        setCanvasPresentationZoom((current) => Math.abs(current - viewport.zoom) <= 0.0001 ? current : viewport.zoom);
       },
     );
   }
@@ -4817,12 +4874,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
   useEffect(() => () => connectionViewportPublisherRef.current?.cancel(), []);
   useEffect(() => {
-    if (!connectionDraft) {
-      connectionViewportPublisherRef.current?.cancel();
-      return;
-    }
     scheduleConnectionViewport(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize);
-  }, [canvasGame.activePlanetId, canvasViewportSize, connectionDraft, scheduleConnectionViewport]);
+  }, [canvasGame.activePlanetId, canvasViewportSize, scheduleConnectionViewport]);
   const selectedEntityIdSet = useMemo(() => new Set(selectedEntityIds), [selectedEntityIds]);
   const activeConnectionViewportBounds = useMemo(() => connectionDraft
     ? getConnectionViewportBounds(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize)
@@ -4940,7 +4993,78 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return { entityIds, beltIds, itemIds };
   }, [activePlanetBelts, activePlanetEntities, canvasGame, highlightedTaskId]);
 
-  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull">>(() => {
+  const canvasPositionNodes = useMemo(() => activePlanetEntities.map((entity) => ({
+    id: entity.id,
+    x: entity.position.x,
+    y: entity.position.y,
+  })), [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision]);
+  const canvasVisibleNodeCount = useMemo(() => countVisibleCanvasNodes(
+    canvasPositionNodes,
+    canvasVisibleRectangle,
+  ), [canvasPositionNodes, canvasVisibleRectangle]);
+  useEffect(() => {
+    setCanvasDetailStage((current) => resolveCanvasDetailStage(canvasDetailPreference, canvasVisibleNodeCount, current));
+  }, [canvasDetailPreference, canvasVisibleNodeCount]);
+  const canvasDetailProgressSnapshot = useMemo(
+    () => canvasDetailProgress(canvasDetailStage, canvasVisibleNodeCount),
+    [canvasDetailStage, canvasVisibleNodeCount],
+  );
+  const stackVisibleCanvasNodeIds = useMemo(() => {
+    const ids = new Set<string>(selectedEntityIds);
+    if (hoveredNodeId) ids.add(hoveredNodeId);
+    if (focusedNodeId) ids.add(focusedNodeId);
+    if (miningEntityId) ids.add(miningEntityId);
+    if (connectionDraft?.nodeId) ids.add(connectionDraft.nodeId);
+    if (connectionCandidateNodeId) ids.add(connectionCandidateNodeId);
+    for (const id of draggedEntityIds) ids.add(id);
+    return ids;
+  }, [connectionCandidateNodeId, connectionDraft?.nodeId, draggedEntityIds, focusedNodeId, hoveredNodeId, miningEntityId, selectedEntityIds]);
+  const fullDetailCanvasNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (selectedEntityIds.length === 1) ids.add(selectedEntityIds[0]);
+    if (hoveredNodeId) ids.add(hoveredNodeId);
+    if (focusedNodeId) ids.add(focusedNodeId);
+    if (miningEntityId) ids.add(miningEntityId);
+    if (connectionDraft?.nodeId) ids.add(connectionDraft.nodeId);
+    if (connectionCandidateNodeId) ids.add(connectionCandidateNodeId);
+    if (draggedEntityIds[0]) ids.add(draggedEntityIds[0]);
+    return ids;
+  }, [connectionCandidateNodeId, connectionDraft?.nodeId, draggedEntityIds, focusedNodeId, hoveredNodeId, miningEntityId, selectedEntityIds]);
+  const activeAlertEntityIds = useMemo(() => new Set(alerts.flatMap((alert) =>
+    alert.planetId === canvasGame.activePlanetId ? [alert.entityId] : [])), [alerts, canvasGame.activePlanetId]);
+  const activeCriticalAlertEntityIds = useMemo(() => new Set(alerts.flatMap((alert) =>
+    alert.planetId === canvasGame.activePlanetId && alert.severity === "critical" ? [alert.entityId] : [])), [alerts, canvasGame.activePlanetId]);
+  const canvasConnectedEntityIds = useMemo(() => new Set(activePlanetBelts.flatMap((belt) => [belt.source, belt.target])),
+    [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision]);
+  const canvasStackGrouping = useMemo(() => {
+    if (connectionDraft && connectExpandAll) {
+      canvasStackMembershipRef.current = new Map();
+      return groupCanvasNodeStacks([], canvasPresentationZoom);
+    }
+    const next = groupCanvasNodeStacks(
+      canvasPositionNodes,
+      canvasPresentationZoom,
+      stackVisibleCanvasNodeIds,
+      canvasStackMembershipRef.current,
+      activeAlertEntityIds,
+      activeCriticalAlertEntityIds,
+    );
+    canvasStackMembershipRef.current = next.membership;
+    return next;
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, canvasPositionNodes, canvasPresentationZoom, connectExpandAll, connectionDraft, stackVisibleCanvasNodeIds]);
+  const activateCanvasStack = useCallback((entityId: string, memberIds: readonly string[], mode: "select" | "cycle") => {
+    const currentIndex = Math.max(0, memberIds.indexOf(entityId));
+    const targetId = mode === "cycle" ? memberIds[(currentIndex + 1) % memberIds.length] ?? entityId : entityId;
+    setSelectedEntityIds([targetId]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setInspectorTab("inspect");
+    if (nextMobileShell) mobileNavigation.openSheet("inspector", "peek");
+    else setMobilePanel("inspector");
+    setNotice(`已展开重叠建筑 ${memberIds.indexOf(targetId) + 1}/${memberIds.length}`);
+  }, [mobileNavigation, nextMobileShell]);
+
+  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
     const planetProfile = getPlanetIndustrialProfile(canvasGame, canvasGame.activePlanetId);
@@ -4964,6 +5088,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         commitGame((current) => setEntitiesInteractionLocked(current, [entityId], locked));
         setNotice(locked ? "建筑已锁定" : "建筑已解锁");
       },
+      onStackActivate: activateCanvasStack,
       researchLabel: technology?.name ?? null,
       researchCosts: technology?.costs.filter((cost) => (progress[cost.itemId] ?? 0) < cost.amount) ?? [],
       completedTechIds: canvasGame.research.completedTechIds,
@@ -4979,16 +5104,128 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
+  }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
 
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
     const frame = window.requestAnimationFrame(() => {
-      const derivationStartedAt = performanceMonitor.isActive() ? performance.now() : 0;
+      const derivationStartedAt = performance.now();
+      canvasNodeCommitStartedAtRef.current = derivationStartedAt;
       setNodes((current) => {
         const existing = new Map(current.map((node) => [node.id, node]));
+        let stableNodeCount = 0;
+        let deferredNodeCount = 0;
+        let dynamicNodeCount = 0;
         const next = activePlanetEntities.map((entity) => {
           const previous = existing.get(entity.id);
+          const selected = selectedEntityIdSet.has(entity.id);
+          const interactionProtected = fullDetailCanvasNodeIds.has(entity.id);
+          const alertActive = activeAlertEntityIds.has(entity.id);
+          const draggable = !placement && !blueprintPlacementId && !entity.interactionLocked;
+          const presentationVisible = canvasNodeIntersectsWorldRectangle({
+            id: entity.id,
+            x: entity.position.x,
+            y: entity.position.y,
+            width: previous?.measured?.width,
+            height: previous?.measured?.height,
+          }, activeConnectionViewportBounds.enter);
+          const preserveMobileConstructionCenterDetail = nextMobileShell && game.settings.fontScale >= 2 && entity.buildingId === "construction_center";
+          const forceDynamicPresentation = interactionProtected || preserveMobileConstructionCenterDetail ||
+            canvasDetailPreference === "full" || Boolean(connectionDraft && connectExpandAll);
+          const topologyStable = Boolean(previous && previous.type === entity.kind &&
+            previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
+            previous.data.entity.buildingId === entity.buildingId && previous.data.entity.resourceId === entity.resourceId);
+          const stackPresentation = canvasStackGrouping.byNodeId.get(entity.id) ?? {
+            groupId: null,
+            memberIds: [entity.id],
+            count: 1,
+            hidden: false,
+            halo: false,
+            alertCount: 0,
+            criticalAlertCount: 0,
+          };
+          const staticAlertActive = stackPresentation.halo && stackPresentation.alertCount > 0;
+          const staticPresentation = !forceDynamicPresentation && (!presentationVisible || canvasDetailStage === "compact");
+          const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.alertActive === staticAlertActive &&
+            previous.draggable === draggable && previous.selected === selected &&
+            previous.data.stackHidden === stackPresentation.hidden && previous.data.stackHalo === stackPresentation.halo &&
+            previous.data.stackGroupId === stackPresentation.groupId && previous.data.stackCount === stackPresentation.count &&
+            previous.data.stackAlertCount === stackPresentation.alertCount &&
+            previous.data.stackCriticalAlertCount === stackPresentation.criticalAlertCount &&
+            previous.data.stackGeometryHandlesRequired === canvasConnectedEntityIds.has(entity.id) &&
+            previous.data.stackMemberIds.length === stackPresentation.memberIds.length &&
+            previous.data.stackMemberIds.every((id, index) => id === stackPresentation.memberIds[index]));
+          if (staticPresentation && staticPresentationStable && previous) {
+            stableNodeCount += 1;
+            return previous;
+          }
+          if (staticPresentation) {
+            deferredNodeCount += 1;
+            const connectedInputItemIds = beltNodeIndex.connectedInputsByTarget.get(entity.id) ?? previous?.data.connectedInputItemIds ?? [];
+            const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? previous?.data.inputBeltCounts ?? {};
+            const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? previous?.data.outputBeltCounts ?? {};
+            const blackHolePortConnections = canvasTopology.targetPortItemsByEntity.get(entity.id) ?? previous?.data.blackHolePortConnections ?? {};
+            const acceptedInputItemIds = topologyStable && previous ? previous.data.acceptedInputItemIds : getAcceptedInputs(entity, canvasGame);
+            const producedOutputItemIds = topologyStable && previous ? previous.data.producedOutputItemIds : getProducedOutputs(entity);
+            const className = [
+              "factory-flow-node--lod-compact",
+              "factory-flow-node--density-compact",
+              "factory-flow-node--effects-static",
+              stackPresentation.hidden ? "factory-flow-node--stack-hidden" : undefined,
+              stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
+            ].filter(Boolean).join(" ");
+            const stablePresentationVisible = previous?.data.lod === "compact" ? previous.data.presentationVisible : presentationVisible;
+            const presentationSignature = ["static", entity.id, draggable, staticAlertActive,
+              stackPresentation.groupId, stackPresentation.count, stackPresentation.hidden, stackPresentation.halo,
+              stackPresentation.alertCount, stackPresentation.criticalAlertCount,
+              canvasConnectedEntityIds.has(entity.id),
+              stackPresentation.memberIds].join(":");
+            return {
+              id: entity.id,
+              type: entity.kind,
+              position: { ...entity.position },
+              measured: previous?.data.lod === "compact" && previous.data.stackHidden === stackPresentation.hidden ? previous.measured : undefined,
+              data: {
+                ...commonNodeData,
+                visualSignature: `deferred:${entity.id}:${entity.kind}:${entity.buildingId ?? ""}:${entity.resourceId ?? ""}`,
+                presentationSignature,
+                entity,
+                connectedInputItemIds,
+                inputBeltCounts,
+                outputBeltCounts,
+                blackHolePortConnections,
+                targetDysonOrbitLabel: previous?.data.targetDysonOrbitLabel,
+                powerFactor: previous?.data.powerFactor ?? 0,
+                resourceReserve: previous?.data.resourceReserve ?? null,
+                status: staticAlertActive
+                  ? { code: "idle", label: `重叠组内 ${stackPresentation.alertCount} 个生产告警`, tone: "warning" }
+                  : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
+                outputCapacity: previous?.data.outputCapacity ?? 0,
+                cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
+                lod: "compact",
+                dynamicEffects: false,
+                presentationVisible: stablePresentationVisible,
+                alertActive: staticAlertActive,
+                stackHidden: stackPresentation.hidden,
+                stackHalo: stackPresentation.halo,
+                stackCount: stackPresentation.count,
+                stackGroupId: stackPresentation.groupId,
+                stackMemberIds: stackPresentation.memberIds,
+                stackAlertCount: stackPresentation.alertCount,
+                stackCriticalAlertCount: stackPresentation.criticalAlertCount,
+                stackGeometryHandlesRequired: canvasConnectedEntityIds.has(entity.id),
+                connectionDraft: null,
+                connectionViewportFull: false,
+                acceptedInputItemIds,
+                producedOutputItemIds,
+              } as FactoryNodeData,
+              selected,
+              className,
+              draggable,
+            } satisfies FactoryFlowNode;
+          }
+          dynamicNodeCount += 1;
           const ejectorTarget = entity.buildingId === "em_rail_ejector" ? getEjectorOrbitTargetStatus(canvasGame, entity) : null;
           const connectedInputItemIds = beltNodeIndex.connectedInputsByTarget.get(entity.id) ?? [];
           const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? {};
@@ -5000,8 +5237,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const status = getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
           const outputCapacity = getEntityOutputCapacity(canvasGame, entity);
           const cycleRatePerSecond = getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
-          const selected = selectedEntityIdSet.has(entity.id);
-          const preserveMobileConstructionCenterDetail = nextMobileShell && game.settings.fontScale >= 2 && entity.buildingId === "construction_center";
           const connectionViewportFull = Boolean(connectionDraft) && nodeIsInsideConnectionViewport({
             x: entity.position.x,
             y: entity.position.y,
@@ -5012,15 +5247,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             connectionActive: Boolean(connectionDraft),
             expandAll: connectExpandAll,
             source: connectionDraft?.nodeId === entity.id,
-            selected,
+            selected: selected && selectedEntityIds.length === 1,
             candidate: connectionCandidateNodeId === entity.id,
             viewport: connectionViewportFull,
-            preserveFullDetail: preserveMobileConstructionCenterDetail,
-            blockingInteraction: Boolean(placement || blueprintPlacementId),
+            preserveFullDetail: preserveMobileConstructionCenterDetail || interactionProtected,
+            blockingInteraction: false,
             denseNodeLodActive,
             zoom: viewportZoom,
           });
-          const lod: CanvasLod = connectionPresentation.lod;
+          const lod: CanvasLod = connectionDraft
+            ? connectionPresentation.full && connectionPresentation.reason !== "viewport"
+              ? "full"
+              : canvasDetailStage
+            : interactionProtected || preserveMobileConstructionCenterDetail || canvasDetailStage === "full"
+              ? "full"
+              : canvasDetailStage;
+          const dynamicEffects = lod === "full" && canvasDetailStage === "full" && !stackPresentation.hidden;
           const nodeConnectionDraft = connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
           const acceptedInputItemIds = getAcceptedInputs(entity, canvasGame);
           const producedOutputItemIds = getProducedOutputs(entity);
@@ -5053,8 +5295,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                     ? "factory-flow-node--connection-candidate"
                     : undefined
             : undefined;
-          const className = [`factory-flow-node--lod-${lod}`, focusClassName, connectionClassName].filter(Boolean).join(" ");
-          const draggable = !placement && !blueprintPlacementId && !entity.interactionLocked;
+          const className = [
+            `factory-flow-node--lod-${lod}`,
+            `factory-flow-node--density-${canvasDetailStage}`,
+            stackPresentation.hidden ? "factory-flow-node--stack-hidden" : undefined,
+            stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
+            dynamicEffects ? undefined : "factory-flow-node--effects-static",
+            focusClassName,
+            connectionClassName,
+          ].filter(Boolean).join(" ");
           const visualSignature = [
             visualEntitySignature(entity),
             connectedInputItemIds,
@@ -5067,20 +5316,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             status,
             outputCapacity,
             cycleRatePerSecond,
-            commonNodeData.cargo,
-            commonNodeData.placement,
-            commonNodeData.placementCount,
-            commonNodeData.miningEntityId === entity.id,
-            commonNodeData.paused,
-            commonNodeData.simulationMultiplier,
-            activeLogisticsEntityIdSet.has(entity.id),
-            entity.kind === "machine" || entity.kind === "power" ? commonNodeData.completedTechIds : null,
-            entity.recipeId === "matrix_research" ? [commonNodeData.researchLabel, commonNodeData.researchCosts] : null,
-            entity.buildingId === "em_rail_ejector" ? commonNodeData.dysonSwarm : null,
-            entity.buildingId === "vertical_launching_silo" ? commonNodeData.dysonSphere : null,
-            entity.buildingId === "time_warp_device" ? commonNodeData.timeWarp : null,
-            entity.kind === "power" ? [commonNodeData.solarGenerationMultiplier, commonNodeData.windGenerationMultiplier, commonNodeData.geothermalGenerationMultiplier] : null,
-            commonNodeData.powerDemandMultiplier,
+            lod === "full" ? commonNodeData.cargo : null,
+            lod === "full" ? commonNodeData.placement : null,
+            lod === "full" ? commonNodeData.placementCount : null,
+            lod === "full" && commonNodeData.miningEntityId === entity.id,
+            lod === "full" ? commonNodeData.paused : null,
+            lod === "full" ? commonNodeData.simulationMultiplier : null,
+            lod === "full" && activeLogisticsEntityIdSet.has(entity.id),
+            lod === "full" && (entity.kind === "machine" || entity.kind === "power") ? commonNodeData.completedTechIds : null,
+            lod === "full" && entity.recipeId === "matrix_research" ? [commonNodeData.researchLabel, commonNodeData.researchCosts] : null,
+            lod === "full" && entity.buildingId === "em_rail_ejector" ? commonNodeData.dysonSwarm : null,
+            lod === "full" && entity.buildingId === "vertical_launching_silo" ? commonNodeData.dysonSphere : null,
+            lod === "full" && entity.buildingId === "time_warp_device" ? commonNodeData.timeWarp : null,
+            lod === "full" && entity.kind === "power" ? [commonNodeData.solarGenerationMultiplier, commonNodeData.windGenerationMultiplier, commonNodeData.geothermalGenerationMultiplier] : null,
+            lod === "full" ? commonNodeData.powerDemandMultiplier : null,
             acceptedInputItemIds,
             producedOutputItemIds,
           ].join("|");
@@ -5091,6 +5340,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             draggable,
             lod,
             commonNodeData.extremeVisuals,
+            dynamicEffects,
+            stackPresentation.groupId,
+            stackPresentation.count,
+            stackPresentation.hidden,
+            stackPresentation.halo,
+            stackPresentation.alertCount,
+            stackPresentation.criticalAlertCount,
+            canvasConnectedEntityIds.has(entity.id),
+            stackPresentation.memberIds,
           ].join("|");
           if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
@@ -5099,7 +5357,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             id: entity.id,
             type: entity.kind,
             position: { ...entity.position },
-            measured: previous?.data.lod === lod ? previous.measured : undefined,
+            measured: previous?.data.lod === lod && previous.data.stackHidden === stackPresentation.hidden ? previous.measured : undefined,
             data: {
               ...commonNodeData,
               visualSignature,
@@ -5116,6 +5374,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               outputCapacity,
               cycleRatePerSecond,
               lod,
+              dynamicEffects,
+              presentationVisible,
+              alertActive,
+              stackHidden: stackPresentation.hidden,
+              stackHalo: stackPresentation.halo,
+              stackCount: stackPresentation.count,
+              stackGroupId: stackPresentation.groupId,
+              stackMemberIds: stackPresentation.memberIds,
+              stackAlertCount: stackPresentation.alertCount,
+              stackCriticalAlertCount: stackPresentation.criticalAlertCount,
+              stackGeometryHandlesRequired: canvasConnectedEntityIds.has(entity.id),
               connectionDraft: nodeConnectionDraft,
               connectionViewportFull,
               acceptedInputItemIds,
@@ -5126,17 +5395,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             draggable,
           } satisfies FactoryFlowNode;
         });
+        const derivationMs = performance.now() - derivationStartedAt;
+        const changedNodeCount = next.reduce((count, node, index) => count + (node === current[index] ? 0 : 1), 0);
+        const canvasElement = factoryCanvasRef.current;
+        if (canvasElement) {
+          canvasElement.dataset.nodeDerivationMs = derivationMs.toFixed(2);
+          canvasElement.dataset.dynamicNodeCount = String(dynamicNodeCount);
+          canvasElement.dataset.stableNodeCount = String(stableNodeCount);
+          canvasElement.dataset.deferredNodeCount = String(deferredNodeCount);
+          canvasElement.dataset.changedNodeCount = String(changedNodeCount);
+          canvasElement.dataset.projectionRuntimeRevision = String(canvasRenderSnapshot.runtimeRevision);
+        }
         if (performanceMonitor.isActive()) {
           performanceMonitor.recordCanvas({
-            nodeDerivationMs: performance.now() - derivationStartedAt,
+            nodeDerivationMs: derivationMs,
             reactFlowNodeCount: next.length,
           });
         }
-        return next.length === current.length && next.every((node, index) => node === current[index]) ? current : next;
+        return next.length === current.length && changedNodeCount === 0 ? current : next;
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasDisplayLookup, canvasGame, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDetailStage, canvasDisplayLookup, canvasGame, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+
+  useLayoutEffect(() => {
+    const startedAt = canvasNodeCommitStartedAtRef.current;
+    if (startedAt <= 0) return;
+    const committedAt = performance.now();
+    const canvasElement = factoryCanvasRef.current;
+    if (canvasElement) canvasElement.dataset.reactCommitMs = Math.max(0, committedAt - startedAt).toFixed(2);
+    if (canvasNodeLayoutFrameRef.current !== null) window.cancelAnimationFrame(canvasNodeLayoutFrameRef.current);
+    canvasNodeLayoutFrameRef.current = window.requestAnimationFrame(() => {
+      if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.layoutPaintMs = Math.max(0, performance.now() - committedAt).toFixed(2);
+      canvasNodeLayoutFrameRef.current = null;
+    });
+    return () => {
+      if (canvasNodeLayoutFrameRef.current !== null) window.cancelAnimationFrame(canvasNodeLayoutFrameRef.current);
+      canvasNodeLayoutFrameRef.current = null;
+    };
+  }, [nodes]);
 
   const handleNodesChange = useCallback((changes: Parameters<typeof onNodesChange>[0]) => {
     onNodesChange(changes);
@@ -5194,15 +5491,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : activePlanetBelts, [activePlanetBelts, canvasBatchRendererEnabled, detailedCanvasBeltIds]);
 
   const edges = useMemo<FactoryFlowEdge[]>(() => {
-    const derivationStartedAt = performanceMonitor.isActive() ? performance.now() : 0;
+    const derivationStartedAt = performance.now();
     const nextCache = new Map<string, FactoryFlowEdge>();
+    let stableEdgeCount = 0;
     const next = reactFlowBelts.map((belt) => {
       const item = ITEMS[belt.itemId];
       const capacity = getBeltCapacity(belt);
-      const flowRatio = capacity > 0 ? Math.min(1, belt.lastFlow / capacity) : 0;
       const bundle = beltBundleMap.get(belt.id) ?? { index: 0, size: 1 };
-      const diagnostic = diagnoseBelt(canvasGame, belt, beltDiagnosticIndex);
-      const routeColor = canvasGame.settings.beltHeatmapEnabled ? beltHeatColor(diagnostic.utilization) : item.color;
       const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
       const focusTone = lineTraceActive
         ? lineFindUpstreamBeltIds.has(belt.id) ? "line-upstream" : lineFindDownstreamBeltIds.has(belt.id) ? "line-downstream" : "line-dim"
@@ -5215,6 +5510,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           : "normal";
       const selected = selectedBeltId === belt.id || selectedBeltIdSet.has(belt.id);
       const detailBypass = selected || hoveredBeltId === belt.id || focusTone === "focus";
+      const previous = edgeRenderCacheRef.current.get(belt.id);
+      if (canvasDetailStage === "compact" && !detailBypass && previous) {
+        stableEdgeCount += 1;
+        nextCache.set(belt.id, previous);
+        return previous;
+      }
+      const flowRatio = capacity > 0 ? Math.min(1, belt.lastFlow / capacity) : 0;
+      const diagnostic = diagnoseBelt(canvasGame, belt, beltDiagnosticIndex);
+      const routeColor = canvasGame.settings.beltHeatmapEnabled ? beltHeatColor(diagnostic.utilization) : item.color;
       const targetHandle = belt.targetPortIndex === undefined
         ? `in:${belt.itemId}`
         : activeEntityById.get(belt.target)?.buildingId === "material_delivery_hub"
@@ -5231,8 +5535,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         targetHandle, diagnostic.health, diagnostic.flow, diagnostic.utilization, belt.congestion ?? 0,
         belt.monitorEnabled ?? false, routeColor, focusTone, selected, routeCenterY, detailVisible, motionEnabled, batched, bundle, strokeWidth,
       ].join("|");
-      const previous = edgeRenderCacheRef.current.get(belt.id);
       if (previous?.data?.visualSignature === visualSignature) {
+        stableEdgeCount += 1;
         nextCache.set(belt.id, previous);
         return previous;
       }
@@ -5280,15 +5584,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return edge;
     });
     edgeRenderCacheRef.current = nextCache;
+    const result = next.length === edgeRenderArrayRef.current.length && next.every((edge, index) => edge === edgeRenderArrayRef.current[index])
+      ? edgeRenderArrayRef.current
+      : next;
+    edgeRenderArrayRef.current = result;
+    const edgeDerivationMs = performance.now() - derivationStartedAt;
+    if (factoryCanvasRef.current) {
+      factoryCanvasRef.current.dataset.edgeDerivationMs = edgeDerivationMs.toFixed(2);
+      factoryCanvasRef.current.dataset.stableEdgeCount = String(stableEdgeCount);
+    }
     if (performanceMonitor.isActive()) {
       performanceMonitor.recordCanvas({
-        edgeDerivationMs: performance.now() - derivationStartedAt,
-        reactFlowEdgeCount: next.length,
-        canvasLineSegments: canvasBatchRendererEnabled ? Math.max(0, activePlanetBelts.length - next.length) : 0,
+        edgeDerivationMs,
+        reactFlowEdgeCount: result.length,
+        canvasLineSegments: canvasBatchRendererEnabled ? Math.max(0, activePlanetBelts.length - result.length) : 0,
       });
     }
-    return next;
-  }, [activeEntityById, activePlanetBelts.length, beltBundleMap, beltDiagnosticIndex, canvasBatchRendererEnabled, canvasGame, coarsePointer, edgeRouteCenters, extremeVisualsActive, focusedBeltNetwork, focusedNetworkBeltIds, highlightedTaskId, hoveredBeltId, lineFindDownstreamBeltIds, lineFindTrace, lineFindUpstreamBeltIds, locatedProductionBeltIds, performanceMonitor.isActive, performanceMonitor.recordCanvas, performanceVisualMode, productionLineFocus, reactFlowBelts, selectedBeltId, selectedBeltIdSet, taskHighlight.beltIds, viewportZoom]);
+    return result;
+  }, [activeEntityById, activePlanetBelts.length, beltBundleMap, beltDiagnosticIndex, canvasBatchRendererEnabled, canvasDetailStage, canvasGame, coarsePointer, edgeRouteCenters, extremeVisualsActive, focusedBeltNetwork, focusedNetworkBeltIds, highlightedTaskId, hoveredBeltId, lineFindDownstreamBeltIds, lineFindTrace, lineFindUpstreamBeltIds, locatedProductionBeltIds, performanceMonitor.isActive, performanceMonitor.recordCanvas, performanceVisualMode, productionLineFocus, reactFlowBelts, selectedBeltId, selectedBeltIdSet, taskHighlight.beltIds, viewportZoom]);
   const handleCanvasBatchUnavailable = useCallback(() => {
     setCanvasBatchFailed(true);
     setNotice("批量线路画布不可用，已自动回退到完整 SVG 线路");
@@ -5950,6 +6263,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // replaced by a simulation refresh. Pane clicks remain the explicit
     // cancellation path, so preserve a stable browse-mode selection here.
     if (ids.length === 0 && selectedEdges.length === 0 && selectedEntityIdsRef.current.length > 0 && !selectionModeRef.current && !deleteModeRef.current) return;
+    // React Flow emits a transient single-node selection before beginning a
+    // drag on an already-selected group. Keep the controlled group intact so
+    // drag-start can snapshot every unlocked member and preserve offsets.
+    if (selectionModeRef.current && ids.length === 1 && selectedEdges.length === 0 &&
+      selectedEntityIdsRef.current.length > 1 && selectedEntityIdsRef.current.includes(ids[0])) return;
     const nodeIds = new Set(ids);
     const beltIds = new Set(selectedEdges.map((edge) => edge.id));
     for (const belt of gameRef.current.belts) {
@@ -6263,8 +6581,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (blueprintPlacementId) {
       const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
       const blueprint = gameRef.current.blueprints.find((candidate) => candidate.id === blueprintPlacementId);
-      const laneOptions = { minimumBeltLanes: defaultBeltLanesRef.current };
+      const laneOptions = { minimumBeltLanes: defaultBeltLanesRef.current, allowExactOverlap: blueprintAllowOverlap };
       const preview = getBlueprintPlacementPreview(gameRef.current, blueprintPlacementId, position, laneOptions);
+      const exactOverlapBlocked = !blueprintAllowOverlap && hasBlueprintExactOverlap(
+        gameRef.current, blueprintPlacementId, position, gameRef.current.activePlanetId);
       const compatible = canQueueBlueprint(gameRef.current, blueprintPlacementId, gameRef.current.activePlanetId, position, laneOptions) &&
         Boolean(blueprint?.entities.length || preview.matchedResourceAnchors > 0);
       const deployable = preview.canPlace && compatible;
@@ -6294,6 +6614,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(deployable
         ? `${blueprintName}部署完成${resourceSummary}${fleetShortfall ? ` · 载具已部分装载（${fleetShortfall}）` : ""} · 连续放置中`
         : compatible ? `${blueprintName}已加入施工队列${resourceSummary} · 连续放置中`
+          : exactOverlapBlocked
+            ? `${blueprintName}未部署：目标吸附坐标已有建筑；需要保留独立重叠实体时请开启“允许重叠放置”`
           : preview.skippedResourceAnchors.length > 0
             ? `${blueprintName}未部署：附近没有对应类型的资源点，矿脉和采集设备均未改动`
             : `${blueprintName}与当前行星不兼容`);
@@ -6391,7 +6713,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -6805,6 +7127,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => nodes.reduce((count, node) => count + (node.data.connectionViewportFull ? 1 : 0), 0),
     [nodes],
   );
+  const canvasFullLogicalCount = useMemo(
+    () => nodes.reduce((count, node) => count + (node.data.lod === "full" && !node.data.stackHidden ? 1 : 0), 0),
+    [nodes],
+  );
   const connectionViewportToken = [
     activeConnectionViewportBounds.enter.left,
     activeConnectionViewportBounds.enter.top,
@@ -6833,6 +7159,76 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setPureIdleStartedAt(null);
     }
   }, [game.timeWarp.enabled]);
+
+  const canvasFlowPresentationToken = [
+    canvasGeometryRevision,
+    canvasGame.activePlanetId,
+    `${canvasViewportSize.width}x${canvasViewportSize.height}`,
+    canvasDetailStage,
+    connectionPointSize,
+    connectionHitArea,
+    connectionFlowRadius,
+    canvasMinimumZoom,
+    denseViewportCullingActive,
+    denseMinimapThrottleActive,
+    JSON.stringify(canvasPerformanceFeatures),
+    endgameExtremeMode,
+    performanceVisualMode,
+    coarsePointer,
+    game.settings.reducedMotion,
+    game.settings.allowDoubleClickZoom,
+    resolvedTheme,
+    viewportZoom,
+    beltTierMode,
+    beltTier,
+    defaultBeltLanes,
+    batchConnectionMode,
+    selectionMode,
+    deleteMode,
+    regionMode,
+    lineFindMode,
+    placement ?? "",
+    placementCount,
+    blueprintPlacementId ?? "",
+    blueprintAllowOverlap,
+    selectedRegionId ?? "",
+    regionDraft ? `${regionDraft.x}:${regionDraft.y}:${regionDraft.width}:${regionDraft.height}` : "",
+    regionResizePreview ? `${regionResizePreview.rectangle.x}:${regionResizePreview.rectangle.y}:${regionResizePreview.rectangle.width}:${regionResizePreview.rectangle.height}` : "",
+    minimapCollapsed,
+    canvasBatchRendererEnabled,
+    canvasBatchFailed,
+    minimapCanvasFailed,
+    nextMobileShell,
+    mobileCanvasMode,
+    mobileContinuousPlacement,
+    mobileNavigation.overlay ? `${mobileNavigation.overlay.kind}:${mobileNavigation.overlay.id}` : "",
+    isEnglish,
+    denseMinimapThrottleActive ? `${minimapViewport.x}:${minimapViewport.y}:${minimapViewport.zoom}` : "",
+    blueprintPlacementId ? `${pendingBlueprintViewport.x}:${pendingBlueprintViewport.y}:${pendingBlueprintViewport.zoom}` : "",
+    canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)
+      .map((region) => `${region.id}:${region.x}:${region.y}:${region.width}:${region.height}:${region.name}`).join(";"),
+    canvasGame.constructionQueue.filter((entry) => entry.planetId === canvasGame.activePlanetId)
+      .map((entry) => `${entry.id}:${entry.status ?? "pending-materials"}:${entry.position.x}:${entry.position.y}`).join(";"),
+  ].join("|");
+  const canvasFlowInteractionHandlers = [
+    handleNodesChange,
+    onSelectionChange,
+    onConnect,
+    onConnectStart,
+    onConnectEnd,
+    onClickConnectStart,
+    onClickConnectEnd,
+    isValidConnection,
+    onNodeClick,
+    onNodeDoubleClick,
+    onNodeDrag,
+    onPaneClick,
+    onCanvasDrop,
+    onRegionResizeStart,
+    centerCanvasFromMinimap,
+    zoomCanvasFromMinimap,
+    handleCanvasBatchUnavailable,
+  ] as const;
 
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
@@ -6863,6 +7259,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-connection-hit-area={connectionHitArea}
       data-connection-hit-diameter={connectionHitDiameter}
       data-connect-expand-all={connectExpandAll ? "true" : "false"}
+      data-canvas-detail-preference={canvasDetailPreference}
+      data-canvas-detail-stage={canvasDetailStage}
+      data-canvas-visible-node-count={canvasVisibleNodeCount}
+      data-canvas-stack-group-count={canvasStackGrouping.groupCount}
+      data-canvas-stack-hidden-count={canvasStackGrouping.hiddenCount}
+      data-canvas-full-logical-count={canvasFullLogicalCount}
+      data-blueprint-allow-overlap={blueprintAllowOverlap ? "true" : "false"}
       data-connection-active={connectionDraft ? "true" : "false"}
       data-connection-candidate-node={connectionCandidateNodeId ?? "none"}
       data-connection-full-logical-count={connectionFullLogicalCount}
@@ -7229,6 +7632,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             className="factory-canvas"
             data-batch-renderer={canvasBatchRendererEnabled ? "true" : "false"}
             data-minimap-throttled={denseMinimapThrottleActive && !minimapCanvasFailed ? "true" : "false"}
+            data-detail-stage={canvasDetailStage}
             aria-label="生产网络画布"
             ref={factoryCanvasRef}
             onPointerDownCapture={(event) => {
@@ -7265,6 +7669,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               finishRegionPointer(event, true);
             }}
             onLostPointerCaptureCapture={() => stopCanvasPointerMotion()}
+          onFocusCapture={(event) => {
+            const node = event.target instanceof Element ? event.target.closest<HTMLElement>(".react-flow__node[data-id]") : null;
+            if (node?.dataset.id) setFocusedNodeId(node.dataset.id);
+          }}
+          onBlurCapture={(event) => {
+            const nextNode = event.relatedTarget instanceof Element ? event.relatedTarget.closest<HTMLElement>(".react-flow__node[data-id]") : null;
+            setFocusedNodeId(nextNode?.dataset.id ?? null);
+          }}
           onClickCapture={(event) => {
             if (!placement && !blueprintPlacementId && clickConnectionPreviewRef.current &&
               completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) {
@@ -7274,7 +7686,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }
             if (!placement && !blueprintPlacementId) return;
             const target = event.target instanceof Element ? event.target : null;
-            if (!target?.closest(".react-flow") || target.closest(".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .planet-navigator")) return;
+            if (!target?.closest(".react-flow") || target.closest(".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .canvas-placement-options, .planet-navigator")) return;
             event.preventDefault();
             event.stopPropagation();
             onPaneClick(event);
@@ -7296,6 +7708,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }
           }}
         >
+          <CanvasFlowCommitBoundary
+            nodes={nodes}
+            edges={edges}
+            compactStatic={canvasDetailStage === "compact" && !connectionDraft && draggedEntityIds.length === 0}
+            presentationToken={canvasFlowPresentationToken}
+            interactionHandlers={canvasFlowInteractionHandlers}
+          >
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -7319,23 +7738,61 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             isValidConnection={isValidConnection}
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
-            onNodeDragStart={() => {
+            onNodeMouseEnter={(_event, node) => setHoveredNodeId(node.id)}
+            onNodeMouseLeave={(_event, node) => setHoveredNodeId((current) => current === node.id ? null : current)}
+            onNodeDragStart={(_event, node, draggedNodes) => {
               if (blockCanvasTouchRef.current) return;
+              const selectedIds = selectedEntityIdsRef.current.includes(node.id) ? selectedEntityIdsRef.current : [node.id];
+              const selectedIdSet = new Set(selectedIds);
+              const members = gameRef.current.entities.filter((entity) => entity.planetId === gameRef.current.activePlanetId &&
+                selectedIdSet.has(entity.id) && !entity.interactionLocked).map((entity) => ({ id: entity.id, position: { ...entity.position } }));
+              const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
+              multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members };
+              setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
+              if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
               nodeDragActiveRef.current = true;
               dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
             }}
             onNodeDrag={onNodeDrag}
             onNodeDragStop={(_event, node, draggedNodes) => {
               nodeDragActiveRef.current = false;
+              setDraggedEntityIds([]);
               dragAlignmentSpatialIndexRef.current = null;
               setCanvasGeometryRevision((revision) => revision + 1);
               setAlignmentGuides({ x: null, y: null });
               if (blockCanvasTouchRef.current) {
+                multiDragStartRef.current = null;
                 restoreCanvasEntityPositions();
                 return;
               }
-              const moved = draggedNodes.length > 0 ? draggedNodes : [node];
-              const positions = moved.map((candidate) => ({ id: candidate.id, position: snapFlowPosition(candidate.position) }));
+              const multiDrag = multiDragStartRef.current;
+              multiDragStartRef.current = null;
+              const snappedPrimary = snapFlowPosition(node.position);
+              if (factoryCanvasRef.current && multiDrag) {
+                factoryCanvasRef.current.dataset.dragPrimaryDeltaX = String(snappedPrimary.x - multiDrag.primaryPosition.x);
+                factoryCanvasRef.current.dataset.dragPrimaryDeltaY = String(snappedPrimary.y - multiDrag.primaryPosition.y);
+              }
+              const positions = multiDrag && multiDrag.members.length > 1
+                ? multiDrag.members.map((member) => ({
+                    id: member.id,
+                    position: snapFlowPosition({
+                      x: member.position.x + snappedPrimary.x - multiDrag.primaryPosition.x,
+                      y: member.position.y + snappedPrimary.y - multiDrag.primaryPosition.y,
+                    }),
+                  }))
+                : (draggedNodes.length > 0 ? draggedNodes : [node]).map((candidate) => ({ id: candidate.id, position: snapFlowPosition(candidate.position) }));
+              if (factoryCanvasRef.current) {
+                factoryCanvasRef.current.dataset.dragStopCount = String(++canvasDragStopCountRef.current);
+                factoryCanvasRef.current.dataset.dragMovedNodeCount = String(positions.length);
+              }
+              if (!blueprintAllowOverlap && hasExactEntityPositionOverlap(gameRef.current, positions)) {
+                if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "true";
+                restoreCanvasEntityPositions();
+                setNotice(isEnglish ? "Move cancelled: another building already occupies that exact snapped position. Enable Allow overlapping placement to continue." : "移动已取消：目标吸附坐标已有建筑。需要重叠时请开启“允许重叠放置”。");
+                playTone("alert");
+                return;
+              }
+              if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "false";
               commitGame((current) => moveEntities(current, positions));
               window.requestAnimationFrame(() => {
                 connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
@@ -7390,7 +7847,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onMoveEnd={(_event, viewport) => {
               viewportRef.current = viewport;
               if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
-              if (connectionDraftRef.current) scheduleConnectionViewport(viewport, canvasSizeRef.current ?? canvasViewportSize);
+              scheduleConnectionViewport(viewport, canvasSizeRef.current ?? canvasViewportSize);
               canvasPinchLodRef.current = getCanvasLod(viewport.zoom);
               setViewportZoom(viewport.zoom);
               setPendingBlueprintViewport(viewport);
@@ -7462,9 +7919,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             /> : null}
             <Controls position="bottom-left" showInteractive={false} />
           </ReactFlow>
+          </CanvasFlowCommitBoundary>
           <button className={`canvas-minimap-toggle nodrag nopan${minimapCollapsed ? " canvas-minimap-toggle--collapsed" : ""}`} type="button" onClick={() => setMinimapCollapsed((collapsed) => !collapsed)} title={minimapCollapsed ? "展开小地图" : "折叠小地图"} aria-label={minimapCollapsed ? "展开小地图" : "折叠小地图"} aria-expanded={!minimapCollapsed}>
             {minimapCollapsed ? <MapIcon size={16} /> : <PanelRightClose size={16} />}
           </button>
+          <output className="canvas-density-status nodrag nopan" aria-live="polite" aria-label="画布自适应细节状态">
+            <span>{canvasDetailPreference === "auto" ? "自动" : canvasDetailPreference === "full" ? "完整" : "最简"} · {canvasDetailStage === "full" ? "完整卡片" : canvasDetailStage === "medium" ? "中等细节" : "紧凑代理"}</span>
+            <strong>{canvasVisibleNodeCount.toLocaleString("zh-CN")} 可见</strong>
+            <i aria-hidden="true"><b style={{ transform: `scaleX(${canvasDetailProgressSnapshot.ratio})` }} /></i>
+            {canvasStackGrouping.hiddenCount > 0 ? <small>{canvasStackGrouping.groupCount} 组重叠 · {canvasStackGrouping.hiddenCount} 个代理</small> : null}
+          </output>
           <PlanetNavigator game={observedGame} onPlanetChange={onPlanetChange} />
           <CanvasSelectionTools
             selectionMode={selectionMode}
@@ -7544,6 +8008,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onAutoLayout={() => autoLayoutEntities()}
             onUndoAutoLayout={undoAutoLayout}
           />
+          {blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
+            <label>
+              <input type="checkbox" checked={blueprintAllowOverlap} onChange={(event) => setBlueprintAllowOverlap(event.target.checked)} />
+              <span><strong>{isEnglish ? "Allow overlapping placement" : "允许重叠放置"}</strong><small>{isEnglish ? "Only bypasses exact snapped-position collision" : "仅绕过完全相同吸附坐标的碰撞检查"}</small></span>
+            </label>
+            {blueprintAllowOverlap ? <p role="alert">{isEnglish ? "Overlapping buildings remain separate. The canvas groups identical cards; saves and machine counts are not merged." : "重叠建筑仍是独立实体；画布只会分组显示，不会合并存档或机器数量。"}</p> : null}
+          </section> : null}
           {batchConnectionMode ? <section className="batch-connection-panel nodrag nopan" aria-label="连续拉线预览" aria-live="polite">
             <header><Route size={16} /><span><small>连续拉线 / 批量连接</small><strong>{clickConnectionPreview ? "选择下游输入接口" : "选择一个输出接口"}</strong></span><em>{batchConnections.length} 条</em></header>
             <dl><div><dt>预计线路</dt><dd>{batchConnections.length}</dd></div><div><dt>每条并联</dt><dd>×{defaultBeltLanes}</dd></div><div><dt>预计材料</dt><dd>{(batchConnections.length * defaultBeltLanes).toLocaleString("zh-CN")}</dd></div><div><dt>非法/重复</dt><dd>{batchConnectionFailure ? 1 : 0}</dd></div></dl>
@@ -8180,6 +8651,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             productionRefreshIntervalMs={productionRefreshIntervalMs}
             endgameExtremeMode={endgameExtremeMode}
             connectExpandAll={connectExpandAll}
+            blueprintAllowOverlap={blueprintAllowOverlap}
+            canvasDetailPreference={canvasDetailPreference}
+            canvasDetailStage={canvasDetailStage}
+            canvasVisibleNodeCount={canvasVisibleNodeCount}
+            canvasStackGroupCount={canvasStackGrouping.groupCount}
+            canvasStackHiddenCount={canvasStackGrouping.hiddenCount}
             canvasPerformanceFeatures={canvasPerformanceFeatures}
             lineFindMode={lineFindMode}
             connectionPointSize={connectionPointSize}
@@ -8189,6 +8666,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             showItemHover={showItemHover}
             onEndgameExtremeModeChange={toggleEndgameExtremeMode}
             onConnectExpandAllChange={setConnectExpandAll}
+            onBlueprintAllowOverlapChange={setBlueprintAllowOverlap}
+            onCanvasDetailPreferenceChange={setCanvasDetailPreference}
             onCanvasPerformanceFeatureChange={updateCanvasPerformanceFeature}
             onLineFindModeChange={setLineFindMode}
             onConnectionPointSizeChange={setConnectionPointSize}

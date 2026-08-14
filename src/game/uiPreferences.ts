@@ -1,4 +1,5 @@
 import type { ThemeMode } from "./types";
+import type { CanvasDetailPreference } from "./canvasDensityPresentation";
 
 /** Device-only preferences. These values never belong in GameState or cloud payloads. */
 export const UI_THEME_PREFERENCE_KEY = "dsp-idle-network.ui.theme.v1";
@@ -10,6 +11,8 @@ export const CONNECTION_HIT_AREA_PREFERENCE_KEY = "dsp-idle-network.ui.connectio
 export const SPEEDRUN_PANEL_COLLAPSED_PREFERENCE_KEY = "dsp-idle-network.ui.speedrun-panel-collapsed.v1";
 export const DEFAULT_BELT_LANES_PREFERENCE_KEY = "dsp-idle-network.ui.default-belt-lanes.v1";
 export const CONNECT_EXPAND_ALL_PREFERENCE_KEY = "dsp-idle-network.ui.connect-expand-all.v1";
+export const CANVAS_DETAIL_PREFERENCE_KEY = "dsp-idle-network.ui.canvas-detail.v1";
+export const BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY = "dsp-idle-network.ui.blueprint-allow-overlap.v1";
 
 export type SettingsCategory = "all" | "visual" | "performance" | "interaction" | "storage" | "statistics" | "other";
 export type ConnectionPointSize = "default" | "large25" | "large50";
@@ -169,6 +172,36 @@ export function writeConnectExpandAllPreference(enabled: boolean): void {
   const storage = localStorageOrNull();
   if (!storage) return;
   try { storage.setItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
+}
+
+export function readCanvasDetailPreference(): CanvasDetailPreference {
+  const storage = localStorageOrNull();
+  if (!storage) return "auto";
+  try {
+    const value = storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY);
+    return value === "full" || value === "minimal" || value === "auto" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+export function writeCanvasDetailPreference(preference: CanvasDetailPreference): void {
+  const storage = localStorageOrNull();
+  if (!storage || (preference !== "auto" && preference !== "full" && preference !== "minimal")) return;
+  try { storage.setItem(CANVAS_DETAIL_PREFERENCE_KEY, preference); } catch { /* optional preference */ }
+}
+
+/** Blueprint placement policy is local UI state; placed/queued results remain ordinary GameState commands. */
+export function readBlueprintAllowOverlapPreference(): boolean {
+  const storage = localStorageOrNull();
+  if (!storage) return false;
+  try { return storage.getItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY) === "true"; } catch { return false; }
+}
+
+export function writeBlueprintAllowOverlapPreference(enabled: boolean): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  try { storage.setItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
 }
 
 /** The speedrun panel is expanded by default and is never part of a save. */

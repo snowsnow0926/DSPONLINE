@@ -1269,3 +1269,34 @@ production-preview Chrome 的匿名活动行星为 106 节点，默认与 expand
 | expand-all | 16.8 / 15.7 / 15.7 | 7.1 / 7.0 / 7.0 | 111.2 / 111.2 / 111.1 | 1 / 1 / 1 | 106 / 106 / 106 | 18 / 18 / 18 | 10 / 10 / 10 | 18 / 18 / 18 |
 
 默认路径硬门禁为 entry ≤50 ms、组合进入/平移/缩放/取消的 frame P95 ≤33 ms，三轮均通过。max 与 >50ms 保留为原始抖动证据，不以 P95 掩盖；expand-all 逻辑模型明显扩大，设置页必须持续显示卡顿警告，不把该显式兼容路径宣称为性能优化。开发 React validation build 的 entry 为 129～143 ms，因此性能硬门禁只在 production preview 执行，开发服务器仍运行全部功能断言。
+
+## 55. `1.0.44` 密集画布自适应、重叠分组与重叠放置专项（开发态）
+
+本项只使用代码生成的匿名 GameState fixture、本地 API shim 和临时浏览器 profile；没有读取、复制、打印或写回真实玩家附件、账号、云存档或生产服务。`canvasDensityPresentation` 纯函数覆盖 100/500/2,000 可见节点、两组迟滞、受保护成员、告警聚合和 2,000 个 exact-overlap 的线性分组；偏好测试覆盖 auto/false 默认、缺失、损坏、写入与重载。引擎/loader 测试覆盖默认 exact-overlap 拒绝、显式即时/排队部署、queue→fund→place、原 `blueprintVersionId`、多拖相对布局/自身旧位置排除、损坏字段回退，以及 1.0.43 loader 丢失 opt-in 后不兼容队列取消返还全部预留材料且实体不变。
+
+最终 production-preview Chromium 为 9/9：
+
+- 50 个 exact-overlap 成员只绘制 1 个代表卡/halo/badge，49 个后层 proxy 均为 `aria-hidden`、`tabIndex=-1`、opacity 0、无 pointer events；只有 3 个真实线路端点保留隐藏 handle，3 条 edge 均存在。fixture 另含 6 个基础节点，因此 heavy card 总数为 7；隐藏成员可由 badge 键盘循环选中并展开，halo 仍为 1。
+- 仅后层成员产生的 1 个告警会聚合为 leader badge `⚠1` 和唯一 alert halo；键盘循环后目标成员成为 selected/full，告警计数和单 halo 保持。
+- 500 节点批量框选得到至少 300 个 selected，拖动时 full/heavy 主交互目标不超过 1，提交至少 300 个相对位置；三节点多拖默认 exact-overlap 被拒绝且两成员位置恢复，在设置页开启同一设备偏好后无需重载即允许、形成 `×2` stack，并在 reload 后保持开启。
+- compact boundary 下不重载切换连接点放大 50% 与超大命中区，近点连接立即建立；compact 蓝图放置中切换 overlap 后，同一点第一次即时部署、第二次保留当次意图进入施工队列。390×844 下放置开关可见且无横向溢出。
+- 2,000 raw-visible exact stack 为 compact、heavy card 0、WorkCycle 0、hidden proxy 1,999、halo 1；分组没有降低 raw visible 压力信号。
+
+暂停/继续控制以 shell 状态变化后第二个 painted frame 为完成边界，不使用 dataset 刚变化的假绿结果：
+
+| 匿名压力 | 控制耗时 | dynamic / stable / changed Node | React commit / layout paint 诊断 | 门禁 |
+| --- | --- | --- | --- | --- |
+| 500（506 个活动节点） | Continue 16.0 ms；Pause 10.3 ms | 0 / 506 / 0 | 56.2 / 43.2 ms | 两次 second-painted ≤50 ms，通过 |
+| 2,000 exact stack（2,006 个活动节点） | Continue 85.3 ms | 0 / 2,006 / 0 | 50.9 / 79.5 ms | second-painted ≤100 ms，通过 |
+
+相同 fit-view、pan 与两次 zoom 手势从 clean production preview 独占运行三轮；默认 auto 是硬门禁，full 与 connect-expand-all 是设置页明确警告的成本对照：
+
+| 模式 | action ms | frame P95 ms | frame max ms | >50 / >100 | 最终 DOM / 逻辑 |
+| --- | --- | --- | --- | --- | --- |
+| auto | 150.76 / 153.65 / 122.28 | 13.9 / 7.0 / 7.1 | 14.0 / 13.9 / 14.0 | 0/0 · 0/0 · 0/0 | compact；默认门禁通过 |
+| full | 1,952.54 / 1,175.50 / 1,551.87 | 347.6 / 160.0 / 104.2 | 347.6 / 389.2 / 361.5 | 12/10 · 7/4 · 10/5 | 显式高成本兼容档，持续警告 |
+| connect-expand-all | 646.05 / 528.60 / 584.04 | 55.5 / 55.6 / 76.5 | 104.2 / 69.5 / 76.5 | 2/1 · 2/0 · 2/0 | 每轮 logical full 506；render wrappers/heavy/handles/glow = 503/503/1,503/0 |
+
+最终 commit-tip 独占窗口为 2026-08-15 05:27:10～05:27:48（Asia/Shanghai），端口 4361 前后均空闲，完整 9/9 通过。两日未活动的旧 Node test 树与用户常驻 Chrome 由 root 预先确认 CPU 静止，期间没有新外部 Playwright/Vite/测试树。此前与 runtime aggregation 重叠的采样、因测试直接操作视觉隐藏 checkbox 而功能失败的采样，以及随后未进入最终代码的 bulk-drag 实验 targeted 采样全部作废，没有混入上表。
+
+门禁汇总：focused Vitest 4 files / 316 tests 通过，typecheck 通过；`server.test.mjs` 39/2 通过并证明现网 c24 开放式 v46 queue validator/PUT 接受字面 `allowExactOverlap: true`；production build 1,931 modules，startup 总 gzip 186,944 B、JS 94,934 B、CSS 92,010 B，预算通过。真实 35 MiB / active 4,213 权威门禁不在本分支伪造或替代，仍必须由集成分支使用正确 IndexedDB loader 验证 Continue/Pause second-painted、React commit/layout 与 running pan/zoom；本专项未部署。

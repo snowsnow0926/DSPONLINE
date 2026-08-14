@@ -7825,6 +7825,8 @@ interface BlueprintPlacementOptions {
   mirror?: BlueprintMirror;
   /** Device preference supplied by the UI; never persisted into GameState. */
   minimumBeltLanes?: number;
+  /** Explicit UI command policy. It bypasses only rounded-position overlap rejection. */
+  allowExactOverlap?: boolean;
 }
 
 function createBlueprintDeploymentPlan(
@@ -8194,7 +8196,7 @@ function queueBlueprintPreview(state: GameState, entry: GameState["constructionQ
     rotation: entry.rotation,
     mirror: entry.mirror,
   });
-  const overlaps = hasQueuedBlueprintOverlap(
+  const overlaps = entry.allowExactOverlap === true ? false : hasQueuedBlueprintOverlap(
     state,
     blueprint,
     entry.position,
@@ -8215,22 +8217,58 @@ function hasQueuedBlueprintOverlap(
   mirror: BlueprintMirror,
   excludedEntryId?: string,
 ): boolean {
+  const positionKey = (point: { x: number; y: number }) => `${Math.round(point.x)}:${Math.round(point.y)}`;
   const occupied = new Set(state.entities
     .filter((entity) => entity.planetId === planetId)
-    .map((entity) => `${Math.round(entity.position.x)}:${Math.round(entity.position.y)}`));
+    .map((entity) => positionKey(entity.position)));
   for (const entry of state.constructionQueue) {
     if (entry.id === excludedEntryId || entry.planetId !== planetId || (entry.status ?? "pending-materials") === "waiting-fleet") continue;
     const queued = getConstructionQueueBlueprint(state, entry);
     if (!queued) continue;
     for (const template of queued.entities) {
       const offset = transformBlueprintOffset(template.offset, entry.rotation, entry.mirror);
-      occupied.add(`${Math.round(entry.position.x + offset.x)}:${Math.round(entry.position.y + offset.y)}`);
+      occupied.add(positionKey({ x: entry.position.x + offset.x, y: entry.position.y + offset.y }));
     }
   }
   return blueprint.entities.some((template) => {
     const offset = transformBlueprintOffset(template.offset, rotation, mirror);
-    return occupied.has(`${Math.round(position.x + offset.x)}:${Math.round(position.y + offset.y)}`);
+    return occupied.has(positionKey({ x: position.x + offset.x, y: position.y + offset.y }));
   });
+}
+
+export function hasBlueprintExactOverlap(
+  state: GameState,
+  blueprintId: string,
+  position: { x: number; y: number },
+  planetId: PlanetId = state.activePlanetId,
+): boolean {
+  const blueprint = state.blueprints.find((candidate) => candidate.id === blueprintId);
+  return blueprint ? hasQueuedBlueprintOverlap(
+    state,
+    blueprint,
+    position,
+    planetId,
+    blueprint.rotation ?? 0,
+    blueprint.mirror ?? "none",
+  ) : false;
+}
+
+/** UI command guard shared by single- and multi-node drag completion. */
+export function hasExactEntityPositionOverlap(
+  state: GameState,
+  positions: ReadonlyArray<{ id: string; position: { x: number; y: number } }>,
+): boolean {
+  const movingIds = new Set(positions.map((entry) => entry.id));
+  const occupied = new Set(state.entities
+    .filter((entity) => entity.planetId === state.activePlanetId && !movingIds.has(entity.id))
+    .map((entity) => `${Math.round(entity.position.x)}:${Math.round(entity.position.y)}`));
+  for (const entry of positions) {
+    if (!Number.isFinite(entry.position.x) || !Number.isFinite(entry.position.y)) return true;
+    const key = `${Math.round(entry.position.x)}:${Math.round(entry.position.y)}`;
+    if (occupied.has(key)) return true;
+    occupied.add(key);
+  }
+  return false;
 }
 
 export function canQueueBlueprint(
@@ -8238,7 +8276,7 @@ export function canQueueBlueprint(
   blueprintId: string,
   planetId: PlanetId = state.activePlanetId,
   position?: { x: number; y: number },
-  options: Pick<BlueprintPlacementOptions, "minimumBeltLanes"> = {},
+  options: Pick<BlueprintPlacementOptions, "minimumBeltLanes" | "allowExactOverlap"> = {},
 ): boolean {
   const blueprint = state.blueprints.find((candidate) => candidate.id === blueprintId);
   if (!blueprint || (blueprint.entities.length === 0 && (blueprint.resourceAnchors?.length ?? 0) === 0) ||
@@ -8247,21 +8285,21 @@ export function canQueueBlueprint(
     blueprint.belts.length > MAX_BLUEPRINT_CONSTRUCTION_BELTS) return false;
   if (!position) return blueprint.entities.every((entity) => canPlaceBuildingOnPlanet(entity.buildingId, planetId, state));
   const preview = getBlueprintPlacementPreview(state, blueprintId, position, { planetId, ...options });
-  return preview.compatible && !hasQueuedBlueprintOverlap(
+  return preview.compatible && (options.allowExactOverlap === true || !hasQueuedBlueprintOverlap(
     state,
     blueprint,
     position,
     planetId,
     blueprint.rotation ?? 0,
     blueprint.mirror ?? "none",
-  ) && Boolean(blueprint.entities.length || preview.matchedResourceAnchors > 0);
+  )) && Boolean(blueprint.entities.length || preview.matchedResourceAnchors > 0);
 }
 
 export function queueBlueprint(
   state: GameState,
   blueprintId: string,
   position: { x: number; y: number },
-  options: Pick<BlueprintPlacementOptions, "minimumBeltLanes"> = {},
+  options: Pick<BlueprintPlacementOptions, "minimumBeltLanes" | "allowExactOverlap"> = {},
 ): GameState {
   const blueprint = state.blueprints.find((candidate) => candidate.id === blueprintId);
   if (!blueprint || !canQueueBlueprint(state, blueprintId, state.activePlanetId, position, options)) return state;
@@ -8287,6 +8325,7 @@ export function queueBlueprint(
     reservedConstruction: {},
     reservedFleet: {},
     placedEntityIdsByKey: {},
+    allowExactOverlap: options.allowExactOverlap === true ? true : undefined,
   });
   withVersion.nextId += 1;
   return withVersion;

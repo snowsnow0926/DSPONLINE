@@ -22,6 +22,7 @@ import {
   canExploreStarSystem,
   canColonizePlanet,
   canPlaceBlueprint,
+  canQueueBlueprint,
   cancelConstructionQueueEntry,
   cancelCurrentResearch,
   canInstallSprayCoater,
@@ -84,6 +85,7 @@ import {
   getInterstellarCargoCapacity,
   getInterstellarRouteEconomics,
   getInterstellarTripSeconds,
+  hasExactEntityPositionOverlap,
   getLogisticsSpeedMultiplier,
   getMaterialDeliveryItems,
   getMaterialDeliverySlots,
@@ -3886,6 +3888,63 @@ describe("factory simulation", () => {
     const pendingId = state.constructionQueue[0].id;
     state = cancelConstructionQueueEntry(state, pendingId);
     expect(state.constructionQueue).toEqual([]);
+  });
+
+  it("keeps exact-overlap placement safe by default and preserves explicit immediate, queued and drag intent", () => {
+    let state = createInitialState();
+    state.construction.assembling_machine_mk1 = 3;
+    state = placeBuilding(state, "assembling_machine_mk1", { x: 0, y: 0 });
+    const source = state.entities.find((entity) => entity.buildingId === "assembling_machine_mk1")!;
+    state = createBlueprint(state, [source.id], "匿名重叠蓝图");
+    const blueprintId = state.blueprints[0].id;
+
+    expect(canQueueBlueprint(state, blueprintId, state.activePlanetId, { x: 0, y: 0 })).toBe(false);
+    expect(queueBlueprint(state, blueprintId, { x: 0, y: 0 })).toBe(state);
+    expect(canQueueBlueprint(state, blueprintId, state.activePlanetId, { x: 0, y: 0 }, { allowExactOverlap: true })).toBe(true);
+    expect(hasExactEntityPositionOverlap(state, [{ id: source.id, position: { ...source.position } }])).toBe(false);
+
+    const immediate = placeBlueprint(state, blueprintId, { x: 0, y: 0 }, { allowExactOverlap: true });
+    expect(immediate.entities.filter((entity) => Math.round(entity.position.x) === 0 && Math.round(entity.position.y) === 0)).toHaveLength(2);
+
+    const shortage = { ...state, construction: { ...state.construction, assembling_machine_mk1: 0 } };
+    let queued = queueBlueprint(shortage, blueprintId, { x: 0, y: 0 }, { allowExactOverlap: true });
+    queued = queueBlueprint(queued, blueprintId, { x: 0, y: 0 }, { allowExactOverlap: true });
+    expect(queued.constructionQueue).toHaveLength(2);
+    expect(queued.constructionQueue.every((entry) => entry.allowExactOverlap === true)).toBe(true);
+    expect(queued.constructionQueue.every((entry) => getConstructionQueueDetails(queued, entry.id).compatible)).toBe(true);
+    queued.construction.assembling_machine_mk1 = 2;
+    queued = processConstructionQueue(queued);
+    expect(queued.constructionQueue).toEqual([]);
+    expect(queued.entities.filter((entity) => Math.round(entity.position.x) === 0 && Math.round(entity.position.y) === 0)).toHaveLength(3);
+
+    // 1.0.43's v46 loader ignores unknown queue keys. Model that rollback by
+    // dropping the opt-in while retaining a partially reserved order: the old
+    // client must block the overlap and let cancellation conserve inventory.
+    let rollbackQueue = queueBlueprint(shortage, blueprintId, { x: 0, y: 0 }, { allowExactOverlap: true });
+    const rollbackEntry = rollbackQueue.constructionQueue[0];
+    rollbackEntry.allowExactOverlap = undefined;
+    rollbackEntry.reservedConstruction ??= {};
+    rollbackEntry.reservedConstruction.assembling_machine_mk1 = 1;
+    const rollbackTotalBefore = (rollbackQueue.construction.assembling_machine_mk1 ?? 0) +
+      (rollbackEntry.reservedConstruction.assembling_machine_mk1 ?? 0);
+    const rollbackEntities = structuredClone(rollbackQueue.entities);
+    expect(getConstructionQueueDetails(rollbackQueue, rollbackEntry.id).compatible).toBe(false);
+    rollbackQueue = cancelConstructionQueueEntry(rollbackQueue, rollbackEntry.id);
+    expect(rollbackQueue.constructionQueue).toEqual([]);
+    expect(rollbackQueue.entities).toEqual(rollbackEntities);
+    expect(rollbackQueue.construction.assembling_machine_mk1).toBe(rollbackTotalBefore);
+
+    const secondId = immediate.entities.find((entity) => entity.id !== source.id && entity.buildingId === "assembling_machine_mk1")!.id;
+    expect(hasExactEntityPositionOverlap(immediate, [{ id: secondId, position: { x: 0, y: 0 } }])).toBe(true);
+    expect(hasExactEntityPositionOverlap(immediate, [{ id: source.id, position: { ...source.position } }])).toBe(true);
+    expect(hasExactEntityPositionOverlap(immediate, [
+      { id: source.id, position: { x: 400, y: 0 } },
+      { id: secondId, position: { x: 640, y: 0 } },
+    ])).toBe(false);
+    expect(hasExactEntityPositionOverlap(immediate, [
+      { id: source.id, position: { x: 400, y: 0 } },
+      { id: secondId, position: { x: 400.4, y: 0 } },
+    ])).toBe(true);
   });
 
   it("reserves blueprint materials across repeated funding and refunds them exactly on cancellation", () => {

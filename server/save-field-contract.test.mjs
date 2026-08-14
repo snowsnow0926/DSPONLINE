@@ -29,6 +29,9 @@ test("server consumes the root save-field contract without a drifted copy", () =
     "lanes", "tier", "sorterTier", "progress", "priority", "stackSize", "monitorEnabled",
     "totalTransferred", "congestion", "lastFlow", "routeMode",
   ]);
+  assert.deepEqual(listSaveContractFields("station-slot", 46, "missing-default"), [
+    "localMode", "remoteMode", "minimumLoad", "minStock", "maxStock", "priority", "routePolicy", "warperBudget",
+  ]);
 });
 
 test("server field reads default only missing v46 values and rejects explicit invalid values", () => {
@@ -48,6 +51,11 @@ test("server field reads default only missing v46 values and rejects explicit in
   assert.equal(inspectSaveContractField("belt", "tier", { tier: 33 }, 46).valid, false);
   assert.equal(inspectSaveContractField("belt", "progress", { progress: Number.NaN }, 46).valid, false);
   assert.equal(inspectSaveContractField("entity", "interactionLocked", { interactionLocked: "false" }, 46).valid, false);
+  assert.equal(inspectSaveContractRecord("station-slot", {}, 46).valid, true);
+  assert.equal(inspectSaveContractField("station-slot", "localMode", { localMode: null }, 46).valid, false);
+  assert.equal(inspectSaveContractField("station-slot", "minimumLoad", { minimumLoad: 0.2 }, 46).valid, false);
+  assert.equal(inspectSaveContractField("station-slot", "minStock", { minStock: 100_000_001 }, 46).valid, false);
+  assert.equal(inspectSaveContractField("station-slot", "warperBudget", { warperBudget: 5 }, 46).valid, false);
 });
 
 test("v45 dense values stay valid while missing required historical fields do not receive v46 defaults", () => {

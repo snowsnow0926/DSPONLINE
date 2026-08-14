@@ -57,6 +57,17 @@ const BELT_PROJECTED_FIELDS = [
   "routeMode",
 ] as const;
 
+const STATION_SLOT_PROJECTED_FIELDS = [
+  "localMode",
+  "remoteMode",
+  "minimumLoad",
+  "minStock",
+  "maxStock",
+  "priority",
+  "routePolicy",
+  "warperBudget",
+] as const;
+
 function denseEntity(): Record<string, unknown> {
   return {
     id: "station",
@@ -107,6 +118,19 @@ function denseBelt(tier = 1): Record<string, unknown> {
   };
 }
 
+function denseStationSlot(): Record<string, unknown> {
+  return {
+    localMode: "storage",
+    remoteMode: "storage",
+    minimumLoad: 1,
+    minStock: 0,
+    maxStock: 0,
+    priority: 1,
+    routePolicy: "relay-preferred",
+    warperBudget: 2,
+  };
+}
+
 describe("shared save-field contract", () => {
   it("keeps saveProjection default omission routed through the shared contract", () => {
     const sourcePath = decodeURIComponent(new URL("./saveProjection.ts", import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1");
@@ -122,29 +146,38 @@ describe("shared save-field contract", () => {
     expect(Object.isFrozen(SAVE_FIELD_CONTRACT)).toBe(true);
     expect(Object.isFrozen(SAVE_FIELD_CONTRACT.scopes.entity)).toBe(true);
     expect(listSaveContractFields("entity", 46, "projection")).toEqual(ENTITY_PROJECTED_FIELDS);
+    expect(listSaveContractFields("station-slot", 46, "projection")).toEqual(STATION_SLOT_PROJECTED_FIELDS);
     expect(listSaveContractFields("belt", 46, "projection")).toEqual(BELT_PROJECTED_FIELDS);
     expect(listSaveContractFields("entity", 45, "projection")).toEqual([]);
+    expect(listSaveContractFields("station-slot", 45, "projection")).toEqual([]);
     expect(listSaveContractFields("belt", 45, "projection")).toEqual([]);
   });
 
   it("omits all and only declared v46 defaults without mutating the source", () => {
     const sourceEntity = denseEntity();
     const sourceBelt = denseBelt(4);
+    const sourceSlot = denseStationSlot();
     const compactEntity = { ...sourceEntity };
     const compactBelt = { ...sourceBelt };
+    const compactSlot = { ...sourceSlot };
     omitSaveContractDefaults(compactEntity, "entity", 46);
     omitSaveContractDefaults(compactBelt, "belt", 46);
+    omitSaveContractDefaults(compactSlot, "station-slot", 46);
     expect(compactEntity).toEqual({ id: "station", kind: "station", buildingId: "interstellar_logistics_station" });
     expect(compactBelt).toEqual({ id: "belt", tier: 4 });
+    expect(compactSlot).toEqual({});
     expect(sourceEntity).toEqual(denseEntity());
     expect(sourceBelt).toEqual(denseBelt(4));
+    expect(sourceSlot).toEqual(denseStationSlot());
   });
 
   it("preserves dense v45 fields because sparse defaults apply only to v46", () => {
     const entity = denseEntity();
     const belt = denseBelt();
+    const slot = denseStationSlot();
     expect(omitSaveContractDefaults(entity, "entity", 45)).toEqual(denseEntity());
     expect(omitSaveContractDefaults(belt, "belt", 45)).toEqual(denseBelt());
+    expect(omitSaveContractDefaults(slot, "station-slot", 45)).toEqual(denseStationSlot());
     expect(inspectSaveContractField("entity", "interactionLocked", {}, 45)).toMatchObject({
       valid: false,
       status: "missing-required",
@@ -165,6 +198,7 @@ describe("shared save-field contract", () => {
     expect(resolveSaveContractDefault("belt", "sorterTier", belt, 46)).toEqual({ applies: true, value: 3 });
     expect(resolveSaveContractDefault("entity", "inputs", {}, 46)).toEqual({ applies: true, value: {} });
     expect(resolveSaveContractDefault("entity", "stationRoutes", {}, 46)).toEqual({ applies: true, value: [] });
+    expect(resolveSaveContractDefault("station-slot", "routePolicy", {}, 46)).toEqual({ applies: true, value: "relay-preferred" });
     expect(belt).toEqual({ tier: 4 });
   });
 
@@ -230,6 +264,26 @@ describe("shared save-field contract", () => {
     }
   });
 
+  it.each([
+    ["localMode", "demand", [null, "auto", 0]],
+    ["remoteMode", "supply", [null, "auto", 0]],
+    ["minimumLoad", 0.1, [null, "1", 0, 0.2, 2]],
+    ["minStock", 100_000_000, [null, "0", -1, 0.5, 100_000_001]],
+    ["maxStock", 100_000_000, [null, "0", -1, 0.5, 100_000_001]],
+    ["priority", 2, [null, "1", -1, 3]],
+    ["routePolicy", "relay-required", [null, "auto", 0]],
+    ["warperBudget", 4, [null, "2", 0, 5, 1.5]],
+  ])("validates station-slot.%s and preserves explicit invalid/null decisions", (field, accepted, invalidValues) => {
+    expect(inspectSaveContractField("station-slot", field, { [field]: accepted }, 46).valid).toBe(true);
+    for (const value of invalidValues) {
+      expect(inspectSaveContractField("station-slot", field, { [field]: value }, 46), `${field}=${String(value)}`).toMatchObject({
+        valid: false,
+        status: "invalid",
+        source: "explicit",
+      });
+    }
+  });
+
   it("validates empty-container fields instead of treating malformed values as defaults", () => {
     expect(inspectSaveContractField("entity", "inputs", { inputs: {} }, 46).valid).toBe(true);
     expect(inspectSaveContractField("entity", "inputs", { inputs: { iron_ore: 0 } }, 46).valid).toBe(true);
@@ -259,6 +313,10 @@ describe("shared save-field contract", () => {
       ["entity", {}, 46],
       ["entity", { interactionLocked: null, machineCount: -1 }, 46],
       ["entity", { interactionLocked: false, machineCount: 0 }, 45],
+      ["station-slot", denseStationSlot(), 46],
+      ["station-slot", {}, 46],
+      ["station-slot", { localMode: null, minStock: -1, warperBudget: 5 }, 46],
+      ["station-slot", denseStationSlot(), 45],
       ["belt", denseBelt(1), 46],
       ["belt", {}, 46],
       ["belt", { lanes: null, tier: "1", progress: -1 }, 46],
@@ -279,6 +337,7 @@ describe("shared save-field contract", () => {
   it("covers every declared field with explicit, missing, null, string, zero, negative and range decisions", () => {
     const scopes = [
       ["entity", denseEntity()],
+      ["station-slot", denseStationSlot()],
       ["belt", denseBelt(4)],
     ] as const;
     for (const [scope, dense] of scopes) {

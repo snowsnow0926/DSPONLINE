@@ -2516,6 +2516,10 @@ function validateParsedSavePayload(parsed, integrity = inspectParsedSavePayloadI
     if (savePayloadModeFromParsed(parsed) === null) return false;
     if (state.entities.some((entity) => !entity || typeof entity !== "object" || Array.isArray(entity) ||
       !inspectSaveContractRecord("entity", entity, state.version).valid)) return false;
+    if (state.entities.some((entity) => entity.stationSlots !== undefined &&
+      (!Array.isArray(entity.stationSlots) || entity.stationSlots.length > 5 || entity.stationSlots.some((slot) =>
+        !slot || typeof slot !== "object" || Array.isArray(slot) ||
+        !inspectSaveContractRecord("station-slot", slot, state.version).valid)))) return false;
     if (state.version >= 38 && !Array.isArray(state.belts)) return false;
     if (state.belts !== undefined && (!Array.isArray(state.belts) || state.belts.some((belt) =>
       !belt || typeof belt !== "object" || Array.isArray(belt) ||

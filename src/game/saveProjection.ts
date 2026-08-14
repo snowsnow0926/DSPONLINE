@@ -2,7 +2,7 @@ import { isAchievementId } from "./progression";
 import { normalizeIdleSettlementState } from "./idleSettlement";
 import { getActiveContentPackReferences, type ContentPackRegistry } from "./contentPacks";
 import { omitSaveContractDefaults } from "./saveFieldContract";
-import type { BeltConnection, BlueprintDefinition, FactoryEntity, GameState, ItemId } from "./types";
+import type { BeltConnection, BlueprintDefinition, FactoryEntity, GameState, ItemId, StationSlot } from "./types";
 
 /**
  * Pure, Worker-safe projection of runtime state into the v46 persistent JSON
@@ -11,11 +11,25 @@ import type { BeltConnection, BlueprintDefinition, FactoryEntity, GameState, Ite
 export function projectPersistentSaveState(state: GameState, contentPackRegistry: ContentPackRegistry): GameState {
   const { runtimeFlow: _runtimeFlow, ...quantumLogisticsNetwork } = state.quantumLogisticsNetwork;
   const compactRecord = (value: Partial<Record<ItemId, number>>): Partial<Record<ItemId, number>> => ({ ...value });
+  const compactStationSlots = (slots: StationSlot[] | undefined): StationSlot[] | undefined => {
+    if (!slots) return undefined;
+    const compact = slots.map((slot) => {
+      const projected = { ...slot } as Record<string, any>;
+      omitSaveContractDefaults(projected, "station-slot", state.version);
+      return projected as StationSlot;
+    });
+    // Slot indexes are authoritative for routes and cursors. Only trim a
+    // JSON-empty suffix; never filter the array or collapse an interior slot.
+    while (compact.length > 0 && Object.values(compact.at(-1) as unknown as Record<string, unknown>)
+      .every((value) => value === undefined)) compact.pop();
+    return compact;
+  };
   const compactEntity = (entity: FactoryEntity): FactoryEntity => {
     const compact = {
       ...entity,
       inputs: compactRecord(entity.inputs),
       outputs: compactRecord(entity.outputs),
+      ...(entity.stationSlots ? { stationSlots: compactStationSlots(entity.stationSlots) } : {}),
       ...(entity.proliferatorBonusProgress
         ? { proliferatorBonusProgress: compactRecord(entity.proliferatorBonusProgress) }
         : {}),

@@ -1254,3 +1254,9 @@ Android `1.0.18 / 1000018` 使用历史长期证书，APK v2/v3 通过，SHA-256
 正式附件还暴露出本热修范围外的运行态 P0：受控 Continue→Pause 为 20,887 ms，Long Task 峰值 20,291 ms。1.0.43 只证明迁移/初次进入、保存和返回持久化链正确且显著有界，不能据此宣称主动模拟可玩性已恢复；1.0.44 必须以 P0 继续优化。
 
 香港 `manifest.webmanifest` 仍继承 1.0.42 的精确响应契约：HTTP 200、413 B、SHA-256 `fc70a386379d0a32eb71fc17a0694d40ad3b1a5ac9b0b61e81a4aa16da0536bf`、`Cache-Control: no-cache`、`Content-Type: application/octet-stream`。Chrome `Page.getAppManifest` 无错误且 PWA ready/controller/offline/update 通过；这不是 `application/manifest+json`，须作为独立 Nginx 技术债修正，不能改写本次既有生产事实。完整证据与回滚状态见 [1.0.43 正式发布记录](./releases/1.0.43.md)。
+
+## 54. `1.0.44` / v46 物流槽位稀疏存档开发门禁
+
+本开发项不升级 GameState v46、envelope v2、cloud schema v7、SQLite layout v2 或 IndexedDB version 2。共享 `station-slot` 契约覆盖本地/远程模式、最低装载率、库存上下限、优先级、中转策略和翘曲器预算；只有缺失字段读取默认值，显式 `null`、错误类型与越界值继续由服务端拒绝。
+
+聚焦门禁覆盖默认字段省略、非默认/`null` 保留、中间空槽不折叠、尾部空槽裁剪、加载补足五槽、client/server 契约一致、dense/sparse 精确重载及 1,000 秒玩法哈希/逐字段等价。匿名 lean 语义夹具为 54,306 实体、97,834 条线路、21,186 座物流站，稀疏正文 29,175,494 bytes；它用于确定性兼容与守恒回归，不作为玩家同形容量证据。可选只读真实派生门禁在内存中做确定性 ID/reference remap，得到 54,306 实体、97,834 条线路、20,138 座物流站的独立 2x 形状，稀疏正文 58,857,707 bytes，低于 60 MiB。原只读玩家附件由 36,704,109 bytes 投影为 29,572,337 bytes；源文件 bytes、mtime 与 SHA-256 `cd2356ea2b9a90a47cfa32ed9533e7056bfc4202f6af777fc4f3b98faa9a81b1` 前后不变，附件未进入 Git 或制品。

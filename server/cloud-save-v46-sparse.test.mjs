@@ -13,7 +13,20 @@ function createV46State(mode = "normal") {
     version: 46,
     mode,
     elapsedSeconds: 600,
-    entities: [{ id: "storage", kind: "storage", buildingId: "storage_mk1" }],
+    entities: [
+      { id: "storage", kind: "storage", buildingId: "storage_mk1" },
+      {
+        id: "station",
+        kind: "station",
+        buildingId: "interstellar_logistics_station",
+        quantumMode: "legacy",
+        stationSlots: [
+          { itemId: "iron_ore", localMode: "supply", minimumLoad: 0.25, minStock: 10, priority: 2, routePolicy: "direct", warperBudget: 4 },
+          {},
+          { itemId: "copper_ore", remoteMode: "supply" },
+        ],
+      },
+    ],
     belts: [{ id: "belt", source: "storage", target: "storage", itemId: "iron_ore" }],
     settings: {
       productionBufferLimit: 1_000_000,
@@ -71,6 +84,7 @@ function createPayload(state, savedAt = 123_456) {
 function createDenseV45Payload() {
   const state = createV46State("normal");
   state.version = 45;
+  state.entities = state.entities.slice(0, 1);
   state.entities[0].interactionLocked = false;
   Object.assign(state.belts[0], { lanes: 1, tier: 1, progress: 0 });
   delete state.blueprintVersions;
@@ -276,6 +290,15 @@ test("v46 sparse defaults reject explicit invalid values while v45 dense saves r
       ["progress overflow", (state) => { state.belts[0].progress = 100_000_001; }],
       ["interaction lock null", (state) => { state.entities[0].interactionLocked = null; }],
       ["interaction lock string", (state) => { state.entities[0].interactionLocked = "false"; }],
+      ["station slots not array", (state) => { state.entities[1].stationSlots = {}; }],
+      ["station slots too many", (state) => { state.entities[1].stationSlots = Array.from({ length: 6 }, () => ({})); }],
+      ["station slot null", (state) => { state.entities[1].stationSlots[1] = null; }],
+      ["station local mode null", (state) => { state.entities[1].stationSlots[1].localMode = null; }],
+      ["station minimum load invalid", (state) => { state.entities[1].stationSlots[1].minimumLoad = 0.2; }],
+      ["station min stock overflow", (state) => { state.entities[1].stationSlots[1].minStock = 100_000_001; }],
+      ["station priority invalid", (state) => { state.entities[1].stationSlots[1].priority = 3; }],
+      ["station route policy invalid", (state) => { state.entities[1].stationSlots[1].routePolicy = "auto"; }],
+      ["station warper budget invalid", (state) => { state.entities[1].stationSlots[1].warperBudget = 5; }],
     ];
     for (const [name, mutate] of invalidCases) {
       const state = createV46State("normal");

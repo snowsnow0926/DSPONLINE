@@ -1,4 +1,4 @@
-export type SaveFieldScope = "entity" | "belt";
+export type SaveFieldScope = "entity" | "station-slot" | "belt";
 export type SaveFieldListingPurpose = "all" | "projection" | "missing-default";
 export type SaveFieldInspectionStatus =
   | "explicit"

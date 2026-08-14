@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { hashGameState } from "./benchmark";
 import { createContentPackRegistry } from "./contentPacks";
-import { advanceSimulation, createInitialState } from "./engine";
+import { advanceSimulation, createInitialState, placeBuilding } from "./engine";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import { projectPersistentSaveState } from "./saveProjection";
 import { inspectSave, migrateGame, serializeEnvelope } from "./storage";
@@ -117,6 +118,114 @@ describe("v46 sparse save projection", () => {
       routeMode: "upper",
     });
   });
+
+  it("compacts station slots without shifting an interior slot or erasing explicit null/nondefault values", () => {
+    const state = createInitialState(1, false);
+    state.construction.interstellar_logistics_station = 1;
+    const placed = placeBuilding(state, "interstellar_logistics_station", { x: 100, y: 100 });
+    const station = placed.entities.at(-1)! as typeof placed.entities[number] & Record<string, unknown>;
+    station.stationSlots = [
+      {
+        itemId: "iron_ore",
+        localMode: "supply",
+        remoteMode: "storage",
+        minimumLoad: 0.25,
+        minStock: 17,
+        maxStock: 300,
+        priority: 2,
+        routePolicy: "direct",
+        warperBudget: 4,
+      },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { itemId: "copper_ore", localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+    ];
+    const invalid = station.stationSlots![3] as unknown as Record<string, unknown>;
+    invalid.localMode = null;
+    const original = structuredClone(placed);
+
+    const projected = projectPersistentSaveState(placed, createContentPackRegistry());
+    const projectedStation = projected.entities.at(-1)!;
+    expect(projectedStation.stationSlots).toEqual([
+      { itemId: "iron_ore", localMode: "supply", minimumLoad: 0.25, minStock: 17, maxStock: 300, priority: 2, routePolicy: "direct", warperBudget: 4 },
+      {},
+      { itemId: "copper_ore" },
+      { localMode: null },
+    ]);
+    expect(placed).toEqual(original);
+  });
+
+  it("loads dense and sparse five-slot stations to the same exact state and 1000-second result", () => {
+    let state = createInitialState(1, false);
+    state.construction.interstellar_logistics_station = 1;
+    state = placeBuilding(state, "interstellar_logistics_station", { x: 100, y: 100 });
+    state.paused = false;
+    const station = state.entities.at(-1)!;
+    station.stationSlots = [
+      { itemId: "iron_ore", localMode: "supply", remoteMode: "storage", minimumLoad: 0.25, minStock: 17, maxStock: 300, priority: 2, routePolicy: "direct", warperBudget: 4 },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { itemId: "copper_ore", localMode: "storage", remoteMode: "supply", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+      { localMode: "storage", remoteMode: "storage", minimumLoad: 1, minStock: 0, maxStock: 0, priority: 1, routePolicy: "relay-preferred", warperBudget: 2 },
+    ];
+    station.outputs.iron_ore = 23;
+    station.outputs.copper_ore = 11;
+    station.routingCursor = 7;
+    station.stationDispatchCursor = 9;
+    station.stationRoutes = [{
+      id: "preserved-route",
+      slotIndex: 0,
+      peerId: station.id,
+      itemId: "iron_ore",
+      scope: "remote",
+      cargo: 5,
+      vehicleCount: 1,
+      progress: 0.5,
+      duration: 20,
+      requiresWarp: false,
+      vehicleStationId: station.id,
+    }];
+    state.nextId = 98_765;
+
+    const sparseRaw = serializeEnvelope(state, 1_786_377_600_000);
+    const sparseParsed = JSON.parse(sparseRaw) as { state: typeof state };
+    expect(sparseParsed.state.entities.at(-1)!.stationSlots).toEqual([
+      { itemId: "iron_ore", localMode: "supply", minimumLoad: 0.25, minStock: 17, maxStock: 300, priority: 2, routePolicy: "direct", warperBudget: 4 },
+      {},
+      { itemId: "copper_ore", remoteMode: "supply" },
+    ]);
+    const denseState = structuredClone(sparseParsed.state);
+    const denseStation = denseState.entities.at(-1)!;
+    const defaults = { localMode: "storage" as const, remoteMode: "storage" as const, minimumLoad: 1 as const, minStock: 0, maxStock: 0, priority: 1 as const, routePolicy: "relay-preferred" as const, warperBudget: 2 };
+    denseStation.stationSlots = Array.from({ length: 5 }, (_, index) => ({ ...defaults, ...(denseStation.stationSlots?.[index] ?? {}) }));
+    const denseRaw = JSON.stringify({
+      formatVersion: 2,
+      kind: "primary",
+      savedAt: 1_786_377_600_000,
+      mode: "normal",
+      slot: "main",
+      state: denseState,
+      checksum: computeSaveStateChecksum(2, denseState),
+    });
+    const denseLoaded = inspectSave(denseRaw);
+    const sparseLoaded = inspectSave(sparseRaw);
+    expect(denseLoaded).toMatchObject({ valid: true, checksum: "valid", stateVersion: 46 });
+    expect(sparseLoaded).toMatchObject({ valid: true, checksum: "valid", stateVersion: 46 });
+    expect(sparseLoaded.state).toEqual(denseLoaded.state);
+    expect(sparseLoaded.state!.entities.at(-1)!.stationSlots).toHaveLength(5);
+    expect(sparseLoaded.state!.entities.at(-1)).toMatchObject({
+      outputs: { iron_ore: 23, copper_ore: 11 },
+      routingCursor: 7,
+      stationDispatchCursor: 9,
+      stationRoutes: [{ id: "preserved-route", slotIndex: 0, cargo: 5, vehicleCount: 1 }],
+    });
+    expect(sparseLoaded.state!.nextId).toBe(98_765);
+    const denseAdvanced = advanceSimulation(structuredClone(denseLoaded.state!), 1_000);
+    const sparseAdvanced = advanceSimulation(structuredClone(sparseLoaded.state!), 1_000);
+    expect(hashGameState(sparseAdvanced)).toBe(hashGameState(denseAdvanced));
+    expect(sparseAdvanced).toEqual(denseAdvanced);
+  }, 30_000);
 
   it("does not apply v46 sparse projection rules to a v45 dense state", () => {
     const state = createInitialState(1, false);
@@ -300,8 +409,66 @@ describe("v46 sparse save projection", () => {
     );
   });
 
+  it("keeps a deterministic lean 2x anonymous semantic fixture below 60 MiB", () => {
+    const entityCount = 27_153 * 2;
+    const beltCount = 48_917 * 2;
+    const stationCount = 10_593 * 2;
+    let templates = createInitialState(1, false);
+    templates.construction.interstellar_logistics_station = 1;
+    templates.construction.storage_mk1 = 1;
+    templates = placeBuilding(templates, "interstellar_logistics_station", { x: 0, y: 0 });
+    templates = placeBuilding(templates, "storage_mk1", { x: 300, y: 0 });
+    const stationTemplate = templates.entities.find((entity) => entity.buildingId === "interstellar_logistics_station")!;
+    const storageTemplate = templates.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+    const state = createInitialState(1, false);
+    const resourceEntities = state.entities.map((entity) => structuredClone(entity));
+    const anonymousEntities = Array.from({ length: entityCount - resourceEntities.length }, (_, index) => {
+      const template = index < stationCount ? stationTemplate : storageTemplate;
+      return {
+        ...template,
+        id: `anonymous_entity_${index}`,
+        position: { x: (index % 500) * 20, y: Math.floor(index / 500) * 20 },
+        inputs: {},
+        outputs: {},
+        ...(template.stationSlots ? { stationSlots: template.stationSlots.map((slot) => ({ ...slot })) } : {}),
+      };
+    });
+    state.entities = [...resourceEntities, ...anonymousEntities];
+    state.belts = Array.from({ length: beltCount }, (_, index) => ({
+      id: `anonymous_belt_${index}`,
+      planetId: "home" as const,
+      source: "anonymous_entity_0",
+      target: `anonymous_entity_${stationCount}`,
+      itemId: "iron_ore" as const,
+      lanes: 1,
+      tier: 1 as const,
+      sorterTier: 1 as const,
+      progress: 0,
+      priority: 0 as const,
+      stackSize: 1 as const,
+      monitorEnabled: false,
+      totalTransferred: 0,
+      congestion: 0,
+      lastFlow: 0,
+      routeMode: "auto" as const,
+    }));
+    state.nextId = entityCount + beltCount + 1;
+
+    const raw = serializeEnvelope(state, 1_786_377_600_000);
+    const bytes = new TextEncoder().encode(raw).byteLength;
+    const inspection = inspectSave(raw);
+    console.log(`V144_ANONYMOUS_2X_SAVE ${JSON.stringify({ bytes, entityCount, beltCount, stationCount })}`);
+    expect(bytes).toBeLessThanOrEqual(60 * 1024 * 1024);
+    expect(inspection).toMatchObject({ valid: true, checksum: "valid", stateVersion: 46 });
+    expect(inspection.state?.entities).toHaveLength(entityCount);
+    expect(inspection.state?.belts).toHaveLength(beltCount);
+  }, 120_000);
+
   it.skipIf(!environment?.DSP_REAL_FIXTURE)("measures read-only real-save reduction and reload integrity", () => {
-    const sourceRaw = readFileSync(environment!.DSP_REAL_FIXTURE!, "utf8");
+    const sourcePath = environment!.DSP_REAL_FIXTURE!;
+    const beforeStat = statSync(sourcePath);
+    const sourceRaw = readFileSync(sourcePath, "utf8");
+    const beforeHash = createHash("sha256").update(sourceRaw).digest("hex");
     const parsed = JSON.parse(sourceRaw);
     const state = migrateGame(parsed.state ?? parsed);
     expect(state).not.toBeNull();
@@ -320,5 +487,65 @@ describe("v46 sparse save projection", () => {
     console.log(`V138_SAVE_COMPACTION ${JSON.stringify(report)}`);
     expect(inspection).toMatchObject({ valid: true, checksum: "valid", stateVersion: 46 });
     expect(compactBytes).toBeLessThan(sourceBytes);
+    if (sourceBytes >= 35 * 1024 * 1024 && sourceBytes <= 36 * 1024 * 1024) {
+      expect(compactBytes).toBeLessThanOrEqual(Math.floor(29.7 * 1024 * 1024));
+    }
+
+    // Preserve the player's field distribution instead of treating the lean
+    // synthetic fixture above as a byte-shape proxy. The second factory is
+    // built only in memory with a deterministic one-character ID namespace;
+    // every entity/belt endpoint and station route reference is remapped.
+    const remapEntityId = new Map(state!.entities.map((entity) => [entity.id, `~${entity.id}`]));
+    const remapReference = (id: string): string => remapEntityId.get(id) ?? id;
+    const copiedEntities = state!.entities.map((source) => {
+      const entity = structuredClone(source);
+      entity.id = remapReference(source.id);
+      if (entity.stationPeerId) entity.stationPeerId = remapReference(entity.stationPeerId);
+      if (entity.stationLastSupplyPeerBySlot) {
+        entity.stationLastSupplyPeerBySlot = Object.fromEntries(
+          Object.entries(entity.stationLastSupplyPeerBySlot).map(([slot, peerId]) => [slot, peerId === undefined ? peerId : remapReference(peerId)]),
+        );
+      }
+      if (entity.stationRoutes) {
+        entity.stationRoutes = entity.stationRoutes.map((route) => ({
+          ...route,
+          id: `~${route.id}`,
+          peerId: remapReference(route.peerId),
+          ...(route.vehicleStationId ? { vehicleStationId: remapReference(route.vehicleStationId) } : {}),
+          ...(route.waypointStationIds ? { waypointStationIds: route.waypointStationIds.map(remapReference) } : {}),
+        }));
+      }
+      return entity;
+    });
+    const copiedBelts = state!.belts.map((source) => ({
+      ...structuredClone(source),
+      id: `~${source.id}`,
+      source: remapReference(source.source),
+      target: remapReference(source.target),
+    }));
+    const doubledState = structuredClone(state!);
+    doubledState.entities = [...state!.entities, ...copiedEntities];
+    doubledState.belts = [...state!.belts, ...copiedBelts];
+    const doubledRaw = serializeEnvelope(doubledState, 1_786_377_600_001);
+    const doubledBytes = new TextEncoder().encode(doubledRaw).byteLength;
+    const doubledInspection = inspectSave(doubledRaw);
+    console.log(`V144_REAL_SHAPE_2X_SAVE ${JSON.stringify({
+      bytes: doubledBytes,
+      entities: doubledState.entities.length,
+      belts: doubledState.belts.length,
+      stationCount: doubledState.entities.filter((entity) => Boolean(entity.stationSlots)).length,
+    })}`);
+    expect(doubledBytes).toBeLessThanOrEqual(60 * 1024 * 1024);
+    expect(doubledInspection).toMatchObject({ valid: true, checksum: "valid", stateVersion: 46 });
+    expect(doubledInspection.state?.entities).toHaveLength(state!.entities.length * 2);
+    expect(doubledInspection.state?.belts).toHaveLength(state!.belts.length * 2);
+
+    const afterStat = statSync(sourcePath);
+    const afterHash = createHash("sha256").update(readFileSync(sourcePath, "utf8")).digest("hex");
+    expect({ bytes: afterStat.size, modified: afterStat.mtimeMs, hash: afterHash }).toEqual({
+      bytes: beforeStat.size,
+      modified: beforeStat.mtimeMs,
+      hash: beforeHash,
+    });
   }, 120_000);
 });

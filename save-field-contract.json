@@ -170,6 +170,56 @@
         "projection": { "omitDefaultVersions": [46] }
       }
     },
+    "station-slot": {
+      "localMode": {
+        "default": { "kind": "literal", "value": "storage" },
+        "validation": { "type": "string", "enum": ["storage", "supply", "demand"] },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "remoteMode": {
+        "default": { "kind": "literal", "value": "storage" },
+        "validation": { "type": "string", "enum": ["storage", "supply", "demand"] },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "minimumLoad": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "finite": true, "enum": [0.1, 0.25, 0.5, 1] },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "minStock": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 0, "maximum": 100000000 },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "maxStock": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 0, "maximum": 100000000 },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "priority": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "enum": [0, 1, 2] },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "routePolicy": {
+        "default": { "kind": "literal", "value": "relay-preferred" },
+        "validation": { "type": "string", "enum": ["direct", "relay-preferred", "relay-required"] },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      },
+      "warperBudget": {
+        "default": { "kind": "literal", "value": 2 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 1, "maximum": 4 },
+        "missing": { "defaultVersions": [46] },
+        "projection": { "omitDefaultVersions": [46] }
+      }
+    },
     "belt": {
       "lanes": {
         "default": { "kind": "literal", "value": 1 },

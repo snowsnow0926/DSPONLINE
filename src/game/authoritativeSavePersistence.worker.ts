@@ -152,13 +152,26 @@ function validSettings(value: unknown): boolean {
   }
 }
 
+function validSlot(value: unknown): value is "main" | 1 | 2 | 3 | null {
+  return value === null || value === "main" || value === 1 || value === 2 || value === 3;
+}
+
+function validWriterFence(value: unknown): value is AuthoritativeSaveWriterFence {
+  if (!value || typeof value !== "object") return false;
+  const fence = value as Partial<AuthoritativeSaveWriterFence>;
+  const token = fence.fencingToken;
+  return typeof fence.ownerId === "string" && fence.ownerId.length > 0 && fence.ownerId.length <= 200 &&
+    fence.ownerId.trim() === fence.ownerId && typeof token === "number" && Number.isSafeInteger(token) && token >= 1;
+}
+
 function validSeed(seed: AuthoritativeSaveCatalogSeed, key: string, proof: AuthoritativeSavePayloadProof): boolean {
   const expectedKind = expectedKindForKey(key);
   const expectedMode = expectedModeForKey(key);
   const expectedSlot = expectedSlotForKey(key);
   return Boolean(expectedKind && expectedMode && seed.kind === expectedKind && seed.mode === expectedMode &&
+    validSlot(seed.slot) &&
     (!(expectedKind === "primary" || expectedKind === "slot") || seed.slot === expectedSlot) &&
-    Number.isFinite(seed.savedAt) && seed.savedAt >= 0 && validNonNegativeInteger(seed.stateVersion) &&
+    Number.isSafeInteger(seed.savedAt) && seed.savedAt >= 0 && validNonNegativeInteger(seed.stateVersion) &&
     validNonNegativeInteger(seed.entityCount) && validNonNegativeInteger(seed.beltCount) &&
     validNonNegativeInteger(seed.elapsedSeconds) && validNonNegativeInteger(seed.completedTechCount) &&
     validNonNegativeInteger(seed.structurePoints) && typeof seed.activePlanetId === "string" &&
@@ -166,6 +179,39 @@ function validSeed(seed: AuthoritativeSaveCatalogSeed, key: string, proof: Autho
     validSettings(seed.settings) && STATE_CHECKSUM_PATTERN.test(seed.stateChecksum) && proof.stateChecksum === seed.stateChecksum &&
     proof.integrity === "valid" && SHA256_PATTERN.test(proof.payloadSha256) && SHA256_PATTERN.test(proof.bindingSha256) &&
     /^[0-9a-f]{8}$/.test(proof.payloadChecksum) && validNonNegativeInteger(proof.byteLength));
+}
+
+/** Re-parse and bind the new envelope in the persistence Worker.  The save
+ * Worker proof is necessary but not trusted by itself: a tampered payload and
+ * an independently supplied catalog seed must never be committed together. */
+function verifyNewEnvelope(raw: string, request: AuthoritativeSavePersistenceRequest): boolean {
+  const inspection = inspectSaveEnvelopeChecksum(raw);
+  if (inspection.status !== "valid" || !inspection.parsed || !inspection.state ||
+    inspection.recordedChecksum !== request.seed.stateChecksum ||
+    inspection.computedChecksum !== request.seed.stateChecksum) return false;
+  const envelope = inspection.parsed;
+  const state = inspection.state;
+  return envelope.formatVersion === 2 && envelope.kind === request.seed.kind && envelope.mode === request.seed.mode &&
+    envelope.slot === request.seed.slot && envelope.savedAt === request.seed.savedAt &&
+    state.mode === request.seed.mode && state.version === request.seed.stateVersion &&
+    state.activePlanetId === request.seed.activePlanetId &&
+    Array.isArray(state.entities) && state.entities.length === request.seed.entityCount &&
+    Array.isArray(state.belts) && state.belts.length === request.seed.beltCount &&
+    state.elapsedSeconds === request.seed.elapsedSeconds &&
+    (() => {
+      const research = state.research;
+      const dysonSphere = state.dysonSphere;
+      const completedTechIds = research && typeof research === "object"
+        ? (research as Record<string, unknown>).completedTechIds
+        : undefined;
+      const structurePoints = dysonSphere && typeof dysonSphere === "object"
+        ? (dysonSphere as Record<string, unknown>).structurePoints
+        : undefined;
+      return Boolean(research && typeof research === "object" &&
+        Array.isArray(completedTechIds) && completedTechIds.length === request.seed.completedTechCount &&
+        dysonSphere && typeof dysonSphere === "object" &&
+        structurePoints === request.seed.structurePoints);
+    })();
 }
 
 function catalogFromSeed(
@@ -316,6 +362,7 @@ function verifyPreviousEnvelopeForBackup(previous: BoundPreviousPayload, mode: "
     return inspection.status === "valid" && inspection.recordedChecksum === inspection.computedChecksum &&
       inspection.recordedChecksum === previous.catalog.stateChecksum &&
       inspection.parsed?.mode === mode && inspection.parsed?.kind === "primary" &&
+      inspection.parsed?.slot === previous.catalog.slot &&
       inspection.parsed?.savedAt === previous.catalog.savedAt &&
       inspection.state?.mode === mode;
   } catch {
@@ -394,7 +441,8 @@ async function writeBackupBestEffort(
     return {
       saved: payloadCommitted?.value === previous.raw && Number(payloadCommitted.bytes) === previous.byteLength &&
         catalogCommitted?.value === catalogRaw && revisionCommitted?.value === nextRevisionRaw,
-      revision: nextRevision,
+      revision: payloadCommitted?.value === previous.raw && Number(payloadCommitted.bytes) === previous.byteLength &&
+        catalogCommitted?.value === catalogRaw && revisionCommitted?.value === nextRevisionRaw ? nextRevision : null,
     };
   } catch {
     return { saved: false, revision: null };
@@ -407,7 +455,7 @@ async function commitPayload(
 ): Promise<AuthoritativeSavePersistenceResult> {
   const decodeStarted = performance.now();
   if (!validNonNegativeInteger(request.expectedRevision) || request.expectedRevision > 0x7fffffff ||
-    !request.fence.ownerId || !Number.isSafeInteger(request.fence.fencingToken) || request.fence.fencingToken < 1 ||
+    !validWriterFence(request.fence) ||
     !validSeed(request.seed, request.key, request.proof) || request.payload.byteLength !== request.proof.byteLength) {
     return failure("invalid", "authoritative payload proof 或 key/seed 不合法");
   }
@@ -425,6 +473,13 @@ async function commitPayload(
     raw = new TextDecoder("utf-8", { fatal: true }).decode(request.payload);
   } catch {
     return failure("invalid", "authoritative payload 不是合法 UTF-8");
+  }
+  // The serializer proof is not sufficient by itself: a caller could pair a
+  // valid proof/seed with a different, structurally valid envelope. Reinspect
+  // the exact bytes in this Worker and bind the envelope header and state
+  // checksum to the same seed that will become the catalog record.
+  if (!verifyNewEnvelope(raw, request)) {
+    return failure("invalid", "authoritative payload envelope header/state 与 catalog seed 不一致");
   }
   const decodeMs = Math.max(0, performance.now() - decodeStarted);
   const db = await openDatabase();

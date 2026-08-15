@@ -5,6 +5,7 @@ import type {
   AuthoritativeSavePayloadProof,
 } from "./authoritativeSavePersistenceProtocol";
 import type {
+  AuthoritativeSaveExpectedStateIdentity,
   AuthoritativeSaveSerializationRequest,
   AuthoritativeSaveSerializationResponse,
   AuthoritativeSaveSerializationSummary,
@@ -48,6 +49,7 @@ export function serializeAuthoritativeSaveStateTransferInWorker(
     signal?: AbortSignal;
     onProgress?: (progress: AuthoritativeSaveSerializationProgress) => void;
     timeoutMs?: number;
+    expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } = {},
 ): Promise<AuthoritativeSerializedSavePayload> {
   const savedAt = options.savedAt ?? Date.now();
@@ -131,6 +133,7 @@ export function serializeAuthoritativeSaveStateTransferInWorker(
       contentPackRegistry: loadContentPackRegistry(),
       includePayloadSha256: true,
       includeAuthoritativeProof: true,
+      ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
     };
     try {
       worker.postMessage(request, [stateTransfer.buffer]);

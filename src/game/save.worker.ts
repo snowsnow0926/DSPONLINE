@@ -46,6 +46,17 @@ self.onmessage = async (event: MessageEvent<AuthoritativeSaveSerializationReques
       : request.state!;
     const persistent = projectPersistentSaveState(state, request.contentPackRegistry);
     const mode = persistent.mode === "speedrun" ? "speedrun" : "normal";
+    const expected = request.expectedStateIdentity;
+    if (expected && (
+      expected.mode !== mode ||
+      expected.version !== persistent.version ||
+      expected.activePlanetId !== persistent.activePlanetId ||
+      expected.entityCount !== persistent.entities.length ||
+      expected.beltCount !== persistent.belts.length ||
+      expected.elapsedSeconds !== persistent.elapsedSeconds
+    )) {
+      throw new Error("save Worker state transfer 与请求保存状态身份不一致");
+    }
     const serialized = serializeSaveEnvelopeToTransfer(persistent, {
       formatVersion: request.formatVersion,
       kind: request.kind,

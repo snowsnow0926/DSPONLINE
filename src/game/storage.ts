@@ -58,8 +58,19 @@ import {
   removeLocalSaveValue,
   setLocalSaveValue,
   writePrimarySaveEmergencyMirror,
+  clearPrimarySaveEmergencyMirrorProof,
+  getLocalSaveWriterStatus,
+  getPrimaryLocalSaveRevision,
+  initializeLocalSaveStore,
+  setLocalSavePayloadWithProof,
   type LocalSaveStorageEstimate,
 } from "./localSaveStore";
+import {
+  serializeAuthoritativeSaveStateTransferInWorker,
+  type AuthoritativeSaveSerializationProgress,
+} from "./authoritativeSaveSerializationClient";
+import type { AuthoritativeSavePersistenceProgress } from "./authoritativeSavePersistenceProtocol";
+import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
 import { LocalSaveConflictError, LocalSaveReadOnlyError } from "./localSaveCoordination";
 import type { ActivityMaterialId, BeltConnection, BeltRouteMode, BeltTier, BlueprintDefinition, BlueprintMirror, BlueprintRotation, BuildingId, CanvasRegion, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DysonEngineeringState, DysonLayerState, DysonLaunchMode, DysonLaunchThrottle, DysonSpherePlanState, DysonSwarmOrbitState, EnergyMode, EndgameState, FactoryEntity, GalacticDispatchThrottle, GalacticExportProjectId, GameState, InfiniteResearchId, InterstellarRoutePolicy, ItemId, LogisticsPriority, MaterialDeliverySlot, PlanetId, PortableFleetItemId, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, SaveMode, SorterTier, StarSystemId, StationLogisticsMode, StationMinimumLoad, StationRoute, StationSlot, TechId, SystemSpaceStationState, GalacticHubNetworkState } from "./types";
 import type { OfflineApproximationReport } from "./offlineApproximation";
@@ -2999,6 +3010,104 @@ function inspectEnvelopeForBackup(raw: string): ExactEnvelopeProof | null {
   return inspection.valid ? { raw, checksumValid: inspection.checksum === "valid" } : null;
 }
 
+function authoritativePersistenceFailure(
+  result: { ok: false; reason: string; message: string },
+  bytes?: number,
+  removedAutomaticSnapshots = 0,
+): SaveGameResult {
+  const code: SaveGameFailureCode = result.reason === "quota"
+    ? "quota"
+    : result.reason === "lease-lost"
+      ? "read-only"
+      : result.reason === "cas-mismatch"
+        ? "conflict"
+        : result.reason === "invalid" || result.reason === "readback-failed"
+          ? "verification"
+          : "unavailable";
+  return failedSave(code, result.message, bytes, removedAutomaticSnapshots);
+}
+
+/**
+ * Authoritative primary-save path for callers that already own a transferable
+ * simulation state buffer. No UI-thread payload decode, JSON.parse, FNV,
+ * TextEncoder, or raw string cache is used; the save/persistence Workers own
+ * those operations and return only small proofs plus restored buffers.
+ */
+export async function saveGameVerifiedFromStateTransfer(
+  state: GameState,
+  stateTransfer: SimulationStateTransfer,
+  options: { onProgress?: (progress: AuthoritativeSaveSerializationProgress | { stage: string; bytes?: number }) => void } = {},
+): Promise<SaveGameResult> {
+  const totalStartedAt = monotonicNow();
+  const savedAt = Date.now();
+  const mode = saveModeForState(state);
+  const primaryKey = primarySaveKey(mode);
+  let removedAutomaticSnapshots = 0;
+  try {
+    await initializeLocalSaveStore();
+    const serialized = await serializeAuthoritativeSaveStateTransferInWorker(stateTransfer, {
+      savedAt,
+      expectedStateIdentity: {
+        mode: state.mode,
+        version: state.version,
+        activePlanetId: state.activePlanetId,
+        entityCount: state.entities.length,
+        beltCount: state.belts.length,
+        elapsedSeconds: state.elapsedSeconds,
+      },
+      onProgress: options.onProgress,
+    });
+    const writer = getLocalSaveWriterStatus();
+    if (writer.role !== "primary") return failedSave("read-only", writer.reason, serialized.proof.byteLength);
+    const expectedRevision = getPrimaryLocalSaveRevision(mode);
+    const commitInput = {
+      key: primaryKey,
+      bytes: serialized.bytes,
+      proof: serialized.proof,
+      seed: serialized.catalogSeed,
+      expectedRevision,
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+    };
+    options.onProgress?.({ stage: "writing-idb", bytes: serialized.proof.byteLength });
+    const persistenceProgress = (progress: AuthoritativeSavePersistenceProgress) => options.onProgress?.(progress);
+    let committed = await setLocalSavePayloadWithProof(commitInput, persistenceProgress);
+    if (!committed.result.ok && committed.result.reason === "quota") {
+      removedAutomaticSnapshots += removeAutomaticSnapshotsForQuotaRetry(mode);
+      // Snapshot removal uses the legacy coordinated queue. Do not send a
+      // second proof commit until that cleanup has become durable, otherwise a
+      // quota retry can race the deletion it relies on.
+      await flushLocalSaveWrites();
+      committed = await setLocalSavePayloadWithProof(commitInput, persistenceProgress);
+    }
+    if (!committed.result.ok) {
+      return authoritativePersistenceFailure(committed.result, serialized.proof.byteLength, removedAutomaticSnapshots);
+    }
+    clearPrimarySaveEmergencyMirrorProof(mode, committed.result.proof.savedAt, committed.result.proof.stateChecksum);
+    options.onProgress?.({ stage: "complete", bytes: serialized.proof.byteLength });
+    return {
+      success: true,
+      message: "主存档已保存",
+      savedAt: committed.result.proof.savedAt,
+      bytes: committed.result.proof.byteLength,
+      removedAutomaticSnapshots,
+      backupSaved: committed.result.proof.backupSaved,
+      timings: {
+        totalMs: Math.max(0, monotonicNow() - totalStartedAt),
+        serializeMs: serialized.durationMs,
+        snapshotScanMs: 0,
+        capacityMs: 0,
+        primaryWriteMs: committed.result.proof.idbWriteMs,
+        backupMs: committed.result.proof.backupVerifyMs,
+        automaticSnapshotMs: 0,
+      },
+    };
+  } catch (error) {
+    const coordination = localCoordinationFailure(error);
+    if (coordination) return coordination;
+    return failedSave("unavailable", error instanceof Error ? error.message : "authoritative 主存档写入失败", undefined, removedAutomaticSnapshots);
+  }
+}
+
 function matchesWorkerVerification(
   raw: string,
   summary: CloudSaveSummary | undefined,
@@ -3117,7 +3226,8 @@ async function recoverLocalSaveCache(): Promise<void> {
  * an exact read-back plus envelope checksum validation. Optional backups and
  * automatic snapshots are deliberately attempted after the primary commit.
  */
-async function saveGameVerifiedOnce(state: GameState): Promise<SaveGameResult> {
+async function saveGameVerifiedOnce(state: GameState, stateTransfer?: SimulationStateTransfer): Promise<SaveGameResult> {
+  if (stateTransfer) return saveGameVerifiedFromStateTransfer(state, stateTransfer);
   const totalStartedAt = monotonicNow();
   const serializeStartedAt = totalStartedAt;
   const savedAt = Date.now();
@@ -3246,6 +3356,7 @@ async function saveGameVerifiedOnce(state: GameState): Promise<SaveGameResult> {
 
 interface PendingPrimarySave {
   state: GameState;
+  stateTransfer?: SimulationStateTransfer;
   waiters: Array<(result: SaveGameResult) => void>;
 }
 
@@ -3264,7 +3375,7 @@ function ensurePrimarySaveProcessor(): void {
       pendingPrimarySaves.delete(mode);
       let result: SaveGameResult;
       try {
-        result = await saveGameVerifiedOnce(request.state);
+        result = await saveGameVerifiedOnce(request.state, request.stateTransfer);
       } catch {
         result = failedSave("unavailable", "本地主存档写入失败，请立即导出当前进度");
       }
@@ -3292,7 +3403,7 @@ function ensurePrimarySaveProcessor(): void {
  * result of the committed request. This prevents autosave, visibility and
  * native lifecycle events from creating a save backlog.
  */
-export function saveGameVerified(state: GameState): Promise<SaveGameResult> {
+export function saveGameVerified(state: GameState, stateTransfer?: SimulationStateTransfer): Promise<SaveGameResult> {
   return new Promise((resolve) => {
     const mode = saveModeForState(state);
     // Lifecycle hooks can request the same immutable state several times while
@@ -3304,9 +3415,11 @@ export function saveGameVerified(state: GameState): Promise<SaveGameResult> {
     const pending = pendingPrimarySaves.get(mode);
     if (pending) {
       pending.state = state;
+      if (stateTransfer) pending.stateTransfer = stateTransfer;
+      else delete pending.stateTransfer;
       pending.waiters.push(resolve);
     } else {
-      pendingPrimarySaves.set(mode, { state, waiters: [resolve] });
+      pendingPrimarySaves.set(mode, { state, ...(stateTransfer ? { stateTransfer } : {}), waiters: [resolve] });
     }
     ensurePrimarySaveProcessor();
   });

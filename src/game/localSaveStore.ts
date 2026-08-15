@@ -211,6 +211,10 @@ let database: IDBDatabase | null = null;
 let initialization: Promise<void> | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 let pendingWriteError: unknown = null;
+// Proof-bound Worker commits must share the same single-writer barrier as
+// legacy string writes; otherwise a queued legacy write can overtake the
+// proof/CAS revision head while the large payload is committing.
+let authoritativeSaveQueue: Promise<void> = Promise.resolve();
 let startupConflictId: string | null = null;
 let startupConflictCreatedAt = -1;
 const LOCAL_SAVE_WRITER_CONTINUATION_MAX_AGE_MS = 120_000;
@@ -1135,6 +1139,36 @@ function clearEmergencyMirror(mode: LocalSaveMode): void {
   }
 }
 
+/** Clear a verified emergency mirror using only its small metadata sidecar. */
+export function clearPrimarySaveEmergencyMirrorProof(
+  mode: LocalSaveMode,
+  savedAt: number,
+  stateChecksum: string,
+): void {
+  ensureSynchronousFallback();
+  if (backend !== "indexeddb" || preserveDevelopmentMirror()) return;
+  try {
+    const keys = localSaveEmergencyMirrorKeys(mode);
+    const metadata = parseLocalSaveEmergencyMirrorMetadata(window.localStorage.getItem(keys.metadata));
+    if (!metadata || metadata.mode !== mode || metadata.saveKey !== primaryKeyForMode(mode)) return;
+    // A checksum-identical mirror is safe regardless of which save generated
+    // it.  Otherwise only the same active writer/fence may retire an older
+    // mirror; this keeps a newer mirror from being removed by a stale tab,
+    // while still clearing the normal crash mirror after a later save whose
+    // envelope checksum necessarily changed.
+    const samePayloadProof = metadata.savedAt === savedAt && metadata.checksum === stateChecksum;
+    const sameWriterChain = metadata.writerId === writerId &&
+      metadata.fencingToken === writerStatus.fencingToken &&
+      Number.isFinite(metadata.savedAt) && metadata.savedAt <= savedAt;
+    if (samePayloadProof || sameWriterChain) {
+      window.localStorage.removeItem(keys.payload);
+      window.localStorage.removeItem(keys.metadata);
+    }
+  } catch {
+    // Metadata cleanup is best effort; it cannot affect the verified IDB save.
+  }
+}
+
 function scheduleLegacyCatalogIndex(): void {
   if (legacyCatalogIndexScheduled || legacyCatalogIndexQueue.length === 0 || backend !== "indexeddb" || !database) return;
   legacyCatalogIndexScheduled = true;
@@ -1789,10 +1823,32 @@ export function getLocalSaveRawCacheSize(): number {
 }
 
 function enqueue(operation: () => Promise<void>, key?: string): void {
-  writeQueue = writeQueue.catch(() => undefined).then(operation).catch((error) => {
+  // Capture the current proof queue at enqueue time. Reading a mutable queue
+  // later inside the callback can deadlock when a proof commit is waiting for
+  // the legacy queue that contains this operation.
+  const priorProof = authoritativeSaveQueue;
+  writeQueue = writeQueue.catch(() => undefined).then(async () => {
+    await priorProof;
+    await operation();
+  }).catch((error) => {
     pendingWriteError ??= error;
     if (key && isQuotaExceededError(error)) recordQuotaRecoveryPrompt(key);
   });
+}
+
+function enqueueAuthoritativeSave<T>(
+  priorLegacyWrites: Promise<void>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const priorProof = authoritativeSaveQueue;
+  const queued = priorProof.catch(() => undefined).then(async () => {
+    await priorLegacyWrites;
+    return operation();
+  });
+  // Keep the chain alive after a failed proof so a later user-initiated save
+  // can attempt a fresh fenced transaction.
+  authoritativeSaveQueue = queued.then(() => undefined, () => undefined);
+  return queued;
 }
 
 export function setLocalSaveValue(key: string, value: string): void {
@@ -1851,21 +1907,30 @@ export async function setLocalSavePayloadWithProof(
     throw new LocalSaveReadOnlyError(writerStatus.reason);
   }
   if (!isCatalogedSaveKey(input.key)) throw new Error(`Unsupported proof-bound save key: ${input.key}`);
-  const result = await commitAuthoritativeSavePayloadInPersistenceWorker(input, onProgress);
-  if (result.result.ok) {
-    revisionCache.set(input.key, result.result.proof.revision);
-    await reloadLocalSaveCache();
-    postCoordinationMessage({
-      schemaVersion: 1,
-      type: "saved",
-      writerId: input.fence.ownerId,
-      sentAt: Date.now(),
-      key: input.key,
-      revision: result.result.proof.revision,
-      fencingToken: input.fence.fencingToken,
-    });
-  }
-  return result;
+  // Capture this before publishing the proof queue entry. A later legacy
+  // write observes that entry and waits behind it; the proof only waits for
+  // legacy writes that existed at this exact call boundary.
+  const priorLegacyWrites = flushLocalSaveWrites();
+  return enqueueAuthoritativeSave(priorLegacyWrites, async () => {
+    const result = await commitAuthoritativeSavePayloadInPersistenceWorker(input, onProgress);
+    if (result.result.ok) {
+      revisionCache.set(input.key, result.result.proof.revision);
+      // Only small catalog/revision metadata is refreshed on the UI thread;
+      // a cache refresh failure cannot turn an already committed primary into
+      // a false save failure.
+      try { await reloadLocalSaveCache(); } catch { /* primary proof is durable */ }
+      postCoordinationMessage({
+        schemaVersion: 1,
+        type: "saved",
+        writerId: input.fence.ownerId,
+        sentAt: Date.now(),
+        key: input.key,
+        revision: result.result.proof.revision,
+        fencingToken: input.fence.fencingToken,
+      });
+    }
+    return result;
+  });
 }
 
 export function removeLocalSaveValue(key: string): void {

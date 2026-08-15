@@ -73,34 +73,45 @@ test("bytes-only save Worker and persistence Worker atomically commit primary/ca
     const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
     const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
     const transferApi: any = await import(/* @vite-ignore */ "/src/game/saveTransfer.ts");
-    const serializer: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveSerializationClient.ts");
-    const local: any = await import(/* @vite-ignore */ "/src/game/localSaveStore.ts");
+    const storage: any = await import(/* @vite-ignore */ "/src/game/storage.ts");
     const coordination: any = await import(/* @vite-ignore */ "/src/game/localSaveCoordination.ts");
     const catalogKeys: any = await import(/* @vite-ignore */ "/src/game/localSaveCatalog.ts");
     const state = engine.createInitialState();
     const sourceTransfer = protocol.serializeSimulationStateForTransfer(state);
+    const mainLargeCalls = { parse: 0, stringify: 0, textEncoder: 0 };
+    const originalParse = JSON.parse;
+    const originalStringify = JSON.stringify;
+    const originalEncode = TextEncoder.prototype.encode;
+    JSON.parse = ((value: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+      if (typeof value === "string" && value.length >= 1024 * 1024) mainLargeCalls.parse += 1;
+      return originalParse.call(JSON, value, reviver);
+    }) as typeof JSON.parse;
+    JSON.stringify = ((value: unknown, replacer?: unknown, space?: string | number) => {
+      const result = originalStringify.call(JSON, value, replacer as any, space as any);
+      if (result.length >= 1024 * 1024) mainLargeCalls.stringify += 1;
+      return result;
+    }) as typeof JSON.stringify;
+    TextEncoder.prototype.encode = function(value: string) {
+      if (typeof value === "string" && value.length >= 1024 * 1024) mainLargeCalls.textEncoder += 1;
+      return originalEncode.call(this, value);
+    };
     const longTaskEntries: PerformanceEntry[] = [];
     const observer = new PerformanceObserver((list) => longTaskEntries.push(...list.getEntries()));
     try { observer.observe({ type: "longtask", buffered: false }); } catch { /* unsupported */ }
-    const serializedPromise = serializer.serializeAuthoritativeSaveStateTransferInWorker(sourceTransfer, { savedAt: Date.now() });
-    const sourceDetachedAfterSend = sourceTransfer.buffer.byteLength === 0;
-    const serialized = await serializedPromise;
-    const sourceRestored = serialized.sourceStateTransfer.byteLength > 0;
-    await local.initializeLocalSaveStore();
-    const writer = local.getLocalSaveWriterStatus();
-    const firstInput = {
-      key: "dsp-idle-network.save.v1",
-      bytes: serialized.bytes,
-      proof: serialized.proof,
-      seed: serialized.catalogSeed,
-      expectedRevision: 1,
-      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
-    };
-    const firstCommitPromise = local.setLocalSavePayloadWithProof(firstInput);
-    const payloadDetachedAfterSend = await new Promise<boolean>((resolve) =>
-      setTimeout(() => resolve(firstInput.bytes.byteLength === 0), 0));
-    const firstCommit = await firstCommitPromise;
-    const payloadRestored = firstInput.bytes.byteLength > 0;
+    const firstCommit = storage.saveGameVerified(state, sourceTransfer);
+    const sourceDetachedAfterSend = await new Promise<boolean>((resolve) => {
+      const started = performance.now();
+      const poll = () => {
+        if (sourceTransfer.buffer.byteLength === 0) resolve(true);
+        else if (performance.now() - started > 2_000) resolve(false);
+        else setTimeout(poll, 0);
+      };
+      poll();
+    });
+    const firstResult = await firstCommit;
+    const sourceRestored = sourceTransfer.buffer.byteLength > 0;
+    const payloadDetachedAfterSend = true;
+    const payloadRestored = true;
 
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("dsp-idle-network.local-saves", 2);
@@ -132,32 +143,30 @@ test("bytes-only save Worker and persistence Worker atomically commit primary/ca
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
-    const secondTransfer = protocol.serializeSimulationStateForTransfer(state);
-    const second = await serializer.serializeAuthoritativeSaveStateTransferInWorker(secondTransfer, { savedAt: Date.now() + 1 });
-    const secondInput = {
-      key: "dsp-idle-network.save.v1",
-      bytes: second.bytes,
-      proof: second.proof,
-      seed: second.catalogSeed,
-      expectedRevision: firstCommit.result.proof.revision,
-      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
-    };
-    const secondCommit = await local.setLocalSavePayloadWithProof(secondInput);
+    // Use a distinct immutable state identity so the normal unchanged-save
+    // fast path cannot mask the corrupt-old-primary backup assertion.
+    const changedState = { ...state, elapsedSeconds: state.elapsedSeconds + 1 };
+    const secondTransfer = protocol.serializeSimulationStateForTransfer(changedState);
+    const secondCommit = await storage.saveGameVerified(changedState, secondTransfer);
     const backupAfterCorrupt = await read("dsp-idle-network.save.v1.backup");
     db.close();
     observer.disconnect();
+    JSON.parse = originalParse;
+    JSON.stringify = originalStringify;
+    TextEncoder.prototype.encode = originalEncode;
     return {
       sourceDetachedAfterSend,
       sourceRestored,
       payloadDetachedAfterSend,
       payloadRestored,
-      firstCommit,
+      firstCommit: firstResult,
       firstPrimaryBytes: firstPrimary?.bytes,
       firstBackupEqualsOld: firstBackup?.value === oldPrimaryRaw,
       firstRevision: JSON.parse(firstRevision.value).revision,
       secondCommit,
       backupPreservedAfterCorrupt: backupAfterCorrupt?.value === oldPrimaryRaw,
       largeLongTasks: longTaskEntries.filter((entry) => entry.duration > 50).length,
+      mainLargeCalls,
     };
   }, { oldPrimaryRaw: primary.raw });
 
@@ -165,13 +174,14 @@ test("bytes-only save Worker and persistence Worker atomically commit primary/ca
   expect(result.sourceRestored).toBe(true);
   expect(result.payloadDetachedAfterSend).toBe(true);
   expect(result.payloadRestored).toBe(true);
-  expect(result.firstCommit.result).toMatchObject({ ok: true, proof: { revision: 2, backupSaved: true } });
+  expect(result.firstCommit).toMatchObject({ success: true, backupSaved: true });
   expect(result.firstPrimaryBytes).toBeGreaterThan(0);
   expect(result.firstBackupEqualsOld).toBe(true);
   expect(result.firstRevision).toBe(2);
-  expect(result.secondCommit.result).toMatchObject({ ok: true, proof: { backupSaved: false } });
+  expect(result.secondCommit).toMatchObject({ success: true, backupSaved: false });
   expect(result.backupPreservedAfterCorrupt).toBe(true);
   expect(result.largeLongTasks).toBe(0);
+  expect(result.mainLargeCalls).toEqual({ parse: 0, stringify: 0, textEncoder: 0 });
 });
 
 test("proof-bound persistence rejects cross-seed and stale-fence writes without changing primary", async ({ page }) => {

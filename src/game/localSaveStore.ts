@@ -45,6 +45,14 @@ import {
 } from "./localSaveCatalog";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 import type { SimulationRuntimeRecoveryBaseIdentity } from "./simulationRuntimeRecovery";
+import {
+  commitAuthoritativeSavePayloadInPersistenceWorker,
+  type AuthoritativeSavePayloadCommitInput,
+} from "./authoritativeSavePersistenceClient";
+import type {
+  AuthoritativeSavePersistenceCommitResult,
+} from "./authoritativeSavePersistenceClient";
+import type { AuthoritativeSavePersistenceProgress } from "./authoritativeSavePersistenceProtocol";
 
 const DATABASE_NAME = "dsp-idle-network.local-saves";
 const DATABASE_VERSION = 2;
@@ -1823,6 +1831,41 @@ export function setLocalSaveValue(key: string, value: string): void {
   const summary = classifySaveRecord(key, value);
   if (summary.category === "automatic-snapshot") enforceAutomaticSnapshotLimit(summary.mode);
   clearRecoveredQuotaPrompt(key);
+}
+
+/**
+ * Proof-bound bytes-only save path. The payload/catalog proof is produced by
+ * the save Worker and committed by the persistence Worker; this function only
+ * refreshes small catalog caches after the Worker has completed its exact
+ * primary/catalog/revision read-back. It deliberately never decodes or hashes
+ * the payload on the UI thread.
+ */
+export async function setLocalSavePayloadWithProof(
+  input: AuthoritativeSavePayloadCommitInput,
+  onProgress?: (progress: AuthoritativeSavePersistenceProgress) => void,
+): Promise<AuthoritativeSavePersistenceCommitResult> {
+  await initializeLocalSaveStore();
+  if (backend !== "indexeddb" || !database) throw new Error("proof-bound local save requires IndexedDB");
+  if (writerStatus.role !== "primary" || writerStatus.writerId !== input.fence.ownerId ||
+    writerStatus.fencingToken !== input.fence.fencingToken) {
+    throw new LocalSaveReadOnlyError(writerStatus.reason);
+  }
+  if (!isCatalogedSaveKey(input.key)) throw new Error(`Unsupported proof-bound save key: ${input.key}`);
+  const result = await commitAuthoritativeSavePayloadInPersistenceWorker(input, onProgress);
+  if (result.result.ok) {
+    revisionCache.set(input.key, result.result.proof.revision);
+    await reloadLocalSaveCache();
+    postCoordinationMessage({
+      schemaVersion: 1,
+      type: "saved",
+      writerId: input.fence.ownerId,
+      sentAt: Date.now(),
+      key: input.key,
+      revision: result.result.proof.revision,
+      fencingToken: input.fence.fencingToken,
+    });
+  }
+  return result;
 }
 
 export function removeLocalSaveValue(key: string): void {

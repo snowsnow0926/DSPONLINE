@@ -24,6 +24,8 @@ export interface AuthoritativeSavePayloadProof {
   payloadSha256: string;
   byteLength: number;
   stateChecksum: string;
+  /** SHA-256 binding the exact payload proof to the canonical catalog seed. */
+  bindingSha256: string;
 }
 
 export interface AuthoritativeSaveWriterFence {
@@ -54,6 +56,7 @@ export interface AuthoritativeSavePersistenceProof {
   backupSaved: boolean;
   workerDecodeMs: number;
   idbWriteMs: number;
+  backupVerifyMs: number;
   totalBytesWritten: number;
 }
 

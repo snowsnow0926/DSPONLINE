@@ -71,6 +71,7 @@ export class AuthoritativeSavePersistenceClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly workerFactory: () => Worker;
   private readonly timeoutMs: number;
+  private closed = false;
 
   constructor(options: AuthoritativeSavePersistenceClientOptions = {}) {
     this.workerFactory = options.workerFactory ?? (() => new Worker(
@@ -191,6 +192,13 @@ export class AuthoritativeSavePersistenceClient {
     input: AuthoritativeSavePayloadCommitInput,
     onProgress?: (progress: AuthoritativeSavePersistenceProgress) => void,
   ): Promise<AuthoritativeSavePersistenceCommitResult> {
+    if (this.closed) {
+      return Promise.reject(new AuthoritativeSavePersistenceClientError(
+        "terminated",
+        "page lifecycle 已关闭 authoritative save persistence queue",
+        false,
+      ));
+    }
     const body: RequestBody = {
       type: "commit",
       key: input.key,
@@ -225,15 +233,31 @@ export class AuthoritativeSavePersistenceClient {
       if (response.type !== "result") {
         throw new AuthoritativeSavePersistenceClientError("protocol", "authoritative save Worker 响应类型不匹配", input.bytes.byteLength === 0);
       }
+      if (!response.sourcePayloadTransfer) {
+        throw new AuthoritativeSavePersistenceClientError(
+          "protocol",
+          "authoritative save Worker 未返还 payload buffer ownership",
+          true,
+        );
+      }
       return {
         result: response.result,
-        ...(response.sourcePayloadTransfer ? { sourcePayloadTransfer: response.sourcePayloadTransfer } : {}),
+        sourcePayloadTransfer: response.sourcePayloadTransfer,
       };
     });
   }
 
   terminate(): void {
+    this.closed = true;
     this.failAll("terminated", "authoritative save persistence Worker 已终止");
+  }
+
+  /** BFCache pageshow starts a fresh Worker generation after pagehide closed the old one. */
+  resumeAfterPageshow(): void {
+    if (this.pending.size > 0 || this.inflightId !== null) {
+      throw new AuthoritativeSavePersistenceClientError("protocol", "仍有未清理的 authoritative save 请求", false);
+    }
+    this.closed = false;
   }
 }
 
@@ -248,4 +272,13 @@ export function commitAuthoritativeSavePayloadInPersistenceWorker(
 
 export function terminateAuthoritativeSavePersistenceWorker(): void {
   defaultClient.terminate();
+}
+
+/** Permanently stop accepting page-lifecycle writes; queued buffers stay owned by the caller. */
+export function closeAuthoritativeSavePersistenceForPagehide(): void {
+  defaultClient.terminate();
+}
+
+export function resumeAuthoritativeSavePersistenceAfterPageshow(): void {
+  defaultClient.resumeAfterPageshow();
 }

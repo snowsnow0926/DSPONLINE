@@ -27,6 +27,10 @@ const traceOutputPath = resolve(argumentsByName.get("trace-output") ?? outputPat
 const disableWorker = argumentsByName.get("disable-worker") === "true";
 const manualCdp = argumentsByName.get("manual-cdp") !== "false";
 const traceEnabled = argumentsByName.get("trace") !== "false";
+const naturalAutosaveEnabled = argumentsByName.get("natural-autosave") !== "false";
+const trendDiagnosticsEnabled = argumentsByName.get("trend-diagnostics") !== "false";
+const trendForceGc = argumentsByName.get("trend-force-gc") === "true";
+const trendPaused = argumentsByName.get("trend-paused") === "true";
 
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -193,6 +197,10 @@ const writeProgressReport = async (status, error = null) => {
     intervalSeconds,
     warmupSeconds,
     commandRecords,
+    naturalAutosaveEnabled,
+    trendDiagnosticsEnabled,
+    trendForceGc,
+    trendPaused,
     pageCrash,
     error,
     startedAt: new Date(lifecycleStartedAt).toISOString(),
@@ -243,7 +251,7 @@ try {
   const page = context.pages()[0] ?? await context.newPage();
   page.on("crash", () => { pageCrash = { observedAt: new Date().toISOString(), elapsedSeconds: (Date.now() - lifecycleStartedAt) / 1_000 }; });
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.addInitScript(({ withoutWorker, expectedAutosaveIntervalMs }) => {
+  await page.addInitScript(({ withoutWorker, expectedAutosaveIntervalMs, allowNaturalAutosave }) => {
     window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
@@ -269,7 +277,7 @@ try {
           tracker.autosaveTriggerCount += 1;
           return handler(...handlerArgs);
         };
-        return nativeSetInterval(tracker.autosaveHandler, timeout, ...args);
+        return nativeSetInterval(allowNaturalAutosave ? tracker.autosaveHandler : () => undefined, timeout, ...args);
       }
       return nativeSetInterval(handler, timeout, ...args);
     });
@@ -311,7 +319,7 @@ try {
       },
     });
     Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: WrappedWorker });
-  }, { withoutWorker: disableWorker, expectedAutosaveIntervalMs: autosaveIntervalMs });
+  }, { withoutWorker: disableWorker, expectedAutosaveIntervalMs: autosaveIntervalMs, allowNaturalAutosave: naturalAutosaveEnabled });
 
   cdp = await context.newCDPSession(page);
   await cdp.send("Performance.enable");
@@ -546,10 +554,20 @@ try {
     };
   }
 
+  if (!trendDiagnosticsEnabled) {
+    await page.evaluate(() => { if (window.__DSP_RUNTIME_TRANSITIONS__) window.__DSP_RUNTIME_TRANSITIONS__.enabled = false; });
+  }
+  if (trendPaused) {
+    const pauseControl = page.getByLabel("暂停模拟");
+    if (await pauseControl.isVisible()) await pauseControl.dispatchEvent("click");
+    await page.locator('.game-shell[data-simulation-paused="true"]').waitFor({ state: "attached", timeout: 30_000 });
+    await sample("trend-paused-start");
+  }
+
   const trendStartedAt = Date.now();
   while ((Date.now() - trendStartedAt) / 1_000 < durationSeconds) {
     await delay(Math.min(intervalSeconds * 1_000, Math.max(0, durationSeconds * 1_000 - (Date.now() - trendStartedAt))));
-    await sample("trend");
+    await sample("trend", { forceGc: trendForceGc });
   }
   await sample("trend-end");
   const finalGc = await sample("trend-end-gc", { forceGc: true });
@@ -588,6 +606,10 @@ try {
     commandRecords,
     disableWorker,
     manualCdp,
+    naturalAutosaveEnabled,
+    trendDiagnosticsEnabled,
+    trendForceGc,
+    trendPaused,
     saveMode,
     pauseResume,
     commandResults,

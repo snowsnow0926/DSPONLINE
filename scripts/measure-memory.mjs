@@ -249,12 +249,28 @@ try {
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");
     window.localStorage.setItem("dsp-idle-network.canvas-performance-features.v1", JSON.stringify({ renderProjection: true, topologyCache: true, extremeVisuals: true, nodeLod: true, canvasBelts: true, viewportCulling: true, spatialIndexes: true, minimapThrottle: true }));
-    window.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {}, counters: {} };
-    const tracker = { commands: [], autosaveHandler: null };
+    const tracker = { commands: [], autosaveHandler: null, autosaveTriggerCount: 0, autosaveCompleteCount: 0, persistenceEventCount: 0 };
+    const diagnosticEvents = [];
+    const nativeEventPush = Array.prototype.push;
+    diagnosticEvents.push = (...events) => {
+      for (const event of events) {
+        if (event?.phase !== "persistence-phase") continue;
+        tracker.persistenceEventCount += 1;
+        if (event.detail?.kind === "autosave" && event.detail?.phase === "complete") tracker.autosaveCompleteCount += 1;
+      }
+      return nativeEventPush.apply(diagnosticEvents, events);
+    };
+    window.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: diagnosticEvents, active: {}, counters: {} };
     Object.defineProperty(window, "__runtimeWorldMemory", { configurable: true, value: tracker });
     const nativeSetInterval = window.setInterval.bind(window);
     window.setInterval = ((handler, timeout, ...args) => {
-      if (timeout === expectedAutosaveIntervalMs && typeof handler === "function" && !tracker.autosaveHandler) tracker.autosaveHandler = handler;
+      if (timeout === expectedAutosaveIntervalMs && typeof handler === "function" && !tracker.autosaveHandler) {
+        tracker.autosaveHandler = (...handlerArgs) => {
+          tracker.autosaveTriggerCount += 1;
+          return handler(...handlerArgs);
+        };
+        return nativeSetInterval(tracker.autosaveHandler, timeout, ...args);
+      }
       return nativeSetInterval(handler, timeout, ...args);
     });
     if (withoutWorker) {
@@ -332,18 +348,19 @@ try {
       cdpCommand("Performance.getMetrics"), cdpCommand("Runtime.getHeapUsage"), cdpCommand("Memory.getDOMCounters"),
       browserProcessMemory(profileDirectory),
       withTimeout(page.evaluate(() => {
-        const events = window.__DSP_RUNTIME_TRANSITIONS__?.events ?? [];
+        const tracker = window.__runtimeWorldMemory;
         return {
           entityCount: document.querySelectorAll(".react-flow__node").length,
           edgeCount: document.querySelectorAll(".react-flow__edge").length,
           workerActive: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
           paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
           rawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
-          autosaveCompleteCount: events.filter((event) => event.phase === "persistence-phase" && event.detail?.kind === "autosave" && event.detail?.phase === "complete").length,
-          persistenceEventCount: events.filter((event) => event.phase === "persistence-phase").length,
+          autosaveTriggerCount: tracker?.autosaveTriggerCount ?? -1,
+          autosaveCompleteCount: tracker?.autosaveCompleteCount ?? -1,
+          persistenceEventCount: tracker?.persistenceEventCount ?? -1,
           visibility: document.visibilityState,
         };
-      }), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, autosaveCompleteCount: -1, persistenceEventCount: -1, visibility: "unknown" })),
+      }), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, autosaveTriggerCount: -1, autosaveCompleteCount: -1, persistenceEventCount: -1, visibility: "unknown" })),
       targetHeapUsage(debuggingPort),
     ]);
     application.workerCount = page.workers().length;
@@ -369,7 +386,7 @@ try {
     };
     samples.push(entry);
     await writeProgressReport("running");
-    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveCompleteCount: entry.application.autosaveCompleteCount, processTotals: entry.processTotals })}\n`);
+    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, processTotals: entry.processTotals })}\n`);
     return entry;
   };
 

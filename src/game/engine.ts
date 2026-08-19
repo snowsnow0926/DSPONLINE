@@ -134,6 +134,7 @@ import {
   beginOrbitalCollectorQuantumModeChange,
   beginOrbitalCollectorQuantumModeChanges,
   depositIntoQuantumInventory,
+  depositIntoNormalizedQuantumInventory,
   createEmptyQuantumLogisticsNetworkState,
   beginQuantumAttachment,
   beginQuantumAttachments,
@@ -1270,8 +1271,10 @@ function getEntityProliferatorPowerMultiplierForStep(
   preparedRecipeSpeedMultiplier?: number,
 ): number {
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
-  if (!recipe || !entity.buildingId || !proliferatorApplies(entity, recipe)) return 1;
-  const sprayedCycles = availableFullProliferatorCycles(entity, recipe, runtime?.sprayCost);
+  if (!recipe || !entity.buildingId || (runtime ? !runtime.proliferatorItemId : !proliferatorApplies(entity, recipe))) return 1;
+  const sprayedCycles = runtime
+    ? availableFullProliferatorCyclesForRuntime(entity, runtime)
+    : availableFullProliferatorCycles(entity, recipe);
   if (sprayedCycles < 1) return 1;
   const baseCyclesPerSecond = runtime
     ? runtime.baseSpeedProduct * (preparedRecipeSpeedMultiplier ?? getRecipeSpeedMultiplier(state, recipe.id)) * runtime.planetSpeed / runtime.recipeDuration
@@ -1282,11 +1285,13 @@ function getEntityProliferatorPowerMultiplierForStep(
         return building.speed * entity.machineCount * getRecipeSpeedMultiplier(state, recipe.id) * planetSpeed / recipe.duration;
       })();
   if (baseCyclesPerSecond <= EPSILON || seconds <= EPSILON) return 1;
-  const speedMultiplier = entity.proliferatorMode === "speed" ? getEntityProliferatorSpeedMultiplierForRecipe(entity, recipe) : 1;
+  const speedMultiplier = runtime?.proliferatorSpeedMultiplier ??
+    (entity.proliferatorMode === "speed" ? getEntityProliferatorSpeedMultiplierForRecipe(entity, recipe) : 1);
   const acceleratedWork = Math.max(0, sprayedCycles - (entity.progress ?? 0));
   const sprayedSeconds = acceleratedWork / Math.max(EPSILON, baseCyclesPerSecond * speedMultiplier);
   const sprayedFraction = Math.min(1, sprayedSeconds / seconds);
-  return 1 + (getEntityProliferatorPowerMultiplierForRecipe(entity, recipe) - 1) * sprayedFraction;
+  const powerMultiplier = runtime?.proliferatorPowerMultiplier ?? getEntityProliferatorPowerMultiplierForRecipe(entity, recipe);
+  return 1 + (powerMultiplier - 1) * sprayedFraction;
 }
 
 export function getEntityExtraProductBonus(entity: FactoryEntity): number {
@@ -1318,6 +1323,13 @@ function availableProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefini
 function availableFullProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefinition, sprayCost = getProliferatorSprayCost(recipe)): number {
   if (!proliferatorApplies(entity, recipe)) return 0;
   return Math.max(0, Math.floor(availableProliferatorCycles(entity, recipe, sprayCost) + EPSILON));
+}
+
+function availableFullProliferatorCyclesForRuntime(entity: FactoryEntity, runtime: IndexedMachineRuntime): number {
+  if (!runtime.proliferatorItemId || runtime.proliferatorSprayPoints < 1) return 0;
+  const points = Math.max(0, entity.proliferatorPoints ?? 0) +
+    Math.floor((entity.inputs[runtime.proliferatorItemId] ?? 0) + EPSILON) * runtime.proliferatorSprayPoints;
+  return Math.max(0, Math.floor(points / runtime.sprayCost + EPSILON));
 }
 
 function availableInputCyclesForRecipe(state: GameState, entity: FactoryEntity, recipe: RecipeDefinition): number {
@@ -1359,13 +1371,15 @@ function availableOutputCycles(
   credits?: OutputCapacityCredits,
   runtime?: IndexedMachineRuntime,
   maximumCycles = Number.POSITIVE_INFINITY,
-  preparedProliferator?: { extraProductBonus: number; sprayedCycleLimit: number },
+  preparedExtraProductBonus?: number,
+  preparedSprayedCycleLimit?: number,
+  fastExactAllocation = false,
 ): number {
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
   if (!recipe || !entity.buildingId) return 0;
   const capacity = runtime?.outputCapacity ?? getEntityOutputCapacity(state, entity);
-  const extraProductBonus = preparedProliferator?.extraProductBonus ?? getEntityExtraProductBonusForRecipe(entity, recipe);
-  const sprayedCycleLimit = preparedProliferator?.sprayedCycleLimit ??
+  const extraProductBonus = preparedExtraProductBonus ?? getEntityExtraProductBonusForRecipe(entity, recipe);
+  const sprayedCycleLimit = preparedSprayedCycleLimit ??
     availableFullProliferatorCycles(entity, recipe, runtime?.sprayCost);
   let available = Number.POSITIVE_INFINITY;
   for (let outputIndex = 0; outputIndex < recipe.outputs.length; outputIndex += 1) {
@@ -1394,30 +1408,70 @@ function availableOutputCycles(
       }
       high = Math.min(high, sprayedCycleLimit);
     }
-    while (low < high) {
-      const candidate = Math.ceil((low + high) / 2);
-      const sprayedCycles = Math.min(candidate, sprayedCycleLimit);
-      const bonus = Math.floor(bonusProgress + output.amount * sprayedCycles * extraProductBonus + EPSILON);
-      if (output.amount * candidate + bonus <= free) low = candidate;
-      else high = candidate - 1;
+    if (fastExactAllocation) {
+      const combinedCost = output.amount * (1 + extraProductBonus);
+      let candidate = Math.min(high, Math.max(0, Math.floor((free - bonusProgress) / combinedCost)));
+      while (candidate < high) {
+        const next = candidate + 1;
+        const nextBonus = Math.floor(
+          bonusProgress + output.amount * Math.min(next, sprayedCycleLimit) * extraProductBonus + EPSILON,
+        );
+        if (output.amount * next + nextBonus > free) break;
+        candidate = next;
+      }
+      while (candidate > 0) {
+        const candidateBonus = Math.floor(
+          bonusProgress + output.amount * Math.min(candidate, sprayedCycleLimit) * extraProductBonus + EPSILON,
+        );
+        if (output.amount * candidate + candidateBonus <= free) break;
+        candidate -= 1;
+      }
+      low = candidate;
+    } else {
+      while (low < high) {
+        const candidate = Math.ceil((low + high) / 2);
+        const sprayedCycles = Math.min(candidate, sprayedCycleLimit);
+        const bonus = Math.floor(bonusProgress + output.amount * sprayedCycles * extraProductBonus + EPSILON);
+        if (output.amount * candidate + bonus <= free) low = candidate;
+        else high = candidate - 1;
+      }
     }
     available = Math.min(available, low);
   }
   return available;
 }
 
-function canMachineRun(state: GameState, entity: FactoryEntity, runtime?: IndexedMachineRuntime): boolean {
+function canMachineRun(
+  state: GameState,
+  entity: FactoryEntity,
+  runtime?: IndexedMachineRuntime,
+  usePreparedRuntimeCapacity = false,
+): boolean {
   if (entity.recipeId === "matrix_research" && !hasActiveResearch(state)) return false;
   if (entity.recipeId === "solar_sail_launch" && !getEjectorOrbitTargetStatus(state, entity).valid) return false;
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
   if (recipe?.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) return false;
-  if (proliferatorApplies(entity, recipe)) {
+  if (runtime?.proliferatorRequiredTechId) {
+    if (!isTechnologyCompleted(state, runtime.proliferatorRequiredTechId)) return false;
+  } else if (!runtime && proliferatorApplies(entity, recipe)) {
     const definition = getProliferator(entity.proliferatorTier!);
     if (!isTechnologyCompleted(state, definition.requiredTechId)) return false;
   }
+  const preparedInputCycles = usePreparedRuntimeCapacity ? runtime?.inputCyclesForStep : undefined;
+  const preparedSprayedCycleLimit = usePreparedRuntimeCapacity ? runtime?.sprayedCycleLimitForStep : undefined;
+  const preparedExtraProductBonus = usePreparedRuntimeCapacity ? runtime?.extraProductBonusForStep : undefined;
   return entity.kind === "machine" && Boolean(recipe) &&
-    Math.floor(recipe ? availableInputCyclesForRecipe(state, entity, recipe) + EPSILON : 0) >= 1 &&
-    Math.floor(availableOutputCycles(state, entity, undefined, runtime, 1) + EPSILON) >= 1;
+    Math.floor((preparedInputCycles ?? (recipe ? availableInputCyclesForRecipe(state, entity, recipe) : 0)) + EPSILON) >= 1 &&
+    Math.floor(availableOutputCycles(
+      state,
+      entity,
+      undefined,
+      runtime,
+      1,
+      preparedExtraProductBonus,
+      preparedSprayedCycleLimit,
+      usePreparedRuntimeCapacity,
+    ) + EPSILON) >= 1;
 }
 
 function extractorFor(entity: FactoryEntity) {
@@ -1724,6 +1778,7 @@ function receiveQuantumSupplyMaterial(
   station: FactoryEntity,
   itemId: ItemId,
   amount: number,
+  normalizedRuntime = false,
 ): number {
   const slot = quantumSupplySlot(station, itemId);
   if (!slot || amount < 1 || !state.quantumLogisticsNetwork?.enabled) return 0;
@@ -1737,7 +1792,9 @@ function receiveQuantumSupplyMaterial(
   if (kept > 0) station.inputs[itemId] = currentInput + kept;
   let remaining = requested - kept;
   if (remaining > 0) {
-    const deposited = depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining);
+    const deposited = normalizedRuntime
+      ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining)
+      : depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining);
     state.quantumLogisticsNetwork = deposited.state;
     const accepted = Number(deposited.accepted);
     if (accepted > 0) recordImmediateQuantumUpload(state, itemId, accepted);
@@ -1758,7 +1815,9 @@ function flushQuantumSupplyBuffer(state: GameState, station: FactoryEntity, item
   const uploadable = Math.max(0, output - reserve - reservedOutgoing) +
     Math.max(0, input - Math.max(0, reserve - output));
   if (uploadable < 1) return 0;
-  const deposited = depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable);
+  const deposited = lookup
+    ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable)
+    : depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable);
   state.quantumLogisticsNetwork = deposited.state;
   const accepted = Number(deposited.accepted);
   if (accepted < 1) return 0;
@@ -1891,6 +1950,7 @@ interface IndexedBeltRoute {
   runtimeIndex?: number;
   source?: FactoryEntity;
   target?: FactoryEntity;
+  targetMachineRuntimeIndex?: number;
   capacity: number;
   compatible: boolean;
   targetCapacityIndex?: number;
@@ -1912,6 +1972,7 @@ interface IndexedBeltRouteGroup {
   key: string;
   planetId: PlanetId;
   source?: FactoryEntity;
+  sourceMachineRuntimeIndex?: number;
   itemId: ItemId;
   routes: IndexedBeltRoute[];
   stableRoutes: IndexedBeltRoute[];
@@ -2039,6 +2100,7 @@ class DenseBeltOutputCapacityCredits implements ReadonlyMap<string, number> {
 }
 
 export type BeltRuntimeImplementation = "compiled" | "legacy";
+export type PowerRuntimeImplementation = "compiled" | "legacy";
 
 interface StationDispatchSlotResult {
   hasMatchingPeer: boolean;
@@ -2052,6 +2114,7 @@ interface IndexedStationDispatchPlan {
 }
 
 interface IndexedMachineRuntime {
+  runtimeIndex: number;
   entity: FactoryEntity;
   recipe: RecipeDefinition;
   baseSpeedProduct: number;
@@ -2062,9 +2125,41 @@ interface IndexedMachineRuntime {
   outputCreditGroupIndices: number[];
   powerDemandProduct: number;
   sprayCost: number;
+  proliferatorItemId?: ItemId;
+  proliferatorSprayPoints: number;
+  proliferatorSpeedMultiplier: number;
+  proliferatorPowerMultiplier: number;
+  proliferatorExtraProductBonus: number;
+  proliferatorRequiredTechId?: TechId;
   baseUnitsPerCycle: number;
   launchEnergyPerCycle: number;
   matrixResearch: boolean;
+  /** Per-step power result, kept beside the compiled machine hot fields. */
+  assignedPowerFactor?: number;
+  /** Exact normal-machine dependency snapshot prepared before production. */
+  inputCyclesForStep?: number;
+  sprayedCycleLimitForStep?: number;
+  extraProductBonusForStep?: number;
+}
+
+const MACHINE_SLEEP_NONE = 0;
+const MACHINE_SLEEP_INPUT = 1;
+const MACHINE_SLEEP_OUTPUT = 2;
+const MACHINE_WAKE_INPUT = 1;
+const MACHINE_WAKE_OUTPUT = 2;
+const MACHINE_WAKE_COMMAND = 4;
+
+interface SimulationMachineRuntimeIndex {
+  frontierEnabled: boolean;
+  initiallyDormantCount: number;
+  /** 1 means evaluate; 0 is a proven dependency-blocked sleeper. */
+  active: Uint8Array;
+  sleepReason: Uint8Array;
+  wakeFlags: Uint8Array;
+  nextEventSeconds: Float64Array;
+  progress: Float64Array;
+  powerFactor: Float64Array;
+  powerFactorPresent: Uint8Array;
 }
 
 interface IndexedLogisticsBufferRuntime {
@@ -2097,6 +2192,7 @@ export interface SimulationLookupContext {
   rayReceivers: FactoryEntity[];
   machineRuntimesByPlanet: Map<PlanetId, IndexedMachineRuntime[]>;
   machineRuntimeById: Map<string, IndexedMachineRuntime>;
+  machineRuntime: SimulationMachineRuntimeIndex;
   veinsByPlanet: Map<PlanetId, FactoryEntity[]>;
   stations: FactoryEntity[];
   orbitalCollectors: FactoryEntity[];
@@ -2139,6 +2235,8 @@ export interface SimulationLookupContext {
   routeEnvironmentKey: string;
   /** Runtime-only dirty bit for the active-route ledger. */
   dynamicRouteLookupDirty: boolean;
+  /** M3 power-domain oracle/fallback selector. */
+  powerImplementation: PowerRuntimeImplementation;
   /** Worker/session-owned recursive plans. Never serialised into GameState. */
   constructionAutomationPlanCache: Map<string, CachedConstructionAutomationPlan>;
 }
@@ -2229,6 +2327,7 @@ export function createSimulationLookupContext(
   profiler?: SimulationProfiler,
   constructionAutomationPlanCache = new Map<string, CachedConstructionAutomationPlan>(),
   beltImplementation: BeltRuntimeImplementation = "compiled",
+  powerImplementation: PowerRuntimeImplementation = "compiled",
 ): SimulationLookupContext {
   const startedAt = profileNow();
   const context: SimulationLookupContext = {
@@ -2239,6 +2338,17 @@ export function createSimulationLookupContext(
     rayReceivers: [],
     machineRuntimesByPlanet: new Map(),
     machineRuntimeById: new Map(),
+    machineRuntime: {
+      frontierEnabled: false,
+      initiallyDormantCount: 0,
+      active: new Uint8Array(state.entities.length),
+      sleepReason: new Uint8Array(state.entities.length),
+      wakeFlags: new Uint8Array(state.entities.length),
+      nextEventSeconds: new Float64Array(state.entities.length),
+      progress: new Float64Array(state.entities.length),
+      powerFactor: new Float64Array(state.entities.length),
+      powerFactorPresent: new Uint8Array(state.entities.length),
+    },
     veinsByPlanet: new Map(),
     stations: [],
     orbitalCollectors: [],
@@ -2314,6 +2424,7 @@ export function createSimulationLookupContext(
     interstellarPaths: new Map(),
     routeEnvironmentKey: routeEnvironmentKey(state),
     dynamicRouteLookupDirty: true,
+    powerImplementation,
     constructionAutomationPlanCache,
   };
   const addTo = <T>(map: Map<string, T[]>, key: string, value: T) => {
@@ -2339,7 +2450,10 @@ export function createSimulationLookupContext(
           const building = getBuilding(entity.buildingId);
           const profile = getPlanetIndustrialProfile(state, entity.planetId);
           const planetSpeed = specializationApplies(profile, building.family, entity.buildingId) ? profile.productionSpeedMultiplier : 1;
+          const proliferator = proliferatorApplies(entity, recipe) ? getProliferator(entity.proliferatorTier!) : undefined;
+          const runtimeIndex = context.machineRuntimeById.size;
           const runtime = {
+            runtimeIndex,
             entity,
             recipe,
             baseSpeedProduct: building.speed * entity.machineCount,
@@ -2350,12 +2464,25 @@ export function createSimulationLookupContext(
             outputCreditGroupIndices: [],
             powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
             sprayCost: getProliferatorSprayCost(recipe),
+            proliferatorItemId: proliferator?.itemId,
+            proliferatorSprayPoints: proliferator?.sprayPoints ?? 0,
+            proliferatorSpeedMultiplier: entity.proliferatorMode === "speed" ? 1 + (proliferator?.speedBonus ?? 0) : 1,
+            proliferatorPowerMultiplier: proliferator?.powerMultiplier ?? 1,
+            proliferatorExtraProductBonus: entity.proliferatorMode === "extra" ? proliferator?.extraProductBonus ?? 0 : 0,
+            proliferatorRequiredTechId: proliferator?.requiredTechId,
             baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
               ? 1
               : recipe.outputs.reduce((sum, output) => sum + output.amount, 0),
             launchEnergyPerCycle: dysonLaunchEnergyPerCycle(recipe.id),
             matrixResearch: recipe.id === "matrix_research",
           } satisfies IndexedMachineRuntime;
+          context.machineRuntime.active[runtimeIndex] = 1;
+          context.machineRuntime.nextEventSeconds[runtimeIndex] = 0;
+          context.machineRuntime.progress[runtimeIndex] = Math.max(0, entity.progress ?? 0);
+          if (typeof entity.powerFactor === "number" && Number.isFinite(entity.powerFactor)) {
+            context.machineRuntime.powerFactor[runtimeIndex] = entity.powerFactor;
+            context.machineRuntime.powerFactorPresent[runtimeIndex] = 1;
+          }
           context.machineRuntimeById.set(entity.id, runtime);
           const runtimes = context.machineRuntimesByPlanet.get(entity.planetId);
           if (runtimes) runtimes.push(runtime);
@@ -2382,6 +2509,18 @@ export function createSimulationLookupContext(
       addTo(context.powerSourcesByPlanetGrid, `${entity.planetId}|${getEntityPowerGridId(entity)}`, entity);
     }
   }
+  for (const runtime of context.machineRuntimeById.values()) {
+    if (runtime.matrixResearch) continue;
+    const inputBlocked = Math.floor(availableInputCyclesForRecipe(state, runtime.entity, runtime.recipe) + EPSILON) < 1;
+    const outputBlocked = !inputBlocked &&
+      Math.floor(availableOutputCycles(state, runtime.entity, undefined, runtime, 1) + EPSILON) < 1;
+    if (inputBlocked || outputBlocked) context.machineRuntime.initiallyDormantCount += 1;
+  }
+  // Dependency wake bookkeeping pays for itself only on genuinely sparse or
+  // blocked shapes. Dense real saves keep the compiled scalar/cache path but
+  // do not add an active-frontier branch to every machine and belt transfer.
+  context.machineRuntime.frontierEnabled = context.machineRuntimeById.size > 0 &&
+    context.machineRuntime.initiallyDormantCount * 5 >= context.machineRuntimeById.size * 2;
   for (const belt of context.sortedBelts) {
     const planetBelts = context.beltsByPlanet.get(belt.planetId);
     if (planetBelts) planetBelts.push(belt);
@@ -2421,6 +2560,7 @@ export function createSimulationLookupContext(
       runtimeIndex,
       source,
       target,
+      targetMachineRuntimeIndex: target ? context.machineRuntimeById.get(target.id)?.runtimeIndex : undefined,
       capacity: getBeltCapacity(belt),
       compatible,
       targetInputCapacity: target ? staticBeltTargetInputCapacity(state, target, belt.itemId) : undefined,
@@ -2468,6 +2608,7 @@ export function createSimulationLookupContext(
         key,
         planetId: route.belt.planetId,
         source: route.source,
+        sourceMachineRuntimeIndex: route.source ? context.machineRuntimeById.get(route.source.id)?.runtimeIndex : undefined,
         itemId: route.belt.itemId,
         routes: [],
         stableRoutes: [],
@@ -3973,24 +4114,54 @@ export function isEntityInPowerCoverage(state: GameState, entity: FactoryEntity,
 interface PowerConsumer {
   entity: FactoryEntity;
   demandKw: number;
+  machineRuntime?: IndexedMachineRuntime;
+  machineRuntimeIndex?: SimulationMachineRuntimeIndex;
 }
 
-function allocateConsumerPower(consumers: PowerConsumer[], availableKw: number): Map<string, number> {
-  const factors = new Map<string, number>();
+interface PowerEntityMaps {
+  powerOutputByEntity: Map<string, number>;
+  powerInputByEntity: Map<string, number>;
+  factorByEntity: Map<string, number>;
+}
+
+function allocateConsumerPower(
+  consumers: PowerConsumer[],
+  availableKw: number,
+  factors = new Map<string, number>(),
+): Map<string, number> {
   let remaining = Math.max(0, availableKw);
   const groups: [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]] = [[], [], [], []];
   for (const consumer of consumers) groups[consumer.entity.powerPriority ?? 2].push(consumer);
-  for (const priority of [3, 2, 1] as PowerPriority[]) {
+  for (let priority: PowerPriority = 3; priority >= 1; priority = (priority - 1) as PowerPriority) {
     const group = groups[priority];
     const demand = group.reduce((sum, consumer) => sum + consumer.demandKw, 0);
     const factor = demand <= EPSILON ? 1 : Math.min(1, remaining / demand);
-    for (const consumer of group) factors.set(consumer.entity.id, factor);
+    for (const consumer of group) {
+      factors.set(consumer.entity.id, factor);
+      if (consumer.machineRuntime) {
+        consumer.machineRuntime.assignedPowerFactor = factor;
+        if (consumer.machineRuntimeIndex) {
+          const runtimeIndex = consumer.machineRuntime.runtimeIndex;
+          consumer.machineRuntimeIndex.powerFactor[runtimeIndex] = factor;
+          consumer.machineRuntimeIndex.powerFactorPresent[runtimeIndex] = 1;
+        }
+      }
+    }
     remaining = Math.max(0, remaining - demand * factor);
   }
   return factors;
 }
 
-function calculatePower(state: GameState, seconds: number, planetId: PlanetId, gridId: PowerGridId, reception: DysonReceptionPlan, lookup?: SimulationLookupContext, profiler?: SimulationProfiler): PowerPlan {
+function calculatePower(
+  state: GameState,
+  seconds: number,
+  planetId: PlanetId,
+  gridId: PowerGridId,
+  reception: DysonReceptionPlan,
+  lookup?: SimulationLookupContext,
+  profiler?: SimulationProfiler,
+  sharedEntityMaps?: PowerEntityMaps,
+): PowerPlan {
   let windGenerationKw = 0;
   let solarGenerationKw = 0;
   let geothermalGenerationKw = 0;
@@ -4009,9 +4180,9 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
   const exchangerDischargeCandidates: PowerCandidate[] = [];
   const accumulatorChargeCandidates: PowerCandidate[] = [];
   const exchangerChargeCandidates: PowerCandidate[] = [];
-  const powerOutputByEntity = new Map<string, number>();
-  const powerInputByEntity = new Map<string, number>();
-  const factorByEntity = new Map<string, number>();
+  const powerOutputByEntity = sharedEntityMaps?.powerOutputByEntity ?? new Map<string, number>();
+  const powerInputByEntity = sharedEntityMaps?.powerInputByEntity ?? new Map<string, number>();
+  const factorByEntity = sharedEntityMaps?.factorByEntity ?? new Map<string, number>();
   const entities = lookup
     ? (lookup.entitiesByPlanetGrid.get(`${planetId}|${gridId}`) ?? [])
     : state.entities;
@@ -4019,7 +4190,6 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
 
   for (const entity of entities) {
     if (entity.planetId !== planetId || getEntityPowerGridId(entity) !== gridId) continue;
-    const machineRuntime = lookup?.machineRuntimeById.get(entity.id);
     if (entity.kind === "power" && entity.buildingId) {
       generatorCount += entity.machineCount;
       if (isFuelGenerator(entity)) {
@@ -4109,31 +4279,74 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       }
       connectedEntities += 1;
       consumers.push({ entity, demandKw: (getBuilding(entity.buildingId!).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
-    } else if (canMachineRun(state, entity, machineRuntime) && entity.buildingId) {
+    } else if (entity.kind === "machine" && entity.buildingId) {
+      const machineRuntime = lookup?.machineRuntimeById.get(entity.id);
+      let preparedRuntimeCapacity = false;
+      if (machineRuntime) {
+        const machineIndex = lookup?.machineRuntime;
+        const runtimeIndex = machineRuntime.runtimeIndex;
+        machineRuntime.assignedPowerFactor = undefined;
+        if (machineIndex) machineIndex.powerFactorPresent[runtimeIndex] = 0;
+        machineRuntime.inputCyclesForStep = undefined;
+        machineRuntime.sprayedCycleLimitForStep = undefined;
+        machineRuntime.extraProductBonusForStep = undefined;
+        if (lookup?.powerImplementation === "compiled" && machineIndex?.frontierEnabled) {
+          if (machineIndex.wakeFlags[runtimeIndex] !== 0) {
+            machineIndex.wakeFlags[runtimeIndex] = 0;
+            machineIndex.active[runtimeIndex] = 1;
+            machineIndex.sleepReason[runtimeIndex] = MACHINE_SLEEP_NONE;
+          } else if (machineIndex.active[runtimeIndex] === 0) {
+            continue;
+          }
+        }
+        // Research capacity depends on earlier labs in stable entity order.
+        // Every ordinary machine has immutable input/output definitions during
+        // this step, so power and production can share one exact dependency read.
+        if (lookup?.powerImplementation === "compiled" && !machineRuntime.matrixResearch) {
+          machineRuntime.inputCyclesForStep = availableInputCyclesForRecipe(state, entity, machineRuntime.recipe);
+          machineRuntime.sprayedCycleLimitForStep = availableFullProliferatorCyclesForRuntime(entity, machineRuntime);
+          machineRuntime.extraProductBonusForStep = machineRuntime.proliferatorExtraProductBonus;
+          preparedRuntimeCapacity = true;
+        }
+      }
+      if (!canMachineRun(state, entity, machineRuntime, preparedRuntimeCapacity)) {
+        if (lookup?.powerImplementation === "compiled" && lookup.machineRuntime.frontierEnabled &&
+          machineRuntime && preparedRuntimeCapacity &&
+          Math.floor((machineRuntime.inputCyclesForStep ?? 0) + EPSILON) < 1) {
+          const runtimeIndex = machineRuntime.runtimeIndex;
+          lookup.machineRuntime.active[runtimeIndex] = 0;
+          lookup.machineRuntime.sleepReason[runtimeIndex] = MACHINE_SLEEP_INPUT;
+          lookup.machineRuntime.nextEventSeconds[runtimeIndex] = Number.POSITIVE_INFINITY;
+        }
+        continue;
+      }
+      const demandKw = (machineRuntime?.powerDemandProduct ?? (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount) *
+        getEntityProliferatorPowerMultiplierForStep(
+          state,
+          entity,
+          seconds,
+          machineRuntime,
+          machineRuntime?.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed,
+        ) * difficultyPowerMultiplier;
       if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
-        disconnectedDemandKw += (machineRuntime?.powerDemandProduct ?? (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount) *
-          getEntityProliferatorPowerMultiplierForStep(
-            state,
-            entity,
-            seconds,
-            machineRuntime,
-            machineRuntime?.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed,
-          ) * difficultyPowerMultiplier;
+        if (machineRuntime) {
+          machineRuntime.assignedPowerFactor = 0;
+          if (lookup?.powerImplementation === "compiled") {
+            lookup.machineRuntime.powerFactor[machineRuntime.runtimeIndex] = 0;
+            lookup.machineRuntime.powerFactorPresent[machineRuntime.runtimeIndex] = 1;
+          }
+        }
+        disconnectedDemandKw += demandKw;
         continue;
       }
       connectedEntities += 1;
       consumers.push({
         entity,
-        demandKw: (machineRuntime?.powerDemandProduct ?? (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount) *
-          getEntityProliferatorPowerMultiplierForStep(
-            state,
-            entity,
-            seconds,
-            machineRuntime,
-            machineRuntime?.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed,
-          ) * difficultyPowerMultiplier,
+        demandKw,
+        machineRuntime,
+        machineRuntimeIndex: lookup?.powerImplementation === "compiled" ? lookup.machineRuntime : undefined,
       });
     } else if (entity.kind === "station" && entity.buildingId && stationRouteReady(state, entity, lookup, profiler)) {
       if (!gridCovered) {
@@ -4190,8 +4403,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
     sum + (powerOutputByEntity.get(candidate.entity.id) ?? 0), 0);
   const exchangerGenerationKw = outputFor(exchangerDischargeCandidates);
   const accumulatorGenerationKw = outputFor(accumulatorCandidates);
-  const allocatedFactors = allocateConsumerPower(consumers, regularSuppliedKw);
-  for (const [entityId, factor] of allocatedFactors) factorByEntity.set(entityId, factor);
+  allocateConsumerPower(consumers, regularSuppliedKw, factorByEntity);
 
   let surplusKw = Math.max(0, baseGenerationKw - demandKw);
   const exchangerChargeKw = allocatePower(exchangerChargeCandidates, surplusKw, powerInputByEntity);
@@ -4223,17 +4435,19 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
   };
 }
 
-function combinePowerPlans(plans: PowerPlan[]): PowerPlan {
+function combinePowerPlans(plans: PowerPlan[], sharedEntityMaps?: PowerEntityMaps): PowerPlan {
   const sum = (select: (plan: PowerPlan) => number) => plans.reduce((total, plan) => total + select(plan), 0);
   const demandKw = sum((plan) => plan.demandKw);
   const suppliedKw = sum((plan) => plan.demandKw * plan.factor);
-  const powerOutputByEntity = new Map<string, number>();
-  const powerInputByEntity = new Map<string, number>();
-  const factorByEntity = new Map<string, number>();
-  for (const plan of plans) {
-    for (const [entityId, value] of plan.powerOutputByEntity) powerOutputByEntity.set(entityId, value);
-    for (const [entityId, value] of plan.powerInputByEntity) powerInputByEntity.set(entityId, value);
-    for (const [entityId, value] of plan.factorByEntity) factorByEntity.set(entityId, value);
+  const powerOutputByEntity = sharedEntityMaps?.powerOutputByEntity ?? new Map<string, number>();
+  const powerInputByEntity = sharedEntityMaps?.powerInputByEntity ?? new Map<string, number>();
+  const factorByEntity = sharedEntityMaps?.factorByEntity ?? new Map<string, number>();
+  if (!sharedEntityMaps) {
+    for (const plan of plans) {
+      for (const [entityId, value] of plan.powerOutputByEntity) powerOutputByEntity.set(entityId, value);
+      for (const [entityId, value] of plan.powerInputByEntity) powerInputByEntity.set(entityId, value);
+      for (const [entityId, value] of plan.factorByEntity) factorByEntity.set(entityId, value);
+    }
   }
   return {
     generationKw: sum((plan) => plan.generationKw),
@@ -4748,6 +4962,29 @@ function synchronizeCompiledBeltRuntimeRecord(lookup: SimulationLookupContext, b
   }
 }
 
+function synchronizeCompiledMachineRuntimeRecord(lookup: SimulationLookupContext, entityId: string): void {
+  const machine = lookup.machineRuntimeById.get(entityId);
+  if (!machine) return;
+  const index = machine.runtimeIndex;
+  lookup.machineRuntime.progress[index] = Math.max(0, machine.entity.progress ?? 0);
+  lookup.machineRuntime.active[index] = 1;
+  lookup.machineRuntime.sleepReason[index] = MACHINE_SLEEP_NONE;
+  lookup.machineRuntime.wakeFlags[index] |= MACHINE_WAKE_COMMAND;
+  lookup.machineRuntime.nextEventSeconds[index] = 0;
+}
+
+function wakeCompiledMachineDependency(
+  runtime: SimulationMachineRuntimeIndex,
+  runtimeIndex: number | undefined,
+  wakeFlag: number,
+): void {
+  if (!runtime.frontierEnabled || runtimeIndex === undefined || runtime.active[runtimeIndex] !== 0) return;
+  runtime.wakeFlags[runtimeIndex] |= wakeFlag;
+  runtime.active[runtimeIndex] = 1;
+  runtime.sleepReason[runtimeIndex] = MACHINE_SLEEP_NONE;
+  runtime.nextEventSeconds[runtimeIndex] = 0;
+}
+
 function receiveSpecialCompiledBeltMaterial(
   state: GameState,
   target: FactoryEntity,
@@ -4756,7 +4993,7 @@ function receiveSpecialCompiledBeltMaterial(
   moved: number,
   kind: Exclude<IndexedBeltRoute["receiveKind"], "ordinary">,
 ): number {
-  if (kind === "quantum-supply") return receiveQuantumSupplyMaterial(state, target, itemId, moved);
+  if (kind === "quantum-supply") return receiveQuantumSupplyMaterial(state, target, itemId, moved, true);
   const port = target.blackHolePorts?.find((entry) => entry.index === belt.targetPortIndex);
   if (!port || target.blackHolePaused !== false || !target.blackHoleActivationConfirmed) return 0;
   try {
@@ -4874,11 +5111,13 @@ function transferBeltsCompiled(
     itemId: ItemId,
     amount: number,
     kind: IndexedBeltRoute["receiveKind"],
+    targetMachineRuntimeIndex?: number,
   ): number => {
     const moved = Math.floor(amount);
     if (moved < 1) return 0;
     if (kind === "ordinary") {
       target.inputs[itemId] = Math.floor((target.inputs[itemId] ?? 0) + moved);
+      wakeCompiledMachineDependency(lookup.machineRuntime, targetMachineRuntimeIndex, MACHINE_WAKE_INPUT);
       return moved;
     }
     return receiveSpecialCompiledBeltMaterial(state, target, belt, itemId, moved, kind);
@@ -4906,6 +5145,7 @@ function transferBeltsCompiled(
         indexedGroup.itemId,
         Math.min(available, runtime.candidateAllowance[routeIndex], targetFree),
         route.receiveKind,
+        route.targetMachineRuntimeIndex,
       );
       if (moved <= 0) return available;
       targetCapacityValues[targetIndex] = targetFree - moved;
@@ -4934,6 +5174,7 @@ function transferBeltsCompiled(
         indexedGroup.itemId,
         Math.min(available, runtime.candidateAllowance[routeIndex], targetFree),
         route.receiveKind,
+        route.targetMachineRuntimeIndex,
       );
       if (moved <= 0) return available;
       targetCapacityValues[targetIndex] = targetFree - moved;
@@ -4960,6 +5201,7 @@ function transferBeltsCompiled(
           indexedGroup.itemId,
           Math.min(available, fairShare, runtime.candidateAllowance[routeIndex], targetFree),
           route.receiveKind,
+          route.targetMachineRuntimeIndex,
         );
         if (moved <= 0) continue;
         targetCapacityValues[targetIndex] = targetFree - moved;
@@ -5075,6 +5317,7 @@ function transferBeltsCompiled(
                 indexedGroup.itemId,
                 Math.min(sourceAvailable, allowance, free),
                 route.receiveKind,
+                route.targetMachineRuntimeIndex,
               );
               if (seconds > 0 && (moved <= 0 || flowWindowSeconds <= 0) &&
                 Math.abs(runtime.lastFlow[beltIndex]) > EPSILON) {
@@ -5085,6 +5328,11 @@ function transferBeltsCompiled(
                 targetCapacityValues[targetCapacityIndex] = free;
                 source.outputs[indexedGroup.itemId] = sourceAvailable - moved + reserved;
                 source.routingCursor = 0;
+                wakeCompiledMachineDependency(
+                  lookup.machineRuntime,
+                  indexedGroup.sourceMachineRuntimeIndex,
+                  MACHINE_WAKE_OUTPUT,
+                );
               }
               const available = sourceAvailable - moved;
               if ((!deferSourceDepletionReset && available <= 0) || free <= 0) {
@@ -5244,6 +5492,7 @@ function transferBeltsCompiled(
           indexedGroup.itemId,
           Math.min(available, runtime.candidateAllowance[beltIndex], targetFree),
           route.receiveKind,
+          route.targetMachineRuntimeIndex,
         );
         if (moved > 0) {
           targetCapacityValues[targetIndex] = targetFree - moved;
@@ -5261,6 +5510,13 @@ function transferBeltsCompiled(
       if (available > 0) available = distributeRoutes(indexedGroup, priorityRoutes![0], available, true);
     }
     source!.outputs[indexedGroup.itemId] = available + reserved;
+    if (available < sourceAvailable) {
+      wakeCompiledMachineDependency(
+        lookup.machineRuntime,
+        indexedGroup.sourceMachineRuntimeIndex,
+        MACHINE_WAKE_OUTPUT,
+      );
+    }
     const sourceWaiting = (source!.outputs[indexedGroup.itemId] ?? 0) > 0;
     for (const route of compiledCandidates) {
       const beltIndex = route.runtimeIndex!;
@@ -5942,9 +6198,18 @@ function runMiners(
   }
 }
 
-function consumeProliferatorPoints(entity: FactoryEntity, recipe: RecipeDefinition, cycles: number, sprayCost = getProliferatorSprayCost(recipe)): void {
-  if (!proliferatorApplies(entity, recipe) || cycles < 1) return;
-  const definition = getProliferator(entity.proliferatorTier!);
+function consumeProliferatorPoints(
+  entity: FactoryEntity,
+  recipe: RecipeDefinition,
+  cycles: number,
+  sprayCost = getProliferatorSprayCost(recipe),
+  runtime?: IndexedMachineRuntime,
+): void {
+  if (cycles < 1 || (runtime ? !runtime.proliferatorItemId : !proliferatorApplies(entity, recipe))) return;
+  const definition = runtime ? {
+    itemId: runtime.proliferatorItemId!,
+    sprayPoints: runtime.proliferatorSprayPoints,
+  } : getProliferator(entity.proliferatorTier!);
   const requiredPoints = sprayCost * cycles;
   let points = Math.max(0, entity.proliferatorPoints ?? 0);
   if (points < requiredPoints) {
@@ -6017,7 +6282,9 @@ function runMachines(
     if (entity.planetId !== planetId || entity.kind !== "machine" || entity.buildingId === "ray_receiver" || !entity.buildingId || !recipe) return [];
     const building = getBuilding(entity.buildingId);
     const planetSpeed = specializationApplies(profile, building.family, entity.buildingId) ? profile.productionSpeedMultiplier : 1;
+    const proliferator = proliferatorApplies(entity, recipe) ? getProliferator(entity.proliferatorTier!) : undefined;
     return [{
+      runtimeIndex: -1,
       entity,
       recipe,
       baseSpeedProduct: building.speed * entity.machineCount,
@@ -6028,6 +6295,12 @@ function runMachines(
       outputCreditGroupIndices: [],
       powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
       sprayCost: getProliferatorSprayCost(recipe),
+      proliferatorItemId: proliferator?.itemId,
+      proliferatorSprayPoints: proliferator?.sprayPoints ?? 0,
+      proliferatorSpeedMultiplier: entity.proliferatorMode === "speed" ? 1 + (proliferator?.speedBonus ?? 0) : 1,
+      proliferatorPowerMultiplier: proliferator?.powerMultiplier ?? 1,
+      proliferatorExtraProductBonus: entity.proliferatorMode === "extra" ? proliferator?.extraProductBonus ?? 0 : 0,
+      proliferatorRequiredTechId: proliferator?.requiredTechId,
       baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
         ? 1
         : recipe.outputs.reduce((sum, output) => sum + output.amount, 0),
@@ -6045,10 +6318,20 @@ function runMachines(
   for (const runtime of runtimes) {
     const { entity, recipe, baseSpeedProduct, planetSpeed, recipeDuration } = runtime;
     if (skippedEntityIds?.has(entity.id)) continue;
-    const assignedPowerFactor = power.factorByEntity.get(entity.id);
+    const machineIndex = lookup?.powerImplementation === "compiled" ? lookup.machineRuntime : undefined;
+    const runtimeIndex = runtime.runtimeIndex;
+    const assignedPowerFactor = machineIndex
+      ? (machineIndex.powerFactorPresent[runtimeIndex] !== 0 ? machineIndex.powerFactor[runtimeIndex] : undefined)
+      : power.factorByEntity.get(entity.id);
     entity.powerFactor = assignedPowerFactor === undefined ? undefined : round(assignedPowerFactor, 4);
+    if (machineIndex?.frontierEnabled && machineIndex.active[runtimeIndex] === 0) {
+      entity.utilization = 0;
+      entity.productionRate = 0;
+      continue;
+    }
     if (recipe.id === "matrix_research" && !activeResearch) {
       entity.progress = 0;
+      if (machineIndex?.frontierEnabled) machineIndex.progress[runtimeIndex] = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
       continue;
@@ -6059,6 +6342,7 @@ function runMachines(
     const launchFactor = runtime.launchEnergyPerCycle > EPSILON ? dysonLaunchFactor(state, recipe.id) : 1;
     if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) {
       entity.progress = 0;
+      if (machineIndex?.frontierEnabled) machineIndex.progress[runtimeIndex] = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
       continue;
@@ -6071,28 +6355,49 @@ function runMachines(
       entity.productionRate = 0;
       continue;
     }
-    const fullInputCycles = Math.floor(availableInputCyclesForRecipe(state, entity, recipe) + EPSILON);
-    const sprayedCycleLimit = availableFullProliferatorCycles(entity, recipe, runtime.sprayCost);
-    const extraProductBonus = getEntityExtraProductBonusForRecipe(entity, recipe);
+    const fullInputCycles = Math.floor((runtime.inputCyclesForStep ?? availableInputCyclesForRecipe(state, entity, recipe)) + EPSILON);
+    const sprayedCycleLimit = runtime.sprayedCycleLimitForStep ??
+      (lookup?.powerImplementation === "compiled"
+        ? availableFullProliferatorCyclesForRuntime(entity, runtime)
+        : availableFullProliferatorCycles(entity, recipe, runtime.sprayCost));
+    const extraProductBonus = runtime.extraProductBonusForStep ??
+      (lookup?.powerImplementation === "compiled"
+        ? runtime.proliferatorExtraProductBonus
+        : getEntityExtraProductBonusForRecipe(entity, recipe));
     const fullOutputCycles = fullInputCycles < 1
       ? 0
-      : Math.floor(availableOutputCycles(state, entity, credits, runtime, fullInputCycles, {
-          extraProductBonus,
-          sprayedCycleLimit,
-        }) + EPSILON);
+        : Math.floor(availableOutputCycles(
+            state,
+            entity,
+            credits,
+            runtime,
+            fullInputCycles,
+            extraProductBonus,
+            sprayedCycleLimit,
+            runtime.inputCyclesForStep !== undefined,
+          ) + EPSILON);
     const maximumCycles = Math.min(fullInputCycles, fullOutputCycles);
-    const progressAtStart = entity.progress ?? 0;
+    const progressAtStart = machineIndex?.frontierEnabled && !runtime.matrixResearch
+      ? machineIndex.progress[runtimeIndex]
+      : entity.progress ?? 0;
     const baseRate = effectiveCyclesPerSecond * powerFactor * launchFactor;
     let potentialCycles = baseRate * seconds;
     let sprayedWork = 0;
     if (entity.proliferatorMode === "speed" && sprayedCycleLimit > 0 && baseRate > EPSILON) {
-      const acceleratedRate = baseRate * getEntityProliferatorSpeedMultiplierForRecipe(entity, recipe);
+      const acceleratedRate = baseRate * (lookup?.powerImplementation === "compiled"
+        ? runtime.proliferatorSpeedMultiplier
+        : getEntityProliferatorSpeedMultiplierForRecipe(entity, recipe));
       const acceleratedCapacity = Math.max(0, Math.min(maximumCycles, sprayedCycleLimit) - progressAtStart);
       const acceleratedSeconds = Math.min(seconds, acceleratedCapacity / Math.max(EPSILON, acceleratedRate));
       sprayedWork = Math.min(acceleratedCapacity, acceleratedRate * acceleratedSeconds);
       potentialCycles = sprayedWork + baseRate * Math.max(0, seconds - acceleratedSeconds);
     }
     if (maximumCycles < 1 || potentialCycles <= EPSILON) {
+      if (machineIndex?.frontierEnabled && fullInputCycles >= 1 && fullOutputCycles < 1) {
+        machineIndex.active[runtimeIndex] = 0;
+        machineIndex.sleepReason[runtimeIndex] = MACHINE_SLEEP_OUTPUT;
+        machineIndex.nextEventSeconds[runtimeIndex] = Number.POSITIVE_INFINITY;
+      }
       entity.utilization = 0;
       entity.productionRate = 0;
       continue;
@@ -6147,13 +6452,25 @@ function runMachines(
           }
         }
       }
-      consumeProliferatorPoints(entity, recipe, Math.min(sprayedCycles, consumedResearchMatrices), runtime.sprayCost);
+      consumeProliferatorPoints(
+        entity,
+        recipe,
+        Math.min(sprayedCycles, consumedResearchMatrices),
+        runtime.sprayCost,
+        lookup?.powerImplementation === "compiled" ? runtime : undefined,
+      );
       refreshRecipeSpeeds();
     } else {
       for (const input of recipe.inputs) {
         entity.inputs[input.itemId] = Math.max(0, Math.floor((entity.inputs[input.itemId] ?? 0) - input.amount * cycles));
       }
-      consumeProliferatorPoints(entity, recipe, sprayedCycles, runtime.sprayCost);
+      consumeProliferatorPoints(
+        entity,
+        recipe,
+        sprayedCycles,
+        runtime.sprayCost,
+        lookup?.powerImplementation === "compiled" ? runtime : undefined,
+      );
       if (recipe.id === "solar_sail_launch" && cycles > 0) {
         launchDysonSails(state, getPlanet(entity.planetId).systemId, targetDysonOrbitId!, cycles);
       }
@@ -6178,10 +6495,18 @@ function runMachines(
     }
 
     entity.progress = Math.max(0, round(entity.progress - cycles, 6));
+    if (machineIndex?.frontierEnabled && !runtime.matrixResearch) machineIndex.progress[runtimeIndex] = entity.progress;
     const activityFactor = potentialCycles > EPSILON ? Math.min(1, work / potentialCycles) : 0;
     entity.utilization = round(powerFactor * launchFactor * activityFactor, 4);
     const bonusUnitsPerCycle = work > EPSILON ? runtime.baseUnitsPerCycle * extraProductBonus * sprayedWork / work : 0;
     entity.productionRate = round((seconds > EPSILON ? work / seconds : 0) * (runtime.baseUnitsPerCycle + bonusUnitsPerCycle) * 60, 2);
+    if (machineIndex?.frontierEnabled) {
+      machineIndex.active[runtimeIndex] = 1;
+      machineIndex.sleepReason[runtimeIndex] = MACHINE_SLEEP_NONE;
+      machineIndex.nextEventSeconds[runtimeIndex] = baseRate > EPSILON
+        ? Math.max(0, (1 - entity.progress) / baseRate)
+        : Number.POSITIVE_INFINITY;
+    }
   }
 }
 
@@ -6321,6 +6646,52 @@ function ensureDynamicRouteLookup(state: GameState, lookup: SimulationLookupCont
 export function ensureSimulationDynamicRouteLookup(state: GameState, lookup: SimulationLookupContext): SimulationLookupContext {
   ensureDynamicRouteLookup(state, lookup);
   return lookup;
+}
+
+export interface SimulationMachineRuntimeDiagnostics {
+  machines: number;
+  frontierEnabled: boolean;
+  initiallyDormant: number;
+  active: number;
+  inputSleeping: number;
+  outputSleeping: number;
+  pendingWake: number;
+  finiteNextEvents: number;
+}
+
+/** Development/read-only view of the M3 scheduler sidecar. */
+export function getSimulationMachineRuntimeDiagnostics(
+  lookup: SimulationLookupContext | undefined,
+): SimulationMachineRuntimeDiagnostics {
+  if (!lookup) return {
+    machines: 0,
+    frontierEnabled: false,
+    initiallyDormant: 0,
+    active: 0,
+    inputSleeping: 0,
+    outputSleeping: 0,
+    pendingWake: 0,
+    finiteNextEvents: 0,
+  };
+  const count = lookup.machineRuntimeById.size;
+  const diagnostics: SimulationMachineRuntimeDiagnostics = {
+    machines: count,
+    frontierEnabled: lookup.machineRuntime.frontierEnabled,
+    initiallyDormant: lookup.machineRuntime.initiallyDormantCount,
+    active: 0,
+    inputSleeping: 0,
+    outputSleeping: 0,
+    pendingWake: 0,
+    finiteNextEvents: 0,
+  };
+  for (let index = 0; index < count; index += 1) {
+    if (lookup.machineRuntime.active[index] !== 0) diagnostics.active += 1;
+    if (lookup.machineRuntime.sleepReason[index] === MACHINE_SLEEP_INPUT) diagnostics.inputSleeping += 1;
+    if (lookup.machineRuntime.sleepReason[index] === MACHINE_SLEEP_OUTPUT) diagnostics.outputSleeping += 1;
+    if (lookup.machineRuntime.wakeFlags[index] !== 0) diagnostics.pendingWake += 1;
+    if (Number.isFinite(lookup.machineRuntime.nextEventSeconds[index])) diagnostics.finiteNextEvents += 1;
+  }
+  return diagnostics;
 }
 
 /** Builds the hydrated read-only indexes used by one P6 planet-phase batch. */
@@ -6832,7 +7203,7 @@ function advanceStationRoutes(
       }
       let deliveredCargo = route.cargo;
       if (scope === "local" && isQuantumStation(demand) && quantumSupplySlot(demand, route.itemId)) {
-        const received = receiveQuantumSupplyMaterial(state, demand, route.itemId, route.cargo);
+        const received = receiveQuantumSupplyMaterial(state, demand, route.itemId, route.cargo, Boolean(lookup));
         deliveredCargo = received;
         if (received < route.cargo) {
           remaining.push({ ...route, progress: 1, cargo: route.cargo - received });
@@ -7265,8 +7636,19 @@ export function runPlanetSimulationPhase(
   if (!lookup) ensureDynamicRouteLookup(state, phaseLookup);
   const baselineProduced = { ...state.totalProduced };
   let subsystemStartedAt = profiler ? profileNow() : 0;
-  const gridPlans = POWER_GRID_IDS.map((gridId) => calculatePower(state, seconds, planetId, gridId, reception, phaseLookup, profiler));
-  const power = combinePowerPlans(gridPlans);
+  // Grid membership is disjoint, so all three calculations can write directly
+  // into the planet aggregate. This preserves insertion order while avoiding
+  // three short-lived map triplets and a second full map copy every step.
+  const powerEntityMaps: PowerEntityMaps | undefined = phaseLookup.powerImplementation === "compiled"
+    ? {
+        powerOutputByEntity: new Map(),
+        powerInputByEntity: new Map(),
+        factorByEntity: new Map(),
+      }
+    : undefined;
+  const gridPlans = POWER_GRID_IDS.map((gridId) =>
+    calculatePower(state, seconds, planetId, gridId, reception, phaseLookup, profiler, powerEntityMaps));
+  const power = combinePowerPlans(gridPlans, powerEntityMaps);
   for (const gridPlan of gridPlans) {
     const gridId = gridPlan.gridId!;
     const storage = gridStoredEnergy(state, planetId, gridId, lookup);
@@ -7569,6 +7951,7 @@ export function completeSimulationStep(
       profiler,
       lookup.constructionAutomationPlanCache,
       lookup.beltRuntime.implementation,
+      lookup.powerImplementation,
     ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
@@ -7909,6 +8292,7 @@ function simulateStep(
       profiler,
       lookup.constructionAutomationPlanCache,
       lookup.beltRuntime.implementation,
+      lookup.powerImplementation,
     ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
@@ -8107,6 +8491,8 @@ export interface SimulationAdvanceOptions {
   contractExperiment?: SimulationContractExperiment;
   /** M2 domain oracle/fallback. Production defaults to the compiled runtime. */
   beltImplementation?: BeltRuntimeImplementation;
+  /** M3 domain oracle/fallback. Production defaults to the compiled runtime. */
+  powerImplementation?: PowerRuntimeImplementation;
 }
 
 export function createSimulationProfiler(): SimulationProfiler {
@@ -8231,6 +8617,7 @@ export function createSimulationAdvanceSession(state: GameState, seconds: number
           options.profiler,
           new Map<string, CachedConstructionAutomationPlan>(),
           options.beltImplementation,
+          options.powerImplementation,
         )
       : undefined,
     profiler: options.profiler,
@@ -8340,11 +8727,14 @@ export interface PersistentSimulationRuntime {
   lookup?: SimulationLookupContext;
   world: RuntimeWorld;
   beltImplementation: BeltRuntimeImplementation;
+  powerImplementation: PowerRuntimeImplementation;
 }
 
 export interface PersistentSimulationRuntimeOptions {
   /** Retained old transferBelts domain for M2 shadow-oracle and fallback. */
   beltImplementation?: BeltRuntimeImplementation;
+  /** Retained allocation/copy path for M3 shadow-oracle and fallback. */
+  powerImplementation?: PowerRuntimeImplementation;
 }
 
 function normalizePersistentRuntimeShape(state: GameState): void {
@@ -8366,13 +8756,21 @@ export function createPersistentSimulationRuntime(
   const startedAt = profiler ? profileNow() : 0;
   normalizePersistentRuntimeShape(state);
   const beltImplementation = options.beltImplementation ?? "compiled";
+  const powerImplementation = options.powerImplementation ?? "compiled";
   const runtime = {
     state,
     lookup: state.paused
       ? undefined
-      : createSimulationLookupContext(state, profiler, new Map<string, CachedConstructionAutomationPlan>(), beltImplementation),
+      : createSimulationLookupContext(
+          state,
+          profiler,
+          new Map<string, CachedConstructionAutomationPlan>(),
+          beltImplementation,
+          powerImplementation,
+        ),
     world: createRuntimeWorld(state),
     beltImplementation,
+    powerImplementation,
   };
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   return runtime;
@@ -8389,6 +8787,7 @@ export function replacePersistentSimulationRuntimeState(runtime: PersistentSimul
         profiler,
         new Map<string, CachedConstructionAutomationPlan>(),
         runtime.beltImplementation,
+        runtime.powerImplementation,
       );
   replaceRuntimeWorldState(runtime.world, state);
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
@@ -8406,6 +8805,9 @@ export function applyPersistentSimulationRuntimeCommand(
   if (!result.lookupInvalidated && runtime.lookup?.beltRuntime.implementation === "compiled") {
     for (const beltId of result.changedBeltIds) synchronizeCompiledBeltRuntimeRecord(runtime.lookup, beltId);
   }
+  if (!result.lookupInvalidated && runtime.lookup?.powerImplementation === "compiled") {
+    for (const entityId of result.changedEntityIds) synchronizeCompiledMachineRuntimeRecord(runtime.lookup, entityId);
+  }
   if (result.lookupInvalidated) {
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     const startedAt = profiler ? profileNow() : 0;
@@ -8416,6 +8818,7 @@ export function applyPersistentSimulationRuntimeCommand(
           profiler,
           constructionAutomationPlanCache,
           runtime.beltImplementation,
+          runtime.powerImplementation,
         );
     if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   }
@@ -8434,6 +8837,7 @@ export function advancePersistentSimulationRuntime(
       profiler,
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
+      runtime.powerImplementation,
     );
   }
   const before = runtime.state;
@@ -8459,7 +8863,13 @@ export function advancePersistentSimulationRuntime(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
+      : createSimulationLookupContext(
+          next,
+          profiler,
+          constructionAutomationPlanCache,
+          runtime.beltImplementation,
+          runtime.powerImplementation,
+        );
   }
   return { state: next, changed: session.changed, cacheRebuilt };
 }
@@ -8498,6 +8908,7 @@ export async function advancePersistentSimulationRuntimeResumable(
       profiler,
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
+      runtime.powerImplementation,
     );
   }
   const before = runtime.state;
@@ -8536,7 +8947,13 @@ export async function advancePersistentSimulationRuntimeResumable(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
+      : createSimulationLookupContext(
+          next,
+          profiler,
+          constructionAutomationPlanCache,
+          runtime.beltImplementation,
+          runtime.powerImplementation,
+        );
   }
   if (profiler) {
     profiler.safeBoundaryCount += safeBoundaryCount;
@@ -8559,6 +8976,7 @@ export async function advancePersistentSimulationRuntimeMulticore(
       profiler,
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
+      runtime.powerImplementation,
     );
   }
   const before = runtime.state;
@@ -8579,7 +8997,13 @@ export async function advancePersistentSimulationRuntimeMulticore(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
+      : createSimulationLookupContext(
+          next,
+          profiler,
+          constructionAutomationPlanCache,
+          runtime.beltImplementation,
+          runtime.powerImplementation,
+        );
   }
   return { state: next, changed: session.changed, cacheRebuilt };
 }

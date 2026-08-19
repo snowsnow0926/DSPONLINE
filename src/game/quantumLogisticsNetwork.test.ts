@@ -5,6 +5,7 @@ import {
   compareQuantumInteger,
   createEmptyQuantumLogisticsNetworkState,
   depositIntoQuantumInventory,
+  depositIntoNormalizedQuantumInventory,
   getQuantumItemCapacity,
   getQuantumLogisticsMultiplier,
   getQuantumTowerBandwidth,
@@ -38,6 +39,22 @@ describe("quantum logistics network", () => {
     expect(blocked.accepted).toBe("0");
     expect(blocked.remainder).toBe("1");
     expect(blocked.state.inventory.iron_ore).toBe("10000");
+  });
+
+  it("keeps the compiled normalized deposit byte-equivalent without replacing the network", () => {
+    const source = {
+      ...createEmptyQuantumLogisticsNetworkState(),
+      enabled: true,
+      inventory: { iron_ore: "9960" as const, copper_ore: "77" as const },
+      itemCapacities: { iron_ore: "10000" as const },
+    };
+    const legacy = depositIntoQuantumInventory(structuredClone(source), "iron_ore", 100);
+    const compiledSource = structuredClone(source);
+    const compiled = depositIntoNormalizedQuantumInventory(compiledSource, "iron_ore", 100);
+
+    expect(compiled).toEqual(legacy);
+    expect(compiled.state).toBe(compiledSource);
+    expect(compiled.state.inventory.copper_ore).toBe("77");
   });
 
   it("量子仓库已满时保留塔内物资，不会静默删除上传缓存", () => {

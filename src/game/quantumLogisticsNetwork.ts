@@ -120,6 +120,8 @@ export interface QuantumInventoryDepositResult {
   state: QuantumLogisticsNetworkState;
 }
 
+const runtimeNormalizedQuantumNetworks = new WeakSet<QuantumLogisticsNetworkState>();
+
 /**
  * Put material into the shared inventory without applying the five-second
  * upload budget. This is used at the moment a quantum supply endpoint actually
@@ -147,6 +149,55 @@ export function depositIntoQuantumInventory(
     accepted: decimal(accepted),
     remainder: decimal(requested - accepted),
     state,
+  };
+}
+
+/**
+ * Runtime-only counterpart for a network that already crossed the save/command
+ * normalization boundary. It deliberately keeps the network object identity
+ * and touches only the requested item, avoiding an O(all quantum items) clone
+ * for every belt or local-drone delivery.
+ */
+export function depositIntoNormalizedQuantumInventory(
+  network: QuantumLogisticsNetworkState,
+  itemId: ItemId,
+  amount: DecimalIntegerString | number,
+): QuantumInventoryDepositResult {
+  // Preserve the legacy first-write normalization contract (including removal
+  // of explicit zero inventory entries), then keep that proof with the object
+  // identity for subsequent hot-path deposits.
+  if (!runtimeNormalizedQuantumNetworks.has(network)) {
+    const runtimeFlow = network.runtimeFlow;
+    const normalized = normalizeQuantumLogisticsNetworkState(network);
+    network.enabled = normalized.enabled;
+    network.inventory = normalized.inventory;
+    network.itemCapacities = normalized.itemCapacities;
+    network.routingCursors = normalized.routingCursors;
+    network.uploadRoutingCursors = normalized.uploadRoutingCursors;
+    if (runtimeFlow) network.runtimeFlow = runtimeFlow;
+    else delete network.runtimeFlow;
+    runtimeNormalizedQuantumNetworks.add(network);
+  } else {
+    // Boundary settlement may materialize explicit zeroes between deliveries.
+    // The retained helper removes them on every call; mirror that observable
+    // shape without rebuilding the other normalized maps.
+    for (const [candidateItemId, value] of Object.entries(network.inventory)) {
+      if (value === "0") delete network.inventory[candidateItemId as ItemId];
+    }
+  }
+  const requested = integer(amount);
+  if (!network.enabled || requested <= 0n) {
+    return { accepted: "0", remainder: decimal(requested), state: network };
+  }
+  const current = integer(network.inventory[itemId]);
+  const capacity = integer(getQuantumItemCapacity(network, itemId));
+  const free = capacity > current ? capacity - current : 0n;
+  const accepted = requested < free ? requested : free;
+  if (accepted > 0n) network.inventory[itemId] = decimal(current + accepted);
+  return {
+    accepted: decimal(accepted),
+    remainder: decimal(requested - accepted),
+    state: network,
   };
 }
 

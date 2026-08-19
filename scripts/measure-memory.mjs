@@ -24,6 +24,7 @@ const commandRecords = Math.max(1, Math.min(1_000, Math.floor(Number(argumentsBy
 const label = (argumentsByName.get("label") ?? basename(executablePath, ".exe")).replace(/[^a-zA-Z0-9_-]/g, "-");
 const outputPath = resolve(argumentsByName.get("output") ?? `artifacts/performance/memory-${label}-${Date.now()}.json`);
 const traceOutputPath = resolve(argumentsByName.get("trace-output") ?? outputPath.replace(/\.json$/i, ".trace.json.gz"));
+const heapProfileOutputPath = resolve(argumentsByName.get("heap-profile-output") ?? outputPath.replace(/\.json$/i, ".heap-profile.json.gz"));
 const disableWorker = argumentsByName.get("disable-worker") === "true";
 const manualCdp = argumentsByName.get("manual-cdp") !== "false";
 const traceEnabled = argumentsByName.get("trace") !== "false";
@@ -31,6 +32,7 @@ const naturalAutosaveEnabled = argumentsByName.get("natural-autosave") !== "fals
 const trendDiagnosticsEnabled = argumentsByName.get("trend-diagnostics") !== "false";
 const trendForceGc = argumentsByName.get("trend-force-gc") === "true";
 const trendPaused = argumentsByName.get("trend-paused") === "true";
+const heapSamplingEnabled = argumentsByName.get("heap-sampling") === "true";
 
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -177,6 +179,7 @@ let browser;
 let browserProcess;
 let debuggingPort = null;
 let traceActive = false;
+let heapSamplingActive = false;
 let traceCompletion = null;
 let cdp = null;
 let browserVersion = null;
@@ -201,6 +204,7 @@ const writeProgressReport = async (status, error = null) => {
     trendDiagnosticsEnabled,
     trendForceGc,
     trendPaused,
+    heapSamplingEnabled,
     pageCrash,
     error,
     startedAt: new Date(lifecycleStartedAt).toISOString(),
@@ -563,6 +567,14 @@ try {
     await page.locator('.game-shell[data-simulation-paused="true"]').waitFor({ state: "attached", timeout: 30_000 });
     await sample("trend-paused-start");
   }
+  if (heapSamplingEnabled) {
+    await cdpCommand("HeapProfiler.startSampling", {
+      samplingInterval: 32_768,
+      includeObjectsCollectedByMajorGC: false,
+      includeObjectsCollectedByMinorGC: false,
+    });
+    heapSamplingActive = true;
+  }
 
   const trendStartedAt = Date.now();
   while ((Date.now() - trendStartedAt) / 1_000 < durationSeconds) {
@@ -571,6 +583,21 @@ try {
   }
   await sample("trend-end");
   const finalGc = await sample("trend-end-gc", { forceGc: true });
+  let heapProfile = null;
+  if (heapSamplingActive) {
+    const profile = await cdpCommand("HeapProfiler.stopSampling", {}, 60_000);
+    heapSamplingActive = false;
+    const profileBytes = Buffer.from(JSON.stringify(profile.profile));
+    const compressed = gzipSync(profileBytes, { level: 9 });
+    await mkdir(dirname(heapProfileOutputPath), { recursive: true });
+    await writeFile(heapProfileOutputPath, compressed);
+    heapProfile = {
+      outputPath: heapProfileOutputPath,
+      bytes: profileBytes.byteLength,
+      gzipBytes: compressed.byteLength,
+      sha256: sha256(compressed),
+    };
+  }
 
   const finalRaw = await readFile(savePath, "utf8");
   const finalStat = await stat(savePath);
@@ -610,10 +637,12 @@ try {
     trendDiagnosticsEnabled,
     trendForceGc,
     trendPaused,
+    heapSamplingEnabled,
     saveMode,
     pauseResume,
     commandResults,
     trace,
+    heapProfile,
     startedAt: new Date(lifecycleStartedAt).toISOString(),
     completedAt: new Date().toISOString(),
     summary: {
@@ -645,6 +674,7 @@ try {
   throw error;
 } finally {
   if (traceActive && cdp) await cdp.send("Tracing.end").catch(() => undefined);
+  if (heapSamplingActive && cdp) await cdp.send("HeapProfiler.stopSampling").catch(() => undefined);
   if (browser) await browser.close().catch(() => undefined);
   else await context?.close().catch(() => undefined);
   browserProcess?.kill();

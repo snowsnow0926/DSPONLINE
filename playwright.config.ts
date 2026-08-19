@@ -36,7 +36,10 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"], channel: "chrome" } },
+    // Use Playwright's pinned Chromium revision. Driving whichever system
+    // Chrome happens to be installed makes long parallel gates depend on a
+    // browser/driver version pair that the lockfile does not control.
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
   webServer: {
     command: webCommand,

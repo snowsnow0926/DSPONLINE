@@ -79,8 +79,8 @@ jobs:
           npm --prefix server audit --omit=dev
       - name: Build production web candidate
         run: npm run build:web
-      - name: Install Chromium for critical browser lifecycle gates
-        run: npx playwright install --with-deps chrome
+      - name: Install lockfile-pinned Chromium for critical browser lifecycle gates
+        run: npx playwright install --with-deps chromium
       - name: Critical Playwright save cloud offline and PWA gates
         run: npm run test:e2e -- --workers=1 --grep "cloud|save|offline|idle|PWA|leaderboard"
       - name: Production-preview PWA lifecycle gate

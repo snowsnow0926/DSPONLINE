@@ -17,7 +17,10 @@ describe("planet-scoped canvas render snapshots", () => {
   it("updates runtime records without invalidating topology or unchanged node references", () => {
     const previousState = createInitialState();
     const cache = createCanvasRenderSnapshot(previousState);
+    const changed = cache.game.entities[0];
     const unchanged = cache.game.entities[1];
+    const entityArray = cache.game.entities;
+    const entityIndex = cache.entityById;
     const current = structuredClone(previousState);
     current.entities[0].progress += 0.25;
     const projection = createSimulationProjection(previousState, current);
@@ -25,8 +28,30 @@ describe("planet-scoped canvas render snapshots", () => {
     expect(result.fullRebuild).toBe(false);
     expect(result.topologyChanged).toBe(false);
     expect(result.snapshot.topologyRevision).toBe(cache.topologyRevision);
+    expect(result.snapshot.game.entities).toBe(entityArray);
+    expect(result.snapshot.entityById).toBe(entityIndex);
+    expect(result.snapshot.entityById.get(changed.id)).toBe(changed);
     expect(result.snapshot.entityById.get(unchanged.id)).toBe(unchanged);
     expect(result.snapshot.entityById.get(current.entities[0].id)?.progress).toBe(current.entities[0].progress);
+    expect(result.snapshot.entityById.get(current.entities[0].id)).not.toBe(current.entities[0]);
+    expect(previousState.entities[0].progress).not.toBe(current.entities[0].progress);
+  });
+
+  it("removes stale optional fields while reusing only render-owned wrappers", () => {
+    const previousState = createInitialState();
+    previousState.entities[0].fuelItemId = "coal";
+    const cache = createCanvasRenderSnapshot(previousState);
+    const wrapper = cache.game.entities[0];
+    const current = structuredClone(previousState);
+    delete current.entities[0].fuelItemId;
+
+    const result = reconcileCanvasRenderSnapshot(cache, current, null, { force: true });
+
+    expect(result.snapshot.game.entities[0]).toBe(wrapper);
+    expect("fuelItemId" in result.snapshot.game.entities[0]).toBe(false);
+    expect(previousState.entities[0].fuelItemId).toBe("coal");
+    expect(result.snapshot.recordCache.entityCount).toBe(result.snapshot.game.entities.length);
+    expect(result.snapshot.recordCache.beltCount).toBe(result.snapshot.game.belts.length);
   });
 
   it("invalidates topology exactly when a node moves or a line is added", () => {

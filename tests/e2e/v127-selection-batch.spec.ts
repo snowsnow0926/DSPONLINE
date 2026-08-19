@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createInitialState, placeBuilding } from "../../src/game/engine";
 import { selectSettingsCategory } from "./settings-helpers";
 import { openSameOriginStorageHarness } from "./same-origin-harness";
 
@@ -15,35 +16,32 @@ test.beforeEach(async ({ page }) => {
 async function seedFactory(page: Page, fixture: "smelters" | "storage-network" = "smelters", storageTargetCount = 2) {
   // The app migrates the primary save to IndexedDB before mounting. Seed the
   // fixture before boot so the same path is exercised as a real fresh browser.
-  await openSameOriginStorageHarness(page);
-  await page.evaluate(async ([selectedFixture, targetCount]) => {
-    const { createInitialState, placeBuilding } = await import("/src/game/engine.ts");
-    let state = createInitialState(27_101, false);
-    state.paused = true;
-    state.construction.conveyor_belt_mk1 = 12;
-    if (selectedFixture === "storage-network") {
-      const storageCount = Math.max(3, targetCount + 1);
-      state.construction.storage_mk1 = storageCount;
-      state.construction.conveyor_belt_mk1 = Math.max(12, targetCount + 2);
-      for (let index = 0; index < storageCount; index += 1) {
-        const position = index === 0 ? { x: -260, y: -80 }
-          : index === 1 ? { x: 20, y: -160 }
-            : index === 2 ? { x: 20, y: 80 }
-              : { x: -1_200 + ((index - 3) % 8) * 320, y: -900 + Math.floor((index - 3) / 8) * 220 };
-        state = placeBuilding(state, "storage_mk1", {
-          ...position,
-        });
-      }
-      const sourceStorage = state.entities.find((entity) => entity.buildingId === "storage_mk1");
-      if (!sourceStorage) throw new Error("storage fixture placement failed");
-      sourceStorage.storedItemId = "iron_ore";
-      sourceStorage.outputs.iron_ore = 100;
-    } else {
-      state.construction.arc_smelter = 12;
-      state = placeBuilding(state, "arc_smelter", { x: -80, y: -100 });
-      state = placeBuilding(state, "arc_smelter", { x: 80, y: -100 });
+  let state = createInitialState(27_101, false);
+  state.paused = true;
+  state.construction.conveyor_belt_mk1 = 12;
+  if (fixture === "storage-network") {
+    const storageCount = Math.max(3, storageTargetCount + 1);
+    state.construction.storage_mk1 = storageCount;
+    state.construction.conveyor_belt_mk1 = Math.max(12, storageTargetCount + 2);
+    for (let index = 0; index < storageCount; index += 1) {
+      const position = index === 0 ? { x: -260, y: -80 }
+        : index === 1 ? { x: 20, y: -160 }
+          : index === 2 ? { x: 20, y: 80 }
+            : { x: -1_200 + ((index - 3) % 8) * 320, y: -900 + Math.floor((index - 3) / 8) * 220 };
+      state = placeBuilding(state, "storage_mk1", position);
     }
-    const raw = JSON.stringify({ savedAt: Date.now(), state });
+    const sourceStorage = state.entities.find((entity) => entity.buildingId === "storage_mk1");
+    if (!sourceStorage) throw new Error("storage fixture placement failed");
+    sourceStorage.storedItemId = "iron_ore";
+    sourceStorage.outputs.iron_ore = 100;
+  } else {
+    state.construction.arc_smelter = 12;
+    state = placeBuilding(state, "arc_smelter", { x: -80, y: -100 });
+    state = placeBuilding(state, "arc_smelter", { x: 80, y: -100 });
+  }
+  const raw = JSON.stringify({ savedAt: Date.now(), state });
+  await openSameOriginStorageHarness(page);
+  await page.evaluate(async (saveRaw) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("dsp-idle-network.local-saves");
       request.onupgradeneeded = () => {
@@ -56,16 +54,16 @@ async function seedFactory(page: Page, fixture: "smelters" | "storage-network" =
       const transaction = database.transaction("records", "readwrite");
       transaction.objectStore("records").put({
         key: "dsp-idle-network.save.v1",
-        value: raw,
+        value: saveRaw,
         updatedAt: Date.now(),
-        bytes: new TextEncoder().encode(raw).byteLength,
+        bytes: new TextEncoder().encode(saveRaw).byteLength,
       });
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);
     });
     database.close();
-  }, [fixture, storageTargetCount]);
+  }, raw);
   await page.goto("/");
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
 }

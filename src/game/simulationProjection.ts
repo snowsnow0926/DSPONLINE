@@ -371,6 +371,38 @@ function mergeRecords<T extends { id: string }>(
   return [...records.values()];
 }
 
+function projectionValueEquals(current: unknown, projected: unknown): boolean {
+  if (Object.is(current, projected)) return true;
+  if (!current || !projected || typeof current !== "object" || typeof projected !== "object") return false;
+  if (Array.isArray(current) !== Array.isArray(projected)) return false;
+  if (Array.isArray(current) && Array.isArray(projected)) {
+    return current.length === projected.length && current.every((value, index) =>
+      projectionValueEquals(value, projected[index]));
+  }
+  const currentRecord = current as Record<string, unknown>;
+  const projectedRecord = projected as Record<string, unknown>;
+  const currentKeys = Object.keys(currentRecord);
+  const projectedKeys = Object.keys(projectedRecord);
+  return currentKeys.length === projectedKeys.length && currentKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(projectedRecord, key) &&
+    projectionValueEquals(currentRecord[key], projectedRecord[key]));
+}
+
+function projectionAlreadyApplied(state: GameState, projection: SimulationProjection): boolean {
+  if (projection.requiresFullSnapshot || projection.activePlanetId !== state.activePlanetId ||
+    !Object.is(projection.elapsedSeconds, state.elapsedSeconds) ||
+    projection.changedEntityIds.length > 0 || projection.changedBeltIds.length > 0 ||
+    projection.changedEntities.length > 0 || projection.changedBelts.length > 0 ||
+    Object.keys(projection.entityColumns).length > 0 || Object.keys(projection.beltColumns).length > 0 ||
+    Object.keys(projection.entityRemovedFields).length > 0 || Object.keys(projection.beltRemovedFields).length > 0 ||
+    projection.removedEntityIds.length > 0 || projection.removedBeltIds.length > 0) {
+    return false;
+  }
+  const stateRecord = state as unknown as Record<string, unknown>;
+  return Object.entries(projection.topLevel).every(([key, value]) =>
+    Object.prototype.hasOwnProperty.call(stateRecord, key) && projectionValueEquals(stateRecord[key], value));
+}
+
 function mergeIds(previous: readonly string[], next: readonly string[], removedIds: readonly string[] = []): string[] {
   const ids = new Set(previous);
   for (const id of removedIds) ids.delete(id);
@@ -525,6 +557,11 @@ export function applySimulationProjectionToState(
   const index = previousIndex && previousIndex.entities === state.entities && previousIndex.belts === state.belts
     ? previousIndex
     : createSimulationProjectionStateIndex(state);
+  // UI commands are applied optimistically before their ordered Worker ack.
+  // A zero-time ack can therefore contain the same paused/settings leaves the
+  // UI already owns. Preserve the GameState identity in that case so React and
+  // the canvas projection do not commit the same large view a second time.
+  if (projectionAlreadyApplied(state, projection)) return { state, index };
   // On a planet switch, removed ids belong to the formerly active planet and
   // must remain in the global UI mirror. The new active planet arrives as a
   // complete changed-record snapshot.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState } from "./engine";
-import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection } from "./simulationProjection";
+import { createInitialState, setPaused } from "./engine";
+import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, createSimulationProjectionStateIndex } from "./simulationProjection";
 
 describe("simulation projection", () => {
   it("reports only changed runtime ids while preserving aggregate counts", () => {
@@ -59,6 +59,34 @@ describe("simulation projection", () => {
     current.totalProduced.iron_ore = 77;
     const projection = createSimulationProjection(baseline, current);
     expect(projection.topLevel.totalProduced?.iron_ore).toBe(77);
+  });
+
+  it("preserves the optimistic UI identity when a zero-time Worker ack repeats the same pause state", () => {
+    const running = createInitialState();
+    const paused = setPaused(running, true);
+    const index = createSimulationProjectionStateIndex(paused);
+    const workerProjection = structuredClone(createSimulationProjection(running, paused, { compact: true }));
+
+    const applied = applySimulationProjectionToState(paused, workerProjection, index);
+
+    expect(workerProjection.changedEntityIds).toEqual([]);
+    expect(workerProjection.changedBeltIds).toEqual([]);
+    expect(workerProjection.topLevel.paused).toBe(true);
+    expect(applied.state).toBe(paused);
+    expect(applied.index).toBe(index);
+  });
+
+  it("preserves identity for structurally equal projected command objects but applies real changes", () => {
+    const state = createInitialState();
+    const echoed = createSimulationProjection(state, state);
+    echoed.topLevel = { settings: structuredClone(state.settings) };
+    expect(applySimulationProjectionToState(state, echoed).state).toBe(state);
+
+    const changed = structuredClone(echoed);
+    changed.topLevel.settings = { ...state.settings, reducedMotion: !state.settings.reducedMotion };
+    const applied = applySimulationProjectionToState(state, changed).state;
+    expect(applied).not.toBe(state);
+    expect(applied.settings.reducedMotion).toBe(!state.settings.reducedMotion);
   });
 
   it("round-trips the compact columnar encoding without full changed records", () => {

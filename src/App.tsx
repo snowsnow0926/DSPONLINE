@@ -339,7 +339,7 @@ import {
 import { applySimulationStateDelta, readExperimentalSimulationDeltaMode } from "./game/simulationDelta";
 import {
   applySimulationCommandPatch,
-  createSimulationCommandPatch,
+  createSimulationCommandPatch as createSimulationCommandPatchRaw,
   serializeSimulationStateForTransfer,
   validateSimulationStateIdentity,
   validateSimulationStateCheckpoint,
@@ -453,6 +453,27 @@ import {
 import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
+
+function createSimulationCommandPatch(
+  previous: GameState,
+  current: GameState,
+  baseRevision: number,
+): SimulationCommandPatch | null {
+  return measureRuntimeTransitionPhase("runtimeworld-command-patch", () =>
+    createSimulationCommandPatchRaw(previous, current, baseRevision), {
+    entityArrayChanged: previous.entities !== current.entities,
+    beltArrayChanged: previous.belts !== current.belts,
+  });
+}
+
+function recordRuntimeWorldSaveStages(kind: string, result: SaveGameResult): void {
+  if (!runtimeTransitionDiagnosticsEnabled() || !result.timings) return;
+  const observedAt = performance.now();
+  const serializeMs = Math.max(0, result.timings.serializeMs ?? 0);
+  const idbWriteMs = Math.max(0, result.timings.primaryWriteMs ?? 0);
+  recordRuntimeTransitionPhase("runtimeworld-save-worker", observedAt - serializeMs, serializeMs, { kind });
+  recordRuntimeTransitionPhase("runtimeworld-idb-write", observedAt - idbWriteMs, idbWriteMs, { kind });
+}
 
 const CanvasFlowCommitBoundary = memo(function CanvasFlowCommitBoundary({ children }: {
   children: ReactNode;
@@ -2364,7 +2385,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationSubmissionRef.current = submission;
       try {
         simulationRequestIdRef.current = request.id;
-        simulationWorkerRef.current?.postMessage(request);
+        measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+          simulationWorkerRef.current?.postMessage(request), { kind: request.kind ?? "advance" });
         return true;
       } catch (error) {
         simulationSubmissionRef.current = null;
@@ -2455,7 +2477,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!worker || simulationWorkerDisabledRef.current) throw new Error("模拟 Worker 在 durable stage 后不可用");
       simulationRequestIdRef.current = request.id;
       simulationSubmissionRef.current = submission;
-      worker.postMessage(request);
+      measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+        worker.postMessage(request), { kind: request.kind ?? "advance", durable: true });
     }).catch((error) => {
       durableRecoveryStageInFlightRef.current = false;
       durableRecoveryStageRequestRef.current = null;
@@ -2485,7 +2508,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationRequestIdRef.current = deferred.request.id;
       simulationSubmissionRef.current = deferred.submission;
       try {
-        worker.postMessage(deferred.request);
+        measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+          worker.postMessage(deferred.request), { kind: deferred.request.kind ?? "advance", deferred: true });
       } catch (error) {
         if (simulationSubmissionRef.current === deferred.submission) {
           simulationSubmissionRef.current = null;
@@ -2600,7 +2624,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     pending.state = state;
     pending.command = command;
     try {
-      worker.postMessage(request);
+      measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+        worker.postMessage(request), { kind: request.kind ?? "checkpoint" });
     } catch (error) {
       simulationCheckpointRequestRef.current = null;
       simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
@@ -2741,10 +2766,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         },
       };
       try {
-        worker.postMessage(request, [
+        measureRuntimeTransitionPhase("runtimeworld-post-message", () => worker.postMessage(request, [
           ...(stateTransfer instanceof Object && "buffer" in stateTransfer ? [stateTransfer.buffer] : []),
           ...(projectionAckChannel ? [projectionAckChannel.port2] : []),
-        ]);
+        ]), { kind: request.kind ?? "replay-durable", authorityReplacement: true });
       } catch (error) {
         projectionAckChannel?.port1.close();
         projectionAckChannel?.port2.close();
@@ -2810,7 +2835,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       approximate: operation?.approximate ?? false,
     };
     try {
-      worker.postMessage(request);
+      measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+        worker.postMessage(request), { kind: request.kind ?? "advance", recovery: true });
     } catch {
       simulationSubmissionRef.current = null;
       simulationRecoveryRef.current = null;
@@ -2980,6 +3006,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在验证 T1 主存档并滚动 recovery…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
       let result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      recordRuntimeWorldSaveStages(kind, result);
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       if (!result.success) {
         setSaveFailure(result);
@@ -3012,6 +3039,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           saveState = finalBarrierState;
           checkpointRevision = finalCheckpointRevision;
           const finalResult = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+          recordRuntimeWorldSaveStages(`${kind}-final`, finalResult);
           if (!finalResult.success) throw new Error(finalResult.message);
           result = finalResult;
           primaryWriteVerified = true;
@@ -3487,6 +3515,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在序列化、写入并逐字复核存档…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
       const result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      recordRuntimeWorldSaveStages(kind, result);
       const durationMs = performance.now() - startedAt;
       if (monitorSave) performanceMonitor.recordSave({ durationMs, bytes: result.bytes ?? 0, stages: result.timings ?? null });
       recordRuntimeTransitionPhase("save-serialize-idb-readback", startedAt, durationMs, {
@@ -5648,7 +5677,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         approximate: false,
       };
       simulationSubmissionRef.current = installedSubmission;
-      worker.postMessage(request, [stateTransfer.buffer]);
+      measureRuntimeTransitionPhase("runtimeworld-post-message", () =>
+        worker.postMessage(request, [stateTransfer.buffer]), { kind: request.kind ?? "advance", initialize: true });
     } catch {
       if (installedSubmission && simulationSubmissionRef.current === installedSubmission) {
         simulationSubmissionRef.current = null;

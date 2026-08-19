@@ -244,16 +244,23 @@ function resolveLocalSaveWriterId(): string {
     const navigationType = (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type;
     const existing = window.sessionStorage.getItem(LOCAL_SAVE_WRITER_SESSION_KEY);
     const continuedByPreviousDocument = consumeSameTabWriterContinuation(existing);
-    if (validLocalSaveWriterId(existing) && (navigationType === "reload" || navigationType === "back_forward" || continuedByPreviousDocument)) return existing;
-    const created = createLocalSaveWriterId();
-    window.sessionStorage.setItem(LOCAL_SAVE_WRITER_SESSION_KEY, created);
-    return created;
+    // Firefox does not reliably classify Playwright-driven reloads as reloads,
+    // while a newly opened tab may clone sessionStorage. Preserve the candidate
+    // here when Web Locks can prove browsing-context ownership asynchronously;
+    // finalizeLocalSaveWriterIdentity resolves clones before storage recovery.
+    const canProveIdentity = typeof navigator.locks?.request === "function";
+    const resolved = validLocalSaveWriterId(existing) &&
+      (canProveIdentity || navigationType === "reload" || navigationType === "back_forward" || continuedByPreviousDocument)
+      ? existing
+      : createLocalSaveWriterId();
+    window.sessionStorage.setItem(LOCAL_SAVE_WRITER_SESSION_KEY, resolved);
+    return resolved;
   } catch {
     return createLocalSaveWriterId();
   }
 }
 
-const writerId = resolveLocalSaveWriterId();
+let writerId = resolveLocalSaveWriterId();
 let writerStatus: LocalSaveWriterStatus = {
   role: "initializing",
   writerId,
@@ -272,6 +279,47 @@ let legacyCatalogIndexQueue: string[] = [];
 let legacyCatalogIndexScheduled = false;
 const RAW_CACHE_LIMIT = 2;
 let synchronousFallbackInitialized = false;
+
+function holdLocalSaveWriterIdentityLock(candidateWriterId: string): Promise<boolean> {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (!locks?.request) return Promise.resolve(true);
+  const lockName = `${LOCAL_SAVE_WRITER_LOCK}.identity.${candidateWriterId}`;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (acquired: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(acquired);
+    };
+    void locks.request(lockName, { mode: "exclusive", ifAvailable: true }, async (lock) => {
+      settle(Boolean(lock));
+      if (!lock) return;
+      // The unresolved callback deliberately holds the identity lock for this
+      // document's lifetime. Navigation releases it; a concurrently opened
+      // context with cloned sessionStorage cannot claim the same writer chain.
+      await new Promise<void>(() => undefined);
+    }).catch(() => settle(false));
+  });
+}
+
+async function finalizeLocalSaveWriterIdentity(): Promise<void> {
+  if (typeof window === "undefined" || typeof navigator.locks?.request !== "function") return;
+  if (await holdLocalSaveWriterIdentityLock(writerId)) return;
+
+  // Contention proves that this page is a cloned/new browsing context, not a
+  // continuation of the document that owns the durable writer chain. A Web
+  // Locks failure follows the same conservative path: use a fresh UUID so it
+  // can never authorize another page's emergency mirror.
+  writerId = createLocalSaveWriterId();
+  try {
+    window.sessionStorage.setItem(LOCAL_SAVE_WRITER_SESSION_KEY, writerId);
+    window.sessionStorage.removeItem(LOCAL_SAVE_WRITER_CONTINUATION_KEY);
+  } catch {
+    // The in-memory UUID remains unique when sessionStorage is unavailable.
+  }
+  writerStatus = { ...writerStatus, writerId };
+  await holdLocalSaveWriterIdentityLock(writerId);
+}
 
 function markSameTabWriterContinuation(): void {
   if (typeof window === "undefined") return;
@@ -1446,6 +1494,7 @@ export function initializeLocalSaveStore(): Promise<void> {
   if (initialization) return initialization;
   if (synchronousFallbackInitialized) return Promise.resolve();
   initialization = (async () => {
+    await finalizeLocalSaveWriterIdentity();
     if (typeof window === "undefined" || !window.indexedDB) {
       initializeFallback();
       return;

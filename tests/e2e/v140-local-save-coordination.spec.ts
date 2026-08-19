@@ -395,13 +395,25 @@ test("a reload applies a verified emergency mirror only from its own durable wri
       checksum: identity.checksum,
       createdAt: Date.now(),
     }));
-    return candidate;
+    return {
+      candidate,
+      writerId: status.writerId,
+      sessionWriterId: sessionStorage.getItem("dsp-idle-network.local-save-coordination.v1.tab-id"),
+    };
   });
 
   await page.reload();
   await expect(page.locator(".start-menu")).toBeVisible();
+  const reloadedIdentity = await page.evaluate(async () => ({
+    writerId: (await import("/src/game/localSaveStore.ts")).getLocalSaveWriterStatus().writerId,
+    sessionWriterId: sessionStorage.getItem("dsp-idle-network.local-save-coordination.v1.tab-id"),
+  }));
+  expect(reloadedIdentity).toEqual({
+    writerId: expected.writerId,
+    sessionWriterId: expected.writerId,
+  });
   await expect(page.locator(".local-save-writer-banner--conflict")).toHaveCount(0);
-  expect(await readRecord(page, SAVE_KEY)).toBe(expected);
+  expect(await readRecord(page, SAVE_KEY)).toBe(expected.candidate);
   expect(await page.evaluate(() => localStorage.getItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.payload"))).toBeNull();
 });
 

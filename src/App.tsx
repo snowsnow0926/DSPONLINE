@@ -1440,6 +1440,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [galacticActivityStatus, setGalacticActivityStatus] = useState<GalacticActivityPublicStatus | null>(null);
   const [, setHistoryRevision] = useState(0);
   const [nodes, setNodes, onNodesChange] = useNodesState<FactoryFlowNode>([]);
+  const canvasNodesRef = useRef(nodes);
+  canvasNodesRef.current = nodes;
   useEffect(() => installRuntimeLongTaskDiagnostics(), []);
   const panelGame = useThrottledRuntimeShellGame(game,
     operationsOpen || mobilePanel !== null ||
@@ -8520,7 +8522,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const derivationStartedAt = performance.now();
       canvasNodeCommitStartedAtRef.current = derivationStartedAt;
       const setNodesStartedAt = derivationStartedAt;
-      setNodes((current) => {
+      const current = canvasNodesRef.current;
         const nodeMapStartedAt = performance.now();
         const existing = new Map(current.map((node) => [node.id, node]));
         let stableNodeCount = 0;
@@ -8916,8 +8918,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           previousNodes: current.length,
           nextNodes: next.length,
         });
-        return next.length === current.length && changedNodeCount === 0 ? current : next;
-      });
+        const committed = next.length === current.length && changedNodeCount === 0 ? current : next;
+        // Do not enqueue a functional React Flow update for a no-op refresh.
+        // The updater closure captured the entire immutable GameState and all
+        // node-derivation maps; interrupted renders consequently retained one
+        // multi-megabyte graph per visual clock tick. A direct publication is
+        // safe here because this animation-frame callback is the sole node
+        // derivation writer and drag-time refreshes are explicitly deferred.
+        if (committed !== current) {
+          canvasNodesRef.current = committed;
+          setNodes(committed);
+        }
       recordRuntimeTransitionPhase("reactflow-setNodes-dispatch", setNodesStartedAt, performance.now() - setNodesStartedAt, {
         entities: activePlanetEntities.length,
       });

@@ -93,6 +93,7 @@ import {
   craftConstruction,
   craftConstructionWithUpstream,
   createSimulationPlanetPhaseLookup,
+  refreshSimulationPlanetPhaseLookup,
   createSimulationProfiler,
   createBlueprint,
   createStandardDysonLayer,
@@ -8448,14 +8449,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasRuntimeDetailsDeferred = canvasFlowStaticPresentationCandidate && canvasVisibleNodeCount === 0 &&
     reactFlowBelts.length === 0 && !placement && !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
+  const canvasDisplayLookupRef = useRef<ReturnType<typeof createSimulationPlanetPhaseLookup> | undefined>(undefined);
   const canvasDisplayLookup = useMemo(
     () => automaticDenseCanvasMode && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
-      createSimulationPlanetPhaseLookup(canvasGame), {
+      refreshSimulationPlanetPhaseLookup(canvasGame, canvasDisplayLookupRef.current), {
         entities: canvasGame.entities.length,
         belts: canvasGame.belts.length,
       }) : undefined,
     [automaticDenseCanvasMode, canvasGame, canvasRuntimeDetailsDeferred],
   );
+  if (canvasDisplayLookup) canvasDisplayLookupRef.current = canvasDisplayLookup;
   const activateCanvasStack = useCallback((entityId: string, memberIds: readonly string[], mode: "select" | "cycle") => {
     const currentIndex = Math.max(0, memberIds.indexOf(entityId));
     const targetId = mode === "cycle" ? memberIds[(currentIndex + 1) % memberIds.length] ?? entityId : entityId;

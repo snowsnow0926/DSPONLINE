@@ -5304,6 +5304,23 @@ export function createSimulationPlanetPhaseLookup(state: GameState, profiler?: S
   return lookup;
 }
 
+/**
+ * Rehydrates a read-only planet-phase index without replacing its root object.
+ * UI renderers can keep this object in a ref: interrupted React trees then all
+ * point at one bounded lookup instead of retaining one full logistics index
+ * for every runtime publication.
+ */
+export function refreshSimulationPlanetPhaseLookup(
+  state: GameState,
+  lookup?: SimulationLookupContext,
+  profiler?: SimulationProfiler,
+): SimulationLookupContext {
+  const next = createSimulationPlanetPhaseLookup(state, profiler);
+  if (!lookup) return next;
+  Object.assign(lookup, next);
+  return lookup;
+}
+
 function refreshRouteEnvironment(state: GameState, lookup: SimulationLookupContext): void {
   const nextKey = routeEnvironmentKey(state);
   if (lookup.routeEnvironmentKey === nextKey) return;

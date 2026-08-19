@@ -387,6 +387,7 @@ import { useLongPress } from "./hooks/useLongPress";
 import { useLowEndMobile } from "./hooks/useLowEndMobile";
 import { useResolvedTheme } from "./hooks/useResolvedTheme";
 import { useObservedBeltFlowGame } from "./hooks/useObservedBeltFlowGame";
+import { useLatestTransitionPublisher } from "./hooks/useLatestTransitionPublisher";
 import { useMobileNavigation, type MobileWorkspaceId } from "./hooks/useMobileNavigation";
 import { useMobileUiPreference } from "./hooks/useMobileUiPreference";
 import { useProductionRefreshPreference } from "./hooks/useProductionRefreshPreference";
@@ -626,6 +627,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
   const latestRef = useRef(game);
   const timerRef = useRef<number | null>(null);
   latestRef.current = game;
+  const publishLatestSnapshot = useLatestTransitionPublisher(snapshot, latestRef, setSnapshot);
   const cargoChanged = snapshot.cargo?.itemId !== game.cargo?.itemId ||
     snapshot.cargo?.amount !== game.cargo?.amount ||
     snapshot.cargo?.origin?.kind !== game.cargo?.origin?.kind ||
@@ -647,9 +649,9 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
       // to reconcile. It is routine telemetry rather than an interaction
       // boundary, so let React yield between panel fibers instead of turning
       // the whole trailing refresh into one main-thread task.
-      startTransition(() => setSnapshot(latestRef.current));
+      publishLatestSnapshot();
     }, trailingDelayMs);
-  }, [game, publishImmediately, trailingDelayMs]);
+  }, [game, publishImmediately, publishLatestSnapshot, trailingDelayMs]);
 
   useEffect(() => () => {
     if (timerRef.current !== null) {
@@ -1497,6 +1499,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
   const pendingRuntimeGamePublicationRef = useRef<GameState | null>(null);
   const pendingRuntimeGamePublicationTimerRef = useRef<number | null>(null);
+  const publishLatestRuntimeGame = useLatestTransitionPublisher(game, gameRef, setGame);
   const publishRuntimeGame = useCallback((next: GameState, immediate = false) => {
     gameRef.current = next;
     latestCanvasGameRef.current = next;
@@ -1511,7 +1514,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // Steady simulation is already authoritative in gameRef. Publish its
           // read-only React view at transition priority so input and animation
           // frames can interrupt a large-tree reconciliation.
-          startTransition(() => setGame(gameRef.current));
+          publishLatestRuntimeGame();
         }, isLargeRuntimeState(next) ? 1_500 : 750);
       }
       return;
@@ -1522,7 +1525,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     pendingRuntimeGamePublicationRef.current = null;
     setGame(next);
-  }, []);
+  }, [publishLatestRuntimeGame]);
   useEffect(() => () => {
     if (pendingRuntimeGamePublicationTimerRef.current !== null) {
       window.clearTimeout(pendingRuntimeGamePublicationTimerRef.current);
@@ -1540,6 +1543,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const returnToMenuSaveInFlightRef = useRef(false);
   const lastCanvasPublishedGameRef = useRef(game);
   const canvasRenderSnapshotRef = useRef(canvasRenderSnapshot);
+  const publishLatestCanvasSnapshot = useLatestTransitionPublisher(
+    canvasRenderSnapshot,
+    canvasRenderSnapshotRef,
+    setCanvasRenderSnapshot,
+  );
   const deferNextCanvasSnapshotPublicationRef = useRef(false);
   const pendingCanvasProjectionRef = useRef<SimulationProjection | null>(null);
   const canvasTopologyRef = useRef<FactoryCanvasTopology | null>(null);
@@ -2127,7 +2135,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     lastCanvasPublishedGameRef.current = state;
     canvasRenderSnapshotRef.current = result.snapshot;
     const publishStartedAt = performance.now();
-    if (deferred) startTransition(() => setCanvasRenderSnapshot(result.snapshot));
+    if (deferred) publishLatestCanvasSnapshot();
     else setCanvasRenderSnapshot(result.snapshot);
     recordRuntimeTransitionPhase("canvas-snapshot-set-state", publishStartedAt, performance.now() - publishStartedAt, {
       changedEntities: result.changedEntityCount,
@@ -2145,7 +2153,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         runtimeRevision: result.snapshot.runtimeRevision,
       });
     }
-  }, [endgameExtremeMode, performanceMonitor.isActive, performanceMonitor.recordCanvas, productionRefreshIntervalMs, projectionFeatureActive]);
+  }, [endgameExtremeMode, performanceMonitor.isActive, performanceMonitor.recordCanvas, productionRefreshIntervalMs, projectionFeatureActive, publishLatestCanvasSnapshot]);
 
   useEffect(() => {
     // `publishRuntimeGame()` advances the imperative authority before React

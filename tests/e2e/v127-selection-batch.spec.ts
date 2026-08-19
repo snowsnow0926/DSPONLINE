@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
+import { openSameOriginStorageHarness } from "./same-origin-harness";
 
 test.use({ hasTouch: true });
 
@@ -14,7 +15,7 @@ test.beforeEach(async ({ page }) => {
 async function seedFactory(page: Page, fixture: "smelters" | "storage-network" = "smelters", storageTargetCount = 2) {
   // The app migrates the primary save to IndexedDB before mounting. Seed the
   // fixture before boot so the same path is exercised as a real fresh browser.
-  await page.goto("/version.json");
+  await openSameOriginStorageHarness(page);
   await page.evaluate(async ([selectedFixture, targetCount]) => {
     const { createInitialState, placeBuilding } = await import("/src/game/engine.ts");
     let state = createInitialState(27_101, false);

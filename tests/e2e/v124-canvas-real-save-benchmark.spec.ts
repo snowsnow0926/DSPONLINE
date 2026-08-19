@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { openSameOriginStorageHarness } from "./same-origin-harness";
 
 const FIXTURE = process.env.DSP_CANVAS_FIXTURE;
 const RUN_BENCHMARK = process.env.DSP_RUN_CANVAS_BENCHMARK === "1";
@@ -207,7 +208,7 @@ async function runStage(browser: Browser, source: SourceState, planetId: string,
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
-    await page.goto("/version.json");
+    await openSameOriginStorageHarness(page);
     await page.evaluate(async ({ saveRaw }) => {
       const database = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("dsp-idle-network.local-saves");
@@ -288,7 +289,7 @@ async function runStagesOnOnePage(browser: Browser, source: SourceState, planetI
   page.on("pageerror", (error) => errors.push(error.message));
   try {
     console.log("CANVAS_STEP", "seed-indexeddb");
-    await page.goto("/version.json");
+    await openSameOriginStorageHarness(page);
     await page.evaluate(async ({ saveRaw }) => {
       const database = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("dsp-idle-network.local-saves");
@@ -377,4 +378,3 @@ test("profiles staged canvas optimizations on an explicitly supplied local real 
     results,
   }));
 });
-

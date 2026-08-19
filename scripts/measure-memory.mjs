@@ -331,14 +331,19 @@ try {
     const [performanceResult, heap, dom, processes, application, targets] = await Promise.all([
       cdpCommand("Performance.getMetrics"), cdpCommand("Runtime.getHeapUsage"), cdpCommand("Memory.getDOMCounters"),
       browserProcessMemory(profileDirectory),
-      withTimeout(page.evaluate(() => ({
-        entityCount: document.querySelectorAll(".react-flow__node").length,
-        edgeCount: document.querySelectorAll(".react-flow__edge").length,
-        workerActive: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
-        paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
-        rawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
-        visibility: document.visibilityState,
-      })), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, visibility: "unknown" })),
+      withTimeout(page.evaluate(() => {
+        const events = window.__DSP_RUNTIME_TRANSITIONS__?.events ?? [];
+        return {
+          entityCount: document.querySelectorAll(".react-flow__node").length,
+          edgeCount: document.querySelectorAll(".react-flow__edge").length,
+          workerActive: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
+          paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
+          rawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
+          autosaveCompleteCount: events.filter((event) => event.phase === "persistence-phase" && event.detail?.kind === "autosave" && event.detail?.phase === "complete").length,
+          persistenceEventCount: events.filter((event) => event.phase === "persistence-phase").length,
+          visibility: document.visibilityState,
+        };
+      }), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, autosaveCompleteCount: -1, persistenceEventCount: -1, visibility: "unknown" })),
       targetHeapUsage(debuggingPort),
     ]);
     application.workerCount = page.workers().length;
@@ -364,7 +369,7 @@ try {
     };
     samples.push(entry);
     await writeProgressReport("running");
-    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, processTotals: entry.processTotals })}\n`);
+    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveCompleteCount: entry.application.autosaveCompleteCount, processTotals: entry.processTotals })}\n`);
     return entry;
   };
 

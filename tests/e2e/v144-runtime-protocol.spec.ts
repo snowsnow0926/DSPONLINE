@@ -609,7 +609,17 @@ test("game runtime replays acknowledged slices after a Worker crash and remains 
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.0");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
-    const tracker = { simulationWorkers: 0, steadyAdvances: 0, injectedCrashes: 0 };
+    const tracker = {
+      simulationWorkers: 0,
+      steadyAdvances: 0,
+      injectedCrashes: 0,
+      crashedWorkerIndex: 0,
+      acknowledgedAdvances: [] as Array<{ workerIndex: number; simulationSeconds: number }>,
+      recoveryReplaySeconds: [] as number[],
+      recoveryCheckpointResponses: 0,
+      recoveryRequests: [] as Array<{ workerIndex: number; id: number; kind: string; simulationSeconds: number; stateTransfer: boolean }>,
+      recoveryResponses: [] as Array<{ workerIndex: number; id: number; stateRevision: number | null; checkpoint: boolean; needsState: boolean; needsResync: boolean; needsRegistry: boolean }>,
+    };
     (window as typeof window & { __v144CrashTracker?: typeof tracker }).__v144CrashTracker = tracker;
     const NativeWorker = window.Worker;
     const WrappedWorker = new Proxy(NativeWorker, {
@@ -618,15 +628,63 @@ test("game runtime replays acknowledged slices after a Worker crash and remains 
         const isSimulation = String(args[0]).includes("simulation.worker") && (args[1] as WorkerOptions | undefined)?.name === "factory-simulation";
         if (!isSimulation) return worker;
         tracker.simulationWorkers += 1;
+        const workerIndex = tracker.simulationWorkers;
+        const requests = new Map<number, { kind: string; simulationSeconds: number; steady: boolean }>();
+        worker.addEventListener("message", (event: MessageEvent<Record<string, unknown>>) => {
+          const responseId = Number(event.data?.id);
+          const request = requests.get(responseId);
+          if (!request) return;
+          if (workerIndex > tracker.crashedWorkerIndex && tracker.crashedWorkerIndex > 0) {
+            tracker.recoveryResponses.push({
+              workerIndex,
+              id: responseId,
+              stateRevision: typeof event.data.stateRevision === "number" ? event.data.stateRevision : null,
+              checkpoint: Boolean(event.data.checkpoint),
+              needsState: event.data.needsState === true,
+              needsResync: event.data.needsResync === true,
+              needsRegistry: event.data.needsRegistry === true,
+            });
+          }
+          const accepted = typeof event.data.stateRevision === "number" &&
+            event.data.needsState !== true && event.data.needsResync !== true && event.data.needsRegistry !== true;
+          if (request.steady && accepted) {
+            tracker.acknowledgedAdvances.push({ workerIndex, simulationSeconds: request.simulationSeconds });
+          }
+          if (workerIndex > tracker.crashedWorkerIndex && tracker.crashedWorkerIndex > 0 &&
+            request.kind === "checkpoint" && accepted && event.data.checkpoint) {
+            tracker.recoveryCheckpointResponses += 1;
+          }
+        });
         const nativePostMessage = worker.postMessage.bind(worker);
         worker.postMessage = ((message: Record<string, unknown>, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
           const steadyAdvance = message.kind === "advance" && !message.stateTransfer && Number(message.simulationSeconds) > 0;
+          const requestId = Number(message.id);
+          const requestKind = typeof message.kind === "string" ? message.kind : "advance";
+          const simulationSeconds = Number(message.simulationSeconds);
+          requests.set(requestId, { kind: requestKind, simulationSeconds, steady: steadyAdvance });
+          if (workerIndex > tracker.crashedWorkerIndex && tracker.crashedWorkerIndex > 0) {
+            tracker.recoveryRequests.push({
+              workerIndex,
+              id: requestId,
+              kind: requestKind,
+              simulationSeconds,
+              stateTransfer: Boolean(message.stateTransfer),
+            });
+          }
+          if (workerIndex > tracker.crashedWorkerIndex && tracker.crashedWorkerIndex > 0 && tracker.recoveryCheckpointResponses === 0 && steadyAdvance) {
+            tracker.recoveryReplaySeconds.push(simulationSeconds);
+          }
           if (tracker.injectedCrashes === 0 && steadyAdvance) {
             tracker.steadyAdvances += 1;
             if (tracker.steadyAdvances === 3) {
               tracker.injectedCrashes += 1;
+              tracker.crashedWorkerIndex = workerIndex;
               window.setTimeout(() => {
-                worker.terminate();
+                // Dispatch the failure before product cleanup. WebKit clears a
+                // terminated Worker's event handlers immediately, so killing
+                // the synthetic Worker first tests browser cleanup order rather
+                // than the application's crash-recovery path. The product
+                // error handler owns termination after observing the crash.
                 worker.dispatchEvent(new ErrorEvent("error", { message: "injected v144 runtime crash" }));
               }, 0);
               return;
@@ -648,7 +706,41 @@ test("game runtime replays acknowledged slices after a Worker crash and remains 
   await expect.poll(() => page.evaluate(() => (
     window as typeof window & { __v144CrashTracker?: { injectedCrashes: number } }
   ).__v144CrashTracker?.injectedCrashes ?? 0), { timeout: 20_000 }).toBe(1);
-  await expect(page.locator(".game-notice")).toContainText("已从精确检查点恢复", { timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => {
+    const tracker = (window as typeof window & {
+      __v144CrashTracker?: { simulationWorkers: number; crashedWorkerIndex: number };
+    }).__v144CrashTracker;
+    return (tracker?.simulationWorkers ?? 0) - (tracker?.crashedWorkerIndex ?? 0);
+  }), { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => page.evaluate(() => {
+    const tracker = (window as typeof window & {
+      __v144CrashTracker?: {
+        simulationWorkers: number;
+        crashedWorkerIndex: number;
+        recoveryCheckpointResponses: number;
+        recoveryRequests: unknown[];
+        recoveryResponses: unknown[];
+      };
+    }).__v144CrashTracker!;
+    return { complete: tracker.recoveryCheckpointResponses >= 1, ...tracker };
+  }), { timeout: 20_000 }).toMatchObject({ complete: true });
+  const replay = await page.evaluate(() => {
+    const tracker = (window as typeof window & {
+      __v144CrashTracker?: {
+        crashedWorkerIndex: number;
+        acknowledgedAdvances: Array<{ workerIndex: number; simulationSeconds: number }>;
+        recoveryReplaySeconds: number[];
+      };
+    }).__v144CrashTracker!;
+    return {
+      acknowledged: tracker.acknowledgedAdvances
+        .filter((entry) => entry.workerIndex === tracker.crashedWorkerIndex)
+        .map((entry) => entry.simulationSeconds),
+      recovered: tracker.recoveryReplaySeconds,
+    };
+  });
+  expect(replay.acknowledged.length).toBeGreaterThanOrEqual(2);
+  expect(replay.recovered).toEqual(replay.acknowledged);
   await expect(shell).toHaveAttribute("data-simulation-worker", "active");
 
   await page.getByLabel("暂停模拟").click();

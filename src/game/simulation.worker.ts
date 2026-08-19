@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { applyContentPackRuntimeSnapshot, type ContentPackRuntimeSnapshot } from "./contentPacks";
-import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";
+import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, advancePersistentSimulationRuntimeResumable, applyPersistentSimulationRuntimeCommand, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";
 import { BrowserMulticoreExecutor, planMulticoreSimulation, type MulticoreSimulationOptions } from "./multicoreSimulation";
 import type { GameState } from "./types";
 import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, type SimulationProjection } from "./simulationProjection";
@@ -19,6 +19,7 @@ import {
   type SimulationStateBlobTransfer,
   type SimulationStateTransfer,
 } from "./simulationRuntimeProtocol";
+import { commitRuntimeWorldProjection, type RuntimeWorldProjectionDiagnostics } from "./runtimeWorld";
 import {
   replaySimulationRuntimeDurableJournal,
   SimulationRuntimeDurableReplayError,
@@ -81,6 +82,10 @@ export interface SimulationWorkerResponse {
   /** JSON-equivalent payload size, sampled only while the diagnostics panel is active. */
   transferBytes?: number;
   profiler?: SimulationProfiler;
+  /** M0 process-temperature label; never mixed inside numeric profiler fields. */
+  runtimeProfileMode?: "cold" | "hot" | "continuous";
+  /** Worker-private journal/v2 shadow result; no GameState data is included. */
+  runtimeWorldProjection?: RuntimeWorldProjectionDiagnostics;
   needsState?: boolean;
   needsResync?: boolean;
   reusedState?: boolean;
@@ -119,6 +124,9 @@ let runtimeRevision = 0;
 let multicoreExecutor: BrowserMulticoreExecutor | null = null;
 let multicoreExecutorWorkerCount = 0;
 let activeRegistrySnapshot: ContentPackRuntimeSnapshot | undefined;
+
+const runtimeWorldEnabled = import.meta.env.VITE_RUNTIMEWORLD_V2 !== "false";
+const runtimeWorldShadowEnabled = import.meta.env.VITE_RUNTIMEWORLD_SHADOW === "true" || import.meta.env.DEV;
 let simulationMessageQueue: Promise<void> = Promise.resolve();
 let runtimeInvalidated = false;
 
@@ -182,6 +190,12 @@ interface AuthoritativeAdvanceResult {
   timeWarpApproximation: TimeWarpApproximationReport | undefined;
 }
 
+function cooperativeWorkerYield(): Promise<void> {
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  if (typeof scheduler?.yield === "function") return scheduler.yield();
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function advanceAuthoritativeRuntime(
   simulationSeconds: number,
   wallSeconds: number,
@@ -224,7 +238,12 @@ async function advanceAuthoritativeRuntime(
         multicoreExecutorWorkerCount = 0;
       }
       replacePersistentSimulationRuntimeState(runtime, baseline, profiler);
-      result = advancePersistentSimulationRuntime(runtime, simulationSeconds, wallSeconds, profiler);
+      result = runtimeWorldEnabled
+        ? await advancePersistentSimulationRuntimeResumable(runtime, simulationSeconds, wallSeconds, profiler, {
+          maximumSliceMs: 24,
+          yieldControl: cooperativeWorkerYield,
+        })
+        : advancePersistentSimulationRuntime(runtime, simulationSeconds, wallSeconds, profiler);
       void error;
     }
   } else {
@@ -233,7 +252,12 @@ async function advanceAuthoritativeRuntime(
       multicoreExecutor = null;
       multicoreExecutorWorkerCount = 0;
     }
-    result = advancePersistentSimulationRuntime(runtime, simulationSeconds, wallSeconds, profiler);
+    result = runtimeWorldEnabled
+      ? await advancePersistentSimulationRuntimeResumable(runtime, simulationSeconds, wallSeconds, profiler, {
+        maximumSliceMs: 24,
+        yieldControl: cooperativeWorkerYield,
+      })
+      : advancePersistentSimulationRuntime(runtime, simulationSeconds, wallSeconds, profiler);
   }
   return { result, multicorePlan, multicoreUsed, multicoreFallback, timeWarpApproximation };
 }
@@ -536,6 +560,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     ? captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel })
     : null;
   let commandApplied = false;
+  let commandCacheRebuilt = false;
   if (event.data.command) {
     if (event.data.command.baseRevision !== runtimeRevision) {
       const { checkpoint, checkpointState } = serializeSimulationStateCheckpoint(runtime.state);
@@ -551,8 +576,17 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
       return;
     }
-    const commandedState = applySimulationCommandPatch(runtime.state, event.data.command);
-    replacePersistentSimulationRuntimeState(runtime, commandedState, profiler);
+    if (runtimeWorldEnabled) {
+      const commandResult = applyPersistentSimulationRuntimeCommand(runtime, event.data.command, profiler);
+      commandCacheRebuilt = commandResult.cacheRebuilt;
+    } else {
+      const commandApplyStartedAt = profiler ? performance.now() : 0;
+      const commandedState = applySimulationCommandPatch(runtime.state, event.data.command);
+      if (profiler) profiler.commandApplyMs += Math.max(0, performance.now() - commandApplyStartedAt);
+      replacePersistentSimulationRuntimeState(runtime, commandedState, profiler);
+      commandCacheRebuilt = true;
+    }
+    if (profiler && commandCacheRebuilt) profiler.persistentRuntimeRebuilds += 1;
     runtimeRevision += 1;
     commandApplied = true;
   }
@@ -606,6 +640,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
   const deltaBaseline = event.data.protocol === "delta" && !suppliedState ? structuredClone(previousState) : null;
   const projectionBaseline = commandProjectionBaseline ?? captureSimulationProjectionBaseline(previousState, { includeDeferredTopLevel });
   const previousRevision = runtimeRevision;
+  const engineStartedAt = profiler ? performance.now() : 0;
   const advanced = await advanceAuthoritativeRuntime(
     simulationSeconds,
     wallSeconds,
@@ -613,9 +648,31 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     event.data.approximate === true,
     profiler,
   );
+  if (profiler) profiler.engineDomainMs += Math.max(0, performance.now() - engineStartedAt);
   const { result, multicorePlan, multicoreUsed, multicoreFallback, timeWarpApproximation } = advanced;
   if (result.changed) runtimeRevision += 1;
   if (profiler && result.cacheRebuilt) profiler.persistentRuntimeRebuilds += 1;
+  const shouldProject = result.changed || commandApplied || (suppliedState && event.data.includeFactoryAlerts === true);
+  let runtimeWorldProjection: RuntimeWorldProjectionDiagnostics | undefined;
+  let selectedProjection: SimulationProjection | undefined;
+  if (shouldProject) {
+    if (runtimeWorldEnabled) {
+      const committed = commitRuntimeWorldProjection(runtime.world, result.state, {
+        compact: event.data.protocol === "projection",
+        includeDeferredTopLevel,
+        compareWithProjectionV2: runtimeWorldShadowEnabled,
+      }, profiler);
+      selectedProjection = committed.projection;
+      runtimeWorldProjection = committed.diagnostics;
+    } else {
+      const projectionStartedAt = profiler ? performance.now() : 0;
+      selectedProjection = createSimulationProjection(projectionBaseline, result.state, {
+        compact: event.data.protocol === "projection",
+        includeDeferredTopLevel,
+      });
+      if (profiler) profiler.projectionMs += Math.max(0, performance.now() - projectionStartedAt);
+    }
+  }
   const response: SimulationWorkerResponse = {
     id,
     changed: result.changed || commandApplied,
@@ -624,15 +681,16 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     stateRevision: runtimeRevision,
     ...(commandApplied ? { commandApplied } : {}),
     ...((result.changed || commandApplied) && event.data.protocol !== "projection" && (event.data.protocol !== "delta" || suppliedState) ? { state: result.state } : {}),
-    ...(profile ? { profiler } : {}),
+    ...(profile ? {
+      profiler,
+      runtimeProfileMode: suppliedState ? "cold" : reusedState && result.changed ? "continuous" : "hot",
+    } : {}),
     reusedState,
-    cacheRebuilt: result.cacheRebuilt,
+    cacheRebuilt: result.cacheRebuilt || commandCacheRebuilt,
     registryFingerprint: activeRegistryFingerprint ?? undefined,
     factoryAlertsGeneration: event.data.factoryAlertsGeneration,
-    ...((result.changed || commandApplied || (suppliedState && event.data.includeFactoryAlerts === true)) ? { projection: attachFactoryAlertProjection(createSimulationProjection(projectionBaseline, result.state, {
-      compact: event.data.protocol === "projection",
-      includeDeferredTopLevel,
-    }), event.data.includeFactoryAlerts === true) } : {}),
+    ...(selectedProjection ? { projection: attachFactoryAlertProjection(selectedProjection, event.data.includeFactoryAlerts === true) } : {}),
+    ...(runtimeWorldProjection ? { runtimeWorldProjection } : {}),
     ...(event.data.multicore ? { multicore: {
       enabled: multicoreUsed,
       workerCount: multicoreUsed ? multicoreExecutor?.workerCount ?? multicorePlan.workerCount : multicorePlan.workerCount,

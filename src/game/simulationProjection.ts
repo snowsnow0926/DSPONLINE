@@ -256,10 +256,20 @@ function appendRecordColumns<T extends { id: string }>(
   }
 }
 
+export interface SimulationProjectionOptions {
+  compact?: boolean;
+  includeDeferredTopLevel?: boolean;
+  /** RuntimeWorld journal candidates. Omitted keeps the Projection v2 scan. */
+  candidateEntityIds?: ReadonlySet<string>;
+  candidateBeltIds?: ReadonlySet<string>;
+  /** Safe only when a shadow comparison or another exact journal oracle owns the ids. */
+  trustCandidateIds?: boolean;
+}
+
 export function createSimulationProjection(
   previous: GameState | SimulationProjectionBaseline | null,
   current: GameState,
-  options: { compact?: boolean; includeDeferredTopLevel?: boolean } = {},
+  options: SimulationProjectionOptions = {},
 ): SimulationProjection {
   // Projection work is bounded by the visible planet. Other planets remain in
   // the authoritative state and are rebuilt once if the player switches to them.
@@ -271,8 +281,12 @@ export function createSimulationProjection(
   const previousBelts = baseline?.beltSignatures ?? new Map<string, string>();
   const currentPlanetEntities = current.entities.filter((entity) => entity.planetId === current.activePlanetId);
   const currentPlanetBelts = current.belts.filter((belt) => belt.planetId === current.activePlanetId);
-  const changedEntities = currentPlanetEntities.filter((entity) => previousEntities.get(entity.id) !== entitySignature(entity));
-  const changedBelts = currentPlanetBelts.filter((belt) => previousBelts.get(belt.id) !== beltSignature(belt));
+  const changedEntities = currentPlanetEntities.filter((entity) =>
+    (!options.candidateEntityIds || options.candidateEntityIds.has(entity.id)) &&
+    (options.trustCandidateIds || previousEntities.get(entity.id) !== entitySignature(entity)));
+  const changedBelts = currentPlanetBelts.filter((belt) =>
+    (!options.candidateBeltIds || options.candidateBeltIds.has(belt.id)) &&
+    (options.trustCandidateIds || previousBelts.get(belt.id) !== beltSignature(belt)));
   const currentEntityIds = new Set(currentPlanetEntities.map((entity) => entity.id));
   const currentBeltIds = new Set(currentPlanetBelts.map((belt) => belt.id));
   const removedEntityIds = [...previousEntities.keys()].filter((id) => !currentEntityIds.has(id));

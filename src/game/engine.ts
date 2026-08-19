@@ -45,6 +45,14 @@ import {
 import { completeStationOperationModeTransition, createEmptyGalacticHubNetwork, createEmptySystemSpaceStations, settleSpaceStationConstructionInputs } from "./systemSpaceStation";
 import { isElevatorStation, settleSystemHubLogistics, SYSTEM_HUB_SETTLEMENT_SECONDS } from "./systemHubLogistics";
 import { compactProductionHistory, PRODUCTION_HISTORY_SAMPLE_SECONDS } from "./productionStatistics";
+import {
+  applyRuntimeWorldCommand,
+  createRuntimeWorld,
+  replaceRuntimeWorldState,
+  type RuntimeWorld,
+  type RuntimeWorldCommandResult,
+} from "./runtimeWorld";
+import type { SimulationCommandPatch } from "./simulationRuntimeProtocol";
 import type {
   BeltTier,
   BeltInputPortIndex,
@@ -1750,6 +1758,18 @@ export interface StationPeerMatch {
 }
 
 export interface SimulationProfiler {
+  /** M0 request phases. All remain zero when the opt-in profiler is absent. */
+  compileMs: number;
+  commandPatchMs: number;
+  commandApplyMs: number;
+  domainInvalidationMs: number;
+  engineDomainMs: number;
+  journalMs: number;
+  projectionMs: number;
+  postMessageMs: number;
+  safeBoundaryCount: number;
+  yieldedBoundaryCount: number;
+  maximumUnyieldedMs: number;
   copyStateMs: number;
   productionMs: number;
   beltsMs: number;
@@ -7017,6 +7037,17 @@ export interface SimulationAdvanceOptions {
 
 export function createSimulationProfiler(): SimulationProfiler {
   return {
+    compileMs: 0,
+    commandPatchMs: 0,
+    commandApplyMs: 0,
+    domainInvalidationMs: 0,
+    engineDomainMs: 0,
+    journalMs: 0,
+    projectionMs: 0,
+    postMessageMs: 0,
+    safeBoundaryCount: 0,
+    yieldedBoundaryCount: 0,
+    maximumUnyieldedMs: 0,
     copyStateMs: 0,
     productionMs: 0,
     beltsMs: 0,
@@ -7214,6 +7245,7 @@ export function advanceSimulationBudget(state: GameState, simulationSeconds: num
 export interface PersistentSimulationRuntime {
   state: GameState;
   lookup?: SimulationLookupContext;
+  world: RuntimeWorld;
 }
 
 function normalizePersistentRuntimeShape(state: GameState): void {
@@ -7228,17 +7260,44 @@ function normalizePersistentRuntimeShape(state: GameState): void {
 }
 
 export function createPersistentSimulationRuntime(state: GameState, profiler?: SimulationProfiler): PersistentSimulationRuntime {
+  const startedAt = profiler ? profileNow() : 0;
   normalizePersistentRuntimeShape(state);
-  return {
+  const runtime = {
     state,
     lookup: state.paused ? undefined : createSimulationLookupContext(state, profiler),
+    world: createRuntimeWorld(state),
   };
+  if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
+  return runtime;
 }
 
 export function replacePersistentSimulationRuntimeState(runtime: PersistentSimulationRuntime, state: GameState, profiler?: SimulationProfiler): void {
+  const startedAt = profiler ? profileNow() : 0;
   normalizePersistentRuntimeShape(state);
   runtime.state = state;
   runtime.lookup = state.paused ? undefined : createSimulationLookupContext(state, profiler);
+  replaceRuntimeWorldState(runtime.world, state);
+  if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
+}
+
+/** Apply a revisioned command without rebuilding compatible lookup domains. */
+export function applyPersistentSimulationRuntimeCommand(
+  runtime: PersistentSimulationRuntime,
+  command: SimulationCommandPatch,
+  profiler?: SimulationProfiler,
+): RuntimeWorldCommandResult & { cacheRebuilt: boolean } {
+  const result = applyRuntimeWorldCommand(runtime.world, command, profiler);
+  normalizePersistentRuntimeShape(result.state);
+  runtime.state = result.state;
+  if (result.lookupInvalidated) {
+    const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
+    const startedAt = profiler ? profileNow() : 0;
+    runtime.lookup = result.state.paused
+      ? undefined
+      : createSimulationLookupContext(result.state, profiler, constructionAutomationPlanCache);
+    if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
+  }
+  return { ...result, cacheRebuilt: result.lookupInvalidated };
 }
 
 export function advancePersistentSimulationRuntime(
@@ -7260,6 +7319,7 @@ export function advancePersistentSimulationRuntime(
   advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
   const next = completeSimulationAdvanceSession(session);
   runtime.state = next;
+  runtime.world.state = next;
   // Campaign/speedrun synchronization can replace only the top-level state
   // object after every request. The entity and belt objects remain the same,
   // so rebuilding all simulation indexes in that case is wasted work. A real
@@ -7273,6 +7333,81 @@ export function advancePersistentSimulationRuntime(
       : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
   }
   return { state: next, changed: session.changed, cacheRebuilt };
+}
+
+export interface ResumableSimulationAdvanceOptions {
+  /** Cooperative wall budget between deterministic, fully committed steps. */
+  maximumSliceMs?: number;
+  /** Worker-provided event-loop yield. Requests remain serialized by the caller. */
+  yieldControl?: () => Promise<void>;
+}
+
+export interface ResumableSimulationAdvanceResult {
+  state: GameState;
+  changed: boolean;
+  cacheRebuilt: boolean;
+  safeBoundaryCount: number;
+  yieldedBoundaryCount: number;
+  maximumUnyieldedMs: number;
+}
+
+/**
+ * Exact legacy-domain execution with cooperative continuation points. A
+ * boundary is exposed only after one complete deterministic engine step; the
+ * caller keeps requests in revision order and publishes only the final state.
+ */
+export async function advancePersistentSimulationRuntimeResumable(
+  runtime: PersistentSimulationRuntime,
+  simulationSeconds: number,
+  wallSeconds: number,
+  profiler?: SimulationProfiler,
+  options: ResumableSimulationAdvanceOptions = {},
+): Promise<ResumableSimulationAdvanceResult> {
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  const before = runtime.state;
+  const entitiesBefore = before.entities;
+  const beltsBefore = before.belts;
+  const session = createSimulationAdvanceSession(before, simulationSeconds, {
+    wallSeconds,
+    profiler,
+    mutateState: true,
+    lookup: runtime.lookup,
+  });
+  const maximumSliceMs = Math.max(1, Math.min(100, options.maximumSliceMs ?? 24));
+  let sliceStartedAt = profileNow();
+  let safeBoundaryCount = 0;
+  let yieldedBoundaryCount = 0;
+  let maximumUnyieldedMs = 0;
+  while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
+    const boundaryStartedAt = profileNow();
+    const completed = advanceSimulationSession(session, 1);
+    const boundaryMs = Math.max(0, profileNow() - boundaryStartedAt);
+    maximumUnyieldedMs = Math.max(maximumUnyieldedMs, boundaryMs);
+    safeBoundaryCount += completed;
+    if (completed === 0) break;
+    if ((session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) &&
+      options.yieldControl && profileNow() - sliceStartedAt >= maximumSliceMs) {
+      yieldedBoundaryCount += 1;
+      await options.yieldControl();
+      sliceStartedAt = profileNow();
+    }
+  }
+  const next = completeSimulationAdvanceSession(session);
+  runtime.state = next;
+  runtime.world.state = next;
+  const cacheRebuilt = next.entities !== entitiesBefore || next.belts !== beltsBefore;
+  if (cacheRebuilt) {
+    const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
+    runtime.lookup = next.paused
+      ? undefined
+      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+  }
+  if (profiler) {
+    profiler.safeBoundaryCount += safeBoundaryCount;
+    profiler.yieldedBoundaryCount += yieldedBoundaryCount;
+    profiler.maximumUnyieldedMs = Math.max(profiler.maximumUnyieldedMs, maximumUnyieldedMs);
+  }
+  return { state: next, changed: session.changed, cacheRebuilt, safeBoundaryCount, yieldedBoundaryCount, maximumUnyieldedMs };
 }
 
 export async function advancePersistentSimulationRuntimeMulticore(
@@ -7295,6 +7430,7 @@ export async function advancePersistentSimulationRuntimeMulticore(
   await advanceSimulationSessionMulticore(session, Number.MAX_SAFE_INTEGER, execute);
   const next = completeSimulationAdvanceSession(session);
   runtime.state = next;
+  runtime.world.state = next;
   const cacheRebuilt = next.entities !== entitiesBefore || next.belts !== beltsBefore;
   if (cacheRebuilt) {
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;

@@ -265,12 +265,12 @@ export function createSimulationCommandPatch(
   };
 }
 
-function applyValuePatch(root: unknown, patch: SimulationValuePatch, offset = 0): unknown {
+export function applySimulationValuePatch(root: unknown, patch: SimulationValuePatch, offset = 0): unknown {
   if (offset >= patch.path.length) return patch.operation === "delete" ? undefined : patch.value;
   const segment = patch.path[offset];
   const source = isContainer(root) ? root : typeof segment === "number" ? [] : {};
   const clone: Record<string | number, unknown> | unknown[] = Array.isArray(source) ? [...source] : { ...source };
-  const next = applyValuePatch((source as Record<string | number, unknown>)[segment], patch, offset + 1);
+  const next = applySimulationValuePatch((source as Record<string | number, unknown>)[segment], patch, offset + 1);
   if (patch.operation === "delete" && offset === patch.path.length - 1) {
     if (Array.isArray(clone) && typeof segment === "number") clone.splice(segment, 1);
     else delete (clone as Record<string | number, unknown>)[segment];
@@ -293,7 +293,7 @@ function applyRecordPatches<T extends { id: string }>(
     if (removed.has(record.id)) return [];
     const patches = changedById.get(record.id);
     if (!patches) return [record];
-    return [patches.reduce((value, patch) => applyValuePatch(value, patch) as T, record)];
+    return [patches.reduce((value, patch) => applySimulationValuePatch(value, patch) as T, record)];
   });
   for (const addition of [...added].sort((left, right) => left.index - right.index)) {
     if (result.some((record) => record.id === addition.value.id)) continue;
@@ -307,7 +307,7 @@ export function applySimulationCommandPatch(state: GameState, patch: SimulationC
     throw new Error(`不支持的模拟命令协议 ${patch.protocolVersion}`);
   }
   let next: unknown = state;
-  for (const change of patch.topLevelChanges) next = applyValuePatch(next, change);
+  for (const change of patch.topLevelChanges) next = applySimulationValuePatch(next, change);
   const topLevel = next as GameState;
   return {
     ...topLevel,

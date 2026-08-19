@@ -32,6 +32,7 @@ const naturalAutosaveEnabled = argumentsByName.get("natural-autosave") !== "fals
 const trendDiagnosticsEnabled = argumentsByName.get("trend-diagnostics") !== "false";
 const trendForceGc = argumentsByName.get("trend-force-gc") === "true";
 const trendPaused = argumentsByName.get("trend-paused") === "true";
+const trendCanvasHidden = argumentsByName.get("trend-canvas-hidden") === "true";
 const heapSamplingEnabled = argumentsByName.get("heap-sampling") === "true";
 
 function delay(milliseconds) {
@@ -204,6 +205,7 @@ const writeProgressReport = async (status, error = null) => {
     trendDiagnosticsEnabled,
     trendForceGc,
     trendPaused,
+    trendCanvasHidden,
     heapSamplingEnabled,
     pageCrash,
     error,
@@ -567,6 +569,11 @@ try {
     await page.locator('.game-shell[data-simulation-paused="true"]').waitFor({ state: "attached", timeout: 30_000 });
     await sample("trend-paused-start");
   }
+  if (trendCanvasHidden) {
+    await page.getByRole("button", { name: "打开设置" }).click();
+    await page.getByRole("dialog", { name: "运营中心" }).waitFor({ state: "visible", timeout: 30_000 });
+    await sample("trend-canvas-hidden-start", { forceGc: true });
+  }
   if (heapSamplingEnabled) {
     await cdpCommand("HeapProfiler.startSampling", {
       samplingInterval: 32_768,
@@ -637,6 +644,7 @@ try {
     trendDiagnosticsEnabled,
     trendForceGc,
     trendPaused,
+    trendCanvasHidden,
     heapSamplingEnabled,
     saveMode,
     pauseResume,

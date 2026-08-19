@@ -378,22 +378,67 @@ try {
   if (warmupSeconds > 0) await delay(warmupSeconds * 1_000);
   await sample("steady-run");
 
+  const waitForSecondPaint = async (transition, before) => {
+    await page.waitForFunction(({ expectedTransition, previousCount }) => (
+      window.__DSP_RUNTIME_TRANSITIONS__?.events.filter((event) =>
+        event.phase === "second-painted-frame" && event.transition === expectedTransition).length ?? 0
+    ) > previousCount, { expectedTransition: transition, previousCount: before }, { timeout: 30_000 });
+    return page.evaluate((expectedTransition) => {
+      const matches = window.__DSP_RUNTIME_TRANSITIONS__?.events.filter((event) =>
+        event.phase === "second-painted-frame" && event.transition === expectedTransition) ?? [];
+      const latest = matches.at(-1);
+      return latest ? { durationMs: latest.durationMs, startedAt: latest.startedAt } : null;
+    }, transition);
+  };
+  const pauseResume = await withProcessBurst("pause-resume", async () => {
+    const pauseBefore = await page.evaluate(() => window.__DSP_RUNTIME_TRANSITIONS__?.events.filter((event) =>
+      event.phase === "second-painted-frame" && event.transition === "pause").length ?? 0);
+    await page.evaluate(() => performance.mark("runtimeworld:pause:start"));
+    await page.getByLabel("暂停模拟").dispatchEvent("click");
+    await page.locator('.game-shell[data-simulation-paused="true"]').waitFor({ state: "attached", timeout: 30_000 });
+    const pause = await waitForSecondPaint("pause", pauseBefore);
+    await page.evaluate(() => performance.mark("runtimeworld:pause:end"));
+    const confirmSettlement = page.getByRole("button", { name: "确认结算" });
+    if (await confirmSettlement.isVisible()) await confirmSettlement.dispatchEvent("click");
+    const resumeBefore = await page.evaluate(() => window.__DSP_RUNTIME_TRANSITIONS__?.events.filter((event) =>
+      event.phase === "second-painted-frame" && event.transition === "resume").length ?? 0);
+    await page.evaluate(() => performance.mark("runtimeworld:resume:start"));
+    await page.getByLabel("继续模拟").dispatchEvent("click");
+    await page.locator('.game-shell[data-simulation-paused="false"]').waitFor({ state: "attached", timeout: 30_000 });
+    const resumeTransition = await waitForSecondPaint("resume", resumeBefore);
+    await page.evaluate(() => performance.mark("runtimeworld:resume:end"));
+    return { pause, resume: resumeTransition };
+  });
+  await sample("pause-resume-complete");
+
   const runCommand = async (command, domain) => {
     const before = await page.evaluate(() => window.__runtimeWorldMemory?.commands.length ?? 0);
+    await page.evaluate((name) => performance.mark(`runtimeworld:${name}:start`), `${command.kind}:${command.count}`);
     const dispatch = await page.evaluate((request) => {
       if (!window.__DSP_RUNTIMEWORLD_BENCHMARK__) throw new Error("diagnostic command bridge is unavailable");
       return window.__DSP_RUNTIMEWORLD_BENCHMARK__.execute(request);
     }, command);
-    await page.waitForFunction(({ count, expectedDomain, minimum }) => {
+    const traceHandle = await page.waitForFunction(({ count, expectedDomain, minimum }) => {
       const commands = window.__runtimeWorldMemory?.commands.slice(count) ?? [];
-      return commands.some((trace) => trace.secondPaintedAt !== undefined && (expectedDomain === "entity" ? trace.entityRecords : trace.beltRecords) >= minimum);
+      return commands.find((trace) => trace.secondPaintedAt !== undefined && (expectedDomain === "entity" ? trace.entityRecords : trace.beltRecords) >= minimum) ?? null;
     }, { count: before, expectedDomain: domain, minimum: command.count }, { timeout: 30_000 });
-    return dispatch;
+    const trace = await traceHandle.jsonValue();
+    await page.evaluate((name) => performance.mark(`runtimeworld:${name}:end`), `${command.kind}:${command.count}`);
+    return {
+      dispatch,
+      trace,
+      actionToWorkerPostMs: trace.submittedAt - dispatch.actionAt,
+      actionToSecondPaintMs: trace.secondPaintedAt - dispatch.actionAt,
+    };
   };
-  const commandResults = await withProcessBurst("command", async () => ({
-    entity: await runCommand({ kind: "entity-lock", count: commandRecords, locked: true }, "entity"),
-    belt: await runCommand({ kind: "belt-route", count: commandRecords, routeMode: "lower" }, "belt"),
-  }));
+  const commandCounts = [...new Set([1, Math.min(100, commandRecords), commandRecords])];
+  const commandResults = await withProcessBurst("command", async () => {
+    const entity = [];
+    const belt = [];
+    for (const count of commandCounts) entity.push(await runCommand({ kind: "entity-lock", count, locked: true }, "entity"));
+    for (const count of commandCounts) belt.push(await runCommand({ kind: "belt-route", count, routeMode: count === commandRecords ? "lower" : "upper" }, "belt"));
+    return { entity, belt };
+  });
   await sample("command-complete");
 
   const autosaveBefore = await page.evaluate(() => window.__DSP_RUNTIME_TRANSITIONS__?.events.filter((event) => event.phase === "persistence-phase" && event.detail?.kind === "autosave" && event.detail?.phase === "complete").length ?? 0);
@@ -481,6 +526,7 @@ try {
     disableWorker,
     manualCdp,
     saveMode,
+    pauseResume,
     commandResults,
     trace,
     startedAt: new Date(lifecycleStartedAt).toISOString(),

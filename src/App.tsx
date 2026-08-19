@@ -8616,16 +8616,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             : undefined;
           const staticAlertActive = stackPresentation.halo && stackPresentation.alertCount > 0;
           const staticPresentation = !forceDynamicPresentation && (!presentationVisible || canvasPresentationDetailStage === "compact");
-          const staticClassName = [
-            "factory-flow-node--lod-compact",
-            "factory-flow-node--density-compact",
-            "factory-flow-node--effects-static",
-            stackPresentation.hidden ? "factory-flow-node--stack-hidden" : undefined,
-            stackPresentation.marker ? "factory-flow-node--stack-marker" : undefined,
-            stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
-            focusClassName,
-          ].filter(Boolean).join(" ");
           const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.staticPresentation === true && previous.data.focusClassName === focusClassName &&
             previous.data.alertActive === staticAlertActive &&
             previous.draggable === nodeDraggable && previous.selectable === nodeSelectable &&
             previous.focusable === nodeFocusable && previous.connectable === nodeConnectable && previous.selected === selected &&
@@ -8635,7 +8627,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             previous.data.stackAlertCount === stackPresentation.alertCount &&
             previous.data.stackCriticalAlertCount === stackPresentation.criticalAlertCount &&
             previous.data.stackGeometryHandlesRequired === stackGeometryHandlesRequired && previous.hidden === nodeHidden &&
-            previous.zIndex === nodeZIndex && previous.className === staticClassName &&
+            previous.zIndex === nodeZIndex &&
             previous.data.stackMembershipToken === stackPresentation.membershipToken);
           if (staticPresentation && staticPresentationStable && previous) {
             stableNodeCount += 1;
@@ -8643,6 +8635,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           }
           if (staticPresentation) {
             deferredNodeCount += 1;
+            const staticClassName = [
+              "factory-flow-node--lod-compact",
+              "factory-flow-node--density-compact",
+              "factory-flow-node--effects-static",
+              stackPresentation.hidden ? "factory-flow-node--stack-hidden" : undefined,
+              stackPresentation.marker ? "factory-flow-node--stack-marker" : undefined,
+              stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
+              focusClassName,
+            ].filter(Boolean).join(" ");
             const connectedInputItemIds = beltNodeIndex.connectedInputsByTarget.get(entity.id) ?? previous?.data.connectedInputItemIds ?? [];
             const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? previous?.data.inputBeltCounts ?? {};
             const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? previous?.data.outputBeltCounts ?? {};
@@ -8700,6 +8701,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 stackAlertCount: stackPresentation.alertCount,
                 stackCriticalAlertCount: stackPresentation.criticalAlertCount,
                 stackGeometryHandlesRequired,
+                staticPresentation: true,
+                focusClassName,
                 connectionDraft: null,
                 connectionViewportFull: false,
                 acceptedInputItemIds,
@@ -8877,6 +8880,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               stackAlertCount: stackPresentation.alertCount,
               stackCriticalAlertCount: stackPresentation.criticalAlertCount,
               stackGeometryHandlesRequired,
+              staticPresentation: false,
+              focusClassName,
               connectionDraft: nodeConnectionDraft,
               connectionViewportFull,
               acceptedInputItemIds,

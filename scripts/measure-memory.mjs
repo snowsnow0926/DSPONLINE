@@ -363,6 +363,8 @@ try {
       browserProcessMemory(profileDirectory),
       withTimeout(page.evaluate(() => {
         const tracker = window.__runtimeWorldMemory;
+        const canvas = document.querySelector(".factory-canvas");
+        const canvasMetric = (name) => Number(canvas?.getAttribute(name) ?? -1);
         return {
           entityCount: document.querySelectorAll(".react-flow__node").length,
           edgeCount: document.querySelectorAll(".react-flow__edge").length,
@@ -373,6 +375,11 @@ try {
           autosaveCompleteCount: tracker?.autosaveCompleteCount ?? -1,
           persistenceEventCount: tracker?.persistenceEventCount ?? -1,
           visibility: document.visibilityState,
+          canvasRuntimeRevision: canvasMetric("data-projection-runtime-revision"),
+          canvasChangedNodeCount: canvasMetric("data-changed-node-count"),
+          canvasStableNodeCount: canvasMetric("data-stable-node-count"),
+          canvasDeferredNodeCount: canvasMetric("data-deferred-node-count"),
+          canvasDynamicNodeCount: canvasMetric("data-dynamic-node-count"),
         };
       }), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, autosaveTriggerCount: -1, autosaveCompleteCount: -1, persistenceEventCount: -1, visibility: "unknown" })),
       targetHeapUsage(debuggingPort),
@@ -400,7 +407,7 @@ try {
     };
     samples.push(entry);
     await writeProgressReport("running");
-    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, processTotals: entry.processTotals })}\n`);
+    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, canvasRuntimeRevision: entry.application.canvasRuntimeRevision, canvasChangedNodeCount: entry.application.canvasChangedNodeCount, canvasStableNodeCount: entry.application.canvasStableNodeCount, processTotals: entry.processTotals })}\n`);
     return entry;
   };
 

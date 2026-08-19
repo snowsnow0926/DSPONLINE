@@ -119,6 +119,9 @@ export interface FactoryNodeData extends Record<string, unknown> {
   stackAlertCount: number;
   stackCriticalAlertCount: number;
   stackGeometryHandlesRequired: boolean;
+  /** Primitive cache keys used to reject a static-node refresh before allocating CSS/signature strings. */
+  staticPresentation?: boolean;
+  focusClassName?: string;
 }
 
 export type FactoryFlowNode = Node<FactoryNodeData, EntityKind>;

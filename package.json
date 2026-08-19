@@ -81,7 +81,7 @@
     "@capacitor/android": "8.4.2",
     "@capacitor/cli": "8.4.2",
     "@playwright/test": "^1.61.1",
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.2.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",

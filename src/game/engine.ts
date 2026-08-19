@@ -225,6 +225,10 @@ function roundBeltMetric(value: number): number {
   return Math.round(value * 1_000) / 1_000;
 }
 
+function roundBeltProgress(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
 export function getTimeWarpRequiredPowerKw(multiplier: number): number | null {
   if (!Number.isSafeInteger(multiplier) || multiplier < TIME_WARP_MINIMUM_MULTIPLIER) return null;
   const exponent = multiplier + 1;
@@ -1336,8 +1340,17 @@ function outputCapacityCreditKey(entityId: string, itemId: ItemId): string {
   return `${entityId}:${itemId}`;
 }
 
-function outputCapacityCredit(credits: OutputCapacityCredits | undefined, entity: FactoryEntity, itemId: ItemId, key?: string): number {
-  return Math.max(0, Math.floor(credits?.get(key ?? outputCapacityCreditKey(entity.id, itemId)) ?? 0));
+function outputCapacityCredit(
+  credits: OutputCapacityCredits | undefined,
+  entity: FactoryEntity,
+  itemId: ItemId,
+  key?: string,
+  denseIndex?: number,
+): number {
+  const value = credits instanceof DenseBeltOutputCapacityCredits && denseIndex !== undefined && denseIndex >= 0
+    ? credits.valueAt(denseIndex)
+    : credits?.get(key ?? outputCapacityCreditKey(entity.id, itemId));
+  return Math.max(0, Math.floor(value ?? 0));
 }
 
 function availableOutputCycles(
@@ -1358,7 +1371,13 @@ function availableOutputCycles(
   for (let outputIndex = 0; outputIndex < recipe.outputs.length; outputIndex += 1) {
     const output = recipe.outputs[outputIndex];
     const free = Math.floor(Math.max(0, capacity - (entity.outputs[output.itemId] ?? 0)) + EPSILON) +
-      outputCapacityCredit(credits, entity, output.itemId, runtime?.outputCreditKeys[outputIndex]);
+      outputCapacityCredit(
+        credits,
+        entity,
+        output.itemId,
+        runtime?.outputCreditKeys[outputIndex],
+        runtime?.outputCreditGroupIndices[outputIndex],
+      );
     let low = 0;
     let high = Math.min(Math.floor(free / output.amount), Math.max(0, Math.floor(maximumCycles)));
     const bonusProgress = entity.proliferatorBonusProgress?.[output.itemId] ?? 0;
@@ -1830,6 +1849,19 @@ export interface SimulationProfiler {
   beltRouteChecks: number;
   beltTargetChecks: number;
   beltStableRoutesSkipped: number;
+  beltInputRouteChecks: number;
+  beltOutputRouteChecks: number;
+  beltInputTargetChecks: number;
+  beltOutputTargetChecks: number;
+  beltActiveSourceGroups: number;
+  beltInputStarvedChecks: number;
+  beltOutputStarvedChecks: number;
+  beltTargetFullChecks: number;
+  beltDistributionCandidates: number;
+  beltReservationRouteChecks: number;
+  logisticsBufferChecks: number;
+  logisticsBufferMoves: number;
+  logisticsQuantumBufferChecks: number;
 }
 
 /**
@@ -1856,15 +1888,18 @@ interface IndexedStationSlot {
 
 interface IndexedBeltRoute {
   belt: BeltConnection;
+  runtimeIndex?: number;
   source?: FactoryEntity;
   target?: FactoryEntity;
   capacity: number;
   compatible: boolean;
   targetCapacityIndex?: number;
+  reservationTargetCapacityIndex?: number;
   sourceGroupIndex?: number;
   /** Stable locale order inside one source/item group for deterministic batching. */
   stableSourceOrder?: number;
   targetInputCapacity?: number;
+  receiveKind: "ordinary" | "quantum-supply" | "black-hole";
   /** Per-call exact-settlement scratch; runtime-only and never serialized. */
   runtimeTargetCapacity?: { free: number };
   runtimeAllowance?: number;
@@ -1879,7 +1914,20 @@ interface IndexedBeltRouteGroup {
   source?: FactoryEntity;
   itemId: ItemId;
   routes: IndexedBeltRoute[];
+  stableRoutes: IndexedBeltRoute[];
   potentiallyProduces: boolean;
+  priorityMask: number;
+  /** True while any route owns transfer credit that affects settlement. */
+  routingSignalPresent: boolean;
+  /** Input credit elided for a dormant group and materialized only if woken. */
+  deferredInputSeconds: number;
+  /** Cursor into the runtime-wide exact input-decay history. */
+  metricDecayCursor: number;
+  /** An input phase ran and therefore requires its matching output barrier. */
+  needsOutputSettlement: boolean;
+  compiledCandidates?: IndexedBeltRoute[];
+  compiledRoundRoutes?: IndexedBeltRoute[];
+  compiledPriorityRoutes?: [IndexedBeltRoute[], IndexedBeltRoute[], IndexedBeltRoute[]];
   runtimeEpoch?: number;
   runtimeGroup?: RuntimeBeltTransferGroup;
 }
@@ -1897,6 +1945,7 @@ export interface SimulationBeltPlanetRuntimeIndex {
 }
 
 export interface SimulationBeltRuntimeIndex {
+  implementation: BeltRuntimeImplementation;
   byPlanet: Map<PlanetId, SimulationBeltPlanetRuntimeIndex>;
   routeGroups: IndexedBeltRouteGroup[];
   routeGroupByKey: Map<string, IndexedBeltRouteGroup>;
@@ -1905,14 +1954,91 @@ export interface SimulationBeltRuntimeIndex {
   activeGroupKeys: Set<string>;
   /** Enabled only when the rebuilt index proves a meaningful dormant cohort. */
   activeQueueEnabled: boolean;
+  compiledFrontierEnabled: boolean;
+  compiledInitiallyDormantRouteCount: number;
   initiallyDormantRouteCount: number;
   targetCapacityGroupCount: number;
   /** Per-topology scratch reused by every exact belt phase. */
   settlementEpoch: number;
   sourceAvailabilityLedgers: RuntimeSourceAvailabilityLedger[];
   targetCapacityLedgers: RuntimeTargetCapacityLedger[];
+  targetCapacityValues: Float64Array;
+  targetCapacityEpochs: Uint32Array;
+  /** Compatibility/oracle plan retained while M2 shadow tests remain active. */
   settlementEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup>;
+  /** Per-phase compact frontier; cleared and reused at every belt boundary. */
+  activeSettlementEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup>;
+  /** Dense M2 hot fields; materialized to GameState at every safe boundary. */
+  progress: Float64Array;
+  lastFlow: Float64Array;
+  congestion: Float64Array;
+  totalTransferred: Float64Array;
+  totalTransferredPresent: Uint8Array;
+  candidateAllowance: Float64Array;
+  candidateMoved: Float64Array;
+  /** Independent exact frontiers rebuilt at their respective phase barrier. */
+  activeInputGroups: IndexedBeltRouteGroup[];
+  activeOutputGroups: IndexedBeltRouteGroup[];
+  /** Exact per-input decay history shared by dormant groups until materialization. */
+  metricDecaySteps: Array<{ flow: number; congestion: number }>;
+  /** Reused dense M2 reservation scratch; never serialized. */
+  reservationAllowance: Float64Array;
+  reservationTargetCapacity: Float64Array;
+  reservationTargetEpoch: Uint32Array;
+  reservationEpoch: number;
+  reservationSourceCredits: Float64Array;
+  reservationSourceDirtyIndices: number[];
 }
+
+class DenseBeltOutputCapacityCredits implements ReadonlyMap<string, number> {
+  constructor(private readonly runtime: SimulationBeltRuntimeIndex) {}
+
+  get size(): number {
+    return this.runtime.reservationSourceDirtyIndices.length;
+  }
+
+  valueAt(index: number): number | undefined {
+    const value = this.runtime.reservationSourceCredits[index];
+    return value > 0 ? value : undefined;
+  }
+
+  get(key: string): number | undefined {
+    const index = this.runtime.routeGroupByKey.get(key)?.index;
+    return index === undefined ? undefined : this.valueAt(index);
+  }
+
+  has(key: string): boolean {
+    return this.get(key) !== undefined;
+  }
+
+  *entries(): MapIterator<[string, number]> {
+    for (const index of this.runtime.reservationSourceDirtyIndices) {
+      const value = this.valueAt(index);
+      if (value !== undefined) yield [this.runtime.routeGroups[index].key, value];
+    }
+  }
+
+  *keys(): MapIterator<string> {
+    for (const [key] of this.entries()) yield key;
+  }
+
+  *values(): MapIterator<number> {
+    for (const [, value] of this.entries()) yield value;
+  }
+
+  forEach(
+    callbackfn: (value: number, key: string, map: ReadonlyMap<string, number>) => void,
+    thisArg?: unknown,
+  ): void {
+    for (const [key, value] of this.entries()) callbackfn.call(thisArg, value, key, this);
+  }
+
+  [Symbol.iterator](): MapIterator<[string, number]> {
+    return this.entries();
+  }
+}
+
+export type BeltRuntimeImplementation = "compiled" | "legacy";
 
 interface StationDispatchSlotResult {
   hasMatchingPeer: boolean;
@@ -1933,6 +2059,7 @@ interface IndexedMachineRuntime {
   recipeDuration: number;
   outputCapacity: number;
   outputCreditKeys: string[];
+  outputCreditGroupIndices: number[];
   powerDemandProduct: number;
   sprayCost: number;
   baseUnitsPerCycle: number;
@@ -1982,6 +2109,7 @@ export interface SimulationLookupContext {
   quantumCollectorStacks: number;
   logisticsBufferEntities: FactoryEntity[];
   logisticsBufferRuntimes: IndexedLogisticsBufferRuntime[];
+  logisticsBuffersInitialized: boolean;
   materialDeliveryHubs: FactoryEntity[];
   /** Global-station upload endpoints; empty saves avoid a per-step entity scan. */
   orbitalCargoTerminals: FactoryEntity[];
@@ -2100,6 +2228,7 @@ export function createSimulationLookupContext(
   state: GameState,
   profiler?: SimulationProfiler,
   constructionAutomationPlanCache = new Map<string, CachedConstructionAutomationPlan>(),
+  beltImplementation: BeltRuntimeImplementation = "compiled",
 ): SimulationLookupContext {
   const startedAt = profileNow();
   const context: SimulationLookupContext = {
@@ -2121,6 +2250,7 @@ export function createSimulationLookupContext(
     quantumCollectorStacks: 0,
     logisticsBufferEntities: [],
     logisticsBufferRuntimes: [],
+    logisticsBuffersInitialized: false,
     materialDeliveryHubs: [],
     orbitalCargoTerminals: [],
     galacticExporters: [],
@@ -2134,18 +2264,40 @@ export function createSimulationLookupContext(
     outgoingBeltsBySource: new Map(),
     incomingBeltsByTarget: new Map(),
     beltRuntime: {
+      implementation: beltImplementation,
       byPlanet: new Map(),
       routeGroups: [],
       routeGroupByKey: new Map(),
       groupKeyByBeltId: new Map(),
       activeGroupKeys: new Set(),
       activeQueueEnabled: false,
+      compiledFrontierEnabled: false,
+      compiledInitiallyDormantRouteCount: 0,
       initiallyDormantRouteCount: 0,
       targetCapacityGroupCount: 0,
       settlementEpoch: 0,
       sourceAvailabilityLedgers: [],
       targetCapacityLedgers: [],
+      targetCapacityValues: new Float64Array(0),
+      targetCapacityEpochs: new Uint32Array(0),
       settlementEntries: [],
+      activeSettlementEntries: [],
+      progress: Float64Array.from(state.belts, (belt) => Math.max(0, belt.progress ?? 0)),
+      lastFlow: Float64Array.from(state.belts, (belt) => Math.max(0, belt.lastFlow ?? 0)),
+      congestion: Float64Array.from(state.belts, (belt) => Math.max(0, belt.congestion ?? 0)),
+      totalTransferred: Float64Array.from(state.belts, (belt) => Math.max(0, belt.totalTransferred ?? 0)),
+      totalTransferredPresent: Uint8Array.from(state.belts, (belt) => belt.totalTransferred === undefined ? 0 : 1),
+      candidateAllowance: new Float64Array(state.belts.length),
+      candidateMoved: new Float64Array(state.belts.length),
+      activeInputGroups: [],
+      activeOutputGroups: [],
+      metricDecaySteps: [],
+      reservationAllowance: new Float64Array(state.belts.length),
+      reservationTargetCapacity: new Float64Array(0),
+      reservationTargetEpoch: new Uint32Array(0),
+      reservationEpoch: 0,
+      reservationSourceCredits: new Float64Array(0),
+      reservationSourceDirtyIndices: [],
     },
     powerSourcesByPlanetGrid: new Map(),
     stationSlotsByKey: new Map(),
@@ -2195,6 +2347,7 @@ export function createSimulationLookupContext(
             recipeDuration: recipe.duration,
             outputCapacity: getEntityOutputCapacity(state, entity),
             outputCreditKeys: recipe.outputs.map((output) => outputCapacityCreditKey(entity.id, output.itemId)),
+            outputCreditGroupIndices: [],
             powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
             sprayCost: getProliferatorSprayCost(recipe),
             baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
@@ -2257,7 +2410,7 @@ export function createSimulationLookupContext(
     if (itemBelts) itemBelts.push(belt);
     else planetRuntime.itemToBelts.set(belt.itemId, [belt]);
   }
-  context.beltRoutes = context.sortedBelts.map((belt) => {
+  context.beltRoutes = context.sortedBelts.map((belt, runtimeIndex) => {
     const source = context.entityById.get(belt.source);
     const target = context.entityById.get(belt.target);
     const compatible = Boolean(source && target && source.planetId === target.planetId &&
@@ -2265,14 +2418,21 @@ export function createSimulationLookupContext(
       targetConsumes(state, target, belt.itemId, belt.targetPortIndex));
     return {
       belt,
+      runtimeIndex,
       source,
       target,
       capacity: getBeltCapacity(belt),
       compatible,
       targetInputCapacity: target ? staticBeltTargetInputCapacity(state, target, belt.itemId) : undefined,
+      receiveKind: target?.buildingId === "micro_black_hole_connector"
+        ? "black-hole"
+        : target && isQuantumStation(target) && quantumSupplySlot(target, belt.itemId)
+          ? "quantum-supply"
+          : "ordinary",
     };
   });
   const targetCapacityIndexByKey = new Map<string, number>();
+  const reservationTargetCapacityIndexByKey = new Map<string, number>();
   for (const route of context.beltRoutes) {
     if (!route.target) continue;
     const key = beltTargetCapacityKey(route.target, route.belt.itemId, route.belt.targetPortIndex);
@@ -2282,8 +2442,23 @@ export function createSimulationLookupContext(
       targetCapacityIndexByKey.set(key, index);
     }
     route.targetCapacityIndex = index;
+    const reservationKey = route.target.buildingId === "material_delivery_hub"
+      ? `tray:${route.target.planetId}:${route.belt.itemId}`
+      : route.target.buildingId === "micro_black_hole_connector"
+        ? `black-hole:${route.target.id}:${route.belt.targetPortIndex ?? -1}`
+        : `${route.target.id}:${route.belt.itemId}`;
+    let reservationIndex = reservationTargetCapacityIndexByKey.get(reservationKey);
+    if (reservationIndex === undefined) {
+      reservationIndex = reservationTargetCapacityIndexByKey.size;
+      reservationTargetCapacityIndexByKey.set(reservationKey, reservationIndex);
+    }
+    route.reservationTargetCapacityIndex = reservationIndex;
   }
   context.beltRuntime.targetCapacityGroupCount = targetCapacityIndexByKey.size;
+  context.beltRuntime.targetCapacityValues = new Float64Array(targetCapacityIndexByKey.size);
+  context.beltRuntime.targetCapacityEpochs = new Uint32Array(targetCapacityIndexByKey.size);
+  context.beltRuntime.reservationTargetCapacity = new Float64Array(reservationTargetCapacityIndexByKey.size);
+  context.beltRuntime.reservationTargetEpoch = new Uint32Array(reservationTargetCapacityIndexByKey.size);
   for (const route of context.beltRoutes) {
     const key = `${route.belt.source}:${route.belt.itemId}`;
     let group = context.beltRuntime.routeGroupByKey.get(key);
@@ -2295,7 +2470,13 @@ export function createSimulationLookupContext(
         source: route.source,
         itemId: route.belt.itemId,
         routes: [],
+        stableRoutes: [],
         potentiallyProduces: Boolean(route.source && beltSourceMayProduceDuringStep(route.source, route.belt.itemId)),
+        priorityMask: 0,
+        routingSignalPresent: false,
+        deferredInputSeconds: 0,
+        metricDecayCursor: 0,
+        needsOutputSettlement: false,
       };
       context.beltRuntime.routeGroupByKey.set(key, group);
       context.beltRuntime.routeGroups.push(group);
@@ -2307,9 +2488,10 @@ export function createSimulationLookupContext(
   }
   let initiallyDormantRouteCount = 0;
   for (const group of context.beltRuntime.routeGroups) {
-    [...group.routes]
-      .sort((left, right) => left.belt.id.localeCompare(right.belt.id))
-      .forEach((route, index) => { route.stableSourceOrder = index; });
+    group.stableRoutes = [...group.routes].sort((left, right) => left.belt.id.localeCompare(right.belt.id));
+    group.stableRoutes.forEach((route, index) => { route.stableSourceOrder = index; });
+    group.priorityMask = group.routes.reduce((mask, route) => mask | (1 << route.belt.priority), 0);
+    group.routingSignalPresent = group.routes.some((route) => Math.abs(route.belt.progress ?? 0) > EPSILON);
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
     const active = group.potentiallyProduces || sourceAmount > EPSILON || context.beltRuntime.activeGroupKeys.has(group.key);
     const planetRuntime = context.beltRuntime.byPlanet.get(group.planetId);
@@ -2321,23 +2503,42 @@ export function createSimulationLookupContext(
       }
     }
   }
+  context.beltRuntime.reservationSourceCredits = new Float64Array(context.beltRuntime.routeGroups.length);
   context.beltRuntime.initiallyDormantRouteCount = initiallyDormantRouteCount;
   context.beltRuntime.activeQueueEnabled = initiallyDormantRouteCount >= Math.max(64, Math.ceil(context.beltRoutes.length * 0.1));
+  const compiledDormantRouteCount = context.beltRuntime.routeGroups.reduce((sum, group) =>
+    sum + ((group.source?.outputs[group.itemId] ?? 0) <= EPSILON && !group.routingSignalPresent ? group.routes.length : 0), 0);
+  context.beltRuntime.compiledInitiallyDormantRouteCount = compiledDormantRouteCount;
+  // A frontier has fixed group-selection and wake bookkeeping cost. Enable it
+  // only when topology compilation proves a substantial dormant cohort; hot
+  // networks use the cheaper straight compiled scan.
+  context.beltRuntime.compiledFrontierEnabled = compiledDormantRouteCount >= Math.max(
+    64,
+    Math.ceil(context.beltRoutes.length * 0.4),
+  );
   for (const group of context.beltRuntime.routeGroups) {
-    if (group.routes.length === 1) {
-      context.beltRuntime.settlementEntries.push(group.routes[0]);
-    } else if (group.source) {
-      const runtimeGroup: RuntimeBeltTransferGroup = {
+    if (group.source && group.routes.length > 1) {
+      group.runtimeGroup = {
         source: group.source,
         itemId: group.itemId,
         available: 0,
         reserved: 0,
         candidates: [],
+        activeCandidates: [],
+        roundCandidates: [],
+        priorityCandidates: [[], [], []],
         runtimeEpoch: 0,
       };
-      group.runtimeGroup = runtimeGroup;
-      context.beltRuntime.settlementEntries.push(runtimeGroup);
     }
+    if (group.routes.length === 1) {
+      context.beltRuntime.settlementEntries.push(group.routes[0]);
+    } else if (group.runtimeGroup) {
+      context.beltRuntime.settlementEntries.push(group.runtimeGroup);
+    }
+  }
+  for (const machineRuntime of context.machineRuntimeById.values()) {
+    machineRuntime.outputCreditGroupIndices = machineRuntime.outputCreditKeys.map((key) =>
+      context.beltRuntime.routeGroupByKey.get(key)?.index ?? -1);
   }
   context.quantumStations = context.stations.filter(isQuantumStation);
   context.quantumEndpoints = context.stations.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
@@ -4270,17 +4471,24 @@ function gridStoredEnergy(state: GameState, planetId: PlanetId, gridId?: PowerGr
   }, { stored: 0, capacity: 0 });
 }
 
-function transferLogisticsBuffers(state: GameState, lookup?: SimulationLookupContext): void {
+function transferLogisticsBuffers(state: GameState, lookup?: SimulationLookupContext, profiler?: SimulationProfiler): void {
   if (lookup) {
+    const fullNormalizationPass = !lookup.logisticsBuffersInitialized;
     for (const { entity, itemId, capacity } of lookup.logisticsBufferRuntimes) {
+      if (profiler) profiler.logisticsBufferChecks += 1;
       if (entity.kind === "station" && entity.buildingId !== "orbital_collector" && !entity.stationSlots) ensureStationSlots(entity);
       const incoming = Math.floor((entity.inputs[itemId] ?? 0) + EPSILON);
       const stored = Math.floor((entity.outputs[itemId] ?? 0) + EPSILON);
+      const quantum = isQuantumStation(entity);
+      if (profiler && quantum) profiler.logisticsQuantumBufferChecks += 1;
+      if (!fullNormalizationPass && incoming < 1 && (!quantum || stored < 1)) continue;
       const moved = Math.min(incoming, Math.max(0, capacity - stored));
+      if (profiler && moved > 0) profiler.logisticsBufferMoves += 1;
       entity.inputs[itemId] = incoming - moved;
       entity.outputs[itemId] = stored + moved;
-      if (isQuantumStation(entity)) flushQuantumSupplyBuffer(state, entity, itemId, lookup);
+      if (quantum) flushQuantumSupplyBuffer(state, entity, itemId, lookup);
     }
+    lookup.logisticsBuffersInitialized = true;
     return;
   }
   for (const entity of state.entities) {
@@ -4323,8 +4531,11 @@ function drainMaterialDeliveryHubs(state: GameState, seconds: number, lookup?: S
 
 interface BeltTransferCandidate {
   belt: BeltConnection;
+  runtimeIndex?: number;
+  receiveKind?: IndexedBeltRoute["receiveKind"];
   target: FactoryEntity;
   targetCapacity: { free: number };
+  compiledTargetCapacityIndex?: number;
   allowance: number;
   moved: number;
   capacity: number;
@@ -4349,6 +4560,9 @@ interface RuntimeBeltTransferGroup {
   available: number;
   reserved: number;
   candidates: BeltTransferCandidate[];
+  activeCandidates?: BeltTransferCandidate[];
+  roundCandidates?: BeltTransferCandidate[];
+  priorityCandidates?: [BeltTransferCandidate[], BeltTransferCandidate[], BeltTransferCandidate[]];
   runtimeEpoch?: number;
 }
 
@@ -4433,19 +4647,684 @@ function staticBeltTargetInputCapacity(state: GameState, target: FactoryEntity, 
 function createIndexedBeltRoutes(state: GameState, sorted = false): IndexedBeltRoute[] {
   const entityById = new Map(state.entities.map((entity) => [entity.id, entity]));
   const belts = sorted ? [...state.belts].sort((left, right) => left.id.localeCompare(right.id)) : state.belts;
-  return belts.map((belt) => {
+  return belts.map((belt, runtimeIndex) => {
     const source = entityById.get(belt.source);
     const target = entityById.get(belt.target);
     return {
       belt,
+      runtimeIndex,
       source,
       target,
       capacity: getBeltCapacity(belt),
       compatible: Boolean(source && target && source.planetId === target.planetId && belt.planetId === source.planetId &&
         sourceProduces(source, belt.itemId) && targetConsumes(state, target, belt.itemId, belt.targetPortIndex)),
       targetInputCapacity: target ? staticBeltTargetInputCapacity(state, target, belt.itemId) : undefined,
+      receiveKind: target?.buildingId === "micro_black_hole_connector"
+        ? "black-hole"
+        : target && isQuantumStation(target) && quantumSupplySlot(target, belt.itemId)
+          ? "quantum-supply"
+          : "ordinary",
     } satisfies IndexedBeltRoute;
   });
+}
+
+function compiledBeltRuntimeRecordChanged(runtime: SimulationBeltRuntimeIndex, route: IndexedBeltRoute): boolean {
+  const index = route.runtimeIndex;
+  if (index === undefined) return false;
+  const belt = route.belt;
+  return !Object.is(belt.progress, runtime.progress[index]) ||
+    !Object.is(belt.lastFlow, runtime.lastFlow[index]) ||
+    !Object.is(belt.congestion ?? 0, runtime.congestion[index]) ||
+    (belt.totalTransferred === undefined) !== (runtime.totalTransferredPresent[index] === 0) ||
+    (runtime.totalTransferredPresent[index] !== 0 && !Object.is(belt.totalTransferred, Math.floor(runtime.totalTransferred[index])));
+}
+
+function applyDeferredCompiledBeltMetrics(
+  runtime: SimulationBeltRuntimeIndex,
+  group: IndexedBeltRouteGroup,
+  includeLatestDormantOutput: boolean,
+  end = runtime.metricDecaySteps.length,
+): void {
+  if (group.metricDecayCursor >= end) return;
+  const latest = end - 1;
+  for (const route of group.routes) {
+    const index = route.runtimeIndex!;
+    for (let stepIndex = group.metricDecayCursor; stepIndex < end; stepIndex += 1) {
+      const decay = runtime.metricDecaySteps[stepIndex];
+      if (Math.abs(runtime.lastFlow[index]) > EPSILON) {
+        runtime.lastFlow[index] = roundBeltMetric(runtime.lastFlow[index] * decay.flow);
+      }
+      if (Math.abs(runtime.congestion[index]) > EPSILON) {
+        runtime.congestion[index] = roundBeltMetric(runtime.congestion[index] * decay.congestion);
+      }
+      const dormantOutputCompleted = stepIndex < latest || includeLatestDormantOutput;
+      if (!dormantOutputCompleted) continue;
+      runtime.progress[index] = 0;
+    }
+  }
+  group.metricDecayCursor = end;
+}
+
+function materializeCompiledBeltRuntime(lookup?: SimulationLookupContext): void {
+  if (!lookup || lookup.beltRuntime.implementation !== "compiled") return;
+  const runtime = lookup.beltRuntime;
+  if (runtime.metricDecaySteps.length > 0) {
+    for (const group of runtime.routeGroups) applyDeferredCompiledBeltMetrics(runtime, group, true);
+    runtime.metricDecaySteps.length = 0;
+    for (const group of runtime.routeGroups) group.metricDecayCursor = 0;
+  }
+  for (const route of lookup.beltRoutes) {
+    const index = route.runtimeIndex;
+    if (index === undefined || !compiledBeltRuntimeRecordChanged(runtime, route)) continue;
+    const belt = route.belt;
+    belt.progress = runtime.progress[index];
+    belt.lastFlow = runtime.lastFlow[index];
+    belt.congestion = runtime.congestion[index];
+    if (runtime.totalTransferredPresent[index] !== 0) {
+      belt.totalTransferred = Math.floor(runtime.totalTransferred[index]);
+    } else {
+      delete belt.totalTransferred;
+    }
+  }
+}
+
+function synchronizeCompiledBeltRuntimeRecord(lookup: SimulationLookupContext, beltId: string): void {
+  const route = lookup.beltRoutes.find((candidate) => candidate.belt.id === beltId);
+  const index = route?.runtimeIndex;
+  if (!route || index === undefined) return;
+  const runtime = lookup.beltRuntime;
+  runtime.progress[index] = Math.max(0, route.belt.progress ?? 0);
+  runtime.lastFlow[index] = Math.max(0, route.belt.lastFlow ?? 0);
+  runtime.congestion[index] = Math.max(0, route.belt.congestion ?? 0);
+  runtime.totalTransferred[index] = Math.max(0, route.belt.totalTransferred ?? 0);
+  runtime.totalTransferredPresent[index] = route.belt.totalTransferred === undefined ? 0 : 1;
+  const groupKey = runtime.groupKeyByBeltId.get(beltId);
+  const group = groupKey ? runtime.routeGroupByKey.get(groupKey) : undefined;
+  if (group) {
+    group.routingSignalPresent = group.routes.some((candidate) => {
+      const candidateIndex = candidate.runtimeIndex!;
+      return Math.abs(runtime.progress[candidateIndex]) > EPSILON;
+    });
+  }
+}
+
+function receiveSpecialCompiledBeltMaterial(
+  state: GameState,
+  target: FactoryEntity,
+  belt: BeltConnection,
+  itemId: ItemId,
+  moved: number,
+  kind: Exclude<IndexedBeltRoute["receiveKind"], "ordinary">,
+): number {
+  if (kind === "quantum-supply") return receiveQuantumSupplyMaterial(state, target, itemId, moved);
+  const port = target.blackHolePorts?.find((entry) => entry.index === belt.targetPortIndex);
+  if (!port || target.blackHolePaused !== false || !target.blackHoleActivationConfirmed) return 0;
+  try {
+    port.currentItemId = itemId;
+    port.totalDestroyed = (BigInt(port.totalDestroyed || "0") + BigInt(moved)).toString();
+    return moved;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * RuntimeWorld M2 compiled settlement. Groups are already ordered by their
+ * first persisted belt occurrence. Scanning and settling one group at a time
+ * preserves that legacy order while avoiding a second full settlement-entry
+ * walk and its request-sized candidate graph.
+ */
+function transferBeltsCompiled(
+  state: GameState,
+  seconds: number,
+  deferSourceDepletionReset: boolean,
+  allowanceCaps: ReadonlyMap<string, number> | undefined,
+  allowanceByIndex: Float64Array | undefined,
+  flowWindowSeconds: number,
+  lookup: SimulationLookupContext,
+  skippedBeltIds: ReadonlySet<string> | undefined,
+  profiler: SimulationProfiler | undefined,
+  allowStableOutputSkip: boolean,
+  allowCompiledFrontier: boolean,
+): void {
+  const runtime = lookup.beltRuntime;
+  const useCompiledFrontier = allowCompiledFrontier && runtime.compiledFrontierEnabled;
+  const runtimeEpoch = ++runtime.settlementEpoch;
+  const targetCapacityValues = runtime.targetCapacityValues;
+  const targetCapacityEpochs = runtime.targetCapacityEpochs;
+  const denseTargetEpoch = runtimeEpoch >>> 0;
+  // Uint32 scratch epochs wrap long before the JS-safe settlement counter.
+  // Poison every old slot on the wrap phase so epoch zero is never mistaken
+  // for an uninitialized-but-current capacity.
+  if (denseTargetEpoch === 0) targetCapacityEpochs.fill(0xffff_ffff);
+  const flowDecay = Math.pow(0.8, Math.max(0, seconds));
+  const congestionDecay = Math.pow(0.85, Math.max(0, seconds));
+  if (seconds > 0 && useCompiledFrontier) {
+    runtime.metricDecaySteps.push({ flow: flowDecay, congestion: congestionDecay });
+  }
+  const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
+  let allowanceGroupKeys: Set<string> | undefined;
+  if (allowanceCaps && runtime.activeQueueEnabled) {
+    allowanceGroupKeys = new Set<string>();
+    for (const beltId of allowanceCaps.keys()) {
+      const key = runtime.groupKeyByBeltId.get(beltId);
+      if (key) allowanceGroupKeys.add(key);
+    }
+  }
+  if (runtime.activeQueueEnabled) {
+    for (const planetRuntime of runtime.byPlanet.values()) {
+      planetRuntime.activeBelts.clear();
+      planetRuntime.blockedBelts.clear();
+      planetRuntime.inputStarvedBelts.clear();
+      planetRuntime.outputFullBelts.clear();
+      planetRuntime.powerLimitedBelts.clear();
+    }
+  }
+
+  const inputPhase = seconds > 0;
+  let selectedGroups = runtime.routeGroups;
+  let selectedRouteCount = lookup.beltRoutes.length;
+  let stableOutputRoutesSkipped = 0;
+  if (useCompiledFrontier) {
+    selectedGroups = inputPhase ? runtime.activeInputGroups : runtime.activeOutputGroups;
+    selectedGroups.length = 0;
+    selectedRouteCount = 0;
+    for (const group of runtime.routeGroups) {
+      const active = (group.source?.outputs[group.itemId] ?? 0) > EPSILON || group.routingSignalPresent ||
+        (!inputPhase && group.needsOutputSettlement) || allowanceGroupKeys?.has(group.key) === true;
+      if (!active) {
+        if (inputPhase) {
+          group.deferredInputSeconds = seconds;
+          group.needsOutputSettlement = false;
+        } else {
+          // A dormant source that remained empty through production has the
+          // same safe-boundary state as legacy input-credit then output-reset.
+          group.deferredInputSeconds = 0;
+        }
+        continue;
+      }
+      if (inputPhase) group.needsOutputSettlement = true;
+      selectedGroups.push(group);
+      selectedRouteCount += group.routes.length;
+    }
+  }
+  if (profiler) {
+    profiler.beltRouteChecks += selectedRouteCount;
+    if (seconds > 0) profiler.beltInputRouteChecks += selectedRouteCount;
+    else profiler.beltOutputRouteChecks += selectedRouteCount;
+    profiler.beltStableRoutesSkipped += Math.max(0, lookup.beltRoutes.length - selectedRouteCount);
+  }
+
+  let targetCheckCount = 0;
+  let inputStarvedCheckCount = 0;
+  let outputStarvedCheckCount = 0;
+  let targetFullCheckCount = 0;
+  let distributionCandidateCount = 0;
+  const decayInactiveRouteMetrics = (index: number): void => {
+    if (Math.abs(runtime.lastFlow[index]) > EPSILON) {
+      runtime.lastFlow[index] = roundBeltMetric(runtime.lastFlow[index] * flowDecay);
+    }
+    if (Math.abs(runtime.congestion[index]) > EPSILON) {
+      runtime.congestion[index] = roundBeltMetric(runtime.congestion[index] * congestionDecay);
+    }
+  };
+  const receive = (
+    target: FactoryEntity,
+    belt: BeltConnection,
+    itemId: ItemId,
+    amount: number,
+    kind: IndexedBeltRoute["receiveKind"],
+  ): number => {
+    const moved = Math.floor(amount);
+    if (moved < 1) return 0;
+    if (kind === "ordinary") {
+      target.inputs[itemId] = Math.floor((target.inputs[itemId] ?? 0) + moved);
+      return moved;
+    }
+    return receiveSpecialCompiledBeltMaterial(state, target, belt, itemId, moved, kind);
+  };
+
+  const routeUsable = (route: IndexedBeltRoute) => runtime.candidateAllowance[route.runtimeIndex!] > 0 &&
+    targetCapacityValues[route.targetCapacityIndex!] > 0;
+  const distributeRoutes = (
+    indexedGroup: IndexedBeltRouteGroup,
+    candidates: IndexedBeltRoute[],
+    startingAvailable: number,
+    initiallyUsable: boolean,
+  ): number => {
+    let available = startingAvailable;
+    if (available <= 0 || candidates.length === 0) return available;
+    if (candidates.length === 1) {
+      const route = candidates[0];
+      if (!routeUsable(route)) return available;
+      const routeIndex = route.runtimeIndex!;
+      const targetIndex = route.targetCapacityIndex!;
+      const targetFree = targetCapacityValues[targetIndex];
+      const moved = receive(
+        route.target!,
+        route.belt,
+        indexedGroup.itemId,
+        Math.min(available, runtime.candidateAllowance[routeIndex], targetFree),
+        route.receiveKind,
+      );
+      if (moved <= 0) return available;
+      targetCapacityValues[targetIndex] = targetFree - moved;
+      runtime.candidateAllowance[routeIndex] -= moved;
+      runtime.candidateMoved[routeIndex] += moved;
+      indexedGroup.source!.routingCursor = 0;
+      return available - moved;
+    }
+    const roundRoutes = indexedGroup.compiledRoundRoutes ??= [];
+    let activeRoutes = candidates;
+    if (!initiallyUsable) {
+      roundRoutes.length = 0;
+      for (const route of candidates) if (routeUsable(route)) roundRoutes.push(route);
+      activeRoutes = roundRoutes;
+    }
+    const candidateCount = activeRoutes.length;
+    if (candidateCount === 0) return available;
+    if (candidateCount === 1) {
+      const route = activeRoutes[0];
+      const routeIndex = route.runtimeIndex!;
+      const targetIndex = route.targetCapacityIndex!;
+      const targetFree = targetCapacityValues[targetIndex];
+      const moved = receive(
+        route.target!,
+        route.belt,
+        indexedGroup.itemId,
+        Math.min(available, runtime.candidateAllowance[routeIndex], targetFree),
+        route.receiveKind,
+      );
+      if (moved <= 0) return available;
+      targetCapacityValues[targetIndex] = targetFree - moved;
+      runtime.candidateAllowance[routeIndex] -= moved;
+      runtime.candidateMoved[routeIndex] += moved;
+      indexedGroup.source!.routingCursor = 0;
+      return available - moved;
+    }
+    let cursor = indexedGroup.source!.routingCursor % candidateCount;
+    while (available > 0) {
+      if (activeRoutes.length === 0) break;
+      const start = cursor % activeRoutes.length;
+      const fairShare = Math.max(1, Math.floor(available / activeRoutes.length));
+      let successful = 0;
+      for (let offset = 0; offset < activeRoutes.length; offset += 1) {
+        if (available <= 0) break;
+        const route = activeRoutes[(start + offset) % activeRoutes.length];
+        const routeIndex = route.runtimeIndex!;
+        const targetIndex = route.targetCapacityIndex!;
+        const targetFree = targetCapacityValues[targetIndex];
+        const moved = receive(
+          route.target!,
+          route.belt,
+          indexedGroup.itemId,
+          Math.min(available, fairShare, runtime.candidateAllowance[routeIndex], targetFree),
+          route.receiveKind,
+        );
+        if (moved <= 0) continue;
+        targetCapacityValues[targetIndex] = targetFree - moved;
+        runtime.candidateAllowance[routeIndex] -= moved;
+        runtime.candidateMoved[routeIndex] += moved;
+        available -= moved;
+        successful += 1;
+        cursor = (cursor + 1) % candidateCount;
+      }
+      if (successful === 0) break;
+      if (available <= 0) break;
+      roundRoutes.length = 0;
+      for (const route of candidates) if (routeUsable(route)) roundRoutes.push(route);
+      activeRoutes = roundRoutes;
+    }
+    indexedGroup.source!.routingCursor = cursor;
+    return available;
+  };
+
+  const scanStartedAt = profiler ? profileNow() : 0;
+  for (const indexedGroup of selectedGroups) {
+    if (useCompiledFrontier) {
+      if (inputPhase) {
+        const priorStepCount = runtime.metricDecaySteps.length - 1;
+        if (indexedGroup.metricDecayCursor < priorStepCount) {
+          applyDeferredCompiledBeltMetrics(runtime, indexedGroup, true, priorStepCount);
+        }
+      } else if (indexedGroup.metricDecayCursor < runtime.metricDecaySteps.length) {
+        applyDeferredCompiledBeltMetrics(runtime, indexedGroup, false);
+      }
+    }
+    const source = indexedGroup.source;
+    const singleRouteGroup = indexedGroup.routes.length === 1;
+    const deferredInputSeconds = inputPhase ? 0 : indexedGroup.deferredInputSeconds;
+    let groupRuntimeSignalPresent = false;
+    const reserved = source && lookup.reservedOutgoing.size > 0
+      ? stationReservedOutgoing(state, source.id, indexedGroup.itemId, lookup)
+      : 0;
+    const sourceAvailable = source
+      ? Math.floor((source.outputs[indexedGroup.itemId] ?? 0) - reserved + EPSILON)
+      : 0;
+    const planetRuntime = runtime.activeQueueEnabled ? runtime.byPlanet.get(indexedGroup.planetId) : undefined;
+    if (singleRouteGroup) {
+      const route = indexedGroup.routes[0];
+      const belt = route.belt;
+      const beltIndex = route.runtimeIndex!;
+      if (!skippedBeltIds?.has(belt.id)) {
+        planetRuntime?.activeBelts.add(belt.id);
+        if (seconds <= 0 && deferredInputSeconds > 0) {
+          const currentCredit = runtime.progress[beltIndex];
+          if (currentCredit < creditLimit) {
+            runtime.progress[beltIndex] = roundBeltProgress(Math.min(
+              creditLimit,
+              currentCredit + route.capacity * deferredInputSeconds,
+            ));
+          }
+        }
+        const target = route.target;
+        if (!route.compatible || !source || !target) {
+          if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+          runtime.progress[beltIndex] = 0;
+          planetRuntime?.blockedBelts.add(belt.id);
+        } else {
+          if (seconds > 0) {
+            const currentCredit = runtime.progress[beltIndex];
+            if (currentCredit < creditLimit) {
+              runtime.progress[beltIndex] = roundBeltProgress(Math.min(creditLimit, currentCredit + route.capacity * seconds));
+            }
+          }
+          if (sourceAvailable < 1) {
+            if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+            if (seconds > 0) inputStarvedCheckCount += 1;
+            else outputStarvedCheckCount += 1;
+            if (!deferSourceDepletionReset) runtime.progress[beltIndex] = 0;
+            planetRuntime?.inputStarvedBelts.add(belt.id);
+            if (indexedGroup.potentiallyProduces && (source.powerFactor ?? 1) <= EPSILON) {
+              planetRuntime?.powerLimitedBelts.add(belt.id);
+            }
+          } else {
+            const targetCapacityIndex = route.targetCapacityIndex!;
+            targetCheckCount += 1;
+            if (targetCapacityEpochs[targetCapacityIndex] !== denseTargetEpoch) {
+              targetCapacityEpochs[targetCapacityIndex] = denseTargetEpoch;
+              if (route.targetInputCapacity === undefined) {
+                targetCapacityValues[targetCapacityIndex] = Math.max(
+                  0,
+                  targetFreeCapacity(state, target, route.belt.itemId, route.belt.targetPortIndex, lookup),
+                );
+              } else {
+                const remaining = route.targetInputCapacity - (target.inputs[route.belt.itemId] ?? 0);
+                targetCapacityValues[targetCapacityIndex] = remaining > 0 ? Math.floor(remaining + EPSILON) : 0;
+              }
+            }
+            let free = targetCapacityValues[targetCapacityIndex];
+            if (free < 1) {
+              if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+              targetFullCheckCount += 1;
+              runtime.progress[beltIndex] = 0;
+              planetRuntime?.blockedBelts.add(belt.id);
+              planetRuntime?.outputFullBelts.add(belt.id);
+            } else {
+              let allowance = Math.floor(runtime.progress[beltIndex] + EPSILON);
+              if (allowanceByIndex) {
+                const denseAllowance = allowanceByIndex[beltIndex];
+                if (denseAllowance >= 0) allowance = Math.min(allowance, denseAllowance);
+              } else if (allowanceCaps) {
+                allowance = Math.min(allowance, allowanceCaps.get(belt.id) ?? Number.MAX_SAFE_INTEGER);
+              }
+              distributionCandidateCount += 1;
+              const moved = receive(
+                target,
+                belt,
+                indexedGroup.itemId,
+                Math.min(sourceAvailable, allowance, free),
+                route.receiveKind,
+              );
+              if (seconds > 0 && (moved <= 0 || flowWindowSeconds <= 0) &&
+                Math.abs(runtime.lastFlow[beltIndex]) > EPSILON) {
+                runtime.lastFlow[beltIndex] = roundBeltMetric(runtime.lastFlow[beltIndex] * flowDecay);
+              }
+              if (moved > 0) {
+                free -= moved;
+                targetCapacityValues[targetCapacityIndex] = free;
+                source.outputs[indexedGroup.itemId] = sourceAvailable - moved + reserved;
+                source.routingCursor = 0;
+              }
+              const available = sourceAvailable - moved;
+              if ((!deferSourceDepletionReset && available <= 0) || free <= 0) {
+                runtime.progress[beltIndex] = 0;
+              } else if (moved > 0) {
+                runtime.progress[beltIndex] = roundBeltProgress(runtime.progress[beltIndex] - moved);
+              }
+              if (moved > 0) {
+                if (flowWindowSeconds > 0) {
+                  runtime.lastFlow[beltIndex] = roundBeltMetric(Math.min(
+                    route.capacity,
+                    (seconds > 0 ? 0 : runtime.lastFlow[beltIndex]) + moved / flowWindowSeconds,
+                  ));
+                }
+                runtime.totalTransferred[beltIndex] = Math.floor(runtime.totalTransferred[beltIndex] + moved);
+                runtime.totalTransferredPresent[beltIndex] = 1;
+              }
+              const sourceWaiting = (source.outputs[indexedGroup.itemId] ?? 0) > 0;
+              const targetBlocked = free <= 0;
+              const load = route.capacity > EPSILON ? runtime.lastFlow[beltIndex] / route.capacity : 0;
+              runtime.congestion[beltIndex] = sourceWaiting && targetBlocked ? 1 : roundBeltMetric(Math.min(1, load));
+            }
+          }
+        }
+      }
+      if (useCompiledFrontier) {
+        groupRuntimeSignalPresent = Math.abs(runtime.progress[beltIndex]) > EPSILON;
+        indexedGroup.routingSignalPresent = groupRuntimeSignalPresent;
+      }
+      if (inputPhase && useCompiledFrontier) indexedGroup.metricDecayCursor = runtime.metricDecaySteps.length;
+      if (!inputPhase) {
+        indexedGroup.deferredInputSeconds = 0;
+        indexedGroup.needsOutputSettlement = false;
+      }
+      continue;
+    }
+    const fairAcrossPriorities = source?.kind === "splitter" && source.distributionMode !== "priority";
+    const requiresPriorityBuckets = !fairAcrossPriorities &&
+      (indexedGroup.priorityMask & (indexedGroup.priorityMask - 1)) !== 0;
+    const compiledCandidates = indexedGroup.compiledCandidates ??= [];
+    compiledCandidates.length = 0;
+    const priorityRoutes = requiresPriorityBuckets
+      ? indexedGroup.compiledPriorityRoutes ??= [[], [], []]
+      : undefined;
+    if (priorityRoutes) {
+      priorityRoutes[0].length = 0;
+      priorityRoutes[1].length = 0;
+      priorityRoutes[2].length = 0;
+    }
+    let allCandidatesInitiallyUsable = true;
+    // The legacy allocator sorts candidates by belt id before settling. Scan
+    // the precompiled stable order directly, so no second route walk or
+    // per-phase candidate epoch is required.
+    for (const route of indexedGroup.stableRoutes) {
+      const belt = route.belt;
+      const beltIndex = route.runtimeIndex!;
+      if (skippedBeltIds?.has(belt.id)) {
+        if (useCompiledFrontier) groupRuntimeSignalPresent ||= Math.abs(runtime.progress[beltIndex]) > EPSILON;
+        continue;
+      }
+      planetRuntime?.activeBelts.add(belt.id);
+      if (seconds <= 0 && deferredInputSeconds > 0) {
+        const currentCredit = runtime.progress[beltIndex];
+        if (currentCredit < creditLimit) {
+          runtime.progress[beltIndex] = roundBeltProgress(Math.min(
+            creditLimit,
+            currentCredit + route.capacity * deferredInputSeconds,
+          ));
+        }
+      }
+      const target = route.target;
+      if (!route.compatible || !source || !target) {
+        if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+        runtime.progress[beltIndex] = 0;
+        planetRuntime?.blockedBelts.add(belt.id);
+        if (useCompiledFrontier) groupRuntimeSignalPresent ||= Math.abs(runtime.progress[beltIndex]) > EPSILON;
+        continue;
+      }
+      if (seconds > 0) {
+        const currentCredit = runtime.progress[beltIndex];
+        if (currentCredit < creditLimit) {
+          runtime.progress[beltIndex] = roundBeltProgress(Math.min(creditLimit, currentCredit + route.capacity * seconds));
+        }
+      }
+      if (sourceAvailable < 1) {
+        if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+        if (seconds > 0) inputStarvedCheckCount += 1;
+        else outputStarvedCheckCount += 1;
+        if (!deferSourceDepletionReset) runtime.progress[beltIndex] = 0;
+        planetRuntime?.inputStarvedBelts.add(belt.id);
+        if (indexedGroup.potentiallyProduces && (source.powerFactor ?? 1) <= EPSILON) planetRuntime?.powerLimitedBelts.add(belt.id);
+        if (useCompiledFrontier) groupRuntimeSignalPresent ||= Math.abs(runtime.progress[beltIndex]) > EPSILON;
+        continue;
+      }
+      const targetCapacityIndex = route.targetCapacityIndex!;
+      targetCheckCount += 1;
+      if (targetCapacityEpochs[targetCapacityIndex] !== denseTargetEpoch) {
+        targetCapacityEpochs[targetCapacityIndex] = denseTargetEpoch;
+        if (route.targetInputCapacity === undefined) {
+          targetCapacityValues[targetCapacityIndex] = Math.max(
+            0,
+            targetFreeCapacity(state, target, route.belt.itemId, route.belt.targetPortIndex, lookup),
+          );
+        } else {
+          const remaining = route.targetInputCapacity - (target.inputs[route.belt.itemId] ?? 0);
+          targetCapacityValues[targetCapacityIndex] = remaining > 0 ? Math.floor(remaining + EPSILON) : 0;
+        }
+      }
+      const free = targetCapacityValues[targetCapacityIndex];
+      if (free < 1) {
+        if (seconds > 0) decayInactiveRouteMetrics(beltIndex);
+        targetFullCheckCount += 1;
+        runtime.progress[beltIndex] = 0;
+        planetRuntime?.blockedBelts.add(belt.id);
+        planetRuntime?.outputFullBelts.add(belt.id);
+        if (useCompiledFrontier) groupRuntimeSignalPresent ||= Math.abs(runtime.progress[beltIndex]) > EPSILON;
+        continue;
+      }
+      runtime.candidateAllowance[beltIndex] = Math.floor(runtime.progress[beltIndex] + EPSILON);
+      if (allowanceByIndex) {
+        const denseAllowance = allowanceByIndex[beltIndex];
+        if (denseAllowance >= 0) {
+          runtime.candidateAllowance[beltIndex] = Math.min(runtime.candidateAllowance[beltIndex], denseAllowance);
+        }
+      } else if (allowanceCaps) {
+        runtime.candidateAllowance[beltIndex] = Math.min(
+          runtime.candidateAllowance[beltIndex],
+          allowanceCaps.get(belt.id) ?? Number.MAX_SAFE_INTEGER,
+        );
+      }
+      const candidateInitiallyUsable = runtime.candidateAllowance[beltIndex] > 0;
+      if (!candidateInitiallyUsable) allCandidatesInitiallyUsable = false;
+      runtime.candidateMoved[beltIndex] = 0;
+      distributionCandidateCount += 1;
+      compiledCandidates.push(route);
+      if (candidateInitiallyUsable) priorityRoutes?.[belt.priority].push(route);
+    }
+    if (compiledCandidates.length === 0) {
+      if (useCompiledFrontier) indexedGroup.routingSignalPresent = groupRuntimeSignalPresent;
+      if (inputPhase && useCompiledFrontier) indexedGroup.metricDecayCursor = runtime.metricDecaySteps.length;
+      if (!inputPhase) {
+        indexedGroup.deferredInputSeconds = 0;
+        indexedGroup.needsOutputSettlement = false;
+      }
+      continue;
+    }
+    let available = sourceAvailable;
+    if (compiledCandidates.length === 1) {
+      const route = compiledCandidates[0];
+      const beltIndex = route.runtimeIndex!;
+      if (routeUsable(route) && available > 0) {
+        const targetIndex = route.targetCapacityIndex!;
+        const targetFree = targetCapacityValues[targetIndex];
+        const moved = receive(
+          route.target!,
+          route.belt,
+          indexedGroup.itemId,
+          Math.min(available, runtime.candidateAllowance[beltIndex], targetFree),
+          route.receiveKind,
+        );
+        if (moved > 0) {
+          targetCapacityValues[targetIndex] = targetFree - moved;
+          runtime.candidateAllowance[beltIndex] -= moved;
+          runtime.candidateMoved[beltIndex] += moved;
+          available -= moved;
+          source!.routingCursor = 0;
+        }
+      }
+    } else if (fairAcrossPriorities || !requiresPriorityBuckets) {
+      available = distributeRoutes(indexedGroup, compiledCandidates, available, allCandidatesInitiallyUsable);
+    } else {
+      available = distributeRoutes(indexedGroup, priorityRoutes![2], available, true);
+      if (available > 0) available = distributeRoutes(indexedGroup, priorityRoutes![1], available, true);
+      if (available > 0) available = distributeRoutes(indexedGroup, priorityRoutes![0], available, true);
+    }
+    source!.outputs[indexedGroup.itemId] = available + reserved;
+    const sourceWaiting = (source!.outputs[indexedGroup.itemId] ?? 0) > 0;
+    for (const route of compiledCandidates) {
+      const beltIndex = route.runtimeIndex!;
+      const moved = runtime.candidateMoved[beltIndex];
+      const targetFree = targetCapacityValues[route.targetCapacityIndex!];
+      if ((!deferSourceDepletionReset && available <= 0) || targetFree <= 0) {
+        runtime.progress[beltIndex] = 0;
+      } else if (moved > 0) {
+        runtime.progress[beltIndex] = roundBeltProgress(runtime.progress[beltIndex] - moved);
+      }
+      if (seconds > 0 && (moved <= 0 || flowWindowSeconds <= 0) &&
+        Math.abs(runtime.lastFlow[beltIndex]) > EPSILON) {
+        runtime.lastFlow[beltIndex] = roundBeltMetric(runtime.lastFlow[beltIndex] * flowDecay);
+      }
+      if (moved > 0) {
+        if (flowWindowSeconds > 0) {
+          runtime.lastFlow[beltIndex] = roundBeltMetric(Math.min(
+            route.capacity,
+            (seconds > 0 ? 0 : runtime.lastFlow[beltIndex]) + moved / flowWindowSeconds,
+          ));
+        }
+        runtime.totalTransferred[beltIndex] = Math.floor(runtime.totalTransferred[beltIndex] + moved);
+        runtime.totalTransferredPresent[beltIndex] = 1;
+      }
+      const targetBlocked = targetFree <= 0;
+      const load = route.capacity > EPSILON ? runtime.lastFlow[beltIndex] / route.capacity : 0;
+      runtime.congestion[beltIndex] = sourceWaiting && targetBlocked ? 1 : roundBeltMetric(Math.min(1, load));
+      if (useCompiledFrontier) groupRuntimeSignalPresent ||= Math.abs(runtime.progress[beltIndex]) > EPSILON;
+    }
+    if (useCompiledFrontier) indexedGroup.routingSignalPresent = groupRuntimeSignalPresent;
+    if (inputPhase && useCompiledFrontier) indexedGroup.metricDecayCursor = runtime.metricDecaySteps.length;
+    if (!inputPhase) {
+      indexedGroup.deferredInputSeconds = 0;
+      indexedGroup.needsOutputSettlement = false;
+    }
+  }
+  if (profiler) {
+    profiler.beltRouteChecks -= stableOutputRoutesSkipped;
+    profiler.beltOutputRouteChecks -= stableOutputRoutesSkipped;
+    profiler.beltStableRoutesSkipped += stableOutputRoutesSkipped;
+    profiler.beltTargetChecks += targetCheckCount;
+    if (seconds > 0) profiler.beltInputTargetChecks += targetCheckCount;
+    else profiler.beltOutputTargetChecks += targetCheckCount;
+    profiler.beltScanMs += profileNow() - scanStartedAt;
+    profiler.beltActiveSourceGroups += selectedGroups.length;
+    profiler.beltInputStarvedChecks += inputStarvedCheckCount;
+    profiler.beltOutputStarvedChecks += outputStarvedCheckCount;
+    profiler.beltTargetFullChecks += targetFullCheckCount;
+    profiler.beltDistributionCandidates += distributionCandidateCount;
+  }
+  if (runtime.activeQueueEnabled) {
+    for (const group of selectedGroups) {
+      if (group.routes.some((route) => {
+        const index = route.runtimeIndex!;
+        return Math.abs(runtime.progress[index]) > EPSILON || Math.abs(runtime.lastFlow[index]) > EPSILON ||
+          Math.abs(runtime.congestion[index]) > EPSILON;
+      })) runtime.activeGroupKeys.add(group.key);
+      else runtime.activeGroupKeys.delete(group.key);
+    }
+  }
+}
+
+function compiledBeltRuntimeEnabled(lookup: SimulationLookupContext): boolean {
+  return lookup.beltRuntime.implementation === "compiled";
 }
 
 function transferBelts(
@@ -4457,12 +5336,31 @@ function transferBelts(
   lookup?: SimulationLookupContext,
   skippedBeltIds?: ReadonlySet<string>,
   profiler?: SimulationProfiler,
+  allowanceByIndex?: Float64Array,
+  allowStableOutputSkip = true,
+  allowCompiledFrontier = true,
 ): void {
+  if (lookup && compiledBeltRuntimeEnabled(lookup)) {
+    transferBeltsCompiled(
+      state,
+      seconds,
+      deferSourceDepletionReset,
+      allowanceCaps,
+      allowanceByIndex,
+      flowWindowSeconds,
+      lookup,
+      skippedBeltIds,
+      profiler,
+      allowStableOutputSkip,
+      allowCompiledFrontier,
+    );
+    return;
+  }
   const runtimeEpoch = lookup ? ++lookup.beltRuntime.settlementEpoch : 0;
   const distributionEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup> = lookup
-    ? lookup.beltRuntime.settlementEntries
+    ? lookup.beltRuntime.activeSettlementEntries
     : [];
-  if (!lookup) distributionEntries.length = 0;
+  distributionEntries.length = 0;
   const fallbackGroups = new Map<string, RuntimeBeltTransferGroup>();
   const indexedSourceAvailability = lookup?.beltRuntime.sourceAvailabilityLedgers ?? [];
   // A candidate reads its capacity ledger many times during fair routing.
@@ -4472,7 +5370,11 @@ function transferBelts(
   const indexedTargetCapacityLedgers = lookup?.beltRuntime.targetCapacityLedgers ?? [];
   const fallbackTargetCapacityLedgers = new Map<string, { free: number }>();
   const targetCapacity = (route: IndexedBeltRoute, target: FactoryEntity, itemId: ItemId, portIndex?: BeltInputPortIndex): { free: number } => {
-    if (profiler) profiler.beltTargetChecks += 1;
+    if (profiler) {
+      profiler.beltTargetChecks += 1;
+      if (seconds > 0) profiler.beltInputTargetChecks += 1;
+      else profiler.beltOutputTargetChecks += 1;
+    }
     const index = route.targetCapacityIndex;
     if (index !== undefined) {
       const cached = indexedTargetCapacityLedgers[index];
@@ -4500,6 +5402,7 @@ function transferBelts(
   // once instead of once per belt; the persisted rounding behavior is intact.
   const flowDecay = Math.pow(0.8, Math.max(0, seconds));
   const congestionDecay = Math.pow(0.85, Math.max(0, seconds));
+  const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
 
   if (lookup?.beltRuntime.activeQueueEnabled) {
     for (const planetRuntime of lookup.beltRuntime.byPlanet.values()) {
@@ -4516,6 +5419,8 @@ function transferBelts(
   const routes = activeSelection?.routes ?? lookup?.beltRoutes ?? createIndexedBeltRoutes(state);
   if (profiler) {
     profiler.beltRouteChecks += routes.length;
+    if (seconds > 0) profiler.beltInputRouteChecks += routes.length;
+    else profiler.beltOutputRouteChecks += routes.length;
     profiler.beltStableRoutesSkipped += Math.max(0, (lookup?.beltRoutes.length ?? routes.length) - routes.length);
   }
   const scanStartedAt = profiler ? profileNow() : 0;
@@ -4526,8 +5431,13 @@ function transferBelts(
       ? lookup.beltRuntime.byPlanet.get(belt.planetId)
       : undefined;
     planetRuntime?.activeBelts.add(belt.id);
-    belt.lastFlow = roundBeltMetric(belt.lastFlow * flowDecay);
-    belt.congestion = roundBeltMetric((belt.congestion ?? 0) * congestionDecay);
+    // The output phase uses a zero-second window immediately after the input
+    // phase, where both decay factors are exactly one and the values are
+    // already normalized. Avoid two redundant round/write pairs per route.
+    if (seconds > 0) {
+      if (Math.abs(belt.lastFlow ?? 0) > EPSILON) belt.lastFlow = roundBeltMetric(belt.lastFlow * flowDecay);
+      if (Math.abs(belt.congestion ?? 0) > EPSILON) belt.congestion = roundBeltMetric((belt.congestion ?? 0) * congestionDecay);
+    }
     const source = route.source;
     const target = route.target;
     if (!route.compatible || !source || !target) {
@@ -4538,7 +5448,6 @@ function transferBelts(
     const capacity = route.capacity;
     if (seconds > 0) {
       const currentCredit = Math.max(0, belt.progress ?? 0);
-      const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
       belt.progress = round(currentCredit > creditLimit
         ? currentCredit
         : Math.min(creditLimit, currentCredit + capacity * seconds));
@@ -4555,13 +5464,21 @@ function transferBelts(
     }
     const available = sourceAvailability.available;
     if (available < 1) {
+      if (profiler) {
+        if (seconds > 0) profiler.beltInputStarvedChecks += 1;
+        else profiler.beltOutputStarvedChecks += 1;
+      }
       if (!deferSourceDepletionReset) belt.progress = 0;
       planetRuntime?.inputStarvedBelts.add(belt.id);
-      if (beltSourceMayProduceDuringStep(source, belt.itemId) && (source.powerFactor ?? 1) <= EPSILON) planetRuntime?.powerLimitedBelts.add(belt.id);
+      const mayProduce = groupIndex === undefined
+        ? beltSourceMayProduceDuringStep(source, belt.itemId)
+        : lookup?.beltRuntime.routeGroups[groupIndex]?.potentiallyProduces ?? beltSourceMayProduceDuringStep(source, belt.itemId);
+      if (mayProduce && (source.powerFactor ?? 1) <= EPSILON) planetRuntime?.powerLimitedBelts.add(belt.id);
       continue;
     }
     const remainingTarget = targetCapacity(route, target, belt.itemId, belt.targetPortIndex);
     if (remainingTarget.free < 1) {
+      if (profiler) profiler.beltTargetFullChecks += 1;
       belt.progress = 0;
       planetRuntime?.blockedBelts.add(belt.id);
       planetRuntime?.outputFullBelts.add(belt.id);
@@ -4572,6 +5489,8 @@ function transferBelts(
       route.runtimeTargetCapacity = remainingTarget;
       route.runtimeAllowance = allowance;
       route.runtimeEpoch = runtimeEpoch;
+      distributionEntries.push(route);
+      if (profiler) profiler.beltDistributionCandidates += 1;
       continue;
     }
     let group: RuntimeBeltTransferGroup | undefined;
@@ -4590,6 +5509,7 @@ function transferBelts(
         group.reserved = sourceAvailability.reserved;
         group.candidates.length = 0;
         group.runtimeEpoch = runtimeEpoch;
+        distributionEntries.push(group);
       }
     } else {
       group = fallbackGroups.get(`${belt.source}:${belt.itemId}`);
@@ -4620,8 +5540,10 @@ function transferBelts(
       candidate.runtimeEpoch = runtimeEpoch;
     }
     group.candidates.push(candidate);
+    if (profiler) profiler.beltDistributionCandidates += 1;
   }
   if (profiler) profiler.beltScanMs += profileNow() - scanStartedAt;
+  if (profiler) profiler.beltActiveSourceGroups += distributionEntries.length;
 
   const distributeStartedAt = profiler ? profileNow() : 0;
   const receiveRoute = (belt: BeltConnection, target: FactoryEntity, itemId: ItemId, amount: number): number => {
@@ -4773,9 +5695,11 @@ function transferBelts(
         }
       }
       source.outputs[belt.itemId] = available + reserved;
-      belt.progress = (!deferSourceDepletionReset && available <= 0) || targetCapacity.free <= 0
-        ? 0
-        : round(Math.max(0, belt.progress - moved));
+      if ((!deferSourceDepletionReset && available <= 0) || targetCapacity.free <= 0) {
+        belt.progress = 0;
+      } else if (moved > 0) {
+        belt.progress = round(Math.max(0, belt.progress - moved));
+      }
       if (moved > 0) {
         if (flowWindowSeconds > 0) {
           belt.lastFlow = roundBeltMetric(Math.min(
@@ -4821,10 +5745,11 @@ function transferBelts(
 
     group.source.outputs[group.itemId] = available + reserved;
     for (const candidate of group.candidates) {
-      candidate.belt.progress = (!deferSourceDepletionReset && available <= 0) ||
-        candidate.targetCapacity.free <= 0
-        ? 0
-        : round(Math.max(0, candidate.belt.progress - candidate.moved));
+      if ((!deferSourceDepletionReset && available <= 0) || candidate.targetCapacity.free <= 0) {
+        candidate.belt.progress = 0;
+      } else if (candidate.moved > 0) {
+        candidate.belt.progress = round(Math.max(0, candidate.belt.progress - candidate.moved));
+      }
       if (candidate.moved > 0) {
         if (flowWindowSeconds > 0) {
           candidate.belt.lastFlow = roundBeltMetric(Math.min(
@@ -4846,7 +5771,8 @@ function transferBelts(
 
 interface BeltStepOutputReservation {
   allowanceByBelt: Map<string, number>;
-  outputCredits: Map<string, number>;
+  allowanceByIndex?: Float64Array;
+  outputCredits: OutputCapacityCredits;
 }
 
 function reserveBeltStepOutputCapacity(
@@ -4857,8 +5783,31 @@ function reserveBeltStepOutputCapacity(
 ): BeltStepOutputReservation {
   const startedAt = profiler ? profileNow() : 0;
   const allowanceByBelt = new Map<string, number>();
-  const outputCredits = new Map<string, number>();
-  const remainingTargetCapacity = new Map<string, number>();
+  const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
+  const compiledRuntime = lookup?.beltRuntime.implementation === "compiled" ? lookup.beltRuntime : undefined;
+  const legacyOutputCredits = compiledRuntime ? undefined : new Map<string, number>();
+  const outputCredits: OutputCapacityCredits = compiledRuntime
+    ? new DenseBeltOutputCapacityCredits(compiledRuntime)
+    : legacyOutputCredits!;
+  const allowanceByIndex = compiledRuntime?.reservationAllowance;
+  // -1 preserves the legacy Map contract: an absent cap means unlimited,
+  // while an explicitly reserved zero (if introduced later) remains a cap.
+  allowanceByIndex?.fill(-1);
+  const remainingTargetCapacity = compiledRuntime ? undefined : new Map<string, number>();
+  let reservationRouteChecks = 0;
+  let reservationEpoch = 0;
+  if (compiledRuntime) {
+    reservationEpoch = compiledRuntime.reservationEpoch + 1;
+    if (reservationEpoch > 0xffff_fffe) {
+      compiledRuntime.reservationTargetEpoch.fill(0);
+      reservationEpoch = 1;
+    }
+    compiledRuntime.reservationEpoch = reservationEpoch;
+    for (const index of compiledRuntime.reservationSourceDirtyIndices) {
+      compiledRuntime.reservationSourceCredits[index] = 0;
+    }
+    compiledRuntime.reservationSourceDirtyIndices.length = 0;
+  }
   const routes = lookup?.beltRuntime.activeQueueEnabled
     ? lookup.beltRuntime.routeGroups.flatMap((group) => lookup.beltRuntime.activeGroupKeys.has(group.key) ? group.routes : [])
     : lookup
@@ -4869,29 +5818,84 @@ function reserveBeltStepOutputCapacity(
     if (skippedBeltIds?.has(belt.id)) continue;
     const source = route.source;
     const target = route.target;
+    let deferredInputSeconds = 0;
+    if (compiledRuntime && route.sourceGroupIndex !== undefined) {
+      const sourceGroup = compiledRuntime.routeGroups[route.sourceGroupIndex];
+      // A source that cannot mutate between the input and output belt phases
+      // does not need speculative output capacity while it is empty.
+      if (!source || (!sourceGroup.potentiallyProduces && (source.outputs[belt.itemId] ?? 0) <= EPSILON)) continue;
+      deferredInputSeconds = sourceGroup.deferredInputSeconds;
+    }
+    reservationRouteChecks += 1;
     if (!route.compatible || !source || !target) continue;
-    const allowance = Math.max(0, Math.floor(belt.progress + EPSILON));
+    const runtimeProgress = lookup?.beltRuntime.implementation === "compiled" && route.runtimeIndex !== undefined
+      ? deferredInputSeconds > 0
+        ? roundBeltProgress(Math.min(
+            creditLimit,
+            Math.max(0, lookup.beltRuntime.progress[route.runtimeIndex]) + route.capacity * deferredInputSeconds,
+          ))
+        : lookup.beltRuntime.progress[route.runtimeIndex]
+      : belt.progress;
+    const allowance = Math.max(0, Math.floor(runtimeProgress + EPSILON));
     if (allowance < 1) continue;
-    const targetKey = target.buildingId === "material_delivery_hub"
-      ? `tray:${target.planetId}:${belt.itemId}`
-      : target.buildingId === "micro_black_hole_connector"
-        ? `black-hole:${target.id}:${belt.targetPortIndex ?? -1}`
-        : `${target.id}:${belt.itemId}`;
-    const targetFree = remainingTargetCapacity.has(targetKey)
-      ? remainingTargetCapacity.get(targetKey)!
-      : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
+    const reservationIndex = route.reservationTargetCapacityIndex;
+    let targetFree: number;
+    if (compiledRuntime && reservationIndex !== undefined) {
+      if (compiledRuntime.reservationTargetEpoch[reservationIndex] !== reservationEpoch) {
+        compiledRuntime.reservationTargetEpoch[reservationIndex] = reservationEpoch;
+        compiledRuntime.reservationTargetCapacity[reservationIndex] = targetFreeCapacity(
+          state,
+          target,
+          belt.itemId,
+          belt.targetPortIndex,
+          lookup,
+        );
+      }
+      targetFree = compiledRuntime.reservationTargetCapacity[reservationIndex];
+    } else {
+      const targetKey = target.buildingId === "material_delivery_hub"
+        ? `tray:${target.planetId}:${belt.itemId}`
+        : target.buildingId === "micro_black_hole_connector"
+          ? `black-hole:${target.id}:${belt.targetPortIndex ?? -1}`
+          : `${target.id}:${belt.itemId}`;
+      targetFree = remainingTargetCapacity!.has(targetKey)
+        ? remainingTargetCapacity!.get(targetKey)!
+        : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
+      remainingTargetCapacity!.set(targetKey, Math.max(0, targetFree));
+    }
     const reserved = Math.min(allowance, Math.max(0, Math.floor(targetFree)));
     if (reserved < 1) continue;
-    allowanceByBelt.set(belt.id, reserved);
-    remainingTargetCapacity.set(targetKey, Math.max(0, targetFree - reserved));
-    const sourceKey = outputCapacityCreditKey(source.id, belt.itemId);
-    outputCredits.set(sourceKey, Math.min(
-      normalizeBuildingBufferLimit(state.settings.beltBufferLimit),
-      (outputCredits.get(sourceKey) ?? 0) + reserved,
-    ));
+    if (compiledRuntime && route.runtimeIndex !== undefined) {
+      allowanceByIndex![route.runtimeIndex] = reserved;
+      if (reservationIndex !== undefined) compiledRuntime.reservationTargetCapacity[reservationIndex] = Math.max(0, targetFree - reserved);
+      const sourceIndex = route.sourceGroupIndex;
+      if (sourceIndex !== undefined) {
+        if (compiledRuntime.reservationSourceCredits[sourceIndex] <= 0) {
+          compiledRuntime.reservationSourceDirtyIndices.push(sourceIndex);
+        }
+        compiledRuntime.reservationSourceCredits[sourceIndex] = Math.min(
+          creditLimit,
+          compiledRuntime.reservationSourceCredits[sourceIndex] + reserved,
+        );
+      }
+    } else {
+      allowanceByBelt.set(belt.id, reserved);
+      const targetKey = target.buildingId === "material_delivery_hub"
+        ? `tray:${target.planetId}:${belt.itemId}`
+        : target.buildingId === "micro_black_hole_connector"
+          ? `black-hole:${target.id}:${belt.targetPortIndex ?? -1}`
+          : `${target.id}:${belt.itemId}`;
+      remainingTargetCapacity!.set(targetKey, Math.max(0, targetFree - reserved));
+      const sourceKey = outputCapacityCreditKey(source.id, belt.itemId);
+      legacyOutputCredits!.set(sourceKey, Math.min(
+        creditLimit,
+        (legacyOutputCredits!.get(sourceKey) ?? 0) + reserved,
+      ));
+    }
   }
+  if (profiler) profiler.beltReservationRouteChecks += reservationRouteChecks;
   if (profiler) profiler.beltReserveMs += profileNow() - startedAt;
-  return { allowanceByBelt, outputCredits };
+  return { allowanceByBelt, allowanceByIndex, outputCredits };
 }
 
 function runMiners(
@@ -5021,6 +6025,7 @@ function runMachines(
       recipeDuration: recipe.duration,
       outputCapacity: getEntityOutputCapacity(state, entity),
       outputCreditKeys: recipe.outputs.map((output) => outputCapacityCreditKey(entity.id, output.itemId)),
+      outputCreditGroupIndices: [],
       powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
       sprayCost: getProliferatorSprayCost(recipe),
       baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
@@ -5036,22 +6041,22 @@ function runMachines(
     industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
     matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   };
+  let activeResearch = hasActiveResearch(state);
   for (const runtime of runtimes) {
     const { entity, recipe, baseSpeedProduct, planetSpeed, recipeDuration } = runtime;
     if (skippedEntityIds?.has(entity.id)) continue;
-    entity.powerFactor = power.factorByEntity.has(entity.id)
-      ? round(power.factorByEntity.get(entity.id)!, 4)
-      : undefined;
-    if (recipe.id === "matrix_research" && !hasActiveResearch(state)) {
+    const assignedPowerFactor = power.factorByEntity.get(entity.id);
+    entity.powerFactor = assignedPowerFactor === undefined ? undefined : round(assignedPowerFactor, 4);
+    if (recipe.id === "matrix_research" && !activeResearch) {
       entity.progress = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
       continue;
     }
-    const powerFactor = powerFactorForEntity(power, entity);
+    const powerFactor = assignedPowerFactor ?? 1;
     const effectiveCyclesPerSecond = baseSpeedProduct *
       (runtime.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed) * planetSpeed / recipeDuration;
-    const launchFactor = dysonLaunchFactor(state, recipe.id);
+    const launchFactor = runtime.launchEnergyPerCycle > EPSILON ? dysonLaunchFactor(state, recipe.id) : 1;
     if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) {
       entity.progress = 0;
       entity.utilization = 0;
@@ -5126,6 +6131,7 @@ function runMachines(
         if (completed) {
           completeTechnology(state, techId);
           activateNextQueuedTechnology(state);
+          activeResearch = hasActiveResearch(state);
           for (const researchEntity of state.entities) {
             if (researchEntity.recipeId === "matrix_research") researchEntity.progress = 0;
           }
@@ -6213,7 +7219,8 @@ function settleQuantumNetworkUploads(
 
 export interface SimulationBeltStepReservation {
   allowanceByBelt: Map<string, number>;
-  outputCredits: Map<string, number>;
+  allowanceByIndex?: Float64Array;
+  outputCredits: OutputCapacityCredits;
 }
 
 export interface SimulationStepPrepared {
@@ -6386,11 +7393,24 @@ export function prepareSimulationStep(
   resetStationRuntime(state, lookup);
   recordLogisticsPhase(profiler, "logisticsResetMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
-  transferLogisticsBuffers(state, lookup);
+  transferLogisticsBuffers(state, lookup, profiler);
   recordLogisticsPhase(profiler, "logisticsBufferMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeInputBelts?.(state);
-  transferBelts(state, seconds, true, undefined, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    seconds,
+    true,
+    undefined,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    undefined,
+    true,
+    !contractExperiment,
+  );
+  if (contractExperiment?.afterInputBelts) materializeCompiledBeltRuntime(lookup);
   contractExperiment?.afterInputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
   const beltStepReservation = reserveBeltStepOutputCapacity(state, lookup, contractExperiment?.skippedBeltIds, profiler);
@@ -6443,7 +7463,20 @@ export function completeSimulationStep(
   }
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeOutputBelts?.(state);
-  transferBelts(state, 0, false, prepared.beltStepReservation.allowanceByBelt, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    0,
+    false,
+    prepared.beltStepReservation.allowanceByBelt,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    prepared.beltStepReservation.allowanceByIndex,
+    !contractExperiment,
+    !contractExperiment,
+  );
+  if (contractExperiment?.afterOutputBelts) materializeCompiledBeltRuntime(lookup);
   contractExperiment?.afterOutputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
@@ -6530,7 +7563,13 @@ export function completeSimulationStep(
     if (profiler) profiler.quantumMs += profileNow() - quantumStartedAt;
   }
   if (lookup && boundaryLookupDirty) {
-    Object.assign(lookup, createSimulationLookupContext(state, profiler, lookup.constructionAutomationPlanCache));
+    materializeCompiledBeltRuntime(lookup);
+    Object.assign(lookup, createSimulationLookupContext(
+      state,
+      profiler,
+      lookup.constructionAutomationPlanCache,
+      lookup.beltRuntime.implementation,
+    ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
   const exportWindowSeconds = state.elapsedSeconds - state.endgame.exportWindowStartedAt;
@@ -6540,6 +7579,7 @@ export function completeSimulationStep(
     state.endgame.exportWindowStartedAt = state.elapsedSeconds;
   }
   state.metrics = { ...state.planetMetrics[state.activePlanetId] };
+  materializeCompiledBeltRuntime(lookup);
 }
 
 export interface SimulationPlanetPhaseExecutor {
@@ -6697,11 +7737,24 @@ function simulateStep(
   resetStationRuntime(state, lookup);
   recordLogisticsPhase(profiler, "logisticsResetMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
-  transferLogisticsBuffers(state, lookup);
+  transferLogisticsBuffers(state, lookup, profiler);
   recordLogisticsPhase(profiler, "logisticsBufferMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeInputBelts?.(state);
-  transferBelts(state, seconds, true, undefined, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    seconds,
+    true,
+    undefined,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    undefined,
+    true,
+    !contractExperiment,
+  );
+  if (contractExperiment?.afterInputBelts) materializeCompiledBeltRuntime(lookup);
   contractExperiment?.afterInputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
   const beltStepReservation = reserveBeltStepOutputCapacity(state, lookup, contractExperiment?.skippedBeltIds, profiler);
@@ -6747,7 +7800,20 @@ function simulateStep(
   }
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeOutputBelts?.(state);
-  transferBelts(state, 0, false, beltStepReservation.allowanceByBelt, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    0,
+    false,
+    beltStepReservation.allowanceByBelt,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    beltStepReservation.allowanceByIndex,
+    !contractExperiment,
+    !contractExperiment,
+  );
+  if (contractExperiment?.afterOutputBelts) materializeCompiledBeltRuntime(lookup);
   contractExperiment?.afterOutputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
@@ -6837,7 +7903,13 @@ function simulateStep(
     if (profiler) profiler.quantumMs += profileNow() - quantumStartedAt;
   }
   if (lookup && boundaryLookupDirty) {
-    Object.assign(lookup, createSimulationLookupContext(state, profiler, lookup.constructionAutomationPlanCache));
+    materializeCompiledBeltRuntime(lookup);
+    Object.assign(lookup, createSimulationLookupContext(
+      state,
+      profiler,
+      lookup.constructionAutomationPlanCache,
+      lookup.beltRuntime.implementation,
+    ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
   const exportWindowSeconds = state.elapsedSeconds - state.endgame.exportWindowStartedAt;
@@ -7033,6 +8105,8 @@ export interface SimulationAdvanceOptions {
   mutateState?: boolean;
   lookup?: SimulationLookupContext;
   contractExperiment?: SimulationContractExperiment;
+  /** M2 domain oracle/fallback. Production defaults to the compiled runtime. */
+  beltImplementation?: BeltRuntimeImplementation;
 }
 
 export function createSimulationProfiler(): SimulationProfiler {
@@ -7101,6 +8175,19 @@ export function createSimulationProfiler(): SimulationProfiler {
     beltRouteChecks: 0,
     beltTargetChecks: 0,
     beltStableRoutesSkipped: 0,
+    beltInputRouteChecks: 0,
+    beltOutputRouteChecks: 0,
+    beltInputTargetChecks: 0,
+    beltOutputTargetChecks: 0,
+    beltActiveSourceGroups: 0,
+    beltInputStarvedChecks: 0,
+    beltOutputStarvedChecks: 0,
+    beltTargetFullChecks: 0,
+    beltDistributionCandidates: 0,
+    beltReservationRouteChecks: 0,
+    logisticsBufferChecks: 0,
+    logisticsBufferMoves: 0,
+    logisticsQuantumBufferChecks: 0,
   };
 }
 
@@ -7139,7 +8226,12 @@ export function createSimulationAdvanceSession(state: GameState, seconds: number
     batchConstructionAutomation: options.batchConstructionAutomation !== false,
     changed: totalSeconds > 0 || totalWallSeconds > 0,
     lookup: totalSeconds > 0 && options.indexedLogistics !== false
-      ? options.lookup ?? createSimulationLookupContext(sessionState, options.profiler)
+      ? options.lookup ?? createSimulationLookupContext(
+          sessionState,
+          options.profiler,
+          new Map<string, CachedConstructionAutomationPlan>(),
+          options.beltImplementation,
+        )
       : undefined,
     profiler: options.profiler,
     contractExperiment: options.contractExperiment,
@@ -7207,6 +8299,7 @@ export function advanceSimulationSession(session: SimulationAdvanceSession, maxi
     session.remainingWallSeconds = Math.max(0, session.remainingWallSeconds - wallStep);
     steps += 1;
   }
+  materializeCompiledBeltRuntime(session.lookup);
   return steps;
 }
 
@@ -7246,6 +8339,12 @@ export interface PersistentSimulationRuntime {
   state: GameState;
   lookup?: SimulationLookupContext;
   world: RuntimeWorld;
+  beltImplementation: BeltRuntimeImplementation;
+}
+
+export interface PersistentSimulationRuntimeOptions {
+  /** Retained old transferBelts domain for M2 shadow-oracle and fallback. */
+  beltImplementation?: BeltRuntimeImplementation;
 }
 
 function normalizePersistentRuntimeShape(state: GameState): void {
@@ -7259,13 +8358,21 @@ function normalizePersistentRuntimeShape(state: GameState): void {
   }
 }
 
-export function createPersistentSimulationRuntime(state: GameState, profiler?: SimulationProfiler): PersistentSimulationRuntime {
+export function createPersistentSimulationRuntime(
+  state: GameState,
+  profiler?: SimulationProfiler,
+  options: PersistentSimulationRuntimeOptions = {},
+): PersistentSimulationRuntime {
   const startedAt = profiler ? profileNow() : 0;
   normalizePersistentRuntimeShape(state);
+  const beltImplementation = options.beltImplementation ?? "compiled";
   const runtime = {
     state,
-    lookup: state.paused ? undefined : createSimulationLookupContext(state, profiler),
+    lookup: state.paused
+      ? undefined
+      : createSimulationLookupContext(state, profiler, new Map<string, CachedConstructionAutomationPlan>(), beltImplementation),
     world: createRuntimeWorld(state),
+    beltImplementation,
   };
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   return runtime;
@@ -7275,7 +8382,14 @@ export function replacePersistentSimulationRuntimeState(runtime: PersistentSimul
   const startedAt = profiler ? profileNow() : 0;
   normalizePersistentRuntimeShape(state);
   runtime.state = state;
-  runtime.lookup = state.paused ? undefined : createSimulationLookupContext(state, profiler);
+  runtime.lookup = state.paused
+    ? undefined
+    : createSimulationLookupContext(
+        state,
+        profiler,
+        new Map<string, CachedConstructionAutomationPlan>(),
+        runtime.beltImplementation,
+      );
   replaceRuntimeWorldState(runtime.world, state);
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
 }
@@ -7289,12 +8403,20 @@ export function applyPersistentSimulationRuntimeCommand(
   const result = applyRuntimeWorldCommand(runtime.world, command, profiler);
   normalizePersistentRuntimeShape(result.state);
   runtime.state = result.state;
+  if (!result.lookupInvalidated && runtime.lookup?.beltRuntime.implementation === "compiled") {
+    for (const beltId of result.changedBeltIds) synchronizeCompiledBeltRuntimeRecord(runtime.lookup, beltId);
+  }
   if (result.lookupInvalidated) {
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     const startedAt = profiler ? profileNow() : 0;
     runtime.lookup = result.state.paused
       ? undefined
-      : createSimulationLookupContext(result.state, profiler, constructionAutomationPlanCache);
+      : createSimulationLookupContext(
+          result.state,
+          profiler,
+          constructionAutomationPlanCache,
+          runtime.beltImplementation,
+        );
     if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   }
   return { ...result, cacheRebuilt: result.lookupInvalidated };
@@ -7306,7 +8428,14 @@ export function advancePersistentSimulationRuntime(
   wallSeconds: number,
   profiler?: SimulationProfiler,
 ): { state: GameState; changed: boolean; cacheRebuilt: boolean } {
-  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) {
+    runtime.lookup = createSimulationLookupContext(
+      runtime.state,
+      profiler,
+      new Map<string, CachedConstructionAutomationPlan>(),
+      runtime.beltImplementation,
+    );
+  }
   const before = runtime.state;
   const entitiesBefore = before.entities;
   const beltsBefore = before.belts;
@@ -7330,7 +8459,7 @@ export function advancePersistentSimulationRuntime(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
   }
   return { state: next, changed: session.changed, cacheRebuilt };
 }
@@ -7363,7 +8492,14 @@ export async function advancePersistentSimulationRuntimeResumable(
   profiler?: SimulationProfiler,
   options: ResumableSimulationAdvanceOptions = {},
 ): Promise<ResumableSimulationAdvanceResult> {
-  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) {
+    runtime.lookup = createSimulationLookupContext(
+      runtime.state,
+      profiler,
+      new Map<string, CachedConstructionAutomationPlan>(),
+      runtime.beltImplementation,
+    );
+  }
   const before = runtime.state;
   const entitiesBefore = before.entities;
   const beltsBefore = before.belts;
@@ -7400,7 +8536,7 @@ export async function advancePersistentSimulationRuntimeResumable(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
   }
   if (profiler) {
     profiler.safeBoundaryCount += safeBoundaryCount;
@@ -7417,7 +8553,14 @@ export async function advancePersistentSimulationRuntimeMulticore(
   execute: SimulationPlanetPhaseExecutor,
   profiler?: SimulationProfiler,
 ): Promise<{ state: GameState; changed: boolean; cacheRebuilt: boolean }> {
-  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) {
+    runtime.lookup = createSimulationLookupContext(
+      runtime.state,
+      profiler,
+      new Map<string, CachedConstructionAutomationPlan>(),
+      runtime.beltImplementation,
+    );
+  }
   const before = runtime.state;
   const entitiesBefore = before.entities;
   const beltsBefore = before.belts;
@@ -7436,7 +8579,7 @@ export async function advancePersistentSimulationRuntimeMulticore(
     const constructionAutomationPlanCache = runtime.lookup?.constructionAutomationPlanCache;
     runtime.lookup = next.paused
       ? undefined
-      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+      : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache, runtime.beltImplementation);
   }
   return { state: next, changed: session.changed, cacheRebuilt };
 }

@@ -21,7 +21,7 @@ function persistedState(state: GameState): GameState {
 }
 
 describe("1.0.38 persistent batching parity", () => {
-  it("reuses belt candidates and capacity ledgers across steps while matching the legacy full-state hash", () => {
+  it("reuses dense belt scratch and capacity ledgers across steps while matching the legacy full-state hash", () => {
     const source = createSyntheticPerformanceFixture("p50");
     source.paused = false;
     const normalizedSource = structuredClone(createPersistentSimulationRuntime(structuredClone(source)).state);
@@ -29,17 +29,17 @@ describe("1.0.38 persistent batching parity", () => {
     const entries = runtime.lookup!.beltRuntime.settlementEntries;
     const sourceLedgers = runtime.lookup!.beltRuntime.sourceAvailabilityLedgers;
     const targetLedgers = runtime.lookup!.beltRuntime.targetCapacityLedgers;
+    const candidateAllowance = runtime.lookup!.beltRuntime.candidateAllowance;
+    const candidateMoved = runtime.lookup!.beltRuntime.candidateMoved;
+    const routeGroups = runtime.lookup!.beltRuntime.routeGroups;
     advancePersistentSimulationRuntime(runtime, 1, 1);
-    const candidate = runtime.lookup!.beltRuntime.routeGroups
-      .flatMap((group) => group.routes)
-      .find((route) => route.runtimeCandidate)?.runtimeCandidate;
-    expect(candidate).toBeDefined();
     advancePersistentSimulationRuntime(runtime, 1, 1);
     expect(runtime.lookup!.beltRuntime.settlementEntries).toBe(entries);
     expect(runtime.lookup!.beltRuntime.sourceAvailabilityLedgers).toBe(sourceLedgers);
     expect(runtime.lookup!.beltRuntime.targetCapacityLedgers).toBe(targetLedgers);
-    expect(runtime.lookup!.beltRuntime.routeGroups.flatMap((group) => group.routes)
-      .find((route) => route.belt.id === candidate!.belt.id)?.runtimeCandidate).toBe(candidate);
+    expect(runtime.lookup!.beltRuntime.candidateAllowance).toBe(candidateAllowance);
+    expect(runtime.lookup!.beltRuntime.candidateMoved).toBe(candidateMoved);
+    expect(runtime.lookup!.beltRuntime.routeGroups).toBe(routeGroups);
 
     let oracleState = structuredClone(normalizedSource);
     for (let step = 0; step < 2; step += 1) {

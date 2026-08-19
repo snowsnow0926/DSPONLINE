@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hashGameState } from "./benchmark";
 import {
   advancePersistentSimulationRuntime,
@@ -67,7 +67,25 @@ describe("1.0.36 read-only real-save benchmark", () => {
     const sliceCount = Math.max(0, Math.min(120, Math.floor(Number(environment?.DSP_V136_SLICE_COUNT ?? 60))));
     const raw = readFileSync(fixturePath, "utf8");
     const parsed = JSON.parse(raw);
-    const migrated = migrateGame(parsed.state ?? parsed);
+    // A pre-v47 save creates its initial station contract board during
+    // migration. Freeze that wall clock to the immutable envelope timestamp so
+    // independent cold-process samples start from the exact same GameState.
+    // This is benchmark isolation only; product migration semantics are not
+    // changed.
+    const requestedFixedNowMs = Number(environment?.DSP_V136_FIXED_NOW_MS);
+    const envelopeSavedAt = Number(parsed?.savedAt);
+    const fixedMigrationNowMs = Number.isFinite(requestedFixedNowMs) && requestedFixedNowMs > 0
+      ? Math.floor(requestedFixedNowMs)
+      : Number.isFinite(envelopeSavedAt) && envelopeSavedAt > 0
+        ? Math.floor(envelopeSavedAt)
+        : 1_700_000_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(fixedMigrationNowMs);
+    let migrated: GameState | null;
+    try {
+      migrated = migrateGame(parsed.state ?? parsed);
+    } finally {
+      dateNow.mockRestore();
+    }
     expect(migrated).not.toBeNull();
     const source = structuredClone(migrated!);
     source.paused = false;
@@ -112,6 +130,7 @@ describe("1.0.36 read-only real-save benchmark", () => {
     const report = {
       fixture: fixturePath,
       bytes: new TextEncoder().encode(raw).byteLength,
+      fixedMigrationNowMs,
       gameStateVersion: source.version,
       entities: source.entities.length,
       belts: source.belts.length,
@@ -121,6 +140,7 @@ describe("1.0.36 read-only real-save benchmark", () => {
       activePlanet: planets.get(source.activePlanetId),
       densestPlanet: densest ? { planetId: densest[0], ...densest[1] } : null,
       workerPayloadBytes: new TextEncoder().encode(JSON.stringify(source)).byteLength,
+      sourceGameplayHash: gameplayHash(source),
       heap: { beforeBytes: heapBeforeBytes, afterBytes: nodeProcess?.memoryUsage?.().heapUsed ?? 0 },
       exact: {
         seconds: exactSeconds,

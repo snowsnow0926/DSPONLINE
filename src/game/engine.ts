@@ -1757,6 +1757,20 @@ export interface SimulationProfiler {
   beltDistributeMs: number;
   beltReserveMs: number;
   logisticsMs: number;
+  /** Exclusive logistics phase: station runtime reset before a step. */
+  logisticsResetMs: number;
+  /** Exclusive logistics phase: input buffers moving into station/storage output. */
+  logisticsBufferMs: number;
+  /** Exclusive logistics phase: material-delivery hub drains. */
+  logisticsDeliveryMs: number;
+  /** Exclusive logistics phase: orbital cargo terminal settlement. */
+  logisticsOrbitalMs: number;
+  /** Exclusive logistics phase: dynamic route lookup refresh/reconciliation. */
+  logisticsLookupMs: number;
+  /** Exclusive logistics phase: station warper refill. */
+  logisticsWarperMs: number;
+  /** Exclusive logistics phase: galactic material/export settlement. */
+  logisticsExportMs: number;
   quantumMs: number;
   powerMs: number;
   dysonMs: number;
@@ -1983,6 +1997,37 @@ export interface SimulationLookupContext {
 
 function profileNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+/**
+ * Mutually exclusive logistics timings. Their sum is the attributed logistics
+ * wall time. More detailed counters such as peerMatchMs, routeEconomicsMs and
+ * dispatchPeerSortMs are nested diagnostics and must not be added to this set.
+ */
+export const SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS = [
+  "logisticsResetMs",
+  "logisticsBufferMs",
+  "logisticsDeliveryMs",
+  "logisticsOrbitalMs",
+  "logisticsLookupMs",
+  "logisticsWarperMs",
+  "dispatchMs",
+  "routeAdvanceMs",
+  "congestionMs",
+  "logisticsExportMs",
+] as const satisfies readonly (keyof SimulationProfiler)[];
+
+type SimulationLogisticsExclusivePhaseKey = typeof SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS[number];
+
+function recordLogisticsPhase(
+  profiler: SimulationProfiler | undefined,
+  key: SimulationLogisticsExclusivePhaseKey,
+  startedAt: number,
+): void {
+  if (!profiler) return;
+  const durationMs = Math.max(0, profileNow() - startedAt);
+  profiler[key] += durationMs;
+  profiler.logisticsMs += durationMs;
 }
 
 function stationSlotIndexKey(scope: StationLogisticsScope, location: PlanetId | "*", itemId: ItemId, mode: StationLogisticsMode): string {
@@ -6300,10 +6345,12 @@ export function prepareSimulationStep(
   absorbDysonSails(state, seconds);
   decayDysonSwarm(state, seconds);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
+  subsystemStartedAt = profiler ? profileNow() : 0;
   resetStationRuntime(state, lookup);
+  recordLogisticsPhase(profiler, "logisticsResetMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   transferLogisticsBuffers(state, lookup);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsBufferMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeInputBelts?.(state);
   transferBelts(state, seconds, true, undefined, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
@@ -6313,7 +6360,7 @@ export function prepareSimulationStep(
   runOrbitalCollectors(state, seconds, beltStepReservation.outputCredits, lookup);
   subsystemStartedAt = profiler ? profileNow() : 0;
   drainMaterialDeliveryHubs(state, seconds, lookup);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsDeliveryMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   const reception = calculateDysonReception(state, lookup);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
@@ -6340,9 +6387,11 @@ export function completeSimulationStep(
   contractExperiment?: SimulationContractExperiment,
 ): void {
   let quantumBoundaryFlow = prepared.quantumBoundaryFlow;
+  let subsystemStartedAt = profiler ? profileNow() : 0;
   if (state.mode === "normal" && state.orbitalStation.status !== "locked") {
     settleOrbitalCargoTerminals(state, seconds, lookup?.orbitalCargoTerminals);
   }
+  recordLogisticsPhase(profiler, "logisticsOrbitalMs", subsystemStartedAt);
   if (prepared.quantumBoundarySecond !== null) {
     const quantumStartedAt = profiler ? profileNow() : 0;
     quantumBoundaryFlow = settleQuantumNetworkDownloads(
@@ -6355,36 +6404,44 @@ export function completeSimulationStep(
     );
     if (profiler) profiler.quantumMs += profileNow() - quantumStartedAt;
   }
-  let subsystemStartedAt = profiler ? profileNow() : 0;
+  subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeOutputBelts?.(state);
   transferBelts(state, 0, false, prepared.beltStepReservation.allowanceByBelt, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
   contractExperiment?.afterOutputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
+  subsystemStartedAt = profiler ? profileNow() : 0;
   drainMaterialDeliveryHubs(state, seconds, lookup);
+  recordLogisticsPhase(profiler, "logisticsDeliveryMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   refillStationWarpers(state, lookup);
-  let phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "logisticsWarperMs", subsystemStartedAt);
+  let phaseStartedAt = profiler ? profileNow() : 0;
   if (lookup) {
     refreshRouteEnvironment(state, lookup);
     lookup.dispatchResultsBySlot.clear();
   }
+  recordLogisticsPhase(profiler, "logisticsLookupMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   dispatchStationScope(state, "local", powerByPlanet, lookup, profiler);
   dispatchStationScope(state, "remote", powerByPlanet, lookup, profiler);
-  if (profiler) profiler.dispatchMs += profileNow() - phaseStartedAt;
-  phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "dispatchMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   advanceStationRoutes(state, "local", seconds, powerByPlanet, lookup);
   advanceStationRoutes(state, "remote", seconds, powerByPlanet, lookup);
+  recordLogisticsPhase(profiler, "routeAdvanceMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   refillStationWarpers(state, lookup);
-  if (profiler) profiler.routeAdvanceMs += profileNow() - phaseStartedAt;
+  recordLogisticsPhase(profiler, "logisticsWarperMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   if (lookup) ensureDynamicRouteLookup(state, lookup);
-  phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "logisticsLookupMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   updateStationCongestion(state, lookup, profiler);
-  if (profiler) profiler.congestionMs += profileNow() - phaseStartedAt;
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "congestionMs", phaseStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   runGalacticMaterialExporters(state, powerByPlanet, lookup);
   runGalacticExports(state, seconds);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsExportMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   syncLegacySwarmIntoOrbits(state);
   updateDysonSphereGeneration(state);
@@ -6599,10 +6656,12 @@ function simulateStep(
   absorbDysonSails(state, seconds);
   decayDysonSwarm(state, seconds);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
+  subsystemStartedAt = profiler ? profileNow() : 0;
   resetStationRuntime(state, lookup);
+  recordLogisticsPhase(profiler, "logisticsResetMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   transferLogisticsBuffers(state, lookup);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsBufferMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeInputBelts?.(state);
   transferBelts(state, seconds, true, undefined, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
@@ -6612,7 +6671,7 @@ function simulateStep(
   runOrbitalCollectors(state, seconds, beltStepReservation.outputCredits, lookup);
   subsystemStartedAt = profiler ? profileNow() : 0;
   drainMaterialDeliveryHubs(state, seconds, lookup);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsDeliveryMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   const reception = calculateDysonReception(state);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
@@ -6632,9 +6691,11 @@ function simulateStep(
     );
     powerByPlanet.set(planet.id, result.powerPlan);
   }
+  subsystemStartedAt = profiler ? profileNow() : 0;
   if (state.mode === "normal" && state.orbitalStation.status !== "locked") {
     settleOrbitalCargoTerminals(state, seconds, lookup?.orbitalCargoTerminals);
   }
+  recordLogisticsPhase(profiler, "logisticsOrbitalMs", subsystemStartedAt);
   if (quantumBoundarySecond !== null) {
     const quantumStartedAt = profiler ? profileNow() : 0;
     quantumBoundaryFlow = settleQuantumNetworkDownloads(
@@ -6652,31 +6713,39 @@ function simulateStep(
   transferBelts(state, 0, false, beltStepReservation.allowanceByBelt, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
   contractExperiment?.afterOutputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
+  subsystemStartedAt = profiler ? profileNow() : 0;
   drainMaterialDeliveryHubs(state, seconds, lookup);
+  recordLogisticsPhase(profiler, "logisticsDeliveryMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   refillStationWarpers(state, lookup);
-  let phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "logisticsWarperMs", subsystemStartedAt);
+  let phaseStartedAt = profiler ? profileNow() : 0;
   if (lookup) {
     refreshRouteEnvironment(state, lookup);
     lookup.dispatchResultsBySlot.clear();
   }
+  recordLogisticsPhase(profiler, "logisticsLookupMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   dispatchStationScope(state, "local", powerByPlanet, lookup, profiler);
   dispatchStationScope(state, "remote", powerByPlanet, lookup, profiler);
-  if (profiler) profiler.dispatchMs += profileNow() - phaseStartedAt;
-  phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "dispatchMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   advanceStationRoutes(state, "local", seconds, powerByPlanet, lookup);
   advanceStationRoutes(state, "remote", seconds, powerByPlanet, lookup);
+  recordLogisticsPhase(profiler, "routeAdvanceMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   refillStationWarpers(state, lookup);
-  if (profiler) profiler.routeAdvanceMs += profileNow() - phaseStartedAt;
+  recordLogisticsPhase(profiler, "logisticsWarperMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   if (lookup) ensureDynamicRouteLookup(state, lookup);
-  phaseStartedAt = profileNow();
+  recordLogisticsPhase(profiler, "logisticsLookupMs", phaseStartedAt);
+  phaseStartedAt = profiler ? profileNow() : 0;
   updateStationCongestion(state, lookup, profiler);
-  if (profiler) profiler.congestionMs += profileNow() - phaseStartedAt;
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "congestionMs", phaseStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   runGalacticMaterialExporters(state, powerByPlanet, lookup);
   runGalacticExports(state, seconds);
-  if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
+  recordLogisticsPhase(profiler, "logisticsExportMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
   syncLegacySwarmIntoOrbits(state);
   updateDysonSphereGeneration(state);
@@ -6938,6 +7007,13 @@ export function createSimulationProfiler(): SimulationProfiler {
     beltDistributeMs: 0,
     beltReserveMs: 0,
     logisticsMs: 0,
+    logisticsResetMs: 0,
+    logisticsBufferMs: 0,
+    logisticsDeliveryMs: 0,
+    logisticsOrbitalMs: 0,
+    logisticsLookupMs: 0,
+    logisticsWarperMs: 0,
+    logisticsExportMs: 0,
     quantumMs: 0,
     powerMs: 0,
     dysonMs: 0,

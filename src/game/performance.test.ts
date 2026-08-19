@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { advanceSimulation, advanceSimulationBudget, createInitialState, createSimulationProfiler } from "./engine";
+import {
+  advanceSimulation,
+  advanceSimulationBudget,
+  createInitialState,
+  createSimulationProfiler,
+  SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS,
+} from "./engine";
 import { hashGameState } from "./benchmark";
 import type { BeltConnection, FactoryEntity } from "./types";
 
@@ -64,5 +70,20 @@ describe("large factory performance", () => {
     expect(hashGameState(profiled)).toBe(hashGameState(ordinary));
     expect(Object.values(profiler).every((value) => Number.isFinite(value) && value >= 0)).toBe(true);
     expect(profiler.copyStateMs + profiler.beltsMs + profiler.logisticsMs).toBeGreaterThan(0);
+  });
+
+  it("reconciles logistics wall time from mutually exclusive phases", () => {
+    const profiler = createSimulationProfiler();
+    advanceSimulationBudget(createStressFactory(), 10, 10, profiler);
+
+    expect(new Set(SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS).size)
+      .toBe(SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS.length);
+    const attributedMs = SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS.reduce(
+      (total, key) => total + profiler[key],
+      0,
+    );
+    expect(profiler.logisticsMs).toBeGreaterThan(0);
+    expect(attributedMs).toBeCloseTo(profiler.logisticsMs, 8);
+    expect(attributedMs / profiler.logisticsMs).toBeGreaterThanOrEqual(0.95);
   });
 });

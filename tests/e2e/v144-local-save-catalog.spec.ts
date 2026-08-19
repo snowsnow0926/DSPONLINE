@@ -147,6 +147,52 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
   console.log(`V144_COLD_CATALOG ${JSON.stringify({ p95, reports })}`);
 });
 
+test("verified IndexedDB lifecycle writes release transient raw payloads after commit", async ({ page }) => {
+  await page.goto("/?menu=1&storageMigration=production");
+  await expect(page.locator(".start-menu")).toBeVisible();
+
+  const result = await page.evaluate(async (saveKey) => {
+    const [engine, storage, store] = await Promise.all([
+      import("/src/game/engine.ts"),
+      import("/src/game/storage.ts"),
+      import("/src/game/localSaveStore.ts"),
+    ]);
+    const state = engine.createInitialState();
+    state.paused = true;
+    const notifications: number[] = [];
+    const unsubscribe = store.subscribeLocalSaveStorageStatus(() => {
+      notifications.push(store.getLocalSaveRawCacheSize());
+    });
+    const saved = storage.saveGame(state);
+    const queuedRawKeys = store.listLocalSaveKeys()
+      .filter((key) => store.getLocalSaveValue(key) !== null);
+    await store.flushLocalSaveWrites();
+    const committedRawKeys = store.listLocalSaveKeys()
+      .filter((key) => store.getLocalSaveValue(key) !== null);
+    const persisted = await store.readPersistedLocalSaveValue(saveKey);
+    unsubscribe();
+    return {
+      backend: store.getLocalSaveBackend(),
+      saved,
+      queuedRawKeys,
+      committedRawKeys,
+      committedRawCacheSize: store.getLocalSaveRawCacheSize(),
+      persistedBytes: persisted ? new TextEncoder().encode(persisted).byteLength : 0,
+      persistedPaused: persisted ? (JSON.parse(persisted) as { state?: { paused?: unknown } }).state?.paused : null,
+      notifications,
+    };
+  }, SAVE_KEY);
+
+  expect(result.backend).toBe("indexeddb");
+  expect(result.saved.success).toBe(true);
+  expect(result.queuedRawKeys).toContain(SAVE_KEY);
+  expect(result.persistedBytes).toBeGreaterThan(0);
+  expect(result.persistedPaused).toBe(true);
+  expect(result.committedRawKeys).toEqual([]);
+  expect(result.committedRawCacheSize).toBe(0);
+  expect(result.notifications.at(-1)).toBe(0);
+});
+
 test("legacy 35 MiB indexing parses one payload off-main and writes a bound small catalog", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/?menu=1&storageMigration=production");

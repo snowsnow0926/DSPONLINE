@@ -1242,6 +1242,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [largeSaveAutosaveProtection, setLargeSaveAutosaveProtection] = useState(readLargeSaveAutosaveThrottlePreference);
   const [allowEditsDuringSave, setAllowEditsDuringSave] = useState(readAllowEditsDuringSavePreference);
   const [persistedPrimaryBytes, setPersistedPrimaryBytes] = useState<number | null>(() => readVerifiedPrimaryByteLength(loaded.state.mode));
+  const [localSaveRawCacheSize, setLocalSaveRawCacheSize] = useState(getLocalSaveRawCacheSize);
   const largeSaveAutosavePolicy: LargeSaveAutosavePolicy = useMemo(() => resolveLargeSaveAutosavePolicy({
     configuredIntervalSeconds: game.settings.autosaveIntervalSeconds,
     persistedByteLength: persistedPrimaryBytes,
@@ -1252,7 +1253,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     writeLargeSaveAutosaveThrottlePreference(enabled);
   }, []);
   useEffect(() => {
-    const refresh = () => setPersistedPrimaryBytes(readVerifiedPrimaryByteLength(game.mode));
+    const refresh = () => {
+      setPersistedPrimaryBytes(readVerifiedPrimaryByteLength(game.mode));
+      setLocalSaveRawCacheSize(getLocalSaveRawCacheSize());
+    };
     refresh();
     return subscribeLocalSaveStorageStatus(refresh);
   }, [game.mode]);
@@ -10957,7 +10961,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-autosave-throttled={largeSaveAutosavePolicy.throttled ? "true" : "false"}
       data-autosave-large-save={largeSaveAutosavePolicy.largeSave ? "true" : "false"}
       data-local-save-backend={getLocalSaveBackend()}
-      data-local-save-raw-cache-size={getLocalSaveRawCacheSize()}
+      data-local-save-raw-cache-size={localSaveRawCacheSize}
       data-primary-save-bytes={persistedPrimaryBytes ?? -1}
       data-canvas-detail-preference={canvasDetailPreference}
       data-canvas-detail-stage={canvasPresentationDetailStage}

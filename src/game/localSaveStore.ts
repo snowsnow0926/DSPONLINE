@@ -1073,6 +1073,15 @@ async function commitCoordinatedRecord(
     catalogCache.delete(key);
     removeStorageEntry(key);
   }
+  // IndexedDB and the bound catalog/revision now own transient lifecycle
+  // payloads. Keep explicit slot/manual recovery payloads for their legacy
+  // same-page synchronous APIs, and keep a newer queued value for this key.
+  // Primary, backup and automatic-snapshot writes have catalog-backed async
+  // readers and must not pin a full factory after exact read-back completes.
+  const committedCategory = storageEntryCache.get(key)?.category;
+  const releaseTransientPayload = committedCategory === "primary" || committedCategory === "backup" ||
+    committedCategory === "automatic-snapshot";
+  if (releaseTransientPayload && value !== null && cache.get(key) === value) cache.delete(key);
   notifyStorageStatus();
   revisionCache.set(key, Math.max(revisionCache.get(key) ?? 0, nextRevision.revision));
   postCoordinationMessage({
@@ -1869,6 +1878,7 @@ export function retainLocalSavePayload(key: string, value: string): boolean {
   cache.set(key, value);
   knownSaveKeys.add(key);
   if (backend === "indexeddb") trimRawCache();
+  notifyStorageStatus();
   return true;
 }
 
@@ -1882,9 +1892,11 @@ export function getLocalSaveRawCacheSize(): number {
  */
 export function clearLocalSaveRawPayloadCache(): void {
   if (backend !== "indexeddb") return;
+  let changed = false;
   for (const key of [...cache.keys()]) {
-    if (isCatalogedSaveKey(key)) cache.delete(key);
+    if (isCatalogedSaveKey(key)) changed = cache.delete(key) || changed;
   }
+  if (changed) notifyStorageStatus();
 }
 
 function enqueue(operation: () => Promise<void>, key?: string): void {

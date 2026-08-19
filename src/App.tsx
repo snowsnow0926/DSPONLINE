@@ -8981,7 +8981,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     x: node.position.x,
     y: node.position.y,
     ...getFactoryFlowNodePresentationSize(node),
-  })), [canvasGeometryRevision, canvasTopology.revision, nodes]);
+  // Runtime node data (inventory, status, visual progress) cannot change line
+  // endpoints. Keep one geometry array until topology, count, drag position,
+  // or measured dimensions change; otherwise every telemetry tick leaves a
+  // full 8k/27k-node geometry projection in retained React render versions.
+  })), [canvasGeometryRevision, canvasTopology.revision, nodes.length]);
 
   const edges = useMemo<FactoryFlowEdge[]>(() => {
     const derivationStartedAt = performance.now();

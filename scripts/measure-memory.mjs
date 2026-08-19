@@ -32,6 +32,20 @@ function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
+async function withTimeout(promise, milliseconds, label) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out after ${milliseconds} ms`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -74,7 +88,7 @@ async function browserProcessMemory(profileDirectory) {
     @($result) | ConvertTo-Json -Compress
   `;
   try {
-    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", script], { maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", script], { maxBuffer: 4 * 1024 * 1024, timeout: 10_000 });
     const parsed = JSON.parse(stdout.trim() || "[]");
     return Array.isArray(parsed) ? parsed : [parsed];
   } catch {
@@ -108,7 +122,7 @@ async function websocketCommand(webSocketDebuggerUrl, method, params = {}) {
 async function targetHeapUsage(debuggingPort) {
   if (!debuggingPort) return [];
   try {
-    const response = await fetch(`http://127.0.0.1:${debuggingPort}/json/list`);
+    const response = await fetch(`http://127.0.0.1:${debuggingPort}/json/list`, { signal: AbortSignal.timeout(5_000) });
     if (!response.ok) return [];
     const targets = await response.json();
     const relevant = targets.filter((target) =>
@@ -161,9 +175,32 @@ let debuggingPort = null;
 let traceActive = false;
 let traceCompletion = null;
 let cdp = null;
+let browserVersion = null;
+let pageCrash = null;
 const samples = [];
 const processBursts = [];
 const lifecycleStartedAt = Date.now();
+const writeProgressReport = async (status, error = null) => {
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, `${JSON.stringify({
+    schemaVersion: 3,
+    status,
+    label,
+    browserVersion,
+    url,
+    source: { bytes: sourceStat.size, sha256: sourceSha256, mtimeMs: sourceStat.mtimeMs, gameStateVersion: sourceState.version ?? null, entities: sourceState.entities?.length ?? 0, belts: sourceState.belts?.length ?? 0 },
+    durationSeconds,
+    intervalSeconds,
+    warmupSeconds,
+    commandRecords,
+    pageCrash,
+    error,
+    startedAt: new Date(lifecycleStartedAt).toISOString(),
+    updatedAt: new Date().toISOString(),
+    samples,
+    processBursts,
+  }, null, 2)}\n`, "utf8");
+};
 
 try {
   if (manualCdp) {
@@ -204,6 +241,7 @@ try {
     });
   }
   const page = context.pages()[0] ?? await context.newPage();
+  page.on("crash", () => { pageCrash = { observedAt: new Date().toISOString(), elapsedSeconds: (Date.now() - lifecycleStartedAt) / 1_000 }; });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(({ withoutWorker, expectedAutosaveIntervalMs }) => {
     window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
@@ -262,7 +300,8 @@ try {
   cdp = await context.newCDPSession(page);
   await cdp.send("Performance.enable");
   await cdp.send("HeapProfiler.enable");
-  const browserVersion = await cdp.send("Browser.getVersion");
+  browserVersion = await cdp.send("Browser.getVersion");
+  const cdpCommand = (method, params = {}, timeoutMs = 20_000) => withTimeout(cdp.send(method, params), timeoutMs, `CDP ${method}`);
 
   const captureProcesses = async (phase) => {
     const processes = await browserProcessMemory(profileDirectory);
@@ -286,20 +325,20 @@ try {
   };
   const sample = async (phase, { forceGc = false } = {}) => {
     if (forceGc) {
-      await cdp.send("HeapProfiler.collectGarbage");
+      await cdpCommand("HeapProfiler.collectGarbage", {}, 60_000);
       await delay(300);
     }
     const [performanceResult, heap, dom, processes, application, targets] = await Promise.all([
-      cdp.send("Performance.getMetrics"), cdp.send("Runtime.getHeapUsage"), cdp.send("Memory.getDOMCounters"),
+      cdpCommand("Performance.getMetrics"), cdpCommand("Runtime.getHeapUsage"), cdpCommand("Memory.getDOMCounters"),
       browserProcessMemory(profileDirectory),
-      page.evaluate(() => ({
+      withTimeout(page.evaluate(() => ({
         entityCount: document.querySelectorAll(".react-flow__node").length,
         edgeCount: document.querySelectorAll(".react-flow__edge").length,
         workerActive: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
         paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
         rawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
         visibility: document.visibilityState,
-      })).catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, visibility: "unknown" })),
+      })), 20_000, "page memory metadata").catch(() => ({ entityCount: 0, edgeCount: 0, workerActive: "unavailable", paused: "unknown", rawCacheSize: -1, visibility: "unknown" })),
       targetHeapUsage(debuggingPort),
     ]);
     application.workerCount = page.workers().length;
@@ -324,6 +363,7 @@ try {
       targets,
     };
     samples.push(entry);
+    await writeProgressReport("running");
     process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, processTotals: entry.processTotals })}\n`);
     return entry;
   };
@@ -513,7 +553,8 @@ try {
     }
   }
   const report = {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    status: "complete",
     label,
     browserVersion,
     url,
@@ -550,6 +591,14 @@ try {
   process.stdout.write(`MEMORY_REPORT ${JSON.stringify({ outputPath, traceOutputPath: trace?.outputPath ?? null, summary: report.summary })}\n`);
   if (!sourceUnchanged) throw new Error("source save changed during memory measurement");
   if (trace?.containsExactSavePrefix) throw new Error("CPU trace unexpectedly contains the exact save prefix");
+} catch (error) {
+  const finalStat = await stat(savePath).catch(() => null);
+  const finalRaw = finalStat ? await readFile(savePath, "utf8").catch(() => null) : null;
+  const sourceUnchanged = finalStat !== null && finalRaw !== null && sha256(finalRaw) === sourceSha256 && finalStat.size === sourceStat.size && finalStat.mtimeMs === sourceStat.mtimeMs;
+  const failure = { name: error?.name ?? "Error", message: error?.message ?? String(error), sourceUnchanged };
+  await writeProgressReport("failed", failure).catch(() => undefined);
+  process.stderr.write(`MEMORY_FAILURE ${JSON.stringify(failure)}\n`);
+  throw error;
 } finally {
   if (traceActive && cdp) await cdp.send("Tracing.end").catch(() => undefined);
   if (browser) await browser.close().catch(() => undefined);

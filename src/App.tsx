@@ -265,6 +265,7 @@ import { getDifficultyDefinition } from "./game/difficulty";
 import { analyzeBeltNetwork, analyzeEntityLineTrace, diagnoseBelt, predictBeltConnection } from "./game/network";
 import { buildFactoryEdgeRouteCenters, reconcileFactoryCanvasTopology, type FactoryCanvasTopology } from "./game/canvasTopology";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
+import { KeyedViewStore } from "./game/keyedViewStore";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
@@ -1442,6 +1443,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [nodes, setNodes, onNodesChange] = useNodesState<FactoryFlowNode>([]);
   const canvasNodesRef = useRef(nodes);
   canvasNodesRef.current = nodes;
+  const factoryNodeRuntimeStoreRef = useRef<KeyedViewStore<FactoryNodeData> | null>(null);
+  if (!factoryNodeRuntimeStoreRef.current) factoryNodeRuntimeStoreRef.current = new KeyedViewStore<FactoryNodeData>();
+  const factoryNodeRuntimeStore = factoryNodeRuntimeStoreRef.current;
   useEffect(() => installRuntimeLongTaskDiagnostics(), []);
   const panelGame = useThrottledRuntimeShellGame(game,
     operationsOpen || mobilePanel !== null ||
@@ -1568,6 +1572,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasNodeDerivationCountRef = useRef(0);
   const canvasChangedNodePublicationCountRef = useRef(0);
   const canvasChangedNodeTotalRef = useRef(0);
+  const canvasRuntimeNodePublicationCountRef = useRef(0);
   const pointerRef = useRef({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
   const clickConnectionPreviewRef = useRef<ClickConnectionPreviewState | null>(null);
   const batchConnectionModeRef = useRef(false);
@@ -8515,8 +8520,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       timeWarp: canvasGame.timeWarp,
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
+      runtimeStore: factoryNodeRuntimeStore,
     };
-  }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
+  }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, factoryNodeRuntimeStore, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
 
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
@@ -8533,6 +8539,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         let stableNodeCount = 0;
         let deferredNodeCount = 0;
         let dynamicNodeCount = 0;
+        let runtimeNodePublicationCount = 0;
         let stackMembershipTokenCompareCount = 0;
         let stackMemberIdReferenceCount = 0;
         const next = activePlanetEntities.map((entity) => {
@@ -8661,6 +8668,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               stackPresentation.alertCount, stackPresentation.criticalAlertCount,
               stackGeometryHandlesRequired,
               stackPresentation.membershipToken].join(":");
+            const staticData = {
+              ...commonNodeData,
+              visualSignature: `deferred:${entity.id}:${entity.kind}:${entity.buildingId ?? ""}:${entity.resourceId ?? ""}`,
+              presentationSignature,
+              entity,
+              connectedInputItemIds,
+              inputBeltCounts,
+              outputBeltCounts,
+              blackHolePortConnections,
+              targetDysonOrbitLabel: previous?.data.targetDysonOrbitLabel,
+              powerFactor: previous?.data.powerFactor ?? 0,
+              resourceReserve: previous?.data.resourceReserve ?? null,
+              status: staticAlertActive
+                ? { code: "idle", label: `重叠组内 ${stackPresentation.alertCount} 个生产告警`, tone: "warning" }
+                : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
+              outputCapacity: previous?.data.outputCapacity ?? 0,
+              cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
+              lod: "compact",
+              dynamicEffects: false,
+              presentationVisible: stablePresentationVisible,
+              alertActive: staticAlertActive,
+              stackHidden: stackPresentation.hidden,
+              stackMarker: stackPresentation.marker,
+              stackHalo: stackPresentation.halo,
+              stackCount: stackPresentation.count,
+              stackGroupId: stackPresentation.groupId,
+              stackMembershipToken: stackPresentation.membershipToken,
+              stackMemberIds: stackPresentation.memberIds,
+              stackAlertCount: stackPresentation.alertCount,
+              stackCriticalAlertCount: stackPresentation.criticalAlertCount,
+              stackGeometryHandlesRequired,
+              staticPresentation: true,
+              focusClassName,
+              connectionDraft: null,
+              connectionViewportFull: false,
+              acceptedInputItemIds,
+              producedOutputItemIds,
+            } as FactoryNodeData;
+            if (factoryNodeRuntimeStore.publish(entity.id, staticData)) runtimeNodePublicationCount += 1;
             return {
               id: entity.id,
               type: entity.kind,
@@ -8675,44 +8721,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               ...getFactoryFlowNodeInitialSize("compact", stackHidden, stackMarker),
               measured: previous?.data.lod === "compact" && previous.data.stackHidden === stackPresentation.hidden &&
                 previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
-              data: {
-                ...commonNodeData,
-                visualSignature: `deferred:${entity.id}:${entity.kind}:${entity.buildingId ?? ""}:${entity.resourceId ?? ""}`,
-                presentationSignature,
-                entity,
-                connectedInputItemIds,
-                inputBeltCounts,
-                outputBeltCounts,
-                blackHolePortConnections,
-                targetDysonOrbitLabel: previous?.data.targetDysonOrbitLabel,
-                powerFactor: previous?.data.powerFactor ?? 0,
-                resourceReserve: previous?.data.resourceReserve ?? null,
-                status: staticAlertActive
-                  ? { code: "idle", label: `重叠组内 ${stackPresentation.alertCount} 个生产告警`, tone: "warning" }
-                  : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
-                outputCapacity: previous?.data.outputCapacity ?? 0,
-                cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
-                lod: "compact",
-                dynamicEffects: false,
-                presentationVisible: stablePresentationVisible,
-                alertActive: staticAlertActive,
-                stackHidden: stackPresentation.hidden,
-                stackMarker: stackPresentation.marker,
-                stackHalo: stackPresentation.halo,
-                stackCount: stackPresentation.count,
-                stackGroupId: stackPresentation.groupId,
-                stackMembershipToken: stackPresentation.membershipToken,
-                stackMemberIds: stackPresentation.memberIds,
-                stackAlertCount: stackPresentation.alertCount,
-                stackCriticalAlertCount: stackPresentation.criticalAlertCount,
-                stackGeometryHandlesRequired,
-                staticPresentation: true,
-                focusClassName,
-                connectionDraft: null,
-                connectionViewportFull: false,
-                acceptedInputItemIds,
-                producedOutputItemIds,
-              } as FactoryNodeData,
+              data: staticData,
               selected,
               zIndex: nodeZIndex,
               className: staticClassName,
@@ -8837,11 +8846,51 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             nodeZIndex,
             stackPresentation.membershipToken,
           ].join("|");
-          if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
+          const outerPresentationStable = Boolean(previous && previous.data.presentationSignature === presentationSignature &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.selected === selected && previous.className === className && previous.draggable === nodeDraggable &&
             previous.selectable === nodeSelectable && previous.focusable === nodeFocusable && previous.connectable === nodeConnectable &&
-            previous.hidden === nodeHidden && previous.zIndex === nodeZIndex) return previous;
+            previous.hidden === nodeHidden && previous.zIndex === nodeZIndex);
+          const previousRuntimeData = factoryNodeRuntimeStore.get(entity.id) ?? previous?.data;
+          if (outerPresentationStable && previousRuntimeData?.visualSignature === visualSignature && previous) return previous;
+          const nextData = {
+            ...commonNodeData,
+            visualSignature,
+            presentationSignature,
+            entity,
+            connectedInputItemIds,
+            inputBeltCounts,
+            outputBeltCounts,
+            blackHolePortConnections,
+            targetDysonOrbitLabel,
+            powerFactor,
+            resourceReserve,
+            status,
+            outputCapacity,
+            cycleRatePerSecond,
+            lod,
+            dynamicEffects,
+            presentationVisible,
+            alertActive,
+            stackHidden: stackPresentation.hidden,
+            stackMarker: stackPresentation.marker,
+            stackHalo: stackPresentation.halo,
+            stackCount: stackPresentation.count,
+            stackGroupId: stackPresentation.groupId,
+            stackMembershipToken: stackPresentation.membershipToken,
+            stackMemberIds: stackPresentation.memberIds,
+            stackAlertCount: stackPresentation.alertCount,
+            stackCriticalAlertCount: stackPresentation.criticalAlertCount,
+            stackGeometryHandlesRequired,
+            staticPresentation: false,
+            focusClassName,
+            connectionDraft: nodeConnectionDraft,
+            connectionViewportFull,
+            acceptedInputItemIds,
+            producedOutputItemIds,
+          } as unknown as FactoryNodeData;
+          if (factoryNodeRuntimeStore.publish(entity.id, nextData)) runtimeNodePublicationCount += 1;
+          if (outerPresentationStable && previous) return previous;
           return {
             id: entity.id,
             type: entity.kind,
@@ -8856,42 +8905,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             ...getFactoryFlowNodeInitialSize(lod, stackHidden, stackMarker),
             measured: previous?.data.lod === lod && previous.data.stackHidden === stackPresentation.hidden &&
               previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
-            data: {
-              ...commonNodeData,
-              visualSignature,
-              presentationSignature,
-              entity,
-              connectedInputItemIds,
-              inputBeltCounts,
-              outputBeltCounts,
-              blackHolePortConnections,
-              targetDysonOrbitLabel,
-              powerFactor,
-              resourceReserve,
-              status,
-              outputCapacity,
-              cycleRatePerSecond,
-              lod,
-              dynamicEffects,
-              presentationVisible,
-              alertActive,
-              stackHidden: stackPresentation.hidden,
-              stackMarker: stackPresentation.marker,
-              stackHalo: stackPresentation.halo,
-              stackCount: stackPresentation.count,
-              stackGroupId: stackPresentation.groupId,
-              stackMembershipToken: stackPresentation.membershipToken,
-              stackMemberIds: stackPresentation.memberIds,
-              stackAlertCount: stackPresentation.alertCount,
-              stackCriticalAlertCount: stackPresentation.criticalAlertCount,
-              stackGeometryHandlesRequired,
-              staticPresentation: false,
-              focusClassName,
-              connectionDraft: nodeConnectionDraft,
-              connectionViewportFull,
-              acceptedInputItemIds,
-              producedOutputItemIds,
-            } as unknown as FactoryNodeData,
+            data: nextData,
             selected,
             zIndex: nodeZIndex,
             className,
@@ -8904,9 +8918,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             domAttributes: hiddenWrapperAttributes,
           } satisfies FactoryFlowNode;
         });
+        if (factoryNodeRuntimeStore.size !== next.length) {
+          factoryNodeRuntimeStore.retain(new Set(next.map((node) => node.id)));
+        }
         const derivationMs = performance.now() - derivationStartedAt;
         const changedNodeCount = next.reduce((count, node, index) => count + (node === current[index] ? 0 : 1), 0);
         canvasNodeDerivationCountRef.current += 1;
+        canvasRuntimeNodePublicationCountRef.current += runtimeNodePublicationCount;
         if (changedNodeCount > 0) {
           canvasChangedNodePublicationCountRef.current += 1;
           canvasChangedNodeTotalRef.current += changedNodeCount;
@@ -8921,6 +8939,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           canvasElement.dataset.nodeDerivationCount = String(canvasNodeDerivationCountRef.current);
           canvasElement.dataset.changedNodePublicationCount = String(canvasChangedNodePublicationCountRef.current);
           canvasElement.dataset.changedNodeTotal = String(canvasChangedNodeTotalRef.current);
+          canvasElement.dataset.runtimeNodePublicationCount = String(canvasRuntimeNodePublicationCountRef.current);
           canvasElement.dataset.stackMembershipTokenCompareCount = String(stackMembershipTokenCompareCount);
           canvasElement.dataset.stackMemberIdReferenceCount = String(stackMemberIdReferenceCount);
           canvasElement.dataset.projectionRuntimeRevision = String(canvasRenderSnapshot.runtimeRevision);

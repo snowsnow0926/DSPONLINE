@@ -25,7 +25,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Handle, Position, useUpdateNodeInternals, type Node, type NodeProps } from "@xyflow/react";
-import { memo, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { FUEL_ENERGY_MJ, ITEMS, MATRIX_ITEM_IDS, getBuilding, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getProliferator, getRecipe, getRecipesForBuilding } from "../game/content";
 import { MATERIAL_DELIVERY_SLOT_COUNT, getEntityProliferatorItemId, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getMaterialDeliveryItems, getMaterialDeliverySlots, getStationDroneCapacity, getStationSlots, getStationVesselCapacity, type ResourceReserveSnapshot } from "../game/engine";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
@@ -38,6 +38,7 @@ import { recordRuntimeTransitionCounter } from "../game/runtimeTransitionDiagnos
 import { getOrbitalCargoPortItems, ORBITAL_CARGO_TERMINAL_PORT_COUNT } from "../game/stationCargoTerminal";
 import type { WorkProgressMode } from "../game/productionRefresh";
 import { useWorkDisplayProgress } from "../hooks/useProductionVisualClock";
+import type { KeyedViewStore } from "../game/keyedViewStore";
 import type {
   BuildingId,
   CargoStack,
@@ -122,6 +123,8 @@ export interface FactoryNodeData extends Record<string, unknown> {
   /** Primitive cache keys used to reject a static-node refresh before allocating CSS/signature strings. */
   staticPresentation?: boolean;
   focusClassName?: string;
+  /** Render-only selector store; never serialized into GameState or Worker messages. */
+  runtimeStore: KeyedViewStore<FactoryNodeData>;
 }
 
 export type FactoryFlowNode = Node<FactoryNodeData, EntityKind>;
@@ -1163,10 +1166,37 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
     previous.data.entity.position.y === next.data.entity.position.y;
 }
 
-const MemoVeinNode = memo(VeinNode, areNodeVisualPropsEqual);
-const MemoMachineNode = memo(MachineNode, areNodeVisualPropsEqual);
-const MemoLogisticsNode = memo(LogisticsNode, areNodeVisualPropsEqual);
-const MemoPowerNode = memo(PowerNode, areNodeVisualPropsEqual);
+function useRuntimeNodeData(props: NodeProps<FactoryFlowNode>): FactoryNodeData {
+  const store = props.data.runtimeStore;
+  const subscribe = useCallback((listener: () => void) => store.subscribe(props.id, listener), [props.id, store]);
+  const getSnapshot = useCallback(() => store.get(props.id) ?? props.data, [props.data, props.id, store]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function RuntimeVeinNode(props: NodeProps<FactoryFlowNode>) {
+  const data = useRuntimeNodeData(props);
+  return <VeinNode {...props} data={data} />;
+}
+
+function RuntimeMachineNode(props: NodeProps<FactoryFlowNode>) {
+  const data = useRuntimeNodeData(props);
+  return <MachineNode {...props} data={data} />;
+}
+
+function RuntimeLogisticsNode(props: NodeProps<FactoryFlowNode>) {
+  const data = useRuntimeNodeData(props);
+  return <LogisticsNode {...props} data={data} />;
+}
+
+function RuntimePowerNode(props: NodeProps<FactoryFlowNode>) {
+  const data = useRuntimeNodeData(props);
+  return <PowerNode {...props} data={data} />;
+}
+
+const MemoVeinNode = memo(RuntimeVeinNode, areNodeVisualPropsEqual);
+const MemoMachineNode = memo(RuntimeMachineNode, areNodeVisualPropsEqual);
+const MemoLogisticsNode = memo(RuntimeLogisticsNode, areNodeVisualPropsEqual);
+const MemoPowerNode = memo(RuntimePowerNode, areNodeVisualPropsEqual);
 
 export const NODE_TYPES = {
   vein: MemoVeinNode,

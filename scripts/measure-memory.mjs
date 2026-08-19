@@ -381,6 +381,7 @@ try {
           canvasNodeDerivationCount: canvasMetric("data-node-derivation-count"),
           canvasChangedNodePublicationCount: canvasMetric("data-changed-node-publication-count"),
           canvasChangedNodeTotal: canvasMetric("data-changed-node-total"),
+          canvasRuntimeNodePublicationCount: canvasMetric("data-runtime-node-publication-count"),
           canvasStableNodeCount: canvasMetric("data-stable-node-count"),
           canvasDeferredNodeCount: canvasMetric("data-deferred-node-count"),
           canvasDynamicNodeCount: canvasMetric("data-dynamic-node-count"),
@@ -411,7 +412,7 @@ try {
     };
     samples.push(entry);
     await writeProgressReport("running");
-    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, canvasRuntimeRevision: entry.application.canvasRuntimeRevision, canvasChangedNodeCount: entry.application.canvasChangedNodeCount, canvasNodeDerivationCount: entry.application.canvasNodeDerivationCount, canvasChangedNodePublicationCount: entry.application.canvasChangedNodePublicationCount, canvasChangedNodeTotal: entry.application.canvasChangedNodeTotal, canvasStableNodeCount: entry.application.canvasStableNodeCount, processTotals: entry.processTotals })}\n`);
+    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, canvasRuntimeRevision: entry.application.canvasRuntimeRevision, canvasChangedNodeCount: entry.application.canvasChangedNodeCount, canvasNodeDerivationCount: entry.application.canvasNodeDerivationCount, canvasChangedNodePublicationCount: entry.application.canvasChangedNodePublicationCount, canvasChangedNodeTotal: entry.application.canvasChangedNodeTotal, canvasRuntimeNodePublicationCount: entry.application.canvasRuntimeNodePublicationCount, canvasStableNodeCount: entry.application.canvasStableNodeCount, processTotals: entry.processTotals })}\n`);
     return entry;
   };
 

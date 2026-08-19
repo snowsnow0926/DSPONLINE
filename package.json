@@ -74,7 +74,7 @@
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",
@@ -83,7 +83,7 @@
     "@playwright/test": "^1.61.1",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
+    "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.1",
     "cross-env": "^10.1.0",
     "electron": "^43.1.1",

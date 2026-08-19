@@ -125,7 +125,13 @@ test("each planet restores its last canvas viewport", async ({ page }) => {
 
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();
-  const savedViewport = await page.evaluate(async () => (await import("/src/game/storage.ts")).loadGame().state.planetViewports.home);
+  const savedViewport = await page.evaluate(async () => {
+    const localSaveStore = await import("/src/game/localSaveStore.ts");
+    await localSaveStore.flushLocalSaveWrites();
+    const raw = await localSaveStore.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    if (!raw) throw new Error("verified primary save is missing");
+    return (JSON.parse(raw) as { state: { planetViewports: { home: { x: number; y: number; zoom: number } } } }).state.planetViewports.home;
+  });
   expect(savedViewport.zoom).toBeGreaterThanOrEqual(0.25);
   expect(Math.abs(savedViewport.x - 510) + Math.abs(savedViewport.y - 250)).toBeGreaterThan(10);
 });
@@ -162,4 +168,3 @@ test("light theme covers the next mobile shell and factory cards", async ({ page
   })).toBeGreaterThan(700);
   await page.screenshot({ path: "artifacts/qa/v31-light-mobile-390.png", fullPage: true });
 });
-

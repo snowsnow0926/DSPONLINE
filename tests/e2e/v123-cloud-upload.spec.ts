@@ -6,10 +6,10 @@ import { createSyntheticCloudSave } from "./fixtures/syntheticCloudSave";
 const FIXTURE = process.env.DSP_CLOUD_UPLOAD_FIXTURE;
 const OFFLINE_SECONDS = Math.max(0, Number(process.env.DSP_CLOUD_UPLOAD_OFFLINE_SECONDS ?? 164));
 
+test.describe.configure({ timeout: Math.max(180_000, OFFLINE_SECONDS * 250) });
 test.use({ serviceWorkers: "block" });
 
 test("cloud upload preparation keeps a large save off the main thread", async ({ page }) => {
-  test.setTimeout(Math.max(180_000, OFFLINE_SECONDS * 250));
   await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.0"));
   await page.goto("/?menu=1");
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 8 * 1024 * 1024 });
@@ -45,7 +45,6 @@ test("cloud upload preparation keeps a large save off the main thread", async ({
 });
 
 test("cloud upload preparation can skip offline settlement without changing the saved factory", async ({ page }) => {
-  test.setTimeout(120_000);
   await page.goto("/?menu=1");
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 8 * 1024 * 1024 });
   const fixture = JSON.parse(raw) as { savedAt?: number };
@@ -77,7 +76,6 @@ test("cloud upload preparation can skip offline settlement without changing the 
 });
 
 test("browser upload sends real gzip bodies for 1 MB, 2 MB and 7 MB saves", async ({ page }) => {
-  test.setTimeout(120_000);
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 7 * 1024 * 1024 });
   const fixture = JSON.parse(raw) as { formatVersion: number; savedAt?: number; state: Record<string, unknown> };
   const checksum = (formatVersion: number, state: unknown) => {
@@ -136,4 +134,3 @@ test("browser upload sends real gzip bodies for 1 MB, 2 MB and 7 MB saves", asyn
   expect(requests.map((request) => request.expectedRevision)).toEqual(revisions);
   expect(result).toEqual([8, 9, 10]);
 });
-

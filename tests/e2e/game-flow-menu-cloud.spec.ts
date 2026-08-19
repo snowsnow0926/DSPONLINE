@@ -12,6 +12,38 @@ async function installTestBootstrap(page: Page) {
   });
 }
 
+async function readCanonicalLocalSavePayloads(page: Page, keys: string[]): Promise<Array<string | null>> {
+  return page.evaluate(async (requestedKeys) => {
+    const legacy = requestedKeys.map((key) => window.localStorage.getItem(key));
+    if (!window.indexedDB) return legacy;
+    try {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = window.indexedDB.open("dsp-idle-network.local-saves", 2);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      if (!database.objectStoreNames.contains("records")) {
+        database.close();
+        return legacy;
+      }
+      const persisted = await Promise.all(requestedKeys.map((key) => new Promise<string | null>((resolve) => {
+        const transaction = database.transaction("records", "readonly");
+        const request = transaction.objectStore("records").get(key);
+        request.onsuccess = () => {
+          const record = request.result as { value?: unknown } | undefined;
+          resolve(typeof record?.value === "string" ? record.value : null);
+        };
+        request.onerror = () => resolve(null);
+        transaction.onabort = () => resolve(null);
+      })));
+      database.close();
+      return persisted.map((value, index) => value ?? legacy[index]);
+    } catch {
+      return legacy;
+    }
+  }, keys);
+}
+
 async function dismissOnboarding(page: Page) {
   const control = page.getByRole("button", { name: /^(?:关闭|跳过)启动引导$/ });
   if (await control.count()) await control.first().click();
@@ -1602,15 +1634,14 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "RuntimeWorld 2.0 超大工厂运行时");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.0");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
-  await expect(releaseNotes).toContainText("自动保存保持模拟运行");
-  await expect(releaseNotes).toContainText("Worker 状态自动解锁");
-  await expect(releaseNotes).toContainText("默认保护与实验性编辑都安全");
-  await expect(releaseNotes).toContainText("手机连续拉线不再遮挡地图");
-  await expect(releaseNotes).toContainText("画布显示可独立控制");
-  await expect(releaseNotes).toContainText("纯挂机日志与宏观进度保留");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toContainText("领域编译运行时默认启用");
+  await expect(releaseNotes).toContainText("确定性与旧引擎回退保留");
+  await expect(releaseNotes).toContainText("命令与投影只更新必要部分");
+  await expect(releaseNotes).toContainText("权威保存减少复制且不削弱保护");
+  await expect(releaseNotes).toContainText("存档与服务协议零迁移");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1633,15 +1664,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "RuntimeWorld 2.0 超大工厂运行时");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.0");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-1440.png", fullPage: true });
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1664,7 +1695,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1678,11 +1709,11 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年8月17日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年8月20日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "RuntimeWorld 2.0 超大工厂运行时");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.0");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1692,12 +1723,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "RuntimeWorld 2.0 超大工厂运行时");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.0");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });
@@ -2125,18 +2156,17 @@ test("username registration and login preserve every local save without automati
   await page.getByLabel("密码", { exact: true }).fill("strong-pass-123");
   await page.getByRole("button", { name: "登录云账户" }).click();
   await expect(page.locator(".start-menu-message")).toContainText("本地存档保持不变");
-  const after = await page.evaluate(() => {
-    const comparable = (raw: string | null) => {
-      if (!raw) return null;
-      const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
-      return envelope;
-    };
-    return [
-      comparable(window.localStorage.getItem("dsp-idle-network.save.v1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.2")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.3")),
-    ];
+  const payloads = await readCanonicalLocalSavePayloads(page, [
+    "dsp-idle-network.save.v1",
+    "dsp-idle-network.slot.1",
+    "dsp-idle-network.slot.2",
+    "dsp-idle-network.slot.3",
+  ]);
+  const after = payloads.map((raw) => {
+    if (!raw) return null;
+    const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
+    return envelope;
   });
+  expect(payloads.every((raw) => raw !== null)).toBe(true);
   expect(after).toEqual(before);
 });

@@ -520,15 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
+  await expect(dialog).toHaveAttribute("aria-label", "RuntimeWorld 2.0 超大工厂运行时");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.0");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(10);
-  await expect(dialog).toContainText("自动保存保持模拟运行");
-  await expect(dialog).toContainText("手机连续拉线不再遮挡地图");
-  await expect(dialog).toContainText("画布显示可独立控制");
-  await expect(dialog).toContainText("Worker 状态自动解锁");
-  await expect(dialog).toContainText("默认保护与实验性编辑都安全");
-  await expect(dialog).toContainText("纯挂机日志与宏观进度保留");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog).toContainText("领域编译运行时默认启用");
+  await expect(dialog).toContainText("确定性与旧引擎回退保留");
+  await expect(dialog).toContainText("命令与投影只更新必要部分");
+  await expect(dialog).toContainText("权威保存减少复制且不削弱保护");
+  await expect(dialog).toContainText("存档与服务协议零迁移");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

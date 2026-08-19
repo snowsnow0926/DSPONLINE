@@ -267,6 +267,7 @@ import { analyzeBeltNetwork, analyzeEntityLineTrace, diagnoseBelt, predictBeltCo
 import { buildFactoryEdgeRouteCenters, reconcileFactoryCanvasTopology, type FactoryCanvasTopology } from "./game/canvasTopology";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
 import { indexCanvasPresentationNodes, reconcileCanvasNodePublication, selectCanvasRuntimeRecords } from "./game/canvasPresentationLifecycle";
+import { selectInspectorBelt } from "./game/inspectorProjection";
 import { KeyedViewStore } from "./game/keyedViewStore";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
@@ -10615,10 +10616,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : game.entities.filter((entity) => selectedEntityIdSet.has(entity.id) && entity.planetId === game.activePlanetId),
   [game.activePlanetId, game.entities, selectedEntityIdSet, selectedEntityIds.length]);
   const selectedEntity = selectedEntities.length === 1 ? selectedEntities[0] : null;
-  const selectedBelt = useMemo(() => selectedBeltId
-    ? canvasGame.belts.find((belt) => belt.id === selectedBeltId && belt.planetId === canvasGame.activePlanetId) ?? null
-    : null,
-  [canvasGame.activePlanetId, canvasGame.belts, selectedBeltId]);
+  // Canvas belt records are render-owned mutable wrappers so the high-frequency
+  // flow sampler can stay allocation-bounded. Inspector controls must never use
+  // those wrappers as controlled-form authority: their stable identity can make
+  // React retain a pre-command value after a route/lane/monitor edit. The game
+  // projection is immutable at player-command boundaries and therefore gives
+  // every accepted edit an observable prop identity.
+  const selectedBelt = useMemo(() => selectInspectorBelt(game, selectedBeltId),
+  [game.activePlanetId, game.belts, selectedBeltId]);
   const selectedBelts = useMemo(() => {
     if (selectedBeltIds.length === 0) return [];
     const selectedIds = new Set(selectedBeltIds);

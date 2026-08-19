@@ -10,4 +10,6 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   readonly VITE_PUBLIC_APP_ORIGIN?: string;
   readonly VITE_RUNTIMEWORLD_DIAGNOSTICS?: string;
+  readonly VITE_RUNTIMEWORLD_SHADOW?: string;
+  readonly VITE_RUNTIMEWORLD_V2?: string;
 }

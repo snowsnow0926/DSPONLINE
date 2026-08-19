@@ -22,6 +22,7 @@ import {
   type SimulationStateTransfer,
 } from "./simulationRuntimeProtocol";
 import { commitRuntimeWorldProjection, type RuntimeWorldProjectionDiagnostics } from "./runtimeWorld";
+import { resolveRuntimeWorldBuildMode } from "./runtimeWorldMode";
 import {
   replaySimulationRuntimeDurableJournal,
   SimulationRuntimeDurableReplayError,
@@ -137,8 +138,13 @@ let multicoreExecutor: BrowserMulticoreExecutor | null = null;
 let multicoreExecutorWorkerCount = 0;
 let activeRegistrySnapshot: ContentPackRuntimeSnapshot | undefined;
 
-const runtimeWorldEnabled = import.meta.env.VITE_RUNTIMEWORLD_V2 !== "false";
-const runtimeWorldShadowEnabled = import.meta.env.VITE_RUNTIMEWORLD_SHADOW === "true" || import.meta.env.DEV;
+const runtimeWorldBuildMode = resolveRuntimeWorldBuildMode({
+  enabled: import.meta.env.VITE_RUNTIMEWORLD_V2,
+  shadow: import.meta.env.VITE_RUNTIMEWORLD_SHADOW,
+  development: import.meta.env.DEV,
+});
+const runtimeWorldEnabled = runtimeWorldBuildMode.enabled;
+const runtimeWorldShadowEnabled = runtimeWorldBuildMode.shadowEnabled;
 let simulationMessageQueue: Promise<void> = Promise.resolve();
 let runtimeInvalidated = false;
 

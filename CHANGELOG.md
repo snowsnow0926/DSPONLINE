@@ -4,7 +4,15 @@ All notable player-facing changes are recorded here. Game-state migration versio
 
 ## [Unreleased]
 
-### 1.0.46（本地候选，未发布）
+### 1.1.0（本地候选，未发布）
+
+- 默认启用 RuntimeWorld 2.0：传送带、生产、电力、物流与量子领域使用 Worker 私有编译索引、稳定依赖和精确失效边界，生产构建不运行影子双跑。
+- 非拓扑命令复用稳定 slot/generation 与领域 revision；Projection 和画布外层节点只发布实际变化的数据，保留旧引擎领域级 fallback 与诊断原因。
+- 模拟 Worker 在权威状态旁准备 canonical 主档/快照，持久化 Worker 独立执行 checksum、CAS、事务提交和精确读回；所有 primary 保存意图共用串行生命周期。
+- 两份只读真实大档的 60 秒精确模拟与逐秒 P95 均较冻结基线下降超过 40%，存档格式、物资守恒和确定性输出不变。
+- 更新 Android 版本为 `1.1.0 / 1001000`；仅生成未签名诊断候选，不执行线上发布。
+
+### 1.0.46（历史候选，未发布）
 
 - 修复 durable finalize/Worker 故障后只能刷新恢复的问题：当前页面会从 T0 recovery 精确回放、验证 T1 并原子重建模拟 Worker，暂停后可继续模拟。
 - 修复新 Worker 沿用旧 `disabled` 标志导致的“durable 模拟 Worker 不可用”假失败。

@@ -115,6 +115,40 @@ const release1046Copy = {
   },
 } as const;
 
+const release1100Copy = {
+  date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
+  title: { "zh-CN": "RuntimeWorld 2.0 超大工厂运行时", en: "RuntimeWorld 2.0 for Large Factories" },
+  summary: {
+    "zh-CN": "1.1.0 默认启用 RuntimeWorld 2.0：传送带、生产、电力、物流与量子结算复用 Worker 私有编译索引和稳定依赖，命令只失效受影响领域，保存由模拟 Worker 在权威状态旁准备并由持久化 Worker 独立校验、提交和精确读回。超大工厂主动运行、画布发布和自动保存显著降低阻塞，同时保持整数物资守恒、确定性顺序、旧引擎受控回退与全部现有存档/在线协议。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变。",
+    en: "Version 1.1.0 enables RuntimeWorld 2.0 by default. Belts, production, power, logistics, and quantum settlement reuse Worker-private compiled indexes and stable dependencies; commands invalidate only affected domains, while the simulation Worker prepares saves beside authority and a persistence Worker independently verifies, commits, and reads them back exactly. Large-factory runtime, canvas publication, and autosaves spend far less time blocked while preserving integer material conservation, deterministic ordering, controlled legacy fallback, and every existing save and online protocol. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  runtimeTitle: { "zh-CN": "领域编译运行时默认启用", en: "Compiled domains are enabled by default" },
+  runtimeDescription: {
+    "zh-CN": "传送带路由、生产/供电依赖、空间站物流和量子边界使用按拓扑修订重建的稳定索引；已证明休眠或阻断的工作只在相关库存、供电、配方或拓扑变化时唤醒。",
+    en: "Belt routes, production and power dependencies, station logistics, and quantum boundaries use stable indexes rebuilt by topology revision. Proven dormant or blocked work wakes only when relevant inventory, power, recipes, or topology changes.",
+  },
+  deterministicTitle: { "zh-CN": "确定性与旧引擎回退保留", en: "Determinism and legacy fallback remain" },
+  deterministicDescription: {
+    "zh-CN": "结算顺序、线路公平游标、物资整数守恒和存档字段继续由跨 1 秒到 30 天的深比较保护；无法证明安全的量子、跨岛或失效边界会明确回退旧扫描路径，生产不承担影子双跑开销。",
+    en: "Settlement order, route fairness cursors, integer material conservation, and saved fields remain protected by deep comparisons from one second through 30 days. Quantum, cross-island, or invalidation boundaries that cannot be proven safe explicitly fall back to the legacy scan, without production shadow-run overhead.",
+  },
+  commandTitle: { "zh-CN": "命令与投影只更新必要部分", en: "Commands and projections update only what changed" },
+  commandDescription: {
+    "zh-CN": "Worker 内 journal、slot/generation 和领域 revision 让非拓扑编辑复用未变引用；界面只接收有界 Projection，画布只重建实际变化的动态节点，继续支持暂停、拖动、框选、拉线与空间站往返。",
+    en: "Worker-private journals, slot generations, and domain revisions let non-topology edits retain unchanged references. The UI receives bounded projections and the canvas rebuilds only changed dynamic nodes while preserving pause, drag, selection, connections, and station round trips.",
+  },
+  saveTitle: { "zh-CN": "权威保存减少复制且不削弱保护", en: "Authoritative saves copy less without weakening protection" },
+  saveDescription: {
+    "zh-CN": "模拟 Worker 直接准备 canonical 主档和快照，持久化 Worker 仍独立验证 checksum、CAS、事务读回与提交后逐字读回；手动、自动、返回主页和生命周期保存共用串行边界，玩家暂停意图保持不变。",
+    en: "The simulation Worker prepares canonical primary and snapshot payloads directly, while the persistence Worker still independently verifies checksums, CAS, transactional read-back, and exact post-commit bytes. Manual, autosave, menu-return, and lifecycle saves share one serial boundary and preserve player pause intent.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与服务协议零迁移", en: "No save or service migration" },
+  compatibilityDescription: {
+    "zh-CN": "RuntimeWorld 是可由权威检查点重建、永不序列化的 Worker 私有结构；v1～v47 存档、备份、快照、导入和云恢复继续走既有 envelope、checksum、writer lease 与跨标签保护。",
+    en: "RuntimeWorld is a Worker-private structure rebuilt from authoritative checkpoints and never serialized. Saves v1-v47, backups, snapshots, imports, and cloud recovery retain the existing envelope, checksum, writer-lease, and cross-tab protections.",
+  },
+} as const;
+
 const release1045Copy = {
   date: { "zh-CN": "2026年8月17日", en: "August 17, 2026" },
   title: { "zh-CN": "全星系空间站扩展", en: "Global Orbital Station Expansion" },
@@ -346,8 +380,12 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1046Copy): string {
+function release1046Message(locale: AppLocale, key: keyof typeof release1046Copy): string {
   return release1046Copy[key][locale];
+}
+
+function currentMessage(locale: AppLocale, key: keyof typeof release1100Copy): string {
+  return release1100Copy[key][locale];
 }
 
 function release1045Message(locale: AppLocale, key: keyof typeof release1045Copy): string {
@@ -365,22 +403,39 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-17-v1.0.46",
+    id: "2026-08-20-v1.1.0",
     date: currentMessage(locale, "date"),
-    version: "1.0.46",
+    version: "1.1.0",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "in-page-durable-recovery", title: currentMessage(locale, "recoveryTitle"), description: currentMessage(locale, "recoveryDescription") },
-      { id: "worker-rebuild", title: currentMessage(locale, "workerTitle"), description: currentMessage(locale, "workerDescription") },
-      { id: "save-modes", title: currentMessage(locale, "saveTitle"), description: currentMessage(locale, "saveDescription") },
-      { id: "mobile-batch-connections", title: currentMessage(locale, "batchTitle"), description: currentMessage(locale, "batchDescription") },
-      { id: "canvas-presentation", title: currentMessage(locale, "canvasTitle"), description: currentMessage(locale, "canvasDescription") },
-      { id: "pure-idle-preservation", title: currentMessage(locale, "idleTitle"), description: currentMessage(locale, "idleDescription") },
-      { id: "time-aware-cycle-progress", title: currentMessage(locale, "progressTitle"), description: currentMessage(locale, "progressDescription") },
-      { id: "committed-terminal-output", title: currentMessage(locale, "idleOutputTitle"), description: currentMessage(locale, "idleOutputDescription") },
-      { id: "ordinary-contract-quantum-delivery", title: currentMessage(locale, "stationDeliveryTitle"), description: currentMessage(locale, "stationDeliveryDescription") },
-      { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+      { id: "runtimeworld-compiled-domains", title: currentMessage(locale, "runtimeTitle"), description: currentMessage(locale, "runtimeDescription") },
+      { id: "runtimeworld-determinism", title: currentMessage(locale, "deterministicTitle"), description: currentMessage(locale, "deterministicDescription") },
+      { id: "runtimeworld-command-projection", title: currentMessage(locale, "commandTitle"), description: currentMessage(locale, "commandDescription") },
+      { id: "runtimeworld-authoritative-save", title: currentMessage(locale, "saveTitle"), description: currentMessage(locale, "saveDescription") },
+      { id: "runtimeworld-compatibility", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1046(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-17-v1.0.46",
+    date: release1046Message(locale, "date"),
+    version: "1.0.46",
+    title: release1046Message(locale, "title"),
+    summary: release1046Message(locale, "summary"),
+    items: [
+      { id: "in-page-durable-recovery", title: release1046Message(locale, "recoveryTitle"), description: release1046Message(locale, "recoveryDescription") },
+      { id: "worker-rebuild", title: release1046Message(locale, "workerTitle"), description: release1046Message(locale, "workerDescription") },
+      { id: "save-modes", title: release1046Message(locale, "saveTitle"), description: release1046Message(locale, "saveDescription") },
+      { id: "mobile-batch-connections", title: release1046Message(locale, "batchTitle"), description: release1046Message(locale, "batchDescription") },
+      { id: "canvas-presentation", title: release1046Message(locale, "canvasTitle"), description: release1046Message(locale, "canvasDescription") },
+      { id: "pure-idle-preservation", title: release1046Message(locale, "idleTitle"), description: release1046Message(locale, "idleDescription") },
+      { id: "time-aware-cycle-progress", title: release1046Message(locale, "progressTitle"), description: release1046Message(locale, "progressDescription") },
+      { id: "committed-terminal-output", title: release1046Message(locale, "idleOutputTitle"), description: release1046Message(locale, "idleOutputDescription") },
+      { id: "ordinary-contract-quantum-delivery", title: release1046Message(locale, "stationDeliveryTitle"), description: release1046Message(locale, "stationDeliveryDescription") },
+      { id: "version-upgrade", title: release1046Message(locale, "compatibilityTitle"), description: release1046Message(locale, "compatibilityDescription") },
     ],
   };
 }

@@ -259,7 +259,7 @@ try {
   page.on("crash", () => { pageCrash = { observedAt: new Date().toISOString(), elapsedSeconds: (Date.now() - lifecycleStartedAt) / 1_000 }; });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(({ withoutWorker, expectedAutosaveIntervalMs, allowNaturalAutosave }) => {
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.0");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");

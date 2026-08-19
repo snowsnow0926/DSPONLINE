@@ -387,7 +387,7 @@ import { useLongPress } from "./hooks/useLongPress";
 import { useLowEndMobile } from "./hooks/useLowEndMobile";
 import { useResolvedTheme } from "./hooks/useResolvedTheme";
 import { useObservedBeltFlowGame } from "./hooks/useObservedBeltFlowGame";
-import { useLatestTransitionPublisher } from "./hooks/useLatestTransitionPublisher";
+import { useLatestSnapshotPublisher } from "./hooks/useLatestSnapshotPublisher";
 import { useMobileNavigation, type MobileWorkspaceId } from "./hooks/useMobileNavigation";
 import { useMobileUiPreference } from "./hooks/useMobileUiPreference";
 import { useProductionRefreshPreference } from "./hooks/useProductionRefreshPreference";
@@ -627,7 +627,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
   const latestRef = useRef(game);
   const timerRef = useRef<number | null>(null);
   latestRef.current = game;
-  const publishLatestSnapshot = useLatestTransitionPublisher(snapshot, latestRef, setSnapshot);
+  const publishLatestSnapshot = useLatestSnapshotPublisher(snapshot, latestRef, setSnapshot);
   const cargoChanged = snapshot.cargo?.itemId !== game.cargo?.itemId ||
     snapshot.cargo?.amount !== game.cargo?.amount ||
     snapshot.cargo?.origin?.kind !== game.cargo?.origin?.kind ||
@@ -1499,7 +1499,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
   const pendingRuntimeGamePublicationRef = useRef<GameState | null>(null);
   const pendingRuntimeGamePublicationTimerRef = useRef<number | null>(null);
-  const publishLatestRuntimeGame = useLatestTransitionPublisher(game, gameRef, setGame);
+  const publishLatestRuntimeGame = useLatestSnapshotPublisher(game, gameRef, setGame);
   const publishRuntimeGame = useCallback((next: GameState, immediate = false) => {
     gameRef.current = next;
     latestCanvasGameRef.current = next;
@@ -1543,7 +1543,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const returnToMenuSaveInFlightRef = useRef(false);
   const lastCanvasPublishedGameRef = useRef(game);
   const canvasRenderSnapshotRef = useRef(canvasRenderSnapshot);
-  const publishLatestCanvasSnapshot = useLatestTransitionPublisher(
+  const publishLatestCanvasSnapshot = useLatestSnapshotPublisher(
     canvasRenderSnapshot,
     canvasRenderSnapshotRef,
     setCanvasRenderSnapshot,

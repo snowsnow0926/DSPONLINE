@@ -3,14 +3,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { useRef, useState } from "react";
-import { useLatestTransitionPublisher } from "./useLatestTransitionPublisher";
+import { useLatestSnapshotPublisher } from "./useLatestSnapshotPublisher";
 
 interface LargeSnapshot {
   revision: number;
   records: readonly number[];
 }
 
-describe("useLatestTransitionPublisher", () => {
+describe("useLatestSnapshotPublisher", () => {
   let root: Root | null = null;
   let host: HTMLDivElement | null = null;
 
@@ -29,7 +29,7 @@ describe("useLatestTransitionPublisher", () => {
       const initialRef = useRef<LargeSnapshot>({ revision: 0, records: [] });
       const [snapshot, setSnapshot] = useState(initialRef.current);
       const latestRef = useRef(snapshot);
-      const publishLatest = useLatestTransitionPublisher(snapshot, latestRef, setSnapshot);
+      const publishLatest = useLatestSnapshotPublisher(snapshot, latestRef, setSnapshot);
       publish = (next) => {
         latestRef.current = next;
         publishLatest();

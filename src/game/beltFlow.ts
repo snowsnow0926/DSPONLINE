@@ -87,6 +87,54 @@ export class BeltFlowSampler {
   }
 }
 
+/**
+ * Reuses render-only belt records across observation publications. React may
+ * retain interrupted render versions, so allocating a fresh object for every
+ * belt on every visual tick turns a bounded five-second sampler into linear
+ * live-heap growth. Source GameState records are never mutated.
+ */
+export class BeltFlowProjectionCache {
+  private readonly projectedById = new Map<string, BeltConnection>();
+
+  project(
+    state: GameState,
+    observations: ReadonlyMap<string, BeltFlowObservation>,
+    planetId?: PlanetId,
+  ): GameState {
+    const activeIds = new Set<string>();
+    const belts = state.belts.map((belt) => {
+      activeIds.add(belt.id);
+      const observation = planetId && belt.planetId !== planetId ? undefined : observations.get(belt.id);
+      let projected = this.projectedById.get(belt.id);
+      if (!projected) {
+        projected = { ...belt };
+        this.projectedById.set(belt.id, projected);
+      } else {
+        Object.assign(projected, belt);
+      }
+      if (observation) {
+        projected.lastFlow = observation.flowPerSecond;
+        projected.recentFlowSampleSeconds = observation.sampleSeconds;
+        projected.recentFlowTransferred = observation.transferred;
+        projected.recentFlowSampling = observation.sampling;
+      }
+      return projected;
+    });
+    for (const beltId of this.projectedById.keys()) {
+      if (!activeIds.has(beltId)) this.projectedById.delete(beltId);
+    }
+    return { ...state, belts };
+  }
+
+  get size(): number {
+    return this.projectedById.size;
+  }
+
+  clear(): void {
+    this.projectedById.clear();
+  }
+}
+
 export function applyBeltFlowObservations(
   state: GameState,
   observations: ReadonlyMap<string, BeltFlowObservation>,

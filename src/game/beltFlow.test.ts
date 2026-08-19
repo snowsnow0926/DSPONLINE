@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addUnitToEntityGroup, advanceSimulation, connectBelt, createInitialState, placeBuilding, setEntityRecipe, setLogisticsItem } from "./engine";
-import { applyBeltFlowObservations, BELT_FLOW_WINDOW_SECONDS, BeltFlowSampler } from "./beltFlow";
+import { applyBeltFlowObservations, BELT_FLOW_WINDOW_SECONDS, BeltFlowProjectionCache, BeltFlowSampler } from "./beltFlow";
 import { diagnoseBelt } from "./network";
 
 function stateWithBelt() {
@@ -24,6 +24,35 @@ function stateWithBelt() {
 }
 
 describe("BeltFlowSampler", () => {
+  it("reuses render-only belt records without mutating source snapshots", () => {
+    const cache = new BeltFlowProjectionCache();
+    const first = stateWithBelt();
+    const firstView = cache.project(first, new Map([[first.belts[0].id, {
+      flowPerSecond: 3,
+      sampleSeconds: 1,
+      transferred: 3,
+      sampling: true,
+    }]]));
+    const projected = firstView.belts[0];
+    expect(projected).not.toBe(first.belts[0]);
+    expect(projected.lastFlow).toBe(3);
+    expect(first.belts[0].lastFlow).toBe(0);
+
+    const second = { ...first, belts: [{ ...first.belts[0], totalTransferred: 12, lastFlow: 12 }] };
+    const secondView = cache.project(second, new Map([[second.belts[0].id, {
+      flowPerSecond: 6,
+      sampleSeconds: 2,
+      transferred: 12,
+      sampling: true,
+    }]]));
+    expect(secondView.belts[0]).toBe(projected);
+    expect(secondView.belts[0]).toMatchObject({ lastFlow: 6, totalTransferred: 12 });
+    expect(second.belts[0].lastFlow).toBe(12);
+
+    cache.project({ ...second, belts: [] }, new Map());
+    expect(cache.size).toBe(0);
+  });
+
   it("derives a stable five-simulation-second rate from totalTransferred", () => {
     const sampler = new BeltFlowSampler();
     const state = stateWithBelt();

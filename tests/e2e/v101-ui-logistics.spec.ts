@@ -3,6 +3,7 @@ import { getBuilding, getRecipe } from "../../src/game/content";
 import { createInitialState, placeBuilding, setEntityRecipe } from "../../src/game/engine";
 import { validateTimedPeriodicProgress, type TimedPeriodicProgressSample } from "../../src/game/periodicProgressValidation";
 import { serializeEnvelope } from "../../src/game/storage";
+import { openSameOriginStorageHarness } from "./same-origin-harness";
 
 const RELEASE_NOTE_ID = "2026-08-20-v1.1.0";
 
@@ -14,18 +15,22 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function seedUiState(page: Page, options: { theme?: "dark" | "light"; fontScale?: number; paused?: boolean } = {}) {
-  await page.addInitScript(({ theme, fontScale, paused, releaseNoteId }) => {
-    const entityBase = {
-      planetId: "home",
-      minerCount: 0,
-      routingCursor: 0,
-      progress: 0,
-      utilization: 0,
-      productionRate: 0,
-      inputs: {},
-      outputs: {},
-    };
-    const state = {
+  const theme = options.theme ?? "dark";
+  const fontScale = options.fontScale ?? 1;
+  const paused = options.paused ?? true;
+  const entityBase = {
+    planetId: "home",
+    minerCount: 0,
+    routingCursor: 0,
+    progress: 0,
+    utilization: 0,
+    productionRate: 0,
+    inputs: {},
+    outputs: {},
+  };
+  const raw = JSON.stringify({
+    savedAt: Date.now(),
+    state: {
       version: 34,
       nextId: 6,
       activePlanetId: "home",
@@ -48,27 +53,39 @@ async function seedUiState(page: Page, options: { theme?: "dark" | "light"; font
         progressByTech: {},
         completedTechIds: ["electromagnetism", "proliferator_1", "plane_smelting"],
       },
-      settings: {
-        theme,
-        fontScale,
-        simulationSpeed: 1,
-        autosaveIntervalSeconds: 30,
-      },
+      settings: { theme, fontScale, simulationSpeed: 1, autosaveIntervalSeconds: 30 },
       paused,
-    };
+    },
+  });
+  await page.addInitScript(({ releaseNoteId }) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", releaseNoteId);
     window.localStorage.setItem("dsp-idle-network.production-refresh.v1", "classic");
-    if (window.sessionStorage.getItem("dsp-idle-network.v101-fixture-seeded") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state }));
-      window.sessionStorage.setItem("dsp-idle-network.v101-fixture-seeded", "1");
-    }
-  }, {
-    theme: options.theme ?? "dark",
-    fontScale: options.fontScale ?? 1,
-    paused: options.paused ?? true,
-    releaseNoteId: RELEASE_NOTE_ID,
-  });
+  }, { releaseNoteId: RELEASE_NOTE_ID });
+  await openSameOriginStorageHarness(page);
+  await page.evaluate(async (saveRaw) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves");
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("records")) request.result.createObjectStore("records", { keyPath: "key" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("records", "readwrite");
+      transaction.objectStore("records").put({
+        key: "dsp-idle-network.save.v1",
+        value: saveRaw,
+        updatedAt: Date.now(),
+        bytes: new TextEncoder().encode(saveRaw).byteLength,
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, raw);
 }
 
 async function dismissOnboarding(page: Page) {

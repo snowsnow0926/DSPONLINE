@@ -1,4 +1,4 @@
-# DSP极简网络 1.0.46 存档、手机拉线、画布与空间站本地审计报告
+# DSP极简网络 1.0.46 发布阻断返修与候选重建审计报告
 
 审计日期：2026-08-19
 
@@ -20,6 +20,12 @@ durable WAL 没有被删除，但只允许通过显式开发变量启用。它�
 
 用户最终给出的“只要切换到空间站再切回来，工厂建筑就无法移动和拉线”还有更直接的独立根因：工厂和空间站曾处于同一个 `ReactFlowProvider` store。空间站挂载时的 StoreUpdater 用空间站节点、边和视口覆盖工厂 store，离开时清理又重置同一 store。修复为给空间站嵌套独立 provider 与固定 flow id，二者不再共享节点仓、手势状态或 viewport。生产预览同时发现直达 `/station/<id>` 时相对 `./assets` 会解析到 `/station/assets/*` 并白屏；Web 资源与 manifest 现使用站点根路径，Desktop/Android 仍保持相对路径。
 
+旧候选 `865f125e8624` 的发布门禁失败不是产品进度真实倒退。失败时 aria、可见文字与 fill 始终一致，问题在旧 E2E 用固定“下降至少 50 才算回绕”判断模 1 进度；Playwright 延迟跨过完整周期后继续前进时，合法净下降可以小于 50。新验证器在浏览器内连续采样并记录 `performance.now()`，用弧形熔炉磁铁配方的 `2/3 cycle/s` 与权威发布窗口展开完整周期；自然回绕必须出现，无法由时间解释的非回绕下降仍失败。目标用例单 worker 连续 20/20，没有 retry、skip 或阈值放宽。
+
+截图中的纯挂机负数来自呈现层把上一宏观桶的瞬时戴森功率变化率外推到下一次 30 秒提交。戴森功率与轨道人口会在吸收、过期等边界真实升降，不能作为累计计数线性插值。现在只有白矩阵、火箭、吸收帆、结构点和活动交付按非负速率插值；瞬时字段只显示最后提交快照，功率副文案明确为“已结算快照 · 30 秒更新”。
+
+空间站前三个普通任务无法量子交付则是渠道匹配错误：`terminal` 要求在 UI 和领域层同时排除了 `quantum`。修复后玩家确认的量子扣除可满足所有普通任务要求，指定来源只继续约束自动轨道终端；扣库存与推进任务仍在同一状态变更中完成。另一个 4-worker 重复失败最终证明是画布真实竞态：上下文卡 hover 视觉展开后错误恢复 `draggable`，pointer-enter 与 pointer-down 会随机选择节点拖动或画布平移；现在视觉保护与交互权限分离，专项连续 20/20。
+
 ## 最终设计边界
 
 1. **默认保存路径回到稳定协调器**：缺失、关闭或错误设置 durable 环境变量时均选择 1.0.43-compatible verified-primary；打开旧玩家档不会隐式启用 durable。空间站 v46 bridge 也强制使用稳定路径。
@@ -31,8 +37,13 @@ durable WAL 没有被删除，但只允许通过显式开发变量启用。它�
 7. **密集保护保持可恢复**：玩家选择“完整 + 全部卡片”时，视口节点超过 480/1,000 会统一改用中等/一行基础卡，并在界面明确显示“密集保护”；单个选中或悬停目标仍完整展开，不更改设置值，也不写入存档。
 8. **视口发布只有一个实时坐标真相**：节点虚拟化、线路端点、放置坐标、框选和小地图都从同一实时 React Flow transform 派生；节流只减少重绘频率，不允许把最终视口留在旧值。
 9. **空间站画布拥有独立 store**：空间站往返、缩放、直达和卸载不能改变工厂节点仓、选择、连接、拖动状态或 viewport；Web history route 的静态资源必须从站点根解析。
+10. **周期进度由时间展开而非下降阈值判定**：同一页面时钟、已知周期速率与权威发布窗口共同决定合法完整周期；显示源必须一致，非回绕下降仍为硬失败。
+11. **纯挂机只插值累计量**：瞬时戴森功率和轨道人口只接受宏观桶权威快照；累计计数忽略负速率，不允许呈现层制造倒退。
+12. **量子交付是显式人工备用渠道**：普通合同可由玩家确认后从共享量子库存完成，来源限制仍属于自动终端合同；不新增存档字段或迁移。
 
 ## 两份真实玩家存档的只读验收
+
+以下真实附件验收完成于上一 clean runtime `865f125e8624`，用于证明未改存档格式和画布/空间站兼容基线；本轮 `d64b9ef85f9d` 没有再次读取或复制玩家附件，也不把这部分历史证据冒充最终 SHA 的新执行结果。
 
 | 输入 | 精确字节 | SHA-256 | 第一次自动保存 | 第二次自动保存 | 结果 |
 | --- | ---: | --- | ---: | ---: | --- |
@@ -67,12 +78,13 @@ durable WAL 没有被删除，但只允许通过显式开发变量启用。它�
 
 ## 本地验证结果
 
-以下数字均来自固定运行时候选 `865f125e862487aedf7d7df08491867881b2b65b`；完整 Chromium、durable、production preview、PWA、跨浏览器、服务端、运维、原生静态和两份真实存档均已在空间站隔离增量合入后重跑。
+除表中明确标为“上一候选兼容基线”的真实附件项外，以下数字均来自独立 detached clean worktree 的固定运行时候选 `d64b9ef85f9dea1cf2d0617cb300fa492ca1f43c`。
 
 | 范围 | 结果 |
 | --- | --- |
 | TypeScript | `npm run typecheck` 通过 |
-| 全量 Vitest | 171 files passed / 7 conditional skipped；1,423 passed / 20 skipped / 0 failed |
+| 发布阻断专项 | 周期进度目标用例单 worker 20/20；网络聚焦真实指针专项 20/20；周期验证器、纯挂机呈现和空间站量子交付均有单元覆盖 |
+| 全量 Vitest | 173 files passed / 7 conditional skipped；1,434 passed / 20 skipped / 0 failed |
 | 服务端与空间站 | server 363 passed / 2 skipped；station 3/3 |
 | 运维与切换模拟 | ops 56 passed / 6 Linux-only skipped；release switch 29/29 |
 | 原生静态安全 | 24/24 |
@@ -81,19 +93,23 @@ durable WAL 没有被删除，但只允许通过显式开发变量启用。它�
 | 默认保存进度 | 2/2；保护模式和实验模式分别验证 |
 | 纯挂机教程与宏 | 20 passed / 1 条真实夹具条件跳过 |
 | 手机连续拉线 | 21/21，含 6/10/50/100 候选、390×844、360×640、844×390 与 80%～200% 字体 |
-| 完整 Chromium | 最终固定候选 425 passed / 26 explicit conditional skips / 0 failed（451 总项，10.8 分钟） |
-| 空间站专项 | dev 6/6、production preview 6/6、关联 Chromium 11/11；Firefox + WebKit 12/12；8 次往返、每轮站内缩放后，工厂 viewport、拖动、反向框选、拉线和放置坐标全部通过，pageerror/React Flow warning 0 |
+| 完整 Chromium | 最终固定候选 426 passed / 26 explicit conditional skips / 0 failed（452 总项，4 workers，6.3 分钟） |
+| 空间站专项 | production preview 7/7；Firefox + WebKit 14/14；新增普通合同量子交付 E2E 通过 |
 | Firefox / WebKit 通用夜间项 | 2/2 |
-| Production preview | 功能门禁 27/27，PWA 3/3；自动密度性能在独立进程连续 3/3，九次手势 P95 7.0～20.9 ms、max 27.8 ms、0 个 >50/>100 ms 帧；连接 bounded entry 9.8 ms、P95 13.8 ms、max 27.9 ms |
-| 真实存档专项 | 两份档的自动保存、画布核心、选中/悬停、实时虚拟化平移和空间站往返全部通过；各 19 张设置/横竖屏截图，pageerror 0；空间站各 6 个模块，返回工厂后的 viewport 与实际平移/选择/绘制/拖动均正常 |
+| Production preview | 功能门禁 31/31，PWA 3/3；标准隔离密度 1/1（内部 9 轮）与连接性能 1/1。额外密度 `repeat-each=3` 为 2 pass / 1 原阈值 fail，失败子轮 P95 27.8 ms、max 34.8 ms，完整记录保留 |
+| 真实存档专项（上一候选兼容基线） | 两份档的自动保存、画布核心、选中/悬停、实时虚拟化平移和空间站往返通过；本轮未再次读取附件 |
 | 匿名 v47 发布夹具 | 12/12 |
 | 许可证与依赖 | 125 个运行时包一致；root/server `npm audit --audit-level=high` 均 0 漏洞 |
-| Web 构建 | 1,961 modules；startup 194,820 B gzip（JS 101,833 B、CSS 92,987 B、最大 JS 58,974 B）；menu 281,377 B gzip；forbidden startup modules 0；Build ID `1.0.46+865f125e8624`；生产直达空间站、根 assets 与 manifest 均通过 |
+| Web 构建 | 1,962 modules；startup 194,810 B gzip（JS 101,823 B、CSS 92,987 B、最大 JS 58,974 B）；menu 282,321 B gzip；forbidden startup modules 0；Build ID `1.0.46+d64b9ef85f9d`；生产直达空间站、根 assets 与 manifest 均通过 |
+| 不可变制品 | source manifest 251/251；Web 155/155；API 166/166；candidate 10/10；provenance 3/3；SHA256SUMS 12/12；Windows/Android 明确未签名 |
 
-Chromium 的条件跳过均由用例内显式条件控制，包括未提供的其他真实夹具、durable-only、production-preview-only 和未显式提供玩家存档路径的 opt-in 场景；它们不是失败。两份用户指定玩家档已由独立 opt-in 用例实际运行，不包含在这些跳过项里。开发 E2E 的 `/api → 127.0.0.1:65534` 拒绝是线上 API 隔离，不是产品故障。
+Chromium 的条件跳过均由用例内显式条件控制，包括未提供的真实夹具、durable-only 与 production-preview-only 场景；它们不是失败。开发 E2E 的 `/api → 127.0.0.1:65534` 拒绝是线上 API 隔离，不是产品故障。
 
 ## 审计中额外处理
 
+- 把经典进度专项从 Playwright 外部定时轮询改为浏览器内连续采样；独立纯函数按实测时间展开模 1 周期，并用单元测试证明 89→59 可在足够时间内是前进、相同下降在短间隔仍是非法倒退。
+- 纯挂机呈现新增字段语义边界：累计字段可插值，瞬时字段只读权威快照；负速率不能降低累计显示。空间站合同渠道匹配则把人工量子备用渠道与自动终端来源限制分开。
+- 完整 Chromium 重压中额外发现并修复上下文节点 hover 恢复 `draggable` 的产品竞态；专项与全量均使用真实鼠标命中，不以 `force` 点击绕过页面几何。
 - 修正保存失败 E2E 的注入位置：现在拦截真正写主档的 authoritative persistence Worker `commit`，并正确返还 transferable payload；已证明连续 quota 失败时实验性编辑仍保留、可导出、刷新后精确恢复且不暂停。
 - 修正 production Web 构建门禁：`npm run build:web` 强制 Web 平台，release gate 在构建后执行 PWA 生命周期，避免 Android/Desktop 的旧 `dist` 被误当 Web 候选。
 - 更新匿名 v47/空间站发布夹具及服务端持久化原子性回归；根与 server 高危依赖审计均为零。
@@ -107,9 +123,9 @@ Chromium 的条件跳过均由用例内显式条件控制，包括未提供的�
 2. `FactoryRuntime` 约 695 KB minified，主 CSS 约 608 KB，Vite 仍报告大 chunk 警告。后续优先从 `App.tsx` 拆出 persistence lifecycle、Worker lifecycle 与 batch-connection presentation，但不得改变权威状态边界。
 3. Android/Windows 正式签名、实体设备、Linux systemd/Nginx 备份与切换、线上 smoke、下载页更新均未执行，不能视为已发布或已签名。
 4. 固定源码、候选归档、manifest、SBOM 与 provenance 只证明开发侧输入与输出一致；正式证书、生产备份、目标节点与受保护切换仍属于 release agent。
-5. 合成 506 个重卡的固定“完整”或显式“展开全部”override 仍会产生数百毫秒到约 1.9 秒的帧；组合功能进程里的展开全部诊断也有 max 111.3 ms、2 帧 >50 ms。自动档在独立干净浏览器连续三轮没有 >50 ms 帧，“完整 + 全部卡片”已有 480/1,000 密集保护。后续仍应拆分重卡内容，但不能把 override 的成本描述成自动档结果。
-6. production 功能 27/27 与自动性能 3/3 是分进程门禁。把性能用例接在重型功能矩阵后同进程运行时，第三轮 P95 曾为 34.8 ms（max 48.7 ms、仍无 >50 ms），说明采样会受前序页面/浏览器进程污染；交接不得宣称组合 28/28，也不得通过放宽阈值掩盖。
+5. 合成 506 个重卡的固定“完整”或显式“展开全部”override 仍会产生数百毫秒到约 1.2 秒的帧；自动档最终隔离三轮 P95 为 7.1～20.9 ms、max 21.0 ms、没有 >50 ms 帧。“完整 + 全部卡片”已有 480/1,000 密集保护，后续仍应拆分重卡内容。
+6. production 功能与性能必须分进程。额外 `repeat-each=3` 压测有一次 auto 子轮 P95 27.8 ms 超过原 `<=21 ms` 预算（max 34.8 ms、无 >50 ms），其前后隔离执行通过。这个结果按失败保留，不能用 retry、删除覆盖或阈值放宽处理；若 release agent 的目标环境可重复超限，应停止候选。
 
 ## 发布交接原则
 
-开发侧已从干净固定 SHA `865f125e862487aedf7d7df08491867881b2b65b` 生成并复验 Web/API/source、未签名原生诊断制品、10 文件 candidate manifest、SBOM 与 3-subject provenance；完整路径和哈希见发布交接。运行时分发包未发现玩家本机路径、存档文件名或密钥标记；内部 source archive 的历史文档/脚本仍有 19 个文字引用，因此不作为公开下载制品。release agent 仍必须独立复算，并在签名、目标节点、备份 evidence、回滚指针和公开 smoke 齐备后才能发布；本报告本身不授权部署。
+开发侧已从干净固定 SHA `d64b9ef85f9dea1cf2d0617cb300fa492ca1f43c` 生成并复验 Web/API/source、未签名原生诊断制品、10 文件 candidate manifest、SBOM 与 3-subject provenance；Release ID 为 `1.0.46-d64b9ef85f9d`，完整路径和哈希见发布交接。旧 `1.0.46-865f125e8624` 因发布门禁阻断作废，更早的 c24 候选继续作废。运行时内容未命中当前本机路径、截图名或私钥/token 模式；source archive 仅内部交接。release agent 仍必须独立复算，并在签名、目标节点、备份 evidence、回滚指针和公开 smoke 齐备后才能发布；本报告本身不授权部署。

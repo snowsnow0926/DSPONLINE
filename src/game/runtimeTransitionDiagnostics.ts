@@ -15,9 +15,25 @@ export interface RuntimeTransitionDiagnosticState {
   counters?: Record<string, { count: number; totalMs: number; maxMs: number }>;
 }
 
+export type RuntimeWorldBenchmarkCommand =
+  | { kind: "entity-lock"; count: number; locked: boolean }
+  | { kind: "belt-route"; count: number; routeMode: "auto" | "bezier" | "upper" | "lower" | "manual" };
+
+export interface RuntimeWorldBenchmarkCommandResult {
+  actionAt: number;
+  requestedRecords: number;
+  acceptedRecords: number;
+  mutationMs: number;
+}
+
+export interface RuntimeWorldBenchmarkBridge {
+  execute(command: RuntimeWorldBenchmarkCommand): RuntimeWorldBenchmarkCommandResult;
+}
+
 declare global {
   interface Window {
     __DSP_RUNTIME_TRANSITIONS__?: RuntimeTransitionDiagnosticState;
+    __DSP_RUNTIMEWORLD_BENCHMARK__?: RuntimeWorldBenchmarkBridge;
   }
 }
 

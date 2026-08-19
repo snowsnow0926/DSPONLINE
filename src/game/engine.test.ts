@@ -163,6 +163,7 @@ import {
   setActiveDysonSwarmOrbit,
   setBeltPriority,
   setBeltRouteMode,
+  setBeltsRouteMode,
   setBeltRouteOffsetY,
   setBlueprintRecipeOverride,
   setBlueprintTransform,
@@ -1645,6 +1646,26 @@ describe("factory simulation", () => {
     expect(state.canvasBookmarks[0].name).toBe("高炉主线");
     state = removeCanvasBookmark(state, bookmarkId);
     expect(state.canvasBookmarks).toEqual([]);
+  });
+
+  it("applies an explicit large belt route batch in one immutable pass", () => {
+    let state = createInitialState();
+    state.construction.arc_smelter = 1;
+    state.construction.assembling_machine_mk1 = 1;
+    state.construction.conveyor_belt_mk1 = 2;
+    state = placeBuilding(state, "arc_smelter", { x: 300, y: 0 });
+    state = placeBuilding(state, "assembling_machine_mk1", { x: 700, y: 0 });
+    const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    const assembler = state.entities.find((entity) => entity.buildingId === "assembling_machine_mk1")!;
+    state = connectBelt(state, "vein_iron", smelter.id, "iron_ore");
+    state = connectBelt(state, smelter.id, assembler.id, "iron_ingot");
+    const untouched = state.belts[1];
+    const changed = setBeltsRouteMode(state, [state.belts[0].id, "missing"], "upper");
+    expect(changed).not.toBe(state);
+    expect(changed.belts[0]).toMatchObject({ routeMode: "upper" });
+    expect(changed.belts[1]).toBe(untouched);
+    expect(setBeltsRouteMode(changed, [changed.belts[0].id], "upper")).toBe(changed);
+    expect(setBeltsRouteMode(changed, [], "lower")).toBe(changed);
   });
 
   it("creates, edits and removes visual production regions without affecting factory entities", () => {

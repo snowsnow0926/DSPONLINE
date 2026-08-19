@@ -172,6 +172,7 @@ import {
   setBlueprintRecipeOverride,
   setBlueprintTransform,
   setBeltMonitorEnabled,
+  setBeltsRouteMode,
   setBeltStackSize,
   setConstructionAutomationEnabled,
   setConstructionAutomationTarget,
@@ -370,7 +371,7 @@ import { readMulticoreSimulationOptions, type MulticoreSimulationOptions } from 
 import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode";
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
 import { accumulateSimulationBudget, NORMAL_SIMULATION_SLICE_SECONDS, takeSimulationBudgetSlice } from "./game/simulationBudget";
-import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase } from "./game/runtimeTransitionDiagnostics";
+import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase, runtimeTransitionDiagnosticsEnabled, type RuntimeWorldBenchmarkBridge } from "./game/runtimeTransitionDiagnostics";
 import {
   createTimeWarpComputeGovernor,
   forceTimeWarpApproximation,
@@ -4560,6 +4561,63 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     return true;
   }, [publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+
+  useEffect(() => {
+    // Explicitly opt-in diagnostic builds can drive large, exact command
+    // batches through the same commitGame -> command patch -> Worker path as
+    // player UI. The bridge is absent from ordinary dev/release bundles and
+    // remains inert unless runtime transition capture was enabled before boot.
+    if (import.meta.env.VITE_RUNTIMEWORLD_DIAGNOSTICS !== "true" || !runtimeTransitionDiagnosticsEnabled()) return;
+    const bridge: RuntimeWorldBenchmarkBridge = {
+      execute(command) {
+        const requestedRecords = Math.floor(command.count);
+        if (!Number.isSafeInteger(requestedRecords) || requestedRecords < 1 || requestedRecords > 1_000) {
+          throw new RangeError("RuntimeWorld diagnostic command count must be between 1 and 1,000");
+        }
+        const actionAt = performance.now();
+        let mutationMs = 0;
+        let acceptedRecords = 0;
+        if (command.kind === "entity-lock") {
+          const ids = gameRef.current.entities
+            .filter((entity) => entity.interactionLocked !== command.locked)
+            .slice(0, requestedRecords)
+            .map((entity) => entity.id);
+          if (ids.length !== requestedRecords) throw new Error(`only ${ids.length} entity records are eligible`);
+          const accepted = commitGame((current) => {
+            const startedAt = performance.now();
+            const next = setEntitiesInteractionLocked(current, ids, command.locked);
+            mutationMs = performance.now() - startedAt;
+            return next;
+          });
+          acceptedRecords = accepted ? ids.length : 0;
+        } else {
+          const ids = gameRef.current.belts
+            .filter((belt) => (belt.routeMode ?? "auto") !== command.routeMode)
+            .slice(0, requestedRecords)
+            .map((belt) => belt.id);
+          if (ids.length !== requestedRecords) throw new Error(`only ${ids.length} belt records are eligible`);
+          const accepted = commitGame((current) => {
+            const startedAt = performance.now();
+            const next = setBeltsRouteMode(current, ids, command.routeMode);
+            mutationMs = performance.now() - startedAt;
+            return next;
+          });
+          acceptedRecords = accepted ? ids.length : 0;
+        }
+        recordRuntimeTransitionPhase("runtimeworld-diagnostic-command", actionAt, performance.now() - actionAt, {
+          kind: command.kind,
+          requestedRecords,
+          acceptedRecords,
+          mutationMs,
+        });
+        return { actionAt, requestedRecords, acceptedRecords, mutationMs };
+      },
+    };
+    window.__DSP_RUNTIMEWORLD_BENCHMARK__ = bridge;
+    return () => {
+      if (window.__DSP_RUNTIMEWORLD_BENCHMARK__ === bridge) delete window.__DSP_RUNTIMEWORLD_BENCHMARK__;
+    };
+  }, [commitGame]);
 
   useEffect(() => {
     if (gameRef.current.mode !== "normal") return;

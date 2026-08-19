@@ -12570,6 +12570,21 @@ export function setBeltRouteMode(state: GameState, beltId: string, routeMode: Be
   };
 }
 
+/** Apply one route-mode command to an explicit belt record set in one pass.
+ * This is the record-level primitive used by large atomic command batches;
+ * callers that mean connected networks must expand those networks first. */
+export function setBeltsRouteMode(state: GameState, beltIds: readonly string[], routeMode: BeltRouteMode): GameState {
+  if (!BELT_ROUTE_MODES.includes(routeMode) || beltIds.length === 0) return state;
+  const requested = new Set(beltIds);
+  let changed = false;
+  const belts = state.belts.map((belt) => {
+    if (!requested.has(belt.id) || (belt.routeMode ?? "auto") === routeMode) return belt;
+    changed = true;
+    return { ...belt, routeMode };
+  });
+  return changed ? { ...state, belts } : state;
+}
+
 export function setBeltRouteOffsetY(state: GameState, beltId: string, routeOffsetY: number): GameState {
   if (!Number.isFinite(routeOffsetY) || !state.belts.some((belt) => belt.id === beltId)) return state;
   const offset = Math.max(-600, Math.min(600, Math.round(routeOffsetY)));

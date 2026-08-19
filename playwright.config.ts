@@ -16,6 +16,12 @@ const e2eWorkers = Number(process.env.DSP_E2E_WORKERS ?? (process.env.CI ? "2" :
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 30_000,
+  // The development server loads the factory through a lazy module graph.
+  // Four concurrent release workers can keep the explicit loading shell
+  // visible beyond Playwright's 5 s matcher default even though the page is
+  // healthy. Match the 15 s readiness contract already used by the current
+  // journey helpers; assertions and product/performance thresholds stay exact.
+  expect: { timeout: 15_000 },
   fullyParallel: false,
   workers: e2eWorkers,
   retries: process.env.CI ? 1 : 0,

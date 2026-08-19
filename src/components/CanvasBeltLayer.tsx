@@ -73,6 +73,9 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
     const currentViewport = viewportRef.current;
     drawnViewportRef.current = currentViewport;
     canvas.style.transform = "translate3d(0, 0, 0)";
+    canvas.dataset.drawnViewportX = String(currentViewport.x);
+    canvas.dataset.drawnViewportY = String(currentViewport.y);
+    canvas.dataset.drawnViewportZoom = String(currentViewport.zoom);
     const margin = 96;
     const zoom = Math.max(0.01, currentViewport.zoom);
     // The hit index records the full route geometry in world coordinates.
@@ -152,13 +155,18 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
   const updateViewport = useCallback((nextViewport: CanvasViewport) => {
     viewportRef.current = nextViewport;
     const drawn = drawnViewportRef.current;
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.dataset.liveViewportX = String(nextViewport.x);
+      canvas.dataset.liveViewportY = String(nextViewport.y);
+      canvas.dataset.liveViewportZoom = String(nextViewport.zoom);
+    }
     if (Math.abs(nextViewport.zoom - drawn.zoom) > 0.0001) {
       scheduleDraw();
       return;
     }
     const offsetX = nextViewport.x - drawn.x;
     const offsetY = nextViewport.y - drawn.y;
-    const canvas = canvasRef.current;
     if (canvas) canvas.style.transform = `translate3d(${offsetX}px, ${offsetY}px, 0)`;
     if (Math.abs(offsetX) >= CANVAS_PAN_OVERSCAN || Math.abs(offsetY) >= CANVAS_PAN_OVERSCAN) scheduleDraw();
   }, [scheduleDraw]);
@@ -172,9 +180,17 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
     },
   }), [hitIndex, updateViewport]);
 
+  const updateViewportRef = useRef(updateViewport);
+  updateViewportRef.current = updateViewport;
   useEffect(() => {
-    updateViewport(viewport);
-  }, [updateViewport, viewport]);
+    // Live panning is intentionally imperative. A topology or selection
+    // rerender can replace `updateViewport` while the controlled prop still
+    // contains the last published/programmatic viewport. Reapplying that
+    // stale prop snaps only the Canvas belts back and detaches them from the
+    // React Flow nodes. Synchronize only when the prop coordinates themselves
+    // change; imperative setViewport remains authoritative between publishes.
+    updateViewportRef.current(viewport);
+  }, [viewport.x, viewport.y, viewport.zoom]);
   useEffect(() => scheduleDraw(), [scheduleDraw]);
 
   useEffect(() => {

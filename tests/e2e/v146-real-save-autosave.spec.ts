@@ -12,7 +12,7 @@ test.describe("real save autosave acceptance", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.0.47");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       // Exercise the player's configured 30-second interval rather than the
       // optional large-save cadence throttle. The handler is called by the

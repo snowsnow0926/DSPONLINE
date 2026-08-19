@@ -55,6 +55,7 @@ import type {
   TechId,
 } from "../game/types";
 import type { CanvasLod } from "../game/canvasPerformance";
+import type { CanvasCompactCardStyle } from "../game/canvasDensityPresentation";
 
 export interface FactoryNodeData extends Record<string, unknown> {
   visualSignature: string;
@@ -102,6 +103,7 @@ export interface FactoryNodeData extends Record<string, unknown> {
   outputCapacity: number;
   cycleRatePerSecond: number;
   lod: CanvasLod;
+  compactCardStyle: CanvasCompactCardStyle;
   extremeVisuals: boolean;
   acceptedInputItemIds: readonly ItemId[];
   producedOutputItemIds: readonly ItemId[];
@@ -504,7 +506,7 @@ function FactoryNodeLodView({ data, selected }: NodeProps<FactoryFlowNode>) {
   const outputItems = entity.kind === "machine"
     ? uniqueItemIds(data.producedOutputItemIds)
     : uniqueItemIds(data.producedOutputItemIds, Object.keys(data.outputBeltCounts) as ItemId[]);
-  return <article className={`factory-node factory-node-lod factory-node-lod--${lod} factory-node--status-${data.status.tone}${selected ? " factory-node--selected" : ""}${entity.interactionLocked ? " factory-node--locked" : ""}`} data-node-lod={lod} data-heavy-card="false">
+  return <article className={`factory-node factory-node-lod factory-node-lod--${lod} factory-node--status-${data.status.tone}${selected ? " factory-node--selected" : ""}${entity.interactionLocked ? " factory-node--locked" : ""}`} data-node-lod={lod} data-compact-card-style={lod === "compact" ? data.compactCardStyle : undefined} data-heavy-card="false">
     <LightweightNodeHandles data={data} />
     <header className="factory-node__header">
       <div className="node-icon" style={resource ? { color: resource.color } : undefined}>{icon}</div>
@@ -1130,25 +1132,25 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
 export function VeinNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
-  return <>{props.data.lod === "full" ? <VeinFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
+  return <>{props.data.lod === "full" ? <VeinFullNode {...props} /> : props.data.lod === "compact" && props.data.compactCardStyle === "minimal" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function MachineNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
-  return <>{props.data.lod === "full" ? <MachineFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
+  return <>{props.data.lod === "full" ? <MachineFullNode {...props} /> : props.data.lod === "compact" && props.data.compactCardStyle === "minimal" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function LogisticsNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
-  return <>{props.data.lod === "full" ? <LogisticsFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
+  return <>{props.data.lod === "full" ? <LogisticsFullNode {...props} /> : props.data.lod === "compact" && props.data.compactCardStyle === "minimal" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function PowerNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
-  return <>{props.data.lod === "full" ? <PowerFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
+  return <>{props.data.lod === "full" ? <PowerFullNode {...props} /> : props.data.lod === "compact" && props.data.compactCardStyle === "minimal" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: NodeProps<FactoryFlowNode>): boolean {

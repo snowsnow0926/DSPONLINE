@@ -544,22 +544,22 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         <p className="settings-help">只调整生产画面与状态发布节奏，不改变模拟时间、产量、物流、科研或戴森工程。固定档位不会被自动调节覆盖。</p>
       </section>
       <section className="settings-group settings-canvas-detail" data-settings-category="performance visual">
-        <header><Gauge size={14} /><span>{locale === "en" ? "Canvas detail" : "画布细节"}</span><small>{canvasDetailStage === "full" ? locale === "en" ? "Full" : "完整" : canvasDetailStage === "medium" ? locale === "en" ? "Medium" : "中等" : locale === "en" ? "Compact" : "紧凑"}</small></header>
+        <header><Gauge size={14} /><span>{locale === "en" ? "Canvas detail" : "画布细节"}</span><small>{canvasDetailStage === "full" ? locale === "en" ? "Full" : "完整" : canvasDetailStage === "medium" ? locale === "en" ? "Medium" : "中等" : canvasDetailPreference === "classic" ? locale === "en" ? "Classic" : "经典" : locale === "en" ? "One line" : "一行"}</small></header>
         <div className="canvas-detail-control">
           <strong>{locale === "en" ? "Base cards" : "基础卡片"}</strong>
           <div className="settings-segmented" role="radiogroup" aria-label={locale === "en" ? "Canvas base cards" : "画布基础卡片"}>
-            {(["auto", "full", "medium", "minimal"] as CanvasDetailPreference[]).map((preference) => <button
+            {(["auto", "full", "classic", "medium", "minimal"] as CanvasDetailPreference[]).map((preference) => <button
               type="button"
               role="radio"
               aria-checked={canvasDetailPreference === preference}
               className={canvasDetailPreference === preference ? "active" : ""}
               onClick={() => onCanvasDetailPreferenceChange(preference)}
               key={preference}
-            >{preference === "auto" ? locale === "en" ? "Auto" : "自动" : preference === "full" ? locale === "en" ? "Full" : "完整" : preference === "medium" ? locale === "en" ? "Medium" : "中等" : locale === "en" ? "One line" : "一行"}</button>)}
+            >{preference === "auto" ? locale === "en" ? "Auto" : "自动" : preference === "full" ? locale === "en" ? "Full" : "完整" : preference === "classic" ? locale === "en" ? "Classic" : "经典" : preference === "medium" ? locale === "en" ? "Medium" : "中等" : locale === "en" ? "One line" : "一行"}</button>)}
           </div>
           <small>{locale === "en"
-            ? "Auto is recommended. Fixed levels stay exact except for the uniform Full + All cards emergency guard above 480 visible nodes."
-            : `推荐自动档；固定档通常保持原样，仅“完整 + 全部卡片”超过 ${CANVAS_FULL_ALL_MEDIUM_SAFETY_VISIBLE} 个视口节点时启用统一安全级别。`}</small>
+            ? "Auto is recommended. Classic restores the 1.0.43 compact card; One line remains the smallest card. Fixed levels stay exact except for the Full + All emergency guard."
+            : `推荐自动档；经典档恢复 1.0.43 精简卡片，一行档仍是最小卡片。固定档通常保持原样，仅“完整 + 全部卡片”超过 ${CANVAS_FULL_ALL_MEDIUM_SAFETY_VISIBLE} 个视口节点时启用统一安全级别。`}</small>
         </div>
         <div className="canvas-detail-control">
           <strong>{locale === "en" ? "Overlapping buildings" : "重叠建筑显示"}</strong>

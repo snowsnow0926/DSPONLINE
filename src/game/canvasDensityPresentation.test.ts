@@ -40,6 +40,7 @@ describe("visible-density canvas presentation", () => {
     expect(resolveCanvasDetailStage("auto", CANVAS_DETAIL_COMPACT_EXIT_VISIBLE, "compact")).toBe("compact");
     expect(resolveCanvasDetailStage("auto", CANVAS_DETAIL_COMPACT_EXIT_VISIBLE - 1, "compact")).toBe("medium");
     expect(resolveCanvasDetailStage("full", 2_000, "compact")).toBe("full");
+    expect(resolveCanvasDetailStage("classic", 1, "full")).toBe("compact");
     expect(resolveCanvasDetailStage("medium", 2_000, "compact")).toBe("medium");
     expect(resolveCanvasDetailStage("minimal", 1, "full")).toBe("compact");
   });

@@ -72,6 +72,8 @@ interface PrimaryCommitExpectation {
   fence: AuthoritativeSaveWriterFence;
 }
 
+const deferredBackupJobs = new Map<number, () => Promise<void>>();
+
 const textEncoder = new TextEncoder();
 
 function stringByteLength(value: string): number {
@@ -585,13 +587,28 @@ async function commitPayload(
     if (!await verifyPrimaryAfterCommit(db, expectation)) {
       return failure("readback-failed", "authoritative save 提交后独立事务回读失败");
     }
-    const backupVerifyStarted = performance.now();
-    const backupEligible = Boolean(previous && verifyPreviousEnvelopeForBackup(previous, request.seed.mode));
-    const backupVerifyMs = Math.max(0, performance.now() - backupVerifyStarted);
     const backupKey = request.preserveBackup === false ? null : backupKeyForPrimary(request.key, request.seed.mode);
-    const backup = backupKey && previous && backupEligible
-      ? await writeBackupBestEffort(db, expectation, previous, backupKey)
-      : { saved: false, revision: null };
+    let backupVerifyMs = 0;
+    let backup = { saved: false, revision: null as number | null };
+    if (request.deferBackup === true && backupKey && previous) {
+      deferredBackupJobs.set(request.id, async () => {
+        const deferredDb = await openDatabase();
+        try {
+          if (verifyPreviousEnvelopeForBackup(previous, request.seed.mode)) {
+            await writeBackupBestEffort(deferredDb, expectation, previous, backupKey);
+          }
+        } finally {
+          deferredDb.close();
+        }
+      });
+    } else {
+      const backupVerifyStarted = performance.now();
+      const backupEligible = Boolean(previous && verifyPreviousEnvelopeForBackup(previous, request.seed.mode));
+      backupVerifyMs = Math.max(0, performance.now() - backupVerifyStarted);
+      backup = backupKey && previous && backupEligible
+        ? await writeBackupBestEffort(db, expectation, previous, backupKey)
+        : backup;
+    }
     const proof: AuthoritativeSavePersistenceProof = {
       key: request.key,
       revision: nextRevision,
@@ -624,7 +641,9 @@ function postResponse(response: AuthoritativeSavePersistenceResponse): void {
   self.postMessage(response, { transfer: responseTransferables(response) });
 }
 
-async function handle(request: AuthoritativeSavePersistenceRequest<WorkerBinaryPayload>): Promise<void> {
+let receivedRequestGeneration = 0;
+
+async function handle(request: AuthoritativeSavePersistenceRequest<WorkerBinaryPayload>, requestGeneration: number): Promise<void> {
   const sourcePayload = request.payload;
   const sourceBytes = workerBinaryPayloadByteLength(sourcePayload);
   const report = (progress: AuthoritativeSavePersistenceProgress) => {
@@ -646,13 +665,27 @@ async function handle(request: AuthoritativeSavePersistenceRequest<WorkerBinaryP
     id: request.id,
     type: "result",
     result,
-    ...(sourcePayload instanceof ArrayBuffer ? { sourcePayloadTransfer: sourcePayload } : {}),
+    ...(sourcePayload instanceof ArrayBuffer && !(request.discardPayloadOnSuccess === true && result.ok)
+      ? { sourcePayloadTransfer: sourcePayload }
+      : {}),
   });
+  const deferredBackup = deferredBackupJobs.get(request.id);
+  deferredBackupJobs.delete(request.id);
+  if (deferredBackup) {
+    // Give a newly queued primary a deterministic chance to supersede this
+    // optional copy. Natural autosave intervals still complete the backup;
+    // immediate save bursts cannot turn it into a latency backlog.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    if (requestGeneration === receivedRequestGeneration) {
+      try { await deferredBackup(); } catch { /* verified primary remains authoritative */ }
+    }
+  }
 }
 
 let queue = Promise.resolve();
 self.onmessage = (event: MessageEvent<AuthoritativeSavePersistenceRequest<WorkerBinaryPayload>>) => {
-  queue = queue.then(() => handle(event.data), () => handle(event.data));
+  const requestGeneration = ++receivedRequestGeneration;
+  queue = queue.then(() => handle(event.data, requestGeneration), () => handle(event.data, requestGeneration));
 };
 
 export {};

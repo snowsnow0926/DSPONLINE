@@ -8,13 +8,14 @@ import {
   createPlayerInitialState,
   createSimulationAdvanceSession,
   createSimulationProfiler,
+  getStationSlots,
   getSimulationLogisticsProfilerAttribution,
   getSimulationLogisticsRuntimeDiagnostics,
   completeSimulationAdvanceSession,
 } from "./engine";
 import { createLogisticsBenchmarkState } from "./logisticsBenchmark";
 import { createSimulationCommandPatch } from "./simulationRuntimeProtocol";
-import type { GameState } from "./types";
+import type { FactoryEntity, GameState } from "./types";
 
 function persisted(state: GameState): GameState {
   return JSON.parse(JSON.stringify(state)) as GameState;
@@ -59,6 +60,43 @@ function firstDifference(left: unknown, right: unknown, path = "$"): string | un
 }
 
 describe("RuntimeWorld M4 compiled logistics runtime", () => {
+  it("normalizes sparse station slots to an idempotent runtime shape in one pass", () => {
+    const station = {
+      id: "m4-sparse-slot",
+      kind: "station" as const,
+      planetId: "home" as const,
+      position: { x: 0, y: 0 },
+      interactionLocked: false,
+      buildingId: "interstellar_logistics_station" as const,
+      machineCount: 1,
+      minerCount: 0,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      utilization: 0,
+      productionRate: 0,
+      routingCursor: 0,
+      stationSlots: [{
+        itemId: "iron_ore" as const,
+        localMode: "storage" as const,
+        remoteMode: "supply" as const,
+        minimumLoad: 0.1 as const,
+        minStock: 0,
+        maxStock: 0,
+        priority: 1 as const,
+        routePolicy: "direct" as const,
+        warperBudget: 2,
+      }],
+    } satisfies FactoryEntity;
+
+    const first = getStationSlots(station);
+    const second = getStationSlots({ ...station, stationSlots: first });
+
+    expect(first).toHaveLength(5);
+    expect(second).toEqual(first);
+    expect(Object.keys(first[1])).not.toContain("itemId");
+  });
+
   it.each([1, 4, 12, 60, 600])(
     "matches the retained logistics oracle after %i exact seconds",
     (seconds) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFactoryAlertProjection, getFactoryAlerts, materializeFactoryAlerts } from "./alerts";
+import { createFactoryAlertProjection, getFactoryAlerts, materializeFactoryAlerts, reconcileFactoryAlertMembership, type FactoryAlertProjection } from "./alerts";
 import { advanceSimulation, createInitialState, createSimulationPlanetPhaseLookup, installMiner, placeBuilding, setPaused } from "./engine";
 
 describe("factory alerts", () => {
@@ -70,5 +70,32 @@ describe("factory alerts", () => {
     expect(materializeFactoryAlerts(reorderedState, projection)).toEqual(materialized);
     expect(new Set(materialized.map((alert) => alert.planetId))).toEqual(new Set(["home", "dune"]));
     expect(new TextEncoder().encode(JSON.stringify(projection)).byteLength).toBeLessThan(8 * 1024);
+  });
+
+  it("reuses canvas alert membership across label-only publications and invalidates exact identity/severity changes", () => {
+    const projection: FactoryAlertProjection = {
+      signature: "initial",
+      codes: ["missing-input"],
+      labels: ["缺少原料"],
+      rows: [["local", "home", 0, 0], ["remote", "dune", 0, 0]],
+    };
+    const first = reconcileFactoryAlertMembership(null, projection, "home");
+    const labelOnly = reconcileFactoryAlertMembership(first, {
+      ...projection,
+      signature: "label-only",
+      labels: ["仍在等待原料"],
+    }, "home");
+    expect(labelOnly).toBe(first);
+    expect([...first.entityIds]).toEqual(["local"]);
+    expect(first.criticalEntityIds.size).toBe(0);
+
+    const critical = reconcileFactoryAlertMembership(first, {
+      ...projection,
+      signature: "critical",
+      codes: ["no-power"],
+      labels: ["没有供电"],
+    }, "home");
+    expect(critical).not.toBe(first);
+    expect([...critical.criticalEntityIds]).toEqual(["local"]);
   });
 });

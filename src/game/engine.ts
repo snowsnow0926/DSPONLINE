@@ -1540,8 +1540,9 @@ function stationSlotsForPlacement(
 function normalizeStationSlot(slot: Partial<StationSlot> | undefined): StationSlot {
   const logisticsMode = (value: unknown): StationLogisticsMode =>
     value === "supply" || value === "demand" || value === "storage" ? value : "storage";
+  const itemId = slot?.itemId && ITEMS[slot.itemId] ? slot.itemId : undefined;
   return {
-    itemId: slot?.itemId && ITEMS[slot.itemId] ? slot.itemId : undefined,
+    ...(itemId ? { itemId } : {}),
     localMode: logisticsMode(slot?.localMode),
     remoteMode: logisticsMode(slot?.remoteMode),
     minimumLoad: STATION_MINIMUM_LOAD_OPTIONS.includes(slot?.minimumLoad as StationMinimumLoad)

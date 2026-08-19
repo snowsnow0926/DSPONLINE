@@ -95,9 +95,11 @@ describe("AuthoritativeSavePersistenceClient", () => {
     const worker = new FakeWorker();
     const client = new AuthoritativeSavePersistenceClient({ workerFactory: () => worker as unknown as Worker });
     const commit = await input([4, 5, 6]);
+    commit.deferBackup = true;
     const pending = client.commit(commit);
     expect(commit.bytes.byteLength).toBe(0);
     const request = worker.requests[0];
+    expect(request.deferBackup).toBe(true);
     const returned = request.payload;
     worker.respond({ id: request.id, type: "result", result: {
       ok: true,
@@ -120,6 +122,42 @@ describe("AuthoritativeSavePersistenceClient", () => {
     }, sourcePayloadTransfer: retryBuffer }, [retryBuffer]);
     expect((await retry).result).toMatchObject({ ok: false, reason: "quota" });
     expect([...new Uint8Array(commit.bytes)]).toEqual([4, 5, 6]);
+  });
+
+  it("allows a successful proof-bound commit to discard the transferred payload", async () => {
+    const worker = new FakeWorker();
+    const client = new AuthoritativeSavePersistenceClient({ workerFactory: () => worker as unknown as Worker });
+    const commit = await input([21, 22, 23]);
+    commit.discardPayloadOnSuccess = true;
+    const pending = client.commit(commit);
+    const request = worker.requests[0];
+    expect(request.discardPayloadOnSuccess).toBe(true);
+    expect(commit.bytes.byteLength).toBe(0);
+    worker.respond({
+      id: request.id,
+      type: "result",
+      result: {
+        ok: true,
+        proof: {
+          key: commit.key,
+          revision: 1,
+          savedAt: 1,
+          byteLength: 3,
+          payloadChecksum: commit.proof.payloadChecksum,
+          payloadSha256: commit.proof.payloadSha256,
+          stateChecksum: seed.stateChecksum,
+          backupKey: null,
+          backupRevision: null,
+          backupSaved: false,
+          workerDecodeMs: 1,
+          idbWriteMs: 2,
+          backupVerifyMs: 0,
+          totalBytesWritten: 3,
+        },
+      },
+    });
+    await expect(pending).resolves.toMatchObject({ result: { ok: true }, sourcePayloadTransfer: undefined });
+    expect(commit.bytes.byteLength).toBe(0);
   });
 
   it("commits an immutable Blob carrier without detaching it or requiring an ownership return", async () => {

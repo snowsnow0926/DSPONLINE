@@ -168,7 +168,7 @@ describe("offline macro contract experiment", () => {
     });
     state.timeWarp.controllerEntityId = "warp";
     const result = runOfflineApproximation(state, 3_600);
-    expect(result.status).toBe("approximate");
+    expect(result.status, result.report.fallbackReason).toBe("approximate");
     expect(state.timeWarp.enabled).toBe(true);
     if (result.status === "approximate") expect(result.state.timeWarp.enabled).toBe(true);
   });
@@ -192,7 +192,7 @@ describe("offline macro contract experiment", () => {
     const warmedState = advanceSimulation(state, 10);
     warmedState.elapsedSeconds = 0;
     const result = runOfflineApproximation(warmedState, 3_600);
-    expect(result.status).toBe("approximate");
+    expect(result.status, result.report.fallbackReason).toBe("approximate");
     if (result.status === "approximate") {
       expect(result.report.approximatedSeconds).toBeGreaterThan(3_500);
       expect(result.state.quantumLogisticsNetwork.inventory.iron_ore).toBeDefined();

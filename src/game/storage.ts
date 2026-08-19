@@ -86,6 +86,7 @@ import type {
   AuthoritativeSaveExpectedStateIdentity,
 } from "./authoritativeSaveSerializationProtocol";
 import type { AuthoritativeSavePersistenceProgress } from "./authoritativeSavePersistenceProtocol";
+import type { PreparedAuthoritativeSavePayload } from "./authoritativeSavePreparation";
 import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationStateBlobTransfer,
@@ -3205,6 +3206,184 @@ function authoritativePersistenceFailure(
   return failedSave(code, result.message, bytes, removedAutomaticSnapshots);
 }
 
+function preparedPayloadMatchesStateIdentity(
+  prepared: PreparedAuthoritativeSavePayload,
+  expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity,
+  expectedKind: "primary" | "snapshot",
+  expectedReason: string | null,
+): boolean {
+  const { bytes, proof, catalogSeed: seed, summary } = prepared;
+  return bytes instanceof ArrayBuffer && bytes.byteLength > 0 && bytes.byteLength === proof.byteLength &&
+    proof.integrity === "valid" && summary.integrity === "valid" &&
+    proof.stateChecksum === seed.stateChecksum && summary.stateChecksum === seed.stateChecksum &&
+    summary.computedStateChecksum === seed.stateChecksum && summary.savedAt === seed.savedAt &&
+    seed.kind === expectedKind && seed.slot === "main" && summary.kind === expectedKind && summary.slot === "main" &&
+    seed.reason === expectedReason && summary.reason === expectedReason &&
+    seed.mode === expectedStateIdentity.mode && summary.mode === expectedStateIdentity.mode &&
+    seed.stateVersion === expectedStateIdentity.version && summary.stateVersion === expectedStateIdentity.version &&
+    seed.activePlanetId === expectedStateIdentity.activePlanetId && summary.activePlanetId === expectedStateIdentity.activePlanetId &&
+    seed.entityCount === expectedStateIdentity.entityCount && summary.entityCount === expectedStateIdentity.entityCount &&
+    seed.beltCount === expectedStateIdentity.beltCount && summary.beltCount === expectedStateIdentity.beltCount &&
+    seed.elapsedSeconds === Math.max(0, Math.floor(expectedStateIdentity.elapsedSeconds)) &&
+    summary.elapsedSeconds === Math.max(0, Math.floor(expectedStateIdentity.elapsedSeconds));
+}
+
+/**
+ * Commit a canonical primary envelope prepared beside simulation authority.
+ * The UI validates only bounded metadata and never decodes the payload; the
+ * persistence Worker still independently hashes, parses, binds, commits and
+ * performs transaction plus post-commit exact readback.
+ */
+export async function saveGameVerifiedFromPreparedPayload(
+  prepared: PreparedAuthoritativeSavePayload,
+  expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity,
+  options: {
+    deferBackup?: boolean;
+    snapshotState?: GameState;
+    onProgress?: (progress: AuthoritativeSavePersistenceProgress | { stage: string; bytes?: number }) => void;
+  } = {},
+): Promise<SaveGameResult> {
+  const totalStartedAt = monotonicNow();
+  const { bytes, proof, catalogSeed: seed, summary } = prepared;
+  if (!preparedPayloadMatchesStateIdentity(prepared, expectedStateIdentity, "primary", null)) {
+    return failedSave("verification", "模拟 Worker prepared save 身份或 proof 不一致");
+  }
+  try {
+    await initializeLocalSaveStore();
+  } catch (error) {
+    const coordination = localCoordinationFailure(error);
+    if (coordination) return coordination;
+    return failedSave("unavailable", error instanceof Error ? error.message : "本地主存档初始化失败");
+  }
+  const mode = expectedStateIdentity.mode;
+  if (!primaryCanUseProofBoundTransfer(mode)) {
+    return failedSave("verification", "当前主存档目录尚未建立 proof-bound 身份，已阻止 prepared save 降级写入");
+  }
+  let removedAutomaticSnapshots = 0;
+  try {
+    const snapshotScanStartedAt = monotonicNow();
+    removedAutomaticSnapshots += prepareAutomaticSnapshotsForPrimarySave(mode);
+    const snapshotScanMs = Math.max(0, monotonicNow() - snapshotScanStartedAt);
+    try { await flushLocalSaveWrites(); } catch { /* quota retry remains authoritative */ }
+    const writer = getLocalSaveWriterStatus();
+    if (writer.role !== "primary") return failedSave("read-only", writer.reason, proof.byteLength);
+    const commitInput = {
+      key: primarySaveKey(mode),
+      bytes,
+      proof,
+      seed,
+      expectedRevision: getPrimaryLocalSaveRevision(mode),
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+      ...(options.deferBackup === true ? { deferBackup: true } : {}),
+      discardPayloadOnSuccess: true,
+    };
+    options.onProgress?.({ stage: "writing-idb", bytes: proof.byteLength });
+    let committed = await setLocalSavePayloadWithProof(commitInput, (progress) => options.onProgress?.(progress));
+    if (!committed.result.ok && committed.result.reason === "quota") {
+      removedAutomaticSnapshots += removeAutomaticSnapshotsForQuotaRetry(mode);
+      await flushLocalSaveWrites();
+      committed = await setLocalSavePayloadWithProof(commitInput, (progress) => options.onProgress?.(progress));
+    }
+    if (!committed.result.ok) {
+      return authoritativePersistenceFailure(committed.result, proof.byteLength, removedAutomaticSnapshots);
+    }
+    clearPrimarySaveEmergencyMirrorProof(mode, committed.result.proof.savedAt, committed.result.proof.stateChecksum);
+    options.onProgress?.({ stage: "complete", bytes: proof.byteLength });
+    if (options.snapshotState) {
+      // Recovery snapshots are best effort and intentionally outside the
+      // primary latency contract. The immutable state is never used as the
+      // primary authority after this point.
+      const snapshotState = options.snapshotState;
+      globalThis.setTimeout(() => { void maybeSaveAutomaticSnapshotVerified(snapshotState, mode); }, 5_000);
+    }
+    return {
+      success: true,
+      message: "主存档已保存",
+      savedAt: committed.result.proof.savedAt,
+      bytes: committed.result.proof.byteLength,
+      removedAutomaticSnapshots,
+      backupSaved: committed.result.proof.backupSaved,
+      timings: {
+        totalMs: Math.max(0, monotonicNow() - totalStartedAt) + prepared.durationMs,
+        serializeMs: prepared.durationMs,
+        snapshotScanMs,
+        capacityMs: 0,
+        primaryWriteMs: committed.result.proof.idbWriteMs,
+        backupMs: committed.result.proof.backupVerifyMs,
+        automaticSnapshotMs: 0,
+      },
+    };
+  } catch (error) {
+    const coordination = localCoordinationFailure(error, proof.byteLength, removedAutomaticSnapshots);
+    if (coordination) return coordination;
+    return failedSave("unavailable", error instanceof Error ? error.message : "prepared 主存档写入失败", proof.byteLength, removedAutomaticSnapshots);
+  }
+}
+
+/**
+ * Commit a best-effort automatic snapshot prepared by the authoritative
+ * simulation Worker after its primary checkpoint has completed. The exact
+ * primary identity captured by the caller is rechecked before serialization
+ * admission and again inside the coordinated persistence queue, so a newer
+ * primary always wins over this recovery-only write.
+ */
+export async function savePreparedAutomaticSnapshot(
+  prepared: PreparedAuthoritativeSavePayload,
+  expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity,
+  primaryIdentity: VerifiedPrimaryLocalSaveIdentity,
+): Promise<SaveSnapshotSummary | null> {
+  if (!preparedPayloadMatchesStateIdentity(prepared, expectedStateIdentity, "snapshot", "自动快照") ||
+    !isAutomaticSnapshotDue(expectedStateIdentity.mode, expectedStateIdentity.elapsedSeconds)) return null;
+  try {
+    await initializeLocalSaveStore();
+    if (activePrimarySave || activePrimaryRequest || pendingPrimarySaves.size > 0) return null;
+    const currentPrimary = getVerifiedPrimaryLocalSaveIdentity(expectedStateIdentity.mode);
+    if (!currentPrimary || !sameVerifiedPrimaryIdentity(currentPrimary, primaryIdentity)) return null;
+    const savedAt = prepared.catalogSeed.savedAt;
+    const sequence = nextSnapshotSequence(expectedStateIdentity.mode, savedAt);
+    const id = `${savedAt}-${sequence}`;
+    const key = `${snapshotSavePrefix(expectedStateIdentity.mode)}.${id}`;
+    const writer = getLocalSaveWriterStatus();
+    if (writer.role !== "primary") return null;
+    const committed = await setLocalSavePayloadWithProof({
+      key,
+      bytes: prepared.bytes,
+      proof: prepared.proof,
+      seed: prepared.catalogSeed,
+      expectedRevision: getLocalSaveRevision(key),
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+      preserveBackup: false,
+      discardPayloadOnSuccess: true,
+    }, undefined, () => {
+      if (activePrimarySave || activePrimaryRequest || pendingPrimarySaves.size > 0) return false;
+      const admittedPrimary = getVerifiedPrimaryLocalSaveIdentity(expectedStateIdentity.mode);
+      return Boolean(admittedPrimary && sameVerifiedPrimaryIdentity(admittedPrimary, primaryIdentity));
+    });
+    if (!committed.result.ok) return null;
+    invalidateSaveSummaryCache(key);
+    snapshotMetadataCache.delete(key);
+    trimAutomaticSnapshots(AUTOMATIC_SAVE_SNAPSHOT_LIMIT, expectedStateIdentity.mode);
+    await flushLocalSaveWrites();
+    const summary = prepared.summary;
+    const snapshot = {
+      id,
+      mode: expectedStateIdentity.mode,
+      savedAt: summary.savedAt,
+      elapsedSeconds: summary.elapsedSeconds,
+      completedTechCount: summary.completedTechCount,
+      structurePoints: summary.structurePoints,
+      activePlanetId: summary.activePlanetId as PlanetId,
+      reason: "自动快照",
+      integrity: "valid",
+      valid: true,
+      issues: [],
+    } satisfies SaveSnapshotSummary;
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The proof path must not hydrate a current large primary merely to decide
  * whether it is an old pre-mode save. A valid catalog can prove both envelope
@@ -4332,16 +4511,19 @@ function nextSnapshotSequence(mode: SaveMode, savedAt: number): number {
   return next;
 }
 
-function maybeSaveAutomaticSnapshot(state: GameState, mode = saveModeForState(state)): void {
+export function isAutomaticSnapshotDue(mode: SaveMode, elapsedSeconds: number): boolean {
   const latest = latestAutomaticSnapshotSummary(mode);
-  if (!latest || state.elapsedSeconds < latest.elapsedSeconds || state.elapsedSeconds - latest.elapsedSeconds >= AUTO_SNAPSHOT_MIN_SECONDS) {
+  return !latest || elapsedSeconds < latest.elapsedSeconds || elapsedSeconds - latest.elapsedSeconds >= AUTO_SNAPSHOT_MIN_SECONDS;
+}
+
+function maybeSaveAutomaticSnapshot(state: GameState, mode = saveModeForState(state)): void {
+  if (isAutomaticSnapshotDue(mode, state.elapsedSeconds)) {
     saveGameSnapshot(state, "自动快照");
   }
 }
 
 async function maybeSaveAutomaticSnapshotVerified(state: GameState, mode = saveModeForState(state)): Promise<void> {
-  const latest = latestAutomaticSnapshotSummary(mode);
-  if (!latest || state.elapsedSeconds < latest.elapsedSeconds || state.elapsedSeconds - latest.elapsedSeconds >= AUTO_SNAPSHOT_MIN_SECONDS) {
+  if (isAutomaticSnapshotDue(mode, state.elapsedSeconds)) {
     await saveGameSnapshotVerified(state, "自动快照");
   }
 }

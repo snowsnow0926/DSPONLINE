@@ -64,6 +64,16 @@ describe("planet-scoped canvas render snapshots", () => {
     expect(result.snapshot.topologyRevision).toBe(cache.topologyRevision + 1);
   });
 
+  it("invalidates outer canvas presentation when entity interaction locking changes", () => {
+    const previous = createInitialState();
+    const cache = createCanvasRenderSnapshot(previous);
+    const current = structuredClone(previous);
+    current.entities[0].interactionLocked = !current.entities[0].interactionLocked;
+    const result = reconcileCanvasRenderSnapshot(cache, current, createSimulationProjection(previous, current));
+    expect(result.topologyChanged).toBe(true);
+    expect(result.snapshot.topologyRevision).toBe(cache.topologyRevision + 1);
+  });
+
   it("does not invalidate topology for a forced settings/runtime publication", () => {
     const previous = createInitialState();
     const cache = createCanvasRenderSnapshot(previous);

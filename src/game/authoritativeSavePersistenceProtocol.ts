@@ -100,6 +100,12 @@ export type AuthoritativeSavePersistenceRequest<Payload extends WorkerBinaryPayl
   expectedRevision: number;
   fence: AuthoritativeSaveWriterFence;
   preserveBackup?: boolean;
+  /** Return the verified primary proof before the best-effort previous-primary
+   * backup. The Worker queue still finishes that backup before the next commit. */
+  deferBackup?: boolean;
+  /** Successful callers that will never retry may leave the large buffer in
+   * the Worker. Controlled failures still return ownership. */
+  discardPayloadOnSuccess?: boolean;
 };
 
 export type AuthoritativeSavePersistenceResponse =

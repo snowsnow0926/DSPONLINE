@@ -154,7 +154,8 @@ function sameEntityTopology(previous: readonly FactoryEntity[], next: readonly F
     const before = byId.get(entity.id);
     return Boolean(before && before.planetId === entity.planetId && before.kind === entity.kind &&
       before.buildingId === entity.buildingId && before.resourceId === entity.resourceId &&
-      before.position.x === entity.position.x && before.position.y === entity.position.y);
+      before.position.x === entity.position.x && before.position.y === entity.position.y &&
+      before.interactionLocked === entity.interactionLocked);
   });
 }
 

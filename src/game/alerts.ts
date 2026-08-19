@@ -65,6 +65,42 @@ export const EMPTY_FACTORY_ALERT_PROJECTION: FactoryAlertProjection = {
   rows: [],
 };
 
+export interface FactoryAlertMembership {
+  planetId: PlanetId;
+  entityIds: ReadonlySet<string>;
+  criticalEntityIds: ReadonlySet<string>;
+}
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) if (!right.has(value)) return false;
+  return true;
+}
+
+/**
+ * Project the alert rows down to the only identity data consumed by Canvas.
+ * Status labels may change every simulation publication; returning the prior
+ * sets when membership is exact prevents those label-only updates from
+ * invalidating stack geometry and every React Flow node.
+ */
+export function reconcileFactoryAlertMembership(
+  previous: FactoryAlertMembership | null,
+  projection: FactoryAlertProjection,
+  planetId: PlanetId,
+): FactoryAlertMembership {
+  const entityIds = new Set<string>();
+  const criticalEntityIds = new Set<string>();
+  for (const [entityId, rowPlanetId, codeIndex] of projection.rows) {
+    if (rowPlanetId !== planetId) continue;
+    entityIds.add(entityId);
+    const code = projection.codes[codeIndex];
+    if (code && isCriticalFactoryAlertCode(code)) criticalEntityIds.add(entityId);
+  }
+  if (previous?.planetId === planetId && sameStringSet(previous.entityIds, entityIds) &&
+    sameStringSet(previous.criticalEntityIds, criticalEntityIds)) return previous;
+  return { planetId, entityIds, criticalEntityIds };
+}
+
 export function isCriticalFactoryAlertCode(code: EntityOperatingStatus["code"]): boolean {
   return CRITICAL_CODES.has(code);
 }

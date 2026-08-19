@@ -44,6 +44,7 @@ import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
+import { RuntimePersistenceNotice } from "./components/RuntimePersistenceNotice";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
 import { usePerformanceMonitor } from "./hooks/usePerformanceMonitor";
 import { MobilePlacementBar, MobileSelectionContextBar, type MobileCanvasMode } from "./components/mobile/MobileFactoryPanels";
@@ -51,7 +52,7 @@ import type { OperationsTab } from "./components/OperationsWorkspace";
 import type { StatisticsTab } from "./components/StatisticsWorkspace";
 import type { StationTab } from "./components/OrbitalStationWorkspace";
 import { ITEMS, RECIPES, getBeltConstructionId, getBeltTiers, getBuilding, getBuildingUpgradeTarget, getConstructionDefinition, getExtractorBuildingId, getPlanet, getStarSystem, getTechnology } from "./game/content";
-import { EMPTY_FACTORY_ALERT_PROJECTION, isCriticalFactoryAlertCode, materializeFactoryAlerts, type FactoryAlert, type FactoryAlertProjection } from "./game/alerts";
+import { EMPTY_FACTORY_ALERT_PROJECTION, materializeFactoryAlerts, reconcileFactoryAlertMembership, type FactoryAlert, type FactoryAlertMembership, type FactoryAlertProjection } from "./game/alerts";
 import { getSaveSummaryRefreshIntervalMs, shouldRefreshSaveSummaries } from "./game/saveRefreshPolicy";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetSolarPowerMultiplier, getStarSystemDisplayName } from "./game/galaxy";
 import {
@@ -265,13 +266,14 @@ import { getDifficultyDefinition } from "./game/difficulty";
 import { analyzeBeltNetwork, analyzeEntityLineTrace, diagnoseBelt, predictBeltConnection } from "./game/network";
 import { buildFactoryEdgeRouteCenters, reconcileFactoryCanvasTopology, type FactoryCanvasTopology } from "./game/canvasTopology";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
+import { indexCanvasPresentationNodes, reconcileCanvasNodePublication, selectCanvasRuntimeRecords } from "./game/canvasPresentationLifecycle";
 import { KeyedViewStore } from "./game/keyedViewStore";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
 import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncCampaignProgress, type CampaignNavigation } from "./game/campaign";
 import { inspectSaveInWorker } from "./game/saveInspection";
-import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
+import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, saveGameVerifiedFromPreparedPayload, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
 import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./game/blueprintExchange";
 import { exportTextFile } from "./game/fileExport";
@@ -346,8 +348,10 @@ import {
   validateSimulationStateTransferIdentity,
   type SimulationCommandPatch,
   type SimulationStateBlobTransfer,
+  type SimulationStateIdentity,
   type SimulationStateTransfer,
 } from "./game/simulationRuntimeProtocol";
+import { createSimulationPreparedSaveRequest, validatePreparedSaveResponse, type PreparedAuthoritativeSaveCheckpoint, type SimulationPreparedSaveRequest } from "./game/simulationPreparedSaveLifecycle";
 import type {
   SimulationRuntimeDurableAppHead,
 } from "./game/simulationRuntimeDurableAppState";
@@ -366,11 +370,14 @@ import {
 } from "./game/simulationRuntimeRecoveryPersistenceClient";
 import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationRuntimeStartupRecovery";
 import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
-import { getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus } from "./game/localSaveStore";
+import { getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, getVerifiedPrimaryLocalSaveIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus, type VerifiedPrimaryLocalSaveIdentity } from "./game/localSaveStore";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
 import type { AuthoritativeSaveCheckpointOverlay } from "./game/authoritativeSaveSerializationProtocol";
 import { readMulticoreSimulationOptions, type MulticoreSimulationOptions } from "./game/multicoreSimulation";
 import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode";
+import { RuntimePersistenceViewStore, type RuntimePersistenceKind, type RuntimePersistenceProgressUpdate } from "./game/runtimePersistenceViewStore";
+import { PreparedAutomaticSnapshotLifecycle } from "./game/preparedAutomaticSnapshotLifecycle";
+import { RuntimePrimaryPersistenceLifecycle } from "./game/runtimePrimaryPersistenceLifecycle";
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
 import { accumulateSimulationBudget, NORMAL_SIMULATION_SLICE_SECONDS, takeSimulationBudgetSlice } from "./game/simulationBudget";
 import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase, runtimeTransitionDiagnosticsEnabled, type RuntimeWorldBenchmarkBridge } from "./game/runtimeTransitionDiagnostics";
@@ -1187,9 +1194,6 @@ function finishSimulationCheckpointChunks(accumulator: SimulationCheckpointAccum
   return { ...accumulator.base, entities: accumulator.entities, belts: accumulator.belts };
 }
 
-type RuntimePersistenceKind = "autosave" | "manual" | "pure-idle-stop" | "return" | "lifecycle" | "other";
-type RuntimePersistencePhase = "checkpoint" | "serialize-write-readback" | "complete" | "failed";
-
 const LIFECYCLE_SEALED_SAVE_MESSAGE = "页面正在退出，已保留当前 durable recovery 供下次精确恢复";
 
 function lifecycleSealedSaveResult(): SaveGameResult {
@@ -1237,14 +1241,6 @@ function applyAuthoritativeCheckpointOverlay(
     };
   }
   return next;
-}
-
-interface RuntimePersistenceProgress {
-  id: number;
-  kind: RuntimePersistenceKind;
-  phase: RuntimePersistencePhase;
-  startedAt: number;
-  message: string;
 }
 
 function minerPlacementHint(buildingId: BuildingId): string {
@@ -1464,6 +1460,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [nodes, setNodes, onNodesChange] = useNodesState<FactoryFlowNode>([]);
   const canvasNodesRef = useRef(nodes);
   canvasNodesRef.current = nodes;
+  const canvasNodeIndexRef = useRef<{ source: FactoryFlowNode[] | null; byId: Map<string, FactoryFlowNode> }>({
+    source: null,
+    byId: new Map(),
+  });
+  const canvasRuntimeDynamicNodeIdsRef = useRef<readonly string[]>([]);
+  const canvasOuterPresentationEpochRef = useRef<object | null>(null);
   const factoryNodeRuntimeStoreRef = useRef<KeyedViewStore<FactoryNodeData> | null>(null);
   if (!factoryNodeRuntimeStoreRef.current) factoryNodeRuntimeStoreRef.current = new KeyedViewStore<FactoryNodeData>();
   const factoryNodeRuntimeStore = factoryNodeRuntimeStoreRef.current;
@@ -1512,7 +1514,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setFactoryAlertsEnabled(enabled);
   }, [invalidateFactoryAlertProjection]);
   const [saveFailure, setSaveFailure] = useState<SaveGameResult | null>(null);
-  const [runtimePersistenceProgress, setRuntimePersistenceProgress] = useState<RuntimePersistenceProgress | null>(null);
+  const runtimePersistenceViewStoreRef = useRef<RuntimePersistenceViewStore | null>(null);
+  if (!runtimePersistenceViewStoreRef.current) runtimePersistenceViewStoreRef.current = new RuntimePersistenceViewStore();
+  const runtimePersistenceViewStore = runtimePersistenceViewStoreRef.current;
+  const setRuntimePersistenceProgress = useCallback((update: RuntimePersistenceProgressUpdate) => {
+    runtimePersistenceViewStore.publish(update);
+  }, [runtimePersistenceViewStore]);
+  const gameShellRef = useRef<HTMLElement | null>(null);
+  useEffect(() => runtimePersistenceViewStore.subscribe(() => {
+    const progress = runtimePersistenceViewStore.getSnapshot();
+    if (!gameShellRef.current) return;
+    gameShellRef.current.dataset.persistenceKind = progress?.kind ?? "idle";
+    gameShellRef.current.dataset.persistencePhase = progress?.phase ?? "idle";
+  }), [runtimePersistenceViewStore]);
   const [primarySaveRejectedEditCount, setPrimarySaveRejectedEditCount] = useState(0);
   const runtimePersistenceProgressIdRef = useRef(0);
   const authorityWorkspaceSyncIdRef = useRef(0);
@@ -1734,6 +1748,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     checkpointChunks?: SimulationCheckpointAccumulator;
   } | null>(null);
   const dispatchSimulationCheckpointRef = useRef<() => void>(() => undefined);
+  const simulationPreparedSaveRequestRef = useRef<SimulationPreparedSaveRequest | null>(null);
+  const dispatchSimulationPreparedSaveRef = useRef<() => void>(() => undefined);
+  const preparedAutomaticSnapshotLifecycleRef = useRef<PreparedAutomaticSnapshotLifecycle | null>(null);
+  if (!preparedAutomaticSnapshotLifecycleRef.current) preparedAutomaticSnapshotLifecycleRef.current = new PreparedAutomaticSnapshotLifecycle();
+  const preparedAutomaticSnapshotLifecycle = preparedAutomaticSnapshotLifecycleRef.current;
+  useEffect(() => () => preparedAutomaticSnapshotLifecycle.cancel(), [preparedAutomaticSnapshotLifecycle]);
+  const runtimePrimaryPersistenceLifecycleRef = useRef<RuntimePrimaryPersistenceLifecycle | null>(null);
+  if (!runtimePrimaryPersistenceLifecycleRef.current) runtimePrimaryPersistenceLifecycleRef.current = new RuntimePrimaryPersistenceLifecycle();
+  const runtimePrimaryPersistenceLifecycle = runtimePrimaryPersistenceLifecycleRef.current;
   const requestAuthoritativeSimulationCheckpointRef = useRef<() => Promise<GameState>>(() => Promise.resolve(loaded.state));
   const persistDurablePrimaryCheckpointRef = useRef<((requestedState: GameState | undefined, kind: RuntimePersistenceKind) => Promise<SaveGameResult>)>(() => Promise.resolve({ success: false, message: "未就绪", code: "unavailable" }));
   const latestAuthoritativeCheckpointRef = useRef<GameState>(loaded.state);
@@ -2585,7 +2608,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const dispatchSimulationCheckpoint = useCallback(() => {
     const pending = simulationCheckpointRequestRef.current;
-    if (!pending || pending.id !== null || simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current || simulationRecoveryRef.current) return;
+    if (!pending || pending.id !== null || simulationPreparedSaveRequestRef.current || simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current || simulationRecoveryRef.current) return;
     const worker = simulationWorkerRef.current;
     const confirmedState = lastSimulationResultRef.current;
     if (!worker || simulationWorkerDisabledRef.current || !confirmedState) {
@@ -2634,7 +2657,93 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [dispatchDurableUiCommand, stateWithSimulationDebt]);
   dispatchSimulationCheckpointRef.current = dispatchSimulationCheckpoint;
 
+  const dispatchSimulationPreparedSave = useCallback(() => {
+    const pending = simulationPreparedSaveRequestRef.current;
+    if (!pending || pending.id !== null || simulationCheckpointRequestRef.current || simulationSubmissionRef.current ||
+      durableRecoveryStageInFlightRef.current || simulationRecoveryRef.current) return;
+    const worker = simulationWorkerRef.current;
+    const confirmedState = lastSimulationResultRef.current;
+    if (!worker || simulationWorkerDisabledRef.current || !confirmedState || durableRecoveryLifecycleRef.current === "active") {
+      simulationPreparedSaveRequestRef.current = null;
+      simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+      pending.resolve(null);
+      return;
+    }
+    const state = gameRef.current;
+    const command = createSimulationCommandPatch(confirmedState, state, simulationStateRevisionRef.current);
+    const checkpointOverlay = createAuthoritativeCheckpointOverlay(confirmedState);
+    const registrySnapshot = contentPackRuntimeSnapshotRef.current;
+    const request: SimulationWorkerRequest = {
+      id: simulationRequestIdRef.current + 1,
+      kind: "prepare-save",
+      simulationSeconds: 0,
+      wallSeconds: 0,
+      registryFingerprint: registrySnapshot.fingerprint,
+      protocol: "projection",
+      stateRevision: simulationStateRevisionRef.current,
+      ...(command ? { command } : {}),
+      prepareSave: {
+        savedAt: pending.savedAt,
+        kind: pending.kind,
+        ...(pending.reason ? { reason: pending.reason } : {}),
+        ...(checkpointOverlay ? { checkpointOverlay } : {}),
+      },
+      ...(simulationWorkerRegistryFingerprintRef.current !== registrySnapshot.fingerprint ? { registry: registrySnapshot } : {}),
+    };
+    simulationRequestIdRef.current = request.id;
+    pending.id = request.id;
+    pending.expectedState = state;
+    pending.command = command;
+    if (checkpointOverlay) pending.checkpointOverlay = checkpointOverlay;
+    try {
+      measureRuntimeTransitionPhase("runtimeworld-post-message", () => worker.postMessage(request), { kind: "prepare-save" });
+    } catch (error) {
+      simulationPreparedSaveRequestRef.current = null;
+      simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+      pending.reject(error instanceof Error ? error : new Error("模拟 Worker 保存准备请求失败"));
+    }
+  }, [createAuthoritativeCheckpointOverlay]);
+  dispatchSimulationPreparedSaveRef.current = dispatchSimulationPreparedSave;
+
+  const requestPreparedAuthoritativeSave = useCallback((
+    kind: "primary" | "snapshot",
+    reason?: string,
+  ): Promise<PreparedAuthoritativeSaveCheckpoint | null> => {
+    const existing = simulationPreparedSaveRequestRef.current;
+    if (existing) return existing.promise.then(() => requestPreparedAuthoritativeSave(kind, reason));
+    if (simulationCheckpointRequestRef.current) {
+      return simulationCheckpointRequestRef.current.promise.then(() => requestPreparedAuthoritativeSave(kind, reason));
+    }
+    if (!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current || simulationRecoveryRef.current) {
+      return Promise.resolve(null);
+    }
+    const pending = createSimulationPreparedSaveRequest(kind, reason);
+    simulationCheckpointBarrierRef.current = true;
+    simulationPreparedSaveRequestRef.current = pending;
+    queueMicrotask(() => dispatchSimulationPreparedSaveRef.current());
+    return pending.promise;
+  }, []);
+
+  const requestPreparedAuthoritativePrimarySave = useCallback(
+    () => requestPreparedAuthoritativeSave("primary"),
+    [requestPreparedAuthoritativeSave],
+  );
+
+  const schedulePreparedAutomaticSnapshot = useCallback((
+    primaryIdentity: VerifiedPrimaryLocalSaveIdentity,
+    stateIdentity: SimulationStateIdentity,
+  ) => {
+    preparedAutomaticSnapshotLifecycle.schedule({
+      primaryIdentity,
+      stateIdentity,
+      request: () => requestPreparedAuthoritativeSave("snapshot", "自动快照"),
+      isExiting: () => lifecycleExitStartedRef.current,
+    });
+  }, [preparedAutomaticSnapshotLifecycle, requestPreparedAuthoritativeSave]);
+
   const requestAuthoritativeSimulationCheckpoint = useCallback((): Promise<GameState> => {
+    const prepared = simulationPreparedSaveRequestRef.current;
+    if (prepared) return prepared.promise.then(() => requestAuthoritativeSimulationCheckpoint());
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint"
@@ -3459,7 +3568,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
   }, [clearPureIdleRecovery, replaceSimulationAuthorityFromStateTransfer]);
 
-  const persistPrimarySave = useCallback(async (
+  const persistPrimarySaveOnce = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
   ): Promise<SaveGameResult> => {
@@ -3484,6 +3593,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationCheckpointBarrierRef.current = true;
     }
     try {
+      const preparedCheckpoint = kind === "autosave" && state === undefined && getLocalSaveBackend() === "indexeddb"
+        ? await requestPreparedAuthoritativePrimarySave()
+        : null;
       const activeSubmission = simulationSubmissionRef.current;
       const confirmedState = lastSimulationResultRef.current;
       // A large factory can spend many seconds inside one ordinary advance
@@ -3494,13 +3606,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const idleWorkerMatchesConfirmedState = activeSubmission === null && confirmedState === gameRef.current;
       const activeAdvanceHasNoUnconfirmedPlayerCommand = activeSubmission?.kind === "advance" &&
         activeSubmission.command === null && activeSubmission.state === gameRef.current;
-      const canUseConfirmedAutosaveBoundary = kind === "autosave" && state === undefined &&
+      const canUseConfirmedAutosaveBoundary = !preparedCheckpoint && kind === "autosave" && state === undefined &&
         confirmedState !== null && simulationRecoveryRef.current === null &&
         (idleWorkerMatchesConfirmedState || activeAdvanceHasNoUnconfirmedPlayerCommand);
-      const barrierState = canUseConfirmedAutosaveBoundary
+      const barrierState = preparedCheckpoint?.saveState ?? (canUseConfirmedAutosaveBoundary
         ? stateWithSimulationDebt(confirmedState)
-        : await requestAuthoritativeSimulationCheckpoint();
-      if (canUseConfirmedAutosaveBoundary) {
+        : await requestAuthoritativeSimulationCheckpoint());
+      if (preparedCheckpoint) {
+        recordRuntimeTransitionPhase("autosave-confirmed-checkpoint", startedAt, performance.now() - startedAt, {
+          source: "worker-prepared-envelope",
+          stateRevision: preparedCheckpoint.stateRevision,
+          bytes: preparedCheckpoint.prepared.proof.byteLength,
+        });
+      } else if (canUseConfirmedAutosaveBoundary) {
         recordRuntimeTransitionPhase("autosave-confirmed-checkpoint", startedAt, performance.now() - startedAt, {
           pendingSimulationSeconds: activeSubmission?.simulationSeconds ?? simulationPendingSecondsRef.current,
           pendingWallSeconds: activeSubmission?.wallSeconds ?? simulationPendingWallSecondsRef.current,
@@ -3514,7 +3632,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       recordRuntimeTransitionPhase("save-authoritative-checkpoint", startedAt, performance.now() - startedAt, { kind });
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在序列化、写入并逐字复核存档…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
-      const result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      let result = preparedCheckpoint
+        ? await saveGameVerifiedFromPreparedPayload(preparedCheckpoint.prepared, {
+          mode: preparedCheckpoint.identity.mode,
+          version: preparedCheckpoint.identity.version,
+          activePlanetId: preparedCheckpoint.identity.activePlanetId,
+          entityCount: preparedCheckpoint.identity.entityCount,
+          beltCount: preparedCheckpoint.identity.beltCount,
+          elapsedSeconds: preparedCheckpoint.identity.elapsedSeconds,
+        }, { deferBackup: true })
+        : await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      if (preparedCheckpoint && !result.success && result.code === "verification") {
+        // Legacy/uncatalogued primaries deliberately retain the compatibility
+        // path until their first verified write establishes proof metadata.
+        result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: true, force: false });
+      }
+      if (preparedCheckpoint && result.success) {
+        const primaryIdentity = getVerifiedPrimaryLocalSaveIdentity(preparedCheckpoint.identity.mode);
+        if (primaryIdentity) schedulePreparedAutomaticSnapshot(primaryIdentity, preparedCheckpoint.identity);
+      }
       recordRuntimeWorldSaveStages(kind, result);
       const durationMs = performance.now() - startedAt;
       if (monitorSave) performanceMonitor.recordSave({ durationMs, bytes: result.bytes ?? 0, stages: result.timings ?? null });
@@ -3560,12 +3696,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       verifiedPrimarySaveInFlightDepthRef.current = Math.max(0, verifiedPrimarySaveInFlightDepthRef.current - 1);
       if (ownsBarrier) {
         simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
-        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) {
+        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current && !simulationPreparedSaveRequestRef.current) {
           simulationCheckpointBarrierRef.current = false;
         }
       }
     }
-  }, [durableSimulationRuntimeEnabled, performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
+  }, [durableSimulationRuntimeEnabled, performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativeSimulationCheckpoint, requestPreparedAuthoritativePrimarySave, saveVerifiedPrimaryCheckpoint, schedulePreparedAutomaticSnapshot, stateWithSimulationDebt]);
+
+  const persistPrimarySave = useCallback((
+    state?: GameState,
+    kind: RuntimePersistenceKind = "other",
+  ): Promise<SaveGameResult> => runtimePrimaryPersistenceLifecycle.enqueue(
+    () => persistPrimarySaveOnce(state, kind),
+  ), [persistPrimarySaveOnce, runtimePrimaryPersistenceLifecycle]);
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
@@ -4934,6 +5077,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
         return;
       }
+      const preparedSaveRequest = simulationPreparedSaveRequestRef.current;
+      if (preparedSaveRequest?.id === event.data.id) {
+        try {
+          if (event.data.needsRegistry || event.data.registryError || event.data.needsState || event.data.needsResync ||
+            !event.data.preparedSave || typeof event.data.stateRevision !== "number") {
+            throw new Error(event.data.registryError ?? "模拟 Worker 未返回有效 prepared save");
+          }
+          const identity = validatePreparedSaveResponse(
+            preparedSaveRequest,
+            event.data.preparedSave,
+            event.data.commandApplied === true,
+          );
+          const expected = preparedSaveRequest.expectedState!;
+          const { identity: _identity, ...prepared } = event.data.preparedSave;
+          const saveState = applyAuthoritativeCheckpointOverlay(expected, preparedSaveRequest.checkpointOverlay);
+          simulationStateRevisionRef.current = event.data.stateRevision;
+          simulationWorkerRegistryFingerprintRef.current = event.data.registryFingerprint ?? simulationWorkerRegistryFingerprintRef.current;
+          lastSimulationResultRef.current = expected;
+          latestAuthoritativeCheckpointRef.current = expected;
+          if (preparedSaveRequest.command) {
+            simulationReplayJournalRef.current.push({
+              command: preparedSaveRequest.command,
+              simulationSeconds: 0,
+              wallSeconds: 0,
+              multicore: undefined,
+              approximate: false,
+              registry: contentPackRuntimeSnapshotRef.current,
+            });
+          }
+          simulationPreparedSaveRequestRef.current = null;
+          simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+          recordRuntimeTransitionPhase("save-worker-prepared-envelope", performance.now() - prepared.durationMs, prepared.durationMs, {
+            bytes: prepared.proof.byteLength,
+          });
+          preparedSaveRequest.resolve({ prepared, identity, saveState, stateRevision: event.data.stateRevision });
+        } catch (error) {
+          simulationPreparedSaveRequestRef.current = null;
+          simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+          preparedSaveRequest.reject(error instanceof Error ? error : new Error("prepared save 校验失败"));
+        }
+        return;
+      }
       const checkpointRequest = simulationCheckpointRequestRef.current;
       if (checkpointRequest?.id === event.data.id) {
         if (event.data.checkpointStateChunk) {
@@ -5061,7 +5246,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             checkpointRequest.state = null;
             checkpointRequest.command = null;
             delete checkpointRequest.checkpointChunks;
-            queueMicrotask(() => dispatchSimulationCheckpointRef.current());
+            queueMicrotask(() => {
+              dispatchSimulationCheckpointRef.current();
+              dispatchSimulationPreparedSaveRef.current();
+            });
             return;
           }
           latestAuthoritativeCheckpointRef.current = authoritative;
@@ -5415,7 +5603,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice("模拟 Worker 已从精确检查点恢复，未完成时间已保留");
           if (simulationCheckpointRequestRef.current) {
             simulationCheckpointRequestRef.current.id = null;
-            queueMicrotask(() => dispatchSimulationCheckpointRef.current());
+            queueMicrotask(() => {
+              dispatchSimulationCheckpointRef.current();
+              dispatchSimulationPreparedSaveRef.current();
+            });
           }
         } catch {
           simulationRecoveryRef.current = null;
@@ -5574,7 +5765,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         responseBytes: event.data.transferBytes ?? 0,
       });
       if (simulationCheckpointBarrierRef.current) {
-        queueMicrotask(() => dispatchSimulationCheckpointRef.current());
+        queueMicrotask(() => {
+          dispatchSimulationCheckpointRef.current();
+          dispatchSimulationPreparedSaveRef.current();
+        });
       }
       if (durableRecoveryLifecycleRef.current === "active") {
         // Worker response handling has already rebased gameRef. Dispatch the
@@ -8423,21 +8617,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     for (const id of draggedEntityIds) ids.add(id);
     return ids;
   }, [canvasInteractionDetailPreference, connectionCandidateNodeId, connectionDraft?.nodeId, draggedEntityIds, hoveredNodeId, miningEntityId, selectedEntityIds]);
-  const activeAlertEntityIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [entityId, planetId] of visibleFactoryAlertProjection.rows) {
-      if (planetId === canvasGame.activePlanetId) ids.add(entityId);
-    }
-    return ids;
+  const activeFactoryAlertMembershipRef = useRef<FactoryAlertMembership | null>(null);
+  const activeFactoryAlertMembership = useMemo(() => {
+    const membership = reconcileFactoryAlertMembership(
+      activeFactoryAlertMembershipRef.current,
+      visibleFactoryAlertProjection,
+      canvasGame.activePlanetId,
+    );
+    activeFactoryAlertMembershipRef.current = membership;
+    return membership;
   }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
-  const activeCriticalAlertEntityIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [entityId, planetId, codeIndex] of visibleFactoryAlertProjection.rows) {
-      const code = visibleFactoryAlertProjection.codes[codeIndex];
-      if (planetId === canvasGame.activePlanetId && code && isCriticalFactoryAlertCode(code)) ids.add(entityId);
-    }
-    return ids;
-  }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
+  const activeAlertEntityIds = activeFactoryAlertMembership.entityIds;
+  const activeCriticalAlertEntityIds = activeFactoryAlertMembership.criticalEntityIds;
   const detailedCanvasBeltIds = useMemo(() => {
     const ids = new Set(selectedBeltIdSet);
     if (hoveredBeltId) ids.add(hoveredBeltId);
@@ -8554,6 +8745,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, factoryNodeRuntimeStore, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
 
+  // Runtime projections update mutable entity wrappers every visual tick, but
+  // they do not change React Flow topology or presentation. A stable epoch lets
+  // the effect below publish only the handful of mounted dynamic cards through
+  // KeyedViewStore instead of allocating a new 4k+ node derivation graph.
+  const canvasOuterPresentationEpoch = useMemo(() => ({}), [
+    activateCanvasStack,
+    activeConnectionViewportBounds,
+    blueprintPlacementId,
+    canvasConnectedEntityIds,
+    canvasDetailPreference,
+    canvasPresentationDetailStage,
+    canvasRenderSnapshot.planetId,
+    canvasRenderSnapshot.topologyRevision,
+    canvasStackGrouping.byNodeId,
+    connectExpandAll,
+    connectionCandidateNodeId,
+    connectionDraft,
+    denseNodeLodActive,
+    focusedBeltNetwork,
+    focusedNetworkEntityIds,
+    fullDetailCanvasNodeIds,
+    game.settings.fontScale,
+    highlightedTaskId,
+    lineFindDownstreamEntityIds,
+    lineFindTrace,
+    lineFindUpstreamEntityIds,
+    locatedProductionEntityIds,
+    nextMobileShell,
+    placement,
+    productionLineFocus,
+    selectedEntityIdSet,
+    selectedEntityIds.length,
+    taskHighlight.entityIds,
+    viewportZoom,
+  ]);
+
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
     if (import.meta.env.VITE_RUNTIMEWORLD_DIAGNOSTICS === "true" &&
@@ -8561,18 +8788,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const frame = window.requestAnimationFrame(() => {
       if (nodeDragActiveRef.current) return;
       const derivationStartedAt = performance.now();
-      canvasNodeCommitStartedAtRef.current = derivationStartedAt;
       const setNodesStartedAt = derivationStartedAt;
       const current = canvasNodesRef.current;
+        const fullPresentationRefresh = canvasOuterPresentationEpochRef.current !== canvasOuterPresentationEpoch ||
+          current.length !== activePlanetEntities.length;
+        canvasNodeCommitStartedAtRef.current = fullPresentationRefresh ? derivationStartedAt : 0;
         const nodeMapStartedAt = performance.now();
-        const existing = new Map(current.map((node) => [node.id, node]));
+        if (canvasNodeIndexRef.current.source !== current) {
+          canvasNodeIndexRef.current = { source: current, byId: indexCanvasPresentationNodes(current) };
+        }
+        const existing = canvasNodeIndexRef.current.byId;
+        const entitiesToDerive = fullPresentationRefresh
+          ? activePlanetEntities
+          : selectCanvasRuntimeRecords(canvasRuntimeDynamicNodeIdsRef.current, canvasRenderSnapshot.entityById);
         let stableNodeCount = 0;
         let deferredNodeCount = 0;
         let dynamicNodeCount = 0;
         let runtimeNodePublicationCount = 0;
         let stackMembershipTokenCompareCount = 0;
         let stackMemberIdReferenceCount = 0;
-        const next = activePlanetEntities.map((entity) => {
+        const next = entitiesToDerive.map((entity) => {
           const previous = existing.get(entity.id);
           const selected = selectedEntityIdSet.has(entity.id);
           const interactionProtected = fullDetailCanvasNodeIds.has(entity.id);
@@ -8948,11 +9183,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             domAttributes: hiddenWrapperAttributes,
           } satisfies FactoryFlowNode;
         });
-        if (factoryNodeRuntimeStore.size !== next.length) {
+        if (fullPresentationRefresh && factoryNodeRuntimeStore.size !== next.length) {
           factoryNodeRuntimeStore.retain(new Set(next.map((node) => node.id)));
         }
         const derivationMs = performance.now() - derivationStartedAt;
-        const changedNodeCount = next.reduce((count, node, index) => count + (node === current[index] ? 0 : 1), 0);
+        const publication = reconcileCanvasNodePublication(current, next, fullPresentationRefresh, existing);
+        const committed = publication.nodes;
+        const changedNodeCount = publication.changedNodeCount;
+        if (fullPresentationRefresh) {
+          canvasRuntimeDynamicNodeIdsRef.current = publication.dynamicNodeIds ?? [];
+          canvasOuterPresentationEpochRef.current = canvasOuterPresentationEpoch;
+        }
         canvasNodeDerivationCountRef.current += 1;
         canvasRuntimeNodePublicationCountRef.current += runtimeNodePublicationCount;
         if (changedNodeCount > 0) {
@@ -8962,8 +9203,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         const canvasElement = factoryCanvasRef.current;
         if (canvasElement) {
           canvasElement.dataset.nodeDerivationMs = derivationMs.toFixed(2);
-          canvasElement.dataset.dynamicNodeCount = String(dynamicNodeCount);
-          canvasElement.dataset.stableNodeCount = String(stableNodeCount);
+          canvasElement.dataset.dynamicNodeCount = String(fullPresentationRefresh ? dynamicNodeCount : entitiesToDerive.length);
+          canvasElement.dataset.stableNodeCount = String(fullPresentationRefresh ? stableNodeCount : Math.max(0, current.length - entitiesToDerive.length));
           canvasElement.dataset.deferredNodeCount = String(deferredNodeCount);
           canvasElement.dataset.changedNodeCount = String(changedNodeCount);
           canvasElement.dataset.nodeDerivationCount = String(canvasNodeDerivationCountRef.current);
@@ -8977,15 +9218,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         if (performanceMonitor.isActive()) {
           performanceMonitor.recordCanvas({
             nodeDerivationMs: derivationMs,
-            reactFlowNodeCount: next.length,
+            reactFlowNodeCount: fullPresentationRefresh ? next.length : current.length,
           });
         }
         recordRuntimeTransitionPhase("canvas-node-map-signature", nodeMapStartedAt, performance.now() - nodeMapStartedAt, {
-          entities: activePlanetEntities.length,
+          entities: entitiesToDerive.length,
           previousNodes: current.length,
-          nextNodes: next.length,
+          nextNodes: fullPresentationRefresh ? next.length : current.length,
+          runtimeOnly: !fullPresentationRefresh,
         });
-        const committed = next.length === current.length && changedNodeCount === 0 ? current : next;
         // Do not enqueue a functional React Flow update for a no-op refresh.
         // The updater closure captured the entire immutable GameState and all
         // node-derivation maps; interrupted renders consequently retained one
@@ -8994,14 +9235,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // derivation writer and drag-time refreshes are explicitly deferred.
         if (committed !== current) {
           canvasNodesRef.current = committed;
+          canvasNodeIndexRef.current = { source: committed, byId: indexCanvasPresentationNodes(committed) };
           setNodes(committed);
         }
       recordRuntimeTransitionPhase("reactflow-setNodes-dispatch", setNodesStartedAt, performance.now() - setNodesStartedAt, {
-        entities: activePlanetEntities.length,
+        entities: entitiesToDerive.length,
+        committed: committed !== current,
+        runtimeOnly: !fullPresentationRefresh,
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasOuterPresentationEpoch, canvasPresentationDetailStage, canvasRenderSnapshot.entityById, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -11072,6 +11316,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
     <main
+      ref={gameShellRef}
       className={`game-shell${placement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
       onContextMenuCapture={(event) => {
         const target = event.target as HTMLElement | null;
@@ -11105,8 +11350,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-connect-expand-all={connectExpandAll ? "true" : "false"}
       data-full-realtime-simulation={fullRealtimeSimulation ? "true" : "false"}
       data-factory-alerts-enabled={factoryAlertsEnabled ? "true" : "false"}
-      data-persistence-kind={runtimePersistenceProgress?.kind ?? "idle"}
-      data-persistence-phase={runtimePersistenceProgress?.phase ?? "idle"}
+      data-persistence-kind={runtimePersistenceViewStore.getSnapshot()?.kind ?? "idle"}
+      data-persistence-phase={runtimePersistenceViewStore.getSnapshot()?.phase ?? "idle"}
       data-autosave-configured-seconds={largeSaveAutosavePolicy.configuredIntervalSeconds}
       data-autosave-effective-seconds={largeSaveAutosavePolicy.effectiveIntervalSeconds}
       data-autosave-throttled={largeSaveAutosavePolicy.throttled ? "true" : "false"}
@@ -12672,8 +12917,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <header><Activity size={13} /><span>运行记录</span><button type="button" onClick={() => setEventHistory([])} title="清空运行记录" aria-label="清空运行记录"><X size={12} /></button></header>
         <div>{eventHistory.map((event) => <p key={event.id}>{event.text}</p>)}</div>
       </aside> : null}
-      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>{runtimePersistenceProgress.message}</div>
-        : notice && (showRunLog || isPersistentNotice(notice)) ? <div className={`game-notice game-notice--${getNoticeTone(notice)}`} role="status" data-notice-tone={getNoticeTone(notice)}>{notice}</div> : null}
+      <RuntimePersistenceNotice store={runtimePersistenceViewStore} notice={notice} showRunLog={showRunLog} />
       {pureIdleActive ? <TimeWarpIdleOverlay
         game={game}
         baselineGame={pureIdleRecoveryRef.current?.state ?? game}

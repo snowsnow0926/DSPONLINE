@@ -184,7 +184,8 @@ function isSimulationProjectionBaseline(value: GameState | SimulationProjectionB
 }
 
 function entityTopologySignature(entity: FactoryEntity): string {
-  return [entity.planetId, entity.kind, entity.buildingId ?? "", entity.resourceId ?? "", entity.position.x, entity.position.y].join("|");
+  return [entity.planetId, entity.kind, entity.buildingId ?? "", entity.resourceId ?? "", entity.position.x, entity.position.y,
+    entity.interactionLocked === true ? 1 : 0].join("|");
 }
 
 function beltTopologySignature(belt: BeltConnection): string {

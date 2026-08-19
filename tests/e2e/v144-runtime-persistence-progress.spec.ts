@@ -44,9 +44,12 @@ test("default save protection rejects edits without pausing a running autosave",
         const url = String(args[0]);
         const simulation = url.includes("simulation.worker") && (args[1] as WorkerOptions | undefined)?.name === "factory-simulation";
         const save = url.includes("save.worker");
+        const persistence = url.includes("authoritativeSavePersistence.worker");
         const nativePostMessage = worker.postMessage.bind(worker);
         worker.postMessage = ((message: Record<string, unknown>, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
-          const delay = simulation && message.kind === "checkpoint" ? 350 : save ? 900 : 0;
+          const delay = simulation && (message.kind === "checkpoint" || message.kind === "prepare-save")
+            ? 350
+            : save || persistence ? 900 : 0;
           const post = () => {
             if (transferOrOptions === undefined) nativePostMessage(message);
             else nativePostMessage(message, transferOrOptions);
@@ -140,9 +143,16 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
         const url = String(args[0]);
         const simulation = url.includes("simulation.worker") && (args[1] as WorkerOptions | undefined)?.name === "factory-simulation";
         const save = url.includes("save.worker");
+        const persistence = url.includes("authoritativeSavePersistence.worker");
         const nativePostMessage = worker.postMessage.bind(worker);
         worker.postMessage = ((message: Record<string, unknown>, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
-          const delay = simulation && message.kind === "checkpoint" ? 300 : save ? 450 : 0;
+          // M5 prepares the canonical envelope in the simulation Worker and
+          // commits it in the authoritative persistence Worker. Keep both
+          // asynchronous boundaries visible instead of delaying only the
+          // retired save.worker preparation hop.
+          const delay = simulation && (message.kind === "checkpoint" || message.kind === "prepare-save")
+            ? 300
+            : save || persistence ? 450 : 0;
           const post = () => {
             if (transferOrOptions === undefined) nativePostMessage(message);
             else nativePostMessage(message, transferOrOptions);
@@ -185,7 +195,10 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
       __DSP_RUNTIME_TRANSITIONS__?: { events: Array<{ phase: string; detail?: { kind?: string; phase?: string } }> };
     }).__DSP_RUNTIME_TRANSITIONS__?.events ?? [];
     return events.filter((event) => event.phase === "persistence-phase" && event.detail?.kind === "autosave" && event.detail.phase === "complete").length;
-  }), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+  // The prepared-save journal is allowed to coalesce later unchanged timer
+  // ticks. One changed-state autosave must still traverse every persistence
+  // phase; repeated full writes are no longer part of this UI contract.
+  }), { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
   await expect(shell).toHaveAttribute("data-simulation-paused", "false");
 
   await page.getByTitle("保存并返回主菜单").click();
@@ -202,5 +215,6 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
   expect(sequence("autosave")).toContain("checkpoint");
   expect(sequence("autosave")).toContain("serialize-write-readback");
   expect(sequence("autosave")).toContain("complete");
+  expect(sequence("autosave")).not.toContain("failed");
   expect(sequence("return")).toEqual(["checkpoint", "serialize-write-readback", "complete"]);
 });

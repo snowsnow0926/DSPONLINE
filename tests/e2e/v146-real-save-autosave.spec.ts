@@ -147,12 +147,35 @@ test.describe("real save autosave acceptance", () => {
           bytes: serialization?.detail?.bytes ?? 0,
           longTaskCount: longTasks.length,
           maxLongTaskMs: Math.round(Math.max(0, ...longTasks.map((entry) => entry.durationMs))),
+          longTasks: longTasks.map((entry) => {
+            const eventIndex = events.indexOf(entry);
+            const previous = events.slice(0, eventIndex).reverse().find((candidate) => candidate.phase !== "main-thread-longtask");
+            const next = events.slice(eventIndex + 1).find((candidate) => candidate.phase !== "main-thread-longtask");
+            return {
+              offsetMs: Math.round(entry.startedAt - startedAt),
+              durationMs: Math.round(entry.durationMs),
+              previousPhase: previous?.phase ?? null,
+              nextPhase: next?.phase ?? null,
+            };
+          }),
         };
       });
       const confirmedBoundarySources = events
         .filter((event) => event.phase === "autosave-confirmed-checkpoint")
         .map((event) => String(event.detail?.source ?? ""));
-      return { snapshots, serializationCount: serializations.length, confirmedBoundarySources };
+      const canvas = document.querySelector<HTMLElement>(".factory-canvas");
+      const canvasDiagnostics = canvas ? {
+        nodeDerivationMs: Number(canvas.dataset.nodeDerivationMs ?? 0),
+        dynamicNodeCount: Number(canvas.dataset.dynamicNodeCount ?? 0),
+        stableNodeCount: Number(canvas.dataset.stableNodeCount ?? 0),
+        deferredNodeCount: Number(canvas.dataset.deferredNodeCount ?? 0),
+        changedNodeCount: Number(canvas.dataset.changedNodeCount ?? 0),
+        nodeDerivationCount: Number(canvas.dataset.nodeDerivationCount ?? 0),
+        changedNodePublicationCount: Number(canvas.dataset.changedNodePublicationCount ?? 0),
+        changedNodeTotal: Number(canvas.dataset.changedNodeTotal ?? 0),
+        runtimeNodePublicationCount: Number(canvas.dataset.runtimeNodePublicationCount ?? 0),
+      } : null;
+      return { snapshots, serializationCount: serializations.length, confirmedBoundarySources, canvasDiagnostics };
     });
     console.log(`REAL_SAVE_AUTOSAVE_METRICS ${JSON.stringify(autosaveMetrics)}`);
     expect(autosaveMetrics.snapshots).toHaveLength(2);
@@ -179,6 +202,11 @@ test.describe("real save autosave acceptance", () => {
       entityCount: importedShape!.entityCount,
       beltCount: importedShape!.beltCount,
     }));
+
+    await expect.poll(() => page.evaluate(async () => {
+      const storage = await import("/src/game/storage.ts");
+      return storage.getSaveSnapshotSummaries().filter((entry) => entry.reason === "自动快照" && entry.valid).length;
+    }), { timeout: 60_000 }).toBeGreaterThanOrEqual(1);
 
     await expect(shell).toHaveAttribute("data-simulation-worker", "active", { timeout: 30_000 });
     await expect(shell).toHaveAttribute("data-simulation-paused", "false", { timeout: 30_000 });

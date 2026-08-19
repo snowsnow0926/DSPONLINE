@@ -22,6 +22,8 @@ export interface AuthoritativeSavePayloadCommitInput<Payload extends WorkerBinar
   expectedRevision: number;
   fence: AuthoritativeSaveWriterFence;
   preserveBackup?: boolean;
+  deferBackup?: boolean;
+  discardPayloadOnSuccess?: boolean;
 }
 
 export interface AuthoritativeSavePersistenceCommitResult {
@@ -215,6 +217,8 @@ export class AuthoritativeSavePersistenceClient {
       expectedRevision: input.expectedRevision,
       fence: input.fence,
       ...(input.preserveBackup === false ? { preserveBackup: false } : {}),
+      ...(input.deferBackup === true ? { deferBackup: true } : {}),
+      ...(input.discardPayloadOnSuccess === true ? { discardPayloadOnSuccess: true } : {}),
     };
     const id = ++this.nextId;
     return new Promise<AuthoritativeSavePersistenceResponse>((resolve, reject) => {
@@ -249,7 +253,8 @@ export class AuthoritativeSavePersistenceClient {
           input.bytes instanceof ArrayBuffer && input.bytes.byteLength === 0,
         );
       }
-      if (input.bytes instanceof ArrayBuffer && !response.sourcePayloadTransfer) {
+      if (input.bytes instanceof ArrayBuffer && !response.sourcePayloadTransfer &&
+        !(input.discardPayloadOnSuccess === true && response.result.ok)) {
         throw new AuthoritativeSavePersistenceClientError(
           "protocol",
           "authoritative save Worker 未返还 payload buffer ownership",

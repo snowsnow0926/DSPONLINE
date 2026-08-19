@@ -8,6 +8,8 @@ import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjectio
 import { createSimulationStateDelta, shouldUseSimulationDelta, type SimulationStateDelta } from "./simulationDelta";
 import { runTimeWarpApproximateSettlement, type TimeWarpApproximationReport } from "./offlineApproximation";
 import { createFactoryAlertProjection } from "./alerts";
+import { prepareAuthoritativeSavePayload, type PreparedAuthoritativeSavePayload } from "./authoritativeSavePreparation";
+import type { AuthoritativeSaveCheckpointOverlay } from "./authoritativeSaveSerializationProtocol";
 import {
   applySimulationCommandPatch,
   createSimulationStateIdentity,
@@ -30,7 +32,7 @@ import {
 
 export interface SimulationWorkerRequest {
   id: number;
-  kind?: "advance" | "checkpoint" | "sync-projection" | "replay-durable";
+  kind?: "advance" | "checkpoint" | "prepare-save" | "sync-projection" | "replay-durable";
   state?: GameState;
   /** One-time/bootstrap state; callers transfer the backing buffer. */
   stateTransfer?: SimulationStateTransfer;
@@ -66,6 +68,14 @@ export interface SimulationWorkerRequest {
   /** Dedicated flow-control channel. The Worker sends the next projection
    * chunk only after the UI has committed and painted the previous one. */
   authorityProjectionAckPort?: MessagePort;
+  /** Build a canonical primary envelope beside Worker authority. The payload
+   * is still independently verified and read back by the persistence Worker. */
+  prepareSave?: {
+    savedAt: number;
+    kind?: "primary" | "snapshot";
+    reason?: string;
+    checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  };
 }
 
 export type SimulationCheckpointStateChunk =
@@ -116,6 +126,8 @@ export interface SimulationWorkerResponse {
   durableReplayError?: { code: string; message: string };
   /** Original checkpoint bytes, not the post-replay state; returned without parsing on main. */
   sourceCheckpointTransfer?: SimulationStateTransfer;
+  /** Canonical primary payload prepared without a main-thread state clone. */
+  preparedSave?: PreparedAuthoritativeSavePayload & { identity: SimulationStateIdentity };
 }
 
 let runtime: PersistentSimulationRuntime | null = null;
@@ -605,6 +617,47 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       checkpoint,
       ...(!chunkedCheckpointState ? { checkpointState } : {}),
     } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
+    return;
+  }
+  if (event.data.kind === "prepare-save") {
+    const preparation = event.data.prepareSave;
+    const saveKind = preparation?.kind ?? "primary";
+    if (!preparation || !Number.isSafeInteger(preparation.savedAt) || preparation.savedAt < 0 ||
+      (saveKind !== "primary" && saveKind !== "snapshot") ||
+      (preparation.reason !== undefined && (typeof preparation.reason !== "string" || preparation.reason.length > 256)) ||
+      !activeRegistrySnapshot) {
+      self.postMessage({
+        id,
+        changed: commandApplied,
+        commandApplied,
+        durationMs: Math.max(0, performance.now() - receivedAt),
+        protocol: event.data.protocol ?? "projection",
+        stateRevision: runtimeRevision,
+        registryFingerprint: activeRegistryFingerprint ?? undefined,
+        registryError: "模拟 Worker 保存准备参数无效",
+      } satisfies SimulationWorkerResponse);
+      return;
+    }
+    const prepared = await prepareAuthoritativeSavePayload(runtime.state, {
+      formatVersion: 2,
+      savedAt: preparation.savedAt,
+      kind: saveKind,
+      slot: "main",
+      ...(preparation.reason ? { reason: preparation.reason } : {}),
+      contentPackRegistry: activeRegistrySnapshot.registry,
+      ...(preparation.checkpointOverlay ? { checkpointOverlay: preparation.checkpointOverlay } : {}),
+    });
+    const response: SimulationWorkerResponse = {
+      id,
+      changed: commandApplied,
+      commandApplied,
+      durationMs: Math.max(0, performance.now() - receivedAt),
+      protocol: event.data.protocol ?? "projection",
+      stateRevision: runtimeRevision,
+      registryFingerprint: activeRegistryFingerprint ?? undefined,
+      preparedSave: { ...prepared, identity: createSimulationStateIdentity(runtime.state) },
+    };
+    self.postMessage(response, [prepared.bytes]);
     return;
   }
   if (event.data.kind === "sync-projection") {

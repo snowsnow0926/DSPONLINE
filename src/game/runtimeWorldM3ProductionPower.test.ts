@@ -4,7 +4,9 @@ import {
   advancePersistentSimulationRuntime,
   applyPersistentSimulationRuntimeCommand,
   createPersistentSimulationRuntime,
+  getEntityOperatingStatus,
   getSimulationMachineRuntimeDiagnostics,
+  isProductiveEntityBlockedForHistory,
 } from "./engine";
 import { createSyntheticPerformanceFixture } from "./performanceFixtures";
 import { createSimulationCommandPatch } from "./simulationRuntimeProtocol";
@@ -106,5 +108,20 @@ describe("RuntimeWorld M3 compiled production/power runtime", () => {
     const resumed = runtime.state.entities.find((entity) => entity.id === machine.id)!;
     expect(resumed.productionRate).toBeGreaterThan(0);
     expect(getSimulationMachineRuntimeDiagnostics(runtime.lookup).active).toBeGreaterThan(0);
+  });
+
+  it("counts blocked productive units without constructing presentation labels", () => {
+    const source = createSyntheticPerformanceFixture("p95");
+    source.paused = false;
+    const runtime = createPersistentSimulationRuntime(source);
+    advancePersistentSimulationRuntime(runtime, 12, 12);
+    const productive = runtime.state.entities.filter((entity) =>
+      entity.kind === "machine" || entity.kind === "vein" && entity.minerCount > 0);
+    expect(productive.length).toBeGreaterThan(0);
+    for (const entity of productive) {
+      expect(isProductiveEntityBlockedForHistory(runtime.state, entity, runtime.lookup)).toBe(
+        getEntityOperatingStatus(runtime.state, entity, runtime.lookup).tone === "blocked",
+      );
+    }
   });
 });

@@ -162,6 +162,7 @@ export function depositIntoNormalizedQuantumInventory(
   network: QuantumLogisticsNetworkState,
   itemId: ItemId,
   amount: DecimalIntegerString | number,
+  pruneExplicitZeroes = true,
 ): QuantumInventoryDepositResult {
   // Preserve the legacy first-write normalization contract (including removal
   // of explicit zero inventory entries), then keep that proof with the object
@@ -177,7 +178,7 @@ export function depositIntoNormalizedQuantumInventory(
     if (runtimeFlow) network.runtimeFlow = runtimeFlow;
     else delete network.runtimeFlow;
     runtimeNormalizedQuantumNetworks.add(network);
-  } else {
+  } else if (pruneExplicitZeroes) {
     // Boundary settlement may materialize explicit zeroes between deliveries.
     // The retained helper removes them on every call; mirror that observable
     // shape without rebuilding the other normalized maps.
@@ -199,6 +200,17 @@ export function depositIntoNormalizedQuantumInventory(
     remainder: decimal(requested - accepted),
     state: network,
   };
+}
+
+/**
+ * Boundary helper for the compiled engine. A settlement can materialize zero
+ * inventory entries, so prune them once before a batch of hot-path deposits
+ * instead of rescanning the full decimal map for every station or belt.
+ */
+export function pruneNormalizedQuantumInventoryZeroes(network: QuantumLogisticsNetworkState): void {
+  for (const [itemId, value] of Object.entries(network.inventory)) {
+    if (value === "0") delete network.inventory[itemId as ItemId];
+  }
 }
 
 export interface QuantumBandwidth {

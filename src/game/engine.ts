@@ -142,6 +142,7 @@ import {
   getQuantumLogisticsMultiplier,
   getQuantumItemCapacity,
   normalizeQuantumInteger,
+  pruneNormalizedQuantumInventoryZeroes,
   setQuantumNetworkItemCapacity,
   settleQuantumAttachments,
   settleQuantumLogisticsNetwork,
@@ -1575,6 +1576,17 @@ export function getStationSlots(station: FactoryEntity): StationSlot[] {
   return slots.slice(0, STATION_SLOT_COUNT);
 }
 
+function indexedStationSlots(station: FactoryEntity, lookup?: SimulationLookupContext): StationSlot[] {
+  if (lookup?.logisticsImplementation !== "compiled") return getStationSlots(station);
+  const cached = lookup.stationSlotsByEntityId.get(station.id);
+  if (cached) {
+    lookup.logisticsRuntime.stationSlotCacheHits += 1;
+    return cached;
+  }
+  lookup.logisticsRuntime.stationSlotCacheMisses += 1;
+  return getStationSlots(station);
+}
+
 function ensureStationSlots(station: FactoryEntity): StationSlot[] {
   station.stationSlots = getStationSlots(station);
   const primary = station.stationSlots.find((slot) => slot.itemId);
@@ -1691,9 +1703,14 @@ export function getStationSlotCapacity(state: GameState, station: FactoryEntity,
   return slot.maxStock > 0 ? Math.min(rated, slot.maxStock) : rated;
 }
 
-export function getEntityItemInputCapacity(state: GameState, entity: FactoryEntity, itemId: ItemId): number {
+export function getEntityItemInputCapacity(
+  state: GameState,
+  entity: FactoryEntity,
+  itemId: ItemId,
+  lookup?: SimulationLookupContext,
+): number {
   if (entity.kind === "station" && entity.buildingId !== "orbital_collector") {
-    const slot = getStationSlots(entity).find((candidate) => candidate.itemId === itemId);
+    const slot = indexedStationSlots(entity, lookup).find((candidate) => candidate.itemId === itemId);
     if (slot) return getStationSlotCapacity(state, entity, slot);
   }
   const rated = getEntityInputCapacity(state, entity);
@@ -1729,17 +1746,35 @@ function hasQuantumBoundaryLogistics(station: FactoryEntity): boolean {
   return isQuantumStation(station) || isQuantumCollector(station) || Boolean(station.quantumTransition);
 }
 
-function quantumSupplySlot(station: FactoryEntity, itemId: ItemId): StationSlot | undefined {
+function quantumSupplySlot(
+  station: FactoryEntity,
+  itemId: ItemId,
+  lookup?: SimulationLookupContext,
+): StationSlot | undefined {
   if (!isQuantumStation(station)) return undefined;
-  return getStationSlots(station).find((slot) => slot.itemId === itemId && slot.remoteMode === "supply");
+  return indexedStationSlots(station, lookup).find((slot) => slot.itemId === itemId && slot.remoteMode === "supply");
 }
 
-function quantumInventoryFree(state: GameState, itemId: ItemId): number {
+function quantumInventoryFree(state: GameState, itemId: ItemId, lookup?: SimulationLookupContext): number {
   if (!state.quantumLogisticsNetwork?.enabled) return 0;
+  const inventoryValue = state.quantumLogisticsNetwork.inventory[itemId];
+  const capacityValue = state.quantumLogisticsNetwork.itemCapacities[itemId];
+  if (lookup?.logisticsImplementation === "compiled") {
+    const cached = lookup.logisticsRuntime.quantumFreeCache.get(itemId);
+    if (cached && cached.inventoryValue === inventoryValue && cached.capacityValue === capacityValue) {
+      lookup.logisticsRuntime.quantumFreeCacheHits += 1;
+      return cached.free;
+    }
+  }
   const current = BigInt(normalizeQuantumInteger(state.quantumLogisticsNetwork.inventory[itemId]));
   const capacity = BigInt(getQuantumItemCapacity(state.quantumLogisticsNetwork, itemId));
   const free = capacity > current ? capacity - current : 0n;
-  return Number(free > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : free);
+  const result = Number(free > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : free);
+  if (lookup?.logisticsImplementation === "compiled") {
+    lookup.logisticsRuntime.quantumFreeCacheMisses += 1;
+    lookup.logisticsRuntime.quantumFreeCache.set(itemId, { inventoryValue, capacityValue, free: result });
+  }
+  return result;
 }
 
 function quantumSupplyFreeCapacity(
@@ -1748,12 +1783,11 @@ function quantumSupplyFreeCapacity(
   itemId: ItemId,
   lookup?: SimulationLookupContext,
 ): number {
-  const slot = quantumSupplySlot(station, itemId);
+  const slot = quantumSupplySlot(station, itemId, lookup);
   if (!slot) return 0;
-  const localCapacity = getEntityItemInputCapacity(state, station, itemId);
+  const localCapacity = getEntityItemInputCapacity(state, station, itemId, lookup);
   const localFree = Math.max(0, Math.floor(localCapacity - (station.inputs[itemId] ?? 0)));
-  void lookup;
-  return Math.max(0, quantumInventoryFree(state, itemId) + localFree);
+  return Math.max(0, quantumInventoryFree(state, itemId, lookup) + localFree);
 }
 
 function recordImmediateQuantumUpload(state: GameState, itemId: ItemId, amount: number): void {
@@ -1768,6 +1802,12 @@ function recordImmediateQuantumUpload(state: GameState, itemId: ItemId, amount: 
   addQuantumBoundaryFlow(flow.uploaded, itemId, amount);
 }
 
+function prepareCompiledQuantumDeposit(state: GameState, lookup?: SimulationLookupContext): void {
+  if (lookup?.logisticsImplementation !== "compiled" || !lookup.logisticsRuntime.quantumZeroPrunePending) return;
+  pruneNormalizedQuantumInventoryZeroes(state.quantumLogisticsNetwork);
+  lookup.logisticsRuntime.quantumZeroPrunePending = false;
+}
+
 /**
  * Receive material at a quantum supply tower. The configured minStock remains
  * local; everything else is deposited directly into shared inventory and any
@@ -1778,22 +1818,24 @@ function receiveQuantumSupplyMaterial(
   station: FactoryEntity,
   itemId: ItemId,
   amount: number,
+  lookup?: SimulationLookupContext,
   normalizedRuntime = false,
 ): number {
-  const slot = quantumSupplySlot(station, itemId);
+  const slot = quantumSupplySlot(station, itemId, lookup);
   if (!slot || amount < 1 || !state.quantumLogisticsNetwork?.enabled) return 0;
   const requested = Math.max(0, Math.floor(amount));
   const currentInput = Math.max(0, Math.floor(station.inputs[itemId] ?? 0));
   const currentOutput = Math.max(0, Math.floor(station.outputs[itemId] ?? 0));
-  const inputCapacity = Math.max(0, Math.floor(getEntityItemInputCapacity(state, station, itemId)));
+  const inputCapacity = Math.max(0, Math.floor(getEntityItemInputCapacity(state, station, itemId, lookup)));
   const inputFree = Math.max(0, inputCapacity - currentInput);
   const localReserve = Math.max(0, Math.floor(slot.minStock ?? 0) - currentInput - currentOutput);
   const kept = Math.min(requested, inputFree, localReserve);
   if (kept > 0) station.inputs[itemId] = currentInput + kept;
   let remaining = requested - kept;
   if (remaining > 0) {
+    if (normalizedRuntime) prepareCompiledQuantumDeposit(state, lookup);
     const deposited = normalizedRuntime
-      ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining)
+      ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining, false)
       : depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, remaining);
     state.quantumLogisticsNetwork = deposited.state;
     const accepted = Number(deposited.accepted);
@@ -1806,7 +1848,7 @@ function receiveQuantumSupplyMaterial(
 }
 
 function flushQuantumSupplyBuffer(state: GameState, station: FactoryEntity, itemId: ItemId, lookup?: SimulationLookupContext): number {
-  const slot = quantumSupplySlot(station, itemId);
+  const slot = quantumSupplySlot(station, itemId, lookup);
   if (!slot || !state.quantumLogisticsNetwork?.enabled) return 0;
   const input = Math.max(0, Math.floor(station.inputs[itemId] ?? 0));
   const output = Math.max(0, Math.floor(station.outputs[itemId] ?? 0));
@@ -1815,8 +1857,9 @@ function flushQuantumSupplyBuffer(state: GameState, station: FactoryEntity, item
   const uploadable = Math.max(0, output - reserve - reservedOutgoing) +
     Math.max(0, input - Math.max(0, reserve - output));
   if (uploadable < 1) return 0;
-  const deposited = lookup
-    ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable)
+  prepareCompiledQuantumDeposit(state, lookup);
+  const deposited = lookup?.logisticsImplementation === "compiled"
+    ? depositIntoNormalizedQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable, false)
     : depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable);
   state.quantumLogisticsNetwork = deposited.state;
   const accepted = Number(deposited.accepted);
@@ -2101,6 +2144,7 @@ class DenseBeltOutputCapacityCredits implements ReadonlyMap<string, number> {
 
 export type BeltRuntimeImplementation = "compiled" | "legacy";
 export type PowerRuntimeImplementation = "compiled" | "legacy";
+export type LogisticsRuntimeImplementation = "compiled" | "legacy";
 
 interface StationDispatchSlotResult {
   hasMatchingPeer: boolean;
@@ -2162,6 +2206,13 @@ interface SimulationMachineRuntimeIndex {
   powerFactorPresent: Uint8Array;
 }
 
+interface SimulationPowerRuntimeIndex {
+  consumerByEntityId: Map<string, PowerConsumer>;
+  consumersByGrid: Map<string, PowerConsumer[]>;
+  priorityGroupsByGrid: Map<string, [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]]>;
+  entityMapsByPlanet: Map<PlanetId, PowerEntityMaps>;
+}
+
 interface IndexedLogisticsBufferRuntime {
   entity: FactoryEntity;
   itemId: ItemId;
@@ -2180,6 +2231,35 @@ interface BlockedStationDispatchCache {
   values: number[];
   lastPeerId?: string;
   result: StationDispatchSlotResult;
+}
+
+export type SimulationLogisticsFallbackReason =
+  | "legacy-oracle"
+  | "quantum-boundary"
+  | "cross-island"
+  | "snapshot-changed";
+
+interface QuantumFreeCapacityCacheEntry {
+  inventoryValue: string | undefined;
+  capacityValue: string | undefined;
+  free: number;
+}
+
+interface SimulationLogisticsRuntimeIndex {
+  implementation: LogisticsRuntimeImplementation;
+  stableIslandEligibleSlots: number;
+  fallbackIslandSlots: number;
+  stableDispatchChecks: number;
+  stableDispatchSkips: number;
+  fullScanFallbacks: number;
+  fallbackReasons: Record<SimulationLogisticsFallbackReason, number>;
+  stationSlotCacheHits: number;
+  stationSlotCacheMisses: number;
+  quantumFreeCache: Map<ItemId, QuantumFreeCapacityCacheEntry>;
+  quantumFreeCacheHits: number;
+  quantumFreeCacheMisses: number;
+  quantumBoundarySettlements: number;
+  quantumZeroPrunePending: boolean;
 }
 
 export interface SimulationLookupContext {
@@ -2220,6 +2300,10 @@ export interface SimulationLookupContext {
   /** Runtime-only active/blocked belt queues. Never serialized into GameState. */
   beltRuntime: SimulationBeltRuntimeIndex;
   powerSourcesByPlanetGrid: Map<string, FactoryEntity[]>;
+  /** Reusable M3 power scratch; one set per disjoint planet/grid partition. */
+  powerRuntime: SimulationPowerRuntimeIndex;
+  /** Normalized once at the topology boundary; hot logistics never clones slots. */
+  stationSlotsByEntityId: Map<string, StationSlot[]>;
   stationSlotsByKey: Map<string, IndexedStationSlot[]>;
   stationPeerMatches: Map<string, StationPeerMatch[]>;
   stationDispatchPlans: Record<StationLogisticsScope, IndexedStationDispatchPlan[]>;
@@ -2237,6 +2321,10 @@ export interface SimulationLookupContext {
   dynamicRouteLookupDirty: boolean;
   /** M3 power-domain oracle/fallback selector. */
   powerImplementation: PowerRuntimeImplementation;
+  /** M4 station/logistics-domain oracle/fallback selector. */
+  logisticsImplementation: LogisticsRuntimeImplementation;
+  /** Runtime-only M4 stable-island counters and decimal-capacity cache. */
+  logisticsRuntime: SimulationLogisticsRuntimeIndex;
   /** Worker/session-owned recursive plans. Never serialised into GameState. */
   constructionAutomationPlanCache: Map<string, CachedConstructionAutomationPlan>;
 }
@@ -2328,6 +2416,7 @@ export function createSimulationLookupContext(
   constructionAutomationPlanCache = new Map<string, CachedConstructionAutomationPlan>(),
   beltImplementation: BeltRuntimeImplementation = "compiled",
   powerImplementation: PowerRuntimeImplementation = "compiled",
+  logisticsImplementation: LogisticsRuntimeImplementation = "compiled",
 ): SimulationLookupContext {
   const startedAt = profileNow();
   const context: SimulationLookupContext = {
@@ -2410,6 +2499,13 @@ export function createSimulationLookupContext(
       reservationSourceDirtyIndices: [],
     },
     powerSourcesByPlanetGrid: new Map(),
+    powerRuntime: {
+      consumerByEntityId: new Map(),
+      consumersByGrid: new Map(),
+      priorityGroupsByGrid: new Map(),
+      entityMapsByPlanet: new Map(),
+    },
+    stationSlotsByEntityId: new Map(),
     stationSlotsByKey: new Map(),
     stationPeerMatches: new Map(),
     stationDispatchPlans: { local: [], remote: [] },
@@ -2425,6 +2521,28 @@ export function createSimulationLookupContext(
     routeEnvironmentKey: routeEnvironmentKey(state),
     dynamicRouteLookupDirty: true,
     powerImplementation,
+    logisticsImplementation,
+    logisticsRuntime: {
+      implementation: logisticsImplementation,
+      stableIslandEligibleSlots: 0,
+      fallbackIslandSlots: 0,
+      stableDispatchChecks: 0,
+      stableDispatchSkips: 0,
+      fullScanFallbacks: 0,
+      fallbackReasons: {
+        "legacy-oracle": 0,
+        "quantum-boundary": 0,
+        "cross-island": 0,
+        "snapshot-changed": 0,
+      },
+      stationSlotCacheHits: 0,
+      stationSlotCacheMisses: 0,
+      quantumFreeCache: new Map(),
+      quantumFreeCacheHits: 0,
+      quantumFreeCacheMisses: 0,
+      quantumBoundarySettlements: 0,
+      quantumZeroPrunePending: false,
+    },
     constructionAutomationPlanCache,
   };
   const addTo = <T>(map: Map<string, T[]>, key: string, value: T) => {
@@ -2496,7 +2614,13 @@ export function createSimulationLookupContext(
       if (veins) veins.push(entity);
       else context.veinsByPlanet.set(entity.planetId, [entity]);
     }
-    if (entity.kind === "station") context.stations.push(entity);
+    if (entity.kind === "station") {
+      context.stations.push(entity);
+      context.stationSlotsByEntityId.set(
+        entity.id,
+        entity.buildingId === "orbital_collector" ? getStationSlots(entity) : ensureStationSlots(entity),
+      );
+    }
     if (entity.buildingId === "orbital_collector") context.orbitalCollectors.push(entity);
     if ((entity.kind === "storage" || entity.kind === "splitter" || entity.kind === "station") && entity.buildingId !== "material_delivery_hub" && !isElevatorStation(entity)) {
       context.logisticsBufferEntities.push(entity);
@@ -2520,7 +2644,7 @@ export function createSimulationLookupContext(
   // blocked shapes. Dense real saves keep the compiled scalar/cache path but
   // do not add an active-frontier branch to every machine and belt transfer.
   context.machineRuntime.frontierEnabled = context.machineRuntimeById.size > 0 &&
-    context.machineRuntime.initiallyDormantCount * 5 >= context.machineRuntimeById.size * 2;
+    context.machineRuntime.initiallyDormantCount * 4 >= context.machineRuntimeById.size;
   for (const belt of context.sortedBelts) {
     const planetBelts = context.beltsByPlanet.get(belt.planetId);
     if (planetBelts) planetBelts.push(belt);
@@ -2566,7 +2690,7 @@ export function createSimulationLookupContext(
       targetInputCapacity: target ? staticBeltTargetInputCapacity(state, target, belt.itemId) : undefined,
       receiveKind: target?.buildingId === "micro_black_hole_connector"
         ? "black-hole"
-        : target && isQuantumStation(target) && quantumSupplySlot(target, belt.itemId)
+        : target && isQuantumStation(target) && quantumSupplySlot(target, belt.itemId, context)
           ? "quantum-supply"
           : "ordinary",
     };
@@ -2686,7 +2810,7 @@ export function createSimulationLookupContext(
   const quantumDownloadByKey = new Map<string, IndexedQuantumSlotPlan>();
   const quantumUploadByKey = new Map<string, IndexedQuantumSlotPlan>();
   for (const endpoint of context.quantumStations) {
-    for (const slot of getStationSlots(endpoint)) {
+    for (const slot of indexedStationSlots(endpoint, context)) {
       if (!slot.itemId || (slot.remoteMode !== "demand" && slot.remoteMode !== "supply")) continue;
       const key = `${endpoint.id}:${slot.itemId}`;
       const target = slot.remoteMode === "demand" ? quantumDownloadByKey : quantumUploadByKey;
@@ -2722,7 +2846,7 @@ export function createSimulationLookupContext(
       });
       continue;
     }
-    const slots = getStationSlots(peer);
+    const slots = indexedStationSlots(peer, context);
     for (let peerSlotIndex = 0; peerSlotIndex < slots.length; peerSlotIndex += 1) {
       const slot = slots[peerSlotIndex];
       if (!slot.itemId) continue;
@@ -2740,7 +2864,7 @@ export function createSimulationLookupContext(
   }
   for (const entity of context.logisticsBufferEntities) {
     const slots = entity.kind === "station" && entity.buildingId !== "orbital_collector"
-      ? getStationSlots(entity).filter((slot): slot is StationSlot & { itemId: ItemId } => Boolean(slot.itemId))
+      ? indexedStationSlots(entity, context).filter((slot): slot is StationSlot & { itemId: ItemId } => Boolean(slot.itemId))
       : entity.storedItemId ? [{ ...emptyStationSlot(), itemId: entity.storedItemId }] : [];
     for (const slot of slots) {
       context.logisticsBufferRuntimes.push({
@@ -2755,12 +2879,19 @@ export function createSimulationLookupContext(
     for (const scope of ["local", "remote"] as const) {
       if (isTraditionalStationScopeDisabled(demand, scope) ||
         (scope === "remote" && demand.buildingId !== "interstellar_logistics_station")) continue;
-      const orderedSlots = getStationSlots(demand)
+      const orderedSlots = indexedStationSlots(demand, context)
         .map((slot, slotIndex) => ({ slot, slotIndex }))
         .filter(({ slot }) => Boolean(slot.itemId) && stationSlotMode(demand, slot, scope) === "demand")
         .sort((left, right) => right.slot.priority - left.slot.priority || left.slotIndex - right.slotIndex);
       if (orderedSlots.length > 0) context.stationDispatchPlans[scope].push({ demand, orderedSlots });
     }
+  }
+  for (const plan of context.stationDispatchPlans.local) {
+    if (isQuantumStation(plan.demand)) context.logisticsRuntime.fallbackIslandSlots += plan.orderedSlots.length;
+    else context.logisticsRuntime.stableIslandEligibleSlots += plan.orderedSlots.length;
+  }
+  for (const plan of context.stationDispatchPlans.remote) {
+    context.logisticsRuntime.fallbackIslandSlots += plan.orderedSlots.length;
   }
   if (profiler) profiler.stationIndexBuildMs += profileNow() - startedAt;
   return context;
@@ -2775,7 +2906,7 @@ export function findStationSlotPeers(
   profiler?: SimulationProfiler,
 ): StationPeerMatch[] {
   const startedAt = profileNow();
-  const slot = getStationSlots(station)[slotIndex];
+  const slot = indexedStationSlots(station, lookup)[slotIndex];
   if (!slot?.itemId) return [];
   const mode = stationSlotMode(station, slot, scope);
   if (mode === "storage") return [];
@@ -2796,7 +2927,7 @@ export function findStationSlotPeers(
     if (isElevatorStation(peer) || isTraditionalStationScopeDisabled(peer, scope)) return [];
     const peerSlots = peer.buildingId === "orbital_collector"
       ? [{ ...emptyStationSlot(), itemId: peer.storedItemId, remoteMode: "supply" as const }]
-      : getStationSlots(peer);
+      : indexedStationSlots(peer, lookup);
     return peerSlots.map((peerSlot, peerSlotIndex) => ({ peer, peerSlotIndex, slot: peerSlot }));
   });
   if (profiler) profiler.peerCandidateChecks += peerCandidates.length;
@@ -2957,7 +3088,7 @@ function stationRouteReady(state: GameState, station: FactoryEntity, lookup?: Si
   const scopes: StationLogisticsScope[] = station.buildingId === "interstellar_logistics_station"
     ? ["local", "remote"]
     : ["local"];
-  const slots = getStationSlots(station);
+  const slots = indexedStationSlots(station, lookup);
   for (const scope of scopes) {
     for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
       const slot = slots[slotIndex];
@@ -2966,12 +3097,12 @@ function stationRouteReady(state: GameState, station: FactoryEntity, lookup?: Si
       if (!match) continue;
       const demand = stationSlotMode(station, slot, scope) === "demand" ? station : match.peer;
       const demandSlotIndex = demand.id === station.id ? slotIndex : match.peerSlotIndex;
-      const demandSlot = getStationSlots(demand)[demandSlotIndex];
+      const demandSlot = indexedStationSlots(demand, lookup)[demandSlotIndex];
       const supply = demand.id === station.id ? match.peer : station;
       const supplySlotIndex = demand.id === station.id ? match.peerSlotIndex : slotIndex;
       const supplySlot = supply.buildingId === "orbital_collector"
         ? { ...emptyStationSlot(), itemId: supply.storedItemId }
-        : getStationSlots(supply)[supplySlotIndex];
+        : indexedStationSlots(supply, lookup)[supplySlotIndex];
       const itemId = demandSlot?.itemId;
       if (!itemId) continue;
       const available = Math.floor(Math.max(0, (supply.outputs[itemId] ?? 0) - supplySlot.minStock));
@@ -4128,9 +4259,11 @@ function allocateConsumerPower(
   consumers: PowerConsumer[],
   availableKw: number,
   factors = new Map<string, number>(),
+  reusableGroups?: [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]],
 ): Map<string, number> {
   let remaining = Math.max(0, availableKw);
-  const groups: [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]] = [[], [], [], []];
+  const groups: [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]] = reusableGroups ?? [[], [], [], []];
+  if (reusableGroups) for (const group of groups) group.length = 0;
   for (const consumer of consumers) groups[consumer.entity.powerPriority ?? 2].push(consumer);
   for (let priority: PowerPriority = 3; priority >= 1; priority = (priority - 1) as PowerPriority) {
     const group = groups[priority];
@@ -4150,6 +4283,30 @@ function allocateConsumerPower(
     remaining = Math.max(0, remaining - demand * factor);
   }
   return factors;
+}
+
+function appendPowerConsumer(
+  consumers: PowerConsumer[],
+  entity: FactoryEntity,
+  demandKw: number,
+  lookup?: SimulationLookupContext,
+  machineRuntime?: IndexedMachineRuntime,
+  machineRuntimeIndex?: SimulationMachineRuntimeIndex,
+): void {
+  if (lookup?.powerImplementation !== "compiled") {
+    consumers.push({ entity, demandKw, machineRuntime, machineRuntimeIndex });
+    return;
+  }
+  let consumer = lookup.powerRuntime.consumerByEntityId.get(entity.id);
+  if (!consumer) {
+    consumer = { entity, demandKw, machineRuntime, machineRuntimeIndex };
+    lookup.powerRuntime.consumerByEntityId.set(entity.id, consumer);
+  } else {
+    consumer.demandKw = demandKw;
+    consumer.machineRuntime = machineRuntime;
+    consumer.machineRuntimeIndex = machineRuntimeIndex;
+  }
+  consumers.push(consumer);
 }
 
 function calculatePower(
@@ -4174,7 +4331,16 @@ function calculatePower(
   const difficultyPowerMultiplier = getDifficultyDefinition(state.settings?.difficulty).powerDemandMultiplier;
   const industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
   const matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
-  const consumers: PowerConsumer[] = [];
+  const gridKey = `${planetId}|${gridId}`;
+  let consumers = lookup?.powerImplementation === "compiled"
+    ? lookup.powerRuntime.consumersByGrid.get(gridKey)
+    : undefined;
+  if (!consumers) {
+    consumers = [];
+    if (lookup?.powerImplementation === "compiled") lookup.powerRuntime.consumersByGrid.set(gridKey, consumers);
+  } else {
+    consumers.length = 0;
+  }
   const fuelCandidates: PowerCandidate[] = [];
   const accumulatorCandidates: PowerCandidate[] = [];
   const exchangerDischargeCandidates: PowerCandidate[] = [];
@@ -4184,12 +4350,12 @@ function calculatePower(
   const powerInputByEntity = sharedEntityMaps?.powerInputByEntity ?? new Map<string, number>();
   const factorByEntity = sharedEntityMaps?.factorByEntity ?? new Map<string, number>();
   const entities = lookup
-    ? (lookup.entitiesByPlanetGrid.get(`${planetId}|${gridId}`) ?? [])
+    ? (lookup.entitiesByPlanetGrid.get(gridKey) ?? [])
     : state.entities;
   const gridCovered = gridPowerSources(state, planetId, gridId, lookup).length > 0;
 
   for (const entity of entities) {
-    if (entity.planetId !== planetId || getEntityPowerGridId(entity) !== gridId) continue;
+    if (!lookup && (entity.planetId !== planetId || getEntityPowerGridId(entity) !== gridId)) continue;
     if (entity.kind === "power" && entity.buildingId) {
       generatorCount += entity.machineCount;
       if (isFuelGenerator(entity)) {
@@ -4238,7 +4404,7 @@ function calculatePower(
       const extractor = extractorFor(entity);
       const capacity = getEntityOutputCapacity(state, entity);
       if ((entity.outputs[entity.resourceId!] ?? 0) < capacity - EPSILON) {
-        consumers.push({ entity, demandKw: (extractor.powerDemandKw ?? 0) * entity.minerCount * difficultyPowerMultiplier });
+        appendPowerConsumer(consumers, entity, (extractor.powerDemandKw ?? 0) * entity.minerCount * difficultyPowerMultiplier, lookup);
       }
     } else if (entity.buildingId === "galactic_material_exporter" && entity.galacticExporterPaused === false &&
       Object.keys(ACTIVITY_PROJECT_BY_ITEM).some((itemId) => (entity.inputs[itemId as ItemId] ?? 0) >= 1)) {
@@ -4249,7 +4415,7 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
+      appendPowerConsumer(consumers, entity, (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier, lookup);
     } else if (entity.buildingId === "construction_center" && constructionAutomationHasDeficit(state)) {
       if (!gridCovered) {
         disconnectedEntities += 1;
@@ -4258,7 +4424,7 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
+      appendPowerConsumer(consumers, entity, (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier, lookup);
     } else if (entity.buildingId === "space_station_construction_launcher" &&
       state.systemSpaceStations[getPlanet(entity.planetId).systemId]?.status === "building") {
       if (!gridCovered) {
@@ -4268,7 +4434,7 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
+      appendPowerConsumer(consumers, entity, (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier, lookup);
     } else if (entity.kind === "station" && (isQuantumStation(entity) ||
       isElevatorStation(entity) && state.systemSpaceStations[getPlanet(entity.planetId).systemId]?.status === "operational")) {
       if (!gridCovered) {
@@ -4278,7 +4444,7 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({ entity, demandKw: (getBuilding(entity.buildingId!).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
+      appendPowerConsumer(consumers, entity, (getBuilding(entity.buildingId!).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier, lookup);
     } else if (entity.kind === "machine" && entity.buildingId) {
       const machineRuntime = lookup?.machineRuntimeById.get(entity.id);
       let preparedRuntimeCapacity = false;
@@ -4342,12 +4508,14 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({
+      appendPowerConsumer(
+        consumers,
         entity,
         demandKw,
+        lookup,
         machineRuntime,
-        machineRuntimeIndex: lookup?.powerImplementation === "compiled" ? lookup.machineRuntime : undefined,
-      });
+        lookup?.powerImplementation === "compiled" ? lookup.machineRuntime : undefined,
+      );
     } else if (entity.kind === "station" && entity.buildingId && stationRouteReady(state, entity, lookup, profiler)) {
       if (!gridCovered) {
         disconnectedEntities += 1;
@@ -4356,7 +4524,7 @@ function calculatePower(
         continue;
       }
       connectedEntities += 1;
-      consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
+      appendPowerConsumer(consumers, entity, (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier, lookup);
     }
   }
 
@@ -4403,7 +4571,14 @@ function calculatePower(
     sum + (powerOutputByEntity.get(candidate.entity.id) ?? 0), 0);
   const exchangerGenerationKw = outputFor(exchangerDischargeCandidates);
   const accumulatorGenerationKw = outputFor(accumulatorCandidates);
-  allocateConsumerPower(consumers, regularSuppliedKw, factorByEntity);
+  let priorityGroups = lookup?.powerImplementation === "compiled"
+    ? lookup.powerRuntime.priorityGroupsByGrid.get(gridKey)
+    : undefined;
+  if (!priorityGroups && lookup?.powerImplementation === "compiled") {
+    priorityGroups = [[], [], [], []];
+    lookup.powerRuntime.priorityGroupsByGrid.set(gridKey, priorityGroups);
+  }
+  allocateConsumerPower(consumers, regularSuppliedKw, factorByEntity, priorityGroups);
 
   let surplusKw = Math.max(0, baseGenerationKw - demandKw);
   const exchangerChargeKw = allocatePower(exchangerChargeCandidates, surplusKw, powerInputByEntity);
@@ -4846,10 +5021,10 @@ function targetFreeCapacity(state: GameState, target: FactoryEntity, itemId: Ite
       : sum, 0);
     return Math.floor(Math.max(0, getPlanetTrayItemFreeCapacity(state, target.planetId, itemId) - pending) + EPSILON);
   }
-  if (quantumSupplySlot(target, itemId)) {
+  if (quantumSupplySlot(target, itemId, lookup)) {
     return Math.max(0, quantumSupplyFreeCapacity(state, target, itemId, lookup) - stationInFlightCargo(target, itemId, lookup));
   }
-  const capacity = getEntityItemInputCapacity(state, target, itemId);
+  const capacity = getEntityItemInputCapacity(state, target, itemId, lookup);
   return Math.floor(Math.max(0, capacity - (target.inputs[itemId] ?? 0)) + EPSILON);
 }
 
@@ -4987,13 +5162,21 @@ function wakeCompiledMachineDependency(
 
 function receiveSpecialCompiledBeltMaterial(
   state: GameState,
+  lookup: SimulationLookupContext,
   target: FactoryEntity,
   belt: BeltConnection,
   itemId: ItemId,
   moved: number,
   kind: Exclude<IndexedBeltRoute["receiveKind"], "ordinary">,
 ): number {
-  if (kind === "quantum-supply") return receiveQuantumSupplyMaterial(state, target, itemId, moved, true);
+  if (kind === "quantum-supply") return receiveQuantumSupplyMaterial(
+    state,
+    target,
+    itemId,
+    moved,
+    lookup,
+    lookup.logisticsImplementation === "compiled",
+  );
   const port = target.blackHolePorts?.find((entry) => entry.index === belt.targetPortIndex);
   if (!port || target.blackHolePaused !== false || !target.blackHoleActivationConfirmed) return 0;
   try {
@@ -5120,7 +5303,7 @@ function transferBeltsCompiled(
       wakeCompiledMachineDependency(lookup.machineRuntime, targetMachineRuntimeIndex, MACHINE_WAKE_INPUT);
       return moved;
     }
-    return receiveSpecialCompiledBeltMaterial(state, target, belt, itemId, moved, kind);
+    return receiveSpecialCompiledBeltMaterial(state, lookup, target, belt, itemId, moved, kind);
   };
 
   const routeUsable = (route: IndexedBeltRoute) => runtime.candidateAllowance[route.runtimeIndex!] > 0 &&
@@ -5805,8 +5988,8 @@ function transferBelts(
   const receiveRoute = (belt: BeltConnection, target: FactoryEntity, itemId: ItemId, amount: number): number => {
     const moved = Math.max(0, Math.floor(amount));
     if (moved < 1) return 0;
-    if (isQuantumStation(target) && quantumSupplySlot(target, itemId)) {
-      return receiveQuantumSupplyMaterial(state, target, itemId, moved);
+    if (isQuantumStation(target) && quantumSupplySlot(target, itemId, lookup)) {
+      return receiveQuantumSupplyMaterial(state, target, itemId, moved, lookup);
     }
     if (target.buildingId !== "micro_black_hole_connector") {
       target.inputs[itemId] = Math.floor((target.inputs[itemId] ?? 0) + moved);
@@ -6694,6 +6877,90 @@ export function getSimulationMachineRuntimeDiagnostics(
   return diagnostics;
 }
 
+export interface SimulationLogisticsRuntimeDiagnostics {
+  implementation: LogisticsRuntimeImplementation;
+  stations: number;
+  cachedStationSlotSets: number;
+  stableIslandEligibleSlots: number;
+  fallbackIslandSlots: number;
+  stableDispatchChecks: number;
+  stableDispatchSkips: number;
+  fullScanFallbacks: number;
+  fallbackRatio: number;
+  fallbackReasons: Record<SimulationLogisticsFallbackReason, number>;
+  stationSlotCacheHits: number;
+  stationSlotCacheMisses: number;
+  quantumFreeCacheHits: number;
+  quantumFreeCacheMisses: number;
+  quantumBoundarySettlements: number;
+}
+
+/** Development/read-only view of the M4 logistics and stable-island sidecar. */
+export function getSimulationLogisticsRuntimeDiagnostics(
+  lookup: SimulationLookupContext | undefined,
+): SimulationLogisticsRuntimeDiagnostics {
+  if (!lookup) return {
+    implementation: "legacy",
+    stations: 0,
+    cachedStationSlotSets: 0,
+    stableIslandEligibleSlots: 0,
+    fallbackIslandSlots: 0,
+    stableDispatchChecks: 0,
+    stableDispatchSkips: 0,
+    fullScanFallbacks: 0,
+    fallbackRatio: 0,
+    fallbackReasons: {
+      "legacy-oracle": 0,
+      "quantum-boundary": 0,
+      "cross-island": 0,
+      "snapshot-changed": 0,
+    },
+    stationSlotCacheHits: 0,
+    stationSlotCacheMisses: 0,
+    quantumFreeCacheHits: 0,
+    quantumFreeCacheMisses: 0,
+    quantumBoundarySettlements: 0,
+  };
+  const runtime = lookup.logisticsRuntime;
+  return {
+    implementation: runtime.implementation,
+    stations: lookup.stations.length,
+    cachedStationSlotSets: lookup.stationSlotsByEntityId.size,
+    stableIslandEligibleSlots: runtime.stableIslandEligibleSlots,
+    fallbackIslandSlots: runtime.fallbackIslandSlots,
+    stableDispatchChecks: runtime.stableDispatchChecks,
+    stableDispatchSkips: runtime.stableDispatchSkips,
+    fullScanFallbacks: runtime.fullScanFallbacks,
+    fallbackRatio: runtime.stableDispatchChecks > 0
+      ? runtime.fullScanFallbacks / runtime.stableDispatchChecks
+      : 0,
+    fallbackReasons: { ...runtime.fallbackReasons },
+    stationSlotCacheHits: runtime.stationSlotCacheHits,
+    stationSlotCacheMisses: runtime.stationSlotCacheMisses,
+    quantumFreeCacheHits: runtime.quantumFreeCacheHits,
+    quantumFreeCacheMisses: runtime.quantumFreeCacheMisses,
+    quantumBoundarySettlements: runtime.quantumBoundarySettlements,
+  };
+}
+
+export interface SimulationLogisticsProfilerAttribution {
+  attributedMs: number;
+  logisticsMs: number;
+  attributionRatio: number;
+}
+
+/** Sum only mutually exclusive M4 phases; nested detail timings are excluded. */
+export function getSimulationLogisticsProfilerAttribution(
+  profiler: Pick<SimulationProfiler, "logisticsMs" | SimulationLogisticsExclusivePhaseKey>,
+): SimulationLogisticsProfilerAttribution {
+  const attributedMs = SIMULATION_LOGISTICS_EXCLUSIVE_PHASE_KEYS.reduce((sum, key) => sum + profiler[key], 0);
+  return {
+    attributedMs,
+    logisticsMs: profiler.logisticsMs,
+    attributionRatio: profiler.logisticsMs > 0 ? attributedMs / profiler.logisticsMs : 1,
+  };
+}
+
 /** Builds the hydrated read-only indexes used by one P6 planet-phase batch. */
 export function createSimulationPlanetPhaseLookup(state: GameState, profiler?: SimulationProfiler): SimulationLookupContext {
   const lookup = createSimulationLookupContext(state, profiler);
@@ -6971,7 +7238,7 @@ function blockedDispatchSnapshot(
   ];
   for (const match of matches) {
     const supply = match.peer;
-    const supplySlot = getStationSlots(supply)[match.peerSlotIndex];
+    const supplySlot = indexedStationSlots(supply, lookup)[match.peerSlotIndex];
     values.push(
       supply.outputs[slot.itemId] ?? 0,
       stationReservedOutgoing(state, supply.id, slot.itemId, lookup),
@@ -7024,22 +7291,44 @@ function dispatchStationScope(
       };
       const dispatchKey = stationDispatchSlotKey(demand.id, slotIndex, scope);
       runtimeLookup.dispatchResultsBySlot.set(dispatchKey, dispatchResult);
-      const snapshot = scope === "local"
-        ? blockedDispatchSnapshot(state, demand, slot as StationSlot & { itemId: ItemId }, slotIndex, matches, powerByPlanet, runtimeLookup)
-        : null;
+      const logisticsRuntime = runtimeLookup.logisticsRuntime;
+      logisticsRuntime.stableDispatchChecks += 1;
+      let fallbackReason: SimulationLogisticsFallbackReason | undefined;
+      let snapshot: number[] | null = null;
+      if (logisticsRuntime.implementation === "legacy") {
+        fallbackReason = "legacy-oracle";
+      } else if (scope === "remote") {
+        fallbackReason = "cross-island";
+      } else if (isQuantumStation(demand)) {
+        fallbackReason = "quantum-boundary";
+      } else {
+        snapshot = blockedDispatchSnapshot(
+          state,
+          demand,
+          slot as StationSlot & { itemId: ItemId },
+          slotIndex,
+          matches,
+          powerByPlanet,
+          runtimeLookup,
+        );
+      }
       const blockedCache = snapshot ? runtimeLookup.blockedStationDispatch.get(dispatchKey) : undefined;
       if (snapshot && blockedCache && blockedCache.lastPeerId === lastPeerId && sameDispatchSnapshot(snapshot, blockedCache.values)) {
         runtimeLookup.dispatchResultsBySlot.set(dispatchKey, blockedCache.result);
+        logisticsRuntime.stableDispatchSkips += 1;
         if (profiler) profiler.dispatchBlockedCacheHits += 1;
         continue;
       }
+      fallbackReason ??= "snapshot-changed";
+      logisticsRuntime.fullScanFallbacks += 1;
+      logisticsRuntime.fallbackReasons[fallbackReason] += 1;
       const peerSortStartedAt = profiler ? profileNow() : 0;
       if (profiler) profiler.dispatchPeerOrderChecks += matches.length;
       const orderedMatches = matches.map((match) => ({
         ...match,
         priority: match.peer.buildingId === "orbital_collector"
           ? 1
-          : getStationSlots(match.peer)[match.peerSlotIndex]?.priority ?? 1,
+          : indexedStationSlots(match.peer, runtimeLookup)[match.peerSlotIndex]?.priority ?? 1,
         activeVehicleLoad: runtimeLookup.activeRouteVehicleLoadByStation.get(match.peer.id) ?? 0,
       })).sort((left, right) => {
           const priorityOrder = right.priority - left.priority;
@@ -7053,7 +7342,7 @@ function dispatchStationScope(
           return left.peer.id.localeCompare(right.peer.id);
         });
       if (profiler) profiler.dispatchPeerSortMs += profileNow() - peerSortStartedAt;
-      let remainingDemandFree = quantumSupplySlot(demand, slot.itemId)
+      let remainingDemandFree = quantumSupplySlot(demand, slot.itemId, runtimeLookup)
         ? Math.max(0, Math.floor(quantumSupplyFreeCapacity(state, demand, slot.itemId, runtimeLookup) -
           stationInFlightCargo(demand, slot.itemId, runtimeLookup) + EPSILON))
         : Math.max(0, Math.floor(getStationSlotCapacity(state, demand, slot) - (demand.outputs[slot.itemId] ?? 0) -
@@ -7063,7 +7352,7 @@ function dispatchStationScope(
         if (profiler) profiler.dispatchPeerVisits += 1;
         const supplySlot = supply.buildingId === "orbital_collector"
           ? { ...emptyStationSlot(), itemId: supply.storedItemId, remoteMode: "supply" as const }
-          : ensureStationSlots(supply)[peerSlotIndex];
+          : indexedStationSlots(supply, runtimeLookup)[peerSlotIndex];
         const sourcePlan = powerByPlanet.get(supply.planetId);
         const targetPlan = powerByPlanet.get(demand.planetId);
         const sourcePower = supply.buildingId === "orbital_collector"
@@ -7202,8 +7491,15 @@ function advanceStationRoutes(
         continue;
       }
       let deliveredCargo = route.cargo;
-      if (scope === "local" && isQuantumStation(demand) && quantumSupplySlot(demand, route.itemId)) {
-        const received = receiveQuantumSupplyMaterial(state, demand, route.itemId, route.cargo, Boolean(lookup));
+      if (scope === "local" && isQuantumStation(demand) && quantumSupplySlot(demand, route.itemId, lookup)) {
+        const received = receiveQuantumSupplyMaterial(
+          state,
+          demand,
+          route.itemId,
+          route.cargo,
+          lookup,
+          lookup?.logisticsImplementation === "compiled",
+        );
         deliveredCargo = received;
         if (received < route.cargo) {
           remaining.push({ ...route, progress: 1, cargo: route.cargo - received });
@@ -7235,7 +7531,7 @@ function updateStationCongestion(state: GameState, lookup?: SimulationLookupCont
       : ["local"];
     const scopes = candidateScopes.filter((scope) => !isTraditionalStationScopeDisabled(station, scope));
     if (scopes.length === 0) continue;
-    const slots = ensureStationSlots(station);
+    const slots = indexedStationSlots(station, lookup);
     const waiting = slots.filter((slot, slotIndex) => slot.itemId && scopes.some((scope) => {
       if (stationSlotMode(station, slot, scope) !== "demand") return false;
       const dispatched = lookup?.dispatchResultsBySlot.get(stationDispatchSlotKey(station.id, slotIndex, scope));
@@ -7414,6 +7710,7 @@ function settleQuantumNetworkDownloads(
   profiler?: SimulationProfiler,
 ): QuantumBoundaryFlow | null {
   if (!state.quantumLogisticsNetwork?.enabled) return null;
+  if (lookup) lookup.logisticsRuntime.quantumBoundarySettlements += 1;
   const flow = createQuantumBoundaryFlow(state, boundarySecond, lookup);
   const stations = lookup?.quantumStations ?? state.entities.filter(isQuantumStation);
   const stationById = lookup?.entityById ?? new Map(stations.map((station) => [station.id, station]));
@@ -7463,6 +7760,7 @@ function settleQuantumNetworkDownloads(
     mutateNormalizedState: true,
   });
   state.quantumLogisticsNetwork = result.state;
+  if (lookup && outputs.length > 0) lookup.logisticsRuntime.quantumZeroPrunePending = true;
   // Keep the runtime flow object attached to the post-settlement network so
   // same-step local drone deliveries can append their immediate uploads.
   state.quantumLogisticsNetwork.runtimeFlow = flow;
@@ -7631,21 +7929,32 @@ export function runPlanetSimulationPhase(
   batchPowerStorage = true,
   batchConstructionAutomation = true,
   contractExperiment?: SimulationContractExperiment,
+  captureMergeResult = true,
 ): SimulationPlanetPhaseResult {
   const phaseLookup = lookup ?? createSimulationLookupContext(state, profiler);
   if (!lookup) ensureDynamicRouteLookup(state, phaseLookup);
-  const baselineProduced = { ...state.totalProduced };
+  const baselineProduced = captureMergeResult ? { ...state.totalProduced } : undefined;
   let subsystemStartedAt = profiler ? profileNow() : 0;
   // Grid membership is disjoint, so all three calculations can write directly
   // into the planet aggregate. This preserves insertion order while avoiding
   // three short-lived map triplets and a second full map copy every step.
-  const powerEntityMaps: PowerEntityMaps | undefined = phaseLookup.powerImplementation === "compiled"
-    ? {
+  let powerEntityMaps = phaseLookup.powerImplementation === "compiled"
+    ? phaseLookup.powerRuntime.entityMapsByPlanet.get(planetId)
+    : undefined;
+  if (phaseLookup.powerImplementation === "compiled") {
+    if (!powerEntityMaps) {
+      powerEntityMaps = {
         powerOutputByEntity: new Map(),
         powerInputByEntity: new Map(),
         factorByEntity: new Map(),
-      }
-    : undefined;
+      };
+      phaseLookup.powerRuntime.entityMapsByPlanet.set(planetId, powerEntityMaps);
+    } else {
+      powerEntityMaps.powerOutputByEntity.clear();
+      powerEntityMaps.powerInputByEntity.clear();
+      powerEntityMaps.factorByEntity.clear();
+    }
+  }
   const gridPlans = POWER_GRID_IDS.map((gridId) =>
     calculatePower(state, seconds, planetId, gridId, reception, phaseLookup, profiler, powerEntityMaps));
   const power = combinePowerPlans(gridPlans, powerEntityMaps);
@@ -7724,24 +8033,26 @@ export function runPlanetSimulationPhase(
     storageChargeKw: round(power.storageChargeKw, 2),
     storedEnergyMj: round(storage.stored, 3),
     storageCapacityMj: round(storage.capacity, 3),
-    fuelReserveSeconds: fuelReserveSeconds(state, planetId),
+    fuelReserveSeconds: fuelReserveSeconds(state, planetId, undefined, phaseLookup),
     totalItemsPerMinute: round((phaseLookup.entitiesByPlanet.get(planetId) ?? []).reduce((sum, entity) =>
       entity.planetId === planetId ? sum + entity.productionRate : sum, 0), 2),
   };
   if (profiler) profiler.powerMs += profileNow() - subsystemStartedAt;
   const localEntities = phaseLookup.entitiesByPlanet.get(planetId) ?? [];
   const totalProducedDelta: Partial<Record<ItemId, number>> = {};
-  for (const [itemId, amount] of Object.entries(state.totalProduced)) {
-    const delta = Math.floor(amount ?? 0) - Math.floor(baselineProduced[itemId as ItemId] ?? 0);
-    if (delta !== 0) totalProducedDelta[itemId as ItemId] = delta;
+  if (baselineProduced) {
+    for (const [itemId, amount] of Object.entries(state.totalProduced)) {
+      const delta = Math.floor(amount ?? 0) - Math.floor(baselineProduced[itemId as ItemId] ?? 0);
+      if (delta !== 0) totalProducedDelta[itemId as ItemId] = delta;
+    }
   }
   return {
     planetId,
-    entities: localEntities,
+    entities: captureMergeResult ? localEntities : [],
     powerGridMetrics: state.powerGridMetrics[planetId],
     planetMetrics: state.planetMetrics[planetId],
     totalProducedDelta,
-    totalProducedKeys: Object.keys(state.totalProduced) as ItemId[],
+    totalProducedKeys: captureMergeResult ? Object.keys(state.totalProduced) as ItemId[] : [],
     powerPlan: power,
   };
 }
@@ -7952,6 +8263,7 @@ export function completeSimulationStep(
       lookup.constructionAutomationPlanCache,
       lookup.beltRuntime.implementation,
       lookup.powerImplementation,
+      lookup.logisticsImplementation,
     ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
@@ -8146,7 +8458,7 @@ function simulateStep(
   drainMaterialDeliveryHubs(state, seconds, lookup);
   recordLogisticsPhase(profiler, "logisticsDeliveryMs", subsystemStartedAt);
   subsystemStartedAt = profiler ? profileNow() : 0;
-  const reception = calculateDysonReception(state);
+  const reception = calculateDysonReception(state, lookup);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
   const powerByPlanet = new Map<PlanetId, PowerPlan>();
   for (const planet of PLANET_LIST) {
@@ -8161,6 +8473,7 @@ function simulateStep(
       batchPowerStorage,
       batchConstructionAutomation,
       contractExperiment,
+      false,
     );
     powerByPlanet.set(planet.id, result.powerPlan);
   }
@@ -8293,6 +8606,7 @@ function simulateStep(
       lookup.constructionAutomationPlanCache,
       lookup.beltRuntime.implementation,
       lookup.powerImplementation,
+      lookup.logisticsImplementation,
     ));
   }
   if (state.endgame.exportWindowStartedAt <= 0) state.endgame.exportWindowStartedAt = state.elapsedSeconds;
@@ -8303,6 +8617,72 @@ function simulateStep(
     state.endgame.exportWindowStartedAt = state.elapsedSeconds;
   }
   state.metrics = { ...state.planetMetrics[state.activePlanetId] };
+}
+
+/** Label-free counterpart used only by aggregate history counting. */
+export function isProductiveEntityBlockedForHistory(
+  state: GameState,
+  entity: FactoryEntity,
+  lookup?: SimulationLookupContext,
+): boolean {
+  if (state.paused) return false;
+  const entityPowerFactor = getEntityPowerFactor(state, entity, lookup);
+  if (entity.kind === "vein") {
+    if (getResourceReserveSnapshot(state, entity)?.exhausted) return true;
+    if (entity.minerCount < 1) return false;
+    const capacity = getEntityOutputCapacity(state, entity);
+    if ((entity.outputs[entity.resourceId!] ?? 0) >= capacity - EPSILON) return true;
+    return entityPowerFactor <= EPSILON;
+  }
+
+  if (entity.buildingId === "micro_black_hole_connector") return false;
+  if (entity.buildingId === "time_warp_device") {
+    return state.timeWarp.controllerEntityId === entity.id && state.timeWarp.enabled &&
+      state.timeWarp.effectiveMultiplier <= state.settings.simulationSpeed;
+  }
+  if (entity.buildingId === "orbital_cargo_terminal" || entity.buildingId === "galactic_material_exporter" ||
+    entity.buildingId === "construction_center") {
+    return getEntityOperatingStatus(state, entity, lookup).tone === "blocked";
+  }
+
+  const runtime = lookup?.machineRuntimeById.get(entity.id);
+  const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
+  if (!recipe) return true;
+  if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) return true;
+  if (recipe.id === "matrix_research" && !hasActiveResearch(state)) return true;
+  if ((recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch") &&
+    dysonLaunchFactor(state, recipe.id) <= EPSILON) return false;
+  if (recipe.id === "solar_sail_launch" && !getEjectorOrbitTargetStatus(state, entity).valid) return true;
+
+  if (entity.buildingId === "ray_receiver") {
+    const capacity = runtime?.outputCapacity ?? getEntityOutputCapacity(state, entity);
+    if (recipe.outputs.some((output) => capacity - (entity.outputs[output.itemId] ?? 0) + EPSILON < output.amount)) return true;
+    const receivedKw = Math.max(0, entity.powerOutputKw ?? 0);
+    return totalDysonGenerationKw(state) <= EPSILON || receivedKw <= EPSILON;
+  }
+
+  if (entity.buildingId) {
+    const capacity = runtime?.outputCapacity ?? getEntityOutputCapacity(state, entity);
+    const sprayedCycles = runtime
+      ? availableFullProliferatorCyclesForRuntime(entity, runtime)
+      : availableFullProliferatorCycles(entity, recipe);
+    const extraProductBonus = sprayedCycles > 0
+      ? runtime?.proliferatorExtraProductBonus ?? getEntityExtraProductBonusForRecipe(entity, recipe)
+      : 0;
+    for (const output of recipe.outputs) {
+      const bonus = Math.floor((entity.proliferatorBonusProgress?.[output.itemId] ?? 0) +
+        output.amount * extraProductBonus + EPSILON);
+      if (capacity - (entity.outputs[output.itemId] ?? 0) + EPSILON < output.amount + bonus) return true;
+    }
+  }
+  if (recipe.id === "matrix_research") {
+    if (remainingResearchCosts(state).some((cost) => (entity.inputs[cost.itemId] ?? 0) + EPSILON < 1)) return true;
+  } else {
+    for (const input of recipe.inputs) {
+      if ((entity.inputs[input.itemId] ?? 0) + EPSILON < input.amount) return true;
+    }
+  }
+  return entityPowerFactor <= EPSILON;
 }
 
 function recordProductionHistory(state: GameState, lookup?: SimulationLookupContext): void {
@@ -8367,7 +8747,9 @@ function recordProductionHistory(state: GameState, lookup?: SimulationLookupCont
     ? productiveEntities.reduce((sum, entity) => sum + (entity.utilization > EPSILON ? (entity.kind === "vein" ? entity.minerCount : entity.machineCount) : 0), 0)
     : previousSample?.activeMachines ?? 0;
   const blockedMachines = refreshDiagnostics
-    ? productiveEntities.reduce((sum, entity) => sum + (getEntityOperatingStatus(state, entity, lookup).tone === "blocked" ? (entity.kind === "vein" ? entity.minerCount : entity.machineCount) : 0), 0)
+    ? productiveEntities.reduce((sum, entity) => sum + (isProductiveEntityBlockedForHistory(state, entity, lookup)
+      ? (entity.kind === "vein" ? entity.minerCount : entity.machineCount)
+      : 0), 0)
     : previousSample?.blockedMachines ?? 0;
   const beltCapacity = refreshDiagnostics ? state.belts.reduce((sum, belt) => sum + getBeltCapacity(belt), 0) : 0;
   const beltFlow = refreshDiagnostics ? state.belts.reduce((sum, belt) => sum + Math.max(0, belt.lastFlow ?? 0), 0) : 0;
@@ -8493,6 +8875,8 @@ export interface SimulationAdvanceOptions {
   beltImplementation?: BeltRuntimeImplementation;
   /** M3 domain oracle/fallback. Production defaults to the compiled runtime. */
   powerImplementation?: PowerRuntimeImplementation;
+  /** M4 domain oracle/fallback. Production defaults to the compiled runtime. */
+  logisticsImplementation?: LogisticsRuntimeImplementation;
 }
 
 export function createSimulationProfiler(): SimulationProfiler {
@@ -8618,6 +9002,7 @@ export function createSimulationAdvanceSession(state: GameState, seconds: number
           new Map<string, CachedConstructionAutomationPlan>(),
           options.beltImplementation,
           options.powerImplementation,
+          options.logisticsImplementation,
         )
       : undefined,
     profiler: options.profiler,
@@ -8728,6 +9113,7 @@ export interface PersistentSimulationRuntime {
   world: RuntimeWorld;
   beltImplementation: BeltRuntimeImplementation;
   powerImplementation: PowerRuntimeImplementation;
+  logisticsImplementation: LogisticsRuntimeImplementation;
 }
 
 export interface PersistentSimulationRuntimeOptions {
@@ -8735,6 +9121,8 @@ export interface PersistentSimulationRuntimeOptions {
   beltImplementation?: BeltRuntimeImplementation;
   /** Retained allocation/copy path for M3 shadow-oracle and fallback. */
   powerImplementation?: PowerRuntimeImplementation;
+  /** Retained station/logistics path for M4 shadow-oracle and fallback. */
+  logisticsImplementation?: LogisticsRuntimeImplementation;
 }
 
 function normalizePersistentRuntimeShape(state: GameState): void {
@@ -8757,6 +9145,7 @@ export function createPersistentSimulationRuntime(
   normalizePersistentRuntimeShape(state);
   const beltImplementation = options.beltImplementation ?? "compiled";
   const powerImplementation = options.powerImplementation ?? "compiled";
+  const logisticsImplementation = options.logisticsImplementation ?? "compiled";
   const runtime = {
     state,
     lookup: state.paused
@@ -8767,10 +9156,12 @@ export function createPersistentSimulationRuntime(
           new Map<string, CachedConstructionAutomationPlan>(),
           beltImplementation,
           powerImplementation,
+          logisticsImplementation,
         ),
     world: createRuntimeWorld(state),
     beltImplementation,
     powerImplementation,
+    logisticsImplementation,
   };
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   return runtime;
@@ -8788,6 +9179,7 @@ export function replacePersistentSimulationRuntimeState(runtime: PersistentSimul
         new Map<string, CachedConstructionAutomationPlan>(),
         runtime.beltImplementation,
         runtime.powerImplementation,
+        runtime.logisticsImplementation,
       );
   replaceRuntimeWorldState(runtime.world, state);
   if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
@@ -8819,6 +9211,7 @@ export function applyPersistentSimulationRuntimeCommand(
           constructionAutomationPlanCache,
           runtime.beltImplementation,
           runtime.powerImplementation,
+          runtime.logisticsImplementation,
         );
     if (profiler) profiler.compileMs += Math.max(0, profileNow() - startedAt);
   }
@@ -8838,6 +9231,7 @@ export function advancePersistentSimulationRuntime(
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
       runtime.powerImplementation,
+      runtime.logisticsImplementation,
     );
   }
   const before = runtime.state;
@@ -8869,6 +9263,7 @@ export function advancePersistentSimulationRuntime(
           constructionAutomationPlanCache,
           runtime.beltImplementation,
           runtime.powerImplementation,
+          runtime.logisticsImplementation,
         );
   }
   return { state: next, changed: session.changed, cacheRebuilt };
@@ -8909,6 +9304,7 @@ export async function advancePersistentSimulationRuntimeResumable(
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
       runtime.powerImplementation,
+      runtime.logisticsImplementation,
     );
   }
   const before = runtime.state;
@@ -8953,6 +9349,7 @@ export async function advancePersistentSimulationRuntimeResumable(
           constructionAutomationPlanCache,
           runtime.beltImplementation,
           runtime.powerImplementation,
+          runtime.logisticsImplementation,
         );
   }
   if (profiler) {
@@ -8977,6 +9374,7 @@ export async function advancePersistentSimulationRuntimeMulticore(
       new Map<string, CachedConstructionAutomationPlan>(),
       runtime.beltImplementation,
       runtime.powerImplementation,
+      runtime.logisticsImplementation,
     );
   }
   const before = runtime.state;
@@ -9003,6 +9401,7 @@ export async function advancePersistentSimulationRuntimeMulticore(
           constructionAutomationPlanCache,
           runtime.beltImplementation,
           runtime.powerImplementation,
+          runtime.logisticsImplementation,
         );
   }
   return { state: next, changed: session.changed, cacheRebuilt };

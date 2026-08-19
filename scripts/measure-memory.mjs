@@ -33,6 +33,7 @@ const trendDiagnosticsEnabled = argumentsByName.get("trend-diagnostics") !== "fa
 const trendForceGc = argumentsByName.get("trend-force-gc") === "true";
 const trendPaused = argumentsByName.get("trend-paused") === "true";
 const trendCanvasHidden = argumentsByName.get("trend-canvas-hidden") === "true";
+const trendFreezeCanvasNodes = argumentsByName.get("trend-freeze-canvas-nodes") === "true";
 const heapSamplingEnabled = argumentsByName.get("heap-sampling") === "true";
 
 function delay(milliseconds) {
@@ -377,6 +378,9 @@ try {
           visibility: document.visibilityState,
           canvasRuntimeRevision: canvasMetric("data-projection-runtime-revision"),
           canvasChangedNodeCount: canvasMetric("data-changed-node-count"),
+          canvasNodeDerivationCount: canvasMetric("data-node-derivation-count"),
+          canvasChangedNodePublicationCount: canvasMetric("data-changed-node-publication-count"),
+          canvasChangedNodeTotal: canvasMetric("data-changed-node-total"),
           canvasStableNodeCount: canvasMetric("data-stable-node-count"),
           canvasDeferredNodeCount: canvasMetric("data-deferred-node-count"),
           canvasDynamicNodeCount: canvasMetric("data-dynamic-node-count"),
@@ -407,7 +411,7 @@ try {
     };
     samples.push(entry);
     await writeProgressReport("running");
-    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, canvasRuntimeRevision: entry.application.canvasRuntimeRevision, canvasChangedNodeCount: entry.application.canvasChangedNodeCount, canvasStableNodeCount: entry.application.canvasStableNodeCount, processTotals: entry.processTotals })}\n`);
+    process.stdout.write(`MEMORY_STAGE ${JSON.stringify({ phase, elapsedSeconds: entry.elapsedSeconds, heapUsedBytes: entry.heap.usedBytes, autosaveTriggerCount: entry.application.autosaveTriggerCount, autosaveCompleteCount: entry.application.autosaveCompleteCount, canvasRuntimeRevision: entry.application.canvasRuntimeRevision, canvasChangedNodeCount: entry.application.canvasChangedNodeCount, canvasNodeDerivationCount: entry.application.canvasNodeDerivationCount, canvasChangedNodePublicationCount: entry.application.canvasChangedNodePublicationCount, canvasChangedNodeTotal: entry.application.canvasChangedNodeTotal, canvasStableNodeCount: entry.application.canvasStableNodeCount, processTotals: entry.processTotals })}\n`);
     return entry;
   };
 
@@ -546,6 +550,9 @@ try {
   });
   await page.locator('.game-shell[data-local-save-raw-cache-size="0"]').waitFor({ state: "attached", timeout: 180_000 });
   await sample("save-complete");
+  if (trendFreezeCanvasNodes) {
+    await page.evaluate(() => { document.documentElement.dataset.runtimeWorldFreezeCanvasNodes = "true"; });
+  }
   const postSaveGc = await sample("post-save-gc", { forceGc: true });
 
   let trace = null;
@@ -652,6 +659,7 @@ try {
     trendForceGc,
     trendPaused,
     trendCanvasHidden,
+    trendFreezeCanvasNodes,
     heapSamplingEnabled,
     saveMode,
     pauseResume,

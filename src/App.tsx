@@ -1565,6 +1565,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const miningTimerRef = useRef<number | null>(null);
   const nodeDragActiveRef = useRef(false);
   const factoryCanvasRef = useRef<HTMLElement | null>(null);
+  const canvasNodeDerivationCountRef = useRef(0);
+  const canvasChangedNodePublicationCountRef = useRef(0);
+  const canvasChangedNodeTotalRef = useRef(0);
   const pointerRef = useRef({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
   const clickConnectionPreviewRef = useRef<ClickConnectionPreviewState | null>(null);
   const batchConnectionModeRef = useRef(false);
@@ -8517,6 +8520,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
+    if (import.meta.env.VITE_RUNTIMEWORLD_DIAGNOSTICS === "true" &&
+      document.documentElement.dataset.runtimeWorldFreezeCanvasNodes === "true") return;
     const frame = window.requestAnimationFrame(() => {
       if (nodeDragActiveRef.current) return;
       const derivationStartedAt = performance.now();
@@ -8901,6 +8906,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         });
         const derivationMs = performance.now() - derivationStartedAt;
         const changedNodeCount = next.reduce((count, node, index) => count + (node === current[index] ? 0 : 1), 0);
+        canvasNodeDerivationCountRef.current += 1;
+        if (changedNodeCount > 0) {
+          canvasChangedNodePublicationCountRef.current += 1;
+          canvasChangedNodeTotalRef.current += changedNodeCount;
+        }
         const canvasElement = factoryCanvasRef.current;
         if (canvasElement) {
           canvasElement.dataset.nodeDerivationMs = derivationMs.toFixed(2);
@@ -8908,6 +8918,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           canvasElement.dataset.stableNodeCount = String(stableNodeCount);
           canvasElement.dataset.deferredNodeCount = String(deferredNodeCount);
           canvasElement.dataset.changedNodeCount = String(changedNodeCount);
+          canvasElement.dataset.nodeDerivationCount = String(canvasNodeDerivationCountRef.current);
+          canvasElement.dataset.changedNodePublicationCount = String(canvasChangedNodePublicationCountRef.current);
+          canvasElement.dataset.changedNodeTotal = String(canvasChangedNodeTotalRef.current);
           canvasElement.dataset.stackMembershipTokenCompareCount = String(stackMembershipTokenCompareCount);
           canvasElement.dataset.stackMemberIdReferenceCount = String(stackMemberIdReferenceCount);
           canvasElement.dataset.projectionRuntimeRevision = String(canvasRenderSnapshot.runtimeRevision);

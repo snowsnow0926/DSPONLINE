@@ -73,7 +73,6 @@ function anonymousCanvasFixture(options: { count: number; exactStack?: number; b
   state.planetViewports.home = options.savedViewport ?? { x: 120, y: 100, zoom: options.zoom ?? zoom };
   state.construction.storage_mk1 = options.blueprint ? 1 : 0;
   if (options.blueprint) state = createBlueprint(state, ["anonymous-node-0"], "匿名重叠蓝图");
-  if (options.hiddenStackAlert) state.paused = false;
   return serializeEnvelope(state, Date.now());
 }
 
@@ -123,8 +122,13 @@ async function seedCanvas(page: Page, options: { count: number; exactStack?: num
   });
   await page.setViewportSize(options.viewport ?? { width: 1440, height: 900 });
   await page.goto("/");
-  await expect(page.locator(".game-shell")).toBeVisible();
-  await expect(page.locator(".game-shell")).toHaveAttribute("data-active-planet-node-count", String(options.count + 6));
+  const shell = page.locator(".game-shell");
+  await expect(shell).toBeVisible();
+  await expect(shell).toHaveAttribute("data-active-planet-node-count", String(options.count + 6));
+  if (options.hiddenStackAlert) {
+    await page.getByLabel("继续模拟").click();
+    await expect(shell).toHaveAttribute("data-simulation-paused", "false");
+  }
 }
 
 async function expectNodePaintedAndHitTestable(node: Locator): Promise<void> {
@@ -909,6 +913,9 @@ test("a hidden stack member alert is aggregated and cycling expands the alerted 
   await expect(badge).toContainText("⚠1");
   await expect(page.locator(".factory-node-stack-halo--alert")).toHaveCount(1);
   await badge.focus();
+  await expect(badge).toBeFocused();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(badge).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator('.react-flow__node[data-id="anonymous-node-1"]')).toHaveClass(/selected/);
   await page.getByLabel("打开设置").focus();

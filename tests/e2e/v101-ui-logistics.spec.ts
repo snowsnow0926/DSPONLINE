@@ -5,7 +5,7 @@ import { validateTimedPeriodicProgress, type TimedPeriodicProgressSample } from 
 import { serializeEnvelope } from "../../src/game/storage";
 import { openSameOriginStorageHarness } from "./same-origin-harness";
 
-const RELEASE_NOTE_ID = "2026-08-20-v1.1.0";
+const RELEASE_NOTE_ID = "2026-08-20-v1.1.1";
 
 test.beforeEach(async ({ page }) => {
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });

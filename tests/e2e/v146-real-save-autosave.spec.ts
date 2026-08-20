@@ -12,7 +12,7 @@ test.describe("real save autosave acceptance", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.0");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       // Exercise the player's configured 30-second interval rather than the
       // optional large-save cadence throttle. The handler is called by the
@@ -216,6 +216,10 @@ test.describe("real save autosave acceptance", () => {
       (window as typeof window & { __dspAutosaveStateChanges?: string[] }).__dspAutosaveStateChanges ?? []);
     expect(stateChanges.filter((value) => value.startsWith("true:"))).toEqual([]);
     expect(stateChanges.filter((value) => value.endsWith(":fallback"))).toEqual([]);
+    await expect.poll(() => page.evaluate(async () => {
+      const { getLocalSaveConflicts } = await import("/src/game/localSaveStore.ts");
+      return (await getLocalSaveConflicts()).length;
+    }), { timeout: 30_000 }).toBe(0);
 
     // Reload through the menu after the second verified write. The menu reads
     // the durable primary directly before it offers an offline settlement

@@ -144,6 +144,40 @@ const release1047Copy = {
   },
 } as const;
 
+const release1101Copy = {
+  date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
+  title: { "zh-CN": "云存档与挂机保存紧急修复", en: "Cloud and Pure-idle Save Hotfix" },
+  summary: {
+    "zh-CN": "1.1.1 修复完成当日全部空间站合同后，客户端重复生成已结算合同并导致服务器拒绝云上传的问题；同时修复纯挂机停止或页面卡顿后，同一页面的保存请求被误判为跨标签页覆盖。受影响的 1.1.0 存档会保留合同历史、奖励、结算防重记录和挂机恢复边界，只移除无法再次接受的重复报价。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变。",
+    en: "Version 1.1.1 fixes cloud uploads rejected after all orbital-station contracts for a day were completed and the client regenerated already-settled offers. It also prevents pure-idle stops or long page stalls from misclassifying same-page persistence as a cross-tab overwrite. Affected 1.1.0 saves retain contract history, rewards, settlement fences, and pure-idle recovery boundaries while removing only unclaimable duplicate offers. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  generationTitle: { "zh-CN": "已结算合同不再同日重生", en: "Settled contracts no longer respawn the same day" },
+  generationDescription: {
+    "zh-CN": "每日合同仍由种子、任务日和槽位确定生成；已经写入结算防重记录的合同不会再次出现在报价区，下一任务日照常生成新合同。",
+    en: "Daily contracts remain deterministic by seed, task day, and slot. Contracts already protected by a settlement fence no longer return to the offer board, while the next task day still generates a fresh board.",
+  },
+  repairTitle: { "zh-CN": "1.1.0 受影响存档自动无损修复", en: "Affected 1.1.0 saves repair without progress loss" },
+  repairDescription: {
+    "zh-CN": "加载时以已结算历史和 settledIds 为权威，保留完成记录、徽记、声望与防重复奖励边界，只过滤同 ID 的不可领取报价；原始导出仍可另行备份。",
+    en: "Loading treats settled history and settledIds as authoritative, preserving completion records, marks, reputation, and duplicate-reward protection while filtering only unclaimable offers with the same IDs. Original exports can still be backed up separately.",
+  },
+  serverTitle: { "zh-CN": "旧客户端获得受限服务端兼容", en: "Old clients receive narrow server compatibility" },
+  serverDescription: {
+    "zh-CN": "服务器只接受“报价与已结算历史身份完全一致、且 settledIds 已防重”的 1.1.0 旧状态；伪造奖励、缺失防重记录、进行中合同冲突和其他重复 ID 继续拒绝。",
+    en: "The server accepts only the 1.1.0 legacy shape where an offer exactly matches settled history and settledIds already blocks replay. Forged rewards, missing fences, accepted/history collisions, and every other duplicate-ID shape remain rejected.",
+  },
+  coordinationTitle: { "zh-CN": "纯挂机与卡顿不再制造假冲突", en: "Pure-idle and stalls no longer create false conflicts" },
+  coordinationDescription: {
+    "zh-CN": "自动保存、生命周期保存和纯挂机终态继续共用有序主存档边界；大存档或主线程停顿超过租约心跳时，只允许同一 writer 与同一 fencing token 安全续租。真实其他标签页接管仍会停止覆盖并保留双方版本。",
+    en: "Autosave, lifecycle persistence, and pure-idle terminal commits share one ordered primary-save boundary. If a large save or main-thread stall outlasts the lease heartbeat, renewal is allowed only for the identical writer and fencing token. A real takeover by another tab still blocks the overwrite and preserves both versions.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与数据库格式不升级", en: "Save and database formats are unchanged" },
+  compatibilityDescription: {
+    "zh-CN": "本热修不改变玩法数值、GameState、存档封装、云 schema、SQLite layout 或 IndexedDB records；失败上传仍不会创建修订、历史或排行榜记录。",
+    en: "This hotfix does not change balance, GameState, the save envelope, cloud schema, SQLite layout, or IndexedDB records. Failed uploads still create no revision, history, or leaderboard entry.",
+  },
+} as const;
+
 const release1100Copy = {
   date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
   title: { "zh-CN": "RuntimeWorld 2.0 超大工厂运行时", en: "RuntimeWorld 2.0 for Large Factories" },
@@ -417,7 +451,11 @@ function release1047Message(locale: AppLocale, key: keyof typeof release1047Copy
   return release1047Copy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1100Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release1101Copy): string {
+  return release1101Copy[key][locale];
+}
+
+function release1100Message(locale: AppLocale, key: keyof typeof release1100Copy): string {
   return release1100Copy[key][locale];
 }
 
@@ -436,17 +474,34 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-20-v1.1.0",
+    id: "2026-08-20-v1.1.1",
     date: currentMessage(locale, "date"),
-    version: "1.1.0",
+    version: "1.1.1",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "runtimeworld-compiled-domains", title: currentMessage(locale, "runtimeTitle"), description: currentMessage(locale, "runtimeDescription") },
-      { id: "runtimeworld-determinism", title: currentMessage(locale, "deterministicTitle"), description: currentMessage(locale, "deterministicDescription") },
-      { id: "runtimeworld-command-projection", title: currentMessage(locale, "commandTitle"), description: currentMessage(locale, "commandDescription") },
-      { id: "runtimeworld-authoritative-save", title: currentMessage(locale, "saveTitle"), description: currentMessage(locale, "saveDescription") },
-      { id: "runtimeworld-compatibility", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+      { id: "station-contract-reoffer", title: currentMessage(locale, "generationTitle"), description: currentMessage(locale, "generationDescription") },
+      { id: "legacy-cloud-save-repair", title: currentMessage(locale, "repairTitle"), description: currentMessage(locale, "repairDescription") },
+      { id: "legacy-cloud-server-compatibility", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
+      { id: "same-page-save-coordination", title: currentMessage(locale, "coordinationTitle"), description: currentMessage(locale, "coordinationDescription") },
+      { id: "cloud-format-compatibility", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1100(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-20-v1.1.0",
+    date: release1100Message(locale, "date"),
+    version: "1.1.0",
+    title: release1100Message(locale, "title"),
+    summary: release1100Message(locale, "summary"),
+    items: [
+      { id: "runtimeworld-compiled-domains", title: release1100Message(locale, "runtimeTitle"), description: release1100Message(locale, "runtimeDescription") },
+      { id: "runtimeworld-determinism", title: release1100Message(locale, "deterministicTitle"), description: release1100Message(locale, "deterministicDescription") },
+      { id: "runtimeworld-command-projection", title: release1100Message(locale, "commandTitle"), description: release1100Message(locale, "commandDescription") },
+      { id: "runtimeworld-authoritative-save", title: release1100Message(locale, "saveTitle"), description: release1100Message(locale, "saveDescription") },
+      { id: "runtimeworld-compatibility", title: release1100Message(locale, "compatibilityTitle"), description: release1100Message(locale, "compatibilityDescription") },
     ],
   };
 }

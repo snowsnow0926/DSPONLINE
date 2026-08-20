@@ -216,6 +216,7 @@ let pendingWriteError: unknown = null;
 // legacy string writes; otherwise a queued legacy write can overtake the
 // proof/CAS revision head while the large payload is committing.
 let authoritativeSaveQueue: Promise<void> = Promise.resolve();
+const pendingAuthoritativeSaveKeys = new Map<string, number>();
 let startupConflictId: string | null = null;
 let startupConflictCreatedAt = -1;
 const LOCAL_SAVE_WRITER_CONTINUATION_MAX_AGE_MS = 120_000;
@@ -1019,13 +1020,11 @@ async function commitCoordinatedRecord(
   baseKnown: boolean,
   baseCatalog: LocalSaveCatalog | null,
   expectedRevision: number,
+  allowOwnedRebase = false,
 ): Promise<LocalSaveRevision> {
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
   const { buildLocalSaveCatalog, catalogMatchesPayload } = await import("./localSaveCatalogBuild");
   const now = Date.now();
-  const preparedCatalog = value !== null && isCatalogedSaveKey(key)
-    ? buildLocalSaveCatalog(key, value, expectedRevision + 1)
-    : null;
   const transaction = db.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const store = transaction.objectStore(RECORD_STORE);
@@ -1053,7 +1052,21 @@ async function commitCoordinatedRecord(
     currentCatalog.revision === baseCatalog.revision && catalogMatchesPayload(baseCatalog, persisted);
   const persistedMatches = baseValue !== null ? persisted === baseValue : baseKnown ? catalogProofMatches : persisted === null;
   const legacyBaseMatches = !revision && expectedRevision === 0 && persistedMatches;
-  if (!leaseMatches || !persistedMatches || !(revisionMatches && (revision !== null || legacyBaseMatches))) {
+  // A proof-bound save does not expose its multi-megabyte candidate through
+  // the UI cache. A later same-page legacy/lifecycle write can therefore be
+  // queued behind that proof while still holding the pre-proof catalog and
+  // revision. Rebase only when the durable head was advanced by this exact
+  // writer/fence and its current payload/catalog/revision proof is complete.
+  // A real tab takeover changes owner or fencing token and remains a hard
+  // conflict with both copies preserved.
+  const ownedProofAdvance = allowOwnedRebase && leaseMatches && revision !== null &&
+    revision.saveKey === key && revision.writerId === writerId &&
+    revision.fencingToken === renewedLease!.fencingToken && revision.revision > expectedRevision &&
+    persisted !== null && currentCatalog !== null && currentCatalog.revision === revision.revision &&
+    revision.savedAt === currentCatalog.savedAt && revision.checksum === currentCatalog.stateChecksum &&
+    catalogMatchesPayload(currentCatalog, persisted);
+  const admittedRevision = ownedProofAdvance ? revision!.revision : expectedRevision;
+  if (!leaseMatches || !ownedProofAdvance && (!persistedMatches || !(revisionMatches && (revision !== null || legacyBaseMatches)))) {
     const conflictId = preserveWriteConflict(store, key, value, persisted, writerStatus.fencingToken, now, buildLocalSaveCatalog);
     await done;
     cache.delete(key);
@@ -1082,9 +1095,12 @@ async function commitCoordinatedRecord(
     postCoordinationMessage({ schemaVersion: 1, type: "conflict", writerId, sentAt: now, key, conflictId, fencingToken: lease?.fencingToken });
     throw new LocalSaveConflictError(conflictId);
   }
+  const preparedCatalog = value !== null && isCatalogedSaveKey(key)
+    ? buildLocalSaveCatalog(key, value, admittedRevision + 1)
+    : null;
   const nextRevision = createLocalSaveRevision({
     saveKey: key,
-    previousRevision: expectedRevision,
+    previousRevision: admittedRevision,
     value,
     writerId,
     fencingToken: renewedLease!.fencingToken,
@@ -1986,9 +2002,10 @@ export function setLocalSaveValue(key: string, value: string): void {
     const baseKnown = knownSaveKeys.has(key);
     const baseCatalog = catalogCache.get(key) ?? null;
     const expectedRevision = revisionCache.get(key) ?? 0;
+    const allowOwnedRebase = (pendingAuthoritativeSaveKeys.get(key) ?? 0) > 0;
     putCacheValue(key, value);
     revisionCache.set(key, expectedRevision + 1);
-    enqueue(() => commitCoordinatedRecord(database!, key, value, baseValue, baseKnown, baseCatalog, expectedRevision).then(() => {
+    enqueue(() => commitCoordinatedRecord(database!, key, value, baseValue, baseKnown, baseCatalog, expectedRevision, allowOwnedRebase).then(() => {
       clearRecoveredQuotaPrompt(key);
       const summary = classifySaveRecord(key, value);
       if (summary.category === "automatic-snapshot") enforceAutomaticSnapshotLimit(summary.mode);
@@ -2027,18 +2044,20 @@ export async function setLocalSavePayloadWithProof<Payload extends WorkerBinaryP
   onProgress?: (progress: AuthoritativeSavePersistenceProgress) => void,
   shouldCommit?: () => boolean,
 ): Promise<AuthoritativeSavePersistenceCommitResult> {
-  await initializeLocalSaveStore();
-  if (backend !== "indexeddb" || !database) throw new Error("proof-bound local save requires IndexedDB");
-  if (writerStatus.role !== "primary" || writerStatus.writerId !== input.fence.ownerId ||
-    writerStatus.fencingToken !== input.fence.fencingToken) {
-    throw new LocalSaveReadOnlyError(writerStatus.reason);
-  }
-  if (!isCatalogedSaveKey(input.key)) throw new Error(`Unsupported proof-bound save key: ${input.key}`);
-  // Capture this before publishing the proof queue entry. A later legacy
-  // write observes that entry and waits behind it; the proof only waits for
-  // legacy writes that existed at this exact call boundary.
-  const priorLegacyWrites = flushLocalSaveWrites();
-  return enqueueAuthoritativeSave(priorLegacyWrites, async () => {
+  pendingAuthoritativeSaveKeys.set(input.key, (pendingAuthoritativeSaveKeys.get(input.key) ?? 0) + 1);
+  try {
+    await initializeLocalSaveStore();
+    if (backend !== "indexeddb" || !database) throw new Error("proof-bound local save requires IndexedDB");
+    if (writerStatus.role !== "primary" || writerStatus.writerId !== input.fence.ownerId ||
+      writerStatus.fencingToken !== input.fence.fencingToken) {
+      throw new LocalSaveReadOnlyError(writerStatus.reason);
+    }
+    if (!isCatalogedSaveKey(input.key)) throw new Error(`Unsupported proof-bound save key: ${input.key}`);
+    // Capture this before publishing the proof queue entry. A later legacy
+    // write observes that entry and waits behind it; the proof only waits for
+    // legacy writes that existed at this exact call boundary.
+    const priorLegacyWrites = flushLocalSaveWrites();
+    return await enqueueAuthoritativeSave(priorLegacyWrites, async () => {
     // This is the final synchronous admission point before payload ownership
     // moves to the persistence Worker. A low-priority snapshot can therefore
     // yield to a primary intent that arrived while initialization or older
@@ -2076,8 +2095,13 @@ export async function setLocalSavePayloadWithProof<Payload extends WorkerBinaryP
       // into every later request in this tab.
       try { await reloadLocalSaveCache(); } catch { /* controlled failure remains authoritative */ }
     }
-    return result;
-  });
+      return result;
+    });
+  } finally {
+    const remaining = (pendingAuthoritativeSaveKeys.get(input.key) ?? 1) - 1;
+    if (remaining > 0) pendingAuthoritativeSaveKeys.set(input.key, remaining);
+    else pendingAuthoritativeSaveKeys.delete(input.key);
+  }
 }
 
 export function removeLocalSaveValue(key: string): void {
@@ -2089,11 +2113,12 @@ export function removeLocalSaveValue(key: string): void {
     const baseKnown = knownSaveKeys.has(key);
     const baseCatalog = catalogCache.get(key) ?? null;
     const expectedRevision = revisionCache.get(key) ?? 0;
+    const allowOwnedRebase = (pendingAuthoritativeSaveKeys.get(key) ?? 0) > 0;
     cache.delete(key);
     knownSaveKeys.delete(key);
     catalogCache.delete(key);
     revisionCache.set(key, expectedRevision + 1);
-    enqueue(() => commitCoordinatedRecord(database!, key, null, baseValue, baseKnown, baseCatalog, expectedRevision).then(() => undefined).catch((error) => {
+    enqueue(() => commitCoordinatedRecord(database!, key, null, baseValue, baseKnown, baseCatalog, expectedRevision, allowOwnedRebase).then(() => undefined).catch((error) => {
       if (!(error instanceof LocalSaveConflictError)) restoreCachedValueAfterFailedCommit(key, baseValue, baseKnown, baseCatalog, expectedRevision);
       throw error;
     }), key);

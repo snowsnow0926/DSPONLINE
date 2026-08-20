@@ -344,22 +344,44 @@ export function normalizeStationContractBoard(value: unknown, nowMs = Date.now()
   const fallback = createStationContractBoard(nowMs);
   if (!value || typeof value !== "object") return fallback;
   const candidate = value as Partial<StationContractBoardState>;
-  const offers = Array.isArray(candidate.offers) ? candidate.offers.flatMap((entry) => {
+  const normalizedOffers = Array.isArray(candidate.offers) ? candidate.offers.flatMap((entry) => {
     const normalized = normalizeContract(entry);
     return normalized?.status === "offered" ? [normalized] : [];
   }).slice(0, 4) : [];
-  const accepted = Array.isArray(candidate.accepted) ? candidate.accepted.flatMap((entry) => {
+  const normalizedAccepted = Array.isArray(candidate.accepted) ? candidate.accepted.flatMap((entry) => {
     const normalized = normalizeContract(entry);
     return normalized && (normalized.status === "accepted" || normalized.status === "claimable") ? [normalized] : [];
   }).slice(0, STATION_CONTRACT_ACCEPT_LIMIT) : [];
-  const history = Array.isArray(candidate.history) ? candidate.history.flatMap((entry) => {
+  const normalizedHistory = Array.isArray(candidate.history) ? candidate.history.flatMap((entry) => {
     const normalized = normalizeContract(entry);
     return normalized?.status === "settled" && normalized.settlementId ? [normalized] : [];
   }).slice(0, STATION_CONTRACT_HISTORY_LIMIT) : [];
-  const settledIds = Array.isArray(candidate.settledIds)
-    ? [...new Set(candidate.settledIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 180))]
-      .slice(-STATION_CONTRACT_SETTLEMENT_ID_LIMIT)
-    : history.map((entry) => entry.id);
+  const historyIds = new Set<string>();
+  const history = normalizedHistory.filter((entry) => {
+    if (historyIds.has(entry.id)) return false;
+    historyIds.add(entry.id);
+    return true;
+  });
+  const candidateSettledIds = Array.isArray(candidate.settledIds)
+    ? candidate.settledIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 180)
+    : [];
+  // 1.1.0 could regenerate the same deterministic offer after all four daily
+  // contracts had already been settled. Preserve the authoritative history
+  // and reward fence, while dropping only active entries that can no longer
+  // be accepted. This repairs affected saves without rewriting progress.
+  const settledIds = [...new Set([...candidateSettledIds, ...history.map((entry) => entry.id)])]
+    .slice(-STATION_CONTRACT_SETTLEMENT_ID_LIMIT);
+  const unavailableIds = new Set(settledIds);
+  const accepted = normalizedAccepted.filter((entry) => {
+    if (unavailableIds.has(entry.id)) return false;
+    unavailableIds.add(entry.id);
+    return true;
+  });
+  const offers = normalizedOffers.filter((entry) => {
+    if (unavailableIds.has(entry.id)) return false;
+    unavailableIds.add(entry.id);
+    return true;
+  });
   const featuredContractId = typeof candidate.featuredContractId === "string" &&
     history.some((entry) => entry.id === candidate.featuredContractId && entry.settlementReason === "completed")
     ? candidate.featuredContractId
@@ -570,7 +592,14 @@ export function synchronizeStationContracts(
     next.contractBoard.offers = [];
   }
   if (next.contractBoard.offers.length === 0) {
-    next.contractBoard.offers = ([0, 1, 2, 3] as const).map((slot) => createContract(state, next.contractBoard.taskDay, slot));
+    const unavailableIds = new Set([
+      ...next.contractBoard.settledIds,
+      ...next.contractBoard.history.map((contract) => contract.id),
+      ...next.contractBoard.accepted.map((contract) => contract.id),
+    ]);
+    next.contractBoard.offers = ([0, 1, 2, 3] as const)
+      .map((slot) => createContract(state, next.contractBoard.taskDay, slot))
+      .filter((contract) => !unavailableIds.has(contract.id));
   }
   return next;
 }

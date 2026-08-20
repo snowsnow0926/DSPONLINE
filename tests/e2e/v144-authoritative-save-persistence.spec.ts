@@ -214,6 +214,131 @@ test("bytes-only save Worker and persistence Worker atomically commit primary/ca
   expect(result.mainLargeCalls).toEqual({ parse: 0, stringify: 0, textEncoder: 0 });
 });
 
+test("proof-bound persistence renews an expired lease only for its exact writer fence", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_700_500, 1, "expired-owned-fence");
+  await seedPrimary(page, primary);
+  const result = await page.evaluate(async () => {
+    const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
+    const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
+    const storage: any = await import(/* @vite-ignore */ "/src/game/storage.ts");
+    const store: any = await import(/* @vite-ignore */ "/src/game/localSaveStore.ts");
+    const coordination: any = await import(/* @vite-ignore */ "/src/game/localSaveCoordination.ts");
+    await store.initializeLocalSaveStore();
+    const writer = store.getLocalSaveWriterStatus();
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction("records", "readwrite");
+      const objectStore = transaction.objectStore("records");
+      const request = objectStore.get(coordination.LOCAL_SAVE_WRITER_LEASE_KEY);
+      request.onsuccess = () => {
+        const lease = JSON.parse(request.result.value);
+        if (lease.ownerId !== writer.writerId || lease.fencingToken !== writer.fencingToken) {
+          throw new Error("test no longer owns the durable writer fence");
+        }
+        const expired = JSON.stringify({ ...lease, heartbeatAt: Date.now() - 30_000, expiresAt: Date.now() - 1 });
+        objectStore.put({ ...request.result, value: expired, updatedAt: Date.now(), bytes: expired.length });
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    db.close();
+
+    const state = engine.createInitialState();
+    state.elapsedSeconds = 2;
+    const transfer = protocol.serializeSimulationStateForTransfer(state);
+    const saved = await storage.saveGameVerified(state, transfer);
+    return {
+      saved,
+      conflicts: (await store.getLocalSaveConflicts()).length,
+      writer: store.getLocalSaveWriterStatus(),
+      revision: store.getPrimaryLocalSaveRevision("normal"),
+    };
+  });
+  expect(result.saved).toMatchObject({ success: true });
+  expect(result.conflicts).toBe(0);
+  expect(result.writer).toMatchObject({ role: "primary" });
+  expect(result.revision).toBe(2);
+});
+
+test("a later same-page legacy primary rebases behind an admitted proof commit without a false conflict", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_700_750, 1, "same-page-proof-base");
+  await seedPrimary(page, primary);
+  const result = await page.evaluate(async () => {
+    const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
+    const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
+    const serializer: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveSerializationClient.ts");
+    const storage: any = await import(/* @vite-ignore */ "/src/game/storage.ts");
+    const store: any = await import(/* @vite-ignore */ "/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+
+    let proofState = engine.createInitialState();
+    proofState.construction.storage_mk1 = 1;
+    proofState = engine.placeBuilding(proofState, "storage_mk1", { x: 0, y: 0 });
+    const template = proofState.entities.at(-1)!;
+    const entities = proofState.entities.slice(0, -1);
+    for (let index = 0; index < 40_000; index += 1) {
+      entities.push({
+        ...template,
+        id: `same_page_proof_${index}`,
+        position: { x: index % 1_000, y: Math.floor(index / 1_000) },
+      });
+    }
+    proofState.entities = entities;
+    proofState.elapsedSeconds = 2;
+    const transfer = protocol.serializeSimulationStateForTransfer(proofState);
+    const serialized = await serializer.serializeAuthoritativeSaveStateTransferInWorker(transfer, { savedAt: Date.now() });
+    const writer = store.getLocalSaveWriterStatus();
+    const proofCommit = store.setLocalSavePayloadWithProof({
+      key: "dsp-idle-network.save.v1",
+      bytes: serialized.bytes,
+      proof: serialized.proof,
+      seed: serialized.catalogSeed,
+      expectedRevision: store.getPrimaryLocalSaveRevision("normal"),
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+    });
+    // Let the proof queue take admission, then enqueue the later lifecycle
+    // candidate in the same page while the large payload is still in flight.
+    await Promise.resolve();
+    await Promise.resolve();
+    const laterState = engine.createInitialState();
+    laterState.elapsedSeconds = 3;
+    const laterRaw = storage.serializeEnvelope(laterState, Date.now() + 1);
+    store.setLocalSaveValue("dsp-idle-network.save.v1", laterRaw);
+    const proof = await proofCommit;
+    let flushError: string | null = null;
+    try {
+      await store.flushLocalSaveWrites();
+    } catch (error) {
+      flushError = error instanceof Error ? error.name : "unknown";
+    }
+    const persisted = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    return {
+      proof,
+      flushError,
+      laterWins: persisted === laterRaw,
+      persistedElapsedSeconds: persisted ? JSON.parse(persisted).state.elapsedSeconds : null,
+      conflicts: (await store.getLocalSaveConflicts()).length,
+      writer: store.getLocalSaveWriterStatus(),
+      revision: store.getPrimaryLocalSaveRevision("normal"),
+    };
+  });
+  expect(result.proof.result).toMatchObject({ ok: true });
+  expect(result.flushError).toBeNull();
+  expect(result.laterWins).toBe(true);
+  expect(result.persistedElapsedSeconds).toBe(3);
+  expect(result.conflicts).toBe(0);
+  expect(result.writer).toMatchObject({ role: "primary" });
+  expect(result.revision).toBe(3);
+});
+
 test("proof-bound persistence rejects cross-seed and stale-fence writes without changing primary", async ({ page }) => {
   await openBarePage(page);
   const primary = primaryFixture(1_786_377_701_000, 1, "cross-seed");

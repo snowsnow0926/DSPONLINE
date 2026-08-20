@@ -256,6 +256,42 @@ test("v47 station validation and public projection enforce four ports and a stri
     rewards: { baseMarks: "1", baseReputation: "1", completionMarks: "1", completionReputation: "1" },
   }];
   assert.equal(validateOrbitalStationGameState(multiOriginTemplate), true);
+  const legacySettledReoffer = structuredClone(multiOriginTemplate);
+  const reoffer = legacySettledReoffer.orbitalStation.contractBoard.offers[0];
+  const settled = structuredClone(reoffer);
+  settled.status = "settled";
+  settled.requirements.forEach((requirement) => { requirement.delivered = requirement.amount; });
+  settled.settlementId = `station-settlement:${settled.id}:completed`;
+  settled.settlementReason = "completed";
+  settled.settledAtTaskDay = settled.taskDay;
+  settled.completionBasisPoints = 10_000;
+  legacySettledReoffer.orbitalStation.contractBoard.history = [settled];
+  legacySettledReoffer.orbitalStation.contractBoard.settledIds = [settled.id];
+  assert.equal(validateOrbitalStationGameState(legacySettledReoffer), true);
+  const legacyPayload = createPayload(legacySettledReoffer);
+  const legacyInspection = inspectDecodedCloudSaveUpload(Buffer.from(legacyPayload), {
+    direct: true,
+    expectedRevision: 0,
+    requestId: null,
+    declaredOriginalBytes: Buffer.byteLength(legacyPayload),
+    payloadLimit: 5_000_000,
+  });
+  assert.equal(legacyInspection.validPayload, true);
+
+  const missingSettlementFence = structuredClone(legacySettledReoffer);
+  missingSettlementFence.orbitalStation.contractBoard.settledIds = [];
+  assert.equal(validateOrbitalStationGameState(missingSettlementFence), false);
+  const forgedSettledReoffer = structuredClone(legacySettledReoffer);
+  forgedSettledReoffer.orbitalStation.contractBoard.offers[0].rewards.baseMarks = "2";
+  assert.equal(validateOrbitalStationGameState(forgedSettledReoffer), false);
+  const acceptedHistoryCollision = structuredClone(legacySettledReoffer);
+  acceptedHistoryCollision.orbitalStation.contractBoard.offers = [];
+  acceptedHistoryCollision.orbitalStation.contractBoard.accepted = [{
+    ...structuredClone(reoffer),
+    status: "accepted",
+    acceptedAtTaskDay: reoffer.taskDay,
+  }];
+  assert.equal(validateOrbitalStationGameState(acceptedHistoryCollision), false);
   const forgedAchievement = structuredClone(state);
   forgedAchievement.orbitalStation.layout.featuredAchievementIds = ["six_matrix_mastery"];
   assert.equal(validateOrbitalStationGameState(forgedAchievement), false);

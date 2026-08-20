@@ -4,8 +4,8 @@ import {
   localSaveRevisionKey,
   parseLocalSaveRevision,
   parseLocalSaveWriterLease,
-  LOCAL_SAVE_LEASE_DURATION_MS,
   LOCAL_SAVE_WRITER_LEASE_KEY,
+  renewOwnedLocalSaveWriterLease,
   type LocalSaveRevision,
   type LocalSaveWriterLease,
 } from "./localSaveCoordination";
@@ -284,14 +284,6 @@ function failureReasonForError(error: unknown): AuthoritativeSavePersistenceFail
   return error instanceof DOMException && error.name === "AbortError" ? "transaction-aborted" : "storage-unavailable";
 }
 
-function leaseMatches(lease: LocalSaveWriterLease | null, fence: AuthoritativeSaveWriterFence, now: number): boolean {
-  return Boolean(lease && lease.ownerId === fence.ownerId && lease.fencingToken === fence.fencingToken && lease.expiresAt > now);
-}
-
-function renewedLease(lease: LocalSaveWriterLease, now: number): LocalSaveWriterLease {
-  return { ...lease, heartbeatAt: now, expiresAt: now + LOCAL_SAVE_LEASE_DURATION_MS };
-}
-
 function revisionRaw(
   key: string,
   revision: number,
@@ -409,7 +401,13 @@ async function writeBackupBestEffort(
     ]);
     const lease = parseLocalSaveWriterLease(typeof leaseRecord?.value === "string" ? leaseRecord.value : null);
     const parsedBackupRevision = parseLocalSaveRevision(typeof backupRevisionRecord?.value === "string" ? backupRevisionRecord.value : null);
-    if (!leaseMatches(lease, primary.fence, now) || currentPrimary?.value !== primary.raw ||
+    const renewedLease = renewOwnedLocalSaveWriterLease(
+      lease,
+      primary.fence.ownerId,
+      primary.fence.fencingToken,
+      now,
+    );
+    if (!renewedLease || currentPrimary?.value !== primary.raw ||
       currentCatalog?.value !== primary.catalogRaw || currentRevision?.value !== primary.revisionRaw ||
       existingBackup !== undefined && parsedBackupRevision === null) {
       await abortTransaction(transaction, done);
@@ -432,7 +430,7 @@ async function writeBackupBestEffort(
       primary.fence,
       now,
     );
-    store.put(storedRecord(LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify(renewedLease(lease!, now)), { updatedAt: now }));
+    store.put(storedRecord(LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify(renewedLease), { updatedAt: now }));
     store.put(storedRecord(backupKey, previous.raw, { byteLength: previous.byteLength, updatedAt: now }));
     store.put(storedRecord(localSaveCatalogRecordKey(backupKey), catalogRaw, { updatedAt: now }));
     store.put(storedRecord(localSaveRevisionKey(backupKey), nextRevisionRaw, { updatedAt: now }));
@@ -517,7 +515,13 @@ async function commitPayload(
       requestResult(store.get(localSaveCatalogRecordKey(request.key)) as IDBRequest<StoredRecord | undefined>),
     ]);
     const lease = parseLocalSaveWriterLease(typeof leaseRecord?.value === "string" ? leaseRecord.value : null);
-    if (!leaseMatches(lease, request.fence, now)) {
+    const nextLease = renewOwnedLocalSaveWriterLease(
+      lease,
+      request.fence.ownerId,
+      request.fence.fencingToken,
+      now,
+    );
+    if (!nextLease) {
       await abortTransaction(transaction, done);
       return failure("lease-lost", "authoritative save writer lease 已失效");
     }
@@ -557,7 +561,7 @@ async function commitPayload(
       request.fence,
       now,
     );
-    const nextLeaseRaw = JSON.stringify(renewedLease(lease!, now));
+    const nextLeaseRaw = JSON.stringify(nextLease);
     store.put(storedRecord(LOCAL_SAVE_WRITER_LEASE_KEY, nextLeaseRaw, { updatedAt: now }));
     store.put(storedRecord(request.key, raw, { byteLength: request.proof.byteLength, updatedAt: now }));
     store.put(storedRecord(localSaveCatalogRecordKey(request.key), catalogRaw, { updatedAt: now }));

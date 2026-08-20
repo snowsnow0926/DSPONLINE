@@ -1767,6 +1767,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const runtimePrimaryPersistenceLifecycleRef = useRef<RuntimePrimaryPersistenceLifecycle | null>(null);
   if (!runtimePrimaryPersistenceLifecycleRef.current) runtimePrimaryPersistenceLifecycleRef.current = new RuntimePrimaryPersistenceLifecycle();
   const runtimePrimaryPersistenceLifecycle = runtimePrimaryPersistenceLifecycleRef.current;
+  const lifecycleSaveEffectGenerationRef = useRef(0);
   const requestAuthoritativeSimulationCheckpointRef = useRef<() => Promise<GameState>>(() => Promise.resolve(loaded.state));
   const persistDurablePrimaryCheckpointRef = useRef<((requestedState: GameState | undefined, kind: RuntimePersistenceKind) => Promise<SaveGameResult>)>(() => Promise.resolve({ success: false, message: "未就绪", code: "unavailable" }));
   const latestAuthoritativeCheckpointRef = useRef<GameState>(loaded.state);
@@ -3581,7 +3582,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPrimarySaveOnce = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
+    options: { quiet?: boolean } = {},
   ): Promise<SaveGameResult> => {
+    const quiet = options.quiet === true;
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
     }
@@ -3595,7 +3598,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     runtimePersistenceProgressIdRef.current = progressId;
     if (kind === "autosave") beginRuntimeTransition("autosave");
     else if (kind === "pure-idle-stop") beginRuntimeTransition("pure-idle-stop");
-    setRuntimePersistenceProgress({ id: progressId, kind, phase: "checkpoint", startedAt, message: "正在取得模拟检查点…" });
+    if (!quiet) setRuntimePersistenceProgress({ id: progressId, kind, phase: "checkpoint", startedAt, message: "正在取得模拟检查点…" });
     recordRuntimeTransitionPhase("persistence-phase", startedAt, 0, { kind, phase: "checkpoint" });
     const ownsBarrier = state === undefined;
     if (ownsBarrier) {
@@ -3640,7 +3643,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
       }
       recordRuntimeTransitionPhase("save-authoritative-checkpoint", startedAt, performance.now() - startedAt, { kind });
-      setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在序列化、写入并逐字复核存档…" });
+      if (!quiet) setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在序列化、写入并逐字复核存档…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
       let result = preparedCheckpoint
         ? await saveGameVerifiedFromPreparedPayload(preparedCheckpoint.prepared, {
@@ -3674,33 +3677,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         automaticSnapshotMs: result.timings?.automaticSnapshotMs ?? 0,
       });
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
-      setSaveFailure(result.success ? null : result);
-      setRuntimePersistenceProgress({
-        id: progressId,
-        kind,
-        phase: result.success ? "complete" : "failed",
-        startedAt,
-        message: result.success ? `存档已验证完成（${Math.round(durationMs)} ms）` : result.message,
-      });
+      if (!quiet) setSaveFailure(result.success ? null : result);
+      if (!quiet) {
+        setRuntimePersistenceProgress({
+          id: progressId,
+          kind,
+          phase: result.success ? "complete" : "failed",
+          startedAt,
+          message: result.success ? `存档已验证完成（${Math.round(durationMs)} ms）` : result.message,
+        });
+      }
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: result.success ? "complete" : "failed" });
-      if (result.success && result.bytes !== undefined) setPersistedPrimaryBytes(result.bytes);
+      if (!quiet && result.success && result.bytes !== undefined) setPersistedPrimaryBytes(result.bytes);
       if (kind === "autosave") completeRuntimeTransition("autosave", result.success ? "save-complete" : "save-failed", { durationMs });
       else if (kind === "pure-idle-stop") completeRuntimeTransition("pure-idle-stop", result.success ? "save-complete" : "save-failed", { durationMs });
-      window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), result.success ? 2_000 : 8_000);
+      if (!quiet) window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), result.success ? 2_000 : 8_000);
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "存档流程失败";
-      setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message });
+      if (!quiet) setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed" });
       if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
       else if (kind === "pure-idle-stop") completeRuntimeTransition("pure-idle-stop", "save-failed");
-      window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+      if (!quiet) window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
       const failure: SaveGameResult = {
         success: false,
         message,
         code: "unavailable",
       };
-      setSaveFailure(failure);
+      if (!quiet) setSaveFailure(failure);
       return failure;
     } finally {
       verifiedPrimarySaveInFlightDepthRef.current = Math.max(0, verifiedPrimarySaveInFlightDepthRef.current - 1);
@@ -3716,8 +3721,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPrimarySave = useCallback((
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
+    options: { quiet?: boolean } = {},
   ): Promise<SaveGameResult> => runtimePrimaryPersistenceLifecycle.enqueue(
-    () => persistPrimarySaveOnce(state, kind),
+    () => persistPrimarySaveOnce(state, kind, options),
   ), [persistPrimarySaveOnce, runtimePrimaryPersistenceLifecycle]);
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
@@ -6321,6 +6327,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [abortPureIdleForWorkerFailure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
   useEffect(() => {
+    const effectGeneration = lifecycleSaveEffectGenerationRef.current + 1;
+    lifecycleSaveEffectGenerationRef.current = effectGeneration;
     const timer = largeSaveAutosavePolicy.effectiveIntervalSeconds > 0
       ? window.setInterval(() => {
         // Pure idle owns an independently fenced checkpoint and heartbeat.
@@ -6383,18 +6391,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       window.removeEventListener("pageshow", restoreFromBfcache);
       document.removeEventListener("visibilitychange", saveWhenHidden);
       window.removeEventListener(NATIVE_APP_STATE_EVENT, saveWhenNativeInactive);
-      // Dependency changes and in-app unmounts still save. During a real page
-      // exit the lifecycle handler already wrote the one authoritative
-      // emergency candidate, so a second, newer cleanup save must not leave
-      // that mirror stale and manufacture a conflict on reload.
-      const controlledCommit = controlledReturnCommitRef.current;
-      if (!lifecycleSaveStarted && !lifecycleExitStartedRef.current && durableRecoveryLifecycleRef.current !== "active" &&
-        (!controlledCommit || !isCurrentPrimarySaveSource(controlledCommit))) {
-        const cleanupState = durableSimulationRuntimeEnabled
-          ? latestAuthoritativeCheckpointRef.current
-          : gameRef.current;
-        saveGame(stateWithSimulationDebt(cleanupState));
-      }
+      // Dependency changes and in-app unmounts still save through the same
+      // primary lifecycle as manual/autosave intents. Never inject the legacy
+      // synchronous writer while a pure-idle journal owns the timeline: that
+      // used to race a large terminal save and manufacture a same-tab conflict.
+      // During a real page exit the lifecycle handler already wrote the one
+      // authoritative emergency candidate.
+      // React runs cleanup before a replacement effect (and twice under
+      // development StrictMode). Defer one microtask so a replacement setup
+      // can advance the generation and cancel this non-unmount cleanup. Only
+      // a real in-app unmount reaches the ordered, presentation-free save.
+      queueMicrotask(() => {
+        if (lifecycleSaveEffectGenerationRef.current !== effectGeneration) return;
+        const controlledCommit = controlledReturnCommitRef.current;
+        if (!lifecycleSaveStarted && !lifecycleExitStartedRef.current && !pureIdleMacroActiveRef.current &&
+          durableRecoveryLifecycleRef.current !== "active" &&
+          (!controlledCommit || !isCurrentPrimarySaveSource(controlledCommit))) {
+          const cleanupState = durableSimulationRuntimeEnabled
+            ? latestAuthoritativeCheckpointRef.current
+            : gameRef.current;
+          // Cleanup still shares the ordered proof/CAS lifecycle, but it must
+          // not replace an unrelated player-command status with save progress.
+          void persistPrimarySave(stateWithSimulationDebt(cleanupState), "lifecycle", { quiet: true });
+        }
+      });
     };
   }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.effectiveIntervalSeconds, isCurrentPrimarySaveSource, persistPrimarySave, stateWithSimulationDebt]);
 

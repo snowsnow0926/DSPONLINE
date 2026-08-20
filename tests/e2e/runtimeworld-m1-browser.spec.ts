@@ -104,7 +104,7 @@ test.describe("RuntimeWorld M-1 production browser baseline", () => {
         active: {},
         counters: {},
       };
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.0");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1");
       localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");

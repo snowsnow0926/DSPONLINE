@@ -1,39 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { CURRENT_RELEASE_NOTES, RELEASE_NOTES_HISTORY, getReleaseNotesPage, getReleaseNotesPageCount, getReleaseNotesPageForRelease } from "./ReleaseNotesDialog";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 
 describe("release notes history", () => {
   it("keeps the newest release first and exposes bounded pages", () => {
     expect(RELEASE_NOTES_HISTORY[0].id).toBe(CURRENT_RELEASE_NOTES.id);
-    expect(RELEASE_NOTES_HISTORY[0].version).toBe("1.1.0");
-    expect(RELEASE_NOTES_HISTORY.slice(1).map((entry) => Number(entry.version.split(".")[2]))).toEqual(Array.from({ length: 48 }, (_, index) => 47 - index));
+    expect(RELEASE_NOTES_HISTORY[0].version).toBe("1.1.1");
+    expect(RELEASE_NOTES_HISTORY[1].version).toBe("1.1.0");
+    expect(RELEASE_NOTES_HISTORY.slice(2).map((entry) => Number(entry.version.split(".")[2]))).toEqual(Array.from({ length: 48 }, (_, index) => 47 - index));
     expect(getReleaseNotesPage(0)).toHaveLength(3);
     expect(getReleaseNotesPage(1)).toHaveLength(3);
     expect(getReleaseNotesPage(99)).toEqual([]);
   });
 
   it("supports a small fixed page size without rendering the complete history", () => {
-    expect(getReleaseNotesPage(0, 3).map((entry) => entry.version)).toEqual(["1.1.0", "1.0.47", "1.0.46"]);
-    expect(getReleaseNotesPage(18, 2).map((entry) => entry.version)).toEqual(["1.0.12", "1.0.11"]);
-    expect(getReleaseNotesPage(19, 2).map((entry) => entry.version)).toEqual(["1.0.10", "1.0.9"]);
-    expect(getReleaseNotesPage(20, 2).map((entry) => entry.version)).toEqual(["1.0.8", "1.0.7"]);
-    expect(getReleaseNotesPage(21, 2).map((entry) => entry.version)).toEqual(["1.0.6", "1.0.5"]);
+    expect(getReleaseNotesPage(0, 3).map((entry) => entry.version)).toEqual(["1.1.1", "1.1.0", "1.0.47"]);
+    expect(getReleaseNotesPage(18, 2).map((entry) => entry.version)).toEqual(["1.0.13", "1.0.12"]);
+    expect(getReleaseNotesPage(19, 2).map((entry) => entry.version)).toEqual(["1.0.11", "1.0.10"]);
+    expect(getReleaseNotesPage(20, 2).map((entry) => entry.version)).toEqual(["1.0.9", "1.0.8"]);
+    expect(getReleaseNotesPage(21, 2).map((entry) => entry.version)).toEqual(["1.0.7", "1.0.6"]);
   });
 
   it("maps direct page jumps and historical details to the same page", () => {
     expect(getReleaseNotesPageCount()).toBe(17);
-    expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.43")).toBe(1);
+    expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.43")).toBe(2);
     expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.42")).toBe(2);
     expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.41")).toBe(2);
-    expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.40")).toBe(2);
+    expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.40")).toBe(3);
     expect(getReleaseNotesPageForRelease("2026-08-11-v1.0.39")).toBe(3);
     expect(getReleaseNotesPageForRelease("2026-08-11-v1.0.38")).toBe(3);
-    expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.37")).toBe(3);
+    expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.37")).toBe(4);
     expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.36")).toBe(4);
     expect(getReleaseNotesPageForRelease("2026-08-09-v1.0.35")).toBe(4);
     expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.33")).toBe(5);
     expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.32")).toBe(5);
-    expect(getReleaseNotesPageForRelease("2026-08-06-v1.0.31")).toBe(5);
+    expect(getReleaseNotesPageForRelease("2026-08-06-v1.0.31")).toBe(6);
     expect(getReleaseNotesPageForRelease("2026-08-03-v1.0.24")).toBe(8);
     expect(getReleaseNotesPageForRelease("missing-release")).toBeNull();
   });
@@ -41,16 +42,18 @@ describe("release notes history", () => {
   it("serves the current release from stable locale keys", () => {
     const chinese = getCurrentReleaseNotes("zh-CN");
     const english = getCurrentReleaseNotes("en");
-    expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.0" });
-    expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.0" });
+    expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.1" });
+    expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.1" });
     expect(chinese.items).toHaveLength(5);
     expect(chinese.items.map((item) => item.id)).toEqual(expect.arrayContaining([
-      "runtimeworld-compiled-domains",
-      "runtimeworld-determinism",
-      "runtimeworld-authoritative-save",
+      "station-contract-reoffer",
+      "legacy-cloud-save-repair",
+      "legacy-cloud-server-compatibility",
+      "same-page-save-coordination",
     ]));
     expect(english.items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));
     expect(english.summary).toContain("GameState v47");
+    expect(getReleaseNotes1100("en")).toMatchObject({ id: "2026-08-20-v1.1.0", version: "1.1.0" });
     expect(getReleaseNotes1047("en")).toMatchObject({ id: "2026-08-20-v1.0.47", version: "1.0.47" });
     expect(getReleaseNotes1046("en")).toMatchObject({ id: "2026-08-17-v1.0.46", version: "1.0.46" });
     expect(getReleaseNotes1044("en")).toMatchObject({ id: "2026-08-15-v1.0.44", version: "1.0.44" });

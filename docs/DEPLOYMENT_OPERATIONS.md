@@ -15,6 +15,8 @@
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
 
+> 当前生产状态（1.1.1，2026-08-20）：香港、上海 Web/API、上海下载页与 Android/Windows stable 均为 `1.1.1-da53958b860c` / `1.1.1+da53958b860c`。香港 generation 28（blue/4321）、上海 generation 15（green/4322），两地直接代码 previous 均为 `1.1.0-9b2c579cbe0d`；上海下载页直接回滚为 1.1.0，香港 `/canary/previous/` 继续固定 1.0.47。数据库保持 schema v8 / SQLite layout v3；本版没有恢复或跨节点复制数据库。完整发布、异常恢复、备份、原生和公网证据见 [releases/1.1.1.md](./releases/1.1.1.md)。
+
 > 当前生产状态（2026-08-15）：香港 Web generation 13 current 为 `web-1.0.43-fceca3eda51c`、Build ID `1.0.43+fceca3eda51c`，直接 previous 为 `web-1.0.42-c24e6247d257`；香港 API、上海 Web/API、上海下载页和 Android/Windows stable 均保持 1.0.42。发布代理继续 forward 到 `api-1.0.42-c24e6247d257`，活动 API `NRestarts=0`，pending switch 为空。两地数据库继续独立使用 schema v7 / SQLite layout v2；本次 Web-only 发布没有 API/数据库/上海/下载/原生写入。香港 `/canary/previous/` 继续 302 到不可变 `/canary/1.0.37-853ecdb12795/`。完整 1.0.43 切换、两次安全回滚、真实附件与观察证据见 [releases/1.0.43.md](./releases/1.0.43.md)；1.0.42 双节点/原生/下载历史见 [releases/1.0.42.md](./releases/1.0.42.md)。
 
 > 当前生产状态（1.0.44）：香港 Web/API、上海 Web/API、上海下载页与 Windows/Android stable 均已切换至 1.0.44。香港 switch-state generation 14：current Web `web-1.0.44-3e580c715a5a`、API `api-1.0.44-3e580c715a5a`，slot green / 4322，previous Web `web-1.0.43-fceca3eda51c`、previous API `api-1.0.42-c24e6247d257`；上海 switch-state generation 5：current Web/API `1.0.44`，slot blue / 4321。上海下载页 `current` = `download-site-1.0.44-3e580c715a5a`（回滚目标 `download-site-1.0.42-c24e6247d257`）；Android stable `1.0.44 / 1000044`、Windows stable setup `1.0.44`。两地发布代理分别 forward 到 `api-1.0.44-3e580c715a5a`，活动 API `NRestarts=0`，pending switch 为空；数据库继续独立使用 schema v7 / SQLite layout v2，本版为代码级稳定发布，无 schema/layout 迁移、恢复或数据写入。下载节点仍为上海（`download.dsponline.cn` → `111.229.128.211`）。**香港上一稳定版回退入口 `/canary/previous/` 已于 1.0.44 观察通过后更新为 302 → `/canary/1.0.43-fceca3eda51c/`**（活动 snippet 新 hash `822389023b94546ca0709afbf959aa8ab606a4545b0311fd48c7171d92efbbab`，回滚副本 `dsp-idle-app.conf.pre-previous-fallback-1.0.43-20260816T175329Z` 原 hash `b230cdf74bc067999e65d33347ab3ed8b860f9506641ca14b70cc2d45bc75cdc`）；`/canary/1.0.37-853ecdb12795/` 保留为历史兼容入口。完整证据见 [releases/1.0.44.md](./releases/1.0.44.md)。
@@ -185,7 +187,7 @@ Get-FileHash release/download-site-<build-id>/downloads/desktop/stable/*.exe -Al
 
 前端回滚只需把 `current` 切回上一发布目录，不触碰数据库。
 
-仓库提供 `deploy/switch-release.sh` 切换前端与后端代码并保存上一次代码指向。1.0.40 候选增加稳定交接代理：Nginx 固定指向 `127.0.0.1:4330`；代理先让已有上传和导出完成并排队新写请求，再短暂排队全部请求。旧写实例释放共享 `flock` 后，新实例才可在 4321/4322 之一接触生产 SQLite。候选预热只允许使用已经验证的发布前备份克隆，不允许两个写实例同时打开生产库。正式安装时须把控制文件放入不可变 `/usr/local/lib/dsp-idle-release/<build-id>/`，再原子更新 `/usr/local/lib/dsp-idle-release/current`，不得覆盖正在运行的控制文件。
+仓库提供 `deploy/switch-release.sh` 切换前端与后端代码并保存上一次代码指向。1.0.40 候选增加稳定交接代理：Nginx 固定指向 `127.0.0.1:4330`；代理先让已有上传和导出完成并排队新写请求，再短暂排队全部请求。旧写实例释放共享 `flock` 后，新实例才可在 4321/4322 之一接触生产 SQLite。候选预热只允许使用已经验证的发布前备份克隆，不允许两个写实例同时打开生产库。正式安装时须把控制文件放入不可变 `/usr/local/lib/dsp-idle-release/<build-id>/`，再原子更新 `/usr/local/lib/dsp-idle-release/current`，不得覆盖正在运行的控制文件。复制控制文件后必须先逐字复核 manifest/SHA，再把 `api-active-entry.sh`、`api-writer-lock.sh` 和 `switch-release.sh` 以安装元数据设为 `0755`；在 `current` 更新前必须以 `test -x` 验证。仅有正确正文但缺少执行位会令 systemd 以 `203/EXEC` 失败，绝不能通过重试或放宽健康门禁掩盖。
 
 API 切换必须提供与不可变 SQLite Backup API 快照绑定的证据。证据锁定绝对路径、大小、mtime、dev/inode、SHA-256、`quick_check`、schema 和 SQLite layout；切换关键路径只复核身份和元数据，避免重新顺序读取多 GiB 快照。快照创建和独立预置副本生成时完成完整 SHA-256。`--dry-run` 执行同样的证据与目标校验，但不启动服务、不 reload Nginx、不改软链。节点级非密钥配置从 `deploy/dsp-idle-runtime.env.example` 安装到 `/etc/dsp-idle-cloud/runtime.env`；真实凭据仍只放 `admin.env`。
 

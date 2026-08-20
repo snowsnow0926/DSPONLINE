@@ -1646,6 +1646,8 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
   await expect(releaseHistory).toBeVisible();
+  await expect(releaseHistory.getByRole("button", { name: /1\.0\.47 · 经典卡片与画布连线显示修复/ })).toBeVisible();
+  await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseHistory.getByRole("button", { name: /1\.0\.42 · 界面适配、存档恢复与规则更新/ }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "界面适配、存档恢复与规则更新");

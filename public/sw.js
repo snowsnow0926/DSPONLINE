@@ -82,6 +82,14 @@ function isHashedShellAsset(pathname) {
   return /-[A-Za-z0-9_-]{6,}\.[A-Za-z0-9]+$/.test(fileName);
 }
 
+function resolveShellAssetUrl(reference, ownerUrl) {
+  const normalized = String(reference).trim();
+  if (normalized.startsWith("assets/")) {
+    return new URL(normalized, new URL(ROUTE_BASE, self.location.origin));
+  }
+  return new URL(normalized, ownerUrl);
+}
+
 function discoverShellAssetUrls(source, ownerUrl) {
   const references = new Set();
   const patterns = [
@@ -94,7 +102,7 @@ function discoverShellAssetUrls(source, ownerUrl) {
     let match = null;
     while ((match = pattern.exec(source))) {
       try {
-        const url = new URL(match[1], ownerUrl);
+        const url = resolveShellAssetUrl(match[1], ownerUrl);
         if (
           url.origin === self.location.origin
           && requestBelongsToRoute(url.pathname)

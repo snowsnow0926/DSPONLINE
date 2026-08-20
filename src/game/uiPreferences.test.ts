@@ -84,7 +84,7 @@ describe("device-only UI preferences", () => {
       writeConnectExpandAllPreference(true);
       writeFullRealtimeSimulationPreference(true);
       writeFactoryAlertsPreference(false);
-      writeCanvasDetailPreference("medium");
+      writeCanvasDetailPreference("classic");
       writeCanvasOverlapPreference("representative");
       writeCanvasInteractionDetailPreference("hover");
       writeBlueprintAllowOverlapPreference(true);
@@ -103,12 +103,12 @@ describe("device-only UI preferences", () => {
       expect(storage.getItem(CONNECT_EXPAND_ALL_PREFERENCE_KEY)).toBe("true");
       expect(storage.getItem(FULL_REALTIME_SIMULATION_PREFERENCE_KEY)).toBe("true");
       expect(storage.getItem(FACTORY_ALERTS_PREFERENCE_KEY)).toBe("false");
-      expect(readCanvasDetailPreference()).toBe("medium");
+      expect(readCanvasDetailPreference()).toBe("classic");
       expect(readCanvasOverlapPreference()).toBe("representative");
       expect(readCanvasInteractionDetailPreference()).toBe("hover");
       expect(readBlueprintAllowOverlapPreference()).toBe(true);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(false);
-      expect(storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY)).toBe("medium");
+      expect(storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY)).toBe("classic");
       expect(storage.getItem(CANVAS_OVERLAP_PREFERENCE_KEY)).toBe("representative");
       expect(storage.getItem(CANVAS_INTERACTION_DETAIL_PREFERENCE_KEY)).toBe("hover");
       expect(storage.getItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY)).toBe("true");

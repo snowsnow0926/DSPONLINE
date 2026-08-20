@@ -10,15 +10,24 @@ All notable player-facing changes are recorded here. Game-state migration versio
 - 非拓扑命令复用稳定 slot/generation 与领域 revision；Projection 和画布外层节点只发布实际变化的数据，保留旧引擎领域级 fallback 与诊断原因。
 - 模拟 Worker 在权威状态旁准备 canonical 主档/快照，持久化 Worker 独立执行 checksum、CAS、事务提交和精确读回；所有 primary 保存意图共用串行生命周期。
 - 两份只读真实大档的 60 秒精确模拟与逐秒 P95 均较冻结基线下降超过 40%，存档格式、物资守恒和确定性输出不变。
+- 以已正式发布的 1.0.47（`aab581cf0c78`）为兼容基线：基础卡片新增 1.0.43 风格的“经典”`224×76` 选项；Canvas 传送带在拖动及节点几何重绘后继续使用实时 viewport；连线草稿期间建筑不再受旧任务、生产链、网络或寻线聚焦影响而半透明。
+- 继承线上 PWA 子资源解析热修：生成代码中的 `assets/...` 引用始终从当前 release root 解析，根部署与不可变 canary 路由都不会请求错误的 `assets/assets/...` 路径。
 - 更新 Android 版本为 `1.1.0 / 1001000`；仅生成未签名诊断候选，不执行线上发布。
 
-### 1.0.46（历史候选，未发布）
+### 1.0.47（已发布，2026-08-20）
+
+- “基础卡片”新增位于“中等”和“一行”之前的“经典”选项，恢复 1.0.43 的 `224×76` 紧凑卡片结构；该选择仍仅保存在当前设备。
+- 修复高密度工厂拖动画布后，批量 Canvas 传送带被陈旧 viewport 覆盖并与建筑错位的问题。
+- 修复任务、生产链、网络或寻线聚焦开启时，开始连线会让非起点建筑偶发半透明的问题；连线结束后原聚焦效果恢复。
+- Runtime Git SHA `aab581cf0c78e480e1d10fe4c7f91e6d6d9311b7`；GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3、IndexedDB records 和玩法数值均不变。
+
+### 1.0.46（已发布，2026-08-19）
 
 - 修复 durable finalize/Worker 故障后只能刷新恢复的问题：当前页面会从 T0 recovery 精确回放、验证 T1 并原子重建模拟 Worker，暂停后可继续模拟。
 - 修复新 Worker 沿用旧 `disabled` 标志导致的“durable 模拟 Worker 不可用”假失败。
 - 默认保存保护模式下 revision 与 recovery head 的竞态改为安全重查，不再以截图中的阻断错误卡住会话。
 - 保存期间允许继续操作（实验性）开启时，已接受编辑会在 recovery head 重建前一起保留；纯挂机恢复日志、宏观进度和导出保护不变。
-- 更新 Android 版本为 `1.0.46 / 1000046`；不执行线上发布。
+- Android 版本为 `1.0.46 / 1000046`；后续 PWA release-root 热修已包含在 1.0.47 线上基线中。
 
 ### 1.0.45（历史候选）
 

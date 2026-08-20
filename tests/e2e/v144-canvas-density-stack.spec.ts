@@ -290,6 +290,59 @@ test("minimal detail keeps one-line card and React Flow wrapper geometry at 96x3
   });
 });
 
+test("classic detail restores the 1.0.43 compact card and wrapper geometry", async ({ page }) => {
+  await seedCanvas(page, { count: 3, detail: "classic", overlap: "all", interactionDetail: "base", spacingX: 340, zoom: 1 });
+  const shell = page.locator(".game-shell");
+  await expect(shell).toHaveAttribute("data-canvas-detail-preference", "classic");
+  await expect(shell).toHaveAttribute("data-canvas-detail-stage", "compact");
+  await expect(shell).toHaveAttribute("data-canvas-compact-card-style", "classic");
+  const classic = page.locator('.react-flow__node[data-id="anonymous-node-0"] .factory-node-lod--compact[data-compact-card-style="classic"]');
+  await expect(classic).toBeVisible();
+  await expect(classic.locator(".factory-node__header")).toContainText("小型储物仓");
+  await expect(classic.locator(".factory-node-lod__summary")).toHaveCount(0);
+  await expect(page.locator('.react-flow__node[data-id="anonymous-node-0"] .factory-node-compact')).toHaveCount(0);
+  await expect.poll(() => classic.evaluate((element) => {
+    const wrapper = element.closest<HTMLElement>(".react-flow__node");
+    if (!wrapper) return null;
+    const style = getComputedStyle(element);
+    const viewport = document.querySelector<HTMLElement>(".react-flow__viewport");
+    const zoom = viewport ? new DOMMatrixReadOnly(getComputedStyle(viewport).transform).a : 1;
+    const card = element.getBoundingClientRect();
+    const node = wrapper.getBoundingClientRect();
+    const round = (value: number) => Math.round(value * 10) / 10;
+    return {
+      cssWidth: style.width,
+      cssMinHeight: style.minHeight,
+      cardWidth: round(card.width / zoom),
+      cardHeight: round(card.height / zoom),
+      wrapperWidth: round(node.width / zoom),
+      wrapperHeight: round(node.height / zoom),
+    };
+  })).toEqual({
+    cssWidth: "224px",
+    cssMinHeight: "68px",
+    cardWidth: 224,
+    cardHeight: 76,
+    wrapperWidth: 224,
+    wrapperHeight: 76,
+  });
+
+  await page.getByLabel("打开设置").click();
+  const settings = page.locator(".operations-workspace");
+  await selectSettingsCategory(settings, "终局性能", "performance");
+  const cardChoices = settings.getByRole("radiogroup", { name: "画布基础卡片" });
+  await expect(cardChoices.getByRole("radio")).toHaveText(["自动", "完整", "经典", "中等", "一行"]);
+  await expect(cardChoices.getByRole("radio", { name: "经典" })).toHaveAttribute("aria-checked", "true");
+  await cardChoices.getByRole("radio", { name: "中等" }).click();
+  await expect(shell).toHaveAttribute("data-canvas-detail-preference", "medium");
+  await cardChoices.getByRole("radio", { name: "经典" }).click();
+  await expect(shell).toHaveAttribute("data-canvas-detail-preference", "classic");
+  expect(await page.evaluate((key) => window.localStorage.getItem(key), CANVAS_DETAIL_KEY)).toBe("classic");
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(classic).toBeVisible();
+});
+
 test("one-line production cards name their recipe and product instead of the host building", async ({ page }) => {
   await seedCanvas(page, {
     count: 3,
@@ -327,6 +380,24 @@ test("network focus keeps interaction cards opaque and permits panning from cont
     draggable: element.classList.contains("draggable"),
     noPan: element.classList.contains("nopan"),
   }))).toEqual({ opacity: 0.5, draggable: false, noPan: false });
+
+  const shell = page.locator(".game-shell");
+  const source = page.locator('.react-flow__node[data-id="anonymous-node-0"] .factory-handle--output').first();
+  await source.dispatchEvent("click", { button: 0 });
+  await expect(shell).toHaveAttribute("data-connection-active", "true");
+  if (await page.locator(".network-focus-indicator").count() === 0) {
+    await page.locator('.react-flow__edge[data-id="anonymous-edge-focus"]').dispatchEvent("dblclick");
+  }
+  await expect(page.locator(".network-focus-indicator")).toBeVisible();
+  await expect.poll(() => contextual.evaluate((element) => ({
+    dimmed: element.classList.contains("factory-flow-node--network-dim"),
+    opacity: Number(getComputedStyle(element).opacity),
+    filter: getComputedStyle(element).filter,
+  }))).toEqual({ dimmed: false, opacity: 1, filter: "none" });
+  await page.keyboard.press("Escape");
+  await expect(shell).toHaveAttribute("data-connection-active", "false");
+  await expect(contextual).toHaveClass(/factory-flow-node--network-dim/);
+  await expect(contextual).toHaveCSS("opacity", "0.5");
 
   const visibilitySamples = await contextual.evaluate((wrapper) => {
     const target = window as typeof window & {
@@ -904,6 +975,61 @@ test("an exact 50-card stack paints one leader and glow while retaining hidden e
   await page.getByLabel("打开设置").focus();
   await expect(page.locator('.factory-node[data-heavy-card="true"]')).toHaveCount(7);
   await expect(page.locator(".factory-node-stack-halo")).toHaveCount(1);
+});
+
+test("Canvas belts keep the live pan after a node-geometry rerender", async ({ page }) => {
+  test.setTimeout(60_000);
+  await seedCanvas(page, {
+    count: 50,
+    exactStack: 50,
+    overlap: "representative",
+    interactionDetail: "selected",
+    savedViewport: { x: 120, y: 100, zoom: 0.84 },
+  });
+  const pane = page.locator(".react-flow__pane");
+  const viewport = page.locator(".react-flow__viewport");
+  const beltCanvas = page.locator("canvas.canvas-belt-layer");
+  await expect(beltCanvas).toHaveAttribute("data-segments", "3");
+  await expect.poll(async () => Number(await beltCanvas.getAttribute("data-drawn-viewport-zoom"))).toBeCloseTo(0.84, 2);
+
+  const paneBox = await pane.boundingBox();
+  if (!paneBox) throw new Error("canvas pane is unavailable");
+  const before = await viewport.evaluate((element) => getComputedStyle(element).transform);
+  await page.mouse.move(paneBox.x + paneBox.width * 0.72, paneBox.y + paneBox.height * 0.68);
+  await page.mouse.down();
+  await page.mouse.move(paneBox.x + paneBox.width * 0.72 + 120, paneBox.y + paneBox.height * 0.68 + 70, { steps: 10 });
+  await page.mouse.up();
+  await expect.poll(() => viewport.evaluate((element) => getComputedStyle(element).transform)).not.toBe(before);
+
+  const alignmentError = () => beltCanvas.evaluate((canvas) => {
+    const flowViewport = document.querySelector<HTMLElement>(".react-flow__viewport");
+    if (!flowViewport) return Number.POSITIVE_INFINITY;
+    const flow = new DOMMatrixReadOnly(getComputedStyle(flowViewport).transform);
+    const translatedCanvas = new DOMMatrixReadOnly(getComputedStyle(canvas).transform);
+    const drawnX = Number((canvas as HTMLElement).dataset.drawnViewportX);
+    const drawnY = Number((canvas as HTMLElement).dataset.drawnViewportY);
+    const drawnZoom = Number((canvas as HTMLElement).dataset.drawnViewportZoom);
+    const liveX = Number((canvas as HTMLElement).dataset.liveViewportX);
+    const liveY = Number((canvas as HTMLElement).dataset.liveViewportY);
+    const liveZoom = Number((canvas as HTMLElement).dataset.liveViewportZoom);
+    return Math.max(
+      Math.abs(drawnX + translatedCanvas.e - flow.e),
+      Math.abs(drawnY + translatedCanvas.f - flow.f),
+      Math.abs(drawnZoom - flow.a),
+      Math.abs(liveX - flow.e),
+      Math.abs(liveY - flow.f),
+      Math.abs(liveZoom - flow.a),
+    );
+  });
+  await expect.poll(alignmentError).toBeLessThanOrEqual(0.75);
+
+  // Selecting the leader changes the compact/full geometry and rebuilds the
+  // Canvas batch. The live viewport must remain authoritative across that
+  // rerender instead of snapping only the belt layer to the stale prop.
+  const leader = page.locator('.react-flow__node[data-id="anonymous-node-0"]');
+  await leader.locator("article.factory-node").click({ position: { x: 20, y: 20 } });
+  await expect(leader).toHaveClass(/selected/);
+  await expect.poll(alignmentError).toBeLessThanOrEqual(0.75);
 });
 
 test("a hidden stack member alert is aggregated and cycling expands the alerted member", async ({ page }) => {

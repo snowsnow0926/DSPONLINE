@@ -1,8 +1,9 @@
 import type { CanvasLod } from "./canvasPerformance";
 import type { CanvasWorldRectangle } from "./canvasConnectionPresentation";
 
-export type CanvasDetailPreference = "auto" | "full" | "medium" | "minimal";
+export type CanvasDetailPreference = "auto" | "full" | "classic" | "medium" | "minimal";
 export type CanvasDetailStage = "full" | "medium" | "compact";
+export type CanvasCompactCardStyle = "classic" | "minimal";
 export type CanvasOverlapPreference = "marker" | "representative" | "all";
 export type CanvasInteractionDetailPreference = "selected" | "hover" | "base";
 
@@ -86,7 +87,7 @@ export function resolveCanvasDetailStage(
 ): CanvasDetailStage {
   if (preference === "full") return "full";
   if (preference === "medium") return "medium";
-  if (preference === "minimal") return "compact";
+  if (preference === "classic" || preference === "minimal") return "compact";
   const count = Math.max(0, Math.floor(Number.isFinite(visibleCount) ? visibleCount : 0));
   if (previous === "compact") {
     if (count >= CANVAS_DETAIL_COMPACT_EXIT_VISIBLE) return "compact";

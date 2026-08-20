@@ -429,6 +429,7 @@ import {
   groupCanvasNodeStacks,
   resolveCanvasFullAllSafetyStage,
   resolveCanvasDetailStage,
+  type CanvasCompactCardStyle,
   type CanvasDetailPreference,
   type CanvasDetailStage,
   type CanvasInteractionDetailPreference,
@@ -526,6 +527,8 @@ const CanvasFlowCommitBoundary = memo(function CanvasFlowCommitBoundary({ childr
 
 const CANVAS_MEDIUM_NODE_WIDTH = 244;
 const CANVAS_MEDIUM_NODE_HEIGHT = 118;
+const CANVAS_CLASSIC_NODE_WIDTH = 224;
+const CANVAS_CLASSIC_NODE_HEIGHT = 76;
 const CANVAS_FULL_NODE_FALLBACK_WIDTH = 256;
 const CANVAS_FULL_NODE_FALLBACK_HEIGHT = 180;
 const CANVAS_STACK_HALO_Z_INDEX = 6;
@@ -541,7 +544,9 @@ const CANVAS_SELECTED_Z_INDEX = 30;
 function getFactoryFlowNodePresentationSize(node: FactoryFlowNode): { width: number; height: number } {
   if (node.data.stackHidden) return { width: CANVAS_STACK_PROXY_WIDTH, height: CANVAS_STACK_PROXY_HEIGHT };
   if (node.data.stackMarker) return { width: CANVAS_STACK_MARKER_WIDTH, height: CANVAS_STACK_MARKER_HEIGHT };
-  if (node.data.lod === "compact") return { width: CANVAS_STACK_PROXY_WIDTH, height: CANVAS_STACK_PROXY_HEIGHT };
+  if (node.data.lod === "compact") return node.data.compactCardStyle === "classic"
+    ? { width: CANVAS_CLASSIC_NODE_WIDTH, height: CANVAS_CLASSIC_NODE_HEIGHT }
+    : { width: CANVAS_STACK_PROXY_WIDTH, height: CANVAS_STACK_PROXY_HEIGHT };
   if (node.data.lod === "medium") return { width: CANVAS_MEDIUM_NODE_WIDTH, height: CANVAS_MEDIUM_NODE_HEIGHT };
   return {
     width: node.measured?.width ?? CANVAS_FULL_NODE_FALLBACK_WIDTH,
@@ -551,12 +556,15 @@ function getFactoryFlowNodePresentationSize(node: FactoryFlowNode): { width: num
 
 function getFactoryFlowNodeInitialSize(
   lod: CanvasLod,
+  compactCardStyle: CanvasCompactCardStyle,
   stackHidden: boolean,
   stackMarker: boolean,
 ): { initialWidth: number; initialHeight: number } {
   if (stackHidden) return { initialWidth: CANVAS_STACK_PROXY_WIDTH, initialHeight: CANVAS_STACK_PROXY_HEIGHT };
   if (stackMarker) return { initialWidth: CANVAS_STACK_MARKER_WIDTH, initialHeight: CANVAS_STACK_MARKER_HEIGHT };
-  if (lod === "compact") return { initialWidth: CANVAS_STACK_PROXY_WIDTH, initialHeight: CANVAS_STACK_PROXY_HEIGHT };
+  if (lod === "compact") return compactCardStyle === "classic"
+    ? { initialWidth: CANVAS_CLASSIC_NODE_WIDTH, initialHeight: CANVAS_CLASSIC_NODE_HEIGHT }
+    : { initialWidth: CANVAS_STACK_PROXY_WIDTH, initialHeight: CANVAS_STACK_PROXY_HEIGHT };
   if (lod === "medium") return { initialWidth: CANVAS_MEDIUM_NODE_WIDTH, initialHeight: CANVAS_MEDIUM_NODE_HEIGHT };
   return { initialWidth: CANVAS_FULL_NODE_FALLBACK_WIDTH, initialHeight: CANVAS_FULL_NODE_FALLBACK_HEIGHT };
 }
@@ -1415,6 +1423,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [batchConnectionFeedback, setBatchConnectionFeedback] = useState<string | null>(null);
   const [mobileBatchConnectionExpanded, setMobileBatchConnectionExpanded] = useState(false);
   const [connectionHint, setConnectionHint] = useState<{ label: string; tone: "ready" | "blocked" | "warning" } | null>(null);
+  const canvasConnectionActive = Boolean(connectionDraft || clickConnectionPreview);
   const initialViewport = loaded.state.planetViewports[loaded.state.activePlanetId] ?? { x: 510, y: 250, zoom: 0.84 };
   const [viewportZoom, setViewportZoom] = useState(initialViewport.zoom);
   const viewportZoomStateRef = useRef(initialViewport.zoom);
@@ -8590,6 +8599,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     canvasVisibleNodeCount,
   );
   const canvasPresentationDetailStage = canvasFullAllSafetyStage ?? canvasDetailStage;
+  const canvasCompactCardStyle: CanvasCompactCardStyle = canvasDetailPreference === "classic" ? "classic" : "minimal";
   const canvasDetailProgressSnapshot = useMemo(
     () => canvasDetailProgress(canvasPresentationDetailStage, canvasVisibleNodeCount),
     [canvasPresentationDetailStage, canvasVisibleNodeCount],
@@ -8703,7 +8713,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`已展开重叠建筑 ${memberIds.indexOf(targetId) + 1}/${memberIds.length}`);
   }, [mobileNavigation, nextMobileShell]);
 
-  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
+  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "compactCardStyle" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
     const planetProfile = getPlanetIndustrialProfile(canvasGame, canvasGame.activePlanetId);
@@ -8851,16 +8861,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             if (entity.id === lineFindTrace?.entityId) focusClassName = "factory-flow-node--line-find-center";
             else if (lineFindUpstreamEntityIds.has(entity.id)) focusClassName = "factory-flow-node--line-find-upstream";
             else if (lineFindDownstreamEntityIds.has(entity.id)) focusClassName = "factory-flow-node--line-find-downstream";
-            else focusContextOnly = true;
+            else focusContextOnly = !canvasConnectionActive;
           } else if (highlightedTaskId) {
             if (taskHighlight.entityIds.has(entity.id)) focusClassName = "factory-flow-node--task-focus";
-            else focusContextOnly = true;
+            else focusContextOnly = !canvasConnectionActive;
           } else if (productionLineFocus?.planetId === canvasGame.activePlanetId) {
             if (locatedProductionEntityIds.has(entity.id)) focusClassName = "factory-flow-node--network-focus";
-            else focusContextOnly = true;
+            else focusContextOnly = !canvasConnectionActive;
           } else if (focusedBeltNetwork) {
             if (focusedNetworkEntityIds.has(entity.id)) focusClassName = "factory-flow-node--network-focus";
-            else focusContextOnly = true;
+            else focusContextOnly = !canvasConnectionActive;
           }
           if (focusContextOnly && !preserveInteractionVisibility) {
             focusClassName = lineTraceActive
@@ -8895,6 +8905,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const staticAlertActive = stackPresentation.halo && stackPresentation.alertCount > 0;
           const staticPresentation = !forceDynamicPresentation && (!presentationVisible || canvasPresentationDetailStage === "compact");
           const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.compactCardStyle === canvasCompactCardStyle &&
             previous.data.staticPresentation === true && previous.data.focusClassName === focusClassName &&
             previous.data.alertActive === staticAlertActive &&
             previous.draggable === nodeDraggable && previous.selectable === nodeSelectable &&
@@ -8933,6 +8944,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               stackPresentation.groupId, stackPresentation.count, stackPresentation.hidden, stackPresentation.marker, stackPresentation.halo,
               stackPresentation.alertCount, stackPresentation.criticalAlertCount,
               stackGeometryHandlesRequired,
+              canvasCompactCardStyle,
               stackPresentation.membershipToken].join(":");
             const staticData = {
               ...commonNodeData,
@@ -8952,6 +8964,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               outputCapacity: previous?.data.outputCapacity ?? 0,
               cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
               lod: "compact",
+              compactCardStyle: canvasCompactCardStyle,
               dynamicEffects: false,
               presentationVisible: stablePresentationVisible,
               alertActive: staticAlertActive,
@@ -8984,9 +8997,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 width: CANVAS_STACK_MARKER_WIDTH,
                 height: CANVAS_STACK_MARKER_HEIGHT,
               } : {}),
-              ...getFactoryFlowNodeInitialSize("compact", stackHidden, stackMarker),
+              ...getFactoryFlowNodeInitialSize("compact", canvasCompactCardStyle, stackHidden, stackMarker),
               measured: previous?.data.lod === "compact" && previous.data.stackHidden === stackPresentation.hidden &&
-                previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
+                previous.data.stackMarker === stackPresentation.marker && previous.data.compactCardStyle === canvasCompactCardStyle ? previous.measured : undefined,
               data: staticData,
               selected,
               zIndex: nodeZIndex,
@@ -9099,6 +9112,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             className,
             draggable,
             lod,
+            canvasCompactCardStyle,
             commonNodeData.extremeVisuals,
             dynamicEffects,
             stackPresentation.groupId,
@@ -9135,6 +9149,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             outputCapacity,
             cycleRatePerSecond,
             lod,
+            compactCardStyle: canvasCompactCardStyle,
             dynamicEffects,
             presentationVisible,
             alertActive,
@@ -9168,9 +9183,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               width: CANVAS_STACK_MARKER_WIDTH,
               height: CANVAS_STACK_MARKER_HEIGHT,
             } : {}),
-            ...getFactoryFlowNodeInitialSize(lod, stackHidden, stackMarker),
+            ...getFactoryFlowNodeInitialSize(lod, canvasCompactCardStyle, stackHidden, stackMarker),
             measured: previous?.data.lod === lod && previous.data.stackHidden === stackPresentation.hidden &&
-              previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
+              previous.data.stackMarker === stackPresentation.marker && previous.data.compactCardStyle === canvasCompactCardStyle ? previous.measured : undefined,
             data: nextData,
             selected,
             zIndex: nodeZIndex,
@@ -9246,7 +9261,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasOuterPresentationEpoch, canvasPresentationDetailStage, canvasRenderSnapshot.entityById, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasCompactCardStyle, canvasConnectedEntityIds, canvasConnectionActive, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasOuterPresentationEpoch, canvasPresentationDetailStage, canvasRenderSnapshot.entityById, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -11366,6 +11381,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-primary-save-bytes={persistedPrimaryBytes ?? -1}
       data-canvas-detail-preference={canvasDetailPreference}
       data-canvas-detail-stage={canvasPresentationDetailStage}
+      data-canvas-compact-card-style={canvasCompactCardStyle}
       data-canvas-requested-detail-stage={canvasDetailStage}
       data-canvas-full-all-safety={canvasFullAllSafetyStage ?? "off"}
       data-canvas-overlap-preference={canvasOverlapPreference}
@@ -11376,7 +11392,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-canvas-stack-marker-count={canvasStackGrouping.markerCount}
       data-canvas-full-logical-count={canvasFullLogicalCount}
       data-blueprint-allow-overlap={blueprintAllowOverlap ? "true" : "false"}
-      data-connection-active={connectionDraft ? "true" : "false"}
+      data-connection-active={canvasConnectionActive ? "true" : "false"}
       data-connection-candidate-node={connectionCandidateNodeId ?? "none"}
       data-connection-full-logical-count={connectionFullLogicalCount}
       data-connection-viewport-logical-count={connectionViewportLogicalCount}
@@ -11977,7 +11993,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             {minimapCollapsed ? <MapIcon size={16} /> : <PanelRightClose size={16} />}
           </button>
           <div className="canvas-density-status nodrag nopan" role="group" aria-live="polite" aria-label="画布自适应细节状态">
-            <span>{canvasDetailPreference === "auto" ? "自动" : canvasDetailPreference === "full" ? "完整" : canvasDetailPreference === "medium" ? "中等" : "一行"} · {canvasPresentationDetailStage === "full" ? "完整卡片" : canvasPresentationDetailStage === "medium" ? "中等细节" : "一行卡片"}{canvasFullAllSafetyStage ? "（密集保护）" : ""}</span>
+            <span>{canvasDetailPreference === "auto" ? "自动" : canvasDetailPreference === "full" ? "完整" : canvasDetailPreference === "classic" ? "经典" : canvasDetailPreference === "medium" ? "中等" : "一行"} · {canvasPresentationDetailStage === "full" ? "完整卡片" : canvasPresentationDetailStage === "medium" ? "中等细节" : canvasCompactCardStyle === "classic" ? "经典卡片" : "一行卡片"}{canvasFullAllSafetyStage ? "（密集保护）" : ""}</span>
             <strong>{canvasVisibleNodeCount.toLocaleString("zh-CN")} 可见</strong>
             <i aria-hidden="true"><b style={{ transform: `scaleX(${canvasDetailProgressSnapshot.ratio})` }} /></i>
             {canvasStackGrouping.groupCount > 0 ? <small>{canvasStackGrouping.groupCount} 组重叠 · {canvasStackGrouping.markerCount} 个标记 · {canvasStackGrouping.hiddenCount} 个隐藏成员</small> : null}

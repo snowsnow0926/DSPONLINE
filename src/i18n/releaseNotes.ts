@@ -115,6 +115,35 @@ const release1046Copy = {
   },
 } as const;
 
+const release1047Copy = {
+  date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
+  title: { "zh-CN": "经典卡片与画布连线显示修复", en: "Classic Cards and Canvas Connection Fixes" },
+  summary: {
+    "zh-CN": "1.0.47 为基础卡片增加 1.0.43 风格的“经典”显示选项，修复拖动画布后 Canvas 传送带与建筑错位，以及连线时建筑偶发半透明的问题。以上均为设备级画布显示修复；GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 与玩法数值不变。",
+    en: "Version 1.0.47 adds a Classic base-card option matching the 1.0.43 presentation, fixes Canvas belts drifting away from buildings after panning, and prevents buildings from occasionally becoming translucent while connecting. These are device-level canvas presentation fixes only; GameState v47, save envelope v2, cloud schema v8, SQLite layout v3, and gameplay balance remain unchanged.",
+  },
+  classicTitle: { "zh-CN": "恢复 1.0.43 经典精简卡片", en: "The 1.0.43 classic compact card returns" },
+  classicDescription: {
+    "zh-CN": "设置 → 终局性能 → 基础卡片现按“自动、完整、经典、中等、一行”排列。“经典”复用 1.0.43 的 224×76 紧凑卡片结构、端口、名称和堆叠数量；偏好只保存在当前设备，不进入存档或云同步。",
+    en: "Settings → Endgame Performance → Base cards now lists Auto, Full, Classic, Medium, and One line. Classic restores the 1.0.43 224×76 compact structure with ports, name, and stack count. The preference stays on this device and is not written to saves or cloud sync.",
+  },
+  beltTitle: { "zh-CN": "拖动画布后线路继续贴合建筑", en: "Belts stay attached after canvas panning" },
+  beltDescription: {
+    "zh-CN": "高密度工厂使用 Canvas 批量线路时，手势中的实时 viewport 不会再被稍后到达的旧 React 属性覆盖；节点几何刷新、选择建筑和后续拖动均保持同一变换坐标。",
+    en: "In dense factories using batched Canvas belts, the live gesture viewport is no longer overwritten by an older React property arriving during a later render. Geometry refreshes, node selection, and subsequent pans remain on the same transform.",
+  },
+  opacityTitle: { "zh-CN": "连线中的建筑保持清晰", en: "Buildings stay clear while connecting" },
+  opacityDescription: {
+    "zh-CN": "任何鼠标、点击、触摸或连续拉线草稿存在时都会暂停任务、生产链、网络和寻线聚焦的背景淡化；结束或取消连线后，原聚焦效果按原状态恢复。",
+    en: "While any mouse, click, touch, or batch connection draft is active, background dimming from task, production-chain, network, and line-find focus is suspended. The previous focus treatment returns after the connection is completed or cancelled.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与在线协议保持兼容", en: "Save and online formats remain compatible" },
+  compatibilityDescription: {
+    "zh-CN": "本热修不升级 GameState、存档封装、云 schema、SQLite layout 或 IndexedDB records，也不改变生产、运输、库存和线路结算。",
+    en: "This hotfix does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or IndexedDB records, and does not change production, transport, inventory, or belt simulation.",
+  },
+} as const;
+
 const release1100Copy = {
   date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
   title: { "zh-CN": "RuntimeWorld 2.0 超大工厂运行时", en: "RuntimeWorld 2.0 for Large Factories" },
@@ -384,6 +413,10 @@ function release1046Message(locale: AppLocale, key: keyof typeof release1046Copy
   return release1046Copy[key][locale];
 }
 
+function release1047Message(locale: AppLocale, key: keyof typeof release1047Copy): string {
+  return release1047Copy[key][locale];
+}
+
 function currentMessage(locale: AppLocale, key: keyof typeof release1100Copy): string {
   return release1100Copy[key][locale];
 }
@@ -414,6 +447,22 @@ export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteR
       { id: "runtimeworld-command-projection", title: currentMessage(locale, "commandTitle"), description: currentMessage(locale, "commandDescription") },
       { id: "runtimeworld-authoritative-save", title: currentMessage(locale, "saveTitle"), description: currentMessage(locale, "saveDescription") },
       { id: "runtimeworld-compatibility", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1047(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-20-v1.0.47",
+    date: release1047Message(locale, "date"),
+    version: "1.0.47",
+    title: release1047Message(locale, "title"),
+    summary: release1047Message(locale, "summary"),
+    items: [
+      { id: "classic-canvas-cards", title: release1047Message(locale, "classicTitle"), description: release1047Message(locale, "classicDescription") },
+      { id: "live-canvas-belt-viewport", title: release1047Message(locale, "beltTitle"), description: release1047Message(locale, "beltDescription") },
+      { id: "connection-card-opacity", title: release1047Message(locale, "opacityTitle"), description: release1047Message(locale, "opacityDescription") },
+      { id: "save-compatibility", title: release1047Message(locale, "compatibilityTitle"), description: release1047Message(locale, "compatibilityDescription") },
     ],
   };
 }

@@ -5719,6 +5719,14 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   filter: grayscale(0.2) saturate(0.62);
 }
 
+/* Connection targets must remain visually legible even if a deferred node
+   commit still carries a task/network focus dim class for one frame. */
+.game-shell[data-connection-active="true"] .react-flow__node.factory-flow-node--task-dim,
+.game-shell[data-connection-active="true"] .react-flow__node.factory-flow-node--network-dim {
+  opacity: 1;
+  filter: none;
+}
+
 .react-flow__node.factory-flow-node--network-focus .factory-node {
   border-color: #67c9ba;
   box-shadow: 0 0 0 2px rgba(103, 201, 186, 0.2), 0 0 22px rgba(64, 178, 161, 0.22);
@@ -19095,6 +19103,7 @@ html[data-ui-font-scale="200"] .operations-settings .setting-row > span {
 .factory-flow-node--line-find-upstream .factory-node { border-color: #66c4ff !important; }
 .factory-flow-node--line-find-downstream .factory-node { border-color: #ff9d76 !important; }
 .factory-flow-node--line-find-dim .factory-node { opacity: 0.5; filter: saturate(0.65); }
+.game-shell[data-connection-active="true"] .factory-flow-node--line-find-dim .factory-node { opacity: 1; filter: none; }
 .factory-edge--line-find-upstream .react-flow__edge-path { stroke: #66c4ff !important; stroke-width: 3.5 !important; }
 .factory-edge--line-find-downstream .react-flow__edge-path { stroke: #ff9d76 !important; stroke-width: 3.5 !important; }
 .factory-edge--line-find-dim { opacity: 0.2; }

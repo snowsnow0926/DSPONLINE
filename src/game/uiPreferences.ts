@@ -210,7 +210,7 @@ export function readCanvasDetailPreference(): CanvasDetailPreference {
   if (!storage) return "auto";
   try {
     const value = storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY);
-    return value === "full" || value === "medium" || value === "minimal" || value === "auto" ? value : "auto";
+    return value === "full" || value === "classic" || value === "medium" || value === "minimal" || value === "auto" ? value : "auto";
   } catch {
     return "auto";
   }
@@ -218,7 +218,7 @@ export function readCanvasDetailPreference(): CanvasDetailPreference {
 
 export function writeCanvasDetailPreference(preference: CanvasDetailPreference): void {
   const storage = localStorageOrNull();
-  if (!storage || (preference !== "auto" && preference !== "full" && preference !== "medium" && preference !== "minimal")) return;
+  if (!storage || (preference !== "auto" && preference !== "full" && preference !== "classic" && preference !== "medium" && preference !== "minimal")) return;
   try { storage.setItem(CANVAS_DETAIL_PREFERENCE_KEY, preference); } catch { /* optional preference */ }
 }
 

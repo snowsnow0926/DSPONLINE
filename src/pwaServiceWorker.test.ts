@@ -207,6 +207,72 @@ describe("DSPidle service worker cache ownership", () => {
     }));
   });
 
+  it("resolves generated assets/ references from the release root on a strict static server", async () => {
+    const harness = createHarness();
+    const expectedAssets = new Map([
+      ["/assets/entry-abcdef.js", [
+        'const routeChunk = "assets/route-ghijkl.js";',
+        'const siblingChunk = "./sibling-mnopqr.js";',
+        'const absoluteChunk = "/assets/absolute-stuvwx.js";',
+      ].join("\n")],
+      ["/assets/route-ghijkl.js", "export const route = true;"],
+      ["/assets/sibling-mnopqr.js", "export const sibling = true;"],
+      ["/assets/absolute-stuvwx.js", "export const absolute = true;"],
+    ]);
+    harness.setFetch(async (request) => {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/" || pathname === "/index.html") {
+        return new Response('<script type="module" src="/assets/entry-abcdef.js"></script>', { status: 200 });
+      }
+      if (expectedAssets.has(pathname)) return new Response(expectedAssets.get(pathname), { status: 200 });
+      if (pathname === "/version.json") {
+        return new Response(JSON.stringify({ version: "1.1.0", buildId: "build-new" }), { status: 200 });
+      }
+      if (pathname === "/manifest.webmanifest" || pathname === "/icon.svg") {
+        return new Response("shell-resource", { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await expect(dispatchWait(harness, "install")).resolves.toBeUndefined();
+
+    const requestedPaths = harness.fetchCalls.map((request) => new URL(request.url).pathname);
+    expect(requestedPaths).toEqual(expect.arrayContaining([...expectedAssets.keys()]));
+    expect(requestedPaths.some((pathname) => pathname.startsWith("/assets/assets/"))).toBe(false);
+  });
+
+  it("keeps generated assets/ references inside an immutable canary route", async () => {
+    const harness = createHarness({
+      scope: "https://game.example/canary/build-a/",
+      workerUrl: "https://game.example/canary/build-a/sw.js?v=build-a&route=canary-build-a&base=%2Fcanary%2Fbuild-a%2F",
+    });
+    harness.setFetch(async (request) => {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/canary/build-a/" || pathname === "/canary/build-a/index.html") {
+        return new Response('<script type="module" src="./assets/entry-abcdef.js"></script>', { status: 200 });
+      }
+      if (pathname === "/canary/build-a/assets/entry-abcdef.js") {
+        return new Response('const chunk = "assets/chunk-ghijkl.js";', { status: 200 });
+      }
+      if (pathname === "/canary/build-a/assets/chunk-ghijkl.js") {
+        return new Response("export const ready = true;", { status: 200 });
+      }
+      if (pathname === "/canary/build-a/version.json") {
+        return new Response(JSON.stringify({ version: "1.1.0", buildId: "build-a" }), { status: 200 });
+      }
+      if (pathname === "/canary/build-a/manifest.webmanifest" || pathname === "/canary/build-a/icon.svg") {
+        return new Response("shell-resource", { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await expect(dispatchWait(harness, "install")).resolves.toBeUndefined();
+
+    const requestedPaths = harness.fetchCalls.map((request) => new URL(request.url).pathname);
+    expect(requestedPaths).toContain("/canary/build-a/assets/chunk-ghijkl.js");
+    expect(requestedPaths.some((pathname) => pathname.includes("/assets/assets/"))).toBe(false);
+  });
+
   it("keeps the active index immutable while a candidate deployment is visible", async () => {
     const caches = new Map<string, CacheRecord>();
     const stable = createHarness({

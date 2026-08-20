@@ -1,6 +1,20 @@
 import { getDesktopBridge, type DesktopUpdateStatus } from "./desktop";
+import {
+  getAppPlatform,
+  NATIVE_APP_STATE_EVENT,
+  NATIVE_BACK_EVENT,
+  type NativeAppPlatform,
+} from "./nativeAppBoundary";
 
-export type NativeAppPlatform = "web" | "desktop" | "android";
+export {
+  getAppPlatform,
+  isNativeApp,
+  isSecureCloudClient,
+  NATIVE_APP_STATE_EVENT,
+  NATIVE_BACK_EVENT,
+} from "./nativeAppBoundary";
+export type { NativeAppPlatform } from "./nativeAppBoundary";
+
 export type NativeUpdateState = DesktopUpdateStatus["state"] | "opening-download";
 
 export interface NativeUpdateStatus {
@@ -42,28 +56,11 @@ export interface AndroidUpdateManifest {
   notes: string[];
 }
 
-export const NATIVE_APP_STATE_EVENT = "dsp-native-app-state";
-export const NATIVE_BACK_EVENT = "dsp-native-back";
-
 const channelLabels = { stable: "稳定版", beta: "Beta", nightly: "Nightly" } as const;
 const updateListeners = new Set<(status: NativeUpdateStatus) => void>();
 let androidReleaseInfo: NativeReleaseInfo | null = null;
 let androidManifest: AndroidUpdateManifest | null = null;
 let initialization: Promise<void> | null = null;
-
-export function getAppPlatform(): NativeAppPlatform {
-  if (getDesktopBridge()) return "desktop";
-  return __APP_PLATFORM__ === "android" ? "android" : "web";
-}
-
-export function isNativeApp(): boolean {
-  return getAppPlatform() !== "web";
-}
-
-export function isSecureCloudClient(): boolean {
-  if (isNativeApp()) return true;
-  return typeof window !== "undefined" && (window.isSecureContext || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-}
 
 function publishAndroidUpdate(update: NativeUpdateStatus): NativeUpdateStatus {
   if (androidReleaseInfo) androidReleaseInfo = { ...androidReleaseInfo, update };

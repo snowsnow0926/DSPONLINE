@@ -73,13 +73,12 @@ import type { AutosaveIntervalSeconds, FontScale, GameSettings, PlanetId, SaveMo
 import { getDesktopBridge } from "../desktop";
 import { getCurrentReleaseNotes } from "../i18n/releaseNotes";
 import { importWithRecovery } from "../game/dynamicImportRecovery";
-import { NATIVE_BACK_EVENT } from "../nativeApp";
+import { isSecureCloudClient, NATIVE_BACK_EVENT } from "../nativeAppBoundary";
 import { StableTextInput } from "./CompositionSafeInput";
 import { SaveDeleteDialog, type SaveDeleteTarget } from "./SaveDeleteDialog";
 import { SpeedrunCopyDialog } from "./SpeedrunCopyDialog";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { useResolvedTheme } from "../hooks/useResolvedTheme";
-import { isSecureCloudClient } from "../nativeApp";
 import { useAppLocale } from "../i18n/locale";
 import { exportTextFile } from "../game/fileExport";
 import type { OfflineApproximationReport } from "../game/offlineApproximation";

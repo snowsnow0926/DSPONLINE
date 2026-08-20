@@ -2,7 +2,7 @@ import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
 import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
-import { NATIVE_BACK_EVENT } from "../nativeApp";
+import { NATIVE_BACK_EVENT } from "../nativeAppBoundary";
 import { AccessibleDialog } from "./AccessibleDialog";
 
 export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";

@@ -9,6 +9,7 @@ import {
   localSaveConflictKeys,
   localSaveEmergencyMirrorKeys,
   localSaveRevisionKey,
+  matchesLocalSaveEmergencyMirrorLineage,
   parseLocalSaveConflictRecord,
   parseLocalSaveEmergencyMirrorMetadata,
   parseLocalSaveRevision,
@@ -121,6 +122,7 @@ describe("local save cross-tab coordination", () => {
     };
     expect(canApplyLocalSaveEmergencyMirror(options)).toBe(true);
     expect(canApplyLocalSaveEmergencyMirror({ ...options, expectedWriterId: "tab-b" })).toBe(false);
+    expect(matchesLocalSaveEmergencyMirrorLineage(options)).toBe(true);
     expect(canApplyLocalSaveEmergencyMirror({ ...options, durableLease: { ...lease, ownerId: "tab-b" } })).toBe(false);
     expect(canApplyLocalSaveEmergencyMirror({ ...options, durableRevision: { ...revision, writerId: "tab-b" } })).toBe(false);
     expect(canApplyLocalSaveEmergencyMirror({ ...options, payloadIdentity: { savedAt: 300, checksum: "tampered" } })).toBe(false);

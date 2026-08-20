@@ -45,7 +45,7 @@ test.describe("RuntimeWorld M5 production save and canvas gate", () => {
     const isolatedRaw = JSON.stringify({ ...envelope, savedAt: Date.now() });
 
     await page.addInitScript(({ expectedAutosaveIntervalMs }) => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-21-v1.1.2");
       localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");

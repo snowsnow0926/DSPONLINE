@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
-const RELEASE_NOTE_ID = "2026-08-20-v1.1.1";
+const RELEASE_NOTE_ID = "2026-08-21-v1.1.2";
 
 async function preparePage(page: Page, disableCoordinationApis = false) {
   await page.addInitScript(({ releaseNoteId, disable }) => {
@@ -415,6 +415,137 @@ test("a reload applies a verified emergency mirror only from its own durable wri
   await expect(page.locator(".local-save-writer-banner--conflict")).toHaveCount(0);
   expect(await readRecord(page, SAVE_KEY)).toBe(expected.candidate);
   expect(await page.evaluate(() => localStorage.getItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.payload"))).toBeNull();
+});
+
+test("a new window continues a closed writer's verified emergency mirror without a false conflict", async ({ context }) => {
+  const oldPage = await context.newPage();
+  await preparePage(oldPage);
+  const expected = await oldPage.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    const store = await import("/src/game/localSaveStore.ts");
+    const coordination = await import("/src/game/localSaveCoordination.ts");
+    const state = engine.createInitialState();
+    state.elapsedSeconds = 800;
+    const first = await storage.saveGameVerified(state);
+    if (!first.success) throw new Error(first.message);
+    const persisted = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    if (!persisted) throw new Error("missing durable base save");
+    state.elapsedSeconds = 801;
+    const candidate = storage.serializeEnvelope(state, JSON.parse(persisted).savedAt + 1_000);
+    const identity = JSON.parse(candidate) as { savedAt: number; checksum: string };
+    const status = store.getLocalSaveWriterStatus();
+    localStorage.setItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.payload", candidate);
+    localStorage.setItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.metadata", JSON.stringify({
+      schemaVersion: 1,
+      mode: "normal",
+      saveKey: "dsp-idle-network.save.v1",
+      writerId: status.writerId,
+      fencingToken: status.fencingToken,
+      candidateRevision: 2,
+      savedAt: identity.savedAt,
+      checksum: identity.checksum,
+      createdAt: Date.now(),
+    }));
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("records", "readwrite");
+      const objectStore = transaction.objectStore("records");
+      const request = objectStore.get(coordination.LOCAL_SAVE_WRITER_LEASE_KEY);
+      request.onsuccess = () => {
+        const lease = JSON.parse(request.result.value);
+        const value = JSON.stringify({ ...lease, heartbeatAt: Date.now() - 20_000, expiresAt: Date.now() - 1 });
+        objectStore.put({ ...request.result, value, updatedAt: Date.now(), bytes: value.length });
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    return { candidate, writerId: status.writerId };
+  });
+  await oldPage.close();
+
+  const reopened = await context.newPage();
+  await preparePage(reopened);
+  await expect(reopened.locator(".local-save-writer-banner--conflict")).toHaveCount(0);
+  const recovered = await reopened.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    return {
+      raw: await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1"),
+      writer: store.getLocalSaveWriterStatus(),
+      conflicts: (await store.getLocalSaveConflicts()).length,
+      mirror: localStorage.getItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.payload"),
+    };
+  });
+  expect(recovered.raw).toBe(expected.candidate);
+  expect(recovered.writer).toMatchObject({ role: "primary" });
+  expect(recovered.writer.writerId).not.toBe(expected.writerId);
+  expect(recovered.conflicts).toBe(0);
+  expect(recovered.mirror).toBeNull();
+});
+
+test("a manual save rebases its backup after the same writer completes a deferred proof backup", async ({ page }) => {
+  await preparePage(page);
+  const result = await page.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    const store = await import("/src/game/localSaveStore.ts");
+    const serialization = await import("/src/game/authoritativeSaveSerializationClient.ts");
+    const transferProtocol = await import("/src/game/simulationRuntimeProtocol.ts");
+
+    const firstState = engine.createInitialState();
+    firstState.elapsedSeconds = 1_000;
+    const first = await storage.saveGameVerified(firstState, undefined, undefined, { force: true });
+    if (!first.success) throw new Error(first.message);
+
+    const autosaveState = engine.createInitialState();
+    autosaveState.elapsedSeconds = 2_000;
+    const autosaveIdentity = {
+      mode: autosaveState.mode,
+      version: autosaveState.version,
+      activePlanetId: autosaveState.activePlanetId,
+      entityCount: autosaveState.entities.length,
+      beltCount: autosaveState.belts.length,
+      elapsedSeconds: autosaveState.elapsedSeconds,
+    };
+    const prepared = await serialization.serializeAuthoritativeSaveStateTransferInWorker(
+      transferProtocol.serializeSimulationStateForTransfer(autosaveState),
+      { savedAt: Date.now() + 1_000, expectedStateIdentity: autosaveIdentity },
+    );
+    const autosave = await storage.saveGameVerifiedFromPreparedPayload(prepared, autosaveIdentity, { deferBackup: true });
+    if (!autosave.success) throw new Error(autosave.message);
+
+    // The persistence Worker returns the verified primary first, then writes
+    // its optional previous-version backup after a short grace period. This is
+    // the production ordering that used to leave the UI revision cache one
+    // step behind the durable backup record.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const manualState = engine.createInitialState();
+    manualState.elapsedSeconds = 3_000;
+    const manual = await storage.saveGameVerified(manualState, undefined, undefined, { force: true });
+    const conflicts = await store.getLocalSaveConflicts();
+    const primary = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    const backup = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1.backup");
+    return {
+      manual,
+      conflicts,
+      primaryElapsedSeconds: primary ? JSON.parse(primary).state.elapsedSeconds : null,
+      backupElapsedSeconds: backup ? JSON.parse(backup).state.elapsedSeconds : null,
+      writer: store.getLocalSaveWriterStatus(),
+    };
+  });
+
+  expect(result.manual).toMatchObject({ success: true });
+  expect(result.primaryElapsedSeconds).toBe(3_000);
+  expect(result.conflicts).toHaveLength(0);
+  expect(result.backupElapsedSeconds).toBe(2_000);
+  expect(result.writer).toMatchObject({ role: "primary" });
 });
 
 test("normal and speedrun slots keep independent coordinated revisions and tombstones", async ({ page }) => {

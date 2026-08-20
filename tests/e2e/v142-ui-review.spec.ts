@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-20-v1.1.1";
+const RELEASE_NOTE_ID = "2026-08-21-v1.1.2";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,11 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "云存档与挂机保存紧急修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.1");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("已结算合同不再同日重生");
-  await expect(dialog).toContainText("1.1.0 受影响存档自动无损修复");
-  await expect(dialog).toContainText("旧客户端获得受限服务端兼容");
-  await expect(dialog).toContainText("纯挂机与卡顿不再制造假冲突");
-  await expect(dialog).toContainText("存档与数据库格式不升级");
+  await expect(dialog).toHaveAttribute("aria-label", "存档冲突修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(2);
+  await expect(dialog).toContainText("延迟备份接续");
+  await expect(dialog).toContainText("真实冲突保护");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

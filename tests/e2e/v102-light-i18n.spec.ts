@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-20-v1.1.1";
+const RELEASE_NOTE_ID = "2026-08-21-v1.1.2";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,11 +110,11 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Cloud and Pure-idle Save Hotfix" });
+  const dialog = page.getByRole("dialog", { name: "Save Conflict Fix" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.1.1");
-  await expect(dialog).toContainText("Settled contracts no longer respawn the same day");
-  await expect(dialog).toContainText("Pure-idle and stalls no longer create false conflicts");
+  await expect(dialog).toContainText("1.1.2");
+  await expect(dialog).toContainText("Deferred backup continuation");
+  await expect(dialog).toContainText("Real conflict protection");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

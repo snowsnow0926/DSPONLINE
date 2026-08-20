@@ -144,6 +144,25 @@ const release1047Copy = {
   },
 } as const;
 
+const release1102Copy = {
+  date: { "zh-CN": "2026年8月21日", en: "August 21, 2026" },
+  title: { "zh-CN": "存档冲突修复", en: "Save Conflict Fix" },
+  summary: {
+    "zh-CN": "1.1.2 修复延迟备份和关闭窗口镜像的假跨标签冲突；接管仍保留双方。GameState v47 与格式不变。",
+    en: "1.1.2 fixes false conflicts from deferred backups and closed-window mirrors; takeovers preserve both sides. GameState v47 and formats are unchanged.",
+  },
+  backupTitle: { "zh-CN": "延迟备份接续", en: "Deferred backup continuation" },
+  backupDescription: {
+    "zh-CN": "仅同一 writer/fence 的连续校验修订可接续。",
+    en: "Only a validated revision on the same writer/fence continues.",
+  },
+  protectionTitle: { "zh-CN": "真实冲突保护", en: "Real conflict protection" },
+  protectionDescription: {
+    "zh-CN": "writer/fence 不同、校验失败或时间倒退仍禁止覆盖。",
+    en: "Different lineage, failed validation, or time regression blocks overwrite.",
+  },
+} as const;
+
 const release1101Copy = {
   date: { "zh-CN": "2026年8月20日", en: "August 20, 2026" },
   title: { "zh-CN": "云存档与挂机保存紧急修复", en: "Cloud and Pure-idle Save Hotfix" },
@@ -451,7 +470,11 @@ function release1047Message(locale: AppLocale, key: keyof typeof release1047Copy
   return release1047Copy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1101Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release1102Copy): string {
+  return release1102Copy[key][locale];
+}
+
+function release1101Message(locale: AppLocale, key: keyof typeof release1101Copy): string {
   return release1101Copy[key][locale];
 }
 
@@ -474,17 +497,31 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-20-v1.1.1",
+    id: "2026-08-21-v1.1.2",
     date: currentMessage(locale, "date"),
-    version: "1.1.1",
+    version: "1.1.2",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "station-contract-reoffer", title: currentMessage(locale, "generationTitle"), description: currentMessage(locale, "generationDescription") },
-      { id: "legacy-cloud-save-repair", title: currentMessage(locale, "repairTitle"), description: currentMessage(locale, "repairDescription") },
-      { id: "legacy-cloud-server-compatibility", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
-      { id: "same-page-save-coordination", title: currentMessage(locale, "coordinationTitle"), description: currentMessage(locale, "coordinationDescription") },
-      { id: "cloud-format-compatibility", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+      { id: "same-fence-deferred-backup", title: currentMessage(locale, "backupTitle"), description: currentMessage(locale, "backupDescription") },
+      { id: "strict-real-tab-protection", title: currentMessage(locale, "protectionTitle"), description: currentMessage(locale, "protectionDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1101(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-20-v1.1.1",
+    date: release1101Message(locale, "date"),
+    version: "1.1.1",
+    title: release1101Message(locale, "title"),
+    summary: release1101Message(locale, "summary"),
+    items: [
+      { id: "station-contract-reoffer", title: release1101Message(locale, "generationTitle"), description: release1101Message(locale, "generationDescription") },
+      { id: "legacy-cloud-save-repair", title: release1101Message(locale, "repairTitle"), description: release1101Message(locale, "repairDescription") },
+      { id: "legacy-cloud-server-compatibility", title: release1101Message(locale, "serverTitle"), description: release1101Message(locale, "serverDescription") },
+      { id: "same-page-save-coordination", title: release1101Message(locale, "coordinationTitle"), description: release1101Message(locale, "coordinationDescription") },
+      { id: "cloud-format-compatibility", title: release1101Message(locale, "compatibilityTitle"), description: release1101Message(locale, "compatibilityDescription") },
     ],
   };
 }

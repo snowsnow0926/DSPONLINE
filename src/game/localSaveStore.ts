@@ -12,7 +12,6 @@ import {
   LOCAL_SAVE_WRITER_SESSION_KEY,
   LocalSaveConflictError,
   LocalSaveReadOnlyError,
-  canApplyLocalSaveEmergencyMirror,
   canClaimLocalSaveWriterLease,
   createLocalSaveConflictId,
   createLocalSaveRevision,
@@ -23,6 +22,7 @@ import {
   localSaveConflictKeys,
   localSaveConflictMetadataKey,
   localSaveRevisionKey,
+  matchesLocalSaveEmergencyMirrorLineage,
   parseLocalSaveConflictRecord,
   parseLocalSaveEmergencyMirrorMetadata,
   parseLocalSaveRevision,
@@ -894,11 +894,16 @@ async function writeLease(db: IDBDatabase, lease: LocalSaveWriterLease): Promise
   await done;
 }
 
-async function claimWriterLease(): Promise<boolean> {
+interface LocalSaveWriterClaimResult {
+  claimed: boolean;
+  previous: LocalSaveWriterLease | null;
+}
+
+async function claimWriterLease(): Promise<LocalSaveWriterClaimResult> {
   const now = Date.now();
   if (backend !== "indexeddb" || !database) {
     publishWriterStatus({ role: "primary", writerId, fencingToken: 1, leaseExpiresAt: Number.MAX_SAFE_INTEGER, reason: "当前环境使用兼容存储后端" });
-    return true;
+    return { claimed: true, previous: null };
   }
   const attempt = await withBrowserCoordinationLock(async () => {
     const previous = parseLocalSaveWriterLease(await readCoordinationValue(database!, LOCAL_SAVE_WRITER_LEASE_KEY));
@@ -915,7 +920,7 @@ async function claimWriterLease(): Promise<boolean> {
       leaseExpiresAt: now + Math.min(1_000, LOCAL_SAVE_HEARTBEAT_INTERVAL_MS),
       reason: "另一个标签页正在更新本地存档，当前页面暂为只读",
     });
-    return false;
+    return { claimed: false, previous: null };
   }
   if (!attempt.value?.ok) {
     const previous = attempt.value?.previous ?? parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
@@ -927,13 +932,13 @@ async function claimWriterLease(): Promise<boolean> {
       leaseExpiresAt: current?.expiresAt ?? previous?.expiresAt ?? 0,
       reason: "另一个标签页已取得本地存档写入权，当前页面为只读",
     });
-    return false;
+    return { claimed: false, previous };
   }
   const lease = attempt.value.lease;
   await reloadLocalSaveCache();
   publishWriterStatus({ role: "primary", writerId, fencingToken: lease.fencingToken, leaseExpiresAt: lease.expiresAt, reason: "当前标签页负责本地存档" });
   postCoordinationMessage({ schemaVersion: 1, type: "lease", writerId, sentAt: now, fencingToken: lease.fencingToken, leaseExpiresAt: lease.expiresAt });
-  return true;
+  return { claimed: true, previous: attempt.value.previous };
 }
 
 async function releaseWriterLeaseForReload(): Promise<void> {
@@ -1040,6 +1045,9 @@ async function commitCoordinatedRecord(
     : undefined;
   const persisted = currentRecord?.value ?? null;
   const currentCatalog = parseLocalSaveCatalog(currentCatalogRecord?.value, key);
+  const candidateCatalogBase = value !== null && isCatalogedSaveKey(key)
+    ? buildLocalSaveCatalog(key, value, 0)
+    : null;
   const baseIdentity = baseValue !== null
     ? inspectLocalSaveIdentity(baseValue)
     : { savedAt: baseCatalog?.savedAt ?? 0, checksum: baseCatalog?.stateChecksum ?? null };
@@ -1059,7 +1067,21 @@ async function commitCoordinatedRecord(
   // writer/fence and its current payload/catalog/revision proof is complete.
   // A real tab takeover changes owner or fencing token and remains a hard
   // conflict with both copies preserved.
-  const ownedProofAdvance = allowOwnedRebase && leaseMatches && revision !== null &&
+  // A deferred proof-bound autosave returns after its primary read-back, then
+  // rolls the previous primary into the backup in the persistence Worker. The
+  // Worker binds that write to the same owner/fence, but it cannot synchronously
+  // refresh this page's small backup revision cache. A later manual/lifecycle
+  // save must therefore admit the newer durable backup head when (and only
+  // when) both copies are valid rolling backups, the candidate does not move
+  // backwards in time, and the durable revision belongs to this exact fence.
+  // An actual tab takeover changes owner/fence and remains a hard conflict.
+  const sameFenceRollingBackupAdvance =
+    (key === `${SAVE_KEY}.backup` || key === `${SAVE_KEY}.backup.speedrun`) &&
+    candidateCatalogBase?.kind === "backup" && candidateCatalogBase.slot === "main" &&
+    candidateCatalogBase.integrity === "valid" && currentCatalog?.kind === "backup" &&
+    currentCatalog.slot === "main" && currentCatalog.integrity === "valid" &&
+    candidateCatalogBase.mode === currentCatalog.mode && candidateCatalogBase.savedAt >= currentCatalog.savedAt;
+  const ownedProofAdvance = (allowOwnedRebase || sameFenceRollingBackupAdvance) && leaseMatches && revision !== null &&
     revision.saveKey === key && revision.writerId === writerId &&
     revision.fencingToken === renewedLease!.fencingToken && revision.revision > expectedRevision &&
     persisted !== null && currentCatalog !== null && currentCatalog.revision === revision.revision &&
@@ -1095,8 +1117,8 @@ async function commitCoordinatedRecord(
     postCoordinationMessage({ schemaVersion: 1, type: "conflict", writerId, sentAt: now, key, conflictId, fencingToken: lease?.fencingToken });
     throw new LocalSaveConflictError(conflictId);
   }
-  const preparedCatalog = value !== null && isCatalogedSaveKey(key)
-    ? buildLocalSaveCatalog(key, value, admittedRevision + 1)
+  const preparedCatalog = candidateCatalogBase
+    ? { ...candidateCatalogBase, revision: admittedRevision + 1 }
     : null;
   const nextRevision = createLocalSaveRevision({
     saveKey: key,
@@ -1259,6 +1281,59 @@ function clearEmergencyMirror(mode: LocalSaveMode): void {
   }
 }
 
+async function reconcileEmergencyMirrors(previousLease: LocalSaveWriterLease | null): Promise<void> {
+  if (backend !== "indexeddb" || !database || writerStatus.role !== "primary") return;
+  for (const mode of ["normal", "speedrun"] as const) {
+    const mirror = readEmergencyMirror(mode);
+    if (!mirror) continue;
+    const key = primaryKeyForMode(mode);
+    const existingRecord = knownSaveKeys.has(key) ? await readRecord(database, key) : undefined;
+    const existing = existingRecord?.value ?? null;
+    if (existing === mirror.payload) {
+      clearEmergencyMirror(mode);
+      continue;
+    }
+    const revision = parseLocalSaveRevision(await readCoordinationValue(database, localSaveRevisionKey(key)));
+    const payloadIdentity = inspectLocalSaveIdentity(mirror.payload);
+    const integrity = inspectSaveEnvelopeChecksum(mirror.payload);
+    const payloadMode = inspectedEnvelopeMode(integrity);
+    const continuesClaimedLineage = mirror.metadata && integrity.status === "valid" && payloadMode === mode &&
+      matchesLocalSaveEmergencyMirrorLineage({
+        metadata: mirror.metadata,
+        expectedMode: mode,
+        expectedSaveKey: key,
+        payloadIdentity,
+        durableRevision: revision,
+        durableLease: previousLease,
+      });
+    try {
+      // An unproven mirror is deliberately supplied as the stale CAS base, so
+      // the common commit path preserves it as a conflict instead of applying
+      // it. A proven lineage uses the actual durable base and may continue.
+      await commitCoordinatedRecord(
+        database,
+        key,
+        mirror.payload,
+        continuesClaimedLineage ? existing : mirror.payload,
+        true,
+        continuesClaimedLineage ? catalogCache.get(key) ?? null : null,
+        revision?.revision ?? 0,
+      );
+      clearEmergencyMirror(mode);
+      if (mode === "normal") {
+        try { if (window.localStorage.getItem(key) === mirror.payload) window.localStorage.removeItem(key); } catch { /* optional cleanup */ }
+      }
+    } catch (error) {
+      if (error instanceof LocalSaveConflictError) {
+        startupConflictId = error.conflictId;
+        startupConflictCreatedAt = Date.now();
+        clearEmergencyMirror(mode);
+      }
+      // Other storage/verification failures leave the exact mirror for retry.
+    }
+  }
+}
+
 /** Clear a verified emergency mirror using only its small metadata sidecar. */
 export function clearPrimarySaveEmergencyMirrorProof(
   mode: LocalSaveMode,
@@ -1370,75 +1445,6 @@ async function initializeIndexedDb(): Promise<void> {
   });
   scheduleLegacyCatalogIndex();
 
-  const durableLease = parseLocalSaveWriterLease(await readCoordinationValue(db, LOCAL_SAVE_WRITER_LEASE_KEY));
-  for (const mode of ["normal", "speedrun"] as const) {
-    const mirror = readEmergencyMirror(mode);
-    if (!mirror) continue;
-    const key = primaryKeyForMode(mode);
-    const existingRecord = knownSaveKeys.has(key) ? await readRecord(db, key) : undefined;
-    const existing = existingRecord?.value ?? null;
-    const revision = parseLocalSaveRevision(await readCoordinationValue(db, localSaveRevisionKey(key)));
-    const payloadIdentity = inspectLocalSaveIdentity(mirror.payload);
-    const integrity = inspectSaveEnvelopeChecksum(mirror.payload);
-    const payloadMode = inspectedEnvelopeMode(integrity);
-    if (mirror.metadata && integrity.status === "valid" && payloadMode === mode && canApplyLocalSaveEmergencyMirror({
-      metadata: mirror.metadata,
-      expectedWriterId: writerId,
-      expectedMode: mode,
-      expectedSaveKey: key,
-      payloadIdentity,
-      durableRevision: revision,
-      durableLease,
-    })) {
-      const now = Date.now();
-      const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
-      const mirrorCatalog = buildLocalSaveCatalog(key, mirror.payload, (revision?.revision ?? 0) + 1);
-      const transaction = db.transaction(RECORD_STORE, "readwrite");
-      const done = transactionDone(transaction);
-      const store = transaction.objectStore(RECORD_STORE);
-      const nextRevision = createLocalSaveRevision({
-        saveKey: key,
-        previousRevision: revision?.revision ?? 0,
-        value: mirror.payload,
-        writerId,
-        fencingToken: mirror.metadata.fencingToken,
-        now,
-      });
-      putSaveValueAndCatalog(store, key, mirror.payload, nextRevision.revision, now, mirrorCatalog);
-      putStoredValue(store, localSaveRevisionKey(key), JSON.stringify(nextRevision), now);
-      await done;
-      revisionCache.set(key, nextRevision.revision);
-      putCacheValue(key, mirror.payload, now);
-      clearEmergencyMirror(mode);
-      // A legacy same-name normal mirror may remain from older code. Remove it
-      // only when it is byte-identical to the proven mirror just committed.
-      if (mode === "normal") {
-        try { if (window.localStorage.getItem(key) === mirror.payload) window.localStorage.removeItem(key); } catch { /* optional cleanup */ }
-      }
-      continue;
-    }
-    if (existing !== mirror.payload) {
-      const now = Date.now();
-      const { buildLocalSaveCatalog } = await import("./localSaveCatalogBuild");
-      const transaction = db.transaction(RECORD_STORE, "readwrite");
-      const done = transactionDone(transaction);
-      const store = transaction.objectStore(RECORD_STORE);
-      const conflictId = preserveWriteConflict(
-        store,
-        key,
-        mirror.payload,
-        existing,
-        mirror.metadata?.fencingToken ?? revision?.fencingToken ?? durableLease?.fencingToken ?? 1,
-        now,
-        buildLocalSaveCatalog,
-      );
-      await done;
-      startupConflictId = conflictId;
-      startupConflictCreatedAt = now;
-    }
-    clearEmergencyMirror(mode);
-  }
-
   const legacy = legacyEntries();
   for (const [key, value] of legacy) {
     const existingRecord = knownSaveKeys.has(key) ? await readRecord(db, key) : undefined;
@@ -1523,7 +1529,8 @@ export function initializeLocalSaveStore(): Promise<void> {
       initializeFallback();
     }
     installCoordinationListeners();
-    await claimWriterLease();
+    const writerClaim = await claimWriterLease();
+    if (writerClaim.claimed) await reconcileEmergencyMirrors(writerClaim.previous);
     if (startupConflictId) {
       publishWriterStatus({ ...writerStatus, role: "conflict", reason: "检测到旧标签页留下的急救存档，已保留双方版本", conflictId: startupConflictId });
     }
@@ -1630,7 +1637,7 @@ function conflictResolutionFailure(
 
 async function requireConflictResolutionLease(startedAt: number): Promise<LocalSaveConflictResolutionResult | null> {
   if (writerStatus.role === "primary") return null;
-  if (await claimWriterLease()) return null;
+  if ((await claimWriterLease()).claimed) return null;
   const durable = database
     ? parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY))
     : null;

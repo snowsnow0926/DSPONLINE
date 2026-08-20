@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotes1101, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeAppBoundary";
 import { AccessibleDialog } from "./AccessibleDialog";
 
@@ -9,6 +9,7 @@ export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
 
 export const CURRENT_RELEASE_NOTES = getCurrentReleaseNotes("zh-CN");
 
+const RELEASE_NOTES_1_1_1 = getReleaseNotes1101("zh-CN");
 const RELEASE_NOTES_1_1_0 = getReleaseNotes1100("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
@@ -156,6 +157,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_1_1,
   RELEASE_NOTES_1_1_0,
   RELEASE_NOTES_1_0_47,
   RELEASE_NOTES_1_0_46,
@@ -540,6 +542,7 @@ export function markCurrentReleaseNotesSeen(): void {
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { locale } = useAppLocale();
   const localizedCurrentRelease = getCurrentReleaseNotes(locale);
+  const localizedRelease1101 = getReleaseNotes1101(locale);
   const localizedRelease1100 = getReleaseNotes1100(locale);
   const localizedRelease1047 = getReleaseNotes1047(locale);
   const localizedRelease1046 = getReleaseNotes1046(locale);
@@ -559,6 +562,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.id === RELEASE_NOTES_1_1_1.id ? localizedRelease1101
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_0.id ? localizedRelease1100
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_47.id ? localizedRelease1047
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_46.id ? localizedRelease1046

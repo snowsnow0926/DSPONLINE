@@ -183,8 +183,19 @@ export function canApplyLocalSaveEmergencyMirror(options: {
   durableRevision: LocalSaveRevision | null;
   durableLease: LocalSaveWriterLease | null;
 }): boolean {
-  const { metadata, expectedWriterId, expectedMode, expectedSaveKey, payloadIdentity, durableRevision, durableLease } = options;
-  return metadata.writerId === expectedWriterId && metadata.mode === expectedMode && metadata.saveKey === expectedSaveKey &&
+  return options.metadata.writerId === options.expectedWriterId && matchesLocalSaveEmergencyMirrorLineage(options);
+}
+
+export function matchesLocalSaveEmergencyMirrorLineage(options: {
+  metadata: LocalSaveEmergencyMirrorMetadata;
+  expectedMode: "normal" | "speedrun";
+  expectedSaveKey: string;
+  payloadIdentity: { savedAt: number; checksum: string | null };
+  durableRevision: LocalSaveRevision | null;
+  durableLease: LocalSaveWriterLease | null;
+}): boolean {
+  const { metadata, expectedMode, expectedSaveKey, payloadIdentity, durableRevision, durableLease } = options;
+  return metadata.mode === expectedMode && metadata.saveKey === expectedSaveKey &&
     metadata.savedAt === payloadIdentity.savedAt && metadata.checksum === payloadIdentity.checksum &&
     metadata.candidateRevision > (durableRevision?.revision ?? 0) &&
     (!durableRevision || durableRevision.writerId === metadata.writerId && durableRevision.fencingToken === metadata.fencingToken) &&

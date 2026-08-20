@@ -10,7 +10,7 @@ test.describe.configure({ timeout: Math.max(180_000, OFFLINE_SECONDS * 250) });
 test.use({ serviceWorkers: "block" });
 
 test("cloud upload preparation keeps a large save off the main thread", async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1"));
+  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-21-v1.1.2"));
   await page.goto("/?menu=1");
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 8 * 1024 * 1024 });
   const fixtureSavedAt = (JSON.parse(raw) as { savedAt?: number }).savedAt ?? Date.now();

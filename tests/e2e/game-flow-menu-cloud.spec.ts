@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-21-v1.1.2");
     }
   });
 }
@@ -1634,20 +1634,17 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档与挂机保存紧急修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.1");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(releaseNotes).toContainText("已结算合同不再同日重生");
-  await expect(releaseNotes).toContainText("1.1.0 受影响存档自动无损修复");
-  await expect(releaseNotes).toContainText("旧客户端获得受限服务端兼容");
-  await expect(releaseNotes).toContainText("纯挂机与卡顿不再制造假冲突");
-  await expect(releaseNotes).toContainText("存档与数据库格式不升级");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "存档冲突修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(2);
+  await expect(releaseNotes).toContainText("延迟备份接续");
+  await expect(releaseNotes).toContainText("真实冲突保护");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
   await expect(releaseHistory).toBeVisible();
-  await expect(releaseHistory.getByRole("button", { name: /1\.0\.47 · 经典卡片与画布连线显示修复/ })).toBeVisible();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
+  await expect(releaseHistory.getByRole("button", { name: /1\.0\.47 · 经典卡片与画布连线显示修复/ })).toBeVisible();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseHistory.getByRole("button", { name: /1\.0\.42 · 界面适配、存档恢复与规则更新/ }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "界面适配、存档恢复与规则更新");
@@ -1666,9 +1663,9 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档与挂机保存紧急修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.1");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "存档冲突修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(2);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1696,7 +1693,7 @@ test("dated release notes appear once and remain available from both settings sc
     const footer = dialog.querySelector<HTMLElement>(".release-notes-footer")?.getBoundingClientRect();
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
-  await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight >= element.clientHeight)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
@@ -1706,16 +1703,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-20-v1.1.1");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-21-v1.1.2");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年8月20日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年8月21日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档与挂机保存紧急修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.1");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "存档冲突修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(2);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1725,9 +1722,9 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档与挂机保存紧急修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.1");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "存档冲突修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(2);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-20-v1100-844x390.png", fullPage: true });

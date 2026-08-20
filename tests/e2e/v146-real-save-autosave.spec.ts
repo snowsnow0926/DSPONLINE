@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 // This is an opt-in local acceptance check. CI never receives a player save;
 // callers supply a read-only fixture path through DSP_REAL_SAVE_FIXTURE.
@@ -8,11 +9,11 @@ test.describe("real save autosave acceptance", () => {
   test.skip(!fixturePath, "requires DSP_REAL_SAVE_FIXTURE");
 
   test("a running imported factory remains running after verified autosaves", async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(360_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-20-v1.1.1");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-21-v1.1.2");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       // Exercise the player's configured 30-second interval rather than the
       // optional large-save cadence throttle. The handler is called by the
@@ -37,12 +38,30 @@ test.describe("real save autosave acceptance", () => {
     });
 
     await page.goto("/?menu=1");
-    await page.getByLabel("选择存档文件").setInputFiles(fixturePath!);
+    const fixtureEnvelope = JSON.parse(await readFile(fixturePath!, "utf8")) as { savedAt?: unknown };
+    fixtureEnvelope.savedAt = Date.now();
+    await page.getByLabel("选择存档文件").setInputFiles({
+      name: "dsp-idle-real-save-current-time.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(fixtureEnvelope)),
+    });
     await expect(page.getByRole("button", { name: "确认导入并进入" })).toBeEnabled({ timeout: 60_000 });
     await page.getByRole("button", { name: "确认导入并进入" }).click();
 
     const shell = page.locator(".game-shell");
-    await expect(shell).toBeVisible({ timeout: 60_000 });
+    const skipSettlement = page.getByRole("button", { name: /放弃离线收益/ });
+    await Promise.race([
+      shell.waitFor({ state: "visible", timeout: 60_000 }),
+      skipSettlement.waitFor({ state: "visible", timeout: 60_000 }),
+    ]);
+    if (await skipSettlement.isVisible()) {
+      await skipSettlement.click();
+      const decision = page.getByRole("alertdialog", { name: "快速结算需要玩家选择" });
+      await decision.getByRole("button", { name: "再次确认：收益为 0" }).click();
+      await page.getByRole("dialog", { name: "离线结算报告" })
+        .getByRole("button", { name: "确认结算" }).click();
+    }
+    await expect(shell).toBeVisible({ timeout: 180_000 });
     await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 60_000 });
     await expect(shell).toHaveAttribute("data-simulation-worker", "active", { timeout: 60_000 });
 
@@ -202,6 +221,32 @@ test.describe("real save autosave acceptance", () => {
       entityCount: importedShape!.entityCount,
       beltCount: importedShape!.beltCount,
     }));
+
+    // Reproduce the production sequence behind the reported banner: a
+    // prepared autosave completes its deferred Worker backup, then a
+    // manual/lifecycle save rolls the just-finished primary into that same
+    // backup key. The second write must rebase the same fenced writer instead
+    // of manufacturing a cross-tab conflict.
+    const manualAfterDeferredBackup = await page.evaluate(async () => {
+      const [storage, localStore] = await Promise.all([
+        import("/src/game/storage.ts"),
+        import("/src/game/localSaveStore.ts"),
+      ]);
+      const raw = await localStore.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+      const inspection = raw ? storage.inspectSave(raw) : null;
+      if (!inspection?.valid || !inspection.state) throw new Error("verified primary missing before manual save");
+      const result = await storage.saveGameVerified(inspection.state, undefined, undefined, { force: true });
+      return {
+        result,
+        conflicts: (await localStore.getLocalSaveConflicts()).map((entry) => entry.saveKey),
+        writerRole: localStore.getLocalSaveWriterStatus().role,
+      };
+    });
+    expect(manualAfterDeferredBackup).toMatchObject({
+      result: { success: true },
+      conflicts: [],
+      writerRole: "primary",
+    });
 
     await expect.poll(() => page.evaluate(async () => {
       const storage = await import("/src/game/storage.ts");

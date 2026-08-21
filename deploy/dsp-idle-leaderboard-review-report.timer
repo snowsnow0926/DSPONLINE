@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the DSP Idle leaderboard review report every evening
+
+[Timer]
+OnCalendar=*-*-* 22:00:00 Asia/Shanghai
+Persistent=true
+Unit=dsp-idle-leaderboard-review-report.service
+
+[Install]
+WantedBy=timers.target

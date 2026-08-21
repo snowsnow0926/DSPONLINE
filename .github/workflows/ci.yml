@@ -92,7 +92,7 @@ jobs:
         run: npm run test:report:slowest -- --limit 10
       - name: Upload shard timing JSON
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: playwright-json-shard-1
           path: test-results/playwright-report.json
@@ -123,7 +123,7 @@ jobs:
         run: npm run test:report:slowest -- --limit 10
       - name: Upload shard timing JSON
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: playwright-json-shard-2
           path: test-results/playwright-report.json

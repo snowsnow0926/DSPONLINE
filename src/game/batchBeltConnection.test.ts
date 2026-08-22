@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectBeltsAtomically, createInitialState } from "./engine";
+import { connectBeltToBatchDraft, connectBeltsAtomically, createBatchBeltConnectionDraft, createInitialState, getBatchBeltConnectionCheck } from "./engine";
 import type { GameState } from "./types";
 
 function fixture(): GameState {
@@ -57,8 +57,8 @@ describe("atomic batch belt connection", () => {
     expect(result.failures).toEqual([{ index: 1, code: "duplicate", label: "批量预览包含重复线路" }]);
   });
 
-  it("commits 10, 50 and 100 routes in one immutable transaction", () => {
-    for (const routeCount of [10, 50, 100]) {
+  it("commits 10, 50, 100, 500 and 1,000 routes in one immutable transaction", () => {
+    for (const routeCount of [10, 50, 100, 500, 1_000]) {
       const before = fixture();
       before.construction.conveyor_belt_mk1 = routeCount;
       before.entities = [before.entities[0], ...Array.from({ length: routeCount }, (_, index) => ({
@@ -77,5 +77,28 @@ describe("atomic batch belt connection", () => {
       expect(before.belts).toHaveLength(0);
       expect(before.construction.conveyor_belt_mk1).toBe(routeCount);
     }
+  });
+
+  it("appends a continuous preview to one isolated draft without touching the source", () => {
+    const before = fixture();
+    before.construction.conveyor_belt_mk1 = 3;
+    before.entities = [before.entities[0], ...Array.from({ length: 3 }, (_, index) => ({
+      ...before.entities[1],
+      id: `target-${index}`,
+      position: { x: index + 1, y: 0 },
+    }))];
+    const draft = createBatchBeltConnectionDraft(before);
+    expect(draft).not.toBe(before);
+    for (let index = 0; index < 3; index += 1) {
+      const request = { sourceId: "source", targetId: `target-${index}`, itemId: "iron_ore" as const };
+      expect(getBatchBeltConnectionCheck(draft, request)).toMatchObject({ ok: true });
+      const result = connectBeltToBatchDraft(draft, request);
+      expect(result.state).toBe(draft);
+      expect(result.beltId).toBe(`belt_${10 + index}`);
+    }
+    expect(draft.belts).toHaveLength(3);
+    expect(draft.construction.conveyor_belt_mk1).toBe(0);
+    expect(before.belts).toHaveLength(0);
+    expect(before.construction.conveyor_belt_mk1).toBe(3);
   });
 });

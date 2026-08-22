@@ -76,12 +76,35 @@ function emitVersionMetadata(): Plugin {
   };
 }
 
+/**
+ * Keep the platform selected for the build observable in the immutable output.
+ *
+ * Native builds and the Web build intentionally share the same `dist/`
+ * directory.  A release script that builds a native target last can otherwise
+ * leave a perfectly valid-looking Web directory containing native compile-time
+ * constants (notably a disabled Web cloud transport).  The release-side Web
+ * verifier consumes this small, non-secret marker before an artifact is
+ * accepted.
+ */
+function emitBuildPlatformMetadata(): Plugin {
+  return {
+    name: "emit-build-platform-metadata",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "build-platform.json",
+        source: `${JSON.stringify({ platform: appPlatform })}\n`,
+      });
+    },
+  };
+}
+
 export default defineConfig({
   // Browser history routes such as /station/:publicId must still resolve the
   // Web entry chunks from the origin root. Packaged file:// shells continue
   // to require relative assets, so keep that behavior only for native builds.
   base: resolveAssetBase(appPlatform),
-  plugins: [scaleUiFontSizes(), react(), emitVersionMetadata()],
+  plugins: [scaleUiFontSizes(), react(), emitVersionMetadata(), emitBuildPlatformMetadata()],
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
     __BUILD_ID__: JSON.stringify(buildId),

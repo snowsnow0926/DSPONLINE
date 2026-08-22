@@ -16,7 +16,11 @@ export const DEFAULT_STARTUP_BUDGET = Object.freeze({
   maxStartupJavaScriptGzipBytes: 100 * 1024,
   maxStartupCssGzipBytes: 105 * 1024,
   maxLargestStartupJavaScriptGzipBytes: 64 * 1024,
-  maxMenuGzipBytes: 280 * 1024,
+  // The real Web build retains the anonymous cloud-health/session transport
+  // in the menu closure.  Keep a tight 1 KiB margin above the measured Web
+  // baseline; the old 280 KiB value was accidentally measured from a native
+  // build left in the shared dist directory.
+  maxMenuGzipBytes: 281 * 1024,
 });
 
 const FORBIDDEN_STARTUP_MODULES = Object.freeze([

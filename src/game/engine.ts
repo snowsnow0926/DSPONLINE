@@ -9967,6 +9967,8 @@ export interface BlueprintPlacementPreview {
   compatible: boolean;
   inventoryReady: boolean;
   canPlace: boolean;
+  /** A player-actionable reason when placement compatibility is false. */
+  blockedReason?: string;
 }
 
 const BLUEPRINT_RESOURCE_ANCHOR_RADIUS = 180;
@@ -10136,7 +10138,14 @@ export function getBlueprintPlacementPreview(
   options: BlueprintPlacementOptions = {},
 ): BlueprintPlacementPreview {
   const plan = createBlueprintDeploymentPlan(state, blueprintId, position, options);
-  if (!plan) return { matchedResourceAnchors: 0, skippedResourceAnchors: [], extractorInstallCount: 0, requirements: [], compatible: false, inventoryReady: false, canPlace: false };
+  if (!plan) return { matchedResourceAnchors: 0, skippedResourceAnchors: [], extractorInstallCount: 0, requirements: [], compatible: false, inventoryReady: false, canPlace: false, blockedReason: "蓝图内容无效或位置参数不完整" };
+  const geothermalCount = plan.blueprint.entities
+    .filter((entity) => entity.buildingId === "geothermal_power_station")
+    .reduce((sum, entity) => sum + Math.max(1, Math.floor(entity.machineCount)), 0);
+  const blockedReason = !plan.compatible && geothermalCount > 0 &&
+    getPlanetIndustrialProfile(state, plan.planetId).geothermalMultiplier <= 0
+    ? `地热发电站只能部署在有地热资源的行星；当前${getPlanet(plan.planetId).name}不兼容`
+    : !plan.compatible ? "放置位置、行星或资源锚点已不兼容" : undefined;
   return {
     matchedResourceAnchors: plan.matches.resolved.length,
     skippedResourceAnchors: plan.matches.skipped.map((anchor) => ({ key: anchor.key, resourceId: anchor.resourceId })),
@@ -10145,6 +10154,7 @@ export function getBlueprintPlacementPreview(
     compatible: plan.compatible,
     inventoryReady: plan.inventoryReady,
     canPlace: plan.canPlace,
+    blockedReason,
   };
 }
 
@@ -10461,7 +10471,7 @@ function queueBlueprintPreview(state: GameState, entry: GameState["constructionQ
     entry.mirror,
     entry.id,
   );
-  return overlaps ? { ...preview, compatible: false, canPlace: false } : preview;
+  return overlaps ? { ...preview, compatible: false, canPlace: false, blockedReason: "放置位置、行星或资源锚点已不兼容" } : preview;
 }
 
 function hasQueuedBlueprintOverlap(
@@ -10665,13 +10675,16 @@ export function getConstructionQueueDetails(state: GameState, entryId: string): 
       : false;
   });
   const compatible = pendingMaterials ? preview.compatible : !missingPlacedEntity;
+  const blockedReason = compatible ? undefined : pendingMaterials
+    ? preview.blockedReason ?? "放置位置、行星或资源锚点已不兼容"
+    : "目标物流塔已拆除";
   return {
     status: pendingMaterials ? "pending-materials" : "waiting-fleet",
     blueprint,
     requirements,
     fleet,
     compatible,
-    blockedReason: compatible ? undefined : pendingMaterials ? "放置位置、行星或资源锚点已不兼容" : "目标物流塔已拆除",
+    blockedReason,
   };
 }
 
@@ -13335,32 +13348,37 @@ export interface ConnectBeltResult {
   created: boolean;
 }
 
-export function connectBeltWithResult(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): ConnectBeltResult {
+/**
+ * Apply one already-validated belt request to an owned draft.  Batch previews
+ * keep one cloned draft and append to it in place; cloning once per request
+ * made a 1,000-line selection quadratic in the size of the whole GameState.
+ * This helper is deliberately private to the command wrappers below so the
+ * persisted state can never be mutated by an ordinary caller.
+ */
+function connectBeltOnDraft(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier, targetPortIndex: BeltInputPortIndex | undefined, lanes: number): ConnectBeltResult {
   const constructionId = getBeltConstructionId(tier);
-  if (!canConnectBelt(state, sourceId, targetId, itemId, tier, targetPortIndex, lanes)) return { state, beltId: null, created: false };
   const source = state.entities.find((entity) => entity.id === sourceId);
   const target = state.entities.find((entity) => entity.id === targetId);
   if (!source || !target) return { state, beltId: null, created: false };
-  const next = copyState(state);
-  const configuredTarget = next.entities.find((entity) => entity.id === targetId)!;
+  const configuredTarget = state.entities.find((entity) => entity.id === targetId)!;
   const resolvedTargetPortIndex = configuredTarget.buildingId === "micro_black_hole_connector"
-    ? resolveBlackHolePortIndex(next, targetId, targetPortIndex)
+    ? resolveBlackHolePortIndex(state, targetId, targetPortIndex)
     : configuredTarget.buildingId === "orbital_cargo_terminal"
-      ? resolveOrbitalCargoPortIndex(next, configuredTarget, itemId, targetPortIndex)
+      ? resolveOrbitalCargoPortIndex(state, configuredTarget, itemId, targetPortIndex)
     : configuredTarget.buildingId === "material_delivery_hub"
       ? resolveMaterialDeliverySlotIndex(configuredTarget, itemId, targetPortIndex)
       : undefined;
   if ((configuredTarget.buildingId === "micro_black_hole_connector" || configuredTarget.buildingId === "material_delivery_hub" || configuredTarget.buildingId === "orbital_cargo_terminal") && resolvedTargetPortIndex === undefined) return { state, beltId: null, created: false };
-  configureAutoTargetRecipe(next, configuredTarget, itemId);
+  const matchingEndpoint = state.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
+    belt.targetPortIndex === resolvedTargetPortIndex);
+  if (matchingEndpoint && matchingEndpoint.tier !== tier) return { state, beltId: null, created: false };
+  configureAutoTargetRecipe(state, configuredTarget, itemId);
   configureTargetItem(configuredTarget, itemId, resolvedTargetPortIndex);
-  const configuredSource = next.entities.find((entity) => entity.id === sourceId)!;
+  const configuredSource = state.entities.find((entity) => entity.id === sourceId)!;
   const resolvedElevatorOutputIndex = isElevatorStation(configuredSource)
     ? configuredSource.elevatorOutputItems?.findIndex((candidate) => candidate === itemId)
     : -1;
-  const matchingEndpoint = next.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
-    belt.targetPortIndex === resolvedTargetPortIndex);
-  if (matchingEndpoint && matchingEndpoint.tier !== tier) return { state, beltId: null, created: false };
-  const existing = next.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
+  const existing = state.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
     belt.targetPortIndex === resolvedTargetPortIndex && belt.tier === tier);
   let beltId: string;
   let created = false;
@@ -13369,8 +13387,8 @@ export function connectBeltWithResult(state: GameState, sourceId: string, target
     existing.lanes += lanes;
     beltId = existing.id;
   } else {
-    beltId = `belt_${next.nextId}`;
-    next.belts.push({
+    beltId = `belt_${state.nextId}`;
+    state.belts.push({
       id: beltId,
       planetId: source.planetId,
       source: sourceId,
@@ -13381,22 +13399,28 @@ export function connectBeltWithResult(state: GameState, sourceId: string, target
       sorterTier: Math.min(3, tier) as SorterTier,
       progress: 0,
       priority: target.buildingId === "material_delivery_hub" ? 0 : 1,
-      stackSize: canSetBeltStackSize(next, next.settings.defaultBeltStackSize) ? next.settings.defaultBeltStackSize : 1,
+      stackSize: canSetBeltStackSize(state, state.settings.defaultBeltStackSize) ? state.settings.defaultBeltStackSize : 1,
       monitorEnabled: false,
       totalTransferred: 0,
       congestion: 0,
       lastFlow: 0,
-      routeMode: next.settings.defaultBeltRouteMode,
+      routeMode: state.settings.defaultBeltRouteMode,
       targetPortIndex: resolvedTargetPortIndex,
       elevatorOutputIndex: resolvedElevatorOutputIndex !== undefined && resolvedElevatorOutputIndex >= 0
         ? resolvedElevatorOutputIndex as 0 | 1 | 2 | 3 | 4
         : undefined,
     });
-    next.nextId += 1;
+    state.nextId += 1;
     created = true;
   }
-  next.construction[constructionId] = (next.construction[constructionId] ?? 0) - lanes;
-  return { state: next, beltId, created };
+  state.construction[constructionId] = (state.construction[constructionId] ?? 0) - lanes;
+  return { state, beltId, created };
+}
+
+export function connectBeltWithResult(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): ConnectBeltResult {
+  if (!canConnectBelt(state, sourceId, targetId, itemId, tier, targetPortIndex, lanes)) return { state, beltId: null, created: false };
+  const next = copyState(state);
+  return connectBeltOnDraft(next, sourceId, targetId, itemId, tier, targetPortIndex, lanes);
 }
 
 export function connectBelt(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): GameState {
@@ -13421,6 +13445,38 @@ export interface BatchBeltConnectionResult {
   failures: Array<{ index: number; code: BeltConnectionCheck["code"] | "duplicate" | "atomic-abort"; label: string }>;
 }
 
+function hasExistingBatchRoute(state: GameState, request: BatchBeltConnectionRequest): boolean {
+  const targetEntity = state.entities.find((entity) => entity.id === request.targetId);
+  return state.belts.some((belt) => belt.source === request.sourceId && belt.target === request.targetId && belt.itemId === request.itemId && (
+    targetEntity?.buildingId === "micro_black_hole_connector" || targetEntity?.buildingId === "material_delivery_hub"
+      ? request.targetPortIndex !== undefined && belt.targetPortIndex === request.targetPortIndex
+      : belt.targetPortIndex === undefined
+  ));
+}
+
+/** Validate a request against an ephemeral batch draft without cloning it. */
+export function getBatchBeltConnectionCheck(state: GameState, request: BatchBeltConnectionRequest): BeltConnectionCheck | { ok: false; code: "duplicate"; label: string } {
+  if (hasExistingBatchRoute(state, request)) return { ok: false, code: "duplicate", label: "目标接口已存在相同物品的运输线" };
+  return getBeltConnectionCheck(state, request.sourceId, request.targetId, request.itemId, request.tier ?? 1, request.targetPortIndex, request.lanes ?? 1);
+}
+
+/** Create an isolated mutable draft for continuous/batch UI previews. */
+export function createBatchBeltConnectionDraft(state: GameState): GameState {
+  return copyState(state);
+}
+
+/**
+ * Append one validated request to a draft created by
+ * {@link createBatchBeltConnectionDraft}. The draft is mutated in place and
+ * never escapes through the normal GameState command path.
+ */
+export function connectBeltToBatchDraft(draft: GameState, request: BatchBeltConnectionRequest): ConnectBeltResult {
+  const tier = request.tier ?? 1;
+  const lanes = request.lanes ?? 1;
+  if (!getBatchBeltConnectionCheck(draft, request).ok) return { state: draft, beltId: null, created: false };
+  return connectBeltOnDraft(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+}
+
 /**
  * Preview and commit use the same sequential draft, so shared stock, special
  * ports and line limits are validated exactly once before the original state
@@ -13430,7 +13486,10 @@ export interface BatchBeltConnectionResult {
  */
 export function connectBeltsAtomically(state: GameState, requests: readonly BatchBeltConnectionRequest[]): BatchBeltConnectionResult {
   if (requests.length < 1) return { state, committed: false, created: 0, skipped: 0, beltIds: [], failures: [] };
-  let draft = state;
+  // Clone once, then apply each validated request to the owned draft. The
+  // previous implementation cloned the complete GameState for every line,
+  // turning a large selection into O(requests × state) allocations.
+  const draft = copyState(state);
   const beltIds: string[] = [];
   const failures: BatchBeltConnectionResult["failures"] = [];
   const seen = new Set<string>();
@@ -13443,27 +13502,16 @@ export function connectBeltsAtomically(state: GameState, requests: readonly Batc
       continue;
     }
     seen.add(key);
-    const targetEntity = draft.entities.find((entity) => entity.id === request.targetId);
-    const existingRoute = draft.belts.some((belt) => belt.source === request.sourceId && belt.target === request.targetId && belt.itemId === request.itemId && (
-      targetEntity?.buildingId === "micro_black_hole_connector" || targetEntity?.buildingId === "material_delivery_hub"
-        ? request.targetPortIndex !== undefined && belt.targetPortIndex === request.targetPortIndex
-        : belt.targetPortIndex === undefined
-    ));
-    if (existingRoute) {
-      failures.push({ index, code: "duplicate", label: "目标接口已存在相同物品的运输线" });
-      continue;
-    }
-    const check = getBeltConnectionCheck(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+    const check = getBatchBeltConnectionCheck(draft, request);
     if (!check.ok) {
       failures.push({ index, code: check.code, label: check.label });
       continue;
     }
-    const result = connectBeltWithResult(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
-    if (!result.beltId || result.state === draft) {
+    const result = connectBeltOnDraft(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+    if (!result.beltId) {
       failures.push({ index, code: "atomic-abort", label: "线路在最终原子校验中未创建" });
       continue;
     }
-    draft = result.state;
     beltIds.push(result.beltId);
   }
   if (failures.length > 0) {

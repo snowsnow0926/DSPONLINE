@@ -76,6 +76,9 @@ import {
   canConnectBelt,
   canEntityAcceptBeltItem,
   getBeltConnectionCheck,
+  getBatchBeltConnectionCheck,
+  createBatchBeltConnectionDraft,
+  connectBeltToBatchDraft,
   connectBeltsAtomically,
   connectBeltWithResult,
   canPlaceBlueprint,
@@ -1622,6 +1625,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const clickConnectionPreviewRef = useRef<ClickConnectionPreviewState | null>(null);
   const batchConnectionModeRef = useRef(false);
   const batchConnectionsRef = useRef<BatchConnectionSelection[]>([]);
+  // Continuous line previews are isolated drafts. Keeping one draft avoids
+  // cloning the complete GameState for every cumulative candidate.
+  const batchConnectionDraftRef = useRef<GameState | null>(null);
+  const batchConnectionDraftBaseRef = useRef<GameState | null>(null);
   const confirmBatchConnectionRef = useRef<() => void>(() => undefined);
   const cancelBatchConnectionRef = useRef<() => void>(() => undefined);
   const clickConnectionSucceededRef = useRef(false);
@@ -9537,6 +9544,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activateBatchConnectionMode = useCallback(() => {
     if (batchConnectionModeRef.current) return;
     batchConnectionModeRef.current = true;
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
     setBatchConnectionMode(true);
     setBatchConnectionFailures([]);
     setBatchConnectionFeedback(null);
@@ -9564,6 +9573,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const clearBatchConnectionCandidates = useCallback(() => {
     batchConnectionsRef.current = [];
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
     setBatchConnections([]);
     setBatchConnectionFailures([]);
     setBatchConnectionFeedback(null);
@@ -9574,6 +9585,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!current[index]) return false;
     const next = current.filter((_, candidateIndex) => candidateIndex !== index);
     batchConnectionsRef.current = next;
+    // Removing an arbitrary candidate invalidates the incremental draft;
+    // rebuild it once on the next add instead of replaying on every render.
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
     setBatchConnections(next);
     setBatchConnectionFailures([]);
     setBatchConnectionFeedback(null);
@@ -9741,22 +9756,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (duplicate) {
       return reject("该目标接口已在预览列表中，未重复加入");
     }
-    const check = getBeltConnectionCheck(gameRef.current, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
+    const current = gameRef.current;
+    const check = getBeltConnectionCheck(current, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
     if (!check.ok) return reject(check.label);
     if (!isValidConnection(connection)) return reject("当前端口、线路等级或并联设置不兼容");
-    const requests = [...batchConnectionsRef.current, { connection, itemId, tier: draft.tier, targetPortIndex }].map((selection) => ({
-      sourceId: selection.connection.source!,
-      targetId: selection.connection.target!,
-      itemId: selection.itemId,
-      tier: selection.tier,
-      targetPortIndex: selection.targetPortIndex,
+    const request = {
+      sourceId: connection.source,
+      targetId: connection.target,
+      itemId,
+      tier: draft.tier,
+      targetPortIndex,
       lanes: defaultBeltLanesRef.current,
-    }));
-    const cumulativePreview = connectBeltsAtomically(gameRef.current, requests);
-    if (!cumulativePreview.committed) {
-      const reasons = [...new Set(cumulativePreview.failures.map((failure) => failure.label))];
-      return reject(reasons.join("；") || "累计候选无法整批建立");
+    };
+    let previewDraft = batchConnectionDraftRef.current;
+    if (!previewDraft || batchConnectionDraftBaseRef.current !== current) {
+      const existingSelections = batchConnectionsRef.current;
+      if (existingSelections.length === 0) {
+        previewDraft = createBatchBeltConnectionDraft(current);
+      } else {
+        const rebuilt = connectBeltsAtomically(current, existingSelections.map((selection) => ({
+          sourceId: selection.connection.source!,
+          targetId: selection.connection.target!,
+          itemId: selection.itemId,
+          tier: selection.tier,
+          targetPortIndex: selection.targetPortIndex,
+          lanes: defaultBeltLanesRef.current,
+        })));
+        if (!rebuilt.committed) {
+          const reasons = [...new Set(rebuilt.failures.map((failure) => failure.label))];
+          batchConnectionDraftRef.current = null;
+          batchConnectionDraftBaseRef.current = current;
+          return reject(reasons.join("；") || "累计候选无法整批建立");
+        }
+        previewDraft = rebuilt.state;
+      }
+      batchConnectionDraftRef.current = previewDraft;
+      batchConnectionDraftBaseRef.current = current;
     }
+    const draftCheck = getBatchBeltConnectionCheck(previewDraft, request);
+    if (!draftCheck.ok) return reject(draftCheck.label);
+    const appended = connectBeltToBatchDraft(previewDraft, request);
+    if (!appended.beltId) return reject("累计候选无法整批建立");
+    batchConnectionDraftRef.current = appended.state;
     const next = [...batchConnectionsRef.current, { connection, itemId, tier: draft.tier, targetPortIndex }];
     batchConnectionsRef.current = next;
     setBatchConnections(next);

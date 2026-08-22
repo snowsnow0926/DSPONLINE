@@ -1524,6 +1524,17 @@ test("box selection copies, pastes, moves and upgrades a production blueprint", 
   await nameInput.press("Enter");
   await expect(nameInput).toHaveValue("处理器模块");
   await page.screenshot({ path: "artifacts/qa/blueprint-library-1440.png", fullPage: true });
+  await page.setViewportSize({ width: 760, height: 900 });
+  const headerGeometry = await library.locator(".blueprint-card > header").evaluate((header) => {
+    const input = header.querySelector<HTMLInputElement>("input")?.getBoundingClientRect();
+    const meta = header.querySelector<HTMLElement>("em")?.getBoundingClientRect();
+    return input && meta ? { inputWidth: input.width, metaWidth: meta.width, inputRight: input.right, metaLeft: meta.left } : null;
+  });
+  expect(headerGeometry).not.toBeNull();
+  expect(headerGeometry!.inputWidth).toBeGreaterThan(80);
+  expect(headerGeometry!.metaWidth).toBeGreaterThan(40);
+  expect(headerGeometry!.inputRight).toBeLessThanOrEqual(headerGeometry!.metaLeft + 1);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByLabel("关闭蓝图工作区").click();
 
   await boxSelect();

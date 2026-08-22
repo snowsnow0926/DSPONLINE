@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotes1101, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes1047, getReleaseNotes1100, getReleaseNotes1101, getReleaseNotes1102, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeAppBoundary";
 import { AccessibleDialog } from "./AccessibleDialog";
 
@@ -10,6 +10,7 @@ export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
 export const CURRENT_RELEASE_NOTES = getCurrentReleaseNotes("zh-CN");
 
 const RELEASE_NOTES_1_1_1 = getReleaseNotes1101("zh-CN");
+const RELEASE_NOTES_1_1_2 = getReleaseNotes1102("zh-CN");
 const RELEASE_NOTES_1_1_0 = getReleaseNotes1100("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
@@ -157,6 +158,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_1_2,
   RELEASE_NOTES_1_1_1,
   RELEASE_NOTES_1_1_0,
   RELEASE_NOTES_1_0_47,
@@ -490,11 +492,9 @@ export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   },
   {
     id: "2026-07-24-v1.0.0", date: "2026年7月24日", version: "1.0.0", title: "公开测试版首发",
-    summary: "戴森壳层、银河物资出口、微型黑洞、时间扭曲主控和多站物流公平调度首次进入公开版本。",
+    summary: "终局系统、物流与云存档首次公开。",
     items: [
-      { id: "release-100", title: "终局系统", description: "戴森壳层复制、银河物资出口、三端口微型黑洞和全存档时间扭曲主控使用确定性状态。" },
-      { id: "logistics-fairness", title: "物流公平", description: "多个供应塔可部分补足同一需求，并通过持久公平游标避免固定命中首塔。" },
-      { id: "cloud-storage", title: "云存储上线", description: "账号、主云存档、手动槽位和服务端存储布局建立稳定协议，存档 envelope 保持 v2。" },
+      { id: "release-100", title: "首发系统", description: "戴森终局、物流调度、账号与云存档建立首版稳定协议。" },
     ],
   },
 ];
@@ -542,6 +542,7 @@ export function markCurrentReleaseNotesSeen(): void {
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { locale } = useAppLocale();
   const localizedCurrentRelease = getCurrentReleaseNotes(locale);
+  const localizedRelease1102 = getReleaseNotes1102(locale);
   const localizedRelease1101 = getReleaseNotes1101(locale);
   const localizedRelease1100 = getReleaseNotes1100(locale);
   const localizedRelease1047 = getReleaseNotes1047(locale);
@@ -562,6 +563,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.id === RELEASE_NOTES_1_1_2.id ? localizedRelease1102
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_1.id ? localizedRelease1101
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_0.id ? localizedRelease1100
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_47.id ? localizedRelease1047

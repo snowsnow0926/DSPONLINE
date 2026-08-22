@@ -144,22 +144,41 @@ const release1047Copy = {
   },
 } as const;
 
+const release1103Copy = {
+  date: { "zh-CN": "2026年8月22日", en: "August 22, 2026" },
+  title: { "zh-CN": "批量/云修复", en: "Batch/cloud fixes" },
+  summary: {
+    "zh-CN": "1.1.3 修复批量、云下载、蓝图。",
+    en: "1.1.3 fixes batch, cloud, and blueprints.",
+  },
+  batchTitle: { "zh-CN": "批量建造", en: "Batch building" },
+  batchDescription: {
+    "zh-CN": "拉线原子提交；地热可补足。",
+    en: "Atomic belts; gated geothermal funding.",
+  },
+  cloudTitle: { "zh-CN": "云下载/蓝图", en: "Cloud/blueprint" },
+  cloudDescription: {
+    "zh-CN": "Windows 用 GET；窄屏标题换行。",
+    en: "Windows GET; narrow titles wrap.",
+  },
+} as const;
+
 const release1102Copy = {
   date: { "zh-CN": "2026年8月21日", en: "August 21, 2026" },
-  title: { "zh-CN": "存档冲突修复", en: "Save Conflict Fix" },
+  title: { "zh-CN": "存档冲突修复", en: "Save conflict fix" },
   summary: {
-    "zh-CN": "1.1.2 修复延迟备份和关闭窗口镜像的假跨标签冲突；接管仍保留双方。GameState v47 与格式不变。",
-    en: "1.1.2 fixes false conflicts from deferred backups and closed-window mirrors; takeovers preserve both sides. GameState v47 and formats are unchanged.",
+    "zh-CN": "1.1.2 修复延迟备份假冲突；格式不变。",
+    en: "1.1.2 fixes deferred-backup conflicts; formats are unchanged.",
   },
   backupTitle: { "zh-CN": "延迟备份接续", en: "Deferred backup continuation" },
   backupDescription: {
-    "zh-CN": "仅同一 writer/fence 的连续校验修订可接续。",
-    en: "Only a validated revision on the same writer/fence continues.",
+    "zh-CN": "同一 writer/fence 才能接续。",
+    en: "Only the same writer/fence continues.",
   },
   protectionTitle: { "zh-CN": "真实冲突保护", en: "Real conflict protection" },
   protectionDescription: {
-    "zh-CN": "writer/fence 不同、校验失败或时间倒退仍禁止覆盖。",
-    en: "Different lineage, failed validation, or time regression blocks overwrite.",
+    "zh-CN": "不同 lineage 或校验失败仍阻止覆盖。",
+    en: "Different lineage or failed validation still blocks overwrite.",
   },
 } as const;
 
@@ -470,7 +489,11 @@ function release1047Message(locale: AppLocale, key: keyof typeof release1047Copy
   return release1047Copy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1102Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release1103Copy): string {
+  return release1103Copy[key][locale];
+}
+
+function release1102Message(locale: AppLocale, key: keyof typeof release1102Copy): string {
   return release1102Copy[key][locale];
 }
 
@@ -497,14 +520,28 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-21-v1.1.2",
+    id: "2026-08-22-v1.1.3",
     date: currentMessage(locale, "date"),
-    version: "1.1.2",
+    version: "1.1.3",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "same-fence-deferred-backup", title: currentMessage(locale, "backupTitle"), description: currentMessage(locale, "backupDescription") },
-      { id: "strict-real-tab-protection", title: currentMessage(locale, "protectionTitle"), description: currentMessage(locale, "protectionDescription") },
+      { id: "batch-belt-stability", title: currentMessage(locale, "batchTitle"), description: currentMessage(locale, "batchDescription") },
+      { id: "windows-cloud-download", title: currentMessage(locale, "cloudTitle"), description: currentMessage(locale, "cloudDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1102(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-21-v1.1.2",
+    date: release1102Message(locale, "date"),
+    version: "1.1.2",
+    title: release1102Message(locale, "title"),
+    summary: release1102Message(locale, "summary"),
+    items: [
+      { id: "same-fence-deferred-backup", title: release1102Message(locale, "backupTitle"), description: release1102Message(locale, "backupDescription") },
+      { id: "strict-real-tab-protection", title: release1102Message(locale, "protectionTitle"), description: release1102Message(locale, "protectionDescription") },
     ],
   };
 }

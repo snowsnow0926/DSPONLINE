@@ -520,11 +520,11 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "存档冲突修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.2");
+  await expect(dialog).toHaveAttribute("aria-label", "批量/云修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.3");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(2);
-  await expect(dialog).toContainText("延迟备份接续");
-  await expect(dialog).toContainText("真实冲突保护");
+  await expect(dialog).toContainText("批量建造");
+  await expect(dialog).toContainText("云下载/蓝图");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -4,6 +4,14 @@ All notable player-facing changes are recorded here. Game-state migration versio
 
 ## [Unreleased]
 
+### 1.1.3（开发候选）
+
+- 修复大批量连续拉线的累计状态复制，最终确认仍保持整批原子提交，失败不会改动库存、端口或存档。
+- 合法地热行星支持蓝图批量补足；不兼容行星继续阻止并显示明确原因。
+- Windows/桌面云存档读取请求统一显式使用 GET，避免旧桥接误报 405。
+- 修复窄屏双列蓝图卡片标题挤压导致的竖排错位。
+- 保持 GameState v47、存档封装、云 schema、SQLite layout 与 IndexedDB records 不变。
+
 ### 1.1.0（本地候选，未发布）
 
 - 默认启用 RuntimeWorld 2.0：传送带、生产、电力、物流与量子领域使用 Worker 私有编译索引、稳定依赖和精确失效边界，生产构建不运行影子双跑。

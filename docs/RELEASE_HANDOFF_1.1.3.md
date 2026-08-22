@@ -6,9 +6,9 @@
 
 - previous-stable：1.1.2
 - 运行时基线：`fe928b4a009a9c385237c0c4f0473fded241e113`
-- 候选提交：由发布 Agent 在本交接文档提交后填写
-- Release ID：`1.1.3-<12 位 clean SHA>`
-- Build ID：`1.1.3+<12 位 clean SHA>`
+- 最终运行时 clean SHA：`e59885bee29b26e3281144ffca74d68003072a7e`
+- Release ID：`1.1.3-e59885bee29b`
+- Build ID：`1.1.3+e59885bee29b`
 
 ## 交接制品
 
@@ -39,3 +39,7 @@
 6. 切换后分别验证 build/version/health/readiness、PWA/service-worker、缓存、完整下载哈希、Range、Android feed 和 Windows feed；全部目标通过后才写成功发布记录。
 
 任一签名、备份、哈希、健康、空间、切换、smoke 或回滚门禁失败，立即记录 No-Go 和当前指针，不热改、不降级、不做部分发布。
+
+## 发布结论（2026-08-22）
+
+以上所有目标已按同一冻结 Release ID 完成原子切换并通过独立备份、健康、公开下载、PWA/cache、Range、签名和观察门禁。正式证据见 [1.1.3 发布记录](./releases/1.1.3.md)。

@@ -612,6 +612,13 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
             const fleetAvailable = details.fleet.some((item) => item.missing > 0 && item.available > 0);
             const canFundConstruction = details.compatible && (constructionReady || constructionAvailable);
             const canFundFleet = details.compatible && fleetAvailable;
+            const constructionUnavailable = details.status === "pending-materials" && details.requirements.some((item) => item.missing > 0) && !constructionAvailable;
+            const fleetUnavailable = details.status === "pending-materials" && details.fleet.some((item) => item.missing > 0) && !fleetAvailable;
+            const fundingHint = details.blockedReason ?? (constructionUnavailable && fleetUnavailable
+              ? "施工托盘和物流载具均暂无可用库存；材料到位后可一键补足"
+              : constructionUnavailable
+                ? "施工托盘暂无可用建筑或线路；材料到位后可一键补足"
+                : fleetUnavailable ? "随身物流载具暂无可用库存；载具到位后可一键补足" : undefined);
             return <article className={`pending-construction-order pending-construction-order--${details.status}`} key={entry.id}>
               <header>
                 <div><i><Layers3 size={16} /></i><span><strong>{entry.blueprintName}</strong><small>{getPlanet(entry.planetId).name} · 坐标 {Math.round(entry.position.x)}, {Math.round(entry.position.y)}</small></span></div>
@@ -622,7 +629,7 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
                 <div><dt>方向</dt><dd>{entry.rotation}°{entry.mirror === "horizontal" ? " · 水平镜像" : ""}</dd></div>
                 <div><dt>版本</dt><dd>r{entry.blueprintRevision ?? details.blueprint?.revision ?? 1}</dd></div>
               </dl>
-              {details.blockedReason ? <p className="pending-construction-blocked">{details.blockedReason}</p> : null}
+              {fundingHint ? <p className="pending-construction-blocked">{fundingHint}</p> : null}
               {details.requirements.length > 0 ? <section className="pending-construction-materials">
                 <strong>建筑与线路</strong>
                 <div>{details.requirements.map((item) => {
@@ -648,9 +655,9 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
                 })}</div>
               </section> : null}
               <footer>
-                <button type="button" disabled={!canFundConstruction} onClick={() => onFundQueue(entry.id, "construction")}><PackageOpen size={14} />{constructionReady ? "开始建造" : "补足建筑与线路"}</button>
-                <button type="button" disabled={!canFundFleet} onClick={() => onFundQueue(entry.id, "fleet")}><Truck size={14} />补足物流载具</button>
-                <button className="primary" type="button" disabled={!details.compatible || (!canFundConstruction && !canFundFleet)} onClick={() => onFundQueue(entry.id, "all")}><PackageCheck size={14} />一键补足本订单</button>
+                <button type="button" disabled={!canFundConstruction} title={!canFundConstruction ? fundingHint : undefined} onClick={() => onFundQueue(entry.id, "construction")}><PackageOpen size={14} />{constructionReady ? "开始建造" : "补足建筑与线路"}</button>
+                <button type="button" disabled={!canFundFleet} title={!canFundFleet ? fundingHint : undefined} onClick={() => onFundQueue(entry.id, "fleet")}><Truck size={14} />补足物流载具</button>
+                <button className="primary" type="button" disabled={!details.compatible || (!canFundConstruction && !canFundFleet)} title={!details.compatible || (!canFundConstruction && !canFundFleet) ? fundingHint : undefined} onClick={() => onFundQueue(entry.id, "all")}><PackageCheck size={14} />一键补足本订单</button>
                 <button className="danger" type="button" onClick={async () => {
                   if (await gameDialog.confirm(`取消“${entry.blueprintName}”施工订单？已投入的建筑、线路和载具会完整返还。`, { danger: true, confirmLabel: "取消并返还" })) onCancelQueue(entry.id);
                 }}><Trash2 size={14} />取消并返还</button>

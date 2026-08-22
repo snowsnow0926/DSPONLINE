@@ -11638,7 +11638,10 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 .blueprint-card > header {
   display: grid;
   min-height: 64px;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  /* Keep a real title column when two cards share a narrow panel. The
+     metadata is allowed to wrap instead of shrinking the input to a
+     one-character-wide vertical strip. */
+  grid-template-columns: 34px minmax(120px, 1fr) minmax(0, 42%);
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -11671,6 +11674,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 .blueprint-card > header input {
   width: 100%;
   min-width: 0;
+  overflow: hidden;
   padding: 0;
   border: 0;
   border-bottom: 1px solid transparent;
@@ -11680,6 +11684,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .blueprint-card > header input:focus {
@@ -11688,10 +11694,14 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 }
 
 .blueprint-card > header em {
+  min-width: 0;
+  max-width: 100%;
   color: var(--muted);
   font-size: 8px;
   font-style: normal;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .blueprint-composition {
@@ -17932,6 +17942,8 @@ select {
 
   .blueprint-card > header em {
     grid-column: 2;
+    max-width: none;
+    text-align: left;
   }
 
   .star-map-headline span {

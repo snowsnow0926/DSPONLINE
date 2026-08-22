@@ -25,11 +25,16 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   if (androidResponse) return androidResponse;
   const bridge = getDesktopBridge();
   if (!bridge || !/^https:\/\//i.test(input)) return fetch(input, init);
+  // Electron's restricted bridge must receive an explicit verb. In
+  // particular, cloud-save downloads use the streaming transfer path; an
+  // omitted method used to cross IPC as `undefined`, which older desktop
+  // bridges/proxies could reinterpret and answer with 405 instead of GET.
+  const method = typeof init.method === "string" ? init.method.toUpperCase() : "GET";
   const target = new URL(input);
   const path = `${target.pathname}${target.search}`.replace(/^\/api(?=\/)/, "");
   const headers = requestHeaders(init.headers);
   const useTransfer = init.body != null && typeof init.body !== "string"
-    || /^\/cloud-save(?:\?|$)/.test(path) && (init.method?.toUpperCase() === "PUT" || init.method == null);
+    || /^\/cloud-save(?:\?|$)/.test(path) && (method === "PUT" || method === "GET");
   if (useTransfer) {
     const requestId = headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader] || createCloudRequestId();
     headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader] = requestId;
@@ -41,14 +46,14 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     }
     init.signal?.addEventListener("abort", abort, { once: true });
     try {
-      const expectedResponseBytes = init.method?.toUpperCase() === "PUT"
+      const expectedResponseBytes = method === "PUT"
         ? 1024 * 1024
         : CLOUD_TRANSFER_CONTRACT.singleSaveResponseLimitBytes;
       const originalBytes = Number(headers[CLOUD_TRANSFER_CONTRACT.originalBytesHeader] ?? 0);
       const timeoutRequestBytes = Math.max(body.byteLength, Number.isFinite(originalBytes) ? originalBytes : 0);
       const response = await bridge.requestApiTransfer({
         path,
-        method: init.method,
+        method,
         headers,
         requestId,
         bodyByteLength: body.byteLength,
@@ -65,7 +70,7 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   }
   const response = await bridge.requestApi({
     path,
-    method: init.method,
+    method,
     headers,
     body: typeof init.body === "string" ? init.body : undefined,
     timeoutMs: cloudRequestTimeoutMs(typeof init.body === "string" ? new TextEncoder().encode(init.body).byteLength : 0),

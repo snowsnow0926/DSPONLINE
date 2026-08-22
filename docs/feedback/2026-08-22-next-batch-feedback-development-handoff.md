@@ -70,7 +70,6 @@ Playwright 本地开发服务器会记录预期的 `127.0.0.1:65534` analytics/h
 
 ## 交接与回滚
 
-- 实现提交 SHA：见本文件所在开发提交及 agent 回报；发布 agent 应以提交后的精确 HEAD 和重新生成的 release manifest 为准，不使用旧 `dist/`。
+- 实现提交 SHA：`190b6807c0d32f24221849e548f2f2bc8e15cdae`；发布 agent 应以该提交（或后续仅交接文档提交）的精确 HEAD 和重新生成的 release manifest 为准，不使用旧 `dist/`。
 - 回滚边界：回退本开发提交即可恢复旧客户端；没有数据库或存档迁移，因此不需要数据回滚。
 - 已知风险：server/ops 完整门禁仍待具备 `better-sqlite3` 的云服务 release 环境复验；桌面真实 Electron 405 需要在打包应用和目标 API 节点做一次端到端下载 smoke。
-

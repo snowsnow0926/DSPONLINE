@@ -110,11 +110,14 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Save Stability and Mobile Belt Batch Hotfix" });
+  const dialog = page.getByRole("dialog", { name: "Endgame Construction, Offline Settlement, and Large Saves" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("1.1.4");
-  await expect(dialog).toContainText("Autosaves keep simulation running");
-  await expect(dialog).toContainText("Mobile continuous connections no longer block the map");
+  await expect(dialog).toContainText("Multiple construction megastructures build fairly");
+  await expect(dialog).toContainText("Blueprints preserve their belt lane counts");
+  await expect(dialog).toContainText("Offline fallback validates an exact prefix");
+  await expect(dialog).toContainText("Endgame saving lowers peak memory");
+  await expect(dialog).toContainText("Cloud saves support larger endgame factories");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

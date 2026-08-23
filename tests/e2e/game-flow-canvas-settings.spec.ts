@@ -2111,22 +2111,54 @@ test("failed primary saves stay visible and never report false success", async (
   await page.addInitScript(() => {
     const runtime = window as typeof window & {
       __dspPrimarySaveFault?: { enabled: boolean; remainingFailures: number; interceptedFailures: number };
-      __dspPrimarySaveNativePut?: IDBObjectStore["put"];
     };
     runtime.__dspPrimarySaveFault = { enabled: false, remainingFailures: 0, interceptedFailures: 0 };
-    runtime.__dspPrimarySaveNativePut = IDBObjectStore.prototype.put;
-    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
-      const fault = runtime.__dspPrimarySaveFault;
-      if (fault?.enabled && fault.remainingFailures > 0 && value && typeof value === "object" &&
-        (value as { key?: unknown }).key === "dsp-idle-network.save.v1") {
-        fault.remainingFailures -= 1;
-        fault.interceptedFailures += 1;
-        throw new DOMException("synthetic quota", "QuotaExceededError");
-      }
-      return key === undefined
-        ? runtime.__dspPrimarySaveNativePut!.call(this, value)
-        : runtime.__dspPrimarySaveNativePut!.call(this, value, key);
-    } as IDBObjectStore["put"];
+
+    // Primary persistence moved into an authoritative save Worker in 1.1.4,
+    // so a window-only IDB prototype fault no longer reaches the production
+    // write boundary.  Intercept that Worker protocol instead and return the
+    // transferred payload exactly as a real pre-write quota failure does.
+    const NativeWorker = window.Worker;
+    const WrappedWorker = new Proxy(NativeWorker, {
+      construct(target, args) {
+        const worker = Reflect.construct(target, args) as Worker;
+        const workerOptions = args[1] as WorkerOptions | undefined;
+        const isAuthoritativePersistenceWorker = workerOptions?.name === "authoritative-save-persistence" ||
+          String(args[0]).includes("authoritativeSavePersistence.worker");
+        if (!isAuthoritativePersistenceWorker) return worker;
+        const nativePostMessage = worker.postMessage.bind(worker);
+        worker.postMessage = ((message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
+          const request = message as { id?: unknown; type?: unknown; payload?: unknown };
+          const fault = runtime.__dspPrimarySaveFault;
+          if (request.type === "commit" && typeof request.id === "number" &&
+            request.payload instanceof ArrayBuffer && fault?.enabled && fault.remainingFailures > 0) {
+            fault.remainingFailures -= 1;
+            fault.interceptedFailures += 1;
+            window.setTimeout(() => {
+              worker.onmessage?.(new MessageEvent("message", {
+                data: {
+                  id: request.id,
+                  type: "result",
+                  result: {
+                    ok: false,
+                    reason: "quota",
+                    message: "synthetic quota",
+                    retryable: true,
+                    degraded: false,
+                  },
+                  sourcePayloadTransfer: request.payload,
+                },
+              }));
+            }, 0);
+            return;
+          }
+          if (transferOrOptions === undefined) nativePostMessage(message);
+          else nativePostMessage(message, transferOrOptions);
+        }) as typeof worker.postMessage;
+        return worker;
+      },
+    });
+    Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: WrappedWorker });
   });
   await freshDurableGame(page);
   const shell = page.locator(".game-shell");

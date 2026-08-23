@@ -27,6 +27,45 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release115Copy = {
+  date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
+  title: { "zh-CN": "超大存档低内存保存与压缩导出", en: "Low-memory Large Saves and Compressed Exports" },
+  summary: {
+    "zh-CN": "1.1.5 修复 70 MiB 以上终局存档在自动或手动保存时可能触发 OUT OF MEMORY 的问题：权威存档在序列化 Worker 内压缩后才跨线程传输，持久化 Worker 不再完整解析或反复回读巨型 JSON。导出默认生成可直接重新导入的 .json.gz，并继续稀疏化可精确恢复的 v47 默认字段；超大存档纯挂机停止与重载加入实测门禁。银河综合榜改为五项公开指标等权的对数工程等级，补上白糖产量且取消隐藏加分。GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 与云端容量合同不变。",
+    en: "Version 1.1.5 fixes possible OUT OF MEMORY crashes while automatically or manually saving 70+ MiB endgame factories. The authoritative save is compressed inside the serialization Worker before crossing threads, and the persistence Worker no longer fully parses or repeatedly reads back the giant JSON. Exports now default to directly importable .json.gz files, with additional exact v47 default-field compaction; large-save pure-idle stop and reload are now acceptance-gated. The Galaxy composite uses equally weighted logarithmic engineering levels for all five visible metrics, adding white-matrix rate and removing hidden bonuses. GameState v47, save envelope v2, cloud schema v8, SQLite layout v3, and cloud size contracts remain unchanged.",
+  },
+  memoryTitle: { "zh-CN": "保存链路不再搬运多份巨型正文", en: "Save transport avoids duplicate giant payloads" },
+  memoryDescription: {
+    "zh-CN": "序列化 Worker 对完整权威 envelope 先做 gzip，再把约 2～3 MiB 的载荷交给持久化 Worker；后者以范围扫描核对摘要和 checksum，移除事务内巨型正文重复回读，同时保留解压后 FNV、SHA-256、catalog、revision、备份和独立事务读回验证。",
+    en: "The serialization Worker gzip-compresses the complete authoritative envelope before transferring roughly 2–3 MiB to the persistence Worker. A range scanner verifies summary fields and checksum without a full parse, duplicate in-transaction payload reads are removed, and raw FNV/SHA-256, catalog, revision, backup, and independent transaction read-back proofs remain enforced.",
+  },
+  exportTitle: { "zh-CN": "存档默认导出为 .json.gz", en: "Saves export as .json.gz by default" },
+  exportDescription: {
+    "zh-CN": "当前进度先完成一次权威手动保存，再从已验证主存档生成 gzip；Web、Windows 与 Android 均可导出，开始菜单和运营中心可直接导入 .json.gz，也继续兼容旧 .json。解压设置 256 MiB 上限并拒绝损坏正文。",
+    en: "Current progress first completes an authoritative manual save, then gzip-compresses the verified primary. Web, Windows, and Android can export it; the start menu and operations center import .json.gz directly while retaining legacy .json support. Expansion is bounded to 256 MiB and corrupt payloads are rejected.",
+  },
+  sparseTitle: { "zh-CN": "v47 默认字段进一步精确瘦身", en: "More exact v47 default-field compaction" },
+  sparseDescription: {
+    "zh-CN": "生产利用率、速率、物流载具、塔等级与模式、增产剂配置等只有在等于迁移器可无损恢复的 v47 默认值时才省略；非默认值和显式非法值仍保留给权威校验拒绝，不改变旧 v46 存档含义。",
+    en: "Utilization, rates, logistics vehicles, station tiers and modes, and proliferator configuration are omitted only when equal to exact v47 defaults reconstructed by migration. Non-default and explicitly invalid values remain available for authoritative validation, and v46 semantics are unchanged.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与服务端协议保持兼容", en: "Save and server protocols remain compatible" },
+  compatibilityDescription: {
+    "zh-CN": "本版只改变本地保存的内存运输方式和文件导出容器；IndexedDB 最终仍保存标准 JSON，云上传仍使用既有 envelope 与容量边界，旧 JSON、备份、槽位和云端修订可继续读取。",
+    en: "This release changes only local save memory transport and the export-file container. IndexedDB still stores standard JSON, cloud uploads retain the existing envelope and limits, and legacy JSON, backups, slots, and cloud revisions remain readable.",
+  },
+  pureIdleTitle: { "zh-CN": "超大存档纯挂机纳入完整验收", en: "Large-save pure idle is acceptance-gated" },
+  pureIdleDescription: {
+    "zh-CN": "使用真实 70 MiB 级终局工厂的只读派生副本验证纯挂机 Worker 初始化、长窗口推进、停止终态校验、持久化与重新载入；测试不会覆盖玩家原文件。",
+    en: "A read-only derived copy of a real 70+ MiB endgame factory verifies pure-idle Worker initialization, long-window advancement, terminal validation, persistence, and reload without overwriting the player's source file.",
+  },
+  leaderboardTitle: { "zh-CN": "银河综合榜使用五项等权对数评分", en: "Galaxy composite balances five logarithmic metrics" },
+  leaderboardDescription: {
+    "zh-CN": "累计发电、白矩阵上传、白糖产量、戴森功率和实际结算吞吐各占同等工程等级；每项每翻倍增加一百万分。累计量不再按单位位数线性压过速率，也不再加入未公开的探索或殖民分。",
+    en: "Cumulative generation, uploaded white matrices, white-matrix rate, Dyson power, and settled throughput contribute equal engineering levels; every doubling adds one million points. Cumulative units can no longer dominate rates through digit count, and exploration or colonization no longer add hidden points.",
+  },
+} as const;
+
 const release114Copy = {
   date: { "zh-CN": "2026年8月23日", en: "August 23, 2026" },
   title: { "zh-CN": "终局制造、离线结算与大存档更新", en: "Endgame Construction, Offline Settlement, and Large Saves" },
@@ -390,7 +429,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release114Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release115Copy): string {
+  return release115Copy[key][locale];
+}
+
+function release114Message(locale: AppLocale, key: keyof typeof release114Copy): string {
   return release114Copy[key][locale];
 }
 
@@ -413,19 +456,37 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-23-v1.1.4",
+    id: "2026-08-24-v1.1.5",
     date: currentMessage(locale, "date"),
-    version: "1.1.4",
+    version: "1.1.5",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "construction-megastructure-fairness", title: currentMessage(locale, "constructionTitle"), description: currentMessage(locale, "constructionDescription") },
-      { id: "blueprint-belt-lanes", title: currentMessage(locale, "blueprintTitle"), description: currentMessage(locale, "blueprintDescription") },
-      { id: "bounded-offline-prefix", title: currentMessage(locale, "offlineTitle"), description: currentMessage(locale, "offlineDescription") },
-      { id: "large-save-low-memory", title: currentMessage(locale, "largeSaveTitle"), description: currentMessage(locale, "largeSaveDescription") },
-      { id: "large-cloud-save", title: currentMessage(locale, "cloudTitle"), description: currentMessage(locale, "cloudDescription") },
-      { id: "authority-checked-user-index", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
+      { id: "compressed-worker-save-transport", title: currentMessage(locale, "memoryTitle"), description: currentMessage(locale, "memoryDescription") },
+      { id: "gzip-save-export", title: currentMessage(locale, "exportTitle"), description: currentMessage(locale, "exportDescription") },
+      { id: "v47-default-compaction", title: currentMessage(locale, "sparseTitle"), description: currentMessage(locale, "sparseDescription") },
       { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+      { id: "large-save-pure-idle", title: currentMessage(locale, "pureIdleTitle"), description: currentMessage(locale, "pureIdleDescription") },
+      { id: "balanced-galaxy-score", title: currentMessage(locale, "leaderboardTitle"), description: currentMessage(locale, "leaderboardDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes114(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-23-v1.1.4",
+    date: release114Message(locale, "date"),
+    version: "1.1.4",
+    title: release114Message(locale, "title"),
+    summary: release114Message(locale, "summary"),
+    items: [
+      { id: "construction-megastructure-fairness", title: release114Message(locale, "constructionTitle"), description: release114Message(locale, "constructionDescription") },
+      { id: "blueprint-belt-lanes", title: release114Message(locale, "blueprintTitle"), description: release114Message(locale, "blueprintDescription") },
+      { id: "bounded-offline-prefix", title: release114Message(locale, "offlineTitle"), description: release114Message(locale, "offlineDescription") },
+      { id: "large-save-low-memory", title: release114Message(locale, "largeSaveTitle"), description: release114Message(locale, "largeSaveDescription") },
+      { id: "large-cloud-save", title: release114Message(locale, "cloudTitle"), description: release114Message(locale, "cloudDescription") },
+      { id: "authority-checked-user-index", title: release114Message(locale, "serverTitle"), description: release114Message(locale, "serverDescription") },
+      { id: "version-upgrade", title: release114Message(locale, "compatibilityTitle"), description: release114Message(locale, "compatibilityDescription") },
     ],
   };
 }

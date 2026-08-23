@@ -274,7 +274,8 @@ import { inspectSaveInWorker } from "./game/saveInspection";
 import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
 import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./game/blueprintExchange";
-import { exportTextFile } from "./game/fileExport";
+import { exportBinaryFile, exportTextFile } from "./game/fileExport";
+import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
 import { getDesktopBridge } from "./desktop";
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
@@ -3514,6 +3515,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         primaryWriteMs: result.timings?.primaryWriteMs ?? 0,
         backupMs: result.timings?.backupMs ?? 0,
         automaticSnapshotMs: result.timings?.automaticSnapshotMs ?? 0,
+        compressionMs: result.timings?.compressionMs ?? 0,
+        transportBytes: result.timings?.transportBytes ?? result.bytes ?? 0,
+        transportEncoding: result.timings?.transportEncoding ?? "raw",
       });
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       setSaveFailure(result.success ? null : result);
@@ -7524,21 +7528,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [persistPrimarySave, playTone, refreshSaveData]);
 
   const downloadSave = useCallback(() => {
-    void requestAuthoritativeSimulationCheckpoint().then((state) => {
+    void (async () => {
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，存档导出未执行");
-      return exportTextFile({
-        contents: exportGame(state),
-        fileName: `dsp-idle-save-${new Date().toISOString().slice(0, 10)}.json`,
+      const saved = await persistPrimarySave(undefined, "manual");
+      if (!saved.success) throw new Error(saved.message);
+      const mode = gameRef.current.mode;
+      const raw = await readLocalSavePayload(mode === "speedrun" ? `${SAVE_KEY}.speedrun` : SAVE_KEY);
+      if (!raw) throw new Error("刚刚保存的本地主存档无法读取");
+      const compressed = await compressSaveTextToGzipBlob(raw);
+      const date = new Date().toISOString().slice(0, 10);
+      if (compressed) {
+        await exportBinaryFile({
+          contents: compressed,
+          fileName: `dsp-idle-save-${date}.json.gz`,
+          mimeType: "application/gzip",
+          title: "导出当前游戏压缩存档",
+        });
+        return "gzip" as const;
+      }
+      await exportTextFile({
+        contents: raw,
+        fileName: `dsp-idle-save-${date}.json`,
         title: "导出当前游戏存档",
       });
-    }).then(() => {
-      setNotice("存档 JSON 已导出");
+      return "json" as const;
+    })().then((format) => {
+      setNotice(format === "gzip" ? "压缩存档 .json.gz 已导出" : "存档 JSON 已导出（当前环境不支持 gzip）");
       playTone("confirm");
     }).catch((error) => {
       setNotice(error instanceof Error ? `存档导出失败：${error.message}` : "存档导出失败");
       playTone("alert");
     });
-  }, [playTone, requestAuthoritativeSimulationCheckpoint]);
+  }, [persistPrimarySave, playTone]);
 
   const importSave = useCallback(async (raw: string) => {
     if (saveImportCommitInFlightRef.current) {

@@ -34,10 +34,32 @@ public class TextExportPlugin extends Plugin {
 
     @PluginMethod
     public void exportAndShare(PluginCall call) {
+        final byte[] bytes;
+        try {
+            bytes = TextExportProtocol.boundedUtf8(call.getString("contents"));
+        } catch (IllegalArgumentException error) {
+            call.reject("导出内容为空或超过安全上限", "TEXT_EXPORT_SIZE_INVALID");
+            return;
+        }
+        exportBytesAndShare(call, bytes, "TEXT_EXPORT_SIZE_INVALID");
+    }
+
+    @PluginMethod
+    public void exportBase64AndShare(PluginCall call) {
+        final byte[] bytes;
+        try {
+            bytes = TextExportProtocol.boundedBase64(call.getString("contentsBase64"));
+        } catch (IllegalArgumentException error) {
+            call.reject("压缩导出内容为空、无效或超过安全上限", "BINARY_EXPORT_SIZE_INVALID");
+            return;
+        }
+        exportBytesAndShare(call, bytes, "BINARY_EXPORT_SIZE_INVALID");
+    }
+
+    private void exportBytesAndShare(PluginCall call, byte[] bytes, String sizeErrorCode) {
         File requestDirectory = null;
         boolean chooserOpened = false;
         try {
-            byte[] bytes = TextExportProtocol.boundedUtf8(call.getString("contents"));
             String fileName = TextExportProtocol.safeFileName(call.getString("fileName"));
             String mimeType = TextExportProtocol.safeMimeType(call.getString("mimeType"));
             requestDirectory = createRequestDirectory();
@@ -51,7 +73,7 @@ public class TextExportPlugin extends Plugin {
                 .put("byteLength", bytes.length)
                 .put("chooserOpened", true));
         } catch (IllegalArgumentException error) {
-            call.reject("导出内容为空或超过安全上限", "TEXT_EXPORT_SIZE_INVALID");
+            call.reject("导出内容为空或超过安全上限", sizeErrorCode);
         } catch (Exception error) {
             call.reject("无法打开系统保存或分享面板", "TEXT_EXPORT_FAILED");
         } finally {

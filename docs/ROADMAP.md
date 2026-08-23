@@ -1,5 +1,16 @@
 # 公开测试版后续路线图
 
+## 1.1.5 开发候选（2026-08-24，开发完成未发布）
+
+- [x] 终局大存档保存管线改为 Worker 内稀疏化、gzip 传输和持久化端范围校验，避免主线程及 Worker 间同时持有多份完整状态对象。
+- [x] 支持有解压上限的 `.json.gz` 导入/导出；真实 79.4 MB 附件压至 2.76 MB，768 MiB Renderer 下连续自动/手动保存、备份与重载通过。
+- [x] 超大存档纯挂机按内存风险进入保守宏观结算；真实附件派生副本完成 30 天可重载验收，原附件未修改。
+- [x] 银河综合升级为五个公开榜等权的 `balanced-log-v2`，每项每翻倍增加相同分数，不再包含隐藏探索/殖民加分。
+- [x] 修复生产进度在延迟 Worker 发布跨过自然换圈后发生视觉回退。
+- [ ] Release Agent 从 clean 固定提交生成不可变 Web/API/Windows/Android 制品，补齐受保护 Android SDK/长期证书、双节点 fresh backup、原子切换、公网 smoke、下载 Range/cache/PWA 和 previous-stable 后方可发布。
+
+开发与制品证据将在 [1.1.5 开发报告](./DEVELOPMENT_REPORT_1.1.5.md)、[Release Agent 交接](./RELEASE_HANDOFF_1.1.5.md) 和 [候选记录](./releases/1.1.5-candidate.md) 中按固定 runtime SHA 封存。
+
 ## 1.1.4 开发候选（2026-08-23，开发完成未发布）
 
 - [x] 高堆叠建筑制造中心安全批处理与多中心公平预算；通过有限副产物相位探测保持物资守恒，避免单个巨构独占保护预算。

@@ -12,6 +12,12 @@ const webCommand = process.env.DSP_E2E_USE_PREVIEW === "1"
 // E2E 文件间并行（fullyParallel=false 保证单文件内仍串行）。
 // 本地默认 4 个 worker；CI 用 2 个避免 2 核 runner 内存过载；可用 DSP_E2E_WORKERS 覆盖。
 const e2eWorkers = Number(process.env.DSP_E2E_WORKERS ?? (process.env.CI ? "2" : "4"));
+const requestedRendererHeapMb = process.env.DSP_E2E_RENDERER_HEAP_MB === undefined
+  ? null
+  : Number(process.env.DSP_E2E_RENDERER_HEAP_MB);
+if (requestedRendererHeapMb !== null && (!Number.isSafeInteger(requestedRendererHeapMb) || requestedRendererHeapMb < 256 || requestedRendererHeapMb > 4_096)) {
+  throw new Error("DSP_E2E_RENDERER_HEAP_MB must be an integer between 256 and 4096");
+}
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -30,7 +36,16 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"], channel: "chrome" } },
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        channel: "chrome",
+        ...(requestedRendererHeapMb === null ? {} : {
+          launchOptions: { args: [`--js-flags=--max-old-space-size=${requestedRendererHeapMb}`] },
+        }),
+      },
+    },
   ],
   webServer: {
     command: webCommand,

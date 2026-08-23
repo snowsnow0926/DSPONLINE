@@ -1,10 +1,11 @@
 /// <reference lib="webworker" />
 
 import { decodeVerifiedSaveTransfer, serializeSaveEnvelopeToTransfer } from "./saveTransfer";
-import { projectPersistentSaveState } from "./saveProjection";
+import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveState } from "./saveProjection";
 import { deserializeSimulationStateTransfer, serializeSimulationStateForTransfer } from "./simulationRuntimeProtocol";
 import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
 import { sha256Bytes } from "./payloadDigest";
+import { prepareSavePayloadTransport } from "./savePayloadCompression";
 import {
   canonicalAuthoritativeSaveJson,
   canonicalizeAuthoritativeSaveSettings,
@@ -66,6 +67,7 @@ function sourceTransferables(request: SaveSerializationRequest): Transferable[] 
 
 async function deserializeAuthoritativeEnvelopeTransfer(
   source: Extract<AuthoritativeSaveSerializationRequest, { envelopeTransfer: unknown }>["envelopeTransfer"],
+  contentPackRegistry: AuthoritativeSaveSerializationRequest["contentPackRegistry"],
 ): Promise<GameState> {
   const raw = decodeVerifiedSaveTransfer(await workerBinaryPayloadToArrayBuffer(source.buffer), source);
   const inspection = inspectSaveEnvelopeChecksum(raw);
@@ -75,16 +77,16 @@ async function deserializeAuthoritativeEnvelopeTransfer(
     inspection.computedChecksum !== source.stateChecksum) {
     throw new Error("authoritative envelope transfer 完整性校验失败");
   }
-  const state = inspection.state as Partial<GameState>;
+  const state = hydrateCurrentPersistentSaveProjection(inspection.state);
   const envelopeMode = inspection.parsed.mode;
-  if (!Array.isArray(state.entities) || !Array.isArray(state.belts) ||
+  if (!state || !Array.isArray(state.entities) || !Array.isArray(state.belts) ||
     (state.mode !== "normal" && state.mode !== "speedrun") ||
     envelopeMode !== state.mode ||
     inspection.parsed.kind !== "primary" || inspection.parsed.slot !== "main" ||
     !Number.isSafeInteger(inspection.parsed.savedAt) || (inspection.parsed.savedAt as number) < 0) {
     throw new Error("authoritative envelope transfer 状态身份无效");
   }
-  return state as GameState;
+  return state;
 }
 
 function applyCheckpointOverlay(
@@ -154,7 +156,7 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
     const sourceState = sourceTransfer
       ? deserializeSimulationStateTransfer(sourceTransfer)
       : envelopeTransfer
-        ? await deserializeAuthoritativeEnvelopeTransfer(envelopeTransfer)
+        ? await deserializeAuthoritativeEnvelopeTransfer(envelopeTransfer, request.contentPackRegistry)
         : request.state as GameState;
     const state = authoritativeProof
       ? applyCheckpointOverlay(sourceState, request.checkpointOverlay)
@@ -243,18 +245,22 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
       reason: summary.reason,
       settings: catalogSettings(persistent.settings),
     };
+    const transport = await prepareSavePayloadTransport(serialized.bytes, payloadSha256!);
     const proofWithoutBinding: Omit<AuthoritativeSavePayloadProof, "bindingSha256"> = {
       integrity: "valid",
       payloadChecksum: serialized.payloadChecksum,
       payloadSha256: payloadSha256!,
       byteLength: serialized.byteLength,
       stateChecksum: serialized.stateChecksum,
+      transportEncoding: transport.encoding,
+      storedByteLength: transport.storedByteLength,
+      storedSha256: transport.storedSha256,
     };
     const proof: AuthoritativeSavePayloadProof = {
       ...proofWithoutBinding,
       bindingSha256: await computeAuthoritativeSaveProofBindingSha256(proofWithoutBinding, catalogSeed),
     };
-    const responseBytes = createImmutableWorkerBinaryPayload(serialized.bytes, binaryTransport);
+    const responseBytes = createImmutableWorkerBinaryPayload(transport.buffer, binaryTransport);
     const responseStateTransfer: WorkerBinaryPayload | undefined = returnedStateTransfer
       ? createImmutableWorkerBinaryPayload(returnedStateTransfer.buffer, binaryTransport)
       : undefined;
@@ -267,6 +273,7 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
       ...(payloadSha256 ? { payloadSha256 } : {}),
       byteLength: serialized.byteLength,
       durationMs: Math.max(0, performance.now() - startedAt),
+      compressionDurationMs: transport.compressionDurationMs,
       summary,
       catalogSeed,
       proof,

@@ -50,6 +50,17 @@ describe("offline workload classification", () => {
     expect(desktop.recommendedDeadlineMs).toBe(30_000);
   });
 
+  it("routes an absolute multi-GiB peak conservatively on a standard desktop", () => {
+    const state = createPlayerInitialState();
+    const report = classifyOfflineWorkload(state, 30 * 24 * 60 * 60, {
+      serializedBytes: 80 * 1024 * 1024,
+      device: { deviceMemoryGb: 16, hardwareConcurrency: 12, coarsePointer: false, workerSupported: true },
+    });
+    expect(report.recommendedStrategy).toBe("conservative");
+    expect(report.recommendedDeadlineMs).toBe(30_000);
+    expect(report.warning).toContain("内存风险");
+  });
+
   it("never changes the input state and keeps speedrun work exact", () => {
     const state = createPlayerInitialState();
     const before = JSON.stringify(state);

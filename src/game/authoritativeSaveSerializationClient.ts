@@ -30,6 +30,7 @@ export interface AuthoritativeSerializedSavePayload<Payload extends WorkerBinary
   catalogSeed: AuthoritativeSaveCatalogSeed;
   summary: AuthoritativeSaveSerializationSummary;
   durationMs: number;
+  compressionDurationMs: number;
 }
 
 type AuthoritativeSaveSerializationSource =
@@ -135,7 +136,12 @@ function serializeAuthoritativeSaveSourceInWorker(
       if (!isWorkerBinaryPayload(bytes) || !proof || !catalogSeed || !summary ||
         !isWorkerBinaryPayload(sourceStateTransfer) ||
         (source.kind === "envelope" && !isWorkerBinaryPayload(sourceEnvelopeTransfer)) ||
-        proof.integrity !== "valid" || proof.byteLength !== workerBinaryPayloadByteLength(bytes) ||
+        proof.integrity !== "valid" || proof.storedByteLength !== workerBinaryPayloadByteLength(bytes) ||
+        (proof.transportEncoding !== "raw" && proof.transportEncoding !== "gzip") ||
+        !/^[a-f0-9]{64}$/.test(proof.storedSha256) ||
+        (proof.transportEncoding === "raw" && (
+          proof.storedByteLength !== proof.byteLength || proof.storedSha256 !== proof.payloadSha256
+        )) ||
         proof.stateChecksum !== catalogSeed.stateChecksum || summary.stateChecksum !== catalogSeed.stateChecksum) {
         finish(() => reject(new AuthoritativeSaveSerializationClientError("protocol", "save Worker authoritative proof 响应不完整", ownershipLost())));
         return;
@@ -143,7 +149,16 @@ function serializeAuthoritativeSaveSourceInWorker(
       finish(() => {
         const durationMs = Math.max(0, event.data.durationMs ?? 0);
         options.onProgress?.({ stage: "serialized", savedAt, bytes: workerBinaryPayloadByteLength(bytes), durationMs });
-        resolve({ bytes, sourceStateTransfer, ...(sourceEnvelopeTransfer ? { sourceEnvelopeTransfer } : {}), proof, catalogSeed, summary, durationMs });
+        resolve({
+          bytes,
+          sourceStateTransfer,
+          ...(sourceEnvelopeTransfer ? { sourceEnvelopeTransfer } : {}),
+          proof,
+          catalogSeed,
+          summary,
+          durationMs,
+          compressionDurationMs: Math.max(0, event.data.compressionDurationMs ?? 0),
+        });
       });
     };
     const request: AuthoritativeSaveSerializationRequest = {

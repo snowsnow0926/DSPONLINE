@@ -20,6 +20,7 @@ export interface LeaderboardMetrics {
   exploredSystems: number;
   colonizedPlanets: number;
   galaxyScore: number;
+  galaxyScoreMetricVersion?: "balanced-log-v2" | "legacy-linear-v1";
 }
 
 function nonNegative(value: unknown): number {
@@ -30,25 +31,35 @@ function integer(value: unknown): number {
   return Math.floor(nonNegative(value));
 }
 
-function saturatingProduct(left: number, right: number): number {
-  if (left <= 0 || right <= 0) return 0;
-  return left > Number.MAX_VALUE / right ? Number.MAX_VALUE : left * right;
-}
-
 function saturatingAdd(left: number, right: number): number {
   const safeLeft = nonNegative(left);
   const safeRight = nonNegative(right);
   return safeLeft >= Number.MAX_VALUE - safeRight ? Number.MAX_VALUE : safeLeft + safeRight;
 }
 
+export const GALAXY_SCORE_METRIC_VERSION = "balanced-log-v2" as const;
+
+const GALAXY_SCORE_POINTS_PER_DOUBLING = 1_000_000;
+
+/**
+ * Each visible leaderboard category contributes one equally weighted,
+ * logarithmic engineering level. This keeps a cumulative metric from
+ * overwhelming every rate metric merely because its unit has more digits:
+ * within any category, every doubling is worth the same number of points.
+ */
+function logarithmicGalaxyScoreTerm(value: unknown, baseline: number): number {
+  const normalized = nonNegative(value);
+  if (normalized === 0) return 0;
+  return Math.round(Math.log2(1 + normalized / baseline) * GALAXY_SCORE_POINTS_PER_DOUBLING);
+}
+
 export function calculateLeaderboardGalaxyScore(metrics: Omit<LeaderboardMetrics, "galaxyScore">): number {
   const terms = [
-    metrics.energyGeneratedMj / 1_000_000,
-    saturatingProduct(metrics.uploadedWhiteMatrix, 12),
-    metrics.peakDysonPowerKw / 100,
-    saturatingProduct(metrics.peakThroughputPerMinute, 8),
-    saturatingProduct(metrics.exploredSystems, 10_000),
-    saturatingProduct(metrics.colonizedPlanets, 2_000),
+    logarithmicGalaxyScoreTerm(metrics.energyGeneratedMj, 1_000_000),
+    logarithmicGalaxyScoreTerm(metrics.uploadedWhiteMatrix, 1),
+    logarithmicGalaxyScoreTerm(metrics.peakWhiteMatrixPerMinute, 1),
+    logarithmicGalaxyScoreTerm(metrics.peakDysonPowerKw, 100),
+    logarithmicGalaxyScoreTerm(metrics.peakThroughputPerMinute, 1),
   ];
   return Math.round(terms.reduce(saturatingAdd, 0));
 }
@@ -78,5 +89,9 @@ export function normalizeLeaderboardMetrics(value: unknown): LeaderboardMetrics 
     exploredSystems: integer(source.exploredSystems),
     colonizedPlanets: integer(source.colonizedPlanets),
   };
-  return { ...metrics, galaxyScore: calculateLeaderboardGalaxyScore(metrics) };
+  return {
+    ...metrics,
+    galaxyScore: calculateLeaderboardGalaxyScore(metrics),
+    galaxyScoreMetricVersion: GALAXY_SCORE_METRIC_VERSION,
+  };
 }

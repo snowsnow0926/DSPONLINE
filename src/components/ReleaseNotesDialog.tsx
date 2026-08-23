@@ -69,6 +69,9 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "compressed-worker-save-transport": Gauge,
+  "gzip-save-export": CloudUpload,
+  "v47-default-compaction": Database,
   "dynamic-shell-safe-area": Gauge,
   "atomic-mobile-navigation": Link2,
   "workspace-accessibility": ShieldCheck,

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
+import { gunzipSync } from "node:zlib";
 
 const durableRuntimeEnabled = ["true", "1", "on"].includes(
   (process.env.VITE_DURABLE_RUNTIME_RECOVERY ?? "").trim().toLowerCase(),
@@ -77,7 +78,7 @@ async function findBlankCanvasPoint(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-23-v1.1.4");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   });
 });
@@ -458,7 +459,11 @@ test("experimental save edits stay durable when the primary write fails", async 
   const download = await downloadPromise;
   const downloadPath = await download.path();
   if (!downloadPath) throw new Error("experimental failed-save export path missing");
-  const exported = JSON.parse(await readFile(downloadPath, "utf8")) as { state?: { settings?: { difficulty?: string }; paused?: boolean } };
+  const downloaded = await readFile(downloadPath);
+  const exportedRaw = downloaded[0] === 0x1f && downloaded[1] === 0x8b
+    ? gunzipSync(downloaded).toString("utf8")
+    : downloaded.toString("utf8");
+  const exported = JSON.parse(exportedRaw) as { state?: { settings?: { difficulty?: string }; paused?: boolean } };
   expect(exported.state?.settings?.difficulty).toBe("relaxed");
   expect(exported.state?.paused).toBe(false);
 

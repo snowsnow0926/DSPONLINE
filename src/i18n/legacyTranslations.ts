@@ -668,6 +668,7 @@ const UI_EN: TranslationMap = {
   "该记录缺少完整行星指标，理论速率暂按旧存档的当前星球口径显示；实际结算吞吐不受此回退影响。": "This record lacks complete per-planet metrics, so nominal rate temporarily uses the legacy active-planet scope. Actual settled throughput is unaffected by this fallback.",
   "历史峰值生产通量": "Historical peak production throughput",
   "银河综合": "Galactic Composite",
+  "五个公开榜指标等权；每项每翻倍增加同等分数，不含隐藏加分": "Five public metrics are equally weighted; every doubling earns the same points, with no hidden bonuses",
   "发电、上传、戴森与工业规模综合评分": "Composite score from power, uploads, Dyson output, and industrial scale",
   "排行榜赛季": "Leaderboard Season",
   "我的排名": "My Rank",

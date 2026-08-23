@@ -330,6 +330,9 @@ export interface SaveStageTimings {
   primaryWriteMs: number;
   backupMs: number;
   automaticSnapshotMs: number;
+  compressionMs?: number;
+  transportBytes?: number;
+  transportEncoding?: "raw" | "gzip";
 }
 
 export interface LocalSaveSummaryMetrics {
@@ -1143,6 +1146,8 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
       machineCount,
       minerCount,
       progress: typeof entity.progress === "number" ? Math.max(0, entity.progress) : 0,
+      utilization: nonNegativeNumber(entity.utilization),
+      productionRate: nonNegativeNumber(entity.productionRate),
       fuelRemainingMj: typeof entity.fuelRemainingMj === "number" ? Math.max(0, entity.fuelRemainingMj) : 0,
       powerOutputKw: typeof entity.powerOutputKw === "number" ? Math.max(0, entity.powerOutputKw) : 0,
       powerInputKw: typeof entity.powerInputKw === "number" ? Math.max(0, entity.powerInputKw) : 0,
@@ -3339,6 +3344,9 @@ export async function saveGameVerifiedFromStateTransfer(
         primaryWriteMs: committed.result.proof.idbWriteMs,
         backupMs: committed.result.proof.backupVerifyMs,
         automaticSnapshotMs,
+        compressionMs: serialized.compressionDurationMs,
+        transportBytes: committed.result.proof.storedByteLength,
+        transportEncoding: committed.result.proof.transportEncoding,
       },
     };
   } catch (error) {
@@ -3463,6 +3471,9 @@ export async function saveGameVerifiedFromEnvelopeTransfer(
         primaryWriteMs: committed.result.proof.idbWriteMs,
         backupMs: committed.result.proof.backupVerifyMs,
         automaticSnapshotMs: 0,
+        compressionMs: serialized.compressionDurationMs,
+        transportBytes: committed.result.proof.storedByteLength,
+        transportEncoding: committed.result.proof.transportEncoding,
       },
     });
   } catch (error) {

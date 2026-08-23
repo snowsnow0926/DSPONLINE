@@ -57,6 +57,7 @@ import type { AutomaticPerformanceReport } from "../game/benchmark";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import type { AutosaveIntervalSeconds, CargoStackSize, DefaultBeltRouteMode, DifficultyMode, FontScale, GameSettings, GameState, SimulationSpeed } from "../game/types";
 import { canSetBeltStackSize } from "../game/engine";
+import { readSaveFileText } from "../game/saveFileCodec";
 import { validateBuildingBufferLimitInput, validateDefaultBeltLanesInput, validateProliferatorBufferLimitInput, type BuildingBufferLimitValidation } from "../game/settings";
 import { PRODUCTION_REFRESH_PROFILES, type ProductionRefreshPreference } from "../game/productionRefresh";
 import { getPerformancePeaks, getPerformancePhaseShares, type PerformanceMonitorSnapshot } from "../game/performanceMonitor";
@@ -932,16 +933,16 @@ function SavesPanel({
       <section className="save-primary-actions">
         <button type="button" onClick={onManualSave}><Save size={15} /><span>立即保存</span></button>
         <button type="button" onClick={onCreateSnapshot}><History size={15} /><span>创建快照</span></button>
-        <button type="button" onClick={onExport}><Download size={15} /><span>导出 JSON</span></button>
-        <button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入 JSON</span></button>
+        <button type="button" onClick={onExport}><Download size={15} /><span>导出压缩存档</span></button>
+        <button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入存档</span></button>
         <input
           ref={fileInputRef}
           type="file"
-          accept="application/json,.json"
+          accept="application/json,application/gzip,.json,.json.gz,.gz"
           aria-label="选择要导入的存档文件"
           onChange={async (event) => {
             const file = event.target.files?.[0];
-            if (file) onImport(await file.text());
+            if (file) onImport(await readSaveFileText(file));
             event.target.value = "";
           }}
         />

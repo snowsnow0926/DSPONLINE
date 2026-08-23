@@ -3,16 +3,17 @@ import { expect, test } from "@playwright/test";
 // This is an opt-in local acceptance check. CI never receives a player save;
 // callers supply a read-only fixture path through DSP_REAL_SAVE_FIXTURE.
 const fixturePath = process.env.DSP_REAL_SAVE_FIXTURE;
+const constrainedRendererHeap = process.env.DSP_E2E_RENDERER_HEAP_MB !== undefined;
 
 test.describe("real save autosave acceptance", () => {
   test.skip(!fixturePath, "requires DSP_REAL_SAVE_FIXTURE");
 
   test("a running imported factory remains running after verified autosaves", async ({ page }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(constrainedRendererHeap ? 420_000 : 240_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-23-v1.1.4");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       // Exercise the player's configured 30-second interval rather than the
       // optional large-save cadence throttle. The handler is called by the
@@ -41,12 +42,18 @@ test.describe("real save autosave acceptance", () => {
     await expect(page.getByRole("button", { name: "确认导入并进入" })).toBeEnabled({ timeout: 60_000 });
     await page.getByRole("button", { name: "确认导入并进入" }).click();
     const shell = page.locator(".game-shell");
+    const offlineChoice = page.getByRole("dialog", { name: "选择离线结算方式" });
     const skipOffline = page.getByRole("button", { name: /保守跳过本次收益/ });
     const startupOutcome = await Promise.race([
       skipOffline.waitFor({ state: "visible", timeout: 90_000 }).then(() => "skip" as const),
+      offlineChoice.waitFor({ state: "visible", timeout: 90_000 }).then(() => "choice" as const),
       shell.waitFor({ state: "visible", timeout: 90_000 }).then(() => "shell" as const),
     ]);
-    if (startupOutcome === "skip") {
+    if (startupOutcome === "choice") {
+      await offlineChoice.getByRole("button", { name: /放弃离线收益/ }).click();
+      await page.getByRole("alertdialog", { name: "快速结算需要玩家选择" })
+        .getByRole("button", { name: "再次确认：收益为 0" }).click();
+    } else if (startupOutcome === "skip") {
       await skipOffline.click();
       await page.getByRole("button", { name: /再次确认.*收益为 0/ }).click();
     }
@@ -137,6 +144,9 @@ test.describe("real save autosave acceptance", () => {
               primaryWriteMs?: number;
               backupMs?: number;
               automaticSnapshotMs?: number;
+              compressionMs?: number;
+              transportBytes?: number;
+              transportEncoding?: "raw" | "gzip";
               bytes?: number;
             };
           }>;
@@ -161,6 +171,9 @@ test.describe("real save autosave acceptance", () => {
           primaryWriteMs: Math.round(serialization?.detail?.primaryWriteMs ?? 0),
           backupMs: Math.round(serialization?.detail?.backupMs ?? 0),
           automaticSnapshotMs: Math.round(serialization?.detail?.automaticSnapshotMs ?? 0),
+          compressionMs: Math.round(serialization?.detail?.compressionMs ?? 0),
+          transportBytes: serialization?.detail?.transportBytes ?? 0,
+          transportEncoding: serialization?.detail?.transportEncoding ?? "raw",
           bytes: serialization?.detail?.bytes ?? 0,
           longTaskCount: longTasks.length,
           maxLongTaskMs: Math.round(Math.max(0, ...longTasks.map((entry) => entry.durationMs))),
@@ -177,6 +190,8 @@ test.describe("real save autosave acceptance", () => {
     expect(autosaveMetrics.snapshots).toHaveLength(2);
     expect(autosaveMetrics.serializationCount).toBe(2);
     expect(autosaveMetrics.snapshots.every((entry) => entry.durationMs > 0 && entry.bytes > 0)).toBe(true);
+    expect(autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "gzip" &&
+      entry.transportBytes > 0 && entry.transportBytes < entry.bytes / 10)).toBe(true);
     expect(autosaveMetrics.confirmedBoundarySources).toEqual([]);
     expect(autosaveMetrics.transferOnlyCheckpointCount).toBeGreaterThanOrEqual(2);
 

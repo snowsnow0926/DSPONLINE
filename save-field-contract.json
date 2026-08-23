@@ -111,6 +111,78 @@
         "missing": { "defaultVersions": [46, 47] },
         "projection": { "omitDefaultVersions": [46, 47] }
       },
+      "utilization": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "finite": true, "minimum": 0 },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "productionRate": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "finite": true, "minimum": 0 },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationDrones": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 0, "maximum": 9007199254740991 },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationVessels": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 0, "maximum": 9007199254740991 },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationWarpers": {
+        "default": { "kind": "literal", "value": 0 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "minimum": 0, "maximum": 9007199254740991 },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationTier": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "enum": [1, 2] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationOperationMode": {
+        "default": { "kind": "literal", "value": "legacy" },
+        "validation": { "type": "string", "enum": ["legacy", "elevator"] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "quantumMode": {
+        "default": { "kind": "literal", "value": "legacy" },
+        "validation": { "type": "string", "enum": ["legacy", "transitioning", "quantum"] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationHubPriority": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "enum": [0, 1, 2] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "stationMinimumLoad": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "finite": true, "enum": [0.1, 0.25, 0.5, 1] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "proliferatorTier": {
+        "default": { "kind": "literal", "value": 1 },
+        "validation": { "type": "number", "integer": true, "safeInteger": true, "enum": [1, 2, 3] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
+      "proliferatorMode": {
+        "default": { "kind": "literal", "value": "normal" },
+        "validation": { "type": "string", "enum": ["normal", "extra", "speed"] },
+        "missing": { "defaultVersions": [47] },
+        "projection": { "omitDefaultVersions": [47] }
+      },
       "quantumTarget": {
         "default": { "kind": "literal", "value": false },
         "validation": { "type": "boolean" },

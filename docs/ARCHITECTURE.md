@@ -1,5 +1,9 @@
 # 系统架构
 
+> **1.1.5 超大存档内存边界（2026-08-24）**：模拟 Worker 仍生成唯一权威规范 JSON；保存 Worker 只在自己的对象图上做 v47 精确默认稀疏投影并生成 envelope，随后于 Worker 内 gzip，主线程只转发可转移压缩缓冲和小型 proof。持久化 Worker 解压后使用 `canonicalSaveEnvelopeInspection.ts` 的范围扫描核对 envelope、FNV checksum、模式、版本、实体/线路数量和身份，不为 primary/backup 读回再执行完整 `JSON.parse`；只有小档兼容路径允许完整解析。`hydrateCurrentPersistentSaveProjection()` 仅恢复已通过 checksum 的当前 v47 内部投影默认值，不是通用迁移器，普通导入继续由 `migrateGame()` 负责。IndexedDB 仍保存兼容的规范 JSON；gzip 是 Worker 传输与 `.json.gz` 导出格式，不改变云正文或本地存储格式。导入支持 JSON/gzip、对解压后正文设 256 MiB 上限，Android 导出使用有界 base64 分片，禁止把超大正文重新集中到主线程。
+
+> **1.1.5 纯挂机、综合榜与周期显示边界**：桌面存档估算正文不少于 64 MiB 或峰值不少于 2 GiB 时，纯挂机直接选择可取消的保守宏观路径；先精确结算可证明的 1 秒前缀，再冻结不确定尾段，最终由 `projectPersistentSaveState()` 生成可规范重载状态，绝不把估算收益当作精确收益。银河综合 `balanced-log-v2` 对五个公开指标分别计算 `max(0, log2(1 + value / baseline)) × 1,000,000` 后求和；五项等权、每次翻倍增量相同，不读取隐藏探索或殖民字段。仍在运行且语义、周期速率和倍率均不变的生产显示保持原单调视觉时钟，延迟权威快照不能在自然换圈后重新基准；暂停、目标或速率变化时立即采用新权威快照。三项均不改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3。
+
 > **1.0.46 存档运行时边界（2026-08-18，未发布）**：普通构建默认使用 `runtimePersistenceMode.ts` 选择的 1.0.43-compatible verified-primary 协调器；模拟 Worker 生成权威检查点，保存 Worker 在既有 writer lease、backup、checksum 与逐字读回合同下提交主档。该默认路径不建立 recovery head，也不会因为打开既有玩家档而自动启用 durable WAL；自动保存前正在运行的模拟在保存期间和验证完成后保持运行，玩家主动暂停意图不变。`VITE_DURABLE_RUNTIME_RECOVERY=true` 只用于显式开发验证，空间站 v46 bridge 即使收到该变量也强制保持稳定协调器。默认保护模式拒绝保存窗口内的玩家编辑但不暂停模拟；设备级实验开关开启后，已接受编辑保留在 durable 队列，保存失败不回滚当前进度并允许立即导出。两条路径都不改变 GameState、save envelope、cloud schema、SQLite layout 或 IndexedDB records。
 
 > **1.0.46 durable 故障恢复边界（显式开发模式）**：模拟 Worker 失败或 durable finalize 回执失败时，`FactoryGame` 保留 T0 recovery base，使用 `replaySimulationRuntimeStartupInWorker` 回放 finalized/pending intent，将精确结果验证写入 T1，并以持久化 Worker 原子替换 recovery head 后安装新模拟 Worker。新 Worker 安装清除旧 disabled latch；暂停状态可在同页恢复。若主存档已先完成 T1 读回而旧 head 尚未替换，head 身份比较跳过旧 journal，待保存锁释放后从 T1 建立新基线。T1 revision 只取自生成对应 payload 的 Worker 回执；较新回执必须重新取得并验证新检查点，不能给旧 payload 提升 revision。

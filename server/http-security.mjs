@@ -1144,6 +1144,7 @@ const METRICS_SCHEMA = Object.freeze({
     exploredSystems: { type: "number", minimum: 0, integer: true },
     colonizedPlanets: { type: "number", minimum: 0, integer: true },
     galaxyScore: { type: "number", minimum: 0 },
+    galaxyScoreMetricVersion: { type: "string", maximumBytes: 96 },
     nominalThroughputMetricVersion: { type: "string", maximumBytes: 96 },
     throughputMetricVersion: { type: "string", maximumBytes: 96 },
     throughputWindowSeconds: { type: "number", minimum: 0 },

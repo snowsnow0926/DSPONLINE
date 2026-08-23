@@ -2264,7 +2264,8 @@ test("recalculates leaderboard score on the server", async () => {
   });
   assert.equal(refreshed.response.status, 200);
   assert.equal(refreshed.body.submission.metrics.uploadedWhiteMatrix, 12);
-  assert.equal(refreshed.body.submission.metrics.galaxyScore, 12_145);
+  assert.equal(refreshed.body.submission.metrics.galaxyScore, 4_700_440);
+  assert.equal(refreshed.body.submission.metrics.galaxyScoreMetricVersion, "balanced-log-v2");
 
   const hidden = await request("/api/leaderboard/visibility", {
     method: "POST",
@@ -2482,7 +2483,7 @@ test("does not merge a legacy nominal throughput peak into the v2 settled-produc
   assert.equal(submission.legacyMetrics.peakThroughputPerMinute, 8_000_000);
 });
 
-test("saturates extreme leaderboard totals instead of wrapping them to zero", async () => {
+test("keeps extreme leaderboard totals finite instead of wrapping them to zero", async () => {
   const registered = await request("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ username: "saturated_rank", password: "rank-pass-123", displayName: "极限工厂" }),
@@ -2507,7 +2508,9 @@ test("saturates extreme leaderboard totals instead of wrapping them to zero", as
   const entry = ranking.body.entries.find((candidate) => candidate.displayName === "极限工厂");
   assert.equal(entry.metrics.energyGeneratedMj, Number.MAX_VALUE);
   assert.equal(entry.metrics.peakDysonPowerKw, Number.MAX_VALUE);
-  assert.equal(entry.metrics.galaxyScore, Number.MAX_VALUE);
+  assert.equal(entry.metrics.galaxyScore, 3_045_424_575);
+  assert.equal(entry.metrics.galaxyScoreMetricVersion, "balanced-log-v2");
+  assert.equal(Number.isSafeInteger(entry.metrics.galaxyScore), true);
 });
 
 test("deletes an account and all directly owned cloud data", async () => {

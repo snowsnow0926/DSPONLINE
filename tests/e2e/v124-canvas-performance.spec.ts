@@ -51,7 +51,7 @@ function seedDensePausedFactory(canvasDetail: "minimal" | null = null) {
       paused: true,
     };
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-23-v1.1.4");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.endgame-extreme.v1", "true");
     window.localStorage.setItem("dsp-idle-network.endgame-extreme-ack.v1", "true");

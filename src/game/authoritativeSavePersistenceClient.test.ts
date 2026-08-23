@@ -36,6 +36,9 @@ async function input(bytes = [1, 2, 3]): Promise<AuthoritativeSavePayloadCommitI
     payloadSha256: "a".repeat(64),
     byteLength: buffer.byteLength,
     stateChecksum: seed.stateChecksum,
+    transportEncoding: "raw" as const,
+    storedByteLength: buffer.byteLength,
+    storedSha256: "a".repeat(64),
   };
   return {
     key: "dsp-idle-network.save.v1",
@@ -104,7 +107,8 @@ describe("AuthoritativeSavePersistenceClient", () => {
       proof: {
         key: commit.key, revision: 1, savedAt: 1, byteLength: 3,
         payloadChecksum: commit.proof.payloadChecksum, payloadSha256: commit.proof.payloadSha256,
-        stateChecksum: seed.stateChecksum, backupKey: null, backupRevision: null, backupSaved: false,
+        stateChecksum: seed.stateChecksum, transportEncoding: "raw", storedByteLength: 3,
+        backupKey: null, backupRevision: null, backupSaved: false,
         workerDecodeMs: 1, idbWriteMs: 2, backupVerifyMs: 0, totalBytesWritten: 3,
       },
     }, sourcePayloadTransfer: returned }, [returned]);
@@ -148,6 +152,8 @@ describe("AuthoritativeSavePersistenceClient", () => {
           payloadChecksum: blobInput.proof.payloadChecksum,
           payloadSha256: blobInput.proof.payloadSha256,
           stateChecksum: seed.stateChecksum,
+          transportEncoding: "raw",
+          storedByteLength: 3,
           backupKey: null,
           backupRevision: null,
           backupSaved: false,
@@ -207,7 +213,8 @@ describe("AuthoritativeSavePersistenceClient", () => {
       proof: {
         key: second.key, revision: 1, savedAt: 1, byteLength: 3,
         payloadChecksum: second.proof.payloadChecksum, payloadSha256: second.proof.payloadSha256,
-        stateChecksum: seed.stateChecksum, backupKey: null, backupRevision: null, backupSaved: false,
+        stateChecksum: seed.stateChecksum, transportEncoding: "raw", storedByteLength: 3,
+        backupKey: null, backupRevision: null, backupSaved: false,
         workerDecodeMs: 0, idbWriteMs: 0, backupVerifyMs: 0, totalBytesWritten: 3,
       },
     }, sourcePayloadTransfer: secondReturned }, [secondReturned]);
@@ -243,7 +250,8 @@ describe("AuthoritativeSavePersistenceClient", () => {
       proof: {
         key: second.key, revision: 1, savedAt: 1, byteLength: 3,
         payloadChecksum: second.proof.payloadChecksum, payloadSha256: second.proof.payloadSha256,
-        stateChecksum: seed.stateChecksum, backupKey: null, backupRevision: null, backupSaved: false,
+        stateChecksum: seed.stateChecksum, transportEncoding: "raw", storedByteLength: 3,
+        backupKey: null, backupRevision: null, backupSaved: false,
         workerDecodeMs: 0, idbWriteMs: 0, backupVerifyMs: 0, totalBytesWritten: 3,
       },
     }, sourcePayloadTransfer: returned }, [returned]);

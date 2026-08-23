@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-23-v1.1.4";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
 
 async function prepareFactory(page: Page, persistence: "granted" | "denied" | "unsupported", usage = 24, quota = 100, mobile = false) {
   await page.addInitScript(({ releaseNoteId, persistenceState, storageUsage, storageQuota }) => {
@@ -132,7 +132,7 @@ test("quota failure keeps the verified main save and exposes an export recovery 
 
   const downloadPromise = page.waitForEvent("download");
   await operations.getByLabel("本地存储占用").getByRole("button", { name: "立即导出" }).click();
-  expect((await downloadPromise).suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json$/);
+  expect((await downloadPromise).suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json\.gz$/);
 });
 
 test("normal and speedrun snapshots restore the same checksum, mode, slot, and state", async ({ page }) => {
@@ -185,4 +185,3 @@ test("normal and speedrun snapshots restore the same checksum, mode, slot, and s
   expect(result?.normal.envelopeChecksum).toBe(result?.normal.inspectedChecksum);
   expect(result?.speedrun.envelopeChecksum).toBe(result?.speedrun.inspectedChecksum);
 });
-

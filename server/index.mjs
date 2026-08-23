@@ -819,13 +819,17 @@ function saturatingMetricAdd(left, right) {
 }
 
 function calculateGalaxyScore(metrics) {
+  const logarithmicTerm = (value, baseline) => {
+    const normalized = normalizeMetric(value);
+    if (normalized === 0) return 0;
+    return Math.round(Math.log2(1 + normalized / baseline) * 1_000_000);
+  };
   const terms = [
-    metrics.energyGeneratedMj / 1_000_000,
-    saturatingMetricProduct(metrics.uploadedWhiteMatrix, 12),
-    metrics.peakDysonPowerKw / 100,
-    saturatingMetricProduct(metrics.peakThroughputPerMinute, 8),
-    saturatingMetricProduct(metrics.exploredSystems, 10_000),
-    saturatingMetricProduct(metrics.colonizedPlanets, 2_000),
+    logarithmicTerm(metrics.energyGeneratedMj, 1_000_000),
+    logarithmicTerm(metrics.uploadedWhiteMatrix, 1),
+    logarithmicTerm(metrics.peakWhiteMatrixPerMinute, 1),
+    logarithmicTerm(metrics.peakDysonPowerKw, 100),
+    logarithmicTerm(metrics.peakThroughputPerMinute, 1),
   ];
   const total = terms.reduce(saturatingMetricAdd, 0);
   return Math.round(total);
@@ -852,6 +856,7 @@ function normalizeMetrics(value) {
   metrics.galaxyScore = calculateGalaxyScore(metrics);
   return {
     ...metrics,
+    galaxyScoreMetricVersion: "balanced-log-v2",
     nominalThroughputMetricVersion: source.nominalThroughputMetricVersion === GALACTIC_NOMINAL_METRIC_VERSION
       ? GALACTIC_NOMINAL_METRIC_VERSION
       : "legacy-active-planet-v1",

@@ -2,12 +2,13 @@ import { expect, test, type Browser, type Locator, type Page } from "@playwright
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { selectSettingsCategory } from "./settings-helpers";
+import { gzipSync } from "node:zlib";
 
 async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-23-v1.1.4");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
     }
   });
 }
@@ -2070,9 +2071,9 @@ test("operations settings and local save slots persist across reload", async ({ 
   await operations.getByLabel("保存到槽位 1").click();
   await expect(operations.locator(".save-slot").filter({ hasText: "本地槽位 1" })).toHaveClass(/save-slot--occupied/);
   const downloadPromise = page.waitForEvent("download");
-  await operations.getByRole("button", { name: "导出 JSON" }).click();
+  await operations.getByRole("button", { name: "导出压缩存档" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json$/);
+  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json\.gz$/);
   await page.screenshot({ path: "artifacts/qa/operations-saves-1440.png", fullPage: true });
   await operations.getByLabel("删除槽位 1").click();
   const deleteDialog = page.getByRole("dialog", { name: "删除本地槽位 1" });
@@ -2209,7 +2210,9 @@ test("failed primary saves stay visible and never report false success", async (
   const downloadPromise = page.waitForEvent("download");
   await warning.getByRole("button", { name: "立即导出当前进度" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-\d{4}-\d{2}-\d{2}\.json$/);
+  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-\d{4}-\d{2}-\d{2}\.json\.gz$/);
+  const afterExport = await readDurablePrimary();
+  expect(afterExport.revision).toBe(before.revision + 1);
 
   await page.evaluate(() => {
     const fault = (window as typeof window & {
@@ -2224,7 +2227,7 @@ test("failed primary saves stay visible and never report false success", async (
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false", { timeout: 15_000 });
   await expect(warning).toBeHidden();
   const afterRetry = await readDurablePrimary();
-  expect(afterRetry.revision).toBe(before.revision + 1);
+  expect(afterRetry.revision).toBe(before.revision + 2);
 });
 
 test("font scaling keeps rendered belt endpoints attached to their handles", async ({ page }) => {
@@ -2269,9 +2272,9 @@ test("save preview, snapshots, content-pack validation and simulation diagnostic
   const savedRaw = await page.evaluate(() => window.localStorage.getItem("dsp-idle-network.save.v1"));
   expect(savedRaw).toContain("checksum");
   await operations.locator('input[aria-label="选择要导入的存档文件"]').setInputFiles({
-    name: "preview.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(savedRaw!, "utf8"),
+    name: "preview.json.gz",
+    mimeType: "application/gzip",
+    buffer: gzipSync(Buffer.from(savedRaw!, "utf8")),
   });
   await expect(operations.locator(".save-import-preview")).toBeVisible();
   await expect(operations.locator(".save-import-preview")).toContainText("校验通过");

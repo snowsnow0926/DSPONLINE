@@ -9,6 +9,7 @@ const {
   requestTimeoutMs,
   validRequestId,
 } = require("./cloud-transport.cjs");
+const { validatePackagedTransferContract } = require("./package-contract.cjs");
 
 test("desktop cloud transport covers legacy 30 MiB raw and guaranteed 64 MiB compressed saves", () => {
   assert.equal(contract.guaranteedSavePayloadBytes, 64 * 1024 * 1024);
@@ -17,6 +18,20 @@ test("desktop cloud transport covers legacy 30 MiB raw and guaranteed 64 MiB com
   assert.equal(requestBodyLimit({ "content-type": "application/json" }), contract.legacyJsonRequestLimitBytes);
   assert.ok(contract.singleSaveResponseLimitBytes > contract.guaranteedSavePayloadBytes * 2);
   assert.ok(contract.requestCompressedLimitBytes > contract.guaranteedSavePayloadBytes);
+});
+
+test("desktop packaging accepts only the complete frozen 64 MiB transfer contract", () => {
+  assert.equal(validatePackagedTransferContract(contract, contract), true);
+  assert.throws(() => validatePackagedTransferContract({
+    ...contract,
+    guaranteedSavePayloadBytes: 48 * 1024 * 1024,
+  }, contract), /冻结源码不一致/);
+  const legacy = {
+    ...contract,
+    guaranteedSavePayloadBytes: 48 * 1024 * 1024,
+    maximumTimeoutMs: 120_000,
+  };
+  assert.throws(() => validatePackagedTransferContract(legacy, legacy), /大存档云传输契约/);
 });
 
 test("desktop cloud transport scales and caps timeouts", () => {

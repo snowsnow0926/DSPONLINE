@@ -121,6 +121,7 @@ import {
   createRuntimeStatePersistencePlan,
   runtimeAppStateFingerprint,
 } from "./runtime-state-persistence.mjs";
+import { UserLookupIndex } from "./user-lookup-index.mjs";
 import {
   ACCOUNT_JSON_SCHEMAS,
   accountArchiveBodyCapability,
@@ -2133,6 +2134,7 @@ function deleteAccountData(store, userId) {
   store.data.errors = store.data.errors.filter((entry) => entry.userId !== userId);
   deleteStationAccountData(store.data, userId);
   delete store.data.users[userId];
+  store.recordRuntimeIndexEvent?.({ type: "user-account", userId });
   store.recordRuntimeIndexEvent?.({ type: "leaderboard-account", userId });
 }
 
@@ -4231,13 +4233,19 @@ export async function createCloudServer({
     categoryValue,
     isRestricted: (data, userId) => isLeaderboardRestricted(data, userId),
   });
+  const userLookupIndex = new UserLookupIndex();
+  userLookupIndex.rebuild(store.data.users);
   const runtimeMetrics = new RuntimeMetricsAggregator();
   store.setPersistenceObserver((sample) => runtimeMetrics.observeSqliteCommit(sample));
   store.setExternalMutationObserver(({ collection, key, previous, value }) => {
     if (collection === "submissions") {
       const entry = value ?? previous;
       if (typeof entry?.seasonId === "string") leaderboardIndex.markSubmissionChanged({ userId: entry.userId ?? String(key).split(":").at(-1), seasonId: entry.seasonId });
-    } else if (collection === "users" && typeof key === "string") leaderboardIndex.markAccountChanged(key);
+    } else if (collection === "users" && typeof key === "string") {
+      if (value) userLookupIndex.upsert(value);
+      else userLookupIndex.delete(key);
+      leaderboardIndex.markAccountChanged(key);
+    }
     else if (collection === "leaderboardModeration" && typeof key === "string") leaderboardIndex.markRestrictionChanged(key);
     else if (collection === "accountControls" && typeof key === "string") leaderboardIndex.markRevalidationChanged(key);
     else if (["submissions", "users", "leaderboardModeration", "accountControls"].includes(collection)) leaderboardIndex.rebuild();
@@ -4255,6 +4263,11 @@ export async function createCloudServer({
   const unsubscribeStoreCommit = store.onCommitted(({ data, runtimeIndexEvents }) => {
     for (const event of runtimeIndexEvents) {
       if (event.type === "presence") presenceIndex.heartbeat(event.playerHash, event.seenAt);
+      else if (event.type === "user-account") {
+        const user = typeof event.userId === "string" ? data.users[event.userId] : null;
+        if (user) userLookupIndex.upsert(user);
+        else if (typeof event.userId === "string") userLookupIndex.delete(event.userId);
+      }
       else if (event.type === "leaderboard-submission") leaderboardIndex.markSubmissionChanged({ userId: event.userId, seasonId: event.seasonId });
       else if (event.type === "leaderboard-visibility") leaderboardIndex.markVisibilityChanged(event.userId);
       else if (event.type === "leaderboard-restriction") leaderboardIndex.markRestrictionChanged(event.userId);
@@ -4262,6 +4275,7 @@ export async function createCloudServer({
       else if (event.type === "leaderboard-account") leaderboardIndex.markAccountChanged(event.userId);
       else if (event.type === "rebuild") {
         presenceIndex.rebuild(data.players, nowProvider());
+        userLookupIndex.rebuild(data.users);
         leaderboardIndex.rebuild();
       }
     }
@@ -4517,6 +4531,7 @@ export async function createCloudServer({
             loginSecurity: loginFailureGuard.metrics(),
             scale: runtimeMetrics.snapshot(),
             presenceIndex: presenceIndex.diagnostics(),
+            userLookupIndex: userLookupIndex.diagnostics(),
             runtimeStatePersistence: store.runtimeStatePersistence?.diagnostics({ includeRowCounts: true }) ?? null,
           },
           accounts: {
@@ -4766,13 +4781,13 @@ export async function createCloudServer({
         const displayName = normalizedName(body.displayName);
         const password = typeof body.password === "string" ? body.password : "";
         if (!username || !displayName || password.length < 8 || password.length > 128) return send(response, 400, { error: "用户名、名称或密码格式无效（用户名 4 至 24 位字母/数字/下划线，密码至少 8 位）" });
-        if (Object.values(store.data.users).some((user) => user.username === username)) return send(response, 409, { error: "该用户名已注册" });
+        if (userLookupIndex.hasUsername(username, store.data.users)) return send(response, 409, { error: "该用户名已注册" });
         const maximumRegistrations = Number.isFinite(registrationLimit) ? Math.max(1, Math.floor(registrationLimit)) : 3;
         if (!registrationRateLimit(`register:${ip}`, maximumRegistrations, 60 * 60 * 1000)) {
           return send(response, 429, { error: "该网络注册账号过于频繁，请一小时后再试", code: "REGISTRATION_RATE_LIMITED" }, { "retry-after": "3600" });
         }
         const credentials = await passwordRecord(password);
-        if (Object.values(store.data.users).some((user) => user.username === username)) return send(response, 409, { error: "该用户名已注册" });
+        if (userLookupIndex.hasUsername(username, store.data.users)) return send(response, 409, { error: "该用户名已注册" });
         const now = Date.now();
         const user = {
           id: `user_${randomUUID().replaceAll("-", "")}`,
@@ -4787,6 +4802,7 @@ export async function createCloudServer({
           ...credentials,
         };
         store.data.users[user.id] = user;
+        store.recordRuntimeIndexEvent?.({ type: "user-account", userId: user.id });
         const issued = issueSession(store, user.id, request, body.deviceName, body.deviceId);
         recordSuccessfulLogin(store.data, user.id, issued.context, { clientType: clientTypeForRequest(request), now });
         appendAudit(store, request, "account.register", user.id);
@@ -4827,7 +4843,9 @@ export async function createCloudServer({
           await store.persist({ operation: "auth.login-denied" });
           return send(response, 429, { error: "登录失败次数过多，请稍后再试", code: "LOGIN_TEMPORARILY_LOCKED" }, { "retry-after": String(guard.retryAfterSeconds) });
         }
-        const user = Object.values(store.data.users).find((candidate) => (email && candidate.email === email) || (username && candidate.username === username));
+        const user = email
+          ? userLookupIndex.findByEmail(email, store.data.users)
+          : userLookupIndex.findByUsername(username, store.data.users);
         if (!user || !(await passwordMatches(password, user))) {
           const failure = loginFailureGuard.fail(identifier ?? "", networkHash);
           appendAudit(store, request, failure.locked ? "account.login_temporarily_locked" : "account.login_failed", user?.id ?? null);
@@ -4883,7 +4901,7 @@ export async function createCloudServer({
         const body = validateJsonDto(await readJson(request), ACCOUNT_JSON_SCHEMAS.emailOnly);
         const email = normalizedEmail(body.email);
         if (!email) return send(response, 400, { error: "邮箱格式无效" });
-        const user = Object.values(store.data.users).find((candidate) => candidate.email === email);
+        const user = userLookupIndex.findByEmail(email, store.data.users);
         if (user && Number.isFinite(user.emailVerifiedAt)) {
           const resetToken = issueActionToken(store.data.passwordResets, user.id);
           appendAudit(store, request, "account.password_reset_requested", user.id);
@@ -5048,11 +5066,13 @@ export async function createCloudServer({
         const body = validateJsonDto(await readJson(request), ACCOUNT_JSON_SCHEMAS.emailOnly);
         const email = normalizedEmail(body.email);
         if (!email) return send(response, 400, { error: "邮箱格式无效" });
-        if (Object.values(store.data.users).some((user) => user.id !== auth.user.id && user.email === email)) {
+        const existingEmail = userLookupIndex.findByEmail(email, store.data.users);
+        if (existingEmail && existingEmail.id !== auth.user.id) {
           return send(response, 409, { error: "该邮箱已绑定其他账号" });
         }
         auth.user.email = email;
         auth.user.emailVerifiedAt = null;
+        store.recordRuntimeIndexEvent?.({ type: "user-account", userId: auth.user.id });
         removeUserActionTokens(store, auth.user.id);
         const verificationToken = issueActionToken(store.data.emailVerifications, auth.user.id);
         appendAudit(store, request, "account.email_bound", auth.user.id);

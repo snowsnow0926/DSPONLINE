@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
+const RELEASE_NOTE_ID = "2026-08-23-v1.1.4";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -112,7 +112,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await page.goto("/?menu=1&lang=en");
   const dialog = page.getByRole("dialog", { name: "Save Stability and Mobile Belt Batch Hotfix" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.0.46");
+  await expect(dialog).toContainText("1.1.4");
   await expect(dialog).toContainText("Autosaves keep simulation running");
   await expect(dialog).toContainText("Mobile continuous connections no longer block the map");
   expect(await visibleHanStrings(dialog)).toEqual([]);

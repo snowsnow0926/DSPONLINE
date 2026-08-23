@@ -27,6 +27,50 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release114Copy = {
+  date: { "zh-CN": "2026年8月23日", en: "August 23, 2026" },
+  title: { "zh-CN": "终局制造、离线结算与大存档更新", en: "Endgame Construction, Offline Settlement, and Large Saves" },
+  summary: {
+    "zh-CN": "1.1.4 加速建筑制造巨构并让多个制造中心公平工作，修复蓝图传送带并联数被设备默认值覆盖的问题；离线与纯挂机在缺少可靠校准时先验证有界精确前缀，不再把未知尾段伪装成完整收益。终局保存减少大存档内存峰值并精确压缩可恢复默认字段，云端保证档位提高到 64 MiB、单修订硬上限提高到约 96 MiB；服务端账号查找改用可权威复核的运行时索引。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变。",
+    en: "Version 1.1.4 accelerates construction megastructures, schedules multiple construction centers fairly, and prevents device belt defaults from overwriting blueprint lane counts. Offline and pure-idle fallback now validates a bounded exact prefix when calibration is unavailable instead of presenting an uncertain tail as complete gains. Endgame saving lowers large-save memory peaks and omits only exactly recoverable defaults; cloud support now guarantees 64 MiB saves with an approximately 96 MiB hard revision boundary. Server account lookup uses an authority-checked runtime index. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  constructionTitle: { "zh-CN": "多个建筑制造巨构持续公平施工", en: "Multiple construction megastructures build fairly" },
+  constructionDescription: {
+    "zh-CN": "制造请求按有界批次处理并在所有可用制造中心间轮转，不再让第一个中心独占工作；吞吐随合法堆叠与供料扩展，同时保持库存、在制品、副产物和取消退款守恒。",
+    en: "Construction requests run in bounded batches and rotate across every available construction center, so the first center no longer monopolizes work. Throughput scales with valid stacks and supply while inventory, work in progress, byproducts, and cancellation refunds remain conserved.",
+  },
+  blueprintTitle: { "zh-CN": "蓝图保留模板传送带数量", en: "Blueprints preserve their belt lane counts" },
+  blueprintDescription: {
+    "zh-CN": "蓝图预览、排队和直接部署始终使用模板明确保存的并联数；设备级默认值只影响玩家新绘制的传送带，不再改写蓝图拓扑或造成错误扣料。",
+    en: "Blueprint preview, queueing, and direct deployment always use the lane count stored by the template. The device default applies only to newly drawn belts and no longer rewrites blueprint topology or consumes the wrong materials.",
+  },
+  offlineTitle: { "zh-CN": "离线与纯挂机回退先验证精确前缀", en: "Offline fallback validates an exact prefix" },
+  offlineDescription: {
+    "zh-CN": "没有有效校准候选时，隔离 Worker 最多精确推进 1 个模拟秒并冻结不确定尾段；失败、取消或内存风险不会提交半成品，界面明确区分短窗口未测得、真实未运行和零收益跳过。",
+    en: "When no valid calibration candidate exists, an isolated Worker advances at most one exact simulation second and freezes the uncertain tail. Failure, cancellation, or memory risk cannot commit partial state, and the UI distinguishes an unmeasured short window, truly idle production, and an explicit zero-gain skip.",
+  },
+  largeSaveTitle: { "zh-CN": "终局保存降低内存峰值", en: "Endgame saving lowers peak memory" },
+  largeSaveDescription: {
+    "zh-CN": "自动和手动保存直接消费模拟 Worker 的可转移权威检查点，不再创建第二份完整状态镜像；v47 只省略迁移器可精确恢复的非活动默认值，checksum、备份、读回和重载验证保持完整。",
+    en: "Automatic and manual saves consume a transferable authoritative checkpoint directly from the simulation Worker instead of creating a second complete state mirror. v47 omits only inactive defaults that migration reconstructs exactly, while checksum, backup, read-back, and reload verification remain intact.",
+  },
+  cloudTitle: { "zh-CN": "云端支持更大的终局存档", en: "Cloud saves support larger endgame factories" },
+  cloudDescription: {
+    "zh-CN": "Web、Windows 和 Android 的有界传输合同保证 64 MiB 存档，单修订硬上限为 96 MiB 减 1 KiB；压缩、解压、并发、响应、超时与 Nginx 限制同步扩容，30 MiB 明文兼容兜底不变。",
+    en: "The bounded Web, Windows, and Android transfer contract guarantees 64 MiB saves with a hard revision limit of 96 MiB minus 1 KiB. Compression, expansion, concurrency, response, timeout, and Nginx limits move together, while the 30 MiB raw compatibility fallback remains unchanged.",
+  },
+  serverTitle: { "zh-CN": "账号服务使用权威复核索引", en: "Account services use an authority-checked index" },
+  serverDescription: {
+    "zh-CN": "注册、登录、找回密码与邮箱绑定从运行时索引查找，再回到权威用户记录复核；冷启动、外部变更、删除和重建路径保持一致，不改变数据库结构、会话或玩家数据。",
+    en: "Registration, sign-in, password recovery, and email binding use a runtime lookup index followed by verification against the authoritative user record. Cold start, external mutation, deletion, and rebuild paths stay coherent without changing the database layout, sessions, or player data.",
+  },
+  compatibilityTitle: { "zh-CN": "协议与存档格式保持兼容", en: "Save and online formats remain compatible" },
+  compatibilityDescription: {
+    "zh-CN": "本版不升级 GameState、存档封装、云 schema、SQLite layout 或 IndexedDB records；确定性、库存守恒、云修订和排行榜边界继续有效。",
+    en: "This release does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or IndexedDB records. Determinism, inventory conservation, cloud revision, and leaderboard boundaries remain active.",
+  },
+} as const;
+
 const release1043Copy = {
   date: { "zh-CN": "2026年8月14日", en: "August 14, 2026" },
   title: { "zh-CN": "超大存档加载与保存紧急修复", en: "Large-save Loading and Saving Hotfix" },
@@ -346,7 +390,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1046Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release114Copy): string {
+  return release114Copy[key][locale];
+}
+
+function release1046Message(locale: AppLocale, key: keyof typeof release1046Copy): string {
   return release1046Copy[key][locale];
 }
 
@@ -365,22 +413,41 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-17-v1.0.46",
+    id: "2026-08-23-v1.1.4",
     date: currentMessage(locale, "date"),
-    version: "1.0.46",
+    version: "1.1.4",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "in-page-durable-recovery", title: currentMessage(locale, "recoveryTitle"), description: currentMessage(locale, "recoveryDescription") },
-      { id: "worker-rebuild", title: currentMessage(locale, "workerTitle"), description: currentMessage(locale, "workerDescription") },
-      { id: "save-modes", title: currentMessage(locale, "saveTitle"), description: currentMessage(locale, "saveDescription") },
-      { id: "mobile-batch-connections", title: currentMessage(locale, "batchTitle"), description: currentMessage(locale, "batchDescription") },
-      { id: "canvas-presentation", title: currentMessage(locale, "canvasTitle"), description: currentMessage(locale, "canvasDescription") },
-      { id: "pure-idle-preservation", title: currentMessage(locale, "idleTitle"), description: currentMessage(locale, "idleDescription") },
-      { id: "time-aware-cycle-progress", title: currentMessage(locale, "progressTitle"), description: currentMessage(locale, "progressDescription") },
-      { id: "committed-terminal-output", title: currentMessage(locale, "idleOutputTitle"), description: currentMessage(locale, "idleOutputDescription") },
-      { id: "ordinary-contract-quantum-delivery", title: currentMessage(locale, "stationDeliveryTitle"), description: currentMessage(locale, "stationDeliveryDescription") },
+      { id: "construction-megastructure-fairness", title: currentMessage(locale, "constructionTitle"), description: currentMessage(locale, "constructionDescription") },
+      { id: "blueprint-belt-lanes", title: currentMessage(locale, "blueprintTitle"), description: currentMessage(locale, "blueprintDescription") },
+      { id: "bounded-offline-prefix", title: currentMessage(locale, "offlineTitle"), description: currentMessage(locale, "offlineDescription") },
+      { id: "large-save-low-memory", title: currentMessage(locale, "largeSaveTitle"), description: currentMessage(locale, "largeSaveDescription") },
+      { id: "large-cloud-save", title: currentMessage(locale, "cloudTitle"), description: currentMessage(locale, "cloudDescription") },
+      { id: "authority-checked-user-index", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
       { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1046(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-17-v1.0.46",
+    date: release1046Message(locale, "date"),
+    version: "1.0.46",
+    title: release1046Message(locale, "title"),
+    summary: release1046Message(locale, "summary"),
+    items: [
+      { id: "in-page-durable-recovery", title: release1046Message(locale, "recoveryTitle"), description: release1046Message(locale, "recoveryDescription") },
+      { id: "worker-rebuild", title: release1046Message(locale, "workerTitle"), description: release1046Message(locale, "workerDescription") },
+      { id: "save-modes", title: release1046Message(locale, "saveTitle"), description: release1046Message(locale, "saveDescription") },
+      { id: "mobile-batch-connections", title: release1046Message(locale, "batchTitle"), description: release1046Message(locale, "batchDescription") },
+      { id: "canvas-presentation", title: release1046Message(locale, "canvasTitle"), description: release1046Message(locale, "canvasDescription") },
+      { id: "pure-idle-preservation", title: release1046Message(locale, "idleTitle"), description: release1046Message(locale, "idleDescription") },
+      { id: "time-aware-cycle-progress", title: release1046Message(locale, "progressTitle"), description: release1046Message(locale, "progressDescription") },
+      { id: "committed-terminal-output", title: release1046Message(locale, "idleOutputTitle"), description: release1046Message(locale, "idleOutputDescription") },
+      { id: "ordinary-contract-quantum-delivery", title: release1046Message(locale, "stationDeliveryTitle"), description: release1046Message(locale, "stationDeliveryDescription") },
+      { id: "version-upgrade", title: release1046Message(locale, "compatibilityTitle"), description: release1046Message(locale, "compatibilityDescription") },
     ],
   };
 }

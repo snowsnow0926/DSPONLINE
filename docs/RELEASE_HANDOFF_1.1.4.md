@@ -1,5 +1,7 @@
 # 1.1.4 Release Agent 交接
 
+> **状态（2026-08-24）**：本交接所固定的 `1.1.4-7dbc149a016c` 已完成香港、上海、下载页、Windows 和 Android stable 全量发布，1.1.3 已设为 previous-stable。最终生产证据、回滚指针和残余风险见 [正式发布记录](./releases/1.1.4.md)。下文保留为当次发布输入合同。
+
 ## 唯一允许发布的候选
 
 - Runtime Git SHA：`7dbc149a016c7f53e5d3648e0fdcb3679309ef73`。

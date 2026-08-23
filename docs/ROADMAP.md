@@ -6,7 +6,9 @@
 - [x] 蓝图传送带显式 `lanes` 守恒；设备默认值只作用于新绘制线路，不覆盖已有蓝图拓扑。
 - [x] 挂机/离线保守回退先执行 1 秒隔离精确前缀，冻结不确定尾段并在 UI 明确区分“短窗口未测得”和“未运行”。
 - [x] 服务端运行时 `UserLookupIndex` 优化注册、登录、找回密码和邮箱绑定查找；权威用户表复核、冷回退和增量事件保持认证安全，不改 SQLite/云协议。
-- [ ] Release Agent 在具备 `better-sqlite3` 的环境补跑完整 server/ops、生成不可变跨端制品并完成签名、真机、备份、双节点健康和公网门禁后，才可进入发布流程。
+- [x] 终局大存档双向治理：v47 精确默认字段稀疏化、模拟 Worker transfer-only 权威保存，以及 64 MiB 保证 / 约 96 MiB 硬上限的完整云传输合同；真实 64.14 MiB 档压缩、两次自动保存、手动保存、备份读回和重载通过。
+- [x] 完整 server/SQLite（376/2 skipped + station 3/3）与 ops（56/6 Linux-only skipped）开发门禁通过。
+- [ ] Release Agent 生成不可变跨端制品并完成 Nginx 112m 配置备份/验证、64～96 MiB 公网传输、签名、真机、备份、双节点健康和观察窗口后，才可进入发布流程。
 
 详细证据见 [1.1.4 开发交接](./feedback/2026-08-23-1.1.4-development-handoff.md) 与 [1.1.4 候选记录](./releases/1.1.4-candidate.md)。
 

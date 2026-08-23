@@ -324,6 +324,45 @@ describe("P2 deterministic batch settlement", () => {
     expect(durationMs).toBeLessThan(1_000);
   });
 
+  it("batches a high-stack recursive building plan whose unused remainder is safely discarded", () => {
+    const initial = createConstructionState({
+      targetId: "plane_smelter",
+      target: 1_000,
+      centerMachines: 1_000_000,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: recursiveRawTray(),
+    });
+    const legacy = runSimulation(initial, 1, { batchConstructionAutomation: false });
+    const batched = runSimulation(initial, 1, { batchConstructionAutomation: true });
+
+    expect(hashGameState(batched.state)).toBe(hashGameState(legacy.state));
+    expect(batched.state.construction.plane_smelter).toBe(1_000);
+    expect(batched.profiler.constructionJobsBatched).toBe(1_000);
+    // Four bounded plan probes establish the finite by-product cycle; the
+    // initial plan adds one build, and no per-job rebuild is allowed after it.
+    expect(batched.profiler.constructionPlanBuilds).toBeLessThanOrEqual(5);
+  });
+
+  it.each([1, 2, 3])("keeps a proven recursive byproduct phase exact (starting alloy %i)", (startingAlloy) => {
+    const initial = createConstructionState({
+      targetId: "plane_smelter",
+      target: 1_000,
+      centerMachines: 1_000_000,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: { ...recursiveRawTray(), titanium_alloy: startingAlloy },
+    });
+    const legacy = runSimulation(initial, 1, { batchConstructionAutomation: false });
+    const batched = runSimulation(initial, 1, { batchConstructionAutomation: true });
+
+    expect(hashGameState(batched.state)).toBe(hashGameState(legacy.state));
+    expect(batched.state.construction.plane_smelter).toBe(1_000);
+    // A non-zero phase can leave at most the three-job prefix outside the
+    // closed cycle; those jobs still use the bounded atomic path and remain
+    // hash-identical to the legacy oracle.
+    expect(batched.profiler.constructionJobsBatched).toBeGreaterThanOrEqual(997);
+    expect(batched.profiler.constructionPlanBuilds).toBeLessThanOrEqual(24);
+  });
+
   it("matches legacy hashes for both one long construction step and segmented steps", () => {
     const initial = createConstructionState({
       targetId: "wind_turbine",

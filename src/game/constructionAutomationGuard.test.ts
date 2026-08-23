@@ -110,6 +110,26 @@ describe("construction automation compute protection", () => {
     expectSafeIntegerInventories(result.state);
   });
 
+  it("shares the guarded budget so a second high-stack center also makes progress", () => {
+    const initial = createProtectedConstructionState();
+    initial.construction.construction_center = 1;
+    const withSecond = placeBuilding(initial, "construction_center", { x: 240, y: 0 });
+    const centers = withSecond.entities.filter((entity) => entity.buildingId === "construction_center");
+    expect(centers).toHaveLength(2);
+    for (const center of centers) center.machineCount = 44_311;
+
+    const profiler = createSimulationProfiler();
+    const runtime = createPersistentSimulationRuntime(structuredClone(withSecond));
+    const result = advancePersistentSimulationRuntime(runtime, 1, 1, profiler);
+    const settledCenters = result.state.entities.filter((entity) => entity.buildingId === "construction_center");
+
+    expect(settledCenters.every((center) => (center.productionRate ?? 0) > 0)).toBe(true);
+    expect(settledCenters.every((center) => (center.utilization ?? 0) > 0)).toBe(true);
+    expect(profiler.constructionIterations).toBeLessThanOrEqual(256);
+    expect(profiler.constructionPlanBuilds).toBeLessThanOrEqual(24);
+    expectSafeIntegerInventories(result.state);
+  });
+
   it("continues guarded jobs deterministically across requests without duplicating WIP", () => {
     const initial = createProtectedConstructionState();
     const run = () => {

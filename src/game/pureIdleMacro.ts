@@ -24,6 +24,12 @@ export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v3";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
+/**
+ * Even when a full affine calibration is unsafe, settle a tiny exact prefix
+ * before freezing the uncertain long tail.  This keeps a complex factory from
+ * appearing completely idle while bounding Worker cost and memory.
+ */
+export const PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS = 1;
 export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 30_000;
 
 export type PureIdleMacroMode = "stable" | "extreme";
@@ -392,10 +398,47 @@ export function createConservativePureIdleMacroSession(
     sailsInOrbit: 0,
     activityDelivered: {},
   };
+  let candidate = state;
+  let measuredRate = cloneRate(emptyRate);
+  let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
+  let prefixFailure: string | undefined;
+  const prefixSeconds = PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS;
+  try {
+    // Keep the fallback transactional if the exact probe throws halfway
+    // through a complex state. The Worker can discard this bounded clone.
+    const prefixSource = structuredClone(state);
+    candidate = advanceExactSimulationWindow(
+      prefixSource,
+      prefixSeconds,
+      prefixSeconds / actualMultiplier,
+    );
+    refreshDysonGenerationSnapshot(candidate);
+    measuredRate = rateBetween(
+      baseline,
+      capturePureIdleTerminalSnapshot(candidate),
+      prefixSeconds,
+    );
+    calibrationCheckpoint = {
+      baseWallSeconds: 0,
+      baseSimulationSeconds: 0,
+      wallSeconds: prefixSeconds / actualMultiplier,
+      simulationSeconds: prefixSeconds,
+      candidate,
+    };
+  } catch (error) {
+    // A failed prefix must not turn a recoverable fallback into a failed
+    // settlement. Keep the old zero-production behavior and expose the exact
+    // reason to the caller instead of fabricating a rate.
+    prefixFailure = error instanceof Error ? error.message : "短窗口精确结算失败";
+    candidate = state;
+  }
+  const degradedReason = prefixFailure
+    ? `${reason}；短窗口精确结算未完成：${prefixFailure}`
+    : `${reason}；已先精确结算 ${prefixSeconds} 秒，其余不确定工厂冻结`;
   return {
     mode,
     phase: "conservative",
-    candidate: state,
+    candidate,
     contract: {
       deltas: [],
       calibrationSeconds: PURE_IDLE_MACRO_CALIBRATION_SECONDS,
@@ -406,8 +449,8 @@ export function createConservativePureIdleMacroSession(
     researchInflowRemainders: {},
     baseline,
     baselineResearch,
-    calibrationRate: cloneRate(emptyRate),
-    currentRate: cloneRate(emptyRate),
+    calibrationRate: cloneRate(measuredRate),
+    currentRate: cloneRate(measuredRate),
     settledWallSeconds: 0,
     settledSimulationSeconds: 0,
     contractVersion: 0,
@@ -415,14 +458,15 @@ export function createConservativePureIdleMacroSession(
     validationFailures: 1,
     lastValidationDurationMs: 0,
     lastValidationDeviation: 1,
-    lastValidationReason: `已切换零校准保守宏观：${reason}`,
+    lastValidationReason: `已切换保守宏观：${degradedReason}`,
     nextValidationAtWallSeconds: null,
     boundaryCorrections: 0,
     calibrationWindowsCompleted: 0,
     actualMultiplier,
-    degradedReason: reason,
+    degradedReason,
     computationDurationMs: 0,
     conservativeOnly: true,
+    ...(calibrationCheckpoint ? { calibrationCheckpoint } : {}),
   };
 }
 
@@ -576,7 +620,7 @@ export function advancePureIdleMacroSession(
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
       : session.conservativeOnly
-        ? { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "零校准保守宏观" }
+        ? { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "保守宏观尾段冻结" }
         : applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
     throwIfMacroInterrupted(options);
     if (!applied.ok) {

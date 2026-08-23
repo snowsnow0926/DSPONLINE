@@ -157,6 +157,8 @@ const VALIDATION_SECONDS = 5;
 /** The fast offline contract deliberately spends exactly thirty simulation seconds on calibration. */
 const FAST_OFFLINE_CALIBRATION_SLICE_SECONDS = 10;
 const FAST_OFFLINE_VALIDATION_SECONDS = 5;
+/** Bounded exact preview used only when no valid calibration candidate exists. */
+export const FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS = 1;
 export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v2";
 export const FAST_OFFLINE_DESKTOP_DEADLINE_MS = 30_000;
 export const FAST_OFFLINE_MOBILE_DEADLINE_MS = 60_000;
@@ -2004,8 +2006,26 @@ export function runConservativeOfflineSettlement(
       },
     };
   }
-  const candidate = calibratedState ?? structuredClone(source);
-  const remainingSeconds = Math.max(0, seconds - calibrationSeconds);
+  let candidate = calibratedState ?? structuredClone(source);
+  let effectiveCalibrationSeconds = Math.max(0, calibrationSeconds);
+  let prefixReason: string | undefined;
+  if (!calibratedState && seconds > EPSILON) {
+    const prefixSeconds = Math.min(FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS, Math.max(0, seconds));
+    const prefixWallSeconds = wallSeconds * prefixSeconds / Math.max(EPSILON, seconds);
+    try {
+      // A failed/timeout calibration must not make the whole factory look
+      // frozen. Probe one exact second on an isolated copy, then keep the
+      // uncertain tail conservative. The source remains transactional.
+      candidate = runExact(structuredClone(source), prefixSeconds, prefixWallSeconds);
+      effectiveCalibrationSeconds = prefixSeconds;
+      prefixReason = `已先精确结算 ${prefixSeconds} 秒，其余不确定产线冻结`;
+    } catch (error) {
+      prefixReason = `短窗口精确结算失败：${error instanceof Error ? error.message : "未知错误"}`;
+      candidate = structuredClone(source);
+      effectiveCalibrationSeconds = 0;
+    }
+  }
+  const remainingSeconds = Math.max(0, seconds - effectiveCalibrationSeconds);
   let researchInvested = 0n;
   if (researchLedger && remainingSeconds > 0) {
     researchInvested = advanceResearchMacroInPlace(candidate, researchLedger, remainingSeconds).consumed;
@@ -2024,7 +2044,7 @@ export function runConservativeOfflineSettlement(
         source,
         seconds,
         wallSeconds,
-        `${reason}；校准候选未通过数值校验，已从原始检查点切换零校准保守宏观`,
+        `${reason}；校准候选未通过数值校验，已从原始检查点重新建立有界保守前缀`,
         undefined,
         0,
         undefined,
@@ -2034,7 +2054,7 @@ export function runConservativeOfflineSettlement(
     return {
       status: "invalid-source",
       report: {
-        ...fastExactReport(calibrationSeconds, normalized.failure ?? "保守候选未通过数值校验"),
+        ...fastExactReport(effectiveCalibrationSeconds, normalized.failure ?? "保守候选未通过数值校验"),
         settlementStatus: "invalid-source",
       },
     };
@@ -2044,11 +2064,11 @@ export function runConservativeOfflineSettlement(
     state: candidate,
     report: {
       mode: "approximate",
-      calibrationWindowSeconds: calibrationSeconds,
+      calibrationWindowSeconds: effectiveCalibrationSeconds,
       approximatedSeconds: remainingSeconds,
       maxEstimatedError: 1,
       fellBack: true,
-      fallbackReason: reason,
+      fallbackReason: prefixReason ? `${reason}；${prefixReason}` : reason,
       algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION,
       boundaryCorrections: normalized.corrections,
       validationScope: "leaderboard-critical",

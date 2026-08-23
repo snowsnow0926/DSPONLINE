@@ -7814,7 +7814,6 @@ function blueprintRequirements(
   blueprint: BlueprintDefinition,
   resourceInstalls = new Map((blueprint.resourceAnchors ?? []).map((anchor) => [anchor.key, Math.max(1, Math.floor(anchor.minerCount))])),
   activeKeys = new Set([...blueprint.entities.map((entity) => entity.key), ...(blueprint.resourceAnchors ?? []).map((anchor) => anchor.key)]),
-  minimumBeltLanes = 1,
 ): Array<{ constructionId: ConstructionId; amount: number }> | null {
   const requirements = new Map<ConstructionId, number>();
   let valid = true;
@@ -7838,7 +7837,10 @@ function blueprintRequirements(
   for (const anchor of blueprint.resourceAnchors ?? []) add(anchor.extractorBuildingId, resourceInstalls.get(anchor.key) ?? 0);
   for (const belt of blueprint.belts) {
     if (!activeKeys.has(belt.sourceKey) || !activeKeys.has(belt.targetKey)) continue;
-    add(getBeltConstructionId(belt.tier), Math.max(belt.lanes, normalizedDefaultBeltLanes(minimumBeltLanes)));
+    // A blueprint is an explicit topology snapshot. Device-level defaults
+    // apply to newly drawn belts only; they must never silently change the
+    // saved lane count or material requirement of a blueprint.
+    add(getBeltConstructionId(belt.tier), belt.lanes);
   }
   return valid ? [...requirements].map(([constructionId, amount]) => ({ constructionId, amount })) : null;
 }
@@ -7864,7 +7866,10 @@ interface BlueprintPlacementOptions {
   planetId?: PlanetId;
   rotation?: BlueprintRotation;
   mirror?: BlueprintMirror;
-  /** Device preference supplied by the UI; never persisted into GameState. */
+  /**
+   * Legacy device preference accepted for call-site compatibility. It is
+   * intentionally ignored for blueprint deployment; template lanes win.
+   */
   minimumBeltLanes?: number;
   /** Explicit UI command policy. It bypasses only rounded-position overlap rejection. */
   allowExactOverlap?: boolean;
@@ -7896,7 +7901,6 @@ function createBlueprintDeploymentPlan(
     blueprint,
     new Map(matches.resolved.map(({ anchor, installCount }) => [anchor.key, installCount])),
     activeKeys,
-    options.minimumBeltLanes,
   );
   if (!requirements) return null;
   const candidatePositions = new Set<string>();
@@ -8034,7 +8038,7 @@ export function placeBlueprint(
 ): GameState {
   const plan = createBlueprintDeploymentPlan(state, blueprintId, position, options);
   if (!plan?.canPlace) return state;
-  const { blueprint, planetId, rotation, mirror, matches, requirements, minimumBeltLanes } = plan;
+  const { blueprint, planetId, rotation, mirror, matches, requirements } = plan;
   let next = copyState(state);
   for (const requirement of requirements) {
     next.construction[requirement.constructionId] = (next.construction[requirement.constructionId] ?? 0) - requirement.amount;
@@ -8201,7 +8205,7 @@ export function placeBlueprint(
       source,
       target,
       itemId: template.itemId,
-      lanes: Math.max(template.lanes, minimumBeltLanes),
+      lanes: template.lanes,
       tier: template.tier,
       sorterTier: Math.min(3, template.tier) as SorterTier,
       progress: 0,
@@ -8377,12 +8381,8 @@ export function queueBlueprint(
 ): GameState {
   const blueprint = state.blueprints.find((candidate) => candidate.id === blueprintId);
   if (!blueprint || !canQueueBlueprint(state, blueprintId, state.activePlanetId, position, options)) return state;
-  const minimumBeltLanes = normalizedDefaultBeltLanes(options.minimumBeltLanes);
-  const resolvedBlueprint = minimumBeltLanes > 1
-    ? { ...cloneBlueprintDefinition(blueprint), belts: blueprint.belts.map((belt) => ({ ...belt, lanes: Math.max(belt.lanes, minimumBeltLanes) })) }
-    : blueprint;
   const next = copyState(state);
-  const version = ensureBlueprintVersion(next, resolvedBlueprint, minimumBeltLanes > 1 ? `:lanes-${minimumBeltLanes}` : "");
+  const version = ensureBlueprintVersion(next, blueprint);
   const withVersion = version.state;
   withVersion.constructionQueue.push({
     id: `construction_${withVersion.nextId}`,
@@ -10607,6 +10607,7 @@ function finishConstructionAutomationStep(state: GameState, planetId: PlanetId, 
 }
 
 interface RepeatableConstructionAutomationBatch {
+  jobsPerCycle: number;
   workSeconds: number;
   trayCosts: Partial<Record<ItemId, number>>;
   trayReturns: Partial<Record<ItemId, number>>;
@@ -10614,6 +10615,9 @@ interface RepeatableConstructionAutomationBatch {
   producedItems: Partial<Record<ItemId, number>>;
   relevantItems: ItemId[];
   touchedTrayItems: ItemId[];
+  /** Finite by-product phase used by a proven multi-job cycle. */
+  cycleStateItems?: ItemId[];
+  cycleStartInventory?: Partial<Record<ItemId, number>>;
 }
 
 function analyzeRepeatableConstructionAutomationPlan(
@@ -10686,6 +10690,7 @@ function analyzeRepeatableConstructionAutomationPlan(
     }
   }
   return {
+    jobsPerCycle: 1,
     workSeconds: plan.steps.reduce((sum, step) => sum + constructionAutomationStepDuration(state, step), 0),
     trayCosts,
     trayReturns,
@@ -10693,6 +10698,8 @@ function analyzeRepeatableConstructionAutomationPlan(
     producedItems,
     relevantItems: [...relevant].sort(),
     touchedTrayItems: [...touchedTrayItems].sort(),
+    cycleStateItems: [],
+    cycleStartInventory: {},
   };
 }
 
@@ -10767,11 +10774,11 @@ function constructionAutomationBatchInputsAvailable(
   state: GameState,
   planetId: PlanetId,
   batch: RepeatableConstructionAutomationBatch,
-  jobs = 1,
+  cycles = 1,
 ): boolean {
   const tray = trayForPlanet(state, planetId);
   return (Object.entries(batch.trayCosts) as Array<[ItemId, number]>).every(([itemId, amount]) =>
-    Math.max(0, Math.floor(tray[itemId] ?? 0)) >= Math.max(0, Math.floor(amount)) * jobs);
+    Math.max(0, Math.floor(tray[itemId] ?? 0)) >= Math.max(0, Math.floor(amount)) * cycles);
 }
 
 function constructionAutomationCachedPlanValid(
@@ -10781,14 +10788,203 @@ function constructionAutomationCachedPlanValid(
 ): boolean {
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
   const materialInventoryVersion = constructionAutomationInventoryVersion(inventorySnapshot);
+  if (cached.batch && cached.batch.jobsPerCycle > 1 &&
+    !constructionAutomationCycleStateMatches(state, planetId, cached.batch)) return false;
   if (materialInventoryVersion === cached.materialInventoryVersion) return true;
   if (cached.plan.blocker) return false;
+  // A proven two-job cycle intentionally consumes a byproduct from the first
+  // job in the second job. Its tray snapshot therefore changes on every
+  // cycle even though the cycle returns to the same recipe state; treating the
+  // newly returned material as an invalidation would rebuild the plan for
+  // every pair and recreate the original high-stack slowdown.
+  if (cached.batch && cached.batch.jobsPerCycle > 1) {
+    // A newly supplied material may enable a different recursive recipe. Do
+    // not keep the cycle cache across such an addition; ordinary depletion is
+    // safe and is handled by the aggregate input check below.
+    const materialAdded = (Object.entries(inventorySnapshot) as Array<[ItemId, number]>).some(([itemId, amount]) =>
+      amount > Math.max(0, Math.floor(cached.inventorySnapshot[itemId] ?? 0)) &&
+      !(cached.batch?.cycleStateItems ?? []).includes(itemId));
+    if (materialAdded) return false;
+    cached.inventorySnapshot = inventorySnapshot;
+    cached.materialInventoryVersion = materialInventoryVersion;
+    return true;
+  }
   const materialAdded = (Object.entries(inventorySnapshot) as Array<[ItemId, number]>).some(([itemId, amount]) =>
     amount > Math.max(0, Math.floor(cached.inventorySnapshot[itemId] ?? 0)));
   if (materialAdded || !constructionAutomationPlanInputsAvailable(state, planetId, cached.plan)) return false;
   cached.inventorySnapshot = inventorySnapshot;
   cached.materialInventoryVersion = materialInventoryVersion;
   return true;
+}
+
+function constructionAutomationPlanningState(state: GameState, planetId: PlanetId): GameState {
+  const sourceTray = trayForPlanet(state, planetId);
+  const tray = { ...sourceTray };
+  return {
+    ...state,
+    tray: planetId === state.activePlanetId ? tray : state.tray,
+    planetTrays: { ...state.planetTrays, [planetId]: tray },
+    construction: { ...state.construction },
+    portableFleet: { ...state.portableFleet },
+    totalProduced: { ...state.totalProduced },
+    constructionAutomation: {
+      ...state.constructionAutomation,
+      targetStock: { ...state.constructionAutomation.targetStock },
+      destroyedByproducts: { ...state.constructionAutomation.destroyedByproducts },
+      jobs: {},
+    },
+  };
+}
+
+function addBatchAmount(
+  target: Partial<Record<ItemId, number>>,
+  itemId: ItemId,
+  amount: number,
+): void {
+  const normalized = Math.max(0, Math.floor(amount));
+  if (normalized < 1) return;
+  target[itemId] = Math.floor((target[itemId] ?? 0) + normalized);
+}
+
+function composeConstructionAutomationBatches(
+  first: RepeatableConstructionAutomationBatch,
+  second: RepeatableConstructionAutomationBatch,
+): RepeatableConstructionAutomationBatch {
+  const itemIds = new Set<ItemId>([
+    ...Object.keys(first.trayCosts), ...Object.keys(first.trayReturns),
+    ...Object.keys(second.trayCosts), ...Object.keys(second.trayReturns),
+  ] as ItemId[]);
+  const trayCosts: Partial<Record<ItemId, number>> = {};
+  const trayReturns: Partial<Record<ItemId, number>> = {};
+  for (const itemId of itemIds) {
+    const firstCost = Math.max(0, Math.floor(first.trayCosts[itemId] ?? 0));
+    const firstReturn = Math.max(0, Math.floor(first.trayReturns[itemId] ?? 0));
+    const secondCost = Math.max(0, Math.floor(second.trayCosts[itemId] ?? 0));
+    const secondReturn = Math.max(0, Math.floor(second.trayReturns[itemId] ?? 0));
+    // Compose the two jobs while allowing the first job's return to satisfy
+    // the second job. This preserves the exact prefix requirement and the
+    // final tray delta, unlike simply adding net deltas.
+    addBatchAmount(trayCosts, itemId, firstCost + Math.max(0, secondCost - firstReturn));
+    addBatchAmount(trayReturns, itemId, secondReturn + Math.max(0, firstReturn - secondCost));
+  }
+  const fleetReturns: Partial<Record<ItemId, number>> = {};
+  for (const itemId of new Set<ItemId>([
+    ...Object.keys(first.fleetReturns), ...Object.keys(second.fleetReturns),
+  ] as ItemId[])) {
+    addBatchAmount(fleetReturns, itemId,
+      Math.max(0, Math.floor(first.fleetReturns[itemId] ?? 0)) +
+      Math.max(0, Math.floor(second.fleetReturns[itemId] ?? 0)));
+  }
+  const producedItems: Partial<Record<ItemId, number>> = {};
+  for (const itemId of new Set<ItemId>([
+    ...Object.keys(first.producedItems), ...Object.keys(second.producedItems),
+  ] as ItemId[])) {
+    addBatchAmount(producedItems, itemId,
+      Math.max(0, Math.floor(first.producedItems[itemId] ?? 0)) +
+      Math.max(0, Math.floor(second.producedItems[itemId] ?? 0)));
+  }
+  return {
+    jobsPerCycle: Math.max(1, Math.floor(first.jobsPerCycle)) + Math.max(1, Math.floor(second.jobsPerCycle)),
+    workSeconds: first.workSeconds + second.workSeconds,
+    trayCosts,
+    trayReturns,
+    fleetReturns,
+    producedItems,
+    relevantItems: [...new Set([...first.relevantItems, ...second.relevantItems])].sort(),
+    touchedTrayItems: [...new Set([...first.touchedTrayItems, ...second.touchedTrayItems])].sort(),
+    cycleStateItems: [...new Set([...(first.cycleStateItems ?? []), ...(second.cycleStateItems ?? [])])].sort(),
+    cycleStartInventory: { ...(first.cycleStartInventory ?? {}) },
+  };
+}
+
+function constructionAutomationBatchSignature(batch: RepeatableConstructionAutomationBatch): string {
+  return JSON.stringify({
+    workSeconds: batch.workSeconds,
+    trayCosts: batch.trayCosts,
+    trayReturns: batch.trayReturns,
+    fleetReturns: batch.fleetReturns,
+    producedItems: batch.producedItems,
+    relevantItems: batch.relevantItems,
+    touchedTrayItems: batch.touchedTrayItems,
+  });
+}
+
+function constructionAutomationCycleFingerprint(
+  state: GameState,
+  planetId: PlanetId,
+  batch: RepeatableConstructionAutomationBatch,
+): string {
+  const tray = trayForPlanet(state, planetId);
+  // Raw inputs are intentionally omitted: they decrease on every completed
+  // job and therefore cannot identify a repeating recipe phase.  Only
+  // by-products that can feed a later job are part of the finite cycle state.
+  // A cycle with no such by-product is already handled by the ordinary
+  // repeatable path.
+  const items = Object.keys(batch.trayReturns).sort() as ItemId[];
+  return JSON.stringify({
+    batch: constructionAutomationBatchSignature(batch),
+    tray: items.map((itemId) => [itemId, Math.max(0, Math.floor(tray[itemId] ?? 0))]),
+  });
+}
+
+function constructionAutomationCycleStateMatches(
+  state: GameState,
+  planetId: PlanetId,
+  batch: RepeatableConstructionAutomationBatch,
+): boolean {
+  if (batch.jobsPerCycle <= 1) return true;
+  const items = batch.cycleStateItems ?? [];
+  const expected = batch.cycleStartInventory;
+  if (!expected) return false;
+  const tray = trayForPlanet(state, planetId);
+  return items.every((itemId) =>
+    Math.max(0, Math.floor(tray[itemId] ?? 0)) === Math.max(0, Math.floor(expected[itemId] ?? 0)));
+}
+
+function tryBuildStableConstructionAutomationCycle(
+  state: GameState,
+  definition: ConstructionAutomationTargetDefinition,
+  planetId: PlanetId,
+  first: RepeatableConstructionAutomationBatch,
+  budget: ConstructionAutomationComputeBudget,
+  profiler?: SimulationProfiler,
+): RepeatableConstructionAutomationBatch | null {
+  const maxProbeJobs = 8;
+  if (first.jobsPerCycle !== 1 || budget.remainingPlanBuilds < 1) return null;
+  const planning = constructionAutomationPlanningState(state, planetId);
+  const destroyedBefore = JSON.stringify(planning.constructionAutomation.destroyedByproducts);
+  const initialFingerprint = constructionAutomationCycleFingerprint(planning, planetId, first);
+  let current = first;
+  let cycle: RepeatableConstructionAutomationBatch = first;
+  const cycleStateItems = new Set<ItemId>();
+  for (let probe = 1; probe <= maxProbeJobs; probe += 1) {
+    for (const itemId of Object.keys(current.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
+    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1);
+    if (JSON.stringify(planning.constructionAutomation.destroyedByproducts) !== destroyedBefore) return null;
+    if (budget.remainingPlanBuilds < 1) return null;
+    const nextPlan = buildConstructionAutomationPlan(planning, definition, planetId);
+    budget.remainingPlanBuilds -= 1;
+    if (profiler) profiler.constructionPlanBuilds += 1;
+    if (nextPlan.blocker) return null;
+    const next = analyzeRepeatableConstructionAutomationPlan(planning, definition, nextPlan);
+    if (!next) return null;
+    for (const itemId of Object.keys(next.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
+    if (constructionAutomationCycleFingerprint(planning, planetId, next) === initialFingerprint) {
+      // The cycle is safe to repeat only when the recipe shape returns to its
+      // initial state. Any transient byproduct is then represented by the
+      // composed external cost/return and cannot silently change a later job.
+      if (!constructionAutomationBatchCanRepeat(state, planetId, cycle)) return null;
+      const cycleStateItemList = [...cycleStateItems].sort();
+      cycle.cycleStateItems = cycleStateItemList;
+      const initialTray = trayForPlanet(state, planetId);
+      cycle.cycleStartInventory = Object.fromEntries(cycleStateItemList.map((itemId) => [itemId,
+        Math.max(0, Math.floor(initialTray[itemId] ?? 0))])) as Partial<Record<ItemId, number>>;
+      return cycle;
+    }
+    cycle = composeConstructionAutomationBatches(cycle, next);
+    current = next;
+  }
+  return null;
 }
 
 function resolveConstructionAutomationPlan(
@@ -10812,7 +11008,9 @@ function resolveConstructionAutomationPlan(
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
   const resolved = {
     plan,
-    batch,
+    batch: batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
+      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+      : batch,
     inventorySnapshot,
     materialInventoryVersion: constructionAutomationInventoryVersion(inventorySnapshot),
   };
@@ -10841,25 +11039,26 @@ function constructionAutomationBatchCanRepeat(
 
 function applyConstructionAutomationBatch(
   state: GameState,
-  entity: FactoryEntity,
+  planetId: PlanetId,
   targetIndex: number,
   definition: ConstructionAutomationTargetDefinition,
   batch: RepeatableConstructionAutomationBatch,
-  jobs: number,
+  cycles: number,
 ): number {
-  const count = Math.max(1, Math.floor(jobs));
-  const tray = trayForPlanet(state, entity.planetId);
+  const cycleCount = Math.max(1, Math.floor(cycles));
+  const count = cycleCount * Math.max(1, Math.floor(batch.jobsPerCycle));
+  const tray = trayForPlanet(state, planetId);
   for (const itemId of batch.touchedTrayItems) {
     if (tray[itemId] === undefined) tray[itemId] = 0;
   }
   for (const [itemId, amount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
-    tray[itemId] = Math.max(0, Math.floor((tray[itemId] ?? 0) - amount * count));
+    tray[itemId] = Math.max(0, Math.floor((tray[itemId] ?? 0) - amount * cycleCount));
   }
   for (const [itemId, amount] of Object.entries(batch.trayReturns) as Array<[ItemId, number]>) {
-    const returned = Math.max(0, Math.floor(amount * count));
+    const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned < 1) continue;
     const current = Math.max(0, Math.floor(tray[itemId] ?? 0));
-    const stored = Math.min(returned, Math.max(0, getPlanetTrayItemLimit(state, entity.planetId) - current));
+    const stored = Math.min(returned, Math.max(0, getPlanetTrayItemLimit(state, planetId) - current));
     if (stored > 0) tray[itemId] = current + stored;
     const destroyed = returned - stored;
     if (destroyed > 0) {
@@ -10869,13 +11068,13 @@ function applyConstructionAutomationBatch(
     }
   }
   for (const [itemId, amount] of Object.entries(batch.fleetReturns) as Array<[ItemId, number]>) {
-    const returned = Math.max(0, Math.floor(amount * count));
+    const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned > 0 && isPortableFleetItem(itemId)) {
       state.portableFleet[itemId] = Math.floor((state.portableFleet[itemId] ?? 0) + returned);
     }
   }
   for (const [itemId, amount] of Object.entries(batch.producedItems) as Array<[ItemId, number]>) {
-    state.totalProduced[itemId] = Math.floor((state.totalProduced[itemId] ?? 0) + amount * count);
+    state.totalProduced[itemId] = Math.floor((state.totalProduced[itemId] ?? 0) + amount * cycleCount);
   }
   const completed = definition.outputAmount * count;
   if (definition.kind === "fleet" && isPortableFleetItem(definition.id)) {
@@ -10906,10 +11105,10 @@ function tryRunConstructionAutomationBatch(
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
   if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable)) return null;
   const tray = trayForPlanet(state, entity.planetId);
-  let jobsForStock = Number.MAX_SAFE_INTEGER;
+  let cyclesForStock = Number.MAX_SAFE_INTEGER;
   for (const [itemId, amount] of Object.entries(repeatable.trayCosts) as Array<[ItemId, number]>) {
     if (amount < 1) continue;
-    jobsForStock = Math.min(jobsForStock, Math.floor(Math.max(0, tray[itemId] ?? 0) / amount));
+    cyclesForStock = Math.min(cyclesForStock, Math.floor(Math.max(0, tray[itemId] ?? 0) / amount));
   }
   const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id) &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
@@ -10919,11 +11118,17 @@ function tryRunConstructionAutomationBatch(
     CONSTRUCTION_AUTOMATION_MAX_FAIR_BATCH_JOBS,
     Math.ceil(jobsForWork / Math.max(1, activeTargetCount)),
   ));
-  const jobs = canRepeat
-    ? Math.min(jobsForTarget, jobsForWork, jobsForStock)
-    : canFairBatch ? Math.min(jobsForTarget, jobsForWork, jobsForStock, fairShare) : 1;
-  const completed = applyConstructionAutomationBatch(state, entity, targetIndex, definition, repeatable, jobs);
-  return { usedWork: repeatable.workSeconds * jobs, completed, jobs };
+  const jobsPerCycle = Math.max(1, Math.floor(repeatable.jobsPerCycle));
+  if (jobsPerCycle > 1 && !constructionAutomationCycleStateMatches(state, entity.planetId, repeatable)) return null;
+  const cyclesForTarget = Math.floor(jobsForTarget / jobsPerCycle);
+  const cyclesForWork = Math.floor(jobsForWork / jobsPerCycle);
+  if (cyclesForTarget < 1 || cyclesForWork < 1 || cyclesForStock < 1) return null;
+  const cycles = canRepeat
+    ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock)
+    : canFairBatch ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock, Math.floor(fairShare / jobsPerCycle)) : 1;
+  if (cycles < 1) return null;
+  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles);
+  return { usedWork: repeatable.workSeconds * cycles, completed, jobs: cycles * jobsPerCycle };
 }
 
 function runConstructionCenters(
@@ -10937,24 +11142,49 @@ function runConstructionCenters(
   lookup?: SimulationLookupContext,
 ): void {
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
-  const budget: ConstructionAutomationComputeBudget = {
-    // The unbatched path remains an exact deterministic oracle for tests.
-    // Production always uses the guarded batch path.
-    remainingIterations: batchConstructionAutomation
-      ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND))
-      : Number.MAX_SAFE_INTEGER,
-    remainingPlanBuilds: batchConstructionAutomation
-      ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND))
-      : Number.MAX_SAFE_INTEGER,
-  };
-  for (const entity of entities) {
-    if (entity.planetId !== planetId || entity.buildingId !== "construction_center") continue;
+  const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+  // A single planet-wide FIFO budget allowed a very large first center to
+  // consume every guarded iteration before later centers were visited. Keep
+  // the same deterministic total cap, but hand out a fair prefix to each
+  // center and return unused tokens to the pool. This preserves single-center
+  // throughput while ensuring a second center always gets a chance to work.
+  let remainingIterationPool = batchConstructionAutomation
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND))
+    : Number.MAX_SAFE_INTEGER;
+  let remainingPlanBuildPool = batchConstructionAutomation
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND))
+    : Number.MAX_SAFE_INTEGER;
+  for (let centerIndex = 0; centerIndex < centerEntities.length; centerIndex += 1) {
+    const entity = centerEntities[centerIndex];
+    const centersRemaining = centerEntities.length - centerIndex;
+    const allocatedIterations = batchConstructionAutomation
+      ? Math.min(remainingIterationPool, Math.max(1, Math.ceil(remainingIterationPool / centersRemaining)))
+      : Number.MAX_SAFE_INTEGER;
+    const allocatedPlanBuilds = batchConstructionAutomation
+      ? Math.min(remainingPlanBuildPool, Math.max(1, Math.ceil(remainingPlanBuildPool / centersRemaining)))
+      : Number.MAX_SAFE_INTEGER;
+    if (batchConstructionAutomation) {
+      remainingIterationPool -= allocatedIterations;
+      remainingPlanBuildPool -= allocatedPlanBuilds;
+    }
+    const budget: ConstructionAutomationComputeBudget = {
+      // The unbatched path remains an exact deterministic oracle for tests.
+      // Production always uses the guarded batch path.
+      remainingIterations: allocatedIterations,
+      remainingPlanBuilds: allocatedPlanBuilds,
+    };
+    const returnUnusedBudget = () => {
+      if (!batchConstructionAutomation) return;
+      remainingIterationPool += budget.remainingIterations;
+      remainingPlanBuildPool += budget.remainingPlanBuilds;
+    };
     const powerFactor = powerFactorForEntity(power, entity);
     entity.powerFactor = power.factorByEntity.has(entity.id) ? round(powerFactor, 4) : undefined;
     if (!state.constructionAutomation.enabled || powerFactor <= EPSILON) {
       entity.utilization = 0;
       entity.productionRate = 0;
       entity.progress = 0;
+      returnUnusedBudget();
       continue;
     }
     let job: ConstructionAutomationJob | undefined = state.constructionAutomation.jobs[entity.id];
@@ -11051,6 +11281,7 @@ function runConstructionCenters(
     }
     entity.utilization = worked || completed > 0 ? powerFactor : 0;
     entity.productionRate = seconds > EPSILON ? round(completed * 60 / seconds, 2) : 0;
+    returnUnusedBudget();
   }
 }
 

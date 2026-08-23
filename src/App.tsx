@@ -3667,7 +3667,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (summary.settledWallSeconds > 0) pureIdleMacroRestartCountRef.current = 0;
       setPureIdleRecoveryContinueState(false);
       setNotice(summary.conservativeOnly
-        ? "精确 Worker 连续失败，已切换保守宏观；原存档和恢复日志保持有效"
+        ? "精确 Worker 连续失败，已先结算短窗口后冻结不确定工厂；原存档和恢复日志保持有效"
         : record.summary ? "纯挂机已从恢复日志继续，未结算墙钟时间保持不变" : "纯挂机校准完成，宏观守恒结算已开始");
       return client;
     } catch (error) {

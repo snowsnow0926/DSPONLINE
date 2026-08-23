@@ -2092,23 +2092,26 @@ test("username registration and login preserve every local save without automati
   await page.goto("/?menu=1");
   await page.getByRole("button", { name: /开始游戏/ }).click();
   await page.getByTitle("保存并返回主菜单").click();
-  const before = await page.evaluate(() => {
+  const before = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+    await store.flushLocalSaveWrites();
     const comparable = (raw: string | null) => {
       if (!raw) return null;
       const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
       return envelope;
     };
-    const main = window.localStorage.getItem("dsp-idle-network.save.v1");
+    const main = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
     if (!main) throw new Error("missing local main save");
-    window.localStorage.setItem("dsp-idle-network.slot.1", main);
-    window.localStorage.setItem("dsp-idle-network.slot.2", main);
-    window.localStorage.setItem("dsp-idle-network.slot.3", main);
-    return [
-      comparable(window.localStorage.getItem("dsp-idle-network.save.v1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.2")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.3")),
+    const keys = [
+      "dsp-idle-network.save.v1",
+      "dsp-idle-network.slot.1",
+      "dsp-idle-network.slot.2",
+      "dsp-idle-network.slot.3",
     ];
+    for (const key of keys.slice(1)) store.setLocalSaveValue(key, main);
+    await store.flushLocalSaveWrites();
+    return Promise.all(keys.map(async (key) => comparable(await store.readPersistedLocalSaveValue(key))));
   });
   await page.reload();
   await page.getByRole("button", { name: "登录与云存档" }).click();
@@ -2125,18 +2128,22 @@ test("username registration and login preserve every local save without automati
   await page.getByLabel("密码", { exact: true }).fill("strong-pass-123");
   await page.getByRole("button", { name: "登录云账户" }).click();
   await expect(page.locator(".start-menu-message")).toContainText("本地存档保持不变");
-  const after = await page.evaluate(() => {
+  const after = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+    await store.flushLocalSaveWrites();
     const comparable = (raw: string | null) => {
       if (!raw) return null;
       const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
       return envelope;
     };
-    return [
-      comparable(window.localStorage.getItem("dsp-idle-network.save.v1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.2")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.3")),
+    const keys = [
+      "dsp-idle-network.save.v1",
+      "dsp-idle-network.slot.1",
+      "dsp-idle-network.slot.2",
+      "dsp-idle-network.slot.3",
     ];
+    return Promise.all(keys.map(async (key) => comparable(await store.readPersistedLocalSaveValue(key))));
   });
   expect(after).toEqual(before);
 });

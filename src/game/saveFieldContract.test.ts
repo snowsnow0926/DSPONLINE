@@ -136,7 +136,14 @@ describe("shared save-field contract", () => {
     const sourcePath = decodeURIComponent(new URL("./saveProjection.ts", import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1");
     const source = readFileSync(sourcePath, "utf8");
     expect(source).not.toContain("omitDefault(");
-    expect([...source.matchAll(/delete\s+compact\.([A-Za-z0-9_]+)/g)].map((match) => match[1])).toEqual(["quantumTarget"]);
+    expect([...source.matchAll(/delete\s+compact\.([A-Za-z0-9_]+)/g)].map((match) => match[1])).toEqual([
+      "quantumTarget",
+      "fuelRemainingMj",
+      "sprayCoaterInstalled",
+      "stationModeTransition",
+      "quantumTransition",
+      "elevatorOutputItems",
+    ]);
     expect(source.match(/omitSaveContractDefaults\(compact,\s*"entity",\s*state\.version\)/g)).toHaveLength(1);
     expect(source.match(/omitSaveContractDefaults\(compact,\s*"belt",\s*state\.version\)/g)).toHaveLength(1);
   });

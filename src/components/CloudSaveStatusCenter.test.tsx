@@ -13,7 +13,7 @@ const cloud = {
   slot: "main" as const,
   revision: 9,
   updatedAt: 1_800_000_000_000,
-  size: 65 * MIB_BYTES,
+  size: 97 * MIB_BYTES,
   checksum: "a".repeat(64),
   summary: null,
 };
@@ -39,7 +39,7 @@ describe("CloudSaveStatusCenter", () => {
   });
 
   it("shows the scoped revision, last success, and readable oversized-save diagnostics", () => {
-    const sizes = cloudSaveCapacityDetails(65 * MIB_BYTES, 5 * MIB_BYTES);
+    const sizes = cloudSaveCapacityDetails(97 * MIB_BYTES, 5 * MIB_BYTES);
     writeCloudSyncStatus(cloudSyncStatusFromUpload("normal", "main", "failed", {
       cloud,
       localRevision: 12,
@@ -65,7 +65,7 @@ describe("CloudSaveStatusCenter", () => {
     expect(host.textContent).toContain("本地修订12");
     expect(host.textContent).toContain("云端修订9");
     expect(host.textContent).not.toContain("尚未同步");
-    expect(host.textContent).toContain("原始 65.00 MiB");
+    expect(host.textContent).toContain("原始 97.00 MiB");
     expect(host.textContent).toContain("压缩 5.00 MiB");
     expect(host.textContent).toContain("超出 1.00 MiB");
     expect(host.textContent).toContain("gzip：可用");

@@ -56,6 +56,8 @@ export const API_SERVER_RELEASE_FILES = Object.freeze([
   "server/upload-inspection-worker.mjs",
   "server/upload-inspection-benchmark.mjs",
   "server/upload-inspection.test.mjs",
+  "server/user-lookup-index.mjs",
+  "server/user-lookup-index.test.mjs",
   "server/web-session.mjs",
   "server/web-session.test.mjs",
   "server/web-session.integration.test.mjs",

@@ -368,7 +368,10 @@ import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationR
 import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
 import { getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus } from "./game/localSaveStore";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
-import type { AuthoritativeSaveCheckpointOverlay } from "./game/authoritativeSaveSerializationProtocol";
+import type {
+  AuthoritativeSaveCheckpointOverlay,
+  AuthoritativeSaveExpectedStateIdentity,
+} from "./game/authoritativeSaveSerializationProtocol";
 import { readMulticoreSimulationOptions, type MulticoreSimulationOptions } from "./game/multicoreSimulation";
 import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode";
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
@@ -1685,7 +1688,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const simulationCheckpointBarrierRef = useRef(false);
   const simulationSaveBarrierDepthRef = useRef(0);
   const simulationCheckpointRequestRef = useRef<{
-    mode: "checkpoint" | "deferred-top-level";
+    mode: "checkpoint" | "persistence-checkpoint" | "deferred-top-level";
     id: number | null;
     promise: Promise<GameState>;
     resolve: (state: GameState) => void;
@@ -1712,6 +1715,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     state: GameState;
     transfer: SimulationStateTransfer;
     checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+    expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } | null>(null);
   const simulationReplayJournalRef = useRef<SimulationReplayOperation[]>([]);
   const simulationRecoveryRef = useRef<{
@@ -2566,7 +2570,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const registrySnapshot = contentPackRuntimeSnapshotRef.current;
     const request: SimulationWorkerRequest = {
       id: simulationRequestIdRef.current + 1,
-      kind: pending.mode === "checkpoint" ? "checkpoint" : "sync-projection",
+      kind: pending.mode === "deferred-top-level" ? "sync-projection" : "checkpoint",
       ...(command ? { command } : {}),
       simulationSeconds: 0,
       wallSeconds: 0,
@@ -2575,6 +2579,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stateRevision: simulationStateRevisionRef.current,
       includeFactoryAlerts: factoryAlertsEnabledRef.current,
       factoryAlertsGeneration: factoryAlertsGenerationRef.current,
+      ...(pending.mode === "persistence-checkpoint" ? { checkpointIdentityOnly: true } : {}),
       ...(simulationWorkerRegistryFingerprintRef.current !== registrySnapshot.fingerprint ? { registry: registrySnapshot } : {}),
     };
     simulationRequestIdRef.current = request.id;
@@ -2623,6 +2628,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return promise;
   }, [stateWithSimulationDebt]);
   requestAuthoritativeSimulationCheckpointRef.current = requestAuthoritativeSimulationCheckpoint;
+
+  const requestAuthoritativePersistenceCheckpoint = useCallback((): Promise<GameState> => {
+    const existing = simulationCheckpointRequestRef.current;
+    if (existing) {
+      return existing.mode === "checkpoint" || existing.mode === "persistence-checkpoint"
+        ? existing.promise
+        : existing.promise.then(() => requestAuthoritativePersistenceCheckpoint());
+    }
+    if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
+      return Promise.resolve(stateWithSimulationDebt(gameRef.current));
+    }
+    let resolve!: (state: GameState) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<GameState>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    simulationCheckpointBarrierRef.current = true;
+    simulationCheckpointRequestRef.current = {
+      mode: "persistence-checkpoint",
+      id: null,
+      promise,
+      resolve,
+      reject,
+      baseState: null,
+      state: null,
+      command: null,
+    };
+    queueMicrotask(() => dispatchSimulationCheckpointRef.current());
+    return promise;
+  }, [stateWithSimulationDebt]);
 
   const requestAuthoritativeDeferredTopLevelProjection = useCallback((): Promise<GameState> => {
     const existing = simulationCheckpointRequestRef.current;
@@ -2838,14 +2874,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [currentPrimarySaveSource]);
 
   const saveVerifiedPrimaryCheckpoint = useCallback((state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
-    // The 1.0.43-compatible bridge deliberately uses the stable verified
-    // envelope path. It still serializes in the save Worker and keeps the
-    // writer lease, checksum, backup and emergency-mirror guarantees, but it
-    // does not couple a primary save to the 1.0.44 checkpoint transfer path.
-    if (!durableSimulationRuntimeEnabled) {
-      latestAuthoritativeCheckpointTransferRef.current = null;
-      return saveGameVerified(state, undefined, undefined, options);
-    }
     const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
     if (!checkpoint || checkpoint.state !== state) {
       // A replacement/imported state must not retain the previous authority
@@ -2857,8 +2885,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // Ownership passes synchronously with postMessage inside the storage
     // boundary. Never offer this same buffer to a later, rebased save.
     latestAuthoritativeCheckpointTransferRef.current = null;
-    return saveGameVerified(state, checkpoint.transfer, checkpoint.checkpointOverlay);
-  }, [durableSimulationRuntimeEnabled]);
+    return saveGameVerified(state, checkpoint.transfer, checkpoint.checkpointOverlay, {
+      ...options,
+      ...(checkpoint.expectedStateIdentity ? { expectedStateIdentity: checkpoint.expectedStateIdentity } : {}),
+    });
+  }, []);
 
   /**
    * Direct/dev entry points can mount FactoryGame without the StartMenu
@@ -3451,10 +3482,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         activeSubmission.command === null && activeSubmission.state === gameRef.current;
       const canUseConfirmedAutosaveBoundary = kind === "autosave" && state === undefined &&
         confirmedState !== null && simulationRecoveryRef.current === null &&
+        !largeSaveAutosavePolicy.largeSave &&
         (idleWorkerMatchesConfirmedState || activeAdvanceHasNoUnconfirmedPlayerCommand);
       const barrierState = canUseConfirmedAutosaveBoundary
         ? stateWithSimulationDebt(confirmedState)
-        : await requestAuthoritativeSimulationCheckpoint();
+        : state === undefined && largeSaveAutosavePolicy.largeSave
+          ? await requestAuthoritativePersistenceCheckpoint()
+          : await requestAuthoritativeSimulationCheckpoint();
       if (canUseConfirmedAutosaveBoundary) {
         recordRuntimeTransitionPhase("autosave-confirmed-checkpoint", startedAt, performance.now() - startedAt, {
           pendingSimulationSeconds: activeSubmission?.simulationSeconds ?? simulationPendingSecondsRef.current,
@@ -3519,7 +3553,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [durableSimulationRuntimeEnabled, performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
+  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, performanceMonitor.isActive, performanceMonitor.recordSave,
+    requestAuthoritativePersistenceCheckpoint, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
@@ -4840,6 +4875,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             checkpointRequest.reject(new Error("工作区同步收到意外的检查点分块"));
             return;
           }
+          if (checkpointRequest.mode === "persistence-checkpoint") {
+            simulationCheckpointRequestRef.current = null;
+            simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+            checkpointRequest.reject(new Error("低内存保存检查点收到意外的完整状态分块"));
+            return;
+          }
           try {
             checkpointRequest.checkpointChunks = appendSimulationCheckpointChunk(
               checkpointRequest.checkpointChunks,
@@ -4908,6 +4949,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationCheckpointRequestRef.current = null;
           simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
           checkpointRequest.reject(new Error(event.data.registryError ?? "模拟 Worker 未返回有效检查点"));
+          return;
+        }
+        if (checkpointRequest.mode === "persistence-checkpoint") {
+          if (event.data.needsResync) {
+            // A revision mismatch is rare and needs the normal authoritative
+            // mirror once so the pending UI command can be rebased safely.
+            // Discard this transfer and retry through the established full
+            // checkpoint branch instead of trusting a bounded identity alone.
+            checkpointRequest.mode = "checkpoint";
+            checkpointRequest.id = null;
+            checkpointRequest.baseState = null;
+            checkpointRequest.state = null;
+            checkpointRequest.command = null;
+            delete checkpointRequest.checkpointChunks;
+            queueMicrotask(() => dispatchSimulationCheckpointRef.current());
+            return;
+          }
+          try {
+            const checkpointTransfer = event.data.checkpoint;
+            const identity = validateSimulationStateTransferIdentity(checkpointTransfer, event.data.checkpointIdentity);
+            const requestedView = checkpointRequest.state ?? gameRef.current;
+            const checkpointOverlay = createAuthoritativeCheckpointOverlay(requestedView);
+            const saveState = applyAuthoritativeCheckpointOverlay(requestedView, checkpointOverlay);
+            latestAuthoritativeCheckpointTransferRef.current = {
+              state: saveState,
+              transfer: checkpointTransfer,
+              expectedStateIdentity: {
+                mode: identity.mode,
+                version: identity.version,
+                activePlanetId: identity.activePlanetId,
+                entityCount: identity.entityCount,
+                beltCount: identity.beltCount,
+                elapsedSeconds: identity.elapsedSeconds,
+              },
+              ...(checkpointOverlay ? { checkpointOverlay } : {}),
+            };
+            simulationStateRevisionRef.current = event.data.stateRevision;
+            simulationReplayJournalRef.current = [];
+            simulationWorkerRegistryFingerprintRef.current = event.data.registryFingerprint ?? simulationWorkerRegistryFingerprintRef.current;
+            lastSimulationResultRef.current = requestedView;
+            simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(requestedView);
+            simulationCheckpointRequestRef.current = null;
+            simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+            recordRuntimeTransitionPhase("save-transfer-only-checkpoint", performance.now(), 0, {
+              bytes: checkpointTransfer.byteLength,
+            });
+            checkpointRequest.resolve(saveState);
+          } catch (error) {
+            simulationCheckpointRequestRef.current = null;
+            simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+            checkpointRequest.reject(error instanceof Error ? error : new Error("低内存保存检查点校验失败"));
+          }
           return;
         }
         try {

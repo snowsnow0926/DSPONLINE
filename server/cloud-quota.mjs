@@ -5,7 +5,7 @@ const SAVE_MODES = ["normal", "speedrun"];
 const CLOUD_SLOTS = ["main", "1", "2", "3"];
 
 export const DEFAULT_CLOUD_QUOTA_POLICY = Object.freeze({
-  revisionBytes: 67_107_840,
+  revisionBytes: 100_662_272,
   slotBytes: 512 * MIB,
   modeBytes: 1024 * MIB,
   accountBytes: 2 * 1024 * MIB,
@@ -18,7 +18,7 @@ function positiveInteger(value, fallback, minimum = 1, maximum = Number.MAX_SAFE
 
 export function normalizeCloudQuotaPolicy(value = {}) {
   // Small positive policies are useful for deterministic boundary tests and
-  // private deployments. The production defaults remain bounded for 64 MiB
+  // private deployments. The production defaults remain bounded below 96 MiB
   // revisions; callers cannot configure zero, negative or unsafe values.
   const revisionBytes = positiveInteger(value.revisionBytes, DEFAULT_CLOUD_QUOTA_POLICY.revisionBytes, 1, 96 * MIB);
   const slotBytes = positiveInteger(value.slotBytes, DEFAULT_CLOUD_QUOTA_POLICY.slotBytes, revisionBytes, 4 * 1024 * MIB);

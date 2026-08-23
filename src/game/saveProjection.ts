@@ -57,6 +57,19 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
     // persisted field only for the interstellar station where it is meaningful.
     if (entity.buildingId !== "interstellar_logistics_station") delete compact.quantumTarget;
     omitSaveContractDefaults(compact, "entity", state.version);
+    // v47 migration already restores these exact inactive defaults. Keeping
+    // them on every late-game entity added several MiB and multiplied the
+    // temporary JSON/TextEncoder memory needed by every autosave. Omit only
+    // values whose absence is explicitly normalized back to the same runtime
+    // state; active transitions, fuel and coater configuration stay intact.
+    if (compact.fuelRemainingMj === 0) delete compact.fuelRemainingMj;
+    if (compact.sprayCoaterInstalled === false) delete compact.sprayCoaterInstalled;
+    if (compact.stationModeTransition === null) delete compact.stationModeTransition;
+    if (compact.quantumTransition === null) delete compact.quantumTransition;
+    if (Array.isArray(compact.elevatorOutputItems) && compact.elevatorOutputItems.length === 5 &&
+      compact.elevatorOutputItems.every((item: unknown) => item === null)) {
+      delete compact.elevatorOutputItems;
+    }
     if (entity.buildingId === "micro_black_hole_connector" && state.version >= 46) {
       // This final assignment deliberately runs after sparse-default omission.
       // A future shared-contract entry cannot silently turn an active,

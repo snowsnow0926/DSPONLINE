@@ -97,7 +97,7 @@ test("reports the 1.1.4 candidate version and a unique build id", async ({ page 
     return collectClientDiagnostics().application as { version: string; build: string };
   });
   expect(application.version).toBe("1.1.4");
-  expect(application.build).toMatch(/^1\.0\.46\+[0-9a-f]{12}(?:\.dirty)?$/);
+  expect(application.build).toMatch(/^1\.1\.4\+[0-9a-f]{12}(?:\.dirty)?$/);
 });
 
 test("browser protocol uploads sparse v46 normal and speedrun saves without rewriting them", async ({ page }) => {

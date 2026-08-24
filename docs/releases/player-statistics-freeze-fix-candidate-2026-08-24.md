@@ -51,11 +51,11 @@
 - `npm run licenses:check`
 - `git diff --check`
 
-最后一次微调后的定向回归：`node --test server/player-statistics.test.mjs server/server.test.mjs` 为 43 通过、2 跳过、0 失败；随后对最终工作树重新运行了完整 Vitest（1,438 通过、20 跳过）、server（373 通过、2 跳过；station 3/3）和 ops（57 通过、6 个 Linux-only 跳过），运行时保留/SQLite 重启测试亦通过。完整矩阵仍应在生成不可变发布制品后由 Release Agent 对最终候选重新执行，不能复用本地 `dist`。
+最后一次微调后的定向回归：`node --test server/player-statistics.test.mjs server/server.test.mjs` 为 44 通过、2 跳过、0 失败；随后对加入未来日期保护前的最终工作树重新运行了完整 Vitest（1,438 通过、20 跳过）、server（373 通过、2 跳过；station 3/3）和 ops（57 通过、6 个 Linux-only 跳过），运行时保留/SQLite 重启测试亦通过。未来日期保护只增加失败关闭校验，发布前仍须对最终不可变制品重跑完整矩阵，不能复用本地 `dist`。
 
 ## 制品与发布门禁
 
-- **Implementation commit SHA**：`45fac16ea16a212c2ff794ca773dc2b637b3ba29`
+- **Implementation commit SHA**：`45fac16ea16a212c2ff794ca773dc2b637b3ba29` + `edb6007`（未来日期失败关闭保护）
 - **Immutable Web/API/native artifacts**：尚未生成；当前 `dist/` 仅为本地验证输出，不得上传
 - **Manifest/aggregate hash**：unknown
 - **未完成门禁**：独立 clean checkout、不可变制品/清单、正式版本号、签名包（如适用）、生产备份、Nginx 原子切换、公网 smoke、历史 preview/apply

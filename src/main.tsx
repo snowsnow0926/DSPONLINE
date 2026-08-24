@@ -12,7 +12,6 @@ import "./styles/save-storage.css";
 import "./styles/local-save-writer.css";
 import "./styles/ui-clarity.css";
 import { AppLocaleProvider, initializeDocumentLocale } from "./i18n/locale";
-import { initializeLocalSaveStore } from "./game/localSaveStore";
 import { importWithRecovery, isDynamicImportFailure, reloadLatestBuild, runtimeErrorDiagnosticCode } from "./game/dynamicImportRecovery";
 import { initializeDocumentTheme } from "./game/uiPreferences";
 import { resolveApplicationRoute } from "./game/applicationRoute";
@@ -38,7 +37,10 @@ const applicationRoute = resolveApplicationRoute(window.location.pathname);
 if (applicationRoute.kind !== "admin") installAnalytics();
 
 async function mountApplication(): Promise<void> {
-  if (applicationRoute.kind === "game") await initializeLocalSaveStore();
+  if (applicationRoute.kind === "game") {
+    const { initializeLocalSaveStore } = await importWithRecovery(() => import("./game/localSaveStore"), "本地存档模块");
+    await initializeLocalSaveStore();
+  }
   const application = applicationRoute.kind === "admin"
     ? await importWithRecovery(() => import("./components/AdminDashboard"), "管理后台模块").then(({ AdminDashboard }) => <AdminDashboard />)
     : applicationRoute.kind === "public-station" && isSpaceStationFeatureEnabled()

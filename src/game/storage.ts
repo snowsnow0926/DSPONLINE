@@ -4077,6 +4077,19 @@ export function loadGameSlot(slotId: SaveSlotId, mode: SaveMode = "normal"): Loa
   }
 }
 
+/** Read an async payload and, when present, overlay the v1 chunk journal. */
+export async function readLocalSavePayloadWithChunkJournal(key: string): Promise<string | null> {
+  const raw = await readLocalSavePayload(key);
+  if (raw === null || (key !== SAVE_KEY && key !== `${SAVE_KEY}.speedrun`)) return raw;
+  try {
+    const { restoreChunkedSavePayload } = await import("./chunkedSaveJournal");
+    const restored = await restoreChunkedSavePayload(raw, key.endsWith(".speedrun") ? "speedrun" : "normal");
+    return restored?.raw ?? raw;
+  } catch {
+    return raw;
+  }
+}
+
 export async function loadGameSlotFromPersistence(slotId: SaveSlotId, mode: SaveMode = "normal"): Promise<LoadedGame | null> {
   try {
     const raw = await readLocalSavePayload(saveSlotKey(slotId, mode));

@@ -1,5 +1,6 @@
-import { getLocalSaveCatalog, readLocalSavePayload } from "./localSaveStore";
+import { getLocalSaveCatalog } from "./localSaveStore";
 import { getMenuContinueSaveCandidates, type MenuContinueSave } from "./savePreview";
+import { readLocalSavePayloadWithChunkJournal } from "./storage";
 import type { SaveInspection } from "./storage";
 import type { SaveMode } from "./types";
 
@@ -16,7 +17,7 @@ async function inspectSelectedPayload(raw: string, mode: SaveMode, key: string):
 /** Lazily read only the selected candidate, then fall back in the established order on corruption. */
 export async function resolveMenuContinueSave(mode: SaveMode = "normal"): Promise<{ save: MenuContinueSave; raw: string; inspection: SaveInspection } | null> {
   for (const handle of getMenuContinueSaveCandidates(mode)) {
-    const raw = await readLocalSavePayload(handle.key);
+    const raw = await readLocalSavePayloadWithChunkJournal(handle.key);
     if (!raw) continue;
     const inspection = await inspectSelectedPayload(raw, mode, handle.key);
     if (inspection) return { save: handle, raw, inspection };
@@ -25,7 +26,7 @@ export async function resolveMenuContinueSave(mode: SaveMode = "normal"): Promis
 }
 
 export async function readMenuSavePayload(key: string): Promise<string | null> {
-  const raw = await readLocalSavePayload(key);
+  const raw = await readLocalSavePayloadWithChunkJournal(key);
   if (!raw) return null;
   const catalog = getLocalSaveCatalog(key);
   const mode = catalog?.mode ?? (key.includes("speedrun") ? "speedrun" : "normal");
@@ -33,7 +34,7 @@ export async function readMenuSavePayload(key: string): Promise<string | null> {
 }
 
 export async function resolveMenuSavePayload(key: string, mode: SaveMode): Promise<{ raw: string; inspection: SaveInspection } | null> {
-  const raw = await readLocalSavePayload(key);
+  const raw = await readLocalSavePayloadWithChunkJournal(key);
   if (!raw) return null;
   const inspection = await inspectSelectedPayload(raw, mode, key);
   return inspection ? { raw, inspection } : null;

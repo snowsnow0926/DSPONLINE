@@ -2246,7 +2246,12 @@ export function createSimulationLookupContext(
       .sort((left, right) => left.belt.id.localeCompare(right.belt.id))
       .forEach((route, index) => { route.stableSourceOrder = index; });
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
-    const active = group.potentiallyProduces || sourceAmount > EPSILON || context.beltRuntime.activeGroupKeys.has(group.key);
+    // Input settlement runs before this step's production. A machine that is
+    // merely capable of producing does not have cargo to pull yet; scanning it
+    // here made every late-game route look active and defeated the dormant
+    // queue. Output reservation/settlement below re-admits a group as soon as
+    // its output buffer receives cargo.
+    const active = sourceAmount > EPSILON || context.beltRuntime.activeGroupKeys.has(group.key);
     const planetRuntime = context.beltRuntime.byPlanet.get(group.planetId);
     for (const route of group.routes) {
       if (active) planetRuntime?.activeBelts.add(route.belt.id);
@@ -2257,7 +2262,10 @@ export function createSimulationLookupContext(
     }
   }
   context.beltRuntime.initiallyDormantRouteCount = initiallyDormantRouteCount;
-  context.beltRuntime.activeQueueEnabled = initiallyDormantRouteCount >= Math.max(64, Math.ceil(context.beltRoutes.length * 0.1));
+  const dormantRouteThreshold = context.beltRoutes.length >= 50_000
+    ? Math.max(256, Math.ceil(context.beltRoutes.length * 0.02))
+    : Math.max(64, Math.ceil(context.beltRoutes.length * 0.1));
+  context.beltRuntime.activeQueueEnabled = initiallyDormantRouteCount >= dormantRouteThreshold;
   for (const group of context.beltRuntime.routeGroups) {
     if (group.routes.length === 1) {
       context.beltRuntime.settlementEntries.push(group.routes[0]);
@@ -4321,8 +4329,13 @@ function activeBeltSettlementRoutes(
   const groupKeys = new Set<string>();
   for (const group of lookup.beltRuntime.routeGroups) {
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
+    // Production has already happened by the time the output phase calls
+    // this helper. The input phase calls it before production, so a
+    // `potentiallyProduces` flag cannot justify a scan in either phase.
+    // Current source output, persisted flow, and reservation allowances are
+    // the exact signals that can move cargo now.
     const active = sourceAmount > EPSILON || lookup.beltRuntime.activeGroupKeys.has(group.key) ||
-      allowanceGroupKeys.has(group.key) || (seconds > 0 && group.potentiallyProduces);
+      allowanceGroupKeys.has(group.key);
     if (!active) continue;
     groupKeys.add(group.key);
     routes.push(...group.routes);
@@ -4795,7 +4808,16 @@ function reserveBeltStepOutputCapacity(
   const outputCredits = new Map<string, number>();
   const remainingTargetCapacity = new Map<string, number>();
   const routes = lookup?.beltRuntime.activeQueueEnabled
-    ? lookup.beltRuntime.routeGroups.flatMap((group) => lookup.beltRuntime.activeGroupKeys.has(group.key) ? group.routes : [])
+    ? lookup.beltRuntime.routeGroups.flatMap((group) => {
+      // Reservation runs after production. Re-admit a previously dormant
+      // group when its output buffer now contains cargo, even if no belt had a
+      // persisted flow signal at lookup construction time.
+      const hasCurrentOutput = (group.source?.outputs[group.itemId] ?? 0) > EPSILON;
+      const hasRuntimeSignal = group.routes.some((route) => beltHasRuntimeSignal(route.belt));
+      return lookup.beltRuntime.activeGroupKeys.has(group.key) || hasCurrentOutput || hasRuntimeSignal
+        ? group.routes
+        : [];
+    })
     : lookup
       ? lookup.beltRoutes
     : createIndexedBeltRoutes(state, true);

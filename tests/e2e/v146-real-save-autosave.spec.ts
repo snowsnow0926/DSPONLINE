@@ -189,9 +189,21 @@ test.describe("real save autosave acceptance", () => {
     console.log(`REAL_SAVE_AUTOSAVE_METRICS ${JSON.stringify(autosaveMetrics)}`);
     expect(autosaveMetrics.snapshots).toHaveLength(2);
     expect(autosaveMetrics.serializationCount).toBe(2);
-    expect(autosaveMetrics.snapshots.every((entry) => entry.durationMs > 0 && entry.bytes > 0)).toBe(true);
-    expect(autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "gzip" &&
-      entry.transportBytes > 0 && entry.transportBytes < entry.bytes / 10)).toBe(true);
+    // A sidecar autosave may legitimately be a no-op when no chunk changed;
+    // in that case its committed byte count is zero. The initial seed must
+    // still carry a positive payload, and every save must have a real duration.
+    expect(autosaveMetrics.snapshots.every((entry) => entry.durationMs > 0 && entry.bytes >= 0)).toBe(true);
+    expect(autosaveMetrics.snapshots[0]?.bytes ?? 0).toBeGreaterThan(0);
+    const legacyCompressedAutosave = autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "gzip" &&
+      entry.transportBytes > 0 && entry.transportBytes < entry.bytes / 10);
+    // 1.1.8 seeds a v1 chunk journal on the first large autosave and writes
+    // only changed chunks afterwards. Its sidecar result intentionally has
+    // no full-envelope gzip timing; the second write must nevertheless be
+    // materially smaller than the initial seed.
+    const incrementalChunkAutosave = autosaveMetrics.snapshots.length >= 2 &&
+      autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "raw" && entry.transportBytes === entry.bytes) &&
+      autosaveMetrics.snapshots[1].bytes < autosaveMetrics.snapshots[0].bytes / 2;
+    expect(legacyCompressedAutosave || incrementalChunkAutosave).toBe(true);
     expect(autosaveMetrics.confirmedBoundarySources).toEqual([]);
     expect(autosaveMetrics.transferOnlyCheckpointCount).toBeGreaterThanOrEqual(2);
 

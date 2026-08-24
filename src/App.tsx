@@ -371,6 +371,8 @@ import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationR
 import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
 import { getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus } from "./game/localSaveStore";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
+import { clearChunkedSaveJournal, persistChunkedSaveJournal } from "./game/chunkedSaveJournal";
+import { projectPersistentSaveState } from "./game/saveProjection";
 import type {
   AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveExpectedStateIdentity,
@@ -379,6 +381,7 @@ import { readMulticoreSimulationOptions, type MulticoreSimulationOptions } from 
 import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode";
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
 import { accumulateSimulationBudget, NORMAL_SIMULATION_SLICE_SECONDS, takeSimulationBudgetSlice } from "./game/simulationBudget";
+import { evaluateMemoryGuard, isLargeMemoryWorkload, readBrowserMemorySnapshot, type MemoryGuardDecision, type MemoryWorkload } from "./game/memoryBudget";
 import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase } from "./game/runtimeTransitionDiagnostics";
 import {
   createTimeWarpComputeGovernor,
@@ -1532,6 +1535,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [interactionBursts, setInteractionBursts] = useState<InteractionBurst[]>([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const gameRef = useRef(game);
+  // P0 memory governor state is kept outside React renders so a large factory
+  // cannot create another object tree merely to display a pressure sample.
+  const memorySlowWorkerCountRef = useRef(0);
+  const memoryGuardPausedRef = useRef(false);
   const latestCanvasGameRef = useRef(game);
   const runtimeUiNeedsImmediateGameRef = useRef(false);
   runtimeUiNeedsImmediateGameRef.current = game.paused || operationsOpen || mobilePanel !== null ||
@@ -1695,6 +1702,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  const memoryWorkloadForState = useCallback((state: GameState): MemoryWorkload => ({
+    serializedBytes: persistedPrimaryBytes,
+    entityCount: state.entities.length,
+    beltCount: state.belts.length,
+    // Do not scan every entity once per scheduler tick just to classify a
+    // workload. The entity/belt thresholds already cover large factories;
+    // this conservative proxy catches station-heavy mid-size saves without
+    // adding another 80k-record pass to the hot path.
+    stationCount: state.entities.length >= 10_000 ? 10_000 : 0,
+  }), [persistedPrimaryBytes]);
+  const pauseForMemoryPressure = useCallback((reason: string) => {
+    if (memoryGuardPausedRef.current || gameRef.current.paused) return;
+    memoryGuardPausedRef.current = true;
+    const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
+    latestAuthoritativeCheckpointRef.current = stopped;
+    lastSimulationResultRef.current = stopped;
+    gameRef.current = stopped;
+    simulationPendingSecondsRef.current = 0;
+    simulationPendingWallSecondsRef.current = 0;
+    simulationRetrySecondsRef.current = 0;
+    simulationRetryWallSecondsRef.current = 0;
+    setGame(stopped);
+    setNotice(`检测到内存压力，已安全暂停在最近检查点：${reason}。保存完成并确认内存稳定后可继续。`);
+  }, []);
   const allowEditsDuringSaveRef = useRef(allowEditsDuringSave);
   allowEditsDuringSaveRef.current = allowEditsDuringSave;
   const setAllowEditsDuringSavePreference = useCallback((enabled: boolean) => {
@@ -3493,6 +3524,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
     }
+    // Autosave/lifecycle timers may fire together. Coalesce them instead of
+    // creating a second full projection while the first save still owns the
+    // checkpoint barrier. Manual saves remain explicit and may wait for the
+    // existing path to finish.
+    if ((kind === "autosave" || kind === "lifecycle") &&
+      (durablePrimarySaveInFlightRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0)) {
+      return { success: true, message: "已有存档检查点进行中，本次自动保存已合并", skippedUnchanged: true };
+    }
     if (durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active") {
       return persistDurablePrimaryCheckpoint(state, kind);
     }
@@ -3541,10 +3580,66 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (lifecycleExitStartedRef.current) {
         return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
       }
+      const saveWorkload = memoryWorkloadForState(saveState);
+      const saveMemoryDecision = evaluateMemoryGuard({
+        snapshot: readBrowserMemorySnapshot(),
+        workload: saveWorkload,
+        pendingSimulationSeconds: simulationPendingSecondsRef.current,
+        workerInFlight: Boolean(simulationSubmissionRef.current),
+        saveInFlight: true,
+        slowWorkerCount: memorySlowWorkerCountRef.current,
+      });
+      if (saveMemoryDecision.shouldPause) {
+        pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
+        return { success: false, message: "内存压力过高，已暂停并保留最近检查点", code: "conflict" };
+      }
       recordRuntimeTransitionPhase("save-authoritative-checkpoint", startedAt, performance.now() - startedAt, { kind });
-      setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在序列化、写入并逐字复核存档…" });
+      setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在准备分块检查点…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
-      const result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      let chunkedAutosaveCommitted = false;
+      let result: SaveGameResult;
+      const mode = saveState.mode === "speedrun" ? "speedrun" : "normal";
+      const baseIdentity = getPrimaryLocalSaveRecoveryIdentity(mode);
+      // React may not have published the byte-length state update from the
+      // immediately preceding full save yet. Entity/belt counts provide an
+      // exact conservative large-save signal for this decision, so the
+      // second autosave can enter the journal without waiting for a render.
+      const largeSaveWorkload = isLargeMemoryWorkload(saveWorkload);
+      if (kind === "autosave" && (largeSaveAutosavePolicy.largeSave || largeSaveWorkload) && baseIdentity && getLocalSaveBackend() === "indexeddb") {
+        try {
+          const journal = await persistChunkedSaveJournal(projectPersistentSaveState(saveState, contentPackRuntimeSnapshotRef.current.registry), {
+            mode,
+            basePrimaryChecksum: baseIdentity.checksum,
+          });
+          chunkedAutosaveCommitted = true;
+          result = {
+            success: true,
+            message: journal.changedChunks > 0
+              ? `增量检查点已保存（${journal.changedChunks} 个区块，写入 ${Math.round(journal.changedBytes / 1024)} KiB）`
+              : "增量检查点无变化，已复用现有区块",
+            savedAt: journal.savedAt,
+            bytes: journal.changedBytes,
+            skippedUnchanged: journal.changedChunks === 0,
+          };
+          // The checkpoint transfer is owned by this sidecar commit; never
+          // hand the same detached buffer to a later full-save attempt.
+          latestAuthoritativeCheckpointTransferRef.current = null;
+        } catch (error) {
+          if (import.meta.env.DEV) console.warn("[1.1.8] chunked autosave fell back to verified full save", error);
+          // A quota/lease failure in the sidecar must not weaken the verified
+          // primary path. Fall back to the existing full save atomically.
+          result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: true, force: false });
+        }
+      } else {
+        result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      }
+      if (result.success && !chunkedAutosaveCommitted) {
+        // Manual/full saves compact the sidecar into the public v2 envelope;
+        // a stale journal can never shadow the newly verified primary.
+        try {
+          await clearChunkedSaveJournal(mode);
+        } catch { /* best-effort cleanup */ }
+      }
       const durationMs = performance.now() - startedAt;
       if (monitorSave) performanceMonitor.recordSave({ durationMs, bytes: result.bytes ?? 0, stages: result.timings ?? null });
       recordRuntimeTransitionPhase("save-serialize-idb-readback", startedAt, durationMs, {
@@ -3569,7 +3664,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         message: result.success ? `存档已验证完成（${Math.round(durationMs)} ms）` : result.message,
       });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: result.success ? "complete" : "failed" });
-      if (result.success && result.bytes !== undefined) setPersistedPrimaryBytes(result.bytes);
+      if (result.success && result.bytes !== undefined && !chunkedAutosaveCommitted) setPersistedPrimaryBytes(result.bytes);
       if (kind === "autosave") completeRuntimeTransition("autosave", result.success ? "save-complete" : "save-failed", { durationMs });
       else if (kind === "pure-idle-stop") completeRuntimeTransition("pure-idle-stop", result.success ? "save-complete" : "save-failed", { durationMs });
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), result.success ? 2_000 : 8_000);
@@ -3597,8 +3692,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, performanceMonitor.isActive, performanceMonitor.recordSave,
-    requestAuthoritativePersistenceCheckpoint, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
+  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryWorkloadForState, pauseForMemoryPressure,
+    performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
+    requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
@@ -4078,6 +4174,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     if (gameRef.current.timeWarp.enabled) return;
     const wasPaused = gameRef.current.paused;
+    if (wasPaused) memoryGuardPausedRef.current = false;
     beginRuntimeTransition(wasPaused ? "resume" : "pause");
     invalidateFactoryAlertProjection();
     const next = setPaused(gameRef.current, !gameRef.current.paused);
@@ -4765,6 +4862,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     let installedSubmission: SimulationSubmission | null = null;
     worker.onmessage = (event: MessageEvent<SimulationWorkerResponse>) => {
       if (simulationWorkerRef.current !== worker) return;
+      // A memory governor pause owns the last confirmed checkpoint. Do not
+      // publish a late advance response that was already in flight when the
+      // pause was requested; discard only that advance and keep the Worker
+      // available for an explicit user resume.
+      if (memoryGuardPausedRef.current && simulationSubmissionRef.current &&
+        !simulationCheckpointRequestRef.current && event.data.id === simulationSubmissionRef.current.id) {
+        simulationSubmissionRef.current = null;
+        return;
+      }
       const authorityReplacement = simulationAuthorityReplacementRef.current;
       if (authorityReplacement?.id === event.data.id) {
         const failReplacement = (error: Error) => {
@@ -5334,6 +5440,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
       workerLatencyMsRef.current = workerLatencyMsRef.current > 0 ? workerLatencyMsRef.current * 0.75 + latency * 0.25 : latency;
       if (typeof event.data.durationMs === "number") {
+        // Three unusually long slices in a row are treated as a memory-risk
+        // signal even on browsers that do not expose performance.memory.
+        memorySlowWorkerCountRef.current = event.data.durationMs >= 12_000
+          ? Math.min(5, memorySlowWorkerCountRef.current + 1)
+          : Math.max(0, memorySlowWorkerCountRef.current - 1);
         performanceMonitor.recordWorker({
           durationMs: event.data.durationMs,
           latencyMs: latency,
@@ -5989,6 +6100,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setTimeWarpPendingUi(0);
         return;
       }
+      // Saving and simulation are deliberately mutually exclusive for the
+      // large-factory safety path. Do not accumulate an unbounded catch-up
+      // queue while a checkpoint owns the authoritative state; the next
+      // scheduler tick starts from the verified save boundary.
+      if (simulationCheckpointBarrierRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0 || durablePrimarySaveInFlightRef.current) {
+        previous = now;
+        return;
+      }
       if (simulationRetrySecondsRef.current > 0 || simulationRetryWallSecondsRef.current > 0) {
         simulationPendingSecondsRef.current += simulationRetrySecondsRef.current;
         simulationPendingWallSecondsRef.current += simulationRetryWallSecondsRef.current;
@@ -6030,8 +6149,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationPendingSecondsRef.current = nextPendingSimulationSeconds;
       simulationPendingWallSecondsRef.current = accumulatedBudget.wallSeconds;
       if (timeWarpLimits) setTimeWarpPendingUi(simulationPendingSecondsRef.current);
-      // Checkpoints are an ordered save barrier. Wall/simulation budget keeps
-      // accumulating, but no later advance may overtake the serialized state.
+      const memoryWorkload = memoryWorkloadForState(currentState);
+      const memoryDecision = evaluateMemoryGuard({
+        snapshot: readBrowserMemorySnapshot(),
+        workload: memoryWorkload,
+        pendingSimulationSeconds: simulationPendingSecondsRef.current,
+        workerInFlight: Boolean(simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current),
+        saveInFlight: simulationCheckpointBarrierRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0 || durablePrimarySaveInFlightRef.current,
+        slowWorkerCount: memorySlowWorkerCountRef.current,
+      });
+      if (memoryDecision.shouldPause && !simulationSubmissionRef.current && !durableRecoveryStageInFlightRef.current) {
+        pauseForMemoryPressure(memoryDecision.reason ?? "未知内存压力");
+        return;
+      }
+      // A save checkpoint owns the authoritative state until its write/read
+      // verification finishes. Keep the simulation queue empty during that
+      // window even if the browser exposes no heap metrics.
+      if (!memoryDecision.admitSimulation) return;
+      // Outside a save barrier, checkpoints remain ordered: no later advance
+      // may overtake the serialized state.
       if (simulationCheckpointBarrierRef.current) return;
       const worker = simulationWorkerRef.current;
       if (worker && !simulationWorkerDisabledRef.current) {
@@ -6041,7 +6177,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationPendingWallSecondsRef.current,
           currentState.timeWarp.enabled
             ? timeWarpLimits?.sliceSimulationSeconds ?? baseMultiplier
-            : NORMAL_SIMULATION_SLICE_SECONDS,
+            : Math.min(NORMAL_SIMULATION_SLICE_SECONDS, memoryDecision.maxSimulationSliceSeconds),
         );
         const simulationSeconds = budget.simulationSeconds;
         const pendingWallSeconds = budget.wallSeconds;
@@ -6133,7 +6269,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const budget = takeSimulationBudgetSlice(
         simulationPendingSecondsRef.current,
         simulationPendingWallSecondsRef.current,
-        NORMAL_SIMULATION_SLICE_SECONDS,
+        Math.min(NORMAL_SIMULATION_SLICE_SECONDS, memoryDecision.maxSimulationSliceSeconds),
       );
       const simulationSeconds = budget.simulationSeconds;
       const pendingWallSeconds = budget.wallSeconds;
@@ -6147,7 +6283,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       publishRuntimeGame(next);
     }, 1_000);
     return () => window.clearInterval(timer);
-  }, [abortPureIdleForWorkerFailure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
+  }, [abortPureIdleForWorkerFailure, memoryWorkloadForState, pauseForMemoryPressure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
   useEffect(() => {
     const timer = largeSaveAutosavePolicy.effectiveIntervalSeconds > 0

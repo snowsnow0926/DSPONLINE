@@ -61,6 +61,8 @@ const RECORD_STORE = "records";
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const SLOT_KEY_PREFIX = "dsp-idle-network.slot.";
 const IMPORT_CACHE_KEY_PREFIX = `${SAVE_KEY}.import-cache.`;
+/** Internal sidecar records are deliberately outside the user save-key set. */
+export const LOCAL_SAVE_INTERNAL_PREFIX = "dsp-idle-network.internal.v1.";
 export const LOCAL_AUTOMATIC_SNAPSHOT_LIMIT = 2;
 const MANAGED_SNAPSHOT_WARNING_COUNT = 8;
 const MANAGED_SNAPSHOT_WARNING_BYTES = 64 * 1024 * 1024;
@@ -203,6 +205,7 @@ class LocalSaveConflictResolutionError extends Error {
 }
 
 const cache = new Map<string, string>();
+const internalCache = new Map<string, string>();
 const knownSaveKeys = new Set<string>();
 const catalogCache = new Map<string, LocalSaveCatalog>();
 const revisionCache = new Map<string, number>();
@@ -829,6 +832,22 @@ async function withBrowserCoordinationLock<T>(operation: () => Promise<T>): Prom
     // IndexedDB's readwrite transaction remains the fallback serialization.
     return { acquired: true, value: await operation() };
   }
+}
+
+/**
+ * A sidecar commit can immediately follow the verified primary transaction.
+ * Chromium may still hold the cooperative lock for that transaction for one
+ * event-loop turn, so give the same-page writer a short retry window before
+ * falling back to a full save. A genuinely contended second tab still fails
+ * closed after the bounded window.
+ */
+async function withBrowserCoordinationLockRetry<T>(operation: () => Promise<T>, attempts = 8): Promise<{ acquired: boolean; value?: T }> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const result = await withBrowserCoordinationLock(operation);
+    if (result.acquired) return result;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  return { acquired: false };
 }
 
 async function writeLease(db: IDBDatabase, lease: LocalSaveWriterLease): Promise<void> {
@@ -1861,6 +1880,97 @@ export async function readLocalSavePayload(key: string): Promise<string | null> 
   const catalog = catalogCache.get(key);
   if (catalog?.integrity === "invalid") return null;
   return value;
+}
+
+export interface LocalSaveInternalWrite {
+  key: string;
+  value: string | null;
+}
+
+function validLocalSaveInternalKey(key: string): boolean {
+  return typeof key === "string" && key.startsWith(LOCAL_SAVE_INTERNAL_PREFIX) && key.length <= 512;
+}
+
+/**
+ * Read a sidecar record without adding it to save menus/catalogs.  These
+ * records are used by the v1 chunk journal and are intentionally ignored by
+ * 1.1.7 and older clients.
+ */
+export async function readLocalSaveInternalValue(key: string): Promise<string | null> {
+  if (!validLocalSaveInternalKey(key)) throw new TypeError("invalid local save internal key");
+  await initializeLocalSaveStore();
+  if (backend === "indexeddb" && database) return (await readRecord(database, key))?.value ?? null;
+  if (backend === "local-storage") {
+    try { return window.localStorage.getItem(key); } catch { return internalCache.get(key) ?? null; }
+  }
+  return internalCache.get(key) ?? null;
+}
+
+export async function listLocalSaveInternalKeys(prefix = LOCAL_SAVE_INTERNAL_PREFIX): Promise<string[]> {
+  if (!prefix.startsWith(LOCAL_SAVE_INTERNAL_PREFIX)) throw new TypeError("invalid local save internal prefix");
+  await initializeLocalSaveStore();
+  if (backend === "indexeddb" && database) {
+    return (await readAllStoredKeys(database)).filter((key) => key.startsWith(prefix));
+  }
+  if (backend === "local-storage") {
+    try { return Object.keys(window.localStorage).filter((key) => key.startsWith(prefix)); } catch { /* fallback below */ }
+  }
+  return [...internalCache.keys()].filter((key) => key.startsWith(prefix));
+}
+
+/**
+ * Atomically commit a batch of sidecar records.  The caller orders the batch
+ * with the manifest last; a crash therefore leaves either the old manifest or
+ * a complete new one, never a half-adopted journal.
+ */
+export async function commitLocalSaveInternalRecords(records: readonly LocalSaveInternalWrite[]): Promise<void> {
+  if (records.some((record) => !validLocalSaveInternalKey(record.key))) {
+    throw new TypeError("invalid local save internal record key");
+  }
+  if (records.length === 0) return;
+  await initializeLocalSaveStore();
+  await flushLocalSaveWrites();
+  await authoritativeSaveQueue.catch(() => undefined);
+  if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError("当前页面没有本地存档写入权");
+  const now = Date.now();
+  if (backend === "indexeddb" && database) {
+    const committed = await withBrowserCoordinationLockRetry(async () => {
+      if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError("当前页面没有本地存档写入权");
+      const transaction = database!.transaction(RECORD_STORE, "readwrite");
+      const done = transactionDone(transaction);
+      const store = transaction.objectStore(RECORD_STORE);
+      const leaseRecord = await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>);
+      const lease = parseLocalSaveWriterLease(leaseRecord?.value);
+      const renewedLease = renewOwnedLocalSaveWriterLease(lease, writerId, writerStatus.fencingToken, now);
+      if (!renewedLease) {
+        transaction.abort();
+        throw new LocalSaveConflictError("", "本地存档写入租约已失效");
+      }
+      putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify(renewedLease), now);
+      for (const record of records) {
+        if (record.value === null) store.delete(record.key);
+        else putStoredValue(store, record.key, record.value, now);
+      }
+      await done;
+      publishWriterStatus({ ...writerStatus, leaseExpiresAt: renewedLease.expiresAt });
+      return true;
+    });
+    if (!committed.acquired) throw new LocalSaveConflictError("", "另一个页面正在写入本地存档");
+  } else if (backend === "local-storage") {
+    try {
+      for (const record of records) {
+        if (record.value === null) window.localStorage.removeItem(record.key);
+        else window.localStorage.setItem(record.key, record.value);
+      }
+    } catch (error) {
+      if (isQuotaExceededError(error)) throw error;
+      throw new Error("本地 sidecar 写入失败");
+    }
+  }
+  for (const record of records) {
+    if (record.value === null) internalCache.delete(record.key);
+    else internalCache.set(record.key, record.value);
+  }
 }
 
 /** Keep a user-selected payload available to synchronous lifecycle saves. */

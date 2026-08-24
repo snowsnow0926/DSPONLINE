@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.6";
 
 async function openMenu(page: Page): Promise<void> {
   await page.addInitScript((releaseNoteId) => {

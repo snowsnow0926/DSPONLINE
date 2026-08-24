@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.6";
 const BELT_LANES_KEY = "dsp-idle-network.ui.default-belt-lanes.v1";
 
 test.beforeEach(async ({ page }) => {

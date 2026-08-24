@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.6";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -112,7 +112,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await page.goto("/?menu=1&lang=en");
   const dialog = page.getByRole("dialog", { name: "Low-memory Large Saves and Compressed Exports" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.1.5");
+  await expect(dialog).toContainText("1.1.6");
   await expect(dialog).toContainText("Save transport avoids duplicate giant payloads");
   await expect(dialog).toContainText("Saves export as .json.gz by default");
   await expect(dialog).toContainText("More exact v47 default-field compaction");

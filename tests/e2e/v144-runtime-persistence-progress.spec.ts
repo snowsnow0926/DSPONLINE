@@ -15,7 +15,7 @@ test("default save protection rejects edits without pausing a running autosave",
 
   await page.addInitScript(({ saveRaw }) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.6");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.save.allow-edits-during-save.v1", "false");
     localStorage.setItem("dsp-idle-network.save.v1", saveRaw);
@@ -113,7 +113,7 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
 
   await page.addInitScript(({ saveRaw }) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.6");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     // This case intentionally resumes while the accelerated autosave may be
     // in flight. Opt into the documented durable-edit mode; the preceding

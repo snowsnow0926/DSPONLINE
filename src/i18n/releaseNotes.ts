@@ -27,6 +27,40 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release116Copy = {
+  date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
+  title: { "zh-CN": "传送带端口对齐与纯挂机高倍率修复", en: "Belt Port Alignment and Productive Pure Idle" },
+  summary: {
+    "zh-CN": "1.1.6 修复高密度画布中传送带线按卡片中心推算、导致多输入/多输出建筑端口错位的问题；批量 Canvas 线路现在复用 React Flow 已测量的真实端口几何，并在拓扑稳定时避免被运行时流量刷新反复重建。1.1.5 的终局纯挂机保守模式修复继续保留：合法高倍率存档按有界累计合同推进生产和科研，不绕过有限资源与安全边界。GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 不变。",
+    en: "Version 1.1.6 fixes dense-canvas belt lines that were inferred from card centres and therefore missed multi-input and multi-output ports. Batched Canvas belts now reuse React Flow's measured handle geometry and avoid rebuilding the topology when runtime flow observations refresh. The 1.1.5 endgame pure-idle fix remains included: eligible high-multiplier saves advance production and research through a bounded cumulative contract without bypassing finite-resource or safety boundaries. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  beltTitle: { "zh-CN": "传送带线精确连接真实端口", en: "Belt lines connect to measured ports" },
+  beltDescription: {
+    "zh-CN": "多输入、多输出和特殊物流端口使用 React Flow 实际测量的 handle 坐标，缩放、平移、低细节卡片与批量 Canvas 渲染保持同一端点；未挂载端口只安全回退到卡片边缘，不写入或改变线路数据。",
+    en: "Multi-input, multi-output, and special logistics ports use React Flow's measured handle coordinates. Zoom, pan, low-detail cards, and batched Canvas rendering share the same endpoints; an unmounted handle safely falls back to the card edge without changing belt data.",
+  },
+  performanceTitle: { "zh-CN": "高密度线路拓扑不随流量重建", en: "Dense belt topology stays stable across flow refreshes" },
+  performanceDescription: {
+    "zh-CN": "线路批次只在拓扑、节点布局或端口几何变化时重新打包；生产流量、悬停和运行时诊断刷新不会反复创建整张线路索引，保留命中测试与交互边界。",
+    en: "The packed line batch rebuilds only when topology, node layout, or handle geometry changes. Production flow, hover, and runtime diagnostics no longer recreate the full line index while hit testing and interaction boundaries remain intact.",
+  },
+  idleTitle: { "zh-CN": "终局纯挂机继续按高倍率结算", en: "Endgame pure idle remains productive at high multipliers" },
+  idleDescription: {
+    "zh-CN": "超大终局存档先做有界精确前缀，再以 80% 安全折扣应用白名单累计速率并推进科研；有限资源、瞬时物流和安全整数边界继续 fail-closed。",
+    en: "Large endgame saves run a bounded exact prefix, then apply whitelisted cumulative rates with an 80% safety haircut while research advances. Finite resources, transient logistics, and unsafe integer boundaries remain fail-closed.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与服务端协议保持兼容", en: "Save and server protocols remain compatible" },
+  compatibilityDescription: {
+    "zh-CN": "本版不升级 GameState、存档封装、云 schema、SQLite layout 或线路数据格式；旧存档、云修订、备份和原生应用继续按既有合同读取。",
+    en: "This release does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or belt data format. Existing saves, cloud revisions, backups, and native apps continue to use the established contracts.",
+  },
+  regressionTitle: { "zh-CN": "多端口与密集画布加入回归门禁", en: "Multi-port dense canvases are regression-gated" },
+  regressionDescription: {
+    "zh-CN": "新增 200 条线路、多输入目标、缩放/平移和低细节渲染回归；纯挂机终局夹具继续验证 15x 长窗口、可重载和源存档不变。",
+    en: "Regression coverage adds a 200-belt multi-input target plus zoom, pan, and low-detail rendering checks; the endgame pure-idle fixture continues to verify a 15x long window, reloadability, and an unchanged source save.",
+  },
+} as const;
+
 const release115Copy = {
   date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
   title: { "zh-CN": "超大存档低内存保存与压缩导出", en: "Low-memory Large Saves and Compressed Exports" },
@@ -429,7 +463,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release115Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release116Copy): string {
+  return release116Copy[key][locale];
+}
+
+function release115Message(locale: AppLocale, key: keyof typeof release115Copy): string {
   return release115Copy[key][locale];
 }
 
@@ -456,18 +494,35 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-24-v1.1.5",
+    id: "2026-08-24-v1.1.6",
     date: currentMessage(locale, "date"),
-    version: "1.1.5",
+    version: "1.1.6",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "compressed-worker-save-transport", title: currentMessage(locale, "memoryTitle"), description: currentMessage(locale, "memoryDescription") },
-      { id: "gzip-save-export", title: currentMessage(locale, "exportTitle"), description: currentMessage(locale, "exportDescription") },
-      { id: "v47-default-compaction", title: currentMessage(locale, "sparseTitle"), description: currentMessage(locale, "sparseDescription") },
+      { id: "measured-belt-endpoints", title: currentMessage(locale, "beltTitle"), description: currentMessage(locale, "beltDescription") },
+      { id: "stable-dense-belt-topology", title: currentMessage(locale, "performanceTitle"), description: currentMessage(locale, "performanceDescription") },
+      { id: "productive-pure-idle", title: currentMessage(locale, "idleTitle"), description: currentMessage(locale, "idleDescription") },
+      { id: "dense-belt-regression", title: currentMessage(locale, "regressionTitle"), description: currentMessage(locale, "regressionDescription") },
       { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
-      { id: "large-save-pure-idle", title: currentMessage(locale, "pureIdleTitle"), description: currentMessage(locale, "pureIdleDescription") },
-      { id: "balanced-galaxy-score", title: currentMessage(locale, "leaderboardTitle"), description: currentMessage(locale, "leaderboardDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes115(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-24-v1.1.5",
+    date: release115Message(locale, "date"),
+    version: "1.1.5",
+    title: release115Message(locale, "title"),
+    summary: release115Message(locale, "summary"),
+    items: [
+      { id: "compressed-worker-save-transport", title: release115Message(locale, "memoryTitle"), description: release115Message(locale, "memoryDescription") },
+      { id: "gzip-save-export", title: release115Message(locale, "exportTitle"), description: release115Message(locale, "exportDescription") },
+      { id: "v47-default-compaction", title: release115Message(locale, "sparseTitle"), description: release115Message(locale, "sparseDescription") },
+      { id: "version-upgrade", title: release115Message(locale, "compatibilityTitle"), description: release115Message(locale, "compatibilityDescription") },
+      { id: "large-save-pure-idle", title: release115Message(locale, "pureIdleTitle"), description: release115Message(locale, "pureIdleDescription") },
+      { id: "balanced-galaxy-score", title: release115Message(locale, "leaderboardTitle"), description: release115Message(locale, "leaderboardDescription") },
     ],
   };
 }

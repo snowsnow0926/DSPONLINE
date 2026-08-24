@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.6";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -521,7 +521,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.6");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
   await expect(dialog).toContainText("保存链路不再搬运多份巨型正文");
   await expect(dialog).toContainText("存档默认导出为 .json.gz");

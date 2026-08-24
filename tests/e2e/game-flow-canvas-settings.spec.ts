@@ -2,12 +2,13 @@ import { expect, test, type Browser, type Locator, type Page } from "@playwright
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { selectSettingsCategory } from "./settings-helpers";
+import { gzipSync } from "node:zlib";
 
 async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
     }
   });
 }
@@ -1524,6 +1525,17 @@ test("box selection copies, pastes, moves and upgrades a production blueprint", 
   await nameInput.press("Enter");
   await expect(nameInput).toHaveValue("处理器模块");
   await page.screenshot({ path: "artifacts/qa/blueprint-library-1440.png", fullPage: true });
+  await page.setViewportSize({ width: 760, height: 900 });
+  const headerGeometry = await library.locator(".blueprint-card > header").evaluate((header) => {
+    const input = header.querySelector<HTMLInputElement>("input")?.getBoundingClientRect();
+    const meta = header.querySelector<HTMLElement>("em")?.getBoundingClientRect();
+    return input && meta ? { inputWidth: input.width, metaWidth: meta.width, inputRight: input.right, metaLeft: meta.left } : null;
+  });
+  expect(headerGeometry).not.toBeNull();
+  expect(headerGeometry!.inputWidth).toBeGreaterThan(80);
+  expect(headerGeometry!.metaWidth).toBeGreaterThan(40);
+  expect(headerGeometry!.inputRight).toBeLessThanOrEqual(headerGeometry!.metaLeft + 1);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByLabel("关闭蓝图工作区").click();
 
   await boxSelect();
@@ -2059,9 +2071,9 @@ test("operations settings and local save slots persist across reload", async ({ 
   await operations.getByLabel("保存到槽位 1").click();
   await expect(operations.locator(".save-slot").filter({ hasText: "本地槽位 1" })).toHaveClass(/save-slot--occupied/);
   const downloadPromise = page.waitForEvent("download");
-  await operations.getByRole("button", { name: "导出 JSON" }).click();
+  await operations.getByRole("button", { name: "导出压缩存档" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json$/);
+  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-.*\.json\.gz$/);
   await page.screenshot({ path: "artifacts/qa/operations-saves-1440.png", fullPage: true });
   await operations.getByLabel("删除槽位 1").click();
   const deleteDialog = page.getByRole("dialog", { name: "删除本地槽位 1" });
@@ -2100,22 +2112,54 @@ test("failed primary saves stay visible and never report false success", async (
   await page.addInitScript(() => {
     const runtime = window as typeof window & {
       __dspPrimarySaveFault?: { enabled: boolean; remainingFailures: number; interceptedFailures: number };
-      __dspPrimarySaveNativePut?: IDBObjectStore["put"];
     };
     runtime.__dspPrimarySaveFault = { enabled: false, remainingFailures: 0, interceptedFailures: 0 };
-    runtime.__dspPrimarySaveNativePut = IDBObjectStore.prototype.put;
-    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
-      const fault = runtime.__dspPrimarySaveFault;
-      if (fault?.enabled && fault.remainingFailures > 0 && value && typeof value === "object" &&
-        (value as { key?: unknown }).key === "dsp-idle-network.save.v1") {
-        fault.remainingFailures -= 1;
-        fault.interceptedFailures += 1;
-        throw new DOMException("synthetic quota", "QuotaExceededError");
-      }
-      return key === undefined
-        ? runtime.__dspPrimarySaveNativePut!.call(this, value)
-        : runtime.__dspPrimarySaveNativePut!.call(this, value, key);
-    } as IDBObjectStore["put"];
+
+    // Primary persistence moved into an authoritative save Worker in 1.1.4,
+    // so a window-only IDB prototype fault no longer reaches the production
+    // write boundary.  Intercept that Worker protocol instead and return the
+    // transferred payload exactly as a real pre-write quota failure does.
+    const NativeWorker = window.Worker;
+    const WrappedWorker = new Proxy(NativeWorker, {
+      construct(target, args) {
+        const worker = Reflect.construct(target, args) as Worker;
+        const workerOptions = args[1] as WorkerOptions | undefined;
+        const isAuthoritativePersistenceWorker = workerOptions?.name === "authoritative-save-persistence" ||
+          String(args[0]).includes("authoritativeSavePersistence.worker");
+        if (!isAuthoritativePersistenceWorker) return worker;
+        const nativePostMessage = worker.postMessage.bind(worker);
+        worker.postMessage = ((message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
+          const request = message as { id?: unknown; type?: unknown; payload?: unknown };
+          const fault = runtime.__dspPrimarySaveFault;
+          if (request.type === "commit" && typeof request.id === "number" &&
+            request.payload instanceof ArrayBuffer && fault?.enabled && fault.remainingFailures > 0) {
+            fault.remainingFailures -= 1;
+            fault.interceptedFailures += 1;
+            window.setTimeout(() => {
+              worker.onmessage?.(new MessageEvent("message", {
+                data: {
+                  id: request.id,
+                  type: "result",
+                  result: {
+                    ok: false,
+                    reason: "quota",
+                    message: "synthetic quota",
+                    retryable: true,
+                    degraded: false,
+                  },
+                  sourcePayloadTransfer: request.payload,
+                },
+              }));
+            }, 0);
+            return;
+          }
+          if (transferOrOptions === undefined) nativePostMessage(message);
+          else nativePostMessage(message, transferOrOptions);
+        }) as typeof worker.postMessage;
+        return worker;
+      },
+    });
+    Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: WrappedWorker });
   });
   await freshDurableGame(page);
   const shell = page.locator(".game-shell");
@@ -2166,7 +2210,9 @@ test("failed primary saves stay visible and never report false success", async (
   const downloadPromise = page.waitForEvent("download");
   await warning.getByRole("button", { name: "立即导出当前进度" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-\d{4}-\d{2}-\d{2}\.json$/);
+  expect(download.suggestedFilename()).toMatch(/^dsp-idle-save-\d{4}-\d{2}-\d{2}\.json\.gz$/);
+  const afterExport = await readDurablePrimary();
+  expect(afterExport.revision).toBe(before.revision + 1);
 
   await page.evaluate(() => {
     const fault = (window as typeof window & {
@@ -2181,7 +2227,7 @@ test("failed primary saves stay visible and never report false success", async (
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false", { timeout: 15_000 });
   await expect(warning).toBeHidden();
   const afterRetry = await readDurablePrimary();
-  expect(afterRetry.revision).toBe(before.revision + 1);
+  expect(afterRetry.revision).toBe(before.revision + 2);
 });
 
 test("font scaling keeps rendered belt endpoints attached to their handles", async ({ page }) => {
@@ -2226,9 +2272,9 @@ test("save preview, snapshots, content-pack validation and simulation diagnostic
   const savedRaw = await page.evaluate(() => window.localStorage.getItem("dsp-idle-network.save.v1"));
   expect(savedRaw).toContain("checksum");
   await operations.locator('input[aria-label="选择要导入的存档文件"]').setInputFiles({
-    name: "preview.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(savedRaw!, "utf8"),
+    name: "preview.json.gz",
+    mimeType: "application/gzip",
+    buffer: gzipSync(Buffer.from(savedRaw!, "utf8")),
   });
   await expect(operations.locator(".save-import-preview")).toBeVisible();
   await expect(operations.locator(".save-import-preview")).toContainText("校验通过");

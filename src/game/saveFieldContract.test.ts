@@ -91,6 +91,18 @@ function denseEntity(): Record<string, unknown> {
     resourceDepletionRemainder: 0,
     stationWarperAutoRefill: false,
     stationHubEnabled: false,
+    utilization: 0,
+    productionRate: 0,
+    stationDrones: 0,
+    stationVessels: 0,
+    stationWarpers: 0,
+    stationTier: 1,
+    stationOperationMode: "legacy",
+    quantumMode: "legacy",
+    stationHubPriority: 1,
+    stationMinimumLoad: 1,
+    proliferatorTier: 1,
+    proliferatorMode: "normal",
     quantumTarget: false,
     stationWarpEnabled: true,
     proliferatorBonusProgress: {},
@@ -136,7 +148,14 @@ describe("shared save-field contract", () => {
     const sourcePath = decodeURIComponent(new URL("./saveProjection.ts", import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1");
     const source = readFileSync(sourcePath, "utf8");
     expect(source).not.toContain("omitDefault(");
-    expect([...source.matchAll(/delete\s+compact\.([A-Za-z0-9_]+)/g)].map((match) => match[1])).toEqual(["quantumTarget"]);
+    expect([...source.matchAll(/delete\s+compact\.([A-Za-z0-9_]+)/g)].map((match) => match[1])).toEqual([
+      "quantumTarget",
+      "fuelRemainingMj",
+      "sprayCoaterInstalled",
+      "stationModeTransition",
+      "quantumTransition",
+      "elevatorOutputItems",
+    ]);
     expect(source.match(/omitSaveContractDefaults\(compact,\s*"entity",\s*state\.version\)/g)).toHaveLength(1);
     expect(source.match(/omitSaveContractDefaults\(compact,\s*"belt",\s*state\.version\)/g)).toHaveLength(1);
   });
@@ -153,7 +172,7 @@ describe("shared save-field contract", () => {
     expect(listSaveContractFields("belt", 45, "projection")).toEqual([]);
   });
 
-  it("omits all and only declared v46 defaults without mutating the source", () => {
+  it("omits all and only declared defaults for each save version without mutating the source", () => {
     const sourceEntity = denseEntity();
     const sourceBelt = denseBelt(4);
     const sourceSlot = denseStationSlot();
@@ -163,9 +182,28 @@ describe("shared save-field contract", () => {
     omitSaveContractDefaults(compactEntity, "entity", 46);
     omitSaveContractDefaults(compactBelt, "belt", 46);
     omitSaveContractDefaults(compactSlot, "station-slot", 46);
-    expect(compactEntity).toEqual({ id: "station", kind: "station", buildingId: "interstellar_logistics_station" });
+    expect(compactEntity).toEqual({
+      id: "station",
+      kind: "station",
+      buildingId: "interstellar_logistics_station",
+      utilization: 0,
+      productionRate: 0,
+      stationDrones: 0,
+      stationVessels: 0,
+      stationWarpers: 0,
+      stationTier: 1,
+      stationOperationMode: "legacy",
+      quantumMode: "legacy",
+      stationHubPriority: 1,
+      stationMinimumLoad: 1,
+      proliferatorTier: 1,
+      proliferatorMode: "normal",
+    });
     expect(compactBelt).toEqual({ id: "belt", tier: 4 });
     expect(compactSlot).toEqual({});
+    const compactV47Entity = { ...sourceEntity };
+    omitSaveContractDefaults(compactV47Entity, "entity", 47);
+    expect(compactV47Entity).toEqual({ id: "station", kind: "station", buildingId: "interstellar_logistics_station" });
     expect(sourceEntity).toEqual(denseEntity());
     expect(sourceBelt).toEqual(denseBelt(4));
     expect(sourceSlot).toEqual(denseStationSlot());
@@ -349,44 +387,44 @@ describe("shared save-field contract", () => {
           minimum?: number;
           maximum?: number;
         };
-        expect(inspectSaveContractField(scope, field, dense, 46), `${scope}.${field} dense`).toMatchObject({
+        expect(inspectSaveContractField(scope, field, dense, 47), `${scope}.${field} dense`).toMatchObject({
           valid: true,
           status: "explicit",
         });
-        expect(inspectSaveContractField(scope, field, {}, 46), `${scope}.${field} missing`).toMatchObject({
+        expect(inspectSaveContractField(scope, field, {}, 47), `${scope}.${field} missing`).toMatchObject({
           valid: true,
           status: "defaulted",
         });
-        expect(inspectSaveContractField(scope, field, { [field]: null }, 46), `${scope}.${field} null`).toMatchObject({
+        expect(inspectSaveContractField(scope, field, { [field]: null }, 47), `${scope}.${field} null`).toMatchObject({
           valid: false,
           status: "invalid",
         });
 
         if (validation.type === "number") {
-          expect(inspectSaveContractField(scope, field, { [field]: "0" }, 46).valid, `${scope}.${field} string`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 46).valid, `${scope}.${field} negative`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: Number.NaN }, 46).valid, `${scope}.${field} NaN`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: Number.POSITIVE_INFINITY }, 46).valid, `${scope}.${field} infinity`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: "0" }, 47).valid, `${scope}.${field} string`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 47).valid, `${scope}.${field} negative`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: Number.NaN }, 47).valid, `${scope}.${field} NaN`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: Number.POSITIVE_INFINITY }, 47).valid, `${scope}.${field} infinity`).toBe(false);
           const zeroExpected = validation.enum
             ? validation.enum.some((entry) => Object.is(entry, 0))
             : (validation.minimum ?? Number.NEGATIVE_INFINITY) <= 0;
-          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 46).valid, `${scope}.${field} zero`).toBe(zeroExpected);
+          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 47).valid, `${scope}.${field} zero`).toBe(zeroExpected);
           if (typeof validation.maximum === "number") {
             expect(
-              inspectSaveContractField(scope, field, { [field]: validation.maximum + 1 }, 46).valid,
+              inspectSaveContractField(scope, field, { [field]: validation.maximum + 1 }, 47).valid,
               `${scope}.${field} overflow`,
             ).toBe(false);
           }
         } else if (validation.type === "boolean") {
-          expect(inspectSaveContractField(scope, field, { [field]: "false" }, 46).valid, `${scope}.${field} string`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 46).valid, `${scope}.${field} zero`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: "false" }, 47).valid, `${scope}.${field} string`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 47).valid, `${scope}.${field} zero`).toBe(false);
         } else if (validation.type === "string") {
-          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 46).valid, `${scope}.${field} zero`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 46).valid, `${scope}.${field} negative`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 47).valid, `${scope}.${field} zero`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 47).valid, `${scope}.${field} negative`).toBe(false);
         } else {
-          expect(inspectSaveContractField(scope, field, { [field]: "invalid" }, 46).valid, `${scope}.${field} string`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 46).valid, `${scope}.${field} zero`).toBe(false);
-          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 46).valid, `${scope}.${field} negative`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: "invalid" }, 47).valid, `${scope}.${field} string`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: 0 }, 47).valid, `${scope}.${field} zero`).toBe(false);
+          expect(inspectSaveContractField(scope, field, { [field]: -1 }, 47).valid, `${scope}.${field} negative`).toBe(false);
         }
       }
     }

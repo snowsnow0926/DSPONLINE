@@ -150,7 +150,15 @@ export function classifyOfflineWorkload(
   let recommendedStrategy: OfflineRecommendedStrategy = secondsSafe <= 30 || state.speedrun?.enabled ? "exact" : "fast";
   const memoryLimitBytes = device.deviceMemoryGb === null ? null : device.deviceMemoryGb * 1024 * MIB;
   const memoryRisk = memoryLimitBytes !== null && estimatedPeakBytes > memoryLimitBytes * 0.72;
-  if (recommendedStrategy === "fast" && device.deviceClass === "low-memory" && (profile === "complex" || memoryRisk)) {
+  // A 70+ MiB endgame save can require several GiB while structured cloning,
+  // calibrating and serializing even on a desktop whose coarse deviceMemory
+  // bucket reports 8/16 GiB. Treat that absolute footprint as unsafe instead
+  // of waiting for two Worker crashes before falling back.
+  const absoluteMemoryRisk = estimatedSerializedBytes >= 64 * MIB || estimatedPeakBytes >= 2 * 1024 * MIB;
+  if (recommendedStrategy === "fast" && (
+    absoluteMemoryRisk ||
+    device.deviceClass === "low-memory" && (profile === "complex" || memoryRisk)
+  )) {
     recommendedStrategy = "conservative";
   }
   const recommendedDeadlineMs = recommendedStrategy === "exact"
@@ -168,9 +176,11 @@ export function classifyOfflineWorkload(
   if (nearCacheBoundaryCount > 0) reasons.push(`缓存边界 ${nearCacheBoundaryCount}`);
   let warning: string | undefined;
   if (!device.workerSupported) warning = "当前环境不支持 Worker，长时间离线不会在主线程静默执行";
-  else if (memoryRisk || estimatedSerializedBytes >= 20 * MIB) {
+  else if (memoryRisk || absoluteMemoryRisk || estimatedSerializedBytes >= 20 * MIB) {
     warning = recommendedStrategy === "conservative"
-      ? "该终局存档在当前低内存设备上存在内存风险，将优先使用可取消的保守宏观路径；原存档在提交前保持不变"
+      ? device.deviceClass === "low-memory"
+        ? "该终局存档在当前低内存设备上存在内存风险，将优先使用可取消的保守宏观路径；原存档在提交前保持不变"
+        : "该超大型终局存档的精确校准存在内存风险，将优先使用可取消的保守宏观路径；原存档在提交前保持不变"
       : "该终局存档预计占用较高内存；结算会保持在 Worker 中并支持取消，不能承诺所有设备 30 秒完成";
   }
   return {

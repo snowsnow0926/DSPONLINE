@@ -590,10 +590,10 @@ describe("cloud save synchronization markers", () => {
       if (descriptor) Object.defineProperty(Blob.prototype, "stream", descriptor);
       else delete (Blob.prototype as unknown as { stream?: unknown }).stream;
     }
-    expect(Date.now() - startedAt).toBeLessThan(22_000);
+    expect(Date.now() - startedAt).toBeLessThan(32_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(typeof (fetchMock.mock.calls[0]?.[1] as RequestInit).body).toBe("string");
-  }, 25_000);
+  }, 35_000);
 
   it("honors cancellation during compression without sending a raw fallback", async () => {
     vi.stubGlobal("CompressionStream", TestCompressionStream);

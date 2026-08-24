@@ -70,7 +70,7 @@ describe("production refresh policy", () => {
     expect(paused.snapshotProgress).toBe(0.22);
   });
 
-  it("accepts a sparse authority snapshot only after the visual clock has naturally wrapped", () => {
+  it("does not rebase an active cycle to a delayed snapshot after the visual clock wraps", () => {
     const previous = {
       mode: "cycle" as const,
       semanticKey: "machine:magnet",
@@ -84,11 +84,32 @@ describe("production refresh policy", () => {
     expect(getWorkDisplayProgress(previous, 1_200)).toBeCloseTo(0.033333, 5);
 
     const afterNaturalWrap = reconcileWorkDisplaySnapshot(previous, { ...previous, snapshotProgress: 0.55 }, 1_200);
-    expect(afterNaturalWrap).not.toBe(previous);
-    expect(afterNaturalWrap.snapshotProgress).toBe(0.55);
+    expect(afterNaturalWrap).toBe(previous);
+    expect(getWorkDisplayProgress(afterNaturalWrap, 1_200)).toBeCloseTo(0.033333, 5);
 
     const beforeNaturalWrap = reconcileWorkDisplaySnapshot(previous, { ...previous, snapshotProgress: 0.55 }, 1_100);
     expect(beforeNaturalWrap).toBe(previous);
+  });
+
+  it("keeps the delayed-publication regression on the monotonic phase", () => {
+    const previous = {
+      mode: "cycle" as const,
+      semanticKey: "machine:magnet",
+      snapshotProgress: 0.96387,
+      publishedAtMs: 1_000,
+      cyclesPerSecond: 2 / 3,
+      effectiveSimulationMultiplier: 1,
+      active: true,
+    };
+    const publishedAtMs = 1_145.9;
+    const reconciled = reconcileWorkDisplaySnapshot(
+      previous,
+      { ...previous, snapshotProgress: 0.88607 },
+      publishedAtMs,
+    );
+
+    expect(reconciled).toBe(previous);
+    expect(getWorkDisplayProgress(reconciled, publishedAtMs)).toBeCloseTo(0.061136, 5);
   });
 
   it("keeps the one-hour simulation hash identical for every visual refresh profile", () => {

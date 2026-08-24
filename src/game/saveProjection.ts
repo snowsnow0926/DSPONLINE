@@ -1,8 +1,89 @@
 import { isAchievementId } from "./progression";
 import { normalizeIdleSettlementState } from "./idleSettlement";
 import { getActiveContentPackReferences, type ContentPackRegistry } from "./contentPacks";
-import { omitSaveContractDefaults } from "./saveFieldContract";
+import {
+  listSaveContractFields,
+  omitSaveContractDefaults,
+  resolveSaveContractDefault,
+  type SaveFieldScope,
+} from "./saveFieldContract";
+import { normalizeQuantumLogisticsNetworkState } from "./quantumLogisticsNetwork";
 import type { BeltConnection, BlueprintDefinition, FactoryEntity, GameState, ItemId, StationSlot } from "./types";
+
+const CURRENT_PROJECTED_SAVE_VERSION = 47;
+const PERSISTED_STATION_SLOT_COUNT = 5;
+
+function hydrateContractDefaultsInPlace(
+  record: Record<string, any>,
+  scope: SaveFieldScope,
+  version: number,
+): void {
+  for (const field of listSaveContractFields(scope, version, "missing-default")) {
+    if (Object.hasOwn(record, field) && record[field] !== undefined) continue;
+    const resolved = resolveSaveContractDefault(scope, field, record, version);
+    if (resolved.applies) record[field] = resolved.value;
+  }
+}
+
+/**
+ * Rehydrates only the exact defaults removed by projectPersistentSaveState.
+ *
+ * The input is an owned, checksum-verified v47 Worker projection, so this
+ * deliberately mutates it in place instead of cloning tens of thousands of
+ * entities a second time. It is not a general save migration or import path;
+ * external/legacy saves must continue through storage.migrateGame.
+ */
+export function hydrateCurrentPersistentSaveProjection(state: unknown): GameState {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    throw new Error("当前持久化投影结构无效");
+  }
+  const projected = state as Record<string, any>;
+  if (projected.version !== CURRENT_PROJECTED_SAVE_VERSION ||
+    (projected.mode !== "normal" && projected.mode !== "speedrun") ||
+    typeof projected.activePlanetId !== "string" || projected.activePlanetId.length === 0 ||
+    !Array.isArray(projected.entities) || !Array.isArray(projected.belts) ||
+    !projected.quantumLogisticsNetwork || typeof projected.quantumLogisticsNetwork !== "object") {
+    throw new Error("当前持久化投影身份无效");
+  }
+  for (const candidate of projected.entities) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("当前持久化投影实体无效");
+    }
+    const entity = candidate as Record<string, any>;
+    hydrateContractDefaultsInPlace(entity, "entity", projected.version);
+    if (entity.fuelRemainingMj === undefined) entity.fuelRemainingMj = 0;
+    if (entity.sprayCoaterInstalled === undefined) entity.sprayCoaterInstalled = false;
+    const interstellarStation = entity.buildingId === "interstellar_logistics_station";
+    const orbitalCollector = entity.buildingId === "orbital_collector";
+    if (interstellarStation && entity.stationModeTransition === undefined) entity.stationModeTransition = null;
+    if ((interstellarStation || orbitalCollector) && entity.quantumTransition === undefined) entity.quantumTransition = null;
+    if (interstellarStation && entity.elevatorOutputItems === undefined) {
+      entity.elevatorOutputItems = [null, null, null, null, null];
+    }
+    if (entity.kind === "station" && !orbitalCollector) {
+      if (!Array.isArray(entity.stationSlots)) entity.stationSlots = [];
+      for (const slot of entity.stationSlots) {
+        if (!slot || typeof slot !== "object" || Array.isArray(slot)) {
+          throw new Error("当前持久化投影物流槽位无效");
+        }
+        hydrateContractDefaultsInPlace(slot as Record<string, any>, "station-slot", projected.version);
+      }
+      while (entity.stationSlots.length < PERSISTED_STATION_SLOT_COUNT) {
+        const slot: Record<string, any> = {};
+        hydrateContractDefaultsInPlace(slot, "station-slot", projected.version);
+        entity.stationSlots.push(slot);
+      }
+    }
+  }
+  for (const candidate of projected.belts) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("当前持久化投影传送带无效");
+    }
+    hydrateContractDefaultsInPlace(candidate as Record<string, any>, "belt", projected.version);
+  }
+  projected.quantumLogisticsNetwork = normalizeQuantumLogisticsNetworkState(projected.quantumLogisticsNetwork);
+  return projected as GameState;
+}
 
 /**
  * Pure, Worker-safe projection of runtime state into the v47 persistent JSON
@@ -57,6 +138,19 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
     // persisted field only for the interstellar station where it is meaningful.
     if (entity.buildingId !== "interstellar_logistics_station") delete compact.quantumTarget;
     omitSaveContractDefaults(compact, "entity", state.version);
+    // v47 migration already restores these exact inactive defaults. Keeping
+    // them on every late-game entity added several MiB and multiplied the
+    // temporary JSON/TextEncoder memory needed by every autosave. Omit only
+    // values whose absence is explicitly normalized back to the same runtime
+    // state; active transitions, fuel and coater configuration stay intact.
+    if (compact.fuelRemainingMj === 0) delete compact.fuelRemainingMj;
+    if (compact.sprayCoaterInstalled === false) delete compact.sprayCoaterInstalled;
+    if (compact.stationModeTransition === null) delete compact.stationModeTransition;
+    if (compact.quantumTransition === null) delete compact.quantumTransition;
+    if (Array.isArray(compact.elevatorOutputItems) && compact.elevatorOutputItems.length === 5 &&
+      compact.elevatorOutputItems.every((item: unknown) => item === null)) {
+      delete compact.elevatorOutputItems;
+    }
     if (entity.buildingId === "micro_black_hole_connector" && state.version >= 46) {
       // This final assignment deliberately runs after sparse-default omission.
       // A future shared-contract entry cannot silently turn an active,

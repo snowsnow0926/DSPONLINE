@@ -61,7 +61,7 @@ export const LEADERBOARD_CATEGORIES: readonly LeaderboardCategoryDefinition[] = 
   { id: "white-rate", label: "白糖产量", unit: "/min", description: "相邻有效主云存档区间的实际产量峰值", color: "#8bc7b7" },
   { id: "dyson", label: "戴森功率", unit: "", description: "戴森云与戴森球当前功率", color: "#e7bd58" },
   { id: "throughput", label: "实际结算吞吐", unit: "/min", description: "相邻主云修订或本地 60 秒窗口内的实际生产增量", color: "#69cbb0" },
-  { id: "galaxy", label: "银河综合", unit: "分", description: "发电、上传、戴森与工业规模综合评分", color: "#b8a0e4" },
+  { id: "galaxy", label: "银河综合", unit: "分", description: "五个公开榜指标等权；每项每翻倍增加同等分数，不含隐藏加分", color: "#b8a0e4" },
 ] as const;
 
 export const LEADERBOARD_SEASONS: readonly LeaderboardSeason[] = [
@@ -102,6 +102,7 @@ export function getLeaderboardMetrics(ledger: AccountLedger): LeaderboardMetrics
     exploredSystems: integer(ledger.exploredSystems),
     colonizedPlanets: integer(ledger.colonizedPlanets),
     galaxyScore: 0,
+    galaxyScoreMetricVersion: "balanced-log-v2",
   };
   metrics.galaxyScore = calculateLeaderboardGalaxyScore(metrics);
   return metrics;

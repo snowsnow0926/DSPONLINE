@@ -89,6 +89,7 @@ export interface AuthoritativeSaveSerializationResponse {
   payloadSha256?: string;
   byteLength?: number;
   durationMs?: number;
+  compressionDurationMs?: number;
   summary?: AuthoritativeSaveSerializationSummary;
   catalogSeed?: AuthoritativeSaveCatalogSeed;
   proof?: AuthoritativeSavePayloadProof;

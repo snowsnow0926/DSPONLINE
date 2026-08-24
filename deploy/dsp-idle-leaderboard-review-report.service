@@ -1,0 +1,19 @@
+[Unit]
+Description=Generate the read-only DSP Idle leaderboard review report
+After=dsp-idle-cloud.service
+Wants=dsp-idle-cloud.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/dsp-idle-cloud/current
+Environment=DSP_CLOUD_DATABASE_FILE=/var/lib/dsp-idle-cloud/cloud.sqlite
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dsp-idle-cloud/leaderboard-review-reports
+ExecStartPre=/usr/bin/install -d -o ubuntu -g ubuntu -m 0750 /var/lib/dsp-idle-cloud/leaderboard-review-reports
+ExecStart=/usr/bin/node /opt/dsp-idle-cloud/current/leaderboard-review-report.mjs --database /var/lib/dsp-idle-cloud/cloud.sqlite --output-directory /var/lib/dsp-idle-cloud/leaderboard-review-reports --retain 30
+UMask=0027

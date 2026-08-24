@@ -9,9 +9,10 @@ const {
   requestTimeoutMs,
   validRequestId,
 } = require("./cloud-transport.cjs");
+const { validatePackagedTransferContract } = require("./package-contract.cjs");
 
-test("desktop cloud transport covers legacy 30 MiB raw and guaranteed 48 MiB compressed saves", () => {
-  assert.equal(contract.guaranteedSavePayloadBytes, 48 * 1024 * 1024);
+test("desktop cloud transport covers legacy 30 MiB raw and guaranteed 64 MiB compressed saves", () => {
+  assert.equal(contract.guaranteedSavePayloadBytes, 64 * 1024 * 1024);
   assert.equal(contract.rawFallbackSafeLimitBytes, 30 * 1024 * 1024);
   assert.equal(requestBodyLimit({ "content-type": contract.directPayloadContentType }), contract.requestCompressedLimitBytes);
   assert.equal(requestBodyLimit({ "content-type": "application/json" }), contract.legacyJsonRequestLimitBytes);
@@ -19,13 +20,28 @@ test("desktop cloud transport covers legacy 30 MiB raw and guaranteed 48 MiB com
   assert.ok(contract.requestCompressedLimitBytes > contract.guaranteedSavePayloadBytes);
 });
 
+test("desktop packaging accepts only the complete frozen 64 MiB transfer contract", () => {
+  assert.equal(validatePackagedTransferContract(contract, contract), true);
+  assert.throws(() => validatePackagedTransferContract({
+    ...contract,
+    guaranteedSavePayloadBytes: 48 * 1024 * 1024,
+  }, contract), /冻结源码不一致/);
+  const legacy = {
+    ...contract,
+    guaranteedSavePayloadBytes: 48 * 1024 * 1024,
+    maximumTimeoutMs: 120_000,
+  };
+  assert.throws(() => validatePackagedTransferContract(legacy, legacy), /大存档云传输契约/);
+});
+
 test("desktop cloud transport scales and caps timeouts", () => {
   assert.equal(requestTimeoutMs(0, 0), contract.baseTimeoutMs);
   assert.equal(requestTimeoutMs(30 * 1024 * 1024, 0), 60_000);
   assert.equal(requestTimeoutMs(48 * 1024 * 1024, 0), 87_000);
+  assert.equal(requestTimeoutMs(96 * 1024 * 1024, 0), 159_000);
   assert.equal(requestTimeoutMs(1, 1, 1), contract.baseTimeoutMs + contract.timeoutPerMibMs);
   assert.equal(requestTimeoutMs(1, 1, 999_999), contract.maximumTimeoutMs);
-  assert.equal(requestTimeoutMs(80 * 1024 * 1024, 0, 1), contract.maximumTimeoutMs);
+  assert.equal(requestTimeoutMs(120 * 1024 * 1024, 0, 1), contract.maximumTimeoutMs);
 });
 
 test("desktop cloud transport allows only bounded cloud headers", () => {

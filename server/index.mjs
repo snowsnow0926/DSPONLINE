@@ -25,6 +25,18 @@ import {
   normalizeLeaderboardModeration,
 } from "./leaderboard-moderation.mjs";
 import {
+  approveLeaderboardReview,
+  clearLeaderboardReview,
+  getLeaderboardReview,
+  isLeaderboardReviewApproved,
+  leaderboardReviewFingerprint,
+  leaderboardReviewReport,
+  normalizeLeaderboardReviewQueue,
+  pendingLeaderboardReviewEntries,
+  publicLeaderboardReviewRecord,
+  queueLeaderboardReview,
+} from "./leaderboard-review.mjs";
+import {
   aggregateGalacticFactoryMetric,
   GALACTIC_NOMINAL_METRIC_VERSION,
 } from "./galactic-metrics.mjs";
@@ -109,6 +121,7 @@ import {
   createRuntimeStatePersistencePlan,
   runtimeAppStateFingerprint,
 } from "./runtime-state-persistence.mjs";
+import { UserLookupIndex } from "./user-lookup-index.mjs";
 import {
   ACCOUNT_JSON_SCHEMAS,
   accountArchiveBodyCapability,
@@ -242,6 +255,7 @@ const DEFAULT_DATA = {
   submissions: {},
   speedrunSubmissions: {},
   leaderboardModeration: {},
+  leaderboardReviewQueue: {},
   accountSecurity: {},
   accountControls: {},
   operationReceipts: {},
@@ -665,6 +679,7 @@ function normalizeStoredData(parsed) {
     submissions: source.submissions && typeof source.submissions === "object" ? source.submissions : {},
     speedrunSubmissions: normalizeSpeedrunSubmissions(source.speedrunSubmissions, users),
     leaderboardModeration: normalizeLeaderboardModeration(source.leaderboardModeration, users),
+    leaderboardReviewQueue: normalizeLeaderboardReviewQueue(source.leaderboardReviewQueue, users),
     accountSecurity: normalizeAccountSecurity(source.accountSecurity, users),
     accountControls: normalizeAccountControls(source.accountControls, users),
     operationReceipts: normalizeOperationReceipts(source.operationReceipts, users),
@@ -804,13 +819,17 @@ function saturatingMetricAdd(left, right) {
 }
 
 function calculateGalaxyScore(metrics) {
+  const logarithmicTerm = (value, baseline) => {
+    const normalized = normalizeMetric(value);
+    if (normalized === 0) return 0;
+    return Math.round(Math.log2(1 + normalized / baseline) * 1_000_000);
+  };
   const terms = [
-    metrics.energyGeneratedMj / 1_000_000,
-    saturatingMetricProduct(metrics.uploadedWhiteMatrix, 12),
-    metrics.peakDysonPowerKw / 100,
-    saturatingMetricProduct(metrics.peakThroughputPerMinute, 8),
-    saturatingMetricProduct(metrics.exploredSystems, 10_000),
-    saturatingMetricProduct(metrics.colonizedPlanets, 2_000),
+    logarithmicTerm(metrics.energyGeneratedMj, 1_000_000),
+    logarithmicTerm(metrics.uploadedWhiteMatrix, 1),
+    logarithmicTerm(metrics.peakWhiteMatrixPerMinute, 1),
+    logarithmicTerm(metrics.peakDysonPowerKw, 100),
+    logarithmicTerm(metrics.peakThroughputPerMinute, 1),
   ];
   const total = terms.reduce(saturatingMetricAdd, 0);
   return Math.round(total);
@@ -837,6 +856,7 @@ function normalizeMetrics(value) {
   metrics.galaxyScore = calculateGalaxyScore(metrics);
   return {
     ...metrics,
+    galaxyScoreMetricVersion: "balanced-log-v2",
     nominalThroughputMetricVersion: source.nominalThroughputMetricVersion === GALACTIC_NOMINAL_METRIC_VERSION
       ? GALACTIC_NOMINAL_METRIC_VERSION
       : "legacy-active-planet-v1",
@@ -2104,6 +2124,7 @@ function deleteAccountData(store, userId) {
   delete store.data.cloudSaveSlotsByMode[userId];
   delete store.data.cloudSaveSlotHistoryByMode[userId];
   delete store.data.leaderboardModeration[userId];
+  clearLeaderboardReview(store.data, userId);
   delete store.data.accountSecurity[userId];
   delete store.data.accountControls[userId];
   for (const [requestId, receipt] of Object.entries(store.data.operationReceipts ?? {})) {
@@ -2118,6 +2139,7 @@ function deleteAccountData(store, userId) {
   store.data.errors = store.data.errors.filter((entry) => entry.userId !== userId);
   deleteStationAccountData(store.data, userId);
   delete store.data.users[userId];
+  store.recordRuntimeIndexEvent?.({ type: "user-account", userId });
   store.recordRuntimeIndexEvent?.({ type: "leaderboard-account", userId });
 }
 
@@ -2162,6 +2184,7 @@ function adminAccountSummary(store, userId) {
     },
     loginDisabledUntil: controls?.loginDisabledUntil ?? null,
     leaderboardRestricted: isLeaderboardRestricted(store.data, userId),
+    leaderboardReview: publicLeaderboardReviewRecord(store.data, userId),
     leaderboardResumeAfterRevision: reviewRevisions.normal || null,
     leaderboardResumeAfterRevisionByMode: {
       normal: reviewRevisions.normal || null,
@@ -3317,16 +3340,28 @@ function applyLeaderboardIntegrityGate(store, userId, currentSave, currentState,
   }
   const result = evaluateLeaderboardIntegrity(currentState, previousState);
   if (!result.freeze) return result;
-  const alreadyRestricted = isLeaderboardRestricted(store.data, userId);
-  store.data.leaderboardModeration[userId] = {
-    status: "blocked",
-    reasonCode: "SAVE_DATA_INTEGRITY",
+  const fingerprint = leaderboardReviewFingerprint(result.findings);
+  if (isLeaderboardReviewApproved(store.data, userId, { revision: currentSave?.revision, fingerprint })) {
+    return { ...result, freeze: false, reviewApproved: true, reviewFingerprint: fingerprint };
+  }
+  const queued = queueLeaderboardReview(store.data, userId, {
     source: LEADERBOARD_INTEGRITY_VERSION,
-    createdAt: alreadyRestricted ? store.data.leaderboardModeration[userId].createdAt : Date.now(),
+    revision: currentSave?.revision,
+    checksum: currentSave?.checksum,
+    findings: result.findings,
+    now: Date.now(),
+  });
+  if (queued.changed) {
+    store.recordRuntimeIndexEvent?.({ type: "leaderboard-review", userId });
+    appendSystemAudit(store, "leaderboard.review_queued", userId, "integrity-gate");
+  }
+  return {
+    ...result,
+    reviewPending: true,
+    reviewChanged: queued.changed,
+    reviewFingerprint: fingerprint,
+    review: queued.record,
   };
-  store.recordRuntimeIndexEvent?.({ type: "leaderboard-restriction", userId });
-  if (!alreadyRestricted) appendSystemAudit(store, "leaderboard.integrity_frozen", userId, "integrity-gate");
-  return result;
 }
 
 function updateLeaderboardFromMainSave(store, userId, { save = null, now = Date.now(), force = false, inspection = null } = {}) {
@@ -3355,9 +3390,16 @@ function updateLeaderboardFromMainSave(store, userId, { save = null, now = Date.
     : null;
   const previousMaterialized = previousMetadata ? materializeCloudSave(store, userId, "main", previousMetadata) : null;
   const previousState = parseSaveState(previousMaterialized?.payload);
+  const key = `${ACTIVE_LEADERBOARD_SEASON_ID}:${userId}`;
+  const retainedSubmission = store.data.submissions[key] ?? null;
   const integrity = applyLeaderboardIntegrityGate(store, userId, materialized, state, previousState);
   if (integrity.freeze) {
-    return { changed: removeUserLeaderboardSubmissions(store, userId) > 0, submission: null, reason: "integrity-frozen", integrity };
+    return {
+      changed: integrity.reviewChanged === true,
+      submission: retainedSubmission,
+      reason: "integrity-review-pending",
+      integrity,
+    };
   }
   const whiteMatrixWindow = whiteMatrixRateFromAdjacentRevision(store, userId, materialized, state, previousState);
   const throughputWindow = throughputRateFromAdjacentRevision(store, userId, materialized, state, previousState);
@@ -3366,7 +3408,6 @@ function updateLeaderboardFromMainSave(store, userId, { save = null, now = Date.
     ? leaderboardMetricsFromState(state, whiteMatrixWindow, throughputWindow)
     : leaderboardMetricsFromSave(materialized, whiteMatrixWindow, throughputWindow);
   if (!observed) return { changed: false, submission: null, reason: "invalid-save" };
-  const key = `${ACTIVE_LEADERBOARD_SEASON_ID}:${userId}`;
   const previous = store.data.submissions[key];
   const previousServerMetrics = isServerLeaderboardSubmission(previous) ? previous.metrics : null;
   const previousUsesActualThroughput = previous?.verification?.strategy === "main-cloud-save-v2";
@@ -3543,13 +3584,14 @@ function publicLeaderboardEntryWithStation(store, entry, rank) {
 }
 
 function backfillLeaderboardFromMainSaves(store) {
-  const summary = { changed: 0, created: 0, updated: 0, hidden: 0, skipped: 0 };
+  const summary = { changed: 0, created: 0, updated: 0, hidden: 0, reviewPending: 0, skipped: 0 };
   for (const userId of Object.keys(store.data.users).sort()) {
     const result = updateLeaderboardFromMainSave(store, userId);
     if (result.changed) summary.changed += 1;
     if (result.reason === "created") summary.created += 1;
     else if (result.reason === "updated") summary.updated += 1;
     else if (result.reason === "hidden") summary.hidden += 1;
+    else if (result.reason === "integrity-review-pending") summary.reviewPending += 1;
     else summary.skipped += 1;
   }
   return summary;
@@ -3709,6 +3751,10 @@ function clearAccountCloudSaveMetadata(store, userId) {
 function installAccountArchiveCloudSaves(store, userId, records) {
   clearAccountCloudSaveMetadata(store, userId);
   clearStationProfileSnapshot(store.data, userId);
+  // Imported revisions are a new evidence set.  Never carry a pending or
+  // approved integrity decision across an archive replacement; the next
+  // normal-main refresh must produce a fresh review record if needed.
+  clearLeaderboardReview(store.data, userId);
   const grouped = new Map();
   for (const record of records) {
     const key = `${record.mode}:${record.slot}`;
@@ -4192,13 +4238,19 @@ export async function createCloudServer({
     categoryValue,
     isRestricted: (data, userId) => isLeaderboardRestricted(data, userId),
   });
+  const userLookupIndex = new UserLookupIndex();
+  userLookupIndex.rebuild(store.data.users);
   const runtimeMetrics = new RuntimeMetricsAggregator();
   store.setPersistenceObserver((sample) => runtimeMetrics.observeSqliteCommit(sample));
   store.setExternalMutationObserver(({ collection, key, previous, value }) => {
     if (collection === "submissions") {
       const entry = value ?? previous;
       if (typeof entry?.seasonId === "string") leaderboardIndex.markSubmissionChanged({ userId: entry.userId ?? String(key).split(":").at(-1), seasonId: entry.seasonId });
-    } else if (collection === "users" && typeof key === "string") leaderboardIndex.markAccountChanged(key);
+    } else if (collection === "users" && typeof key === "string") {
+      if (value) userLookupIndex.upsert(value);
+      else userLookupIndex.delete(key);
+      leaderboardIndex.markAccountChanged(key);
+    }
     else if (collection === "leaderboardModeration" && typeof key === "string") leaderboardIndex.markRestrictionChanged(key);
     else if (collection === "accountControls" && typeof key === "string") leaderboardIndex.markRevalidationChanged(key);
     else if (["submissions", "users", "leaderboardModeration", "accountControls"].includes(collection)) leaderboardIndex.rebuild();
@@ -4216,6 +4268,11 @@ export async function createCloudServer({
   const unsubscribeStoreCommit = store.onCommitted(({ data, runtimeIndexEvents }) => {
     for (const event of runtimeIndexEvents) {
       if (event.type === "presence") presenceIndex.heartbeat(event.playerHash, event.seenAt);
+      else if (event.type === "user-account") {
+        const user = typeof event.userId === "string" ? data.users[event.userId] : null;
+        if (user) userLookupIndex.upsert(user);
+        else if (typeof event.userId === "string") userLookupIndex.delete(event.userId);
+      }
       else if (event.type === "leaderboard-submission") leaderboardIndex.markSubmissionChanged({ userId: event.userId, seasonId: event.seasonId });
       else if (event.type === "leaderboard-visibility") leaderboardIndex.markVisibilityChanged(event.userId);
       else if (event.type === "leaderboard-restriction") leaderboardIndex.markRestrictionChanged(event.userId);
@@ -4223,6 +4280,7 @@ export async function createCloudServer({
       else if (event.type === "leaderboard-account") leaderboardIndex.markAccountChanged(event.userId);
       else if (event.type === "rebuild") {
         presenceIndex.rebuild(data.players, nowProvider());
+        userLookupIndex.rebuild(data.users);
         leaderboardIndex.rebuild();
       }
     }
@@ -4478,6 +4536,7 @@ export async function createCloudServer({
             loginSecurity: loginFailureGuard.metrics(),
             scale: runtimeMetrics.snapshot(),
             presenceIndex: presenceIndex.diagnostics(),
+            userLookupIndex: userLookupIndex.diagnostics(),
             runtimeStatePersistence: store.runtimeStatePersistence?.diagnostics({ includeRowCounts: true }) ?? null,
           },
           accounts: {
@@ -4485,6 +4544,9 @@ export async function createCloudServer({
             activeSessions,
             cloudSaves: Object.keys(store.data.cloudSaves).length,
             submissions: Object.keys(store.data.submissions).length,
+          },
+          leaderboardReviews: {
+            pending: leaderboardReviewReport(store.data, { limit: 1 }).pendingCount,
           },
           players: presenceIndex.metrics(now),
           analytics: analyticsSummary(store.data.analytics, { now, timeZone: metricsTimeZone, days }),
@@ -4561,13 +4623,31 @@ export async function createCloudServer({
         return send(response, 200, { account: summary });
       }
 
+      if (request.method === "GET" && ["/api/admin/leaderboard/reviews", "/api/admin/leaderboard/review-report"].includes(url.pathname)) {
+        if (!secureAdminToken) return send(response, 503, { error: "管理员接口尚未配置" });
+        if (!adminAuthorized(request, secureAdminToken)) return send(response, 401, { error: "管理员凭据无效" });
+        const requestedLimit = Number(url.searchParams.get("limit"));
+        const report = leaderboardReviewReport(store.data, {
+          limit: Number.isInteger(requestedLimit) ? requestedLimit : 500,
+          generatedAt: Date.now(),
+        });
+        return send(response, 200, {
+          ...report,
+          policy: {
+            automaticRestriction: false,
+            automaticSubmissionRemoval: false,
+            manualActionRequired: true,
+          },
+        });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/admin/account/action") {
         if (!secureAdminToken) return send(response, 503, { error: "管理员接口尚未配置" });
         if (!adminAuthorized(request, secureAdminToken)) return send(response, 401, { error: "管理员凭据无效" });
         const body = await readJson(request);
         const accountId = typeof body.accountId === "string" && store.data.users[body.accountId] ? body.accountId : null;
         const action = typeof body.action === "string" ? body.action : "";
-        const allowedActions = new Set(["revoke-sessions", "disable-login", "enable-login", "restrict-leaderboard", "restore-leaderboard", "withdraw-station", "restore-station", "delete-account"]);
+        const allowedActions = new Set(["revoke-sessions", "disable-login", "enable-login", "restrict-leaderboard", "restore-leaderboard", "approve-leaderboard-review", "withdraw-station", "restore-station", "delete-account"]);
         if (!accountId || !allowedActions.has(action)) return send(response, 400, { error: "账号或管理员动作无效" });
         if (body.confirmation !== `CONFIRM:${action}:${accountId}`) {
           return send(response, 400, { error: "二次确认文字不匹配", code: "ADMIN_CONFIRMATION_INVALID" });
@@ -4598,10 +4678,12 @@ export async function createCloudServer({
             source: "admin-manual-review",
             createdAt: Date.now(),
           };
+          clearLeaderboardReview(store.data, accountId);
           removeUserLeaderboardSubmissions(store, accountId);
           store.recordRuntimeIndexEvent?.({ type: "leaderboard-restriction", userId: accountId });
         } else if (action === "restore-leaderboard") {
           delete store.data.leaderboardModeration[accountId];
+          clearLeaderboardReview(store.data, accountId);
           removeUserLeaderboardSubmissions(store, accountId);
           const reviewRevisions = Object.fromEntries(SAVE_MODES.flatMap((mode) => {
             const revision = currentCloudSave(store, accountId, "main", mode)?.revision ?? 0;
@@ -4620,6 +4702,28 @@ export async function createCloudServer({
           else delete store.data.accountControls[accountId];
           store.recordRuntimeIndexEvent?.({ type: "leaderboard-restriction", userId: accountId });
           store.recordRuntimeIndexEvent?.({ type: "leaderboard-revalidation", userId: accountId });
+        } else if (action === "approve-leaderboard-review") {
+          const review = getLeaderboardReview(store.data, accountId);
+          const currentSave = currentCloudSave(store, accountId, "main", "normal");
+          if (!review || review.status !== "pending") {
+            return send(response, 409, { error: "该账号没有等待人工复核的排行榜异常", code: "LEADERBOARD_REVIEW_NOT_PENDING" });
+          }
+          if (!currentSave || currentSave.revision !== review.detectedRevision || currentSave.checksum !== review.detectedChecksum) {
+            return send(response, 409, { error: "排行榜异常证据已变化，请重新读取待复核报告", code: "LEADERBOARD_REVIEW_CHANGED" });
+          }
+          approveLeaderboardReview(store.data, accountId, {
+            revision: review.detectedRevision,
+            fingerprint: review.fingerprint,
+            now: Date.now(),
+          });
+          const approvedLeaderboard = updateLeaderboardFromMainSave(store, accountId, { save: currentSave, force: true });
+          if (approvedLeaderboard.reason === "integrity-review-pending" || !approvedLeaderboard.submission) {
+            const error = new Error("复核批准后仍未能生成排行榜成绩，请保留待复核状态并重新检查");
+            error.statusCode = 409;
+            error.code = "LEADERBOARD_REVIEW_APPROVAL_FAILED";
+            throw error;
+          }
+          appendSystemAudit(store, "leaderboard.review_approved", accountId, "admin-manual-review");
         } else if (action === "withdraw-station") {
           store.data.stationModeration ??= {};
           store.data.stationModeration[accountId] = {
@@ -4682,13 +4786,13 @@ export async function createCloudServer({
         const displayName = normalizedName(body.displayName);
         const password = typeof body.password === "string" ? body.password : "";
         if (!username || !displayName || password.length < 8 || password.length > 128) return send(response, 400, { error: "用户名、名称或密码格式无效（用户名 4 至 24 位字母/数字/下划线，密码至少 8 位）" });
-        if (Object.values(store.data.users).some((user) => user.username === username)) return send(response, 409, { error: "该用户名已注册" });
+        if (userLookupIndex.hasUsername(username, store.data.users)) return send(response, 409, { error: "该用户名已注册" });
         const maximumRegistrations = Number.isFinite(registrationLimit) ? Math.max(1, Math.floor(registrationLimit)) : 3;
         if (!registrationRateLimit(`register:${ip}`, maximumRegistrations, 60 * 60 * 1000)) {
           return send(response, 429, { error: "该网络注册账号过于频繁，请一小时后再试", code: "REGISTRATION_RATE_LIMITED" }, { "retry-after": "3600" });
         }
         const credentials = await passwordRecord(password);
-        if (Object.values(store.data.users).some((user) => user.username === username)) return send(response, 409, { error: "该用户名已注册" });
+        if (userLookupIndex.hasUsername(username, store.data.users)) return send(response, 409, { error: "该用户名已注册" });
         const now = Date.now();
         const user = {
           id: `user_${randomUUID().replaceAll("-", "")}`,
@@ -4703,6 +4807,7 @@ export async function createCloudServer({
           ...credentials,
         };
         store.data.users[user.id] = user;
+        store.recordRuntimeIndexEvent?.({ type: "user-account", userId: user.id });
         const issued = issueSession(store, user.id, request, body.deviceName, body.deviceId);
         recordSuccessfulLogin(store.data, user.id, issued.context, { clientType: clientTypeForRequest(request), now });
         appendAudit(store, request, "account.register", user.id);
@@ -4743,7 +4848,9 @@ export async function createCloudServer({
           await store.persist({ operation: "auth.login-denied" });
           return send(response, 429, { error: "登录失败次数过多，请稍后再试", code: "LOGIN_TEMPORARILY_LOCKED" }, { "retry-after": String(guard.retryAfterSeconds) });
         }
-        const user = Object.values(store.data.users).find((candidate) => (email && candidate.email === email) || (username && candidate.username === username));
+        const user = email
+          ? userLookupIndex.findByEmail(email, store.data.users)
+          : userLookupIndex.findByUsername(username, store.data.users);
         if (!user || !(await passwordMatches(password, user))) {
           const failure = loginFailureGuard.fail(identifier ?? "", networkHash);
           appendAudit(store, request, failure.locked ? "account.login_temporarily_locked" : "account.login_failed", user?.id ?? null);
@@ -4799,7 +4906,7 @@ export async function createCloudServer({
         const body = validateJsonDto(await readJson(request), ACCOUNT_JSON_SCHEMAS.emailOnly);
         const email = normalizedEmail(body.email);
         if (!email) return send(response, 400, { error: "邮箱格式无效" });
-        const user = Object.values(store.data.users).find((candidate) => candidate.email === email);
+        const user = userLookupIndex.findByEmail(email, store.data.users);
         if (user && Number.isFinite(user.emailVerifiedAt)) {
           const resetToken = issueActionToken(store.data.passwordResets, user.id);
           appendAudit(store, request, "account.password_reset_requested", user.id);
@@ -4964,11 +5071,13 @@ export async function createCloudServer({
         const body = validateJsonDto(await readJson(request), ACCOUNT_JSON_SCHEMAS.emailOnly);
         const email = normalizedEmail(body.email);
         if (!email) return send(response, 400, { error: "邮箱格式无效" });
-        if (Object.values(store.data.users).some((user) => user.id !== auth.user.id && user.email === email)) {
+        const existingEmail = userLookupIndex.findByEmail(email, store.data.users);
+        if (existingEmail && existingEmail.id !== auth.user.id) {
           return send(response, 409, { error: "该邮箱已绑定其他账号" });
         }
         auth.user.email = email;
         auth.user.emailVerifiedAt = null;
+        store.recordRuntimeIndexEvent?.({ type: "user-account", userId: auth.user.id });
         removeUserActionTokens(store, auth.user.id);
         const verificationToken = issueActionToken(store.data.emailVerifications, auth.user.id);
         appendAudit(store, request, "account.email_bound", auth.user.id);
@@ -5465,12 +5574,14 @@ export async function createCloudServer({
           ...(legacyImplicitSpeedrun ? { legacyMode: true } : {}),
         };
         appendSaveRevision(store, auth.user.id, next, slot, effectiveMode);
+        let leaderboardReviewPending = false;
         if (slot === "main") {
           const revalidationCleared = clearLeaderboardRevalidationIfSatisfied(store.data, auth.user.id, next.revision, effectiveMode);
           if (revalidationCleared && effectiveMode === "normal") store.recordRuntimeIndexEvent?.({ type: "leaderboard-revalidation", userId: auth.user.id });
           if (effectiveMode === "normal") {
             const inspection = publicUploadInspection(body);
             const leaderboard = updateLeaderboardFromMainSave(store, auth.user.id, { save: next, inspection });
+            leaderboardReviewPending = leaderboard.reason === "integrity-review-pending";
             refreshStationProfile(
               store.data,
               auth.user,
@@ -5494,7 +5605,10 @@ export async function createCloudServer({
         });
         if (pruned.revisionCount > 0) appendAudit(store, request, "cloud.history_pruned_for_quota", auth.user.id);
         await store.persist();
-        return send(response, 200, { cloudSave: metadata });
+        return send(response, 200, {
+          cloudSave: metadata,
+          ...(leaderboardReviewPending ? { leaderboard: { status: "review_pending", automaticRestriction: false } } : {}),
+        });
       }
 
       if (request.method === "POST" && url.pathname === "/api/cloud-save/restore") {
@@ -5537,12 +5651,14 @@ export async function createCloudServer({
           restoredFromRevision: sourceRevision,
         };
         appendSaveRevision(store, auth.user.id, restored, slot, mode);
+        let leaderboardReviewPending = false;
         if (slot === "main") {
           const revalidationCleared = clearLeaderboardRevalidationIfSatisfied(store.data, auth.user.id, restored.revision, mode);
           if (revalidationCleared && mode === "normal") store.recordRuntimeIndexEvent?.({ type: "leaderboard-revalidation", userId: auth.user.id });
           if (mode === "normal") {
             const restoredState = parseSaveState(restored.payload);
             const leaderboard = updateLeaderboardFromMainSave(store, auth.user.id, { save: restored });
+            leaderboardReviewPending = leaderboard.reason === "integrity-review-pending";
             refreshStationProfile(
               store.data,
               auth.user,
@@ -5557,7 +5673,10 @@ export async function createCloudServer({
         appendAudit(store, request, "cloud.revision_restored", auth.user.id);
         if (pruned.revisionCount > 0) appendAudit(store, request, "cloud.history_pruned_for_quota", auth.user.id);
         await store.persist();
-        return send(response, 200, { cloudSave: cloudSaveMetadata(restored, slot, mode) });
+        return send(response, 200, {
+          cloudSave: cloudSaveMetadata(restored, slot, mode),
+          ...(leaderboardReviewPending ? { leaderboard: { status: "review_pending", automaticRestriction: false } } : {}),
+        });
       }
 
       const publicStationMatch = /^\/api\/stations\/(station_[a-f0-9]{32})$/.exec(url.pathname);
@@ -5788,6 +5907,13 @@ export async function createCloudServer({
         if (result.reason === "missing-save") return send(response, 409, { error: "请先上传当前主云存档，再刷新排行榜" });
         if (result.reason === "missing-payload") return send(response, 500, { error: "云存档正文缺失，暂时无法刷新排行榜", code: "CLOUD_SAVE_PAYLOAD_MISSING" });
         if (result.reason === "modded-save") return send(response, 422, { error: "启用内容包的存档不参与官方排行榜" });
+        if (result.reason === "integrity-review-pending") {
+          return send(response, 409, {
+            error: "该排行榜修订已进入人工复核队列，账号和云存档不会被封禁或修改",
+            code: "LEADERBOARD_REVIEW_PENDING",
+            submission: result.submission,
+          });
+        }
         if (result.reason === "invalid-save" || !result.submission) return send(response, 422, { error: "主云存档无法用于排行榜计算" });
         dayMetric.leaderboardSubmissions += 1;
         return send(response, 200, { submission: result.submission, verified: true, source: "main-cloud-save" });

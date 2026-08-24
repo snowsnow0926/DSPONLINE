@@ -1396,7 +1396,7 @@ test("reports cloud save format and size failures separately", async () => {
   const malformed = await request("/api/cloud-save", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: "not-json", expectedRevision: 0 }) });
   assert.equal(malformed.response.status, 400);
   assert.equal(malformed.body.code, "SAVE_FORMAT_INVALID");
-  const oversized = "x".repeat(64 * 1024 * 1024);
+  const oversized = "x".repeat(96 * 1024 * 1024);
   const tooLarge = await request("/api/cloud-save", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: oversized, expectedRevision: 0 }) });
   assert.equal(tooLarge.response.status, 413);
   assert.equal(tooLarge.body.code, "SAVE_SIZE_TOO_LARGE");
@@ -1451,7 +1451,7 @@ test("accepts gzip cloud saves and rejects invalid or expanded gzip bodies", asy
   assert.equal(rawFallback.response.status, 200);
   assert.equal(rawFallback.body.cloudSave.revision, 2);
 
-  const expandedState = { ...base.state, padding: "x".repeat(64 * 1024 * 1024) };
+  const expandedState = { ...base.state, padding: "x".repeat(96 * 1024 * 1024) };
   const expandedBody = gzipSync(Buffer.from(JSON.stringify({ payload: createSavePayload(expandedState), expectedRevision: 2 })));
   const expanded = await isolatedRequest("/api/cloud-save", {
     method: "PUT",
@@ -1469,11 +1469,11 @@ test("accepts gzip cloud saves and rejects invalid or expanded gzip bodies", asy
       "content-type": "application/vnd.dspidle.save+json",
       "x-dsp-expected-revision": "2",
     },
-    body: gzipSync(Buffer.alloc(64 * 1024 * 1024 + 1, 0x78)),
+    body: gzipSync(Buffer.alloc(96 * 1024 * 1024 + 1, 0x78)),
   });
   assert.equal(decompressionBomb.response.status, 413);
   assert.equal(decompressionBomb.body.code, "REQUEST_EXPANDED_BODY_TOO_LARGE");
-  assert.equal(decompressionBomb.body.expandedLimitBytes, 64 * 1024 * 1024);
+  assert.equal(decompressionBomb.body.expandedLimitBytes, 96 * 1024 * 1024);
   assert.ok(decompressionBomb.body.compressedBytes > 0);
   assert.equal(decompressionBomb.body.expandedBytesAtLeast, true);
   assert.ok(decompressionBomb.body.expandedBytes > decompressionBomb.body.expandedLimitBytes);
@@ -2264,7 +2264,8 @@ test("recalculates leaderboard score on the server", async () => {
   });
   assert.equal(refreshed.response.status, 200);
   assert.equal(refreshed.body.submission.metrics.uploadedWhiteMatrix, 12);
-  assert.equal(refreshed.body.submission.metrics.galaxyScore, 12_145);
+  assert.equal(refreshed.body.submission.metrics.galaxyScore, 4_700_440);
+  assert.equal(refreshed.body.submission.metrics.galaxyScoreMetricVersion, "balanced-log-v2");
 
   const hidden = await request("/api/leaderboard/visibility", {
     method: "POST",
@@ -2482,7 +2483,7 @@ test("does not merge a legacy nominal throughput peak into the v2 settled-produc
   assert.equal(submission.legacyMetrics.peakThroughputPerMinute, 8_000_000);
 });
 
-test("saturates extreme leaderboard totals instead of wrapping them to zero", async () => {
+test("keeps extreme leaderboard totals finite instead of wrapping them to zero", async () => {
   const registered = await request("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ username: "saturated_rank", password: "rank-pass-123", displayName: "极限工厂" }),
@@ -2507,7 +2508,9 @@ test("saturates extreme leaderboard totals instead of wrapping them to zero", as
   const entry = ranking.body.entries.find((candidate) => candidate.displayName === "极限工厂");
   assert.equal(entry.metrics.energyGeneratedMj, Number.MAX_VALUE);
   assert.equal(entry.metrics.peakDysonPowerKw, Number.MAX_VALUE);
-  assert.equal(entry.metrics.galaxyScore, Number.MAX_VALUE);
+  assert.equal(entry.metrics.galaxyScore, 3_045_424_575);
+  assert.equal(entry.metrics.galaxyScoreMetricVersion, "balanced-log-v2");
+  assert.equal(Number.isSafeInteger(entry.metrics.galaxyScore), true);
 });
 
 test("deletes an account and all directly owned cloud data", async () => {

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((releaseNoteId) => {

@@ -246,7 +246,7 @@ describe("pure idle final envelope ownership", () => {
     installWorker(malformedWorker);
     const malformedState = {
       ...createInitialState(45, false),
-      research: undefined,
+      version: 999,
     } as unknown as GameState;
     const malformedResponse = finalizedResponse(malformedState);
     const malformedBytes = arrayBufferPayload(malformedResponse.finalEnvelope.payloadBytes);

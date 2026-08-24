@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
 
@@ -15,6 +15,7 @@ const RELEASE_NOTES_1_0_42 = getReleaseNotes1042("zh-CN");
 const RELEASE_NOTES_1_0_43 = getReleaseNotes1043("zh-CN");
 const RELEASE_NOTES_1_0_44 = getReleaseNotes1044("zh-CN");
 const RELEASE_NOTES_1_0_45 = getReleaseNotes1045("zh-CN");
+const RELEASE_NOTES_1_0_46 = getReleaseNotes1046("zh-CN");
 
 const RELEASE_NOTES_1_0_40 = {
   ...getCurrentReleaseNotes("zh-CN"),
@@ -68,6 +69,9 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "compressed-worker-save-transport": Gauge,
+  "gzip-save-export": CloudUpload,
+  "v47-default-compaction": Database,
   "dynamic-shell-safe-area": Gauge,
   "atomic-mobile-navigation": Link2,
   "workspace-accessibility": ShieldCheck,
@@ -139,6 +143,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_0_46,
   RELEASE_NOTES_1_0_45,
   RELEASE_NOTES_1_0_44,
   RELEASE_NOTES_1_0_43,
@@ -520,6 +525,7 @@ export function markCurrentReleaseNotesSeen(): void {
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { locale } = useAppLocale();
   const localizedCurrentRelease = getCurrentReleaseNotes(locale);
+  const localizedRelease1046 = getReleaseNotes1046(locale);
   const localizedRelease1045 = getReleaseNotes1045(locale);
   const localizedRelease1044 = getReleaseNotes1044(locale);
   const localizedRelease1043 = getReleaseNotes1043(locale);
@@ -536,6 +542,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.id === RELEASE_NOTES_1_0_46.id ? localizedRelease1046
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_45.id ? localizedRelease1045
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_44.id ? localizedRelease1044
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_43.id ? localizedRelease1043

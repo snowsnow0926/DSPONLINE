@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
 
 async function preparePage(page: Page, disableCoordinationApis = false) {
   await page.addInitScript(({ releaseNoteId, disable }) => {
@@ -584,7 +584,7 @@ test("a single writer can commit a runtime-generated 35 MiB save after its own l
     state = engine.placeBuilding(state, "storage_mk1", { x: 0, y: 0 });
     const template = state.entities.at(-1)!;
     const entities = state.entities.slice(0, -1);
-    for (let index = 0; index < 220_000; index += 1) {
+    for (let index = 0; index < 260_000; index += 1) {
       entities.push({
         ...template,
         id: `synthetic_large_storage_${index}`,

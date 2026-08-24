@@ -2,7 +2,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
+const { validatePackagedTransferContract } = require("./package-contract.cjs");
 const { extractFile } = require("@electron/asar");
+
+const expectedTransferContract = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "cloud-transfer-contract.json"), "utf8"));
 
 const builderEntry = require.resolve("electron-builder/cli");
 const mode = process.argv[2] || "pack";
@@ -46,9 +49,7 @@ function verifyPackagedMetadata(outputDirectory) {
     throw new Error("桌面安装包元数据必须包含 HTTPS 云 API 和更新地址");
   }
   const transferContract = JSON.parse(extractFile(asarPath, "cloud-transfer-contract.json").toString("utf8"));
-  if (transferContract.guaranteedSavePayloadBytes !== 48 * 1024 * 1024 || transferContract.maximumTimeoutMs < 120_000) {
-    throw new Error("桌面安装包缺少当前大存档云传输契约");
-  }
+  validatePackagedTransferContract(transferContract, expectedTransferContract);
 }
 
 async function main() {

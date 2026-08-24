@@ -22,10 +22,15 @@ export interface AuthoritativeSaveCatalogSeed {
 
 export interface AuthoritativeSavePayloadProof {
   integrity: "valid";
+  /** Integrity of the exact uncompressed UTF-8 envelope. */
   payloadChecksum: string;
   payloadSha256: string;
   byteLength: number;
   stateChecksum: string;
+  /** Bulk transport is gzip when that reduces the cross-Worker payload. */
+  transportEncoding: "raw" | "gzip";
+  storedByteLength: number;
+  storedSha256: string;
   /** SHA-256 binding the exact payload proof to the canonical catalog seed. */
   bindingSha256: string;
 }
@@ -53,6 +58,8 @@ export interface AuthoritativeSavePersistenceProof {
   payloadChecksum: string;
   payloadSha256: string;
   stateChecksum: string;
+  transportEncoding: "raw" | "gzip";
+  storedByteLength: number;
   backupKey: string | null;
   backupRevision: number | null;
   backupSaved: boolean;

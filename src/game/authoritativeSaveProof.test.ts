@@ -28,6 +28,9 @@ const proof = {
   payloadSha256: "a".repeat(64),
   byteLength: 10,
   stateChecksum: "1234abcd",
+  transportEncoding: "raw" as const,
+  storedByteLength: 10,
+  storedSha256: "a".repeat(64),
 };
 
 describe("authoritative save proof binding", () => {

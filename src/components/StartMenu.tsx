@@ -1062,7 +1062,11 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setRescueConfirmation(false);
     setMessage({ tone: "busy", text: "正在后台检查存档完整性与兼容性…" });
     try {
-      const [saveInspection, raw] = await Promise.all([loadSaveInspectionModule(), file.text()]);
+      const [saveInspection, saveFileCodec] = await Promise.all([
+        loadSaveInspectionModule(),
+        import("../game/saveFileCodec"),
+      ]);
+      const raw = await saveFileCodec.readSaveFileText(file);
       const inspection = await saveInspection.inspectSaveInWorker(raw);
       if (generation !== importInspectionGenerationRef.current) return;
       setImportRaw(!inspection.valid && inspection.repairable ? raw : null);
@@ -1732,7 +1736,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             <button className={view === "settings" ? "active" : ""} type="button" onClick={() => { setView("settings"); setMessage(null); }}><Settings size={17} /><span>游戏设置</span></button>
             {__APP_PLATFORM__ === "web" ? <a className="start-menu-download-link" href={NATIVE_DOWNLOAD_URL} target="_blank" rel="noreferrer" title="下载 Windows 或 Android 客户端"><Download size={17} /><span>客户端下载</span><em>测试版</em></a> : null}
           </nav>
-          <input ref={fileInputRef} className="start-menu-file-input" type="file" accept="application/json,.json" aria-label="选择存档文件" onChange={async (event) => { const file = event.target.files?.[0]; if (file) await readImportFile(file); event.target.value = ""; }} />
+          <input ref={fileInputRef} className="start-menu-file-input" type="file" accept="application/json,application/gzip,.json,.json.gz,.gz" aria-label="选择存档文件" onChange={async (event) => { const file = event.target.files?.[0]; if (file) await readImportFile(file); event.target.value = ""; }} />
         </aside>
 
         <section className="start-menu-workspace" aria-live="polite">

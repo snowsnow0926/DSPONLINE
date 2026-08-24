@@ -59,6 +59,10 @@ export interface SimulationWorkerRequest {
   /** Authority replacement requests may ask for the exact post-replay state
    * mirror using the same bounded checkpoint chunk protocol as normal saves. */
   includeCheckpointStateMirror?: boolean;
+  /** Primary persistence can consume the transferable checkpoint directly.
+   * This mode returns only its bounded identity proof and deliberately skips
+   * the second JSON.parse plus full-state mirror clones. */
+  checkpointIdentityOnly?: boolean;
   /** Pure-idle authority replacement keeps the full state in the Worker and
    * streams only bounded current-planet UI projection chunks. */
   streamAuthorityProjection?: boolean;
@@ -538,7 +542,15 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
   let commandApplied = false;
   if (event.data.command) {
     if (event.data.command.baseRevision !== runtimeRevision) {
-      const { checkpoint, checkpointState } = serializeSimulationStateCheckpoint(runtime.state);
+      let checkpoint: SimulationStateTransfer;
+      let checkpointState: GameState | undefined;
+      if (event.data.checkpointIdentityOnly) {
+        checkpoint = serializeSimulationStateForTransfer(runtime.state);
+      } else {
+        const serialized = serializeSimulationStateCheckpoint(runtime.state);
+        checkpoint = serialized.checkpoint;
+        checkpointState = serialized.checkpointState;
+      }
       self.postMessage({
         id,
         changed: false,
@@ -547,7 +559,8 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
         stateRevision: runtimeRevision,
         registryFingerprint: activeRegistryFingerprint ?? undefined,
         checkpoint,
-        checkpointState,
+        ...(checkpointState ? { checkpointState } : {}),
+        ...(event.data.checkpointIdentityOnly ? { checkpointIdentity: createSimulationStateIdentity(runtime.state) } : {}),
       } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
       return;
     }
@@ -557,6 +570,21 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     commandApplied = true;
   }
   if (event.data.kind === "checkpoint") {
+    if (event.data.checkpointIdentityOnly) {
+      const checkpoint = serializeSimulationStateForTransfer(runtime.state);
+      self.postMessage({
+        id,
+        changed: commandApplied,
+        commandApplied,
+        durationMs: Math.max(0, performance.now() - receivedAt),
+        protocol: event.data.protocol ?? "projection",
+        stateRevision: runtimeRevision,
+        registryFingerprint: activeRegistryFingerprint ?? undefined,
+        checkpoint,
+        checkpointIdentity: createSimulationStateIdentity(runtime.state),
+      } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
+      return;
+    }
     const { checkpoint, checkpointState } = serializeSimulationStateCheckpoint(runtime.state);
     const chunkedCheckpointState = checkpoint.byteLength >= CHECKPOINT_CHUNK_THRESHOLD_BYTES;
     if (chunkedCheckpointState) postCheckpointStateChunks(id, checkpointState);

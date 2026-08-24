@@ -8,6 +8,7 @@ import {
   createConservativePureIdleMacroSession,
   createPureIdleMacroSession,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
+  PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS,
   PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS,
 } from "./pureIdleMacro";
 import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
@@ -347,7 +348,7 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
-  it("uses a zero-calibration conservative session after repeated Worker failures", () => {
+  it("settles a bounded exact prefix before freezing the uncertain conservative tail", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 9;
@@ -358,6 +359,13 @@ describe("pure idle macro session", () => {
       "stable",
       "injected repeated Worker crash",
     );
+
+    expect(session.calibrationCheckpoint).toBeDefined();
+    expect(session.candidate.elapsedSeconds - source.elapsedSeconds).toBeCloseTo(
+      PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS,
+      6,
+    );
+    expect(session.lastValidationReason).toContain("已先精确结算");
 
     const summary = advancePureIdleMacroSession(session, 30 * 24 * 60 * 60);
     const finalized = finalizePureIdleMacroSession(session, 30 * 24 * 60 * 60, createContentPackRegistry());

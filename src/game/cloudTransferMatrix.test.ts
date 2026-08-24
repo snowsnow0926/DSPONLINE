@@ -56,7 +56,7 @@ describe("cloud transfer size matrix", () => {
     expect((request.headers as Record<string, string>)["x-dsp-save-original-bytes"]).toBe(String(new TextEncoder().encode(source).byteLength));
   }, 30_000);
 
-  it.each([33, 40, 48] as const)("preflights and gzip-uploads a %i MiB endgame save", async (mebibytes) => {
+  it.each([33, 40, 48, 80] as const)("preflights and gzip-uploads a %i MiB endgame save", async (mebibytes) => {
     vi.stubGlobal("CompressionStream", class {
       readonly readable: ReadableStream<Uint8Array>;
       readonly writable: WritableStream<Uint8Array>;
@@ -82,8 +82,8 @@ describe("cloud transfer size matrix", () => {
     expect(((fetchMock.mock.calls[1]?.[1] as RequestInit).headers as Record<string, string>)["content-encoding"]).toBe("gzip");
   }, 60_000);
 
-  it("rejects a direct payload above the 64 MiB server save boundary before fetch", async () => {
-    const source = payloadNearSize(65, "normal");
+  it("rejects a direct payload above the 96 MiB server save boundary before fetch", async () => {
+    const source = payloadNearSize(97, "normal");
     const fetchMock = vi.spyOn(globalThis, "fetch");
     await expect(uploadCloudSaveWithOptions(source, 0, "main", { verified: true })).rejects.toMatchObject({
       status: 413,

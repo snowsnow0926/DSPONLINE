@@ -330,6 +330,9 @@ export interface SaveStageTimings {
   primaryWriteMs: number;
   backupMs: number;
   automaticSnapshotMs: number;
+  compressionMs?: number;
+  transportBytes?: number;
+  transportEncoding?: "raw" | "gzip";
 }
 
 export interface LocalSaveSummaryMetrics {
@@ -1143,6 +1146,8 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
       machineCount,
       minerCount,
       progress: typeof entity.progress === "number" ? Math.max(0, entity.progress) : 0,
+      utilization: nonNegativeNumber(entity.utilization),
+      productionRate: nonNegativeNumber(entity.productionRate),
       fuelRemainingMj: typeof entity.fuelRemainingMj === "number" ? Math.max(0, entity.fuelRemainingMj) : 0,
       powerOutputKw: typeof entity.powerOutputKw === "number" ? Math.max(0, entity.powerOutputKw) : 0,
       powerInputKw: typeof entity.powerInputKw === "number" ? Math.max(0, entity.powerInputKw) : 0,
@@ -3232,6 +3237,7 @@ export async function saveGameVerifiedFromStateTransfer(
   options: {
     onProgress?: (progress: AuthoritativeSaveSerializationProgress | { stage: string; bytes?: number }) => void;
     checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+    expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } = {},
 ): Promise<SaveGameResult> {
   try {
@@ -3241,7 +3247,19 @@ export async function saveGameVerifiedFromStateTransfer(
     if (coordination) return coordination;
     return failedSave("unavailable", error instanceof Error ? error.message : "本地主存档初始化失败");
   }
-  if (!primaryCanUseProofBoundTransfer(saveModeForState(state))) {
+  const expectedStateIdentity = options.expectedStateIdentity ?? {
+    mode: state.mode,
+    version: state.version,
+    activePlanetId: state.activePlanetId,
+    entityCount: state.entities.length,
+    beltCount: state.belts.length,
+    elapsedSeconds: state.elapsedSeconds,
+  };
+  const mode = expectedStateIdentity.mode;
+  if (saveModeForState(state) !== mode) {
+    return failedSave("verification", "权威检查点模式与请求保存模式不一致");
+  }
+  if (!primaryCanUseProofBoundTransfer(mode)) {
     // The v46 mode migration owns an immutable copy of the previous bytes.
     // It is a rare, deliberate compatibility fallback; current catalogued
     // large saves never reach it and therefore avoid a UI-thread payload read.
@@ -3249,20 +3267,12 @@ export async function saveGameVerifiedFromStateTransfer(
   }
   const totalStartedAt = monotonicNow();
   const savedAt = Date.now();
-  const mode = saveModeForState(state);
   const primaryKey = primarySaveKey(mode);
   let removedAutomaticSnapshots = 0;
   try {
     const serialized = await serializeAuthoritativeSaveStateTransferInWorker(stateTransfer, {
       savedAt,
-      expectedStateIdentity: {
-        mode: state.mode,
-        version: state.version,
-        activePlanetId: state.activePlanetId,
-        entityCount: state.entities.length,
-        beltCount: state.belts.length,
-        elapsedSeconds: state.elapsedSeconds,
-      },
+      expectedStateIdentity,
       onProgress: options.onProgress,
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
     });
@@ -3307,7 +3317,7 @@ export async function saveGameVerifiedFromStateTransfer(
     const automaticSnapshotStartedAt = monotonicNow();
     try {
       scheduleAutomaticSnapshotFromStateTransfer(
-        state,
+        expectedStateIdentity,
         stateTransfer,
         mode,
         options.checkpointOverlay,
@@ -3334,6 +3344,9 @@ export async function saveGameVerifiedFromStateTransfer(
         primaryWriteMs: committed.result.proof.idbWriteMs,
         backupMs: committed.result.proof.backupVerifyMs,
         automaticSnapshotMs,
+        compressionMs: serialized.compressionDurationMs,
+        transportBytes: committed.result.proof.storedByteLength,
+        transportEncoding: committed.result.proof.transportEncoding,
       },
     };
   } catch (error) {
@@ -3458,6 +3471,9 @@ export async function saveGameVerifiedFromEnvelopeTransfer(
         primaryWriteMs: committed.result.proof.idbWriteMs,
         backupMs: committed.result.proof.backupVerifyMs,
         automaticSnapshotMs: 0,
+        compressionMs: serialized.compressionDurationMs,
+        transportBytes: committed.result.proof.storedByteLength,
+        transportEncoding: committed.result.proof.transportEncoding,
       },
     });
   } catch (error) {
@@ -3746,6 +3762,7 @@ interface PendingPrimarySave {
   state: GameState;
   stateTransfer?: SimulationStateTransfer;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   deferBackup?: boolean;
   waiters: Array<(result: SaveGameResult) => void>;
 }
@@ -3873,6 +3890,7 @@ function ensurePrimarySaveProcessor(): void {
         result = request.stateTransfer
           ? await saveGameVerifiedFromStateTransfer(request.state, request.stateTransfer, {
             ...(request.checkpointOverlay ? { checkpointOverlay: request.checkpointOverlay } : {}),
+            ...(request.expectedStateIdentity ? { expectedStateIdentity: request.expectedStateIdentity } : {}),
           })
           : await saveGameVerifiedOnce(request.state, undefined, { deferBackup: request.deferBackup === true });
       } catch {
@@ -3913,7 +3931,11 @@ export function saveGameVerified(
   state: GameState,
   stateTransfer?: SimulationStateTransfer,
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay,
-  options: { deferBackup?: boolean; force?: boolean } = {},
+  options: {
+    deferBackup?: boolean;
+    force?: boolean;
+    expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+  } = {},
 ): Promise<SaveGameResult> {
   let ownedStateTransfer: SimulationStateTransfer | undefined;
   if (stateTransfer) {
@@ -3955,13 +3977,17 @@ export function saveGameVerified(
           pending.stateTransfer = ownedStateTransfer;
           if (checkpointOverlay) pending.checkpointOverlay = checkpointOverlay;
           else delete pending.checkpointOverlay;
+          if (options.expectedStateIdentity) pending.expectedStateIdentity = options.expectedStateIdentity;
+          else delete pending.expectedStateIdentity;
         } else {
           delete pending.stateTransfer;
           delete pending.checkpointOverlay;
+          delete pending.expectedStateIdentity;
         }
       } else if (ownedStateTransfer && !pending.stateTransfer) {
         pending.stateTransfer = ownedStateTransfer;
         if (checkpointOverlay) pending.checkpointOverlay = checkpointOverlay;
+        if (options.expectedStateIdentity) pending.expectedStateIdentity = options.expectedStateIdentity;
       }
       if (options.deferBackup !== true) pending.deferBackup = false;
       pending.waiters.push(resolve);
@@ -3976,6 +4002,7 @@ export function saveGameVerified(
         state,
         ...(ownedStateTransfer ? { stateTransfer: ownedStateTransfer } : {}),
         ...(checkpointOverlay ? { checkpointOverlay } : {}),
+        ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
         ...(options.deferBackup === true ? { deferBackup: true } : {}),
         waiters: [resolve],
       });
@@ -4356,14 +4383,7 @@ interface DeferredAutomaticSnapshotJob {
   stateTransfer: SimulationStateTransfer;
   checkpointOverlay: AuthoritativeSaveCheckpointOverlay | undefined;
   primaryIdentity: VerifiedPrimaryLocalSaveIdentity;
-  expectedStateIdentity: {
-    mode: SaveMode;
-    version: number;
-    activePlanetId: PlanetId;
-    entityCount: number;
-    beltCount: number;
-    elapsedSeconds: number;
-  };
+  expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity;
 }
 
 const deferredAutomaticSnapshots = new Map<SaveMode, DeferredAutomaticSnapshotJob>();
@@ -4379,14 +4399,15 @@ function scheduleDeferredAutomaticSnapshotProcessor(delayMs = 0): void {
 }
 
 function scheduleAutomaticSnapshotFromStateTransfer(
-  state: GameState,
+  expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity,
   stateTransfer: SimulationStateTransfer,
   mode: SaveMode,
   checkpointOverlay: AuthoritativeSaveCheckpointOverlay | undefined,
   primaryIdentity: VerifiedPrimaryLocalSaveIdentity | null,
 ): void {
   const latest = latestAutomaticSnapshotSummary(mode);
-  if (latest && state.elapsedSeconds >= latest.elapsedSeconds && state.elapsedSeconds - latest.elapsedSeconds < AUTO_SNAPSHOT_MIN_SECONDS) return;
+  if (latest && expectedStateIdentity.elapsedSeconds >= latest.elapsedSeconds &&
+    expectedStateIdentity.elapsedSeconds - latest.elapsedSeconds < AUTO_SNAPSHOT_MIN_SECONDS) return;
   if (!primaryIdentity || !(stateTransfer.buffer instanceof ArrayBuffer) || stateTransfer.buffer.byteLength === 0) return;
   const snapshotTransfer = structuredClone(stateTransfer, { transfer: [stateTransfer.buffer] });
   deferredAutomaticSnapshots.set(mode, {
@@ -4394,14 +4415,7 @@ function scheduleAutomaticSnapshotFromStateTransfer(
     stateTransfer: snapshotTransfer,
     checkpointOverlay,
     primaryIdentity,
-    expectedStateIdentity: {
-      mode: state.mode,
-      version: state.version,
-      activePlanetId: state.activePlanetId,
-      entityCount: state.entities.length,
-      beltCount: state.belts.length,
-      elapsedSeconds: state.elapsedSeconds,
-    },
+    expectedStateIdentity,
   });
   scheduleDeferredAutomaticSnapshotProcessor();
 }

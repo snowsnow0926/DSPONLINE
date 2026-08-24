@@ -93,11 +93,24 @@ describe("apiFetch", () => {
     expect(requestApiTransfer).toHaveBeenCalledOnce();
     expect(requestApiTransfer.mock.calls[0][0]).toMatchObject({
       path: "/cloud-save?slot=2&mode=speedrun",
+      method: "GET",
       bodyByteLength: 0,
       expectedResponseBytes: CLOUD_TRANSFER_CONTRACT.singleSaveResponseLimitBytes,
       timeoutMs: cloudRequestTimeoutMs(0, CLOUD_TRANSFER_CONTRACT.singleSaveResponseLimitBytes),
     });
     await expect(response.json()).resolves.toEqual({ cloudSave: { payload: "large-save" } });
+  });
+
+  it("normalizes an omitted bridge verb for ordinary API requests", async () => {
+    const requestApi = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 204,
+      body: "",
+      headers: { "content-type": "application/json" },
+    });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { dspDesktop: desktopBridge({ requestApi }) } });
+    await apiFetch("https://dsponline.cn/api/account");
+    expect(requestApi).toHaveBeenCalledWith(expect.objectContaining({ path: "/account", method: "GET" }));
   });
 
   it("propagates AbortSignal cancellation to the desktop main process", async () => {

@@ -17,8 +17,11 @@ import {
   type LocalSaveCatalogKind,
 } from "./localSaveCatalog";
 import { computeSavePayloadChecksum } from "./saveTransfer";
-import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
+import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 import { sha256Bytes } from "./payloadDigest";
+import { inspectCanonicalSaveEnvelope } from "./canonicalSaveEnvelopeInspection";
+import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
+import { decodeSavePayloadTransport } from "./savePayloadCompression";
 import { canonicalAuthoritativeSaveJson, computeAuthoritativeSaveProofBindingSha256 } from "./authoritativeSaveProof";
 import type {
   AuthoritativeSaveCatalogSeed,
@@ -189,7 +192,10 @@ function validSeed(seed: AuthoritativeSaveCatalogSeed, key: string, proof: Autho
     seed.activePlanetId.length <= 128 && (seed.reason === null || typeof seed.reason === "string" && seed.reason.length <= 256) &&
     seed.modeExplicit === true && validSettings(seed.settings) && STATE_CHECKSUM_PATTERN.test(seed.stateChecksum) && proof.stateChecksum === seed.stateChecksum &&
     proof.integrity === "valid" && SHA256_PATTERN.test(proof.payloadSha256) && SHA256_PATTERN.test(proof.bindingSha256) &&
-    /^[0-9a-f]{8}$/.test(proof.payloadChecksum) && validNonNegativeInteger(proof.byteLength));
+    SHA256_PATTERN.test(proof.storedSha256) && (proof.transportEncoding === "raw" || proof.transportEncoding === "gzip") &&
+    /^[0-9a-f]{8}$/.test(proof.payloadChecksum) && validNonNegativeInteger(proof.byteLength) &&
+    validNonNegativeInteger(proof.storedByteLength) && proof.storedByteLength > 0 &&
+    (proof.transportEncoding !== "raw" || proof.storedByteLength === proof.byteLength && proof.storedSha256 === proof.payloadSha256));
 }
 
 /** Re-parse and bind the new envelope in the persistence Worker.  The save
@@ -199,11 +205,11 @@ function newEnvelopeMismatch(
   raw: string,
   request: AuthoritativeSavePersistenceRequest<WorkerBinaryPayload>,
 ): string | null {
-  const inspection = inspectSaveEnvelopeChecksum(raw);
-  if (inspection.status !== "valid" || !inspection.parsed || !inspection.state) return "integrity";
+  const inspection = inspectCanonicalSaveEnvelope(raw);
+  if (!inspection) return "integrity";
   if (inspection.recordedChecksum !== request.seed.stateChecksum) return "recordedChecksum";
   if (inspection.computedChecksum !== request.seed.stateChecksum) return "computedChecksum";
-  const envelope = inspection.parsed;
+  const envelope = inspection;
   const state = inspection.state;
   if (envelope.formatVersion !== 2) return "formatVersion";
   if (envelope.kind !== request.seed.kind) return "kind";
@@ -213,19 +219,11 @@ function newEnvelopeMismatch(
   if (state.mode !== request.seed.mode) return "state.mode";
   if (state.version !== request.seed.stateVersion) return "state.version";
   if (state.activePlanetId !== request.seed.activePlanetId) return "activePlanetId";
-  if (!Array.isArray(state.entities) || state.entities.length !== request.seed.entityCount) return "entityCount";
-  if (!Array.isArray(state.belts) || state.belts.length !== request.seed.beltCount) return "beltCount";
-  if (catalogInteger(state.elapsedSeconds) !== request.seed.elapsedSeconds) return "elapsedSeconds";
-  const research = state.research;
-  const completedTechIds = research && typeof research === "object"
-    ? (research as Record<string, unknown>).completedTechIds
-    : undefined;
-  if (!Array.isArray(completedTechIds) || completedTechIds.length !== request.seed.completedTechCount) return "completedTechCount";
-  const dysonSphere = state.dysonSphere;
-  const structurePoints = dysonSphere && typeof dysonSphere === "object"
-    ? (dysonSphere as Record<string, unknown>).structurePoints
-    : undefined;
-  if (structurePoints !== request.seed.structurePoints) return "structurePoints";
+  if (state.entityCount !== request.seed.entityCount) return "entityCount";
+  if (state.beltCount !== request.seed.beltCount) return "beltCount";
+  if (state.elapsedSeconds !== request.seed.elapsedSeconds) return "elapsedSeconds";
+  if (state.completedTechCount !== request.seed.completedTechCount) return "completedTechCount";
+  if (state.structurePoints !== request.seed.structurePoints) return "structurePoints";
   return null;
 }
 
@@ -336,9 +334,9 @@ function payloadMatchesCatalogAndRevision(
 ): catalog is LocalSaveCatalog {
   if (!catalog || !revision || catalog.integrity !== "valid" || catalog.revision !== expectedRevision ||
     revision.revision !== expectedRevision || revision.savedAt !== catalog.savedAt || revision.checksum !== catalog.stateChecksum) return false;
-  const bytes = textEncoder.encode(raw);
-  return bytes.byteLength === catalog.byteLength && Number(record.bytes) === bytes.byteLength &&
-    computeSavePayloadChecksum(bytes) === catalog.payloadChecksum;
+  const measured = computeSavePayloadTextChecksum(raw);
+  return measured.byteLength === catalog.byteLength && Number(record.bytes) === measured.byteLength &&
+    measured.checksum === catalog.payloadChecksum;
 }
 
 async function abortTransaction(transaction: IDBTransaction, done: Promise<void>): Promise<void> {
@@ -374,13 +372,22 @@ function backupKeyForPrimary(key: string, mode: "normal" | "speedrun"): string |
  * the old primary copy that may become a backup. The UI never parses it. */
 function verifyPreviousEnvelopeForBackup(previous: BoundPreviousPayload, mode: "normal" | "speedrun"): boolean {
   try {
-    const inspection = inspectSaveEnvelopeChecksum(previous.raw);
-    return inspection.status === "valid" && inspection.recordedChecksum === inspection.computedChecksum &&
+    const inspection = inspectCanonicalSaveEnvelope(previous.raw);
+    if (inspection) return Boolean(inspection.recordedChecksum === inspection.computedChecksum &&
       inspection.recordedChecksum === previous.catalog.stateChecksum &&
-      inspection.parsed?.mode === mode && inspection.parsed?.kind === "primary" &&
-      inspection.parsed?.slot === previous.catalog.slot &&
-      inspection.parsed?.savedAt === previous.catalog.savedAt &&
-      inspection.state?.mode === mode;
+      inspection.mode === mode && inspection.kind === "primary" &&
+      inspection.slot === previous.catalog.slot &&
+      inspection.savedAt === previous.catalog.savedAt &&
+      inspection.state.mode === mode);
+    // Tiny pre-catalog fixtures and old envelopes may omit summary fields.
+    // Full parsing is bounded here; large saves deliberately never take this
+    // compatibility path and therefore cannot recreate the 1.1.4 OOM peak.
+    if (previous.byteLength > 1024 * 1024) return false;
+    const legacy = inspectSaveEnvelopeChecksum(previous.raw);
+    return legacy.status === "valid" && legacy.recordedChecksum === legacy.computedChecksum &&
+      legacy.recordedChecksum === previous.catalog.stateChecksum && legacy.parsed?.mode === mode &&
+      legacy.parsed?.kind === "primary" && legacy.parsed?.slot === previous.catalog.slot &&
+      legacy.parsed?.savedAt === previous.catalog.savedAt && legacy.state?.mode === mode;
   } catch {
     return false;
   }
@@ -397,9 +404,8 @@ async function writeBackupBestEffort(
     const done = transactionDone(transaction);
     const store = transaction.objectStore(RECORD_STORE);
     const now = Date.now();
-    const [leaseRecord, currentPrimary, currentCatalog, currentRevision, existingBackup, backupRevisionRecord] = await Promise.all([
+    const [leaseRecord, currentCatalog, currentRevision, existingBackup, backupRevisionRecord] = await Promise.all([
       requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredRecord | undefined>),
-      requestResult(store.get(primary.key) as IDBRequest<StoredRecord | undefined>),
       requestResult(store.get(localSaveCatalogRecordKey(primary.key)) as IDBRequest<StoredRecord | undefined>),
       requestResult(store.get(localSaveRevisionKey(primary.key)) as IDBRequest<StoredRecord | undefined>),
       requestResult(store.get(backupKey) as IDBRequest<StoredRecord | undefined>),
@@ -407,8 +413,7 @@ async function writeBackupBestEffort(
     ]);
     const lease = parseLocalSaveWriterLease(typeof leaseRecord?.value === "string" ? leaseRecord.value : null);
     const parsedBackupRevision = parseLocalSaveRevision(typeof backupRevisionRecord?.value === "string" ? backupRevisionRecord.value : null);
-    if (!leaseMatches(lease, primary.fence, now) || currentPrimary?.value !== primary.raw ||
-      currentCatalog?.value !== primary.catalogRaw || currentRevision?.value !== primary.revisionRaw ||
+    if (!leaseMatches(lease, primary.fence, now) || currentCatalog?.value !== primary.catalogRaw || currentRevision?.value !== primary.revisionRaw ||
       existingBackup !== undefined && parsedBackupRevision === null) {
       await abortTransaction(transaction, done);
       return { saved: false, revision: null };
@@ -434,16 +439,6 @@ async function writeBackupBestEffort(
     store.put(storedRecord(backupKey, previous.raw, { byteLength: previous.byteLength, updatedAt: now }));
     store.put(storedRecord(localSaveCatalogRecordKey(backupKey), catalogRaw, { updatedAt: now }));
     store.put(storedRecord(localSaveRevisionKey(backupKey), nextRevisionRaw, { updatedAt: now }));
-    const [payloadReadback, catalogReadback, revisionReadback] = await Promise.all([
-      requestResult(store.get(backupKey) as IDBRequest<StoredRecord | undefined>),
-      requestResult(store.get(localSaveCatalogRecordKey(backupKey)) as IDBRequest<StoredRecord | undefined>),
-      requestResult(store.get(localSaveRevisionKey(backupKey)) as IDBRequest<StoredRecord | undefined>),
-    ]);
-    if (payloadReadback?.value !== previous.raw || Number(payloadReadback.bytes) !== previous.byteLength ||
-      catalogReadback?.value !== catalogRaw || revisionReadback?.value !== nextRevisionRaw) {
-      await abortTransaction(transaction, done);
-      return { saved: false, revision: null };
-    }
     await done;
     const verify = db.transaction(RECORD_STORE, "readonly");
     const verifyDone = transactionDone(verify);
@@ -467,23 +462,28 @@ async function writeBackupBestEffort(
 
 async function commitPayload(
   request: AuthoritativeSavePersistenceRequest<WorkerBinaryPayload>,
-  payload: ArrayBuffer,
+  storedPayload: ArrayBuffer,
   report: (progress: AuthoritativeSavePersistenceProgress) => void,
 ): Promise<AuthoritativeSavePersistenceResult> {
   const decodeStarted = performance.now();
   if (!validNonNegativeInteger(request.expectedRevision) || request.expectedRevision > 0x7fffffff ||
     !validWriterFence(request.fence) ||
-    !validSeed(request.seed, request.key, request.proof) || payload.byteLength !== request.proof.byteLength) {
+    !validSeed(request.seed, request.key, request.proof) || storedPayload.byteLength !== request.proof.storedByteLength) {
     return failure("invalid", "authoritative payload proof 或 key/seed 不合法");
   }
   const { bindingSha256, ...proofWithoutBinding } = request.proof;
   if (await computeAuthoritativeSaveProofBindingSha256(proofWithoutBinding, request.seed) !== bindingSha256) {
     return failure("invalid", "authoritative payload proof 与 catalog seed binding 不匹配");
   }
-  report({ stage: "decoding-payload", key: request.key, bytes: payload.byteLength });
-  if (computeSavePayloadChecksum(payload) !== request.proof.payloadChecksum ||
+  report({ stage: "decoding-payload", key: request.key, bytes: request.proof.byteLength });
+  if (await sha256Bytes(storedPayload) !== request.proof.storedSha256) {
+    return failure("invalid", "authoritative 存档传输 SHA-256 与 Worker proof 不匹配");
+  }
+  const payload = await decodeSavePayloadTransport(storedPayload, request.proof.transportEncoding);
+  if (payload.byteLength !== request.proof.byteLength ||
+    computeSavePayloadChecksum(payload) !== request.proof.payloadChecksum ||
     await sha256Bytes(payload) !== request.proof.payloadSha256) {
-    return failure("invalid", "authoritative payload checksum 与 Worker proof 不匹配");
+    return failure("invalid", "authoritative 原始存档 checksum 与 Worker proof 不匹配");
   }
   let raw: string;
   try {
@@ -560,13 +560,11 @@ async function commitPayload(
     store.put(storedRecord(request.key, raw, { byteLength: request.proof.byteLength, updatedAt: now }));
     store.put(storedRecord(localSaveCatalogRecordKey(request.key), catalogRaw, { updatedAt: now }));
     store.put(storedRecord(localSaveRevisionKey(request.key), nextRevisionRaw, { updatedAt: now }));
-    const [payloadReadback, catalogReadback, revisionReadback] = await Promise.all([
-      requestResult(store.get(request.key) as IDBRequest<StoredRecord | undefined>),
+    const [catalogReadback, revisionReadback] = await Promise.all([
       requestResult(store.get(localSaveCatalogRecordKey(request.key)) as IDBRequest<StoredRecord | undefined>),
       requestResult(store.get(localSaveRevisionKey(request.key)) as IDBRequest<StoredRecord | undefined>),
     ]);
-    if (payloadReadback?.value !== raw || Number(payloadReadback.bytes) !== request.proof.byteLength ||
-      catalogReadback?.value !== catalogRaw || revisionReadback?.value !== nextRevisionRaw) {
+    if (catalogReadback?.value !== catalogRaw || revisionReadback?.value !== nextRevisionRaw) {
       await abortTransaction(transaction, done);
       return failure("readback-failed", "authoritative save 事务内回读失败");
     }
@@ -581,7 +579,7 @@ async function commitPayload(
       stateChecksum: request.seed.stateChecksum,
       fence: request.fence,
     };
-    report({ stage: "readback", key: request.key, bytes: payload.byteLength, revision: nextRevision });
+    report({ stage: "readback", key: request.key, bytes: request.proof.byteLength, revision: nextRevision });
     if (!await verifyPrimaryAfterCommit(db, expectation)) {
       return failure("readback-failed", "authoritative save 提交后独立事务回读失败");
     }
@@ -600,6 +598,8 @@ async function commitPayload(
       payloadChecksum: request.proof.payloadChecksum,
       payloadSha256: request.proof.payloadSha256,
       stateChecksum: request.seed.stateChecksum,
+      transportEncoding: request.proof.transportEncoding,
+      storedByteLength: request.proof.storedByteLength,
       backupKey,
       backupRevision: backup.revision,
       backupSaved: backup.saved,

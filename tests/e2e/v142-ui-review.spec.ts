@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,15 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.0.46");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(10);
-  await expect(dialog).toContainText("自动保存保持模拟运行");
-  await expect(dialog).toContainText("手机连续拉线不再遮挡地图");
-  await expect(dialog).toContainText("画布显示可独立控制");
-  await expect(dialog).toContainText("Worker 状态自动解锁");
-  await expect(dialog).toContainText("默认保护与实验性编辑都安全");
-  await expect(dialog).toContainText("纯挂机日志与宏观进度保留");
+  await expect(dialog).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(dialog).toContainText("保存链路不再搬运多份巨型正文");
+  await expect(dialog).toContainText("存档默认导出为 .json.gz");
+  await expect(dialog).toContainText("超大存档纯挂机纳入完整验收");
+  await expect(dialog).toContainText("银河综合榜使用五项等权对数评分");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

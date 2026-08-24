@@ -125,8 +125,10 @@ export interface WorkProgressSnapshot {
 
 /**
  * Sparse Worker publications can arrive after the visual clock has already
- * advanced the same cycle. Do not make a still-active cycle visibly rewind:
- * its visual clock will cross the natural wrap boundary on its own.
+ * advanced, or even wrapped, the same repeating cycle. While the semantic
+ * work and rate are unchanged, the existing monotonic clock is already the
+ * best phase estimate. Rebasing it to a delayed authority snapshot can make
+ * the visible progress jump backwards after a natural wrap.
  */
 export function reconcileWorkDisplaySnapshot(
   previous: WorkProgressSnapshot,
@@ -138,11 +140,7 @@ export function reconcileWorkDisplaySnapshot(
     previous.cyclesPerSecond === next.cyclesPerSecond &&
     previous.effectiveSimulationMultiplier === next.effectiveSimulationMultiplier &&
     previous.mode !== "indeterminate" && previous.mode !== "level";
-  if (sameCycle) {
-    const displayed = getWorkDisplayProgress(previous, publishedAtMs);
-    const incoming = Math.max(0, Math.min(1, Number.isFinite(next.snapshotProgress) ? next.snapshotProgress : 0));
-    if (displayed > incoming) return previous;
-  }
+  if (sameCycle) return previous;
   return { ...next, publishedAtMs };
 }
 

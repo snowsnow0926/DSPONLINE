@@ -88,7 +88,7 @@ describe("1.0.36 belt defaults and fuel support", () => {
     expect(shortage.state.construction.conveyor_belt_mk1).toBe(3);
   });
 
-  it("applies the lane preference to direct and queued blueprints with matching material previews", () => {
+  it("preserves explicit blueprint lanes even when a larger device default is selected", () => {
     const blueprint = laneBlueprint();
     const source = createInitialState();
     source.blueprints = [blueprint];
@@ -96,17 +96,17 @@ describe("1.0.36 belt defaults and fuel support", () => {
     source.construction.conveyor_belt_mk1 = 4;
     const preview = getBlueprintPlacementPreview(source, blueprint.id, { x: 600, y: 0 }, { minimumBeltLanes: 4 });
     expect(preview.requirements).toEqual(expect.arrayContaining([
-      { constructionId: "conveyor_belt_mk1", amount: 4 },
+      { constructionId: "conveyor_belt_mk1", amount: 1 },
     ]));
     const deployed = placeBlueprint(source, blueprint.id, { x: 600, y: 0 }, { minimumBeltLanes: 4 });
-    expect(deployed.belts.at(-1)?.lanes).toBe(4);
-    expect(deployed.construction.conveyor_belt_mk1).toBe(0);
+    expect(deployed.belts.at(-1)?.lanes).toBe(1);
+    expect(deployed.construction.conveyor_belt_mk1).toBe(3);
 
-    const shortage = { ...source, construction: { ...source.construction, conveyor_belt_mk1: 3 } };
+    const shortage = { ...source, construction: { ...source.construction, conveyor_belt_mk1: 0 } };
     expect(placeBlueprint(shortage, blueprint.id, { x: 600, y: 0 }, { minimumBeltLanes: 4 })).toBe(shortage);
 
     const queued = queueBlueprint({ ...source, construction: { ...source.construction, conveyor_belt_mk1: 0 } }, blueprint.id, { x: 900, y: 0 }, { minimumBeltLanes: 4 });
-    expect(queued.blueprintVersions?.find((version) => version.id.includes(":lanes-4"))?.definition.belts[0].lanes).toBe(4);
+    expect(queued.blueprintVersions?.find((version) => version.id === "v136-lane-blueprint@1")?.definition.belts[0].lanes).toBe(1);
     expect(queued.blueprints[0].belts[0].lanes).toBe(1);
   });
 

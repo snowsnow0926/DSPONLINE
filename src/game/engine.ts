@@ -7771,6 +7771,8 @@ export interface BlueprintPlacementPreview {
   compatible: boolean;
   inventoryReady: boolean;
   canPlace: boolean;
+  /** A player-actionable reason when placement compatibility is false. */
+  blockedReason?: string;
 }
 
 const BLUEPRINT_RESOURCE_ANCHOR_RADIUS = 180;
@@ -7812,7 +7814,6 @@ function blueprintRequirements(
   blueprint: BlueprintDefinition,
   resourceInstalls = new Map((blueprint.resourceAnchors ?? []).map((anchor) => [anchor.key, Math.max(1, Math.floor(anchor.minerCount))])),
   activeKeys = new Set([...blueprint.entities.map((entity) => entity.key), ...(blueprint.resourceAnchors ?? []).map((anchor) => anchor.key)]),
-  minimumBeltLanes = 1,
 ): Array<{ constructionId: ConstructionId; amount: number }> | null {
   const requirements = new Map<ConstructionId, number>();
   let valid = true;
@@ -7836,7 +7837,10 @@ function blueprintRequirements(
   for (const anchor of blueprint.resourceAnchors ?? []) add(anchor.extractorBuildingId, resourceInstalls.get(anchor.key) ?? 0);
   for (const belt of blueprint.belts) {
     if (!activeKeys.has(belt.sourceKey) || !activeKeys.has(belt.targetKey)) continue;
-    add(getBeltConstructionId(belt.tier), Math.max(belt.lanes, normalizedDefaultBeltLanes(minimumBeltLanes)));
+    // A blueprint is an explicit topology snapshot. Device-level defaults
+    // apply to newly drawn belts only; they must never silently change the
+    // saved lane count or material requirement of a blueprint.
+    add(getBeltConstructionId(belt.tier), belt.lanes);
   }
   return valid ? [...requirements].map(([constructionId, amount]) => ({ constructionId, amount })) : null;
 }
@@ -7862,7 +7866,10 @@ interface BlueprintPlacementOptions {
   planetId?: PlanetId;
   rotation?: BlueprintRotation;
   mirror?: BlueprintMirror;
-  /** Device preference supplied by the UI; never persisted into GameState. */
+  /**
+   * Legacy device preference accepted for call-site compatibility. It is
+   * intentionally ignored for blueprint deployment; template lanes win.
+   */
   minimumBeltLanes?: number;
   /** Explicit UI command policy. It bypasses only rounded-position overlap rejection. */
   allowExactOverlap?: boolean;
@@ -7894,7 +7901,6 @@ function createBlueprintDeploymentPlan(
     blueprint,
     new Map(matches.resolved.map(({ anchor, installCount }) => [anchor.key, installCount])),
     activeKeys,
-    options.minimumBeltLanes,
   );
   if (!requirements) return null;
   const candidatePositions = new Set<string>();
@@ -7940,7 +7946,14 @@ export function getBlueprintPlacementPreview(
   options: BlueprintPlacementOptions = {},
 ): BlueprintPlacementPreview {
   const plan = createBlueprintDeploymentPlan(state, blueprintId, position, options);
-  if (!plan) return { matchedResourceAnchors: 0, skippedResourceAnchors: [], extractorInstallCount: 0, requirements: [], compatible: false, inventoryReady: false, canPlace: false };
+  if (!plan) return { matchedResourceAnchors: 0, skippedResourceAnchors: [], extractorInstallCount: 0, requirements: [], compatible: false, inventoryReady: false, canPlace: false, blockedReason: "蓝图内容无效或位置参数不完整" };
+  const geothermalCount = plan.blueprint.entities
+    .filter((entity) => entity.buildingId === "geothermal_power_station")
+    .reduce((sum, entity) => sum + Math.max(1, Math.floor(entity.machineCount)), 0);
+  const blockedReason = !plan.compatible && geothermalCount > 0 &&
+    getPlanetIndustrialProfile(state, plan.planetId).geothermalMultiplier <= 0
+    ? `地热发电站只能部署在有地热资源的行星；当前${getPlanet(plan.planetId).name}不兼容`
+    : !plan.compatible ? "放置位置、行星或资源锚点已不兼容" : undefined;
   return {
     matchedResourceAnchors: plan.matches.resolved.length,
     skippedResourceAnchors: plan.matches.skipped.map((anchor) => ({ key: anchor.key, resourceId: anchor.resourceId })),
@@ -7949,6 +7962,7 @@ export function getBlueprintPlacementPreview(
     compatible: plan.compatible,
     inventoryReady: plan.inventoryReady,
     canPlace: plan.canPlace,
+    blockedReason,
   };
 }
 
@@ -8024,7 +8038,7 @@ export function placeBlueprint(
 ): GameState {
   const plan = createBlueprintDeploymentPlan(state, blueprintId, position, options);
   if (!plan?.canPlace) return state;
-  const { blueprint, planetId, rotation, mirror, matches, requirements, minimumBeltLanes } = plan;
+  const { blueprint, planetId, rotation, mirror, matches, requirements } = plan;
   let next = copyState(state);
   for (const requirement of requirements) {
     next.construction[requirement.constructionId] = (next.construction[requirement.constructionId] ?? 0) - requirement.amount;
@@ -8191,7 +8205,7 @@ export function placeBlueprint(
       source,
       target,
       itemId: template.itemId,
-      lanes: Math.max(template.lanes, minimumBeltLanes),
+      lanes: template.lanes,
       tier: template.tier,
       sorterTier: Math.min(3, template.tier) as SorterTier,
       progress: 0,
@@ -8265,7 +8279,7 @@ function queueBlueprintPreview(state: GameState, entry: GameState["constructionQ
     entry.mirror,
     entry.id,
   );
-  return overlaps ? { ...preview, compatible: false, canPlace: false } : preview;
+  return overlaps ? { ...preview, compatible: false, canPlace: false, blockedReason: "放置位置、行星或资源锚点已不兼容" } : preview;
 }
 
 function hasQueuedBlueprintOverlap(
@@ -8367,12 +8381,8 @@ export function queueBlueprint(
 ): GameState {
   const blueprint = state.blueprints.find((candidate) => candidate.id === blueprintId);
   if (!blueprint || !canQueueBlueprint(state, blueprintId, state.activePlanetId, position, options)) return state;
-  const minimumBeltLanes = normalizedDefaultBeltLanes(options.minimumBeltLanes);
-  const resolvedBlueprint = minimumBeltLanes > 1
-    ? { ...cloneBlueprintDefinition(blueprint), belts: blueprint.belts.map((belt) => ({ ...belt, lanes: Math.max(belt.lanes, minimumBeltLanes) })) }
-    : blueprint;
   const next = copyState(state);
-  const version = ensureBlueprintVersion(next, resolvedBlueprint, minimumBeltLanes > 1 ? `:lanes-${minimumBeltLanes}` : "");
+  const version = ensureBlueprintVersion(next, blueprint);
   const withVersion = version.state;
   withVersion.constructionQueue.push({
     id: `construction_${withVersion.nextId}`,
@@ -8469,13 +8479,16 @@ export function getConstructionQueueDetails(state: GameState, entryId: string): 
       : false;
   });
   const compatible = pendingMaterials ? preview.compatible : !missingPlacedEntity;
+  const blockedReason = compatible ? undefined : pendingMaterials
+    ? preview.blockedReason ?? "放置位置、行星或资源锚点已不兼容"
+    : "目标物流塔已拆除";
   return {
     status: pendingMaterials ? "pending-materials" : "waiting-fleet",
     blueprint,
     requirements,
     fleet,
     compatible,
-    blockedReason: compatible ? undefined : pendingMaterials ? "放置位置、行星或资源锚点已不兼容" : "目标物流塔已拆除",
+    blockedReason,
   };
 }
 
@@ -10594,6 +10607,7 @@ function finishConstructionAutomationStep(state: GameState, planetId: PlanetId, 
 }
 
 interface RepeatableConstructionAutomationBatch {
+  jobsPerCycle: number;
   workSeconds: number;
   trayCosts: Partial<Record<ItemId, number>>;
   trayReturns: Partial<Record<ItemId, number>>;
@@ -10601,6 +10615,9 @@ interface RepeatableConstructionAutomationBatch {
   producedItems: Partial<Record<ItemId, number>>;
   relevantItems: ItemId[];
   touchedTrayItems: ItemId[];
+  /** Finite by-product phase used by a proven multi-job cycle. */
+  cycleStateItems?: ItemId[];
+  cycleStartInventory?: Partial<Record<ItemId, number>>;
 }
 
 function analyzeRepeatableConstructionAutomationPlan(
@@ -10673,6 +10690,7 @@ function analyzeRepeatableConstructionAutomationPlan(
     }
   }
   return {
+    jobsPerCycle: 1,
     workSeconds: plan.steps.reduce((sum, step) => sum + constructionAutomationStepDuration(state, step), 0),
     trayCosts,
     trayReturns,
@@ -10680,6 +10698,8 @@ function analyzeRepeatableConstructionAutomationPlan(
     producedItems,
     relevantItems: [...relevant].sort(),
     touchedTrayItems: [...touchedTrayItems].sort(),
+    cycleStateItems: [],
+    cycleStartInventory: {},
   };
 }
 
@@ -10754,11 +10774,11 @@ function constructionAutomationBatchInputsAvailable(
   state: GameState,
   planetId: PlanetId,
   batch: RepeatableConstructionAutomationBatch,
-  jobs = 1,
+  cycles = 1,
 ): boolean {
   const tray = trayForPlanet(state, planetId);
   return (Object.entries(batch.trayCosts) as Array<[ItemId, number]>).every(([itemId, amount]) =>
-    Math.max(0, Math.floor(tray[itemId] ?? 0)) >= Math.max(0, Math.floor(amount)) * jobs);
+    Math.max(0, Math.floor(tray[itemId] ?? 0)) >= Math.max(0, Math.floor(amount)) * cycles);
 }
 
 function constructionAutomationCachedPlanValid(
@@ -10768,14 +10788,203 @@ function constructionAutomationCachedPlanValid(
 ): boolean {
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
   const materialInventoryVersion = constructionAutomationInventoryVersion(inventorySnapshot);
+  if (cached.batch && cached.batch.jobsPerCycle > 1 &&
+    !constructionAutomationCycleStateMatches(state, planetId, cached.batch)) return false;
   if (materialInventoryVersion === cached.materialInventoryVersion) return true;
   if (cached.plan.blocker) return false;
+  // A proven two-job cycle intentionally consumes a byproduct from the first
+  // job in the second job. Its tray snapshot therefore changes on every
+  // cycle even though the cycle returns to the same recipe state; treating the
+  // newly returned material as an invalidation would rebuild the plan for
+  // every pair and recreate the original high-stack slowdown.
+  if (cached.batch && cached.batch.jobsPerCycle > 1) {
+    // A newly supplied material may enable a different recursive recipe. Do
+    // not keep the cycle cache across such an addition; ordinary depletion is
+    // safe and is handled by the aggregate input check below.
+    const materialAdded = (Object.entries(inventorySnapshot) as Array<[ItemId, number]>).some(([itemId, amount]) =>
+      amount > Math.max(0, Math.floor(cached.inventorySnapshot[itemId] ?? 0)) &&
+      !(cached.batch?.cycleStateItems ?? []).includes(itemId));
+    if (materialAdded) return false;
+    cached.inventorySnapshot = inventorySnapshot;
+    cached.materialInventoryVersion = materialInventoryVersion;
+    return true;
+  }
   const materialAdded = (Object.entries(inventorySnapshot) as Array<[ItemId, number]>).some(([itemId, amount]) =>
     amount > Math.max(0, Math.floor(cached.inventorySnapshot[itemId] ?? 0)));
   if (materialAdded || !constructionAutomationPlanInputsAvailable(state, planetId, cached.plan)) return false;
   cached.inventorySnapshot = inventorySnapshot;
   cached.materialInventoryVersion = materialInventoryVersion;
   return true;
+}
+
+function constructionAutomationPlanningState(state: GameState, planetId: PlanetId): GameState {
+  const sourceTray = trayForPlanet(state, planetId);
+  const tray = { ...sourceTray };
+  return {
+    ...state,
+    tray: planetId === state.activePlanetId ? tray : state.tray,
+    planetTrays: { ...state.planetTrays, [planetId]: tray },
+    construction: { ...state.construction },
+    portableFleet: { ...state.portableFleet },
+    totalProduced: { ...state.totalProduced },
+    constructionAutomation: {
+      ...state.constructionAutomation,
+      targetStock: { ...state.constructionAutomation.targetStock },
+      destroyedByproducts: { ...state.constructionAutomation.destroyedByproducts },
+      jobs: {},
+    },
+  };
+}
+
+function addBatchAmount(
+  target: Partial<Record<ItemId, number>>,
+  itemId: ItemId,
+  amount: number,
+): void {
+  const normalized = Math.max(0, Math.floor(amount));
+  if (normalized < 1) return;
+  target[itemId] = Math.floor((target[itemId] ?? 0) + normalized);
+}
+
+function composeConstructionAutomationBatches(
+  first: RepeatableConstructionAutomationBatch,
+  second: RepeatableConstructionAutomationBatch,
+): RepeatableConstructionAutomationBatch {
+  const itemIds = new Set<ItemId>([
+    ...Object.keys(first.trayCosts), ...Object.keys(first.trayReturns),
+    ...Object.keys(second.trayCosts), ...Object.keys(second.trayReturns),
+  ] as ItemId[]);
+  const trayCosts: Partial<Record<ItemId, number>> = {};
+  const trayReturns: Partial<Record<ItemId, number>> = {};
+  for (const itemId of itemIds) {
+    const firstCost = Math.max(0, Math.floor(first.trayCosts[itemId] ?? 0));
+    const firstReturn = Math.max(0, Math.floor(first.trayReturns[itemId] ?? 0));
+    const secondCost = Math.max(0, Math.floor(second.trayCosts[itemId] ?? 0));
+    const secondReturn = Math.max(0, Math.floor(second.trayReturns[itemId] ?? 0));
+    // Compose the two jobs while allowing the first job's return to satisfy
+    // the second job. This preserves the exact prefix requirement and the
+    // final tray delta, unlike simply adding net deltas.
+    addBatchAmount(trayCosts, itemId, firstCost + Math.max(0, secondCost - firstReturn));
+    addBatchAmount(trayReturns, itemId, secondReturn + Math.max(0, firstReturn - secondCost));
+  }
+  const fleetReturns: Partial<Record<ItemId, number>> = {};
+  for (const itemId of new Set<ItemId>([
+    ...Object.keys(first.fleetReturns), ...Object.keys(second.fleetReturns),
+  ] as ItemId[])) {
+    addBatchAmount(fleetReturns, itemId,
+      Math.max(0, Math.floor(first.fleetReturns[itemId] ?? 0)) +
+      Math.max(0, Math.floor(second.fleetReturns[itemId] ?? 0)));
+  }
+  const producedItems: Partial<Record<ItemId, number>> = {};
+  for (const itemId of new Set<ItemId>([
+    ...Object.keys(first.producedItems), ...Object.keys(second.producedItems),
+  ] as ItemId[])) {
+    addBatchAmount(producedItems, itemId,
+      Math.max(0, Math.floor(first.producedItems[itemId] ?? 0)) +
+      Math.max(0, Math.floor(second.producedItems[itemId] ?? 0)));
+  }
+  return {
+    jobsPerCycle: Math.max(1, Math.floor(first.jobsPerCycle)) + Math.max(1, Math.floor(second.jobsPerCycle)),
+    workSeconds: first.workSeconds + second.workSeconds,
+    trayCosts,
+    trayReturns,
+    fleetReturns,
+    producedItems,
+    relevantItems: [...new Set([...first.relevantItems, ...second.relevantItems])].sort(),
+    touchedTrayItems: [...new Set([...first.touchedTrayItems, ...second.touchedTrayItems])].sort(),
+    cycleStateItems: [...new Set([...(first.cycleStateItems ?? []), ...(second.cycleStateItems ?? [])])].sort(),
+    cycleStartInventory: { ...(first.cycleStartInventory ?? {}) },
+  };
+}
+
+function constructionAutomationBatchSignature(batch: RepeatableConstructionAutomationBatch): string {
+  return JSON.stringify({
+    workSeconds: batch.workSeconds,
+    trayCosts: batch.trayCosts,
+    trayReturns: batch.trayReturns,
+    fleetReturns: batch.fleetReturns,
+    producedItems: batch.producedItems,
+    relevantItems: batch.relevantItems,
+    touchedTrayItems: batch.touchedTrayItems,
+  });
+}
+
+function constructionAutomationCycleFingerprint(
+  state: GameState,
+  planetId: PlanetId,
+  batch: RepeatableConstructionAutomationBatch,
+): string {
+  const tray = trayForPlanet(state, planetId);
+  // Raw inputs are intentionally omitted: they decrease on every completed
+  // job and therefore cannot identify a repeating recipe phase.  Only
+  // by-products that can feed a later job are part of the finite cycle state.
+  // A cycle with no such by-product is already handled by the ordinary
+  // repeatable path.
+  const items = Object.keys(batch.trayReturns).sort() as ItemId[];
+  return JSON.stringify({
+    batch: constructionAutomationBatchSignature(batch),
+    tray: items.map((itemId) => [itemId, Math.max(0, Math.floor(tray[itemId] ?? 0))]),
+  });
+}
+
+function constructionAutomationCycleStateMatches(
+  state: GameState,
+  planetId: PlanetId,
+  batch: RepeatableConstructionAutomationBatch,
+): boolean {
+  if (batch.jobsPerCycle <= 1) return true;
+  const items = batch.cycleStateItems ?? [];
+  const expected = batch.cycleStartInventory;
+  if (!expected) return false;
+  const tray = trayForPlanet(state, planetId);
+  return items.every((itemId) =>
+    Math.max(0, Math.floor(tray[itemId] ?? 0)) === Math.max(0, Math.floor(expected[itemId] ?? 0)));
+}
+
+function tryBuildStableConstructionAutomationCycle(
+  state: GameState,
+  definition: ConstructionAutomationTargetDefinition,
+  planetId: PlanetId,
+  first: RepeatableConstructionAutomationBatch,
+  budget: ConstructionAutomationComputeBudget,
+  profiler?: SimulationProfiler,
+): RepeatableConstructionAutomationBatch | null {
+  const maxProbeJobs = 8;
+  if (first.jobsPerCycle !== 1 || budget.remainingPlanBuilds < 1) return null;
+  const planning = constructionAutomationPlanningState(state, planetId);
+  const destroyedBefore = JSON.stringify(planning.constructionAutomation.destroyedByproducts);
+  const initialFingerprint = constructionAutomationCycleFingerprint(planning, planetId, first);
+  let current = first;
+  let cycle: RepeatableConstructionAutomationBatch = first;
+  const cycleStateItems = new Set<ItemId>();
+  for (let probe = 1; probe <= maxProbeJobs; probe += 1) {
+    for (const itemId of Object.keys(current.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
+    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1);
+    if (JSON.stringify(planning.constructionAutomation.destroyedByproducts) !== destroyedBefore) return null;
+    if (budget.remainingPlanBuilds < 1) return null;
+    const nextPlan = buildConstructionAutomationPlan(planning, definition, planetId);
+    budget.remainingPlanBuilds -= 1;
+    if (profiler) profiler.constructionPlanBuilds += 1;
+    if (nextPlan.blocker) return null;
+    const next = analyzeRepeatableConstructionAutomationPlan(planning, definition, nextPlan);
+    if (!next) return null;
+    for (const itemId of Object.keys(next.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
+    if (constructionAutomationCycleFingerprint(planning, planetId, next) === initialFingerprint) {
+      // The cycle is safe to repeat only when the recipe shape returns to its
+      // initial state. Any transient byproduct is then represented by the
+      // composed external cost/return and cannot silently change a later job.
+      if (!constructionAutomationBatchCanRepeat(state, planetId, cycle)) return null;
+      const cycleStateItemList = [...cycleStateItems].sort();
+      cycle.cycleStateItems = cycleStateItemList;
+      const initialTray = trayForPlanet(state, planetId);
+      cycle.cycleStartInventory = Object.fromEntries(cycleStateItemList.map((itemId) => [itemId,
+        Math.max(0, Math.floor(initialTray[itemId] ?? 0))])) as Partial<Record<ItemId, number>>;
+      return cycle;
+    }
+    cycle = composeConstructionAutomationBatches(cycle, next);
+    current = next;
+  }
+  return null;
 }
 
 function resolveConstructionAutomationPlan(
@@ -10799,7 +11008,9 @@ function resolveConstructionAutomationPlan(
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
   const resolved = {
     plan,
-    batch,
+    batch: batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
+      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+      : batch,
     inventorySnapshot,
     materialInventoryVersion: constructionAutomationInventoryVersion(inventorySnapshot),
   };
@@ -10828,25 +11039,26 @@ function constructionAutomationBatchCanRepeat(
 
 function applyConstructionAutomationBatch(
   state: GameState,
-  entity: FactoryEntity,
+  planetId: PlanetId,
   targetIndex: number,
   definition: ConstructionAutomationTargetDefinition,
   batch: RepeatableConstructionAutomationBatch,
-  jobs: number,
+  cycles: number,
 ): number {
-  const count = Math.max(1, Math.floor(jobs));
-  const tray = trayForPlanet(state, entity.planetId);
+  const cycleCount = Math.max(1, Math.floor(cycles));
+  const count = cycleCount * Math.max(1, Math.floor(batch.jobsPerCycle));
+  const tray = trayForPlanet(state, planetId);
   for (const itemId of batch.touchedTrayItems) {
     if (tray[itemId] === undefined) tray[itemId] = 0;
   }
   for (const [itemId, amount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
-    tray[itemId] = Math.max(0, Math.floor((tray[itemId] ?? 0) - amount * count));
+    tray[itemId] = Math.max(0, Math.floor((tray[itemId] ?? 0) - amount * cycleCount));
   }
   for (const [itemId, amount] of Object.entries(batch.trayReturns) as Array<[ItemId, number]>) {
-    const returned = Math.max(0, Math.floor(amount * count));
+    const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned < 1) continue;
     const current = Math.max(0, Math.floor(tray[itemId] ?? 0));
-    const stored = Math.min(returned, Math.max(0, getPlanetTrayItemLimit(state, entity.planetId) - current));
+    const stored = Math.min(returned, Math.max(0, getPlanetTrayItemLimit(state, planetId) - current));
     if (stored > 0) tray[itemId] = current + stored;
     const destroyed = returned - stored;
     if (destroyed > 0) {
@@ -10856,13 +11068,13 @@ function applyConstructionAutomationBatch(
     }
   }
   for (const [itemId, amount] of Object.entries(batch.fleetReturns) as Array<[ItemId, number]>) {
-    const returned = Math.max(0, Math.floor(amount * count));
+    const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned > 0 && isPortableFleetItem(itemId)) {
       state.portableFleet[itemId] = Math.floor((state.portableFleet[itemId] ?? 0) + returned);
     }
   }
   for (const [itemId, amount] of Object.entries(batch.producedItems) as Array<[ItemId, number]>) {
-    state.totalProduced[itemId] = Math.floor((state.totalProduced[itemId] ?? 0) + amount * count);
+    state.totalProduced[itemId] = Math.floor((state.totalProduced[itemId] ?? 0) + amount * cycleCount);
   }
   const completed = definition.outputAmount * count;
   if (definition.kind === "fleet" && isPortableFleetItem(definition.id)) {
@@ -10893,10 +11105,10 @@ function tryRunConstructionAutomationBatch(
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
   if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable)) return null;
   const tray = trayForPlanet(state, entity.planetId);
-  let jobsForStock = Number.MAX_SAFE_INTEGER;
+  let cyclesForStock = Number.MAX_SAFE_INTEGER;
   for (const [itemId, amount] of Object.entries(repeatable.trayCosts) as Array<[ItemId, number]>) {
     if (amount < 1) continue;
-    jobsForStock = Math.min(jobsForStock, Math.floor(Math.max(0, tray[itemId] ?? 0) / amount));
+    cyclesForStock = Math.min(cyclesForStock, Math.floor(Math.max(0, tray[itemId] ?? 0) / amount));
   }
   const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id) &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
@@ -10906,11 +11118,17 @@ function tryRunConstructionAutomationBatch(
     CONSTRUCTION_AUTOMATION_MAX_FAIR_BATCH_JOBS,
     Math.ceil(jobsForWork / Math.max(1, activeTargetCount)),
   ));
-  const jobs = canRepeat
-    ? Math.min(jobsForTarget, jobsForWork, jobsForStock)
-    : canFairBatch ? Math.min(jobsForTarget, jobsForWork, jobsForStock, fairShare) : 1;
-  const completed = applyConstructionAutomationBatch(state, entity, targetIndex, definition, repeatable, jobs);
-  return { usedWork: repeatable.workSeconds * jobs, completed, jobs };
+  const jobsPerCycle = Math.max(1, Math.floor(repeatable.jobsPerCycle));
+  if (jobsPerCycle > 1 && !constructionAutomationCycleStateMatches(state, entity.planetId, repeatable)) return null;
+  const cyclesForTarget = Math.floor(jobsForTarget / jobsPerCycle);
+  const cyclesForWork = Math.floor(jobsForWork / jobsPerCycle);
+  if (cyclesForTarget < 1 || cyclesForWork < 1 || cyclesForStock < 1) return null;
+  const cycles = canRepeat
+    ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock)
+    : canFairBatch ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock, Math.floor(fairShare / jobsPerCycle)) : 1;
+  if (cycles < 1) return null;
+  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles);
+  return { usedWork: repeatable.workSeconds * cycles, completed, jobs: cycles * jobsPerCycle };
 }
 
 function runConstructionCenters(
@@ -10924,24 +11142,49 @@ function runConstructionCenters(
   lookup?: SimulationLookupContext,
 ): void {
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
-  const budget: ConstructionAutomationComputeBudget = {
-    // The unbatched path remains an exact deterministic oracle for tests.
-    // Production always uses the guarded batch path.
-    remainingIterations: batchConstructionAutomation
-      ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND))
-      : Number.MAX_SAFE_INTEGER,
-    remainingPlanBuilds: batchConstructionAutomation
-      ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND))
-      : Number.MAX_SAFE_INTEGER,
-  };
-  for (const entity of entities) {
-    if (entity.planetId !== planetId || entity.buildingId !== "construction_center") continue;
+  const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+  // A single planet-wide FIFO budget allowed a very large first center to
+  // consume every guarded iteration before later centers were visited. Keep
+  // the same deterministic total cap, but hand out a fair prefix to each
+  // center and return unused tokens to the pool. This preserves single-center
+  // throughput while ensuring a second center always gets a chance to work.
+  let remainingIterationPool = batchConstructionAutomation
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND))
+    : Number.MAX_SAFE_INTEGER;
+  let remainingPlanBuildPool = batchConstructionAutomation
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND))
+    : Number.MAX_SAFE_INTEGER;
+  for (let centerIndex = 0; centerIndex < centerEntities.length; centerIndex += 1) {
+    const entity = centerEntities[centerIndex];
+    const centersRemaining = centerEntities.length - centerIndex;
+    const allocatedIterations = batchConstructionAutomation
+      ? Math.min(remainingIterationPool, Math.max(1, Math.ceil(remainingIterationPool / centersRemaining)))
+      : Number.MAX_SAFE_INTEGER;
+    const allocatedPlanBuilds = batchConstructionAutomation
+      ? Math.min(remainingPlanBuildPool, Math.max(1, Math.ceil(remainingPlanBuildPool / centersRemaining)))
+      : Number.MAX_SAFE_INTEGER;
+    if (batchConstructionAutomation) {
+      remainingIterationPool -= allocatedIterations;
+      remainingPlanBuildPool -= allocatedPlanBuilds;
+    }
+    const budget: ConstructionAutomationComputeBudget = {
+      // The unbatched path remains an exact deterministic oracle for tests.
+      // Production always uses the guarded batch path.
+      remainingIterations: allocatedIterations,
+      remainingPlanBuilds: allocatedPlanBuilds,
+    };
+    const returnUnusedBudget = () => {
+      if (!batchConstructionAutomation) return;
+      remainingIterationPool += budget.remainingIterations;
+      remainingPlanBuildPool += budget.remainingPlanBuilds;
+    };
     const powerFactor = powerFactorForEntity(power, entity);
     entity.powerFactor = power.factorByEntity.has(entity.id) ? round(powerFactor, 4) : undefined;
     if (!state.constructionAutomation.enabled || powerFactor <= EPSILON) {
       entity.utilization = 0;
       entity.productionRate = 0;
       entity.progress = 0;
+      returnUnusedBudget();
       continue;
     }
     let job: ConstructionAutomationJob | undefined = state.constructionAutomation.jobs[entity.id];
@@ -11038,6 +11281,7 @@ function runConstructionCenters(
     }
     entity.utilization = worked || completed > 0 ? powerFactor : 0;
     entity.productionRate = seconds > EPSILON ? round(completed * 60 / seconds, 2) : 0;
+    returnUnusedBudget();
   }
 }
 
@@ -11139,32 +11383,37 @@ export interface ConnectBeltResult {
   created: boolean;
 }
 
-export function connectBeltWithResult(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): ConnectBeltResult {
+/**
+ * Apply one already-validated belt request to an owned draft.  Batch previews
+ * keep one cloned draft and append to it in place; cloning once per request
+ * made a 1,000-line selection quadratic in the size of the whole GameState.
+ * This helper is deliberately private to the command wrappers below so the
+ * persisted state can never be mutated by an ordinary caller.
+ */
+function connectBeltOnDraft(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier, targetPortIndex: BeltInputPortIndex | undefined, lanes: number): ConnectBeltResult {
   const constructionId = getBeltConstructionId(tier);
-  if (!canConnectBelt(state, sourceId, targetId, itemId, tier, targetPortIndex, lanes)) return { state, beltId: null, created: false };
   const source = state.entities.find((entity) => entity.id === sourceId);
   const target = state.entities.find((entity) => entity.id === targetId);
   if (!source || !target) return { state, beltId: null, created: false };
-  const next = copyState(state);
-  const configuredTarget = next.entities.find((entity) => entity.id === targetId)!;
+  const configuredTarget = state.entities.find((entity) => entity.id === targetId)!;
   const resolvedTargetPortIndex = configuredTarget.buildingId === "micro_black_hole_connector"
-    ? resolveBlackHolePortIndex(next, targetId, targetPortIndex)
+    ? resolveBlackHolePortIndex(state, targetId, targetPortIndex)
     : configuredTarget.buildingId === "orbital_cargo_terminal"
-      ? resolveOrbitalCargoPortIndex(next, configuredTarget, itemId, targetPortIndex)
+      ? resolveOrbitalCargoPortIndex(state, configuredTarget, itemId, targetPortIndex)
     : configuredTarget.buildingId === "material_delivery_hub"
       ? resolveMaterialDeliverySlotIndex(configuredTarget, itemId, targetPortIndex)
       : undefined;
   if ((configuredTarget.buildingId === "micro_black_hole_connector" || configuredTarget.buildingId === "material_delivery_hub" || configuredTarget.buildingId === "orbital_cargo_terminal") && resolvedTargetPortIndex === undefined) return { state, beltId: null, created: false };
-  configureAutoTargetRecipe(next, configuredTarget, itemId);
+  const matchingEndpoint = state.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
+    belt.targetPortIndex === resolvedTargetPortIndex);
+  if (matchingEndpoint && matchingEndpoint.tier !== tier) return { state, beltId: null, created: false };
+  configureAutoTargetRecipe(state, configuredTarget, itemId);
   configureTargetItem(configuredTarget, itemId, resolvedTargetPortIndex);
-  const configuredSource = next.entities.find((entity) => entity.id === sourceId)!;
+  const configuredSource = state.entities.find((entity) => entity.id === sourceId)!;
   const resolvedElevatorOutputIndex = isElevatorStation(configuredSource)
     ? configuredSource.elevatorOutputItems?.findIndex((candidate) => candidate === itemId)
     : -1;
-  const matchingEndpoint = next.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
-    belt.targetPortIndex === resolvedTargetPortIndex);
-  if (matchingEndpoint && matchingEndpoint.tier !== tier) return { state, beltId: null, created: false };
-  const existing = next.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
+  const existing = state.belts.find((belt) => belt.source === sourceId && belt.target === targetId && belt.itemId === itemId &&
     belt.targetPortIndex === resolvedTargetPortIndex && belt.tier === tier);
   let beltId: string;
   let created = false;
@@ -11173,8 +11422,8 @@ export function connectBeltWithResult(state: GameState, sourceId: string, target
     existing.lanes += lanes;
     beltId = existing.id;
   } else {
-    beltId = `belt_${next.nextId}`;
-    next.belts.push({
+    beltId = `belt_${state.nextId}`;
+    state.belts.push({
       id: beltId,
       planetId: source.planetId,
       source: sourceId,
@@ -11185,22 +11434,28 @@ export function connectBeltWithResult(state: GameState, sourceId: string, target
       sorterTier: Math.min(3, tier) as SorterTier,
       progress: 0,
       priority: target.buildingId === "material_delivery_hub" ? 0 : 1,
-      stackSize: canSetBeltStackSize(next, next.settings.defaultBeltStackSize) ? next.settings.defaultBeltStackSize : 1,
+      stackSize: canSetBeltStackSize(state, state.settings.defaultBeltStackSize) ? state.settings.defaultBeltStackSize : 1,
       monitorEnabled: false,
       totalTransferred: 0,
       congestion: 0,
       lastFlow: 0,
-      routeMode: next.settings.defaultBeltRouteMode,
+      routeMode: state.settings.defaultBeltRouteMode,
       targetPortIndex: resolvedTargetPortIndex,
       elevatorOutputIndex: resolvedElevatorOutputIndex !== undefined && resolvedElevatorOutputIndex >= 0
         ? resolvedElevatorOutputIndex as 0 | 1 | 2 | 3 | 4
         : undefined,
     });
-    next.nextId += 1;
+    state.nextId += 1;
     created = true;
   }
-  next.construction[constructionId] = (next.construction[constructionId] ?? 0) - lanes;
-  return { state: next, beltId, created };
+  state.construction[constructionId] = (state.construction[constructionId] ?? 0) - lanes;
+  return { state, beltId, created };
+}
+
+export function connectBeltWithResult(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): ConnectBeltResult {
+  if (!canConnectBelt(state, sourceId, targetId, itemId, tier, targetPortIndex, lanes)) return { state, beltId: null, created: false };
+  const next = copyState(state);
+  return connectBeltOnDraft(next, sourceId, targetId, itemId, tier, targetPortIndex, lanes);
 }
 
 export function connectBelt(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): GameState {
@@ -11225,6 +11480,38 @@ export interface BatchBeltConnectionResult {
   failures: Array<{ index: number; code: BeltConnectionCheck["code"] | "duplicate" | "atomic-abort"; label: string }>;
 }
 
+function hasExistingBatchRoute(state: GameState, request: BatchBeltConnectionRequest): boolean {
+  const targetEntity = state.entities.find((entity) => entity.id === request.targetId);
+  return state.belts.some((belt) => belt.source === request.sourceId && belt.target === request.targetId && belt.itemId === request.itemId && (
+    targetEntity?.buildingId === "micro_black_hole_connector" || targetEntity?.buildingId === "material_delivery_hub"
+      ? request.targetPortIndex !== undefined && belt.targetPortIndex === request.targetPortIndex
+      : belt.targetPortIndex === undefined
+  ));
+}
+
+/** Validate a request against an ephemeral batch draft without cloning it. */
+export function getBatchBeltConnectionCheck(state: GameState, request: BatchBeltConnectionRequest): BeltConnectionCheck | { ok: false; code: "duplicate"; label: string } {
+  if (hasExistingBatchRoute(state, request)) return { ok: false, code: "duplicate", label: "目标接口已存在相同物品的运输线" };
+  return getBeltConnectionCheck(state, request.sourceId, request.targetId, request.itemId, request.tier ?? 1, request.targetPortIndex, request.lanes ?? 1);
+}
+
+/** Create an isolated mutable draft for continuous/batch UI previews. */
+export function createBatchBeltConnectionDraft(state: GameState): GameState {
+  return copyState(state);
+}
+
+/**
+ * Append one validated request to a draft created by
+ * {@link createBatchBeltConnectionDraft}. The draft is mutated in place and
+ * never escapes through the normal GameState command path.
+ */
+export function connectBeltToBatchDraft(draft: GameState, request: BatchBeltConnectionRequest): ConnectBeltResult {
+  const tier = request.tier ?? 1;
+  const lanes = request.lanes ?? 1;
+  if (!getBatchBeltConnectionCheck(draft, request).ok) return { state: draft, beltId: null, created: false };
+  return connectBeltOnDraft(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+}
+
 /**
  * Preview and commit use the same sequential draft, so shared stock, special
  * ports and line limits are validated exactly once before the original state
@@ -11234,7 +11521,10 @@ export interface BatchBeltConnectionResult {
  */
 export function connectBeltsAtomically(state: GameState, requests: readonly BatchBeltConnectionRequest[]): BatchBeltConnectionResult {
   if (requests.length < 1) return { state, committed: false, created: 0, skipped: 0, beltIds: [], failures: [] };
-  let draft = state;
+  // Clone once, then apply each validated request to the owned draft. The
+  // previous implementation cloned the complete GameState for every line,
+  // turning a large selection into O(requests × state) allocations.
+  const draft = copyState(state);
   const beltIds: string[] = [];
   const failures: BatchBeltConnectionResult["failures"] = [];
   const seen = new Set<string>();
@@ -11247,27 +11537,16 @@ export function connectBeltsAtomically(state: GameState, requests: readonly Batc
       continue;
     }
     seen.add(key);
-    const targetEntity = draft.entities.find((entity) => entity.id === request.targetId);
-    const existingRoute = draft.belts.some((belt) => belt.source === request.sourceId && belt.target === request.targetId && belt.itemId === request.itemId && (
-      targetEntity?.buildingId === "micro_black_hole_connector" || targetEntity?.buildingId === "material_delivery_hub"
-        ? request.targetPortIndex !== undefined && belt.targetPortIndex === request.targetPortIndex
-        : belt.targetPortIndex === undefined
-    ));
-    if (existingRoute) {
-      failures.push({ index, code: "duplicate", label: "目标接口已存在相同物品的运输线" });
-      continue;
-    }
-    const check = getBeltConnectionCheck(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+    const check = getBatchBeltConnectionCheck(draft, request);
     if (!check.ok) {
       failures.push({ index, code: check.code, label: check.label });
       continue;
     }
-    const result = connectBeltWithResult(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
-    if (!result.beltId || result.state === draft) {
+    const result = connectBeltOnDraft(draft, request.sourceId, request.targetId, request.itemId, tier, request.targetPortIndex, lanes);
+    if (!result.beltId) {
       failures.push({ index, code: "atomic-abort", label: "线路在最终原子校验中未创建" });
       continue;
     }
-    draft = result.state;
     beltIds.push(result.beltId);
   }
   if (failures.length > 0) {

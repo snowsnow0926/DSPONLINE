@@ -278,12 +278,13 @@ export class PureIdleMacroClient {
       );
     }
     try {
-      const state = parseTrustedWorkerEnvelope(raw, finalEnvelope.verification, undefined, { persistentProjection: false });
-      if (!matchesFinalizedIdentity(state, finalEnvelope.identity) ||
+      const state = parseTrustedWorkerEnvelope(raw, finalEnvelope.verification);
+      const identityMismatch = finalizedIdentityMismatch(state, finalEnvelope.identity);
+      if (identityMismatch ||
         result.summary.algorithmVersion !== finalEnvelope.identity.algorithmVersion ||
         result.summary.settledWallSeconds !== finalEnvelope.identity.settledWallSeconds ||
         result.summary.settledSimulationSeconds !== finalEnvelope.identity.settledSimulationSeconds) {
-        throw new Error("纯挂机 Worker 结果摘要与重载状态不一致");
+        throw new Error(`纯挂机 Worker 结果摘要与重载状态不一致${identityMismatch ? `（${identityMismatch}）` : ""}`);
       }
       return {
         state,
@@ -362,11 +363,13 @@ function validatedFinalEnvelopeProtocol(
   return finalEnvelope;
 }
 
-function matchesFinalizedIdentity(state: GameState, identity: PureIdleMacroFinalizedIdentity): boolean {
-  return state.version === identity.stateVersion &&
-    state.mode === identity.mode &&
-    state.activePlanetId === identity.activePlanetId &&
-    state.entities.length === identity.entityCount &&
-    state.belts.length === identity.beltCount &&
-    state.elapsedSeconds === identity.elapsedSeconds;
+function finalizedIdentityMismatch(state: GameState, identity: PureIdleMacroFinalizedIdentity): string {
+  const fields: string[] = [];
+  if (state.version !== identity.stateVersion) fields.push("version");
+  if (state.mode !== identity.mode) fields.push("mode");
+  if (state.activePlanetId !== identity.activePlanetId) fields.push("activePlanetId");
+  if (state.entities.length !== identity.entityCount) fields.push("entityCount");
+  if (state.belts.length !== identity.beltCount) fields.push("beltCount");
+  if (state.elapsedSeconds !== identity.elapsedSeconds) fields.push("elapsedSeconds");
+  return fields.join(",");
 }

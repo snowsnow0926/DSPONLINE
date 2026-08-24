@@ -4,6 +4,7 @@ import { hashGameState } from "./benchmark";
 import {
   FAST_OFFLINE_ALGORITHM_VERSION,
   FAST_OFFLINE_CALIBRATION_SECONDS,
+  FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS,
   OFFLINE_APPROXIMATION_KEY,
   OFFLINE_APPROXIMATION_DEFAULT_ENABLED,
   readOfflineApproximationEnabled,
@@ -313,7 +314,7 @@ describe("offline macro contract experiment", () => {
     expect(source.elapsedSeconds).toBe(0);
   });
 
-  it("discards an invalid calibration candidate and keeps the valid source on zero-calibration conservative settlement", () => {
+  it("discards an invalid calibration candidate and keeps the valid source on a bounded conservative prefix", () => {
     const source = stableEmptyState();
     source.tray.iron_ore = 25;
     const sourceHash = hashGameState(source);
@@ -331,8 +332,8 @@ describe("offline macro contract experiment", () => {
 
     expect(result.status).toBe("conservative");
     if (result.status === "conservative") {
-      expect(result.report.calibrationWindowSeconds).toBe(0);
-      expect(result.report.fallbackReason).toContain("零校准保守宏观");
+      expect(result.report.calibrationWindowSeconds).toBe(FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS);
+      expect(result.report.fallbackReason).toContain("有界保守前缀");
       expect(result.state.tray.iron_ore).toBe(25);
       expect(result.state.elapsedSeconds - source.elapsedSeconds).toBe(3_600);
     }

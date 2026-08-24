@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.5");
     }
   });
 }
@@ -1602,15 +1602,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.0.46");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
-  await expect(releaseNotes).toContainText("自动保存保持模拟运行");
-  await expect(releaseNotes).toContainText("Worker 状态自动解锁");
-  await expect(releaseNotes).toContainText("默认保护与实验性编辑都安全");
-  await expect(releaseNotes).toContainText("手机连续拉线不再遮挡地图");
-  await expect(releaseNotes).toContainText("画布显示可独立控制");
-  await expect(releaseNotes).toContainText("纯挂机日志与宏观进度保留");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(releaseNotes).toContainText("保存链路不再搬运多份巨型正文");
+  await expect(releaseNotes).toContainText("存档默认导出为 .json.gz");
+  await expect(releaseNotes).toContainText("v47 默认字段进一步精确瘦身");
+  await expect(releaseNotes).toContainText("存档与服务端协议保持兼容");
+  await expect(releaseNotes).toContainText("超大存档纯挂机纳入完整验收");
+  await expect(releaseNotes).toContainText("银河综合榜使用五项等权对数评分");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1633,15 +1633,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.0.46");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-1440.png", fullPage: true });
+  await expect(releaseNotes).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v115-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v115-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1664,7 +1664,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v115-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1673,16 +1673,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-17-v1.0.46");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-24-v1.1.5");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年8月17日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年8月24日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.0.46");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1692,12 +1692,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "存档稳定性与手机连续拉线热修");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.0.46");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(10);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.5");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v143-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v115-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });
@@ -2092,23 +2092,26 @@ test("username registration and login preserve every local save without automati
   await page.goto("/?menu=1");
   await page.getByRole("button", { name: /开始游戏/ }).click();
   await page.getByTitle("保存并返回主菜单").click();
-  const before = await page.evaluate(() => {
+  const before = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+    await store.flushLocalSaveWrites();
     const comparable = (raw: string | null) => {
       if (!raw) return null;
       const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
       return envelope;
     };
-    const main = window.localStorage.getItem("dsp-idle-network.save.v1");
+    const main = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
     if (!main) throw new Error("missing local main save");
-    window.localStorage.setItem("dsp-idle-network.slot.1", main);
-    window.localStorage.setItem("dsp-idle-network.slot.2", main);
-    window.localStorage.setItem("dsp-idle-network.slot.3", main);
-    return [
-      comparable(window.localStorage.getItem("dsp-idle-network.save.v1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.2")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.3")),
+    const keys = [
+      "dsp-idle-network.save.v1",
+      "dsp-idle-network.slot.1",
+      "dsp-idle-network.slot.2",
+      "dsp-idle-network.slot.3",
     ];
+    for (const key of keys.slice(1)) store.setLocalSaveValue(key, main);
+    await store.flushLocalSaveWrites();
+    return Promise.all(keys.map(async (key) => comparable(await store.readPersistedLocalSaveValue(key))));
   });
   await page.reload();
   await page.getByRole("button", { name: "登录与云存档" }).click();
@@ -2125,18 +2128,22 @@ test("username registration and login preserve every local save without automati
   await page.getByLabel("密码", { exact: true }).fill("strong-pass-123");
   await page.getByRole("button", { name: "登录云账户" }).click();
   await expect(page.locator(".start-menu-message")).toContainText("本地存档保持不变");
-  const after = await page.evaluate(() => {
+  const after = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+    await store.flushLocalSaveWrites();
     const comparable = (raw: string | null) => {
       if (!raw) return null;
       const { savedAt: _savedAt, ...envelope } = JSON.parse(raw) as Record<string, unknown>;
       return envelope;
     };
-    return [
-      comparable(window.localStorage.getItem("dsp-idle-network.save.v1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.1")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.2")),
-      comparable(window.localStorage.getItem("dsp-idle-network.slot.3")),
+    const keys = [
+      "dsp-idle-network.save.v1",
+      "dsp-idle-network.slot.1",
+      "dsp-idle-network.slot.2",
+      "dsp-idle-network.slot.3",
     ];
+    return Promise.all(keys.map(async (key) => comparable(await store.readPersistedLocalSaveValue(key))));
   });
   expect(after).toEqual(before);
 });

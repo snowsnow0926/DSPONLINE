@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.5";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,11 +110,14 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Save Stability and Mobile Belt Batch Hotfix" });
+  const dialog = page.getByRole("dialog", { name: "Low-memory Large Saves and Compressed Exports" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.0.46");
-  await expect(dialog).toContainText("Autosaves keep simulation running");
-  await expect(dialog).toContainText("Mobile continuous connections no longer block the map");
+  await expect(dialog).toContainText("1.1.5");
+  await expect(dialog).toContainText("Save transport avoids duplicate giant payloads");
+  await expect(dialog).toContainText("Saves export as .json.gz by default");
+  await expect(dialog).toContainText("More exact v47 default-field compaction");
+  await expect(dialog).toContainText("Large-save pure idle is acceptance-gated");
+  await expect(dialog).toContainText("Galaxy composite balances five logarithmic metrics");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

@@ -2,6 +2,7 @@
 
 import {
   applyContentPackRuntimeSnapshot,
+  type ContentPackRegistry,
 } from "./contentPacks";
 import {
   applyPureIdleMacroFinalState,
@@ -20,6 +21,7 @@ import type {
   PureIdleMacroWorkerResponse,
 } from "./pureIdleMacroProtocol";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
+import { projectPersistentSaveState } from "./saveProjection";
 import {
   createImmutableWorkerBinaryPayload,
   workerBinaryPayloadTransferables,
@@ -30,6 +32,7 @@ export type { PureIdleMacroWorkerRequest, PureIdleMacroWorkerResponse } from "./
 interface PureIdleMacroWorkerSessionContext {
   session: PureIdleMacroSession;
   registryFingerprint: string;
+  registry: ContentPackRegistry;
   terminalState?: PureIdleMacroFinalStateOptions;
 }
 
@@ -107,6 +110,7 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
       sessionContext = {
         session: initializedSession,
         registryFingerprint: request.registry.fingerprint,
+        registry: request.registry.registry,
         ...(terminalState ? { terminalState } : {}),
       };
       self.postMessage({
@@ -140,9 +144,14 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
     const finalState = request.terminal
       ? applyPureIdleMacroFinalState(result.state, request.targetWallSeconds, sessionContext.terminalState!)
       : result.state;
-    const mode = finalState.mode === "speedrun" ? "speedrun" : "normal";
+    // Keep the pure-idle stop path on the same sparse, canonical persistence
+    // boundary as ordinary autosave/manual-save. Serializing the full runtime
+    // state here retained exact defaults on every late-game entity and could
+    // hold the Worker for minutes on 70+ MiB saves.
+    const persistent = projectPersistentSaveState(finalState, sessionContext.registry);
+    const mode = persistent.mode === "speedrun" ? "speedrun" : "normal";
     const savedAt = Date.now();
-    const serialized = serializeSaveEnvelopeToTransfer(finalState, {
+    const serialized = serializeSaveEnvelopeToTransfer(persistent, {
       formatVersion: 2,
       kind: "primary",
       mode,
@@ -151,12 +160,12 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
     });
     const identity: PureIdleMacroFinalizedIdentity = {
       stateChecksum: serialized.stateChecksum,
-      stateVersion: finalState.version,
+      stateVersion: persistent.version,
       mode,
-      activePlanetId: finalState.activePlanetId,
-      entityCount: finalState.entities.length,
-      beltCount: finalState.belts.length,
-      elapsedSeconds: finalState.elapsedSeconds,
+      activePlanetId: persistent.activePlanetId,
+      entityCount: persistent.entities.length,
+      beltCount: persistent.belts.length,
+      elapsedSeconds: persistent.elapsedSeconds,
       algorithmVersion: result.summary.algorithmVersion,
       settledWallSeconds: result.summary.settledWallSeconds,
       settledSimulationSeconds: result.summary.settledSimulationSeconds,

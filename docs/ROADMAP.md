@@ -1,5 +1,28 @@
 # 公开测试版后续路线图
 
+## 1.1.5 开发候选（2026-08-24，开发完成未发布）
+
+- [x] 终局大存档保存管线改为 Worker 内稀疏化、gzip 传输和持久化端范围校验，避免主线程及 Worker 间同时持有多份完整状态对象。
+- [x] 支持有解压上限的 `.json.gz` 导入/导出；真实 79.4 MB 附件压至 2.76 MB，768 MiB Renderer 下连续自动/手动保存、备份与重载通过。
+- [x] 超大存档纯挂机按内存风险进入保守宏观结算；真实附件派生副本完成 30 天可重载验收，原附件未修改。
+- [x] 银河综合升级为五个公开榜等权的 `balanced-log-v2`，每项每翻倍增加相同分数，不再包含隐藏探索/殖民加分。
+- [x] 修复生产进度在延迟 Worker 发布跨过自然换圈后发生视觉回退。
+- [ ] Release Agent 从 clean 固定提交生成不可变 Web/API/Windows/Android 制品，补齐受保护 Android SDK/长期证书、双节点 fresh backup、原子切换、公网 smoke、下载 Range/cache/PWA 和 previous-stable 后方可发布。
+
+开发与制品证据将在 [1.1.5 开发报告](./DEVELOPMENT_REPORT_1.1.5.md)、[Release Agent 交接](./RELEASE_HANDOFF_1.1.5.md) 和 [候选记录](./releases/1.1.5-candidate.md) 中按固定 runtime SHA 封存。
+
+## 1.1.4 开发候选（2026-08-23，开发完成未发布）
+
+- [x] 高堆叠建筑制造中心安全批处理与多中心公平预算；通过有限副产物相位探测保持物资守恒，避免单个巨构独占保护预算。
+- [x] 蓝图传送带显式 `lanes` 守恒；设备默认值只作用于新绘制线路，不覆盖已有蓝图拓扑。
+- [x] 挂机/离线保守回退先执行 1 秒隔离精确前缀，冻结不确定尾段并在 UI 明确区分“短窗口未测得”和“未运行”。
+- [x] 服务端运行时 `UserLookupIndex` 优化注册、登录、找回密码和邮箱绑定查找；权威用户表复核、冷回退和增量事件保持认证安全，不改 SQLite/云协议。
+- [x] 终局大存档双向治理：v47 精确默认字段稀疏化、模拟 Worker transfer-only 权威保存，以及 64 MiB 保证 / 约 96 MiB 硬上限的完整云传输合同；真实 64.14 MiB 档压缩、两次自动保存、手动保存、备份读回和重载通过。
+- [x] 完整 server/SQLite（376/2 skipped + station 3/3）与 ops（56/6 Linux-only skipped）开发门禁通过。
+- [ ] Release Agent 生成不可变跨端制品并完成 Nginx 112m 配置备份/验证、64～96 MiB 公网传输、签名、真机、备份、双节点健康和观察窗口后，才可进入发布流程。
+
+详细证据见 [1.1.4 开发交接](./feedback/2026-08-23-1.1.4-development-handoff.md) 与 [1.1.4 候选记录](./releases/1.1.4-candidate.md)。
+
 ## 全星系空间站扩展（1.0.45 候选，开发合并完成）
 
 - [x] M0：兼容桥接开关与新状态骨架；`VITE_SPACE_STATION_ENABLED=false` 可构建不升级 v46 的桥接版。

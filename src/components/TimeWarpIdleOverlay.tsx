@@ -63,8 +63,9 @@ function stateSnapshot(game: GameState): PureIdleTerminalSnapshot {
   };
 }
 
-function efficiencyLabel(value: number | null): string {
-  return value === null ? "未运行" : `${Math.round(value * 100)}%`;
+function efficiencyLabel(value: number | null, conservativeOnly = false): string {
+  if (value !== null) return `${Math.round(value * 100)}%`;
+  return conservativeOnly ? "短窗口未测得" : "未运行";
 }
 
 function efficiencyTone(value: number | null): string {
@@ -135,6 +136,7 @@ export function TimeWarpIdleOverlay({
   const persistentBaseline = useMemo(() => stateSnapshot(baselineGame), [baselineGame]);
   const projected = projectPureIdleTerminalSnapshot(macroSummary, fallback, elapsed);
   const baseline = macroSummary?.baseline ?? persistentBaseline;
+  const conservativeOnly = macroSummary?.conservativeOnly === true;
   const modeLabel = macroSummary?.mode === "extreme" ? "终局极限模式" : "宏观纯挂机";
   const phaseLabel = macroSummary
     ? macroSummary.phase === "preparing-power" ? "正在准备供电快照"
@@ -192,14 +194,16 @@ export function TimeWarpIdleOverlay({
         </header>
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
-          : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
+          : conservativeOnly
+            ? "精确 Worker 连续失败，已先结算 1 秒可验证前缀；其余不确定产线冻结，不会伪造产量，停止后仍可重试精确恢复。"
+            : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
 
         <section className="time-warp-idle-metrics" aria-label="运行摘要">
           <div><Gauge size={17} /><span>实际倍率</span><strong>{macroSummary?.actualMultiplier ?? computeLimits.actualMultiplier}x</strong></div>
           <div><Zap size={17} /><span>请求 / 供电倍率</span><strong>{macroSummary?.requestedMultiplier ?? game.timeWarp.requestedMultiplier}x / {macroSummary?.powerLimitedMultiplier ?? computeLimits.powerLimitedMultiplier}x</strong></div>
           <div><Clock3 size={17} /><span>本次挂机</span><strong>{formatDuration(elapsed)}</strong></div>
           <div><Clock3 size={17} /><span>历史累计挂机</span><strong>{formatDuration(game.idleSettlement.totalIdleTime)}</strong><small>仅统计已验证提交的时间段</small></div>
-          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{efficiencyLabel(macroSummary?.minimumEfficiency ?? null)}</strong><small>{macroSummary?.limitingReason ?? "等待校准"}</small></div>
+          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{efficiencyLabel(macroSummary?.minimumEfficiency ?? null, conservativeOnly)}</strong><small>{macroSummary?.limitingReason ?? (conservativeOnly ? "仅显示可验证短窗口；不确定尾段已冻结" : "等待校准")}</small></div>
           <div><HardDrive size={17} /><span>保存与恢复</span><strong className={saveFailure ? "warning" : "ready"}>{saveFailure ? "需要处理" : "检查点正常"}</strong><small>{recoveryStatus}</small></div>
           <div><ShieldCheck size={17} /><span>下次真实校验</span><strong>{macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
         </section>
@@ -226,7 +230,7 @@ export function TimeWarpIdleOverlay({
 
         {macroSummary?.terminalLines.length ? <section className="time-warp-limit-lines" aria-label="产线效率详情">
           <header><span>产线效率</span><small>按启动校准速率比较</small></header>
-          {macroSummary.terminalLines.map((line) => <div key={line.id} className={`efficiency-${efficiencyTone(line.efficiency)}`}><span>{line.label}</span><strong>{efficiencyLabel(line.efficiency)}</strong><small>{line.reason} · {formatQuantityCompact(line.sustainableRatePerMinute)}/分钟</small></div>)}
+          {macroSummary.terminalLines.map((line) => <div key={line.id} className={`efficiency-${efficiencyTone(line.efficiency)}`}><span>{line.label}</span><strong>{efficiencyLabel(line.efficiency, conservativeOnly)}</strong><small>{line.reason}{conservativeOnly && line.efficiency === null ? "；不确定尾段已冻结" : ""} · {formatQuantityCompact(line.sustainableRatePerMinute)}/分钟</small></div>)}
         </section> : null}
 
         <details className="time-warp-idle-diagnostics">

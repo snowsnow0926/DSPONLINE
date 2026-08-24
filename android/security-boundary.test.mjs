@@ -109,8 +109,10 @@ test("Android WebView excludes generic filesystem readers and uses a bounded wri
   assert.doesNotMatch(settings, /capacitor-(?:filesystem|share)/);
   assert.doesNotMatch(build, /capacitor-(?:filesystem|share)/);
   assert.match(exporter, /TextExportProtocol\.boundedUtf8/);
+  assert.match(exporter, /TextExportProtocol\.boundedBase64/);
+  assert.match(exporter, /exportBase64AndShare/);
   assert.match(exporter, /getFilesDir\(\), "private-exports"/);
-  assert.doesNotMatch(exporter, /readFile|readdir|Base64|arrayBuffer/);
+  assert.doesNotMatch(exporter, /readFile|readdir|arrayBuffer/);
 });
 
 test("Android TypeScript archive bridge cannot pass raw tokens or archive bytes through WebView", async () => {

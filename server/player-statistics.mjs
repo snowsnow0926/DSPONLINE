@@ -114,6 +114,7 @@ export function buildPlayerEstimatePlan({
     ? Math.max(MIN_BASELINE_DAYS, Math.min(30, baselineDays))
     : DEFAULT_BASELINE_DAYS;
   if (!from || !to || dayOrdinal(to) < dayOrdinal(from)) throw new Error("玩家估算日期范围无效");
+  if (dayOrdinal(to) > dayOrdinal(asOf)) throw new Error("玩家估算不能覆盖未来日期");
 
   const fromOrdinal = dayOrdinal(from);
   const baselineDaysList = Array.from({ length: requestedBaselineDays }, (_, index) => dayFromOrdinal(fromOrdinal - requestedBaselineDays + index));

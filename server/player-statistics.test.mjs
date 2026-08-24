@@ -90,3 +90,14 @@ test("summarizes estimates as daily activity, not a unique lifetime count", () =
   assert.equal(summary.latest.day, "2026-08-15");
   assert.equal(summary.daily[0].observedPlayers, 206);
 });
+
+test("rejects a backfill range that extends beyond the as-of day", () => {
+  const { dailyMetrics, analyticsDaily } = baselineData();
+  assert.throws(() => buildPlayerEstimatePlan({
+    dailyMetrics,
+    analyticsDaily,
+    fromDay: "2026-08-14",
+    toDay: "2026-08-25",
+    asOfDay: "2026-08-24",
+  }), /不能覆盖未来日期/);
+});

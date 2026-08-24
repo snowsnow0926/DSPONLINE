@@ -1,5 +1,11 @@
 # 原生应用构建与更新
 
+> 当前发布版本：Web/Windows `1.1.6`；Android 正式包 `1.1.6 / 1001006`
+> 1.1.6 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.5。
+> 当前公开稳定版本：Windows `1.1.6` 安装包按历史策略为 `NotSigned`；Android `1.1.6 / 1001006` 使用既有长期证书签名。实体 Android 设备本轮未执行。
+> 1.1.6 的 Web、Windows 与 Android 继续使用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；纯挂机合同和线路渲染修复不改变存档边界。
+> APK：5,220,189 B，SHA-256 `38b8d717a75322329c8965b531e18e7ba03067adac6c565411ad432d60c923eb`；AAB：5,009,117 B，SHA-256 `70af4b7c853a8ff73edb240f2c118d1cc12310ecd29e235d93334509ab079090`。公开下载与更新清单证据见 [1.1.6 正式发布记录](./releases/1.1.6.md)。
+
 > 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
 > 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
 > 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。

@@ -1,5 +1,14 @@
 # 公开测试版后续路线图
 
+## 1.1.6 已发布（2026-08-24）
+
+- [x] 修复传送带线路在批量拉线、视口变换和重渲染时的端点/卡片相对位置错位。
+- [x] 修复超大终局存档纯挂机保守模式冻结累计生产的问题；在安全合同边界内继续高倍率时间与科研结算。
+- [x] 完成香港/上海 Web/API、上海下载页、Windows 和 Android stable 全量发布，1.1.5 保留为 current/previous/rollback 边界。
+- [x] 归档不可变候选、组件清单、双节点备份 evidence、下载哈希和香港 previous-stable Nginx 指针；实体 Android 设备门禁未执行，Windows 继续 `NotSigned`。
+
+完整 observed evidence 见 [1.1.6 正式发布记录](./releases/1.1.6.md)。
+
 ## 1.1.5 已发布（2026-08-24）
 
 - [x] 大存档低峰值 Worker gzip、稀疏持久化、`.json.gz` 导入/导出和受限原生分享。

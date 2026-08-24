@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前生产状态（2026-08-24，1.1.6 已稳定发布）**：香港/上海 Web/API 均为 `1.1.6-4f6d24f8c709`；香港 generation 36 / proxy generation 148、上海 generation 22 / proxy generation 62，current 均为 green / 4322，previous Web/API 均为 1.1.5。上海下载页 current 为 `download-site-1.1.6-4f6d24f8c709`，previous 保留 1.1.5；香港 `/canary/previous/` 302 到不可变 `web-1.1.5-a92c0d3157f3`。两地 API、handoff proxy、health/node-health timer active，`NRestarts=0`，pending switch 为空；本地/公网 health/ready 200。香港正式备份为 3,772,833,792 bytes、SHA `0bd51a5c…96180`、quick_check/schema8/layout3、根盘约 83%；上海为 462,848 bytes、SHA `96315225…495ed8`、quick_check/schema8/layout3、根盘约 88%。上海容量处于预警水位，下一次 data mutation 前必须重新验证低于 90%。完整 observed evidence、下载 Range/哈希、控制代理修复和回滚边界见 [1.1.6 正式发布记录](./releases/1.1.6.md)。
+
 > 公开仓库脱敏说明：本文及 `deploy/` 模板中的节点地址、证书主机名和对象存储标识均使用示例占位符。实际值只应从受保护的运维环境注入，不能提交到 Git。
 
 ## 1. 环境边界

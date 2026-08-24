@@ -56,7 +56,7 @@
 | Chromium E2E | targeted 40 通过；menu/cloud 9/9；full 428 通过 / 26 条件跳过，0 失败 |
 | Web build | 1,965 modules；startup gzip 195,013 B（JS 101,992 B，CSS 93,021 B）；menu gzip 251,710 B；forbidden 0 |
 | API candidate | expanded 182 files；archive source 105 files；smoke HTTP 200；schema v8 / SQLite layout v3 |
-| Release metadata | source manifest 269 files；candidate bundle 8 files；provenance 3 subjects；SHA256SUMS covers 10 files |
+| Release metadata | source manifest 269 files；candidate manifest covers 8 payload files（另有 provenance sidecar）；provenance 3 subjects；SHA256SUMS covers 10 files |
 
 全量 E2E 中出现的 Vite proxy `127.0.0.1:65534` 和 ResizeObserver/React Flow warning 是既有测试环境诊断输出，不是失败。
 

@@ -22,7 +22,7 @@
 在候选提交上已完成并复验以下交接物（`<release-id>` 为提交短 SHA 组成的候选 ID）：
 
 - `artifacts/release-bundle/<release-id>/`：Web、API、source 和 Windows unsigned-unpacked 压缩包，以及 source-gate、gate-report、SBOM。
-- `artifacts/release-manifests/<release-id>-candidate.json`：8 个候选文件的大小、SHA-256 和 aggregate hash。
+- `artifacts/release-manifests/<release-id>-candidate.json`：8 个 payload 文件的大小、SHA-256 和 aggregate hash；bundle 中另有 provenance sidecar。
 - `artifacts/release-gate/<release-id>-provenance.intoto.json`：3 个 subject，已通过 `verify-provenance`。
 - `artifacts/release-manifests/<release-id>-SHA256SUMS.txt`：候选包及全部交接元数据的可重复校验清单。
 - `dist/version.json`：由最终 Web build 生成，版本和 buildId 必须与候选 manifest 对齐。

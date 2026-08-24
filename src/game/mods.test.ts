@@ -48,4 +48,17 @@ describe("content pack validation", () => {
     expect(result.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["building-override-value", "building-override-id", "belt-duplicate"]));
     expect(result.manifest).not.toHaveProperty("script");
   });
+
+  it("rejects a belt/building ID collision before runtime registration", () => {
+    const result = validateContentPack({
+      formatVersion: 2,
+      id: "cross_category_collision",
+      name: "跨类别冲突",
+      version: "1.0.0",
+      buildings: [{ id: "shared_runtime_id", name: "共享建筑", costs: [{ itemId: "iron_ingot", amount: 1 }] }],
+      belts: [{ id: "shared_runtime_id", name: "共享线路", tier: 4, speed: 60, costs: [{ itemId: "iron_ingot", amount: 1 }] }],
+    });
+    expect(result.valid).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain("belt-building-id-conflict");
+  });
 });

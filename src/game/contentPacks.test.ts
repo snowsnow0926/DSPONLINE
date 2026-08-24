@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import documentedExample from "../../docs/examples/example-dense-materials.content-pack.json";
-import { CONSTRUCTION, ITEMS, getBeltConstructionId, getBeltSpeed, getBuilding, getRecipe, getRecipesForBuilding } from "./content";
+import { CONSTRUCTION, ITEMS, getBeltConstructionId, getBeltSpeed, getBuilding, getConstructionCatalogIds, getRecipe, getRecipesForBuilding, isConstructionDeployable, isConstructionInCategory } from "./content";
 import {
   applyContentPackRegistry,
   applyContentPackRuntimeSnapshot,
@@ -172,6 +172,48 @@ describe("content pack runtime registry", () => {
     expect(getRecipe("qa_alloy_recipe" as never)?.outputs[0].itemId).toBe("qa_alloy");
     expect(getRecipesForBuilding("qa_fabricator" as never).map((recipe) => recipe.id)).toContain("qa_alloy_recipe");
     expect((CONSTRUCTION as Array<{ buildingId: string }>).some((definition) => definition.buildingId === "qa_fabricator")).toBe(true);
+  });
+
+  it("exposes runtime custom buildings in the deployment catalog and generic tray category", () => {
+    const validation = validateContentPack({
+      formatVersion: 1,
+      id: "qa_deployable_pack",
+      name: "QA 可部署建筑",
+      version: "1.0.0",
+      buildings: [{
+        id: "qa_deployable_splitter",
+        name: "QA 可部署分流器",
+        kind: "splitter",
+        costs: [{ itemId: "iron_ingot", amount: 2 }],
+      }],
+    });
+    expect(validation.valid).toBe(true);
+    const registered = registerContentPack(createContentPackRegistry(), validation);
+    expect(applyContentPackRegistry(registered.registry).catalogValid).toBe(true);
+    expect(getConstructionCatalogIds()).toContain("qa_deployable_splitter");
+    expect(isConstructionDeployable("qa_deployable_splitter" as never)).toBe(true);
+    expect(isConstructionInCategory("qa_deployable_splitter", "logistics")).toBe(true);
+    expect(isConstructionInCategory("qa_deployable_splitter", "production")).toBe(false);
+  });
+
+  it("keeps declarative miner entries out of free-coordinate deployment", () => {
+    const validation = validateContentPack({
+      formatVersion: 1,
+      id: "qa_miner_pack",
+      name: "QA 采矿扩展",
+      version: "1.0.0",
+      buildings: [{
+        id: "qa_miner",
+        name: "QA 采矿器",
+        kind: "miner",
+        costs: [{ itemId: "iron_ingot", amount: 2 }],
+      }],
+    });
+    expect(validation.valid).toBe(true);
+    const registered = registerContentPack(createContentPackRegistry(), validation);
+    expect(applyContentPackRegistry(registered.registry).catalogValid).toBe(true);
+    expect(getConstructionCatalogIds()).toContain("qa_miner");
+    expect(isConstructionDeployable("qa_miner" as never)).toBe(false);
   });
 
   it("requires installed and enabled version-compatible dependencies before activation", () => {

@@ -31,12 +31,15 @@ import {
   getBeltConstructionId,
   getBeltTier,
   getBuilding,
+  getConstructionCatalogIds,
   getConstructionDefinition,
   getExtractorBuildingId,
   getItem,
   getPlanet,
   getRecipe,
   getTechnology,
+  isConstructionDeployable,
+  isConstructionInCategory,
   isConveyorBeltId,
 } from "../../game/content";
 import {
@@ -81,7 +84,7 @@ import type {
 import type { MobileSheetSnap } from "../../hooks/useMobileNavigation";
 import { PowerValue } from "../PowerValue";
 import { ItemCatalogPicker } from "../CatalogPicker";
-import { CONSTRUCTION_BUILD_ORDER, constructionBuildIcon } from "../GamePanels";
+import { constructionBuildIcon } from "../GamePanels";
 import { ItemGlyph } from "../ItemReference";
 import { QuantityStepper } from "../QuantityStepper";
 import { QuantityValue } from "../QuantityValue";
@@ -97,13 +100,6 @@ export type MobileCanvasMode = "browse" | "place" | "connect" | "select" | "layo
 type BuildMode = "deploy" | "craft" | "fleet" | "discard";
 type BuildCategory = "all" | "recent" | "power" | "production" | "logistics" | "dyson";
 
-const BUILD_CATEGORIES: Record<Exclude<BuildCategory, "all" | "recent">, Set<ConstructionId>> = {
-  power: new Set(["wind_turbine", "solar_panel", "geothermal_power_station", "thermal_power_plant", "mini_fusion_power_plant", "artificial_star", "accumulator", "energy_exchanger"]),
-  production: new Set(["mining_machine", "arc_smelter", "plane_smelter", "assembling_machine_mk1", "assembling_machine_mk2", "assembling_machine_mk3", "matrix_lab", "oil_extractor", "oil_refinery", "water_pump", "chemical_plant", "quantum_chemical_plant", "fractionator", "miniature_particle_collider", "spray_coater", "construction_center"]),
-  logistics: new Set(["conveyor_belt_mk1", "conveyor_belt_mk2", "conveyor_belt_mk3", "storage_mk1", "material_delivery_hub", "orbital_cargo_terminal", "splitter_4way", "storage_tank", "planetary_logistics_station", "interstellar_logistics_station", "space_station_construction_launcher", "orbital_collector"]),
-  dyson: new Set(["em_rail_ejector", "vertical_launching_silo", "ray_receiver", "galactic_material_exporter", "micro_black_hole_connector", "time_warp_device"]),
-};
-
 const BUILD_MODE_LABELS: Record<BuildMode, string> = { deploy: "部署", craft: "制造", fleet: "载具", discard: "删除" };
 const BUILD_CATEGORY_LABELS: Record<BuildCategory, string> = { all: "全部", recent: "最近", power: "能源", production: "生产", logistics: "物流", dyson: "戴森" };
 const PLACEMENT_COUNTS: PlacementCount[] = [1, 2, 5, 10];
@@ -112,7 +108,8 @@ const MOBILE_RECENT_BUILD_KEY = "dsp-idle-network.mobile-recent-construction.v1"
 function loadMobileRecentBuilds(): Array<BuildingId | ConveyorBeltId> {
   try {
     const value = JSON.parse(window.localStorage.getItem(MOBILE_RECENT_BUILD_KEY) ?? "[]") as unknown;
-    return Array.isArray(value) ? value.filter((id): id is BuildingId | ConveyorBeltId => typeof id === "string" && CONSTRUCTION_BUILD_ORDER.includes(id as BuildingId | ConveyorBeltId)).slice(0, 12) : [];
+    const catalog = getConstructionCatalogIds();
+    return Array.isArray(value) ? value.filter((id): id is BuildingId | ConveyorBeltId => typeof id === "string" && catalog.includes(id as BuildingId | ConveyorBeltId)).slice(0, 12) : [];
   } catch {
     return [];
   }
@@ -168,15 +165,17 @@ export function MobileBuildSheet({ game, snap, placement, beltTier, beltTierMode
     try { window.localStorage.setItem(MOBILE_RECENT_BUILD_KEY, JSON.stringify(next)); } catch { /* Recent build history is optional UI state. */ }
   };
   const visible = useMemo(() => {
-    const catalog: ConstructionId[] = mode === "deploy" || mode === "discard"
-      ? [...CONSTRUCTION_BUILD_ORDER]
-      : CONSTRUCTION.map((definition) => definition.buildingId);
+    const catalog: ConstructionId[] = mode === "deploy"
+      ? getConstructionCatalogIds().filter(isConstructionDeployable)
+      : mode === "discard"
+        ? getConstructionCatalogIds()
+        : CONSTRUCTION.map((definition) => definition.buildingId);
     return catalog.filter((id) => {
-    if (!isConstructionVisible(game, id)) return false;
-    if (category === "recent" && (!CONSTRUCTION_BUILD_ORDER.includes(id as BuildingId | ConveyorBeltId) || !recent.includes(id as BuildingId | ConveyorBeltId))) return false;
-    if (category !== "all" && category !== "recent" && !BUILD_CATEGORIES[category].has(id)) return false;
-    const term = query.trim().toLocaleLowerCase("zh-CN");
-    return !term || mobileConstructionSearchText(id).includes(term);
+      if (!isConstructionVisible(game, id)) return false;
+      if (category === "recent" && !recent.includes(id as BuildingId | ConveyorBeltId)) return false;
+      if (category !== "all" && category !== "recent" && !isConstructionInCategory(id, category)) return false;
+      const term = query.trim().toLocaleLowerCase("zh-CN");
+      return !term || mobileConstructionSearchText(id).includes(term);
     });
   }, [category, game, mode, query, recent]);
 
@@ -229,7 +228,6 @@ export function MobileBuildSheet({ game, snap, placement, beltTier, beltTierMode
               return;
             }
             if (mode === "deploy") {
-              if (!CONSTRUCTION_BUILD_ORDER.includes(id as BuildingId | ConveyorBeltId)) return;
               remember(id as BuildingId | ConveyorBeltId);
               if (isBelt) onBelt(getBeltTier(id));
               else onPlacement(id as BuildingId);

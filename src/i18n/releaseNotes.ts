@@ -27,6 +27,45 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release117Copy = {
+  date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
+  title: { "zh-CN": "云存档合同修复与 Mod 建筑托盘", en: "Cloud Contract Repair and Mod Building Trays" },
+  summary: {
+    "zh-CN": "1.1.7 修复空间站合同在同一任务日重复生成、导致历史合同与活动合同使用同一 ID 并被云端判定 SAVE_FORMAT_INVALID 的问题；迁移时保留已结算奖励并清除不可再次领取的重复项。内容包注册的自定义建筑现在进入桌面和移动端部署托盘，按通用建筑类型归类；GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 不变。",
+    en: "Version 1.1.7 repairs same-task-day orbital station contract reoffers that reused IDs across history and active entries and were rejected by cloud validation as SAVE_FORMAT_INVALID. Migration preserves settled rewards and removes only entries that can no longer be claimed. Content-pack buildings now appear in desktop and mobile deployment trays with generic kind-based categories. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  contractTitle: { "zh-CN": "空间站合同 ID 冲突可自愈", en: "Orbital contract ID collisions self-heal" },
+  contractDescription: {
+    "zh-CN": "加载旧版存档时，已结算历史和 settledIds 组成奖励围栏；重复的 offer、accepted 和 history 条目只保留可验证的权威记录，已领取奖励不会丢失，也不会被再次领取。",
+    en: "When an older save is loaded, settled history and settledIds form a reward fence. Duplicate offer, accepted, and history entries keep only an authoritative verifiable record, so claimed rewards are preserved and cannot be claimed again.",
+  },
+  serverTitle: { "zh-CN": "云端校验保留兼容边界", en: "Cloud validation keeps a narrow compatibility boundary" },
+  serverDescription: {
+    "zh-CN": "服务端继续拒绝活动合同之间的伪造碰撞；仅对带 settledIds 且正文身份完全一致的旧版 offer/history 重叠保留兼容，奖励字段被篡改仍会被拒绝。",
+    en: "The server continues to reject forged collisions between active contracts. It accepts only a legacy offer/history overlap with settledIds and an exact identity match; altered reward fields remain invalid.",
+  },
+  modTrayTitle: { "zh-CN": "自定义建筑进入部署托盘", en: "Custom buildings appear in deployment trays" },
+  modTrayDescription: {
+    "zh-CN": "拥有有效成本的内容包建筑会按核心建筑之后的稳定顺序加入桌面和移动端托盘；machine/miner、power、storage/splitter/station 等通用 kind 会映射到对应分类，旧建筑顺序不变。",
+    en: "Content-pack buildings with valid costs are appended after core buildings in a stable order on desktop and mobile trays. Generic kinds such as machine/miner, power, and storage/splitter/station map to their corresponding categories without changing core order.",
+  },
+  modContractTitle: { "zh-CN": "Mod 扩展边界保持可验证", en: "Mod extension boundaries stay verifiable" },
+  modContractDescription: {
+    "zh-CN": "内容包仍使用声明式 JSON，不开放脚本注入；自定义建筑复用已有生产、物流和电力行为。真正的传送带等级应使用 belts 条目，建筑 kind 为 splitter 的条目不会自动获得传送带全部语义，建筑 ID 与 belt ID 冲突会在校验阶段拒绝。",
+    en: "Content packs remain declarative JSON with no script injection; custom buildings reuse existing production, logistics, and power behavior. True conveyor tiers should use belts entries; a building with kind splitter does not automatically gain all conveyor semantics, and building/belt ID collisions fail validation.",
+  },
+  compatibilityTitle: { "zh-CN": "旧存档与 1.1.6 可继续读取", en: "Existing saves and 1.1.6 remain readable" },
+  compatibilityDescription: {
+    "zh-CN": "本版不升级 GameState、存档封装、云 schema、SQLite layout 或 Mod JSON 格式；1.1.6 的保存、云修订、蓝图和核心建筑顺序保持兼容，未安装内容包时仍按缺少内容包规则处理。",
+    en: "This release does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or Mod JSON format. 1.1.6 saves, cloud revisions, blueprints, and core building order remain compatible; missing packs still follow the existing missing-content rules.",
+  },
+  regressionTitle: { "zh-CN": "合同、托盘和服务端加入回归门禁", en: "Contracts, trays, and server validation are regression-gated" },
+  regressionDescription: {
+    "zh-CN": "回归覆盖实际重复 ID 形状、奖励围栏、服务端伪造碰撞、自定义 splitter 托盘分类，以及桌面/移动端动态目录；发布前仍需完成完整单元、服务端、原生和构建门禁。",
+    en: "Regression coverage includes the affected duplicate-ID shape, reward fences, forged server collisions, custom splitter tray classification, and dynamic desktop/mobile catalogs. Full unit, server, native, and build gates remain required before release.",
+  },
+} as const;
+
 const release116Copy = {
   date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
   title: { "zh-CN": "传送带端口对齐与纯挂机高倍率修复", en: "Belt Port Alignment and Productive Pure Idle" },
@@ -463,7 +502,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release116Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release117Copy): string {
+  return release117Copy[key][locale];
+}
+
+function release116Message(locale: AppLocale, key: keyof typeof release116Copy): string {
   return release116Copy[key][locale];
 }
 
@@ -494,17 +537,35 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-24-v1.1.6",
+    id: "2026-08-24-v1.1.7",
     date: currentMessage(locale, "date"),
-    version: "1.1.6",
+    version: "1.1.7",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "measured-belt-endpoints", title: currentMessage(locale, "beltTitle"), description: currentMessage(locale, "beltDescription") },
-      { id: "stable-dense-belt-topology", title: currentMessage(locale, "performanceTitle"), description: currentMessage(locale, "performanceDescription") },
-      { id: "productive-pure-idle", title: currentMessage(locale, "idleTitle"), description: currentMessage(locale, "idleDescription") },
-      { id: "dense-belt-regression", title: currentMessage(locale, "regressionTitle"), description: currentMessage(locale, "regressionDescription") },
+      { id: "station-contract-id-repair", title: currentMessage(locale, "contractTitle"), description: currentMessage(locale, "contractDescription") },
+      { id: "station-contract-server-validation", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
+      { id: "custom-building-trays", title: currentMessage(locale, "modTrayTitle"), description: currentMessage(locale, "modTrayDescription") },
+      { id: "declarative-mod-contract", title: currentMessage(locale, "modContractTitle"), description: currentMessage(locale, "modContractDescription") },
       { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+      { id: "contract-mod-regression", title: currentMessage(locale, "regressionTitle"), description: currentMessage(locale, "regressionDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes116(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-24-v1.1.6",
+    date: release116Message(locale, "date"),
+    version: "1.1.6",
+    title: release116Message(locale, "title"),
+    summary: release116Message(locale, "summary"),
+    items: [
+      { id: "measured-belt-endpoints", title: release116Message(locale, "beltTitle"), description: release116Message(locale, "beltDescription") },
+      { id: "stable-dense-belt-topology", title: release116Message(locale, "performanceTitle"), description: release116Message(locale, "performanceDescription") },
+      { id: "productive-pure-idle", title: release116Message(locale, "idleTitle"), description: release116Message(locale, "idleDescription") },
+      { id: "dense-belt-regression", title: release116Message(locale, "regressionTitle"), description: release116Message(locale, "regressionDescription") },
+      { id: "version-upgrade", title: release116Message(locale, "compatibilityTitle"), description: release116Message(locale, "compatibilityDescription") },
     ],
   };
 }

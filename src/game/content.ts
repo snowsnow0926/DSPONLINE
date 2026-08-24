@@ -803,6 +803,68 @@ export const CONSTRUCTION: ConstructionDefinition[] = [
   { buildingId: "space_station_construction_launcher", name: "空间站施工发射平台", outputAmount: 1, requiredTechId: "system_space_station_engineering", costs: [{ itemId: "titanium_alloy", amount: 2000 }, { itemId: "frame_material", amount: 1000 }, { itemId: "quantum_chip", amount: 1000 }, { itemId: "processor", amount: 2000 }] },
 ];
 
+/**
+ * Construction ids that ship with the game.  The array is captured once so
+ * runtime content-pack entries appended to CONSTRUCTION can be discovered
+ * without changing the ordering of the built-in tray.
+ */
+const CORE_CONSTRUCTION_IDS: readonly ConstructionId[] = CONSTRUCTION.map((definition) => definition.buildingId);
+
+export type ConstructionCategory = "power" | "production" | "logistics" | "dyson";
+
+const CORE_CONSTRUCTION_CATEGORY_IDS: Record<ConstructionCategory, ReadonlySet<ConstructionId>> = {
+  power: new Set(["wind_turbine", "solar_panel", "geothermal_power_station", "thermal_power_plant", "mini_fusion_power_plant", "artificial_star", "accumulator", "energy_exchanger"]),
+  production: new Set(["mining_machine", "arc_smelter", "plane_smelter", "assembling_machine_mk1", "assembling_machine_mk2", "assembling_machine_mk3", "spray_coater", "matrix_lab", "oil_extractor", "oil_refinery", "water_pump", "chemical_plant", "quantum_chemical_plant", "fractionator", "miniature_particle_collider", "construction_center"]),
+  logistics: new Set(["conveyor_belt_mk1", "conveyor_belt_mk2", "conveyor_belt_mk3", "storage_mk1", "material_delivery_hub", "orbital_cargo_terminal", "splitter_4way", "storage_tank", "planetary_logistics_station", "interstellar_logistics_station", "space_station_construction_launcher", "orbital_collector"]),
+  dyson: new Set(["em_rail_ejector", "vertical_launching_silo", "ray_receiver", "galactic_material_exporter", "micro_black_hole_connector", "time_warp_device"]),
+};
+
+const CORE_RESOURCE_EXTRACTOR_IDS: ReadonlySet<BuildingId> = new Set([
+  "mining_machine",
+  "oil_extractor",
+  "water_pump",
+]);
+
+/** Return the core construction order followed by active runtime additions. */
+export function getConstructionCatalogIds(): ConstructionId[] {
+  const result: ConstructionId[] = [];
+  const seen = new Set<ConstructionId>();
+  for (const id of [...CORE_CONSTRUCTION_IDS, ...CONSTRUCTION.map((definition) => definition.buildingId)]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+/**
+ * Whether an entry has a supported placement interaction.  Core extractors
+ * are installed on resource veins through their dedicated interaction; a
+ * declarative `kind: "miner"` has no resource mapping yet and must not look
+ * deployable in a free-coordinate tray.
+ */
+export function isConstructionDeployable(id: ConstructionId): boolean {
+  if (isConveyorBeltId(id)) return true;
+  const building = BUILDINGS[id as BuildingId];
+  return Boolean(building && (building.kind !== "miner" || CORE_RESOURCE_EXTRACTOR_IDS.has(building.id)));
+}
+
+/**
+ * Categorize both core and declarative content-pack construction entries.
+ * Custom buildings use their safe generic kind; custom belts always belong to
+ * logistics.  Dyson-specific behavior remains an explicit core allowlist.
+ */
+export function isConstructionInCategory(id: ConstructionId, category: ConstructionCategory): boolean {
+  if (CORE_CONSTRUCTION_CATEGORY_IDS[category].has(id)) return true;
+  if (isConveyorBeltId(id)) return category === "logistics";
+  const building = BUILDINGS[id as BuildingId];
+  if (!building) return false;
+  if (category === "power") return building.kind === "power";
+  if (category === "production") return building.kind === "machine" || building.kind === "miner";
+  if (category === "logistics") return building.kind === "storage" || building.kind === "splitter" || building.kind === "station";
+  return false;
+}
+
 export const TECHNOLOGIES: Record<TechId, TechnologyDefinition> = {
   electromagnetic_matrix: {
     id: "electromagnetic_matrix", name: "电磁矩阵", tier: 0, costs: [{ itemId: "electromagnetic_matrix", amount: 3 }], prerequisites: [],

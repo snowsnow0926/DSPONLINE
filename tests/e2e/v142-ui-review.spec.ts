@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.6";
+const RELEASE_NOTE_ID = "2026-08-24-v1.1.7";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "传送带端口对齐与纯挂机高倍率修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.6");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("传送带线精确连接真实端口");
-  await expect(dialog).toContainText("高密度线路拓扑不随流量重建");
-  await expect(dialog).toContainText("终局纯挂机继续按高倍率结算");
-  await expect(dialog).toContainText("多端口与密集画布加入回归门禁");
-  await expect(dialog).toContainText("存档与服务端协议保持兼容");
+  await expect(dialog).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.7");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(dialog).toContainText("空间站合同 ID 冲突可自愈");
+  await expect(dialog).toContainText("云端校验保留兼容边界");
+  await expect(dialog).toContainText("自定义建筑进入部署托盘");
+  await expect(dialog).toContainText("Mod 扩展边界保持可验证");
+  await expect(dialog).toContainText("旧存档与 1.1.6 可继续读取");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -6,6 +6,7 @@ import { createProductionPlan } from "./planning";
 import { cancelDeferredOfflineGame, clearGameSlot, exportGame, exportGameSlot, finalizeDeferredOfflineGame, getSaveSlotSummaries, getSaveSnapshotSummaries, importGame, inspectSave, loadGame, loadGameDeferredOffline, loadGameSlot, loadGameSlotDeferredOffline, loadSaveSnapshot, migrateGame, repairSave, saveGame, saveGameSnapshot, saveGameSlot, saveGameVerified, saveVerifiedPayload, skipDeferredOfflineGame } from "./storage";
 import { getOfflineSimulationLimitSeconds } from "./endgame";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
+import { STATION_TASK_DAY_MS, STATION_TASK_TIME_ZONE_OFFSET_MS, synchronizeStationContracts } from "./stationContracts";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 
@@ -28,6 +29,52 @@ describe("game storage", () => {
     expect(migrated).toMatchObject({ version: 47, contentPacks: [], settings: { beltBufferLimit: 100_000_000 } });
     expect(migrated.entities[0].outputs.iron_ore).toBe(321);
     expect(migrated.endgame.constructionActivity.endsAtMs).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("repairs duplicate station contract IDs through the normal import/export path", () => {
+    const source = createInitialState();
+    source.version = 47;
+    source.totalProduced.universe_matrix = 1;
+    source.orbitalStation.status = "showcase-building";
+    const taskDay = 12;
+    const taskDayClock = taskDay * STATION_TASK_DAY_MS - STATION_TASK_TIME_ZONE_OFFSET_MS + 1_000;
+    source.orbitalStation.contractBoard.taskDay = taskDay;
+    source.orbitalStation.contractBoard.lastConfirmedWallClockMs = taskDayClock;
+    const synchronized = synchronizeStationContracts(source, taskDayClock);
+    const generated = structuredClone(synchronized.contractBoard.offers);
+    expect(generated).toHaveLength(4);
+
+    const history = generated.map((contract) => ({
+      ...structuredClone(contract),
+      status: "settled" as const,
+      requirements: contract.requirements.map((requirement) => ({ ...requirement, delivered: requirement.amount })),
+      settlementId: `station-settlement:${contract.id}:completed`,
+      settlementReason: "completed" as const,
+      settledAtTaskDay: taskDay,
+      completionBasisPoints: 10_000,
+    }));
+    const malformed = structuredClone(synchronized);
+    malformed.contractBoard.offers = generated;
+    malformed.contractBoard.accepted = [{
+      ...structuredClone(generated[0]),
+      status: "accepted",
+      acceptedAtTaskDay: taskDay,
+    }];
+    malformed.contractBoard.history = history;
+    malformed.contractBoard.settledIds = history.map((contract) => contract.id);
+    const migrated = migrateGame({ ...source, orbitalStation: malformed })!;
+    expect(migrated.orbitalStation.contractBoard.offers).toHaveLength(0);
+    expect(migrated.orbitalStation.contractBoard.accepted).toHaveLength(0);
+    expect(migrated.orbitalStation.contractBoard.history).toHaveLength(4);
+    expect(new Set([
+      ...migrated.orbitalStation.contractBoard.offers,
+      ...migrated.orbitalStation.contractBoard.accepted,
+      ...migrated.orbitalStation.contractBoard.history,
+    ].map((contract) => contract.id)).size).toBe(4);
+
+    const roundTrip = importGame(exportGame(migrated));
+    expect(roundTrip?.orbitalStation.contractBoard.history.map((contract) => contract.id)).toEqual(history.map((contract) => contract.id));
+    expect(roundTrip?.orbitalStation.contractBoard.offers).toHaveLength(0);
   });
 
   it("keeps the automatically resumed research queue stable after save and reload", () => {

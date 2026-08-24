@@ -351,7 +351,10 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
   if (new Set(validBelts.map((belt) => belt.id)).size !== validBelts.length || new Set(validBelts.map((belt) => belt.tier)).size !== validBelts.length) {
     issues.push({ severity: "error", code: "belt-duplicate", path: "$.belts", message: "自定义传送带 ID 和等级必须唯一" });
   }
+  const registeredBuildingIds = new Set(context?.buildingIds ?? []);
   for (const belt of validBelts) {
+    if (buildingIds.has(belt.id)) issues.push({ severity: "error", code: "belt-building-id-conflict", path: `$.belts.${belt.id}`, message: `传送带 ID ${belt.id} 不能与同包建筑 ID 相同` });
+    if (registeredBuildingIds.has(belt.id)) issues.push({ severity: "error", code: "belt-building-id-conflict", path: `$.belts.${belt.id}`, message: `传送带 ID ${belt.id} 不能与已注册建筑 ID 相同` });
     if (coreBuildings.has(belt.id) || coreItems.has(belt.id) || coreRecipes.has(belt.id) || coreTechnologies.has(belt.id)) issues.push({ severity: "error", code: "belt-id-conflict", path: `$.belts.${belt.id}`, message: `传送带 ID ${belt.id} 与核心目录冲突` });
     if (belt.requiredTechId && !allTechnologies.has(belt.requiredTechId)) issues.push({ severity: "error", code: "belt-tech", path: `$.belts.${belt.id}`, message: `传送带引用未知科技 ${belt.requiredTechId}` });
     for (const cost of belt.costs) if (!allItems.has(cost.itemId)) issues.push({ severity: "error", code: "belt-cost", path: `$.belts.${belt.id}`, message: `传送带引用未知物品 ${cost.itemId}` });

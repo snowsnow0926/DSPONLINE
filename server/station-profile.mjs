@@ -164,6 +164,24 @@ function validContract(contract, boardTaskDay) {
   return contract.completionBasisPoints === undefined || finiteInteger(contract.completionBasisPoints, 0, 10_000);
 }
 
+function sameContractIdentity(left, right) {
+  const sameOptionalStringArray = (leftValues, rightValues) => {
+    if (leftValues === undefined || rightValues === undefined) return leftValues === rightValues;
+    return leftValues.length === rightValues.length && leftValues.every((value, index) => value === rightValues[index]);
+  };
+  const sameRequirement = (leftRequirement, rightRequirement) =>
+    leftRequirement.itemId === rightRequirement.itemId && leftRequirement.amount === rightRequirement.amount &&
+    leftRequirement.channel === rightRequirement.channel && leftRequirement.weight === rightRequirement.weight &&
+    sameOptionalStringArray(leftRequirement.sourcePlanetIds, rightRequirement.sourcePlanetIds);
+  const rewardKeys = ["baseMarks", "baseReputation", "completionMarks", "completionReputation"];
+  return left.id === right.id && left.templateId === right.templateId && left.slot === right.slot &&
+    left.title === right.title && left.summary === right.summary && left.taskDay === right.taskDay &&
+    left.expiresAtTaskDay === right.expiresAtTaskDay && left.special === right.special &&
+    left.difficulty === right.difficulty && left.requirements.length === right.requirements.length &&
+    left.requirements.every((requirement, index) => sameRequirement(requirement, right.requirements[index])) &&
+    rewardKeys.every((key) => left.rewards[key] === right.rewards[key]);
+}
+
 function validContractBoard(board) {
   if (!isRecord(board) || board.rulesVersion !== 1 || !finiteInteger(board.taskDay, 0) ||
     !finiteInteger(board.lastConfirmedWallClockMs, 0) || !Array.isArray(board.offers) || board.offers.length > 4 ||
@@ -172,8 +190,20 @@ function validContractBoard(board) {
     !board.settledIds.every((id) => PLACEMENT_ID_PATTERN.test(id)) ||
     !(board.featuredContractId === null || PLACEMENT_ID_PATTERN.test(board.featuredContractId))) return false;
   const contracts = [...board.offers, ...board.accepted, ...board.history];
-  return contracts.every((contract) => validContract(contract, board.taskDay)) &&
-    new Set(contracts.map((contract) => contract.id)).size === contracts.length;
+  if (!contracts.every((contract) => validContract(contract, board.taskDay))) return false;
+  const collectionIdsAreUnique = (collection) => new Set(collection.map((contract) => contract.id)).size === collection.length;
+  if (!collectionIdsAreUnique(board.offers) || !collectionIdsAreUnique(board.accepted) || !collectionIdsAreUnique(board.history)) return false;
+  const acceptedIds = new Set(board.accepted.map((contract) => contract.id));
+  const historyById = new Map(board.history.map((contract) => [contract.id, contract]));
+  if (board.accepted.some((contract) => historyById.has(contract.id)) || board.offers.some((contract) => acceptedIds.has(contract.id))) return false;
+  const settledIds = new Set(board.settledIds);
+  // Compatibility for the 1.1.0 same-day re-offer bug.  An exact offer /
+  // settled-history identity is harmless only when the reward fence is
+  // present; every other cross-collection collision remains invalid.
+  return board.offers.every((offer) => {
+    const settled = historyById.get(offer.id);
+    return !settled || (settledIds.has(offer.id) && sameContractIdentity(offer, settled));
+  });
 }
 
 function validPlacement(placement, allowUnknownDecoration = true) {

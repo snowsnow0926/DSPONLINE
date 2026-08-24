@@ -10,6 +10,7 @@ import {
   deliverStationContractMutable,
   getStationContractCompletionBasisPoints,
   getStationContractRemaining,
+  normalizeStationContractBoard,
   stationTaskDayIndex,
   synchronizeStationContracts,
 } from "./stationContracts";
@@ -111,6 +112,65 @@ describe("orbital station contracts", () => {
     expect(duplicate.economy.stationReputation).toBe(reputation);
     expect(duplicate.totals.completedContracts).toBe(1);
     expect(duplicate.contractBoard.settledIds).toContain(accepted.id);
+  });
+
+  it("does not regenerate settled deterministic offers on the same task day", () => {
+    const game = contractReadyState(31415, 77);
+    const generatedOffers = structuredClone(game.orbitalStation.contractBoard.offers);
+    let station = game.orbitalStation;
+    for (const offer of generatedOffers) {
+      station = cloneOrbitalStationState(acceptStationContract(station, offer.id));
+      const accepted = station.contractBoard.accepted.find((contract) => contract.id === offer.id)!;
+      deliverContract(station, accepted);
+      station = claimStationContract(station, offer.id);
+    }
+    expect(station.contractBoard.offers).toHaveLength(0);
+    expect(station.contractBoard.history).toHaveLength(4);
+    expect(station.contractBoard.settledIds).toHaveLength(4);
+
+    const sameDay = synchronizeStationContracts(
+      { ...game, orbitalStation: station },
+      atTaskDay(station.contractBoard.taskDay) + 2_000,
+    );
+    expect(sameDay.contractBoard.offers).toHaveLength(0);
+    expect(sameDay.contractBoard.history.map((contract) => contract.id)).toEqual(
+      station.contractBoard.history.map((contract) => contract.id),
+    );
+
+    const nextDay = synchronizeStationContracts(
+      { ...game, orbitalStation: sameDay },
+      atTaskDay(station.contractBoard.taskDay + 1),
+    );
+    expect(nextDay.contractBoard.offers).toHaveLength(4);
+    expect(nextDay.contractBoard.offers.every((offer) => !nextDay.contractBoard.settledIds.includes(offer.id))).toBe(true);
+  });
+
+  it("repairs a legacy same-day re-offer without losing history or reward fences", () => {
+    const game = contractReadyState(27182, 88);
+    const generatedOffers = structuredClone(game.orbitalStation.contractBoard.offers);
+    let station = game.orbitalStation;
+    for (const offer of generatedOffers) {
+      station = cloneOrbitalStationState(acceptStationContract(station, offer.id));
+      const accepted = station.contractBoard.accepted.find((contract) => contract.id === offer.id)!;
+      deliverContract(station, accepted);
+      station = claimStationContract(station, offer.id);
+    }
+    const legacyBoard = structuredClone(station.contractBoard);
+    legacyBoard.offers = generatedOffers;
+    // This mirrors the affected 1.1.5 save shape: the first offer was left
+    // in the board while the same contract was still present as accepted.
+    legacyBoard.accepted = [{
+      ...structuredClone(generatedOffers[0]),
+      status: "accepted",
+      acceptedAtTaskDay: legacyBoard.taskDay,
+    }];
+
+    const normalized = normalizeStationContractBoard(legacyBoard, atTaskDay(legacyBoard.taskDay));
+    expect(normalized.offers).toHaveLength(0);
+    expect(normalized.accepted).toHaveLength(0);
+    expect(normalized.history).toEqual(station.contractBoard.history);
+    expect(normalized.settledIds).toEqual(station.contractBoard.settledIds);
+    expect(normalized.featuredContractId).toBe(station.contractBoard.featuredContractId);
   });
 
   it("settles an expired partial contract proportionally without completion bonus", () => {

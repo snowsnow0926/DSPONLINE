@@ -34,7 +34,7 @@ async function seedAnonymousCanvas(page: Page, storageCount: number, preference?
   };
 
   await page.addInitScript(({ key, rawPreference, extremeMode, anonymousFixture }) => {
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.6");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.7");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (extremeMode) {

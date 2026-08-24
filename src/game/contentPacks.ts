@@ -239,15 +239,22 @@ export function getContentPackConflicts(registry: ContentPackRegistry, manifest:
   const conflicts: string[] = [];
   for (const pack of Object.values(registry.packs)) {
     if (pack.manifest.id === manifest.id) continue;
+    const existingBuildingIds = new Set(pack.manifest.buildings?.map((building) => building.id) ?? []);
+    const existingBeltIds = new Set(pack.manifest.belts?.map((belt) => belt.id) ?? []);
     for (const item of pack.manifest.items ?? []) if (items.has(item.id)) conflicts.push(`物品 ${item.id} 已由 ${pack.manifest.name} 提供`);
-    for (const building of pack.manifest.buildings ?? []) if (buildings.has(building.id)) conflicts.push(`建筑 ${building.id} 已由 ${pack.manifest.name} 提供`);
+    for (const building of pack.manifest.buildings ?? []) {
+      if (buildings.has(building.id)) conflicts.push(`建筑 ${building.id} 已由 ${pack.manifest.name} 提供`);
+      if (beltIds.has(building.id)) conflicts.push(`建筑 ${building.id} 与 ${pack.manifest.name} 的传送带 ID 冲突`);
+    }
     for (const recipe of pack.manifest.recipes ?? []) if (recipes.has(recipe.id)) conflicts.push(`配方 ${recipe.id} 已由 ${pack.manifest.name} 提供`);
     for (const technology of pack.manifest.technologies ?? []) if (technologies.has(technology.id)) conflicts.push(`科技 ${technology.id} 已由 ${pack.manifest.name} 提供`);
     for (const override of pack.manifest.buildingOverrides ?? []) if (overrides.has(override.id)) conflicts.push(`建筑 ${override.id} 已由 ${pack.manifest.name} 调整`);
     for (const belt of pack.manifest.belts ?? []) {
       if (beltIds.has(belt.id)) conflicts.push(`传送带 ${belt.id} 已由 ${pack.manifest.name} 提供`);
       if (beltTiers.has(belt.tier)) conflicts.push(`传送带等级 ${belt.tier} 已由 ${pack.manifest.name} 提供`);
+      if (existingBuildingIds.has(belt.id)) conflicts.push(`传送带 ${belt.id} 与 ${pack.manifest.name} 的建筑 ID 冲突`);
     }
+    for (const building of manifest.buildings ?? []) if (existingBeltIds.has(building.id)) conflicts.push(`建筑 ${building.id} 与 ${pack.manifest.name} 的传送带 ID 冲突`);
   }
   return [...new Set(conflicts)];
 }

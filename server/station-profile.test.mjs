@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -193,6 +194,39 @@ test("v47 station validation and public projection enforce four ports and a stri
   assert.equal(inspection.validPayload, true);
   assert.equal(inspection.stationProjection.status, "operational");
 
+  // The persistent v47 projection omits the shared-contract legacy default
+  // from inactive quantum endpoints. The server must resolve that omission
+  // during validation, while an explicit invalid value remains rejected.
+  const sparseQuantumEndpoint = structuredClone(state);
+  sparseQuantumEndpoint.entities.push({
+    id: "collector_sparse",
+    kind: "station",
+    buildingId: "orbital_collector",
+    planetId: "giant",
+    machineCount: 1,
+  });
+  assert.equal(validateOrbitalStationGameState(sparseQuantumEndpoint), true);
+  const sparseQuantumPayload = createPayload(sparseQuantumEndpoint);
+  const sparseQuantumInspection = inspectDecodedCloudSaveUpload(Buffer.from(sparseQuantumPayload), {
+    direct: true,
+    expectedRevision: 0,
+    requestId: null,
+    declaredOriginalBytes: Buffer.byteLength(sparseQuantumPayload),
+    payloadLimit: 5_000_000,
+  });
+  assert.equal(sparseQuantumInspection.validPayload, true);
+  const explicitInvalidQuantum = structuredClone(sparseQuantumEndpoint);
+  explicitInvalidQuantum.entities.at(-1).quantumMode = null;
+  const explicitInvalidQuantumPayload = createPayload(explicitInvalidQuantum);
+  const explicitInvalidQuantumInspection = inspectDecodedCloudSaveUpload(Buffer.from(explicitInvalidQuantumPayload), {
+    direct: true,
+    expectedRevision: 0,
+    requestId: null,
+    declaredOriginalBytes: Buffer.byteLength(explicitInvalidQuantumPayload),
+    payloadLimit: 5_000_000,
+  });
+  assert.equal(explicitInvalidQuantumInspection.validPayload, false);
+
   const snapshot = buildPublicStationSnapshot({
     user: { id: "account_secret", displayName: "公开工程师" },
     projection: stationProjectionFromState(state),
@@ -256,9 +290,85 @@ test("v47 station validation and public projection enforce four ports and a stri
     rewards: { baseMarks: "1", baseReputation: "1", completionMarks: "1", completionReputation: "1" },
   }];
   assert.equal(validateOrbitalStationGameState(multiOriginTemplate), true);
+  const legacySettledReoffer = structuredClone(multiOriginTemplate);
+  const reoffer = legacySettledReoffer.orbitalStation.contractBoard.offers[0];
+  const settled = structuredClone(reoffer);
+  settled.status = "settled";
+  settled.requirements.forEach((requirement) => { requirement.delivered = requirement.amount; });
+  settled.settlementId = `station-settlement:${settled.id}:completed`;
+  settled.settlementReason = "completed";
+  settled.settledAtTaskDay = settled.taskDay;
+  settled.completionBasisPoints = 10_000;
+  legacySettledReoffer.orbitalStation.contractBoard.history = [settled];
+  legacySettledReoffer.orbitalStation.contractBoard.settledIds = [settled.id];
+  assert.equal(validateOrbitalStationGameState(legacySettledReoffer), true);
+  const legacyPayload = createPayload(legacySettledReoffer);
+  const legacyInspection = inspectDecodedCloudSaveUpload(Buffer.from(legacyPayload), {
+    direct: true,
+    expectedRevision: 0,
+    requestId: null,
+    declaredOriginalBytes: Buffer.byteLength(legacyPayload),
+    payloadLimit: 5_000_000,
+  });
+  assert.equal(legacyInspection.validPayload, true);
+
+  const missingSettlementFence = structuredClone(legacySettledReoffer);
+  missingSettlementFence.orbitalStation.contractBoard.settledIds = [];
+  assert.equal(validateOrbitalStationGameState(missingSettlementFence), false);
+  const forgedSettledReoffer = structuredClone(legacySettledReoffer);
+  forgedSettledReoffer.orbitalStation.contractBoard.offers[0].rewards.baseMarks = "2";
+  assert.equal(validateOrbitalStationGameState(forgedSettledReoffer), false);
+  const acceptedHistoryCollision = structuredClone(legacySettledReoffer);
+  acceptedHistoryCollision.orbitalStation.contractBoard.offers = [];
+  acceptedHistoryCollision.orbitalStation.contractBoard.accepted = [{
+    ...structuredClone(reoffer),
+    status: "accepted",
+    acceptedAtTaskDay: reoffer.taskDay,
+  }];
+  assert.equal(validateOrbitalStationGameState(acceptedHistoryCollision), false);
   const forgedAchievement = structuredClone(state);
   forgedAchievement.orbitalStation.layout.featuredAchievementIds = ["six_matrix_mastery"];
   assert.equal(validateOrbitalStationGameState(forgedAchievement), false);
+});
+
+test("v47 sparse quantum endpoint defaults missing mode during cloud upload", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "dsp-v47-sparse-quantum-"));
+  const databaseFile = path.join(directory, "cloud.sqlite");
+  let running;
+  try {
+    running = await startServer(databaseFile);
+    const owner = await register(running.baseUrl, "station_sparse_quantum", "稀疏端点测试");
+    const sparseState = createV47State();
+    sparseState.entities.push({
+      id: "collector_sparse",
+      kind: "station",
+      buildingId: "orbital_collector",
+      planetId: "giant",
+      machineCount: 1,
+    });
+    const sparsePayload = createPayload(sparseState, 151);
+    const uploaded = await request(running.baseUrl, "/api/cloud-save", {
+      method: "PUT",
+      headers: owner.headers,
+      body: JSON.stringify({ payload: sparsePayload, expectedRevision: 0 }),
+    });
+    assert.equal(uploaded.response.status, 200, JSON.stringify(uploaded.body));
+    assert.equal(uploaded.body.cloudSave.checksum, createHash("sha256").update(sparsePayload).digest("hex"));
+
+    const explicitlyInvalidState = structuredClone(sparseState);
+    explicitlyInvalidState.entities.at(-1).quantumMode = null;
+    const invalidPayload = createPayload(explicitlyInvalidState, 152);
+    const rejected = await request(running.baseUrl, "/api/cloud-save", {
+      method: "PUT",
+      headers: owner.headers,
+      body: JSON.stringify({ payload: invalidPayload, expectedRevision: 1 }),
+    });
+    assert.equal(rejected.response.status, 400, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.code, "SAVE_FORMAT_INVALID");
+  } finally {
+    await stopServer(running?.server);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("public station lifecycle keeps privacy separate from rankings and persists social state", async () => {

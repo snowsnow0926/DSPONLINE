@@ -8,48 +8,55 @@ import type { AppLocale } from "./locale";
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const english = locale === "en";
   return {
-    id: "2026-08-24-v1.1.6",
+    id: "2026-08-24-v1.1.7",
     date: english ? "August 24, 2026" : "2026年8月24日",
-    version: "1.1.6",
-    title: english ? "Belt Port Alignment and Productive Pure Idle" : "传送带端口对齐与纯挂机高倍率修复",
+    version: "1.1.7",
+    title: english ? "Cloud Contract Repair and Mod Building Trays" : "云存档合同修复与 Mod 建筑托盘",
     summary: english
-      ? "Version 1.1.6 fixes dense-canvas belt lines that were inferred from card centres and therefore missed multi-input and multi-output ports. Batched Canvas belts now reuse React Flow's measured handle geometry and avoid rebuilding the topology when runtime flow observations refresh. The 1.1.5 endgame pure-idle fix remains included: eligible high-multiplier saves advance production and research through a bounded cumulative contract without bypassing finite-resource or safety boundaries. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged."
-      : "1.1.6 修复高密度画布中传送带线按卡片中心推算、导致多输入/多输出建筑端口错位的问题；批量 Canvas 线路现在复用 React Flow 已测量的真实端口几何，并在拓扑稳定时避免被运行时流量刷新反复重建。1.1.5 的终局纯挂机保守模式修复继续保留：合法高倍率存档按有界累计合同推进生产和科研，不绕过有限资源与安全边界。GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 不变。",
+      ? "Version 1.1.7 repairs same-task-day orbital station contract reoffers that reused IDs across history and active entries and were rejected by cloud validation as SAVE_FORMAT_INVALID. Migration preserves settled rewards and removes only entries that can no longer be claimed. Content-pack buildings now appear in desktop and mobile deployment trays with generic kind-based categories. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged."
+      : "1.1.7 修复空间站合同在同一任务日重复生成、导致历史合同与活动合同使用同一 ID 并被云端判定 SAVE_FORMAT_INVALID 的问题；迁移时保留已结算奖励并清除不可再次领取的重复项。内容包注册的自定义建筑现在进入桌面和移动端部署托盘，按通用建筑类型归类；GameState v47、存档 envelope v2、cloud schema v8、SQLite layout v3 不变。",
     items: [
       {
-        id: "measured-belt-endpoints",
-        title: english ? "Belt lines connect to measured ports" : "传送带线精确连接真实端口",
+        id: "station-contract-id-repair",
+        title: english ? "Orbital contract ID collisions self-heal" : "空间站合同 ID 冲突可自愈",
         description: english
-          ? "Multi-input, multi-output, and special logistics ports use React Flow's measured handle coordinates. Zoom, pan, low-detail cards, and batched Canvas rendering share the same endpoints; an unmounted handle safely falls back to the card edge without changing belt data."
-          : "多输入、多输出和特殊物流端口使用 React Flow 实际测量的 handle 坐标，缩放、平移、低细节卡片与批量 Canvas 渲染保持同一端点；未挂载端口只安全回退到卡片边缘，不写入或改变线路数据。",
+          ? "When an older save is loaded, settled history and settledIds form a reward fence. Duplicate offer, accepted, and history entries keep only an authoritative verifiable record, so claimed rewards are preserved and cannot be claimed again."
+          : "加载旧版存档时，已结算历史和 settledIds 组成奖励围栏；重复的 offer、accepted 和 history 条目只保留可验证的权威记录，已领取奖励不会丢失，也不会被再次领取。",
       },
       {
-        id: "stable-dense-belt-topology",
-        title: english ? "Dense belt topology stays stable across flow refreshes" : "高密度线路拓扑不随流量重建",
+        id: "station-contract-server-validation",
+        title: english ? "Cloud validation keeps a narrow compatibility boundary" : "云端校验保留兼容边界",
         description: english
-          ? "The packed line batch rebuilds only when topology, node layout, or handle geometry changes. Production flow, hover, and runtime diagnostics no longer recreate the full line index while hit testing and interaction boundaries remain intact."
-          : "线路批次只在拓扑、节点布局或端口几何变化时重新打包；生产流量、悬停和运行时诊断刷新不会反复创建整张线路索引，保留命中测试与交互边界。",
+          ? "The server continues to reject forged collisions between active contracts. It accepts only a legacy offer/history overlap with settledIds and an exact identity match; altered reward fields remain invalid."
+          : "服务端继续拒绝活动合同之间的伪造碰撞；仅对带 settledIds 且正文身份完全一致的旧版 offer/history 重叠保留兼容，奖励字段被篡改仍会被拒绝。",
       },
       {
-        id: "productive-pure-idle",
-        title: english ? "Endgame pure idle remains productive at high multipliers" : "终局纯挂机继续按高倍率结算",
+        id: "custom-building-trays",
+        title: english ? "Custom buildings appear in deployment trays" : "自定义建筑进入部署托盘",
         description: english
-          ? "Large endgame saves run a bounded exact prefix, then apply whitelisted cumulative rates with an 80% safety haircut while research advances. Finite resources, transient logistics, and unsafe integer boundaries remain fail-closed."
-          : "超大终局存档先做有界精确前缀，再以 80% 安全折扣应用白名单累计速率并推进科研；有限资源、瞬时物流和安全整数边界继续 fail-closed。",
+          ? "Content-pack buildings with valid costs are appended after core buildings in a stable order on desktop and mobile trays. Generic kinds map to their corresponding categories without changing core order."
+          : "拥有有效成本的内容包建筑会按核心建筑之后的稳定顺序加入桌面和移动端托盘；通用 kind 会映射到对应分类，旧建筑顺序不变。",
       },
       {
-        id: "dense-belt-regression",
-        title: english ? "Multi-port dense canvases are regression-gated" : "多端口与密集画布加入回归门禁",
+        id: "declarative-mod-contract",
+        title: english ? "Mod extension boundaries stay verifiable" : "Mod 扩展边界保持可验证",
         description: english
-          ? "Regression coverage adds a 200-belt multi-input target plus zoom, pan, and low-detail rendering checks; the endgame pure-idle fixture continues to verify 15x long windows, reloadability, and an unchanged source save."
-          : "新增 200 条线路、多输入目标、缩放/平移和低细节渲染回归；纯挂机终局夹具继续验证 15x 长窗口、可重载和源存档不变。",
+          ? "Content packs remain declarative JSON with no script injection. True conveyor tiers should use belts entries; a building with kind splitter does not automatically gain all conveyor semantics, and building/belt ID collisions fail validation."
+          : "内容包仍使用声明式 JSON，不开放脚本注入；真正的传送带等级应使用 belts 条目，建筑 kind 为 splitter 的条目不会自动获得传送带全部语义，建筑 ID 与 belt ID 冲突会在校验阶段拒绝。",
       },
       {
         id: "version-upgrade",
-        title: english ? "Save and server protocols remain compatible" : "存档与服务端协议保持兼容",
+        title: english ? "Existing saves and 1.1.6 remain readable" : "旧存档与 1.1.6 可继续读取",
         description: english
-          ? "This release does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or belt data format. Existing saves, cloud revisions, backups, and native apps continue to use the established contracts."
-          : "本版不升级 GameState、存档封装、云 schema、SQLite layout 或线路数据格式；旧存档、云修订、备份和原生应用继续按既有合同读取。",
+          ? "This release does not upgrade GameState, the save envelope, cloud schema, SQLite layout, or Mod JSON format. 1.1.6 saves, cloud revisions, blueprints, and core building order remain compatible."
+          : "本版不升级 GameState、存档封装、云 schema、SQLite layout 或 Mod JSON 格式；1.1.6 的保存、云修订、蓝图和核心建筑顺序保持兼容。",
+      },
+      {
+        id: "contract-mod-regression",
+        title: english ? "Contracts, trays, and server validation are regression-gated" : "合同、托盘和服务端加入回归门禁",
+        description: english
+          ? "Regression coverage includes the affected duplicate-ID shape, reward fences, forged server collisions, custom splitter tray classification, and dynamic desktop/mobile catalogs."
+          : "回归覆盖实际重复 ID 形状、奖励围栏、服务端伪造碰撞、自定义 splitter 托盘分类，以及桌面/移动端动态目录。",
       },
     ],
   } as const;

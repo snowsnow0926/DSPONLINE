@@ -2751,7 +2751,13 @@ function validateParsedSavePayload(parsed, integrity = inspectParsedSavePayloadI
         if (!quantumEndpoint && entity?.quantumTarget !== undefined && entity.quantumTarget !== false) return false;
         if (!quantumEndpoint) continue;
         if (entity.quantumMode !== undefined && !["legacy", "transitioning", "quantum"].includes(entity.quantumMode)) return false;
-        if (state.version >= 45 && !["legacy", "transitioning", "quantum"].includes(entity.quantumMode)) return false;
+        // v47's persistent projection deliberately omits shared-contract
+        // defaults.  An absent mode on an endpoint is therefore the inactive
+        // legacy mode, not malformed data; explicit null/unknown values still
+        // fail closed above.  This keeps sparse saves produced by 1.1.5/1.1.6
+        // uploadable without rewriting their payload or checksum.
+        const effectiveQuantumMode = state.version >= 47 && entity.quantumMode === undefined ? "legacy" : entity.quantumMode;
+        if (state.version >= 45 && !["legacy", "transitioning", "quantum"].includes(effectiveQuantumMode)) return false;
         const transition = entity.quantumTransition;
         if (transition !== undefined && transition !== null) {
           if (!transition || typeof transition !== "object" || !["quantum", "legacy"].includes(transition.targetMode) ||

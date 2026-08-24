@@ -68,7 +68,7 @@ import { ItemCatalogPicker, RecipeCatalogPicker } from "./CatalogPicker";
 import { StableTextInput } from "./CompositionSafeInput";
 import { QuantityStepper } from "./QuantityStepper";
 import { CAMPAIGN_TASKS, getCampaignSnapshot, getCampaignTaskDeficits } from "../game/campaign";
-import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConstructionId, getBeltTier, getBuilding, getBuildingUpgradeTarget, getConstructionDefinition, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getNextBeltTier, getPlanet, getProliferator, getRecipe, getRecipesForBuilding, getTechnology, isConveyorBeltId } from "../game/content";
+import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConstructionId, getBeltTier, getBuilding, getBuildingUpgradeTarget, getConstructionCatalogIds, getConstructionDefinition, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getNextBeltTier, getPlanet, getProliferator, getRecipe, getRecipesForBuilding, getTechnology, isConstructionDeployable, isConstructionInCategory, isConveyorBeltId } from "../game/content";
  import { MATERIAL_DELIVERY_SLOT_COUNT, MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, MAX_MANUAL_CRAFT_BATCHES, MAX_PLANET_TRAY_ITEM_LIMIT, MIN_PLANET_TRAY_ITEM_LIMIT, PORTABLE_FLEET_ITEM_IDS, POWER_GRID_IDS, POWER_GRID_LABELS, canPlaceBuildingOnPlanet, canQueueHandcraftRecipe, canSetBeltStackSize, canUpgradeBelt, canUpgradeEntity, findInterstellarPeer, findPlanetaryPeer, getBeltCapacity, getBeltLaneAdjustmentCheck, getBeltNetworkIds, getConstructionAutomationStatus, getConstructionCraftDeficits, getConstructionQuickCraftPlan, getDysonEngineeringSnapshot, getDysonShellCapacity, getEjectorOrbitTargetStatus, getEntityExtraProductBonus, getEntityOperatingStatus, getEntityOutputCapacity, getEntityPowerFactor, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getInterstellarCargoCapacity, getInterstellarTripSeconds, getMaterialDeliveryItems, getMaterialDeliverySlots, getMaxConstructionQuickCraftBatches, getMaxRecursiveHandcraftBatches, getMiningSpeedMultiplier, getOrbitalCollectorQuantumStatus, getPlanetaryCargoCapacity, getPlanetaryTripSeconds, getPlanetMetrics, getPlanetTrayItemLimit, getPowerGridMetrics, getProliferatorSprayCost, getQuantumAttachmentStatus, getRayReceiverCapacityKw, getRecursiveHandcraftPlan, getResourceReserveSnapshot, getSprayCoaterInstallCheck, getSprayCoaterRemovalRefund, getStationActiveRoutes, getStationBusyVehicleCount, getStationDroneCapacity, getStationFleetDiagnostic, getStationMinimumCargo, getStationSlotCapacity, getStationSlots, getStationVesselCapacity, getStationWarperAutoRefillTarget, getStationWarperCapacity, getStationWarperRefillSnapshot, getTimeWarpRequiredPowerKw, isEntityInPowerCoverage, isHandcraftableRecipe, isPlanetColonized, isPortableFleetItem, isProliferatorEligible, isTechnologyCompleted, stationRouteRequiresWarp } from "../game/engine";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYields, specializationApplies } from "../game/galaxy";
 import { analyzeBeltNetwork } from "../game/network";
@@ -2198,7 +2198,8 @@ const COMPACT_CONSTRUCTION_KEY = "dsp-idle-network.construction-compact.v1";
 function loadRecentConstruction(): Array<BuildingId | ConveyorBeltId> {
   try {
     const value = JSON.parse(window.localStorage.getItem(RECENT_CONSTRUCTION_KEY) ?? "[]") as unknown;
-    return Array.isArray(value) ? value.filter((id): id is BuildingId | ConveyorBeltId => typeof id === "string" && CONSTRUCTION_BUILD_ORDER.includes(id as BuildingId | ConveyorBeltId)).slice(0, 8) : [];
+    const catalog = getConstructionCatalogIds();
+    return Array.isArray(value) ? value.filter((id): id is BuildingId | ConveyorBeltId => typeof id === "string" && catalog.includes(id as BuildingId | ConveyorBeltId)).slice(0, 8) : [];
   } catch {
     return [];
   }
@@ -2212,13 +2213,6 @@ function loadCompactConstruction(): boolean {
   }
 }
 
-const CONSTRUCTION_CATEGORY_IDS: Record<Exclude<ConstructionCategory, "all" | "recent">, Set<BuildingId | ConveyorBeltId>> = {
-  power: new Set(["wind_turbine", "solar_panel", "geothermal_power_station", "thermal_power_plant", "mini_fusion_power_plant", "artificial_star", "accumulator", "energy_exchanger"]),
-  production: new Set(["mining_machine", "arc_smelter", "plane_smelter", "assembling_machine_mk1", "assembling_machine_mk2", "assembling_machine_mk3", "matrix_lab", "oil_extractor", "oil_refinery", "water_pump", "chemical_plant", "quantum_chemical_plant", "fractionator", "miniature_particle_collider", "construction_center"]),
-  logistics: new Set(["conveyor_belt_mk1", "conveyor_belt_mk2", "conveyor_belt_mk3", "storage_mk1", "material_delivery_hub", "orbital_cargo_terminal", "splitter_4way", "storage_tank", "planetary_logistics_station", "interstellar_logistics_station", "space_station_construction_launcher", "orbital_collector"]),
-  dyson: new Set(["em_rail_ejector", "vertical_launching_silo", "ray_receiver", "galactic_material_exporter", "micro_black_hole_connector", "time_warp_device"]),
-};
-
 export function ConstructionDock({ game, placement, beltTier, beltTierMode, placementCount, onPlacementChange, onBeltTierChange, onBeltTierModeChange, onPlacementCountChange, onOpenFabricator, onCraft, onCraftItem, onStowCargo, onMissingCraftNavigate, onDeleteConstruction }: ConstructionDockProps) {
   const { isEnglish } = useAppLocale();
   const [category, setCategory] = useState<ConstructionCategory>("all");
@@ -2226,7 +2220,7 @@ export function ConstructionDock({ game, placement, beltTier, beltTierMode, plac
   const [compact, setCompact] = useState(loadCompactConstruction);
   const [discardMode, setDiscardMode] = useState(false);
   const horizontalPan = useHorizontalPan<HTMLDivElement>();
-  const unlockedBuildOrder = useMemo(() => CONSTRUCTION_BUILD_ORDER.filter((id) => {
+  const unlockedBuildOrder = useMemo(() => getConstructionCatalogIds().filter((id) => {
     if (id === "orbital_cargo_terminal" && (game.mode !== "normal" || game.orbitalStation.status === "locked")) return false;
     const requiredTechId = getConstructionDefinition(id)?.requiredTechId;
     if (!requiredTechId || isTechnologyCompleted(game, requiredTechId)) return true;
@@ -2237,10 +2231,10 @@ export function ConstructionDock({ game, placement, beltTier, beltTierMode, plac
     return false;
   }), [game.construction, game.belts, game.entities, game.mode, game.orbitalStation.status, game.research.completedTechIds]);
   const visibleBuildOrder = useMemo(() => category === "all"
-    ? unlockedBuildOrder
+    ? (discardMode ? unlockedBuildOrder : unlockedBuildOrder.filter(isConstructionDeployable))
     : category === "recent"
-      ? recent.filter((id) => unlockedBuildOrder.includes(id))
-      : unlockedBuildOrder.filter((id) => CONSTRUCTION_CATEGORY_IDS[category].has(id)), [category, recent, unlockedBuildOrder]);
+      ? recent.filter((id) => unlockedBuildOrder.includes(id) && (discardMode || isConstructionDeployable(id)))
+      : unlockedBuildOrder.filter((id) => (discardMode || isConstructionDeployable(id)) && isConstructionInCategory(id, category)), [category, discardMode, recent, unlockedBuildOrder]);
   const visibleFleetItems = useMemo(() => category === "all" || category === "logistics"
     ? PORTABLE_FLEET_ITEM_IDS.filter((itemId) => {
         const recipe = getRecipe(itemId);

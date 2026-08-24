@@ -60,6 +60,7 @@ interface AdminMetrics {
     loginSecurity?: { failures: number; activeBuckets: number; activeLocks: number };
   };
   accounts: { users: number; activeSessions: number; cloudSaves: number; submissions: number };
+  leaderboardReviews?: { pending: number };
   players: { total: number; today: number; online: number; onlineWindowSeconds: number };
   analytics: {
     today: string;
@@ -112,7 +113,25 @@ interface AdminMetrics {
   };
 }
 
-type AdminAccountAction = "revoke-sessions" | "disable-login" | "enable-login" | "restrict-leaderboard" | "restore-leaderboard" | "delete-account";
+type AdminAccountAction = "revoke-sessions" | "disable-login" | "enable-login" | "restrict-leaderboard" | "restore-leaderboard" | "approve-leaderboard-review" | "delete-account";
+
+interface LeaderboardReview {
+  accountId: string;
+  username: string | null;
+  displayName: string | null;
+  status: "pending" | "approved";
+  reasonCode: string;
+  source: string;
+  detectedRevision: number;
+  detectedChecksumPrefix: string | null;
+  firstDetectedAt: number;
+  lastDetectedAt: number;
+  occurrences: number;
+  findings: Array<{ code: string; field?: string; severity: string }>;
+  fingerprint: string;
+  leaderboardSubmissionRevision: number | null;
+  leaderboardPeakWhiteMatrixPerMinute: number | null;
+}
 
 interface AdminAccountSummary {
   accountId: string;
@@ -126,6 +145,7 @@ interface AdminAccountSummary {
   cloud: { bytes: number; slots: Record<string, { revision: number; size: number; historyCount: number }> };
   loginDisabledUntil: number | null;
   leaderboardRestricted: boolean;
+  leaderboardReview: LeaderboardReview | null;
   leaderboardResumeAfterRevision: number | null;
 }
 
@@ -196,7 +216,10 @@ const AUDIT_LABELS: Record<string, string> = {
   "admin.account_enable_login": "管理员恢复账号登录",
   "admin.account_restrict_leaderboard": "管理员移除排行榜",
   "admin.account_restore_leaderboard": "管理员批准排行榜复核",
+  "admin.account_approve_leaderboard_review": "管理员确认排行榜复核",
   "admin.account_delete_account": "管理员彻底注销账号",
+  "leaderboard.review_queued": "排行榜异常进入待复核",
+  "leaderboard.review_approved": "排行榜异常复核通过",
 };
 
 function readToken(): string {
@@ -269,11 +292,17 @@ async function adminRequest<T>(token: string, path: string, options: RequestInit
   return payload as T;
 }
 
+async function fetchLeaderboardReviews(token: string): Promise<LeaderboardReview[]> {
+  const result = await adminRequest<{ entries: LeaderboardReview[] }>(token, "/api/admin/leaderboard/reviews?limit=200");
+  return Array.isArray(result.entries) ? result.entries : [];
+}
+
 export function AdminDashboard() {
   const [token, setToken] = useState(readToken);
   const [draftToken, setDraftToken] = useState(readToken);
   const [days, setDays] = useState(7);
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
+  const [leaderboardReviews, setLeaderboardReviews] = useState<LeaderboardReview[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [accountIdDraft, setAccountIdDraft] = useState("");
@@ -291,11 +320,17 @@ export function AdminDashboard() {
     setError(null);
     try {
       const next = await fetchAdminMetrics(candidate, selectedDays);
+      // Keep the main dashboard usable during a rolling deployment where the
+      // new review endpoint may not have reached the active API yet.
+      let reviews: LeaderboardReview[] = [];
+      try { reviews = await fetchLeaderboardReviews(candidate); } catch { /* optional during rollout */ }
       setMetrics(next);
+      setLeaderboardReviews(reviews);
       setToken(candidate);
       writeToken(candidate);
     } catch (reason) {
       setMetrics(null);
+      setLeaderboardReviews([]);
       setError(reason instanceof Error ? reason.message : "无法读取运营数据");
     } finally {
       setLoading(false);
@@ -315,9 +350,9 @@ export function AdminDashboard() {
     if (candidate) void refresh(candidate, days);
   };
 
-  const lookupAccount = async (event?: FormEvent) => {
+  const lookupAccount = async (event?: FormEvent, requestedAccountId?: string) => {
     event?.preventDefault();
-    const accountId = accountIdDraft.trim();
+    const accountId = (requestedAccountId ?? accountIdDraft).trim();
     if (!accountId) return;
     setOperationBusy(true);
     setOperationsMessage(null);
@@ -349,7 +384,11 @@ export function AdminDashboard() {
       });
       setAccount(result.account);
       setAccountConfirmation("");
-      setOperationsMessage(result.account ? "管理员动作已应用并写入审计；排行榜恢复仍需新云修订重新验证" : "账号已彻底注销并写入审计");
+      setOperationsMessage(result.account
+        ? accountAction === "approve-leaderboard-review"
+          ? "已确认本次异常为可接受结果，并重新发布当前排行榜修订"
+          : "管理员动作已应用并写入审计；排行榜恢复仍需新云修订重新验证"
+        : "账号已彻底注销并写入审计");
       await refresh();
     } catch (reason) {
       setOperationsMessage(reason instanceof Error ? reason.message : "管理员动作失败");
@@ -511,6 +550,20 @@ export function AdminDashboard() {
           </div>
         </article>
 
+        <article className="admin-meta-panel admin-review-panel">
+          <header><div><small>排行榜人工复核</small><strong>待处理异常 {formatNumber(metrics?.leaderboardReviews?.pending ?? leaderboardReviews.length)}</strong></div><em>不自动封禁</em></header>
+          <div className="admin-review-list">
+            {leaderboardReviews.length === 0 ? <p>暂无待复核异常</p> : leaderboardReviews.map((review) => (
+              <div className="admin-review-row" key={review.accountId}>
+                <span><strong>{review.displayName ?? "未命名账号"}</strong><small>{review.username ?? "--"} · 修订 {review.detectedRevision} · {formatTime(review.lastDetectedAt)}</small></span>
+                <span><small>{review.findings.map((finding) => finding.code).join("、")}</small><em>{review.occurrences} 次</em></span>
+                <button type="button" disabled={operationBusy} onClick={() => { setAccountIdDraft(review.accountId); void lookupAccount(undefined, review.accountId); }}>查询账号</button>
+              </div>
+            ))}
+          </div>
+          <small>异常只进入此队列；确认异常请查询账号后选择“移除排行榜”，确认正常请选择“确认复核并发布”。登录、云存档和账号不会因入队被修改。</small>
+        </article>
+
         <article className="admin-meta-panel admin-account-panel">
           <header><div><small>账号处置</small><strong>精确账号 ID、最小化摘要与审计</strong></div><em>不读取存档正文</em></header>
           <form className="admin-operation-form" onSubmit={(event) => void lookupAccount(event)}>
@@ -526,7 +579,7 @@ export function AdminDashboard() {
             </dl>
             <div className="admin-operation-form">
               <select value={accountAction} onChange={(event) => { setAccountAction(event.target.value as AdminAccountAction); setAccountConfirmation(""); }}>
-                <option value="revoke-sessions">撤销全部会话</option><option value="disable-login">限制登录 24 小时</option><option value="enable-login">恢复登录</option><option value="restrict-leaderboard">移除排行榜</option><option value="restore-leaderboard">批准复核（需新修订）</option><option value="delete-account">彻底注销（需 24h 内备份）</option>
+                <option value="revoke-sessions">撤销全部会话</option><option value="disable-login">限制登录 24 小时</option><option value="enable-login">恢复登录</option><option value="restrict-leaderboard">移除排行榜</option><option value="approve-leaderboard-review">确认复核并发布</option><option value="restore-leaderboard">批准复核（需新修订）</option><option value="delete-account">彻底注销（需 24h 内备份）</option>
               </select>
               <small>二次确认：CONFIRM:{accountAction}:{account.accountId}</small>
               <StableTextInput sensitive draftId="admin-account-confirmation" value={accountConfirmation} onValueChange={setAccountConfirmation} placeholder="输入完整二次确认文字" />

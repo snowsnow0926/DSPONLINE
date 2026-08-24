@@ -2,7 +2,7 @@
 
 English | [Simplified Chinese README](./README.md)
 
-A 2D infinite-canvas idle factory game inspired by the production flow of Dyson Sphere Program. The current product version is `1.0.24`, using GameState v46, save envelope v2, cloud schema v7, and SQLite layout v2. It ships as Web/PWA, an Electron desktop app, and a Capacitor Android app, with cloud accounts, four cloud-save slots, and a live leaderboard. Windows and Android 1.0.24 installers are available from the [Shanghai download node](https://download.dsponline.cn/). Hong Kong and Shanghai Web/API both run 1.0.24. The Windows installer is explicitly published as an unsigned test package.
+A 2D infinite-canvas idle factory game inspired by the production flow of Dyson Sphere Program. The current stable release is `1.1.5`, using GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3. It ships as Web/PWA, an Electron desktop app, and a Capacitor Android app, with cloud accounts, four cloud-save slots, and a live leaderboard. Version 1.1.5 adds Worker-side sparse projection and gzip export for very large saves, a conservative pure-idle macro settlement path, and the five-metric equal-weight `balanced-log-v2` galaxy score. Hong Kong and Shanghai Web/API, the Shanghai download page, Windows stable, and Android stable all run 1.1.5. Android uses the approved long-term signing certificate; Windows remains explicitly published as `NotSigned` under the established policy. See the [1.1.5 release record](./docs/releases/1.1.5.md) and the [Shanghai download node](https://download.dsponline.cn/).
 
 Official site: [https://dsponline.cn](https://dsponline.cn)
 

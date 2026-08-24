@@ -4,6 +4,14 @@ All notable player-facing changes are recorded here. Game-state migration versio
 
 ## [Unreleased]
 
+### 1.1.5（已发布）
+
+- 终局大存档保存改为 Worker 内精确稀疏投影、gzip 传输与有界校验，支持 `.json.gz` 导入/导出并降低主线程峰值。
+- 超大终局档在内存风险过高时进入可取消的保守纯挂机宏观结算，不把不确定尾段伪装为精确收益。
+- 银河综合榜采用五个公开指标等权的 `balanced-log-v2` 对数计分，移除隐藏探索/殖民加分。
+- 香港/上海 Web/API、上海下载页、Windows 与 Android stable 已完成 1.1.5 发布；Android 实体设备门禁按用户授权豁免，Windows 按策略保持 `NotSigned`。
+- 完整备份、健康、下载、PWA、回滚和观察证据见 [1.1.5 正式发布记录](./docs/releases/1.1.5.md)。
+
 ### 1.1.4（发布候选）
 
 - 建筑制造巨构改为有界批处理并在多个制造中心间公平轮转，提升终局吞吐且保持库存、在制品、副产物和退款守恒。

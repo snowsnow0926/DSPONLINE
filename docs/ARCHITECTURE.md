@@ -1,5 +1,7 @@
 # 系统架构
 
+> **1.1.5 生产架构边界（2026-08-24）**：当前稳定运行时为 GameState v47、save envelope v2、云 API schema v8、SQLite layout v3。70+ MiB 存档使用 Worker 内压缩、稀疏持久投影和有界解压；纯挂机终局档可走保守宏观结算，均不改变旧档迁移、资源守恒或确定性边界。银河综合榜使用版本化的 `balanced-log-v2` 五指标对数公式，服务端只从验证后的普通主云档及相邻修订派生排名值。下方 v2/v7 段落属于历史兼容与迁移说明，不代表当前生产 layout/schema。
+
 > **1.0.46 存档运行时边界（2026-08-18，未发布）**：普通构建默认使用 `runtimePersistenceMode.ts` 选择的 1.0.43-compatible verified-primary 协调器；模拟 Worker 生成权威检查点，保存 Worker 在既有 writer lease、backup、checksum 与逐字读回合同下提交主档。该默认路径不建立 recovery head，也不会因为打开既有玩家档而自动启用 durable WAL；自动保存前正在运行的模拟在保存期间和验证完成后保持运行，玩家主动暂停意图不变。`VITE_DURABLE_RUNTIME_RECOVERY=true` 只用于显式开发验证，空间站 v46 bridge 即使收到该变量也强制保持稳定协调器。默认保护模式拒绝保存窗口内的玩家编辑但不暂停模拟；设备级实验开关开启后，已接受编辑保留在 durable 队列，保存失败不回滚当前进度并允许立即导出。两条路径都不改变 GameState、save envelope、cloud schema、SQLite layout 或 IndexedDB records。
 
 > **1.0.46 durable 故障恢复边界（显式开发模式）**：模拟 Worker 失败或 durable finalize 回执失败时，`FactoryGame` 保留 T0 recovery base，使用 `replaySimulationRuntimeStartupInWorker` 回放 finalized/pending intent，将精确结果验证写入 T1，并以持久化 Worker 原子替换 recovery head 后安装新模拟 Worker。新 Worker 安装清除旧 disabled latch；暂停状态可在同页恢复。若主存档已先完成 T1 读回而旧 head 尚未替换，head 身份比较跳过旧 journal，待保存锁释放后从 T1 建立新基线。T1 revision 只取自生成对应 payload 的 Worker 回执；较新回执必须重新取得并验证新检查点，不能给旧 payload 提升 revision。
@@ -68,7 +70,7 @@ flowchart LR
 
 “新建传送带默认并联数量”沿用 `uiPreferences.ts` 的 localStorage 设备偏好，不进入保存结构。所有桌面、点击、触摸与蓝图新线路入口把最终 `lanes` 显式传入同一原子领域命令；预览、施工扣除和队列版本使用同一解析值。蓝图模板本体不被改写，队列只保存带 `:lanes-N` 标识的不可变解析版本。
 
-云服务保持单进程 + SQLite layout v2，不做本批分表迁移。1.0.35 在内部 `app_state` 增加规范化的账号安全与账号控制记录，并提供 SQLite/WAL/表大小、修订增长、备份状态、写队列、慢请求及磁盘 80%/90% 水位指标。历史裁剪先生成稳定预览哈希，再用同一确认值事务性保留最近 20 条；账号处置只返回摘要并写隐私最小化审计。新登录只保存匿名设备/区域哈希，不保存原始 IP 或完整指纹。高置信排行榜异常只冻结后续提交并移除公开成绩，不回写玩家存档；恢复必须产生新的合法云修订。
+云服务保持单进程 + SQLite layout v2，不做本批分表迁移。1.0.35 在内部 `app_state` 增加规范化的账号安全与账号控制记录，并提供 SQLite/WAL/表大小、修订增长、备份状态、写队列、慢请求及磁盘 80%/90% 水位指标。历史裁剪先生成稳定预览哈希，再用同一确认值事务性保留最近 20 条；账号处置只返回摘要并写隐私最小化审计。新登录只保存匿名设备/区域哈希，不保存原始 IP 或完整指纹。高置信排行榜异常先进入服务器端 `leaderboardReviewQueue`，不自动冻结账号或移除已有成绩；上一份有效 submission 保留，管理员批准后才发布异常 revision，或明确选择移除排行榜。该队列与普通账号、登录和云存档正文分离。
 
 实时、纯挂机和离线 Worker 在首次模拟前接收同一份规范化内容包运行时快照。快照带有单调 revision 和 fingerprint；注册表变化会建立模拟边界，旧代次响应被丢弃，必要时只重建运行时目录和索引，不重建 `GameState`。主线程 fallback 与两个 Worker 对同一状态、注册表和时间预算必须保持确定性等价；`GameState.contentPacks` 仍只保存 `{ id, version }`。
 
@@ -233,7 +235,7 @@ React Flow 只负责可视节点、边、视口和交互；真实生产库存与
 
 线路模型包含源、汇、物品、等级、并联数量、分拣兼容字段、优先级、货物堆叠、路由、流量和拥堵。端口能够根据已有配方、物流槽或默认状态自动接受物品。连接草稿在开始拉线时锁定传送带等级；自动模式按 Mk.III→Mk.II→Mk.I 选择已解锁且有库存的最高等级，并优先复用已有并行线等级，手动模式保留显式选择。多条同端点线路由 bundle 信息进行视觉错位。
 
-`setBeltLaneCount()` 是修改已建线路并联数量的唯一命令入口：目标范围为 1～4096；增加数量原子扣除同级施工传送带，减少数量原子返还同级施工库存。命令只修改 `lanes` 和对应施工库存，必须保留 `progress`、`totalTransferred`、优先级、堆叠、路由、端口与在途物资。v38 加载器把非法超上限值限制到 4096，并把裁掉的实体传送带完整退回对应施工库存；蓝图参数同样夹紧但不凭空产生库存。64/256/1024/4096 四档基准均保持单个 bundle 对象和常数时间容量计算。`getBeltCapacity()` 继续统一按等级基础速度 × `lanes` × 货物堆叠计算。连续拉线只收集带源/目标/物品/端口/等级的临时候选。每次拟新增候选可用 `connectBeltsAtomically()` 对完整集合做累计预检；重复、不兼容、已有线路或材料不足只作为本次点击的非阻塞临时反馈，不新增候选、不扣料、不污染此前有效候选，也不禁用其确认。最终确认必须再次调用同一领域事务做严格原子复核；失败按候选索引展示原因并保持零创建、零扣料。撤销只删除最近一条，清空候选与退出连续模式是独立命令；取消、Escape 或离开画布不改变线路与施工库存。
+`setBeltLaneCount()` 是修改已建线路并联数量的唯一命令入口：目标范围为 1～4096；增加数量原子扣除同级施工传送带，减少数量原子返还同级施工库存。命令只修改 `lanes` 和对应施工库存，必须保留 `progress`、`totalTransferred`、优先级、堆叠、路由、端口与在途物资。v38 加载器把非法超上限值限制到 4096，并把裁掉的实体传送带完整退回对应施工库存；蓝图参数同样夹紧但不凭空产生库存。64/256/1024/4096 四档基准均保持单个 bundle 对象和常数时间容量计算。`getBeltCapacity()` 继续统一按等级基础速度 × `lanes` × 货物堆叠计算。连续拉线只收集带源/目标/物品/端口/等级的临时候选，并在一个隔离 draft 上增量预检，避免每次候选都复制完整 `GameState`；最终确认仍调用 `connectBeltsAtomically()` 对完整集合做严格原子复核。重复、不兼容、已有线路或材料不足只作为本次点击的非阻塞临时反馈，不新增候选、不扣料、不污染此前有效候选，也不禁用其确认。失败按候选索引展示原因并保持零创建、零扣料。撤销只删除最近一条，清空候选与退出连续模式是独立命令；取消、Escape 或离开画布不改变线路与施工库存。
 
 普通来源和分流器都按 `高 2 → 标准 1 → 低 0` 分配输出，同优先级线路按稳定 ID 与持久 `routingCursor` 确定性轮询。模拟步先结算已有输出，再为本步可生产输出预留目标容量并完成第二次转运，因此单个来源的 100 万输出缓存不再把多条高吞吐线路错误截断。`settings.beltBufferLimit` 只限制每条线路在大时间步累计的转运额度，范围 1,000～100,000,000；它不是实际货物库存，也不改变每秒吞吐。
 
@@ -366,7 +368,7 @@ API 表面：
 
 密码使用 scrypt 派生并采用 timing-safe 比较；会话 token 和邮箱动作 token 只保存 SHA-256，登录会话默认有效期 30 天，邮箱动作链接有效期 30 分钟。注册与四槽云存档只要求安全入口和有效登录会话；排行榜匿名只读，加入要求有效登录会话和 `main` 存档，不要求邮箱验证。服务端忽略旧客户端携带的指标：发电、戴森等从主云快照提取，白糖和实际结算吞吐分别从相邻主云修订的累计量增量计算，窗口至少跨 60 个模拟秒。实际吞吐固定为 `settled-total-produced-v1`，绝不从机器标称速率补数；名义吞吐另由共享 `aggregateGalacticFactoryMetric()` 处理，显式 `planetMetrics` 存在时以所有唯一行星键的同名非负有限指标做饱和和，并同时返回 `activePlanetThroughputPerMinute`、`galacticThroughputPerMinute` 与 `galactic-planet-sum-v1`。根 `state.metrics` 只是当前星球 UI 快照，只有旧存档缺少或为空 `planetMetrics` 时才能作为 `legacy-active-planet-v1` 回退。非法、负数、非有限或字符串行星值按零忽略并计数；JSON 重复键遵循解析器的最后键值语义。历史 `peakThroughputPerMinute` 理论峰值保存在独立诊断字段和 legacy 审计信息中，不得与实际排名值合并；启动时按用户 ID 排序幂等回填已有主存档。`leaderboardVisible=false` 会移除该账号的公开提交，后续主槽同步不会重新加入。
 
-`app_state.leaderboardModeration` 是只存在服务器的可选内部状态，不改变 GameState、存档 envelope、云 schema 或 SQLite layout。合法记录只允许固定的 `blocked / SAVE_DATA_INTEGRITY`、有界来源和时间戳，并且必须引用仍存在的账号。受限账号从五个公开榜单过滤，手动刷新和重新开启可见性返回 `LEADERBOARD_RESTRICTED`，主档上传、历史恢复和启动回填也不能重建提交；登录、云档读写、历史恢复和账号导出继续可用。账号注销才清理该内部标记。`server/moderate-leaderboard.mjs` 默认用只读/query-only SQLite dry-run，先按服务器综合榜排序锁定唯一第一名，再核对受保护显示名、主档 revision、SHA-256、envelope 和官方矿脉不变量；实际写入要求验证备份和服务已停止确认，并在单个事务中写标记、删除提交和追加不含 PII 的审计，云档正文表不参与该事务。
+`app_state.leaderboardReviewQueue` 与 `app_state.leaderboardModeration` 都只存在服务器，不改变 GameState、存档 envelope、云 schema 或 SQLite layout。完整性检测只写入待复核的普通主档 revision、finding 指纹和有限公开摘要；不会自动写入 moderation、禁用登录或删除 submission。`GET /api/admin/leaderboard/reviews` 和每日只读报告供管理员人工复核；批准动作要求 revision、checksum 和 finding 指纹仍完全一致，然后才发布该 revision。管理员明确执行 `restrict-leaderboard` 后，合法 moderation 记录才允许固定的 `blocked / SAVE_DATA_INTEGRITY`、有界来源和时间戳，并且必须引用仍存在的账号。受限账号从五个公开榜单过滤，手动刷新和重新开启可见性返回 `LEADERBOARD_RESTRICTED`，主档上传、历史恢复和启动回填也不能重建提交；登录、云档读写、历史恢复和账号导出继续可用。账号注销才清理这些内部标记。`server/moderate-leaderboard.mjs` 默认用只读/query-only SQLite dry-run，先按服务器综合榜排序锁定唯一第一名，再核对受保护显示名、主档 revision、SHA-256、envelope 和官方矿脉不变量；实际写入要求验证备份和服务已停止确认，并在单个事务中写标记、删除提交和追加不含 PII 的审计，云档正文表不参与该事务。
 
 `server/mail.mjs` 优先使用腾讯云 SES `SendEmail` 审核模板 API，分别传入验证或重置模板 ID 及单一 `actionToken` 变量；审核模板固定保留 `https://dsponline.cn` 域名和对应的 `verify` / `reset` 查询参数，不使用变量填充整个链接。凭据不完整时可以回退到原有 HTTPS webhook，二者都不可用时邮箱绑定、验证重发和找回密码明确返回不可用，但用户名注册、登录、四槽云存档、自动同步和排行榜继续可用。邮件失败日志只记录供应商错误码和 RequestId，不记录收件地址或动作 token。请求体上限为 8 MiB，认证接口每 IP/路径每分钟 12 次，新账号注册另按 IP 默认限制为每小时 3 个，其余接口 120 次。Origin 白名单、Nginx `client_max_body_size` 和前端 HTTPS 限制共同形成入口边界。
 

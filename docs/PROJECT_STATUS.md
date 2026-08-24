@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **1.1.5 已完成稳定发布（2026-08-24）**：运行时 `a92c0d3157f3658523d8d4abbbb0ae654dc4fc35`，Release ID `1.1.5-a92c0d3157f3`，Build ID `1.1.5+a92c0d3157f3`。香港与上海 Web/API、上海下载页、Windows stable 和 Android stable 均已完成不可变目录部署与原子切换；香港 `/canary/previous/` 现在指向 1.1.4 的不可变 Web 目录。两地 health/ready、公网 smoke、Range/完整下载哈希和 PWA 路由隔离均通过；正式 SQLite Backup API evidence、quick_check、schema/layout 和磁盘保护门禁均通过。Android 实体设备门禁为用户明确豁免，Windows 按历史策略保持 `NotSigned`。完整制品、哈希、当前/previous 指针、观察结果和回滚边界见 [1.1.5 正式发布记录](./releases/1.1.5.md)，交接、开发报告和候选记录也已归档。
+
+> **1.0.46 生产发布 No-Go（2026-08-19，已完整回滚）**：候选 `d64b9ef85f9dea1cf2d0617cb300fa492ca1f43c` / `1.0.46+d64b9ef85f9d` 的制品、签名、两地 schema v8/layout v3 备份、不可变目录和原子切换均通过，但最终公网 Chrome 发现 Service Worker 会把嵌套生成代码中的 `assets/<hash>` 错误解析为 `/assets/assets/<hash>`；生产静态服务器严格返回 404，导致新 Worker 安装冗余、全新浏览器无法建立离线 PWA。没有用 Nginx 兼容别名或服务器热改掩盖缺陷。香港/上海 Web/API 已分别回滚到 `1.0.45-8061a002fc59`（generation 21/10），上海下载与 Android/Windows stable 回到 `1.0.44-3e580c715a5a`，香港 `/canary/previous/` 继续固定为不可变 1.0.43；数据库保持 schema v8/layout v3且未恢复或改写，服务 health/ready 200、`NRestarts=0`。被拒绝的 1.0.46 目录和证据只保留审计，禁止再次激活；完整证据与返修门禁见 [No-Go 记录](./releases/1.0.46-no-go-2026-08-19.md)。
+
+> **排行榜异常人工复核策略（2026-08-21，开发中，尚未部署）**：服务端完整性异常改为只进入 `leaderboardReviewQueue`，不自动封禁账号、禁用登录或删除已有排行榜成绩；上一份有效 submission 保留，异常 revision 等待人工批准或明确移除。新增管理员复核接口、后台待复核面板、每日 22:00（Asia/Shanghai）只读报告 service/timer，以及当前任务的夜间只读提醒。代码与测试已在本工作树通过，未连接或修改香港/上海生产数据库；需 Release Agent 完成独立备份、预检、发布和观察后才可生效。
+
 > **1.0.46 发布阻断返修候选（2026-08-19，开发门禁完成，未发布）**：固定运行时源码 `d64b9ef85f9dea1cf2d0617cb300fa492ca1f43c`，Build ID `1.0.46+d64b9ef85f9d`，Release ID `1.0.46-d64b9ef85f9d`。经典进度专项现由浏览器内连续采样记录 `performance.now()`，按已知周期速率与权威发布窗口展开模 1 进度；aria/文字/fill 必须一致，必须观察自然回绕，非回绕下降仍硬失败，目标用例单 worker 20/20，未增加 retry、skip 或固定下降阈值。纯挂机只插值累计字段，戴森功率与轨道人口显示 30 秒权威快照，不再出现旧速率外推的短暂负数。空间站普通、来源限制和多行星任务均可由玩家确认后从量子库存原子交付，来源限制继续约束自动终端。4-worker 回归另修复上下文 hover 恢复 `draggable`、随机把画布平移变成节点拖动的产品竞态。最终门禁为 Vitest 1,434/20、server 363/2 + station 3/3、ops 56/6、release-switch 29/29、native 24/24、durable 7/7、Chromium 426/26、nightly 2/2、production feature 31/31、PWA 3/3、空间站 preview 7/7 与 Firefox+WebKit 14/14，均 0 失败。标准隔离密度与连接性能各 1/1；额外密度 `repeat-each=3` 为 2 pass / 1 原阈值 fail（P95 27.8 ms、max 34.8 ms），完整保留且未放宽。Web build 1,962 modules，startup 194,810 B gzip、menu 282,321 B gzip；根/server 生产审计为 0。source 251/251、Web 155/155、API 166/166、candidate 10/10、provenance 3/3、SHA256SUMS 12/12，Windows/Android 都是明确未签名诊断制品。旧 `1.0.46-865f125e8624` 因发布门禁阻断作废，更早 c24 候选继续作废；均不得发布。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 IndexedDB records 不变；本任务没有连接生产、签名、部署或修改下载页。审计见 [DEVELOPMENT_REPORT_1.0.46.md](./DEVELOPMENT_REPORT_1.0.46.md)，交接见 [RELEASE_HANDOFF_1.0.46.md](./RELEASE_HANDOFF_1.0.46.md)。
 
 > **双节点备份/恢复运维加固（2026-08-19，已上线）**：香港日备已从 COSFS 明文 staging 恢复为本机一致性快照、校验、认证加密后受限传到上海；备份、恢复演练和节点探针改由独立不可变运维包执行，不再随应用 `current` 切换。真实 schema v7 备份在两端密文 SHA-256 一致，上海隔离恢复验证 909 个账号、731 个当前云档和 8,660 条修订等计数一致，结束后明文 SQLite 为 0；两端 API `NRestarts=0`，相关 timer 均 active。此次没有发布或切换 1.0.46，详情见 [运维记录](./releases/ops-backup-restore-2026-08-19.md)。
@@ -599,6 +605,7 @@
 - [GAMEPLAY_SYSTEMS.md](./GAMEPLAY_SYSTEMS.md)：玩法循环、内容边界和交互规则。
 - [MODDING.md](./MODDING.md)：内容包 Mod 格式、依赖、导入、存档兼容与示例。
 - [DEPLOYMENT_OPERATIONS.md](./DEPLOYMENT_OPERATIONS.md)：双节点拓扑、发布、备份和回滚。
+- [PROTECTED_RELEASE_ACCESS.md](./PROTECTED_RELEASE_ACCESS.md)：Android 长期签名与香港/上海受保护连接的新会话入口；只记录接口和门禁，不记录秘密位置或值。
 - [TESTING_RELEASE.md](./TESTING_RELEASE.md)：测试矩阵、验收和版本发布清单。
 - [ROADMAP.md](./ROADMAP.md)：从公开测试版走向长期运营的阶段计划。
 - [COMMUNITY_BUILDS.md](./COMMUNITY_BUILDS.md)：社区构建、自建 API 和原生更新配置边界。

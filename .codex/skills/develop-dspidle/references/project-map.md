@@ -57,6 +57,8 @@ Use this map after reading `docs/PROJECT_STATUS.md`. Open only the files relevan
 | Protected operations dashboard | `src/components/AdminDashboard.tsx`, `src/admin.css` |
 | API tests | `server/server.test.mjs` |
 | Nginx/systemd/backup/restore/monitoring | `deploy/` |
+| Read-only leaderboard review report | `server/leaderboard-review-report.mjs`, `deploy/dsp-idle-leaderboard-review-report.*`, `scripts/report-hk-leaderboard-reviews.ps1` |
+| Protected Android signing and VPS access | `docs/PROTECTED_RELEASE_ACCESS.md`, `references/protected-release-access.md`, `scripts/test-protected-release-access.ps1`, `scripts/invoke-protected-android-release.ps1`, `scripts/invoke-protected-ssh-script.ps1` |
 | Electron | `desktop/main.cjs`, `preload.cjs`, `pack.cjs`, `release-channels.cjs` |
 | Desktop CI | `.github/workflows/desktop-release.yml` |
 | Build splitting/font transform | `vite.config.ts` |

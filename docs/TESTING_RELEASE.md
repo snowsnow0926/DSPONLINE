@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **1.1.5 稳定发布验收已收口（2026-08-24）**：冻结候选的 typecheck/build、Vitest 1,457、server 376 + station 3/3、ops 56、native 25、Chromium 427、PWA、durable recovery、release-switch、完整清单/来源和公网 smoke 证据均已归档并通过。Android 签名、v2/v3、zipalign、版本元数据和历史证书连续性通过；实体 Android 设备门禁由用户明确豁免并保留残余风险。Windows stable 明确标注 `NotSigned`。正式发布后的香港/上海 health/ready、下载 Range/哈希、PWA 与 previous-stable 浏览器隔离验收见 [1.1.5 正式发布记录](./releases/1.1.5.md)。本次文档同步不声称重新运行上述门禁。
+
 > **1.0.46 返修后完整开发门禁（2026-08-19，未发布）**：固定 runtime SHA `d64b9ef85f9dea1cf2d0617cb300fa492ca1f43c`，Build ID `1.0.46+d64b9ef85f9d`，Release ID `1.0.46-d64b9ef85f9d`。旧 `865f125e8624` 因可重复 Chromium 阻断作废。进度专项改为浏览器内 `requestAnimationFrame + MutationObserver + performance.now()` 连续采样，按 `2/3 cycle/s` 与权威发布窗口展开模 1 周期；aria/文字/fill 一致、自然回绕与非回绕单调性都保留，单 worker 20/20，无 retry/skip/下降阈值。纯挂机只插值累计字段，戴森瞬时量使用 30 秒提交快照；普通空间站任务可由玩家确认后从量子库存原子交付，自动终端仍受来源限制；画布上下文 hover 不再恢复拖拽并与平移竞态。最终 typecheck 通过；Vitest 1,434/20；server 363/2 + station 3/3；ops 56/6；release-switch 29/29；native 24/24；durable 7/7；Chromium 426/26/0（452 total，4 workers）；nightly 2/2；production feature 31/31、PWA 3/3、标准隔离密度/连接性能各 1/1；空间站 preview 7/7、Firefox+WebKit 14/14；root/server audit 0。额外密度 `repeat-each=3` 为 2 pass / 1 原阈值 fail（auto P95 27.8 ms、max 34.8 ms），按失败保留且未放宽。Web build 1,962 modules，startup 194,810 B gzip、menu 282,321 B gzip、forbidden 0。source 251/251、Web 155/155、API 166/166、candidate 10/10、provenance 3/3、SHA256SUMS 12/12；Windows/Android 为明确未签名诊断制品。未访问生产、签名、部署或修改下载页。
 
 > **1.0.46 画布展示增量门禁（2026-08-19，旧 `865f125e8624` 兼容基线，候选已作废）**：一行卡及 React Flow wrapper 固定 `96×32`；数量标记为 `88×44` 点击区和约 `80×30` 可见胶囊；大幅平移后 `elementFromPoint()` 仍命中卡片，fully-deferred 空白视角可由 Fit View 恢复。网络聚焦专项还断言选中/悬停节点不继承 dim、LOD 展开全过程没有 `visibility:hidden`、上下文卡片区域可以平移画布，且一行生产卡显示配方与产物。实时视口专项在 pointer 尚未松开时验证 CanvasMiniMap 已移动，并覆盖跨旧虚拟窗口拖动建筑、框选、选中展开和移动后放置坐标。两份 36,704,109-byte / 11,723,913-byte 玩家档各完成 4 种卡片 × 3 种重叠、选择/悬停展开和 390×844 / 360×640 / 844×390 的 19 张截图；两轮均无 pageerror，原附件 bytes、mtime、SHA-256 未变，80/100/125/150/200% 字体继续通过。production feature 27/27 与性能分进程执行；自动档独立 3/3、九次手势 P95 7～20.8 ms、max 27.8 ms、没有 >50 ms 帧。组合功能进程后的性能样本不作为通过证据。“完整 + 全部卡片”通过 480/1,000 统一密集保护保持可恢复；合成 506 个重卡的固定完整/显式展开全部诊断仍可出现数百毫秒到约 1.9 秒的帧，作为明确记录的残余成本。
@@ -159,6 +161,18 @@ npm run desktop:pack
 # 需要安装包时
 npm run desktop:dist
 ```
+
+Android 正式签名另加；先只读检查，再只在独立 clean checkout 对精确 runtime SHA 构建：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Android
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-android-release.ps1 `
+  -WorkspaceRoot '<isolated-clean-worktree>' `
+  -ExpectedGitSha '<40-char-runtime-sha>' `
+  -Build
+```
+
+输出只允许包含制品名、大小、SHA-256、包版本和 v2/v3、zipalign、证书连续性布尔结果；不得输出 vault locator、keystore/配置路径、alias、口令或证书正文。完整边界见 [受保护发布凭据与新会话接管](./PROTECTED_RELEASE_ACCESS.md)。
 
 ## 3. 关键回归清单
 

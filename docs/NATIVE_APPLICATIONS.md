@@ -1,18 +1,18 @@
 # 原生应用构建与更新
 
-> 当前发布版本：Web/Windows `1.0.42`；Android 正式包 `1.0.42 / 1000042`
-> 1.0.37 按用户要求继续作为香港 previous-stable 和历史下载备份；1.0.42 已写入两地 Web/API 和上海公网更新清单。
-> 当前公开稳定版本：Windows `1.0.42` 未签名测试包；Android `1.0.42 / 1000042` 正式签名包
+> 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
+> 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
+> 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。
 > Windows 包名：`com.dspidle.network`
 > Android applicationId：`cn.dsponline.network`
-> Web、Windows 与 Android 1.0.42 共用 `GameState` v46。两端存档 envelope v2 和云 schema v7 不变；旧存档通过连续守恒迁移载入。
+> 1.1.5 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；大存档稀疏投影与压缩不改变旧档迁移边界。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
 
-> 1.0.42 已使用既有 Android 长期证书生成正式 APK/AAB，并生成 Windows 安装程序；APK 与 Windows setup 已进入上海公网更新清单，AAB 只作归档。API 36.1 模拟器完成正式 1.0.38→1.0.42 覆盖升级；Android 实体真机、低配 Windows 和实体输入法/读屏器没有可用设备，不能描述为已通过。
+> 冻结 APK：5,211,333 B，SHA-256 `56aa74f0b5f72be320bbaffa0f3476119458137741e21745e2b4fc5281f8036e`；AAB：5,000,249 B，SHA-256 `92fe6f0759cddf8a99c740da8ee78336edf7e370186e0b5d3f1ac35285f5e6a1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户明确豁免，未创建新证书。
 
-> `1.0.42` 正式制品来自 clean runtime source `c24e6247d2572e54e30e173d3e16bfd85829b92f`。Release Agent 使用既有长期 Android 证书重建并验证 APK v2/v3、zipalign、证书连续性、正式 URL 和 API 36.1 模拟器原地升级；Windows setup 的包内 Build ID、正式 URL 与隔离 profile 通过，Authenticode 继续按历史策略为 `NotSigned`，没有创建新证书。完整哈希、下载和残余边界见 [1.0.42 正式发布记录](./releases/1.0.42.md)。
+> Windows setup：110,426,594 B，SHA-256 `8304d9bae267dcff4f480daf178bbb49b71e5c39148ca9c16065500a14a9b5cb`；blockmap SHA-256 `08f555b95dd7b91f54acab651c37e9396a295788ede10bbf4e8106078b525f78`。完整下载哈希、更新清单和残余边界见 [1.1.5 正式发布记录](./releases/1.1.5.md)。
 
-> 1.0.42 开发阶段的 unsigned Android 与 Windows unpacked 诊断制品只用于复验，现已由同一 runtime source 的正式制品替代；它们没有进入 stable feed 或下载页。
+> 历史 1.0.42 制品和门禁记录仍保留在 [1.0.42 正式发布记录](./releases/1.0.42.md)，不代表当前 stable。
 
 ## 1. 架构边界
 
@@ -104,15 +104,14 @@ Android `1.0.42` APK 已使用与 `1.0.0` 至 `1.0.38` 相同的长期发布密�
 
 `1.0.42 / 1000042` 正式 APK 使用同一长期证书生成，大小为 4,900,079 字节，SHA-256 为 `7a2450b21b23619004ed6b665f1ebe5067b5b158f0f53ce09bf1d8bb14864b95`。APK v2/v3、zipalign、证书连续性、内置正式 API/更新源和公网完整哈希均通过；API 36.1 模拟器从正式 1.0.38 使用 `adb install -r` 覆盖升级后 `firstInstallTime` 不变、应用进程运行且无 Fatal/ANR。4,688,602 字节 AAB SHA-256 为 `b98e96e7a9e1f919ec89675fc8958deec8ab562979accc9e8193f740c3a0594e`，只作归档；严格 JAR 输入流结构警告与 1.0.38 相同。Android 实体真机没有可用设备，未宣称通过。
 
-本机发布前只在受保护 PowerShell 会话中从该 vault 读取配置，不把密码回显到终端：
+本机发布前只通过受保护入口读取 vault，不手工显示 locator、配置路径、alias 或口令。先执行只读检查：
 
 ```powershell
-$vault = '<LOCAL_SIGNING_VAULT>'
-# 从 android-release-v1.properties 读取 keystorePath、storePassword、keyAlias、keyPassword
-# 设置 DSP_ANDROID_* 环境变量后运行 npm run android:release
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Android
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-android-release.ps1
 ```
 
-若本机 vault 不可读，发布必须停止并恢复同一文件，不能生成新证书替代。
+从独立 clean checkout 正式构建时，向同一脚本提供精确 40 位 runtime SHA 和 `-Build`；脚本只在子进程中注入 `DSP_ANDROID_*`，并验证 APK v2/v3、zipalign、包名/版本及 APK/AAB 历史证书连续性。若本机 vault 不可读，发布必须停止并恢复同一长期材料，不能生成新证书替代。完整新会话流程见 [受保护发布凭据与新会话接管](./PROTECTED_RELEASE_ACCESS.md)。
 
 ## 5. 更新源
 

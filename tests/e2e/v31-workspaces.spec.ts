@@ -110,10 +110,16 @@ test("each planet restores its last canvas viewport", async ({ page }) => {
     const before = await transform();
     await page.locator(control).click();
     await expect.poll(async () => transformDelta(await transform(), before)).toBeGreaterThan(1);
+    await expect.poll(async () => {
+      const first = await transform();
+      await page.waitForTimeout(80);
+      return transformDelta(await transform(), first);
+    }).toBeLessThanOrEqual(0.1);
   };
 
   await changeZoom(".react-flow__controls-zoomin");
   const homeViewport = await transform();
+  expect(transformDelta(homeViewport, { x: 510, y: 250, zoom: 0.84 })).toBeGreaterThan(1);
   await page.getByTitle(/切换到澄海 I/).click();
   await expect.poll(async () => transformDelta(await transform(), homeViewport)).toBeLessThanOrEqual(0.6);
   await page.getByTitle("切换到烬原 II").click();
@@ -126,8 +132,9 @@ test("each planet restores its last canvas viewport", async ({ page }) => {
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();
   const savedViewport = await page.evaluate(async () => (await import("/src/game/storage.ts")).loadGame().state.planetViewports.home);
-  expect(savedViewport.zoom).toBeGreaterThanOrEqual(0.25);
-  expect(Math.abs(savedViewport.x - 510) + Math.abs(savedViewport.y - 250)).toBeGreaterThan(10);
+  expect(savedViewport.x).toBeCloseTo(homeViewport.x, 0);
+  expect(savedViewport.y).toBeCloseTo(homeViewport.y, 0);
+  expect(savedViewport.zoom).toBeCloseTo(homeViewport.zoom, 3);
 });
 
 test("next mobile navigation closes technology and more when their active buttons are pressed again", async ({ page }) => {
@@ -162,4 +169,3 @@ test("light theme covers the next mobile shell and factory cards", async ({ page
   })).toBeGreaterThan(700);
   await page.screenshot({ path: "artifacts/qa/v31-light-mobile-390.png", fullPage: true });
 });
-

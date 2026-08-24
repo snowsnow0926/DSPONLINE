@@ -10971,7 +10971,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       viewportZoomStateRef.current = viewport.zoom;
       setViewportZoom(viewport.zoom);
     }
-  }, [blueprintPlacementId, canvasViewportSize, scheduleConnectionViewport, viewportZoom]);
+    // Some React Flow controls (notably programmatic zoom) can emit a final
+    // onMove without a matching onMoveEnd. Keep the same debounced persistence
+    // boundary on the live move path so a valid zoom/pan cannot be lost when
+    // the gesture-end callback is skipped.
+    persistPlanetViewport(gameRef.current.activePlanetId, viewport);
+  }, [blueprintPlacementId, canvasViewportSize, persistPlanetViewport, scheduleConnectionViewport, viewportZoom]);
   const handleFactoryFlowMoveEnd = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;

@@ -244,6 +244,53 @@ test("retries one stale reused socket for a bodyless read but never retries a wr
   }
 });
 
+test("settles counters when the client disconnects before an upstream response", async () => {
+  let releaseResponse;
+  const responseGate = new Promise((resolve) => { releaseResponse = resolve; });
+  let markReceived;
+  const received = new Promise((resolve) => { markReceived = resolve; });
+  const upstream = http.createServer(async (request, response) => {
+    await consumeRequest(request);
+    markReceived();
+    await responseGate;
+    response.end("late");
+  });
+  const upstreamPort = await listen(upstream);
+  const stateFile = path.join(directory, "disconnect-state.json");
+  const statusFile = path.join(directory, "disconnect-status.json");
+  await writeApiProxyState(stateFile, {
+    version: 1,
+    generation: 1,
+    mode: "forward",
+    changedAt: Date.now(),
+    upstream: { host: "127.0.0.1", port: upstreamPort, slot: "blue", releaseId: "disconnect" },
+  });
+  const proxyPort = await reservePort();
+  const proxy = createApiHandoffProxy({ stateFile, statusFile, port: proxyPort, pollIntervalMs: 10 });
+  await proxy.start();
+  try {
+    const request = http.request({
+      host: "127.0.0.1",
+      port: proxyPort,
+      path: "/api/slow",
+      method: "GET",
+      agent: false,
+    }, (response) => response.resume());
+    request.once("error", () => {});
+    request.end();
+    await received;
+    request.destroy();
+    await waitUntil(() => proxy.status().activeRequests === 0);
+    assert.equal(proxy.status().activeWriterRequests, 0);
+    assert.equal(proxy.status().failedRequests, 1);
+    releaseResponse();
+  } finally {
+    releaseResponse?.();
+    await proxy.close();
+    await close(upstream);
+  }
+});
+
 test("continuous synthetic traffic observes no 502 or 504 across a hold and upstream switch", async () => {
   const oldServer = http.createServer((_request, response) => setTimeout(() => response.end("old"), 4));
   const newServer = http.createServer((_request, response) => setTimeout(() => response.end("new"), 4));

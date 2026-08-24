@@ -275,16 +275,33 @@ export function createApiHandoffProxy({
     let settled = false;
     let activeUpstreamRequest = null;
     let retryCount = 0;
-    const destroyActiveUpstream = () => activeUpstreamRequest?.destroy();
+    let responseCloseListener = null;
     const settle = (failed = false) => {
       if (settled) return;
       settled = true;
-      entry.request.removeListener("aborted", destroyActiveUpstream);
-      entry.request.removeListener("error", destroyActiveUpstream);
+      entry.request.removeListener("aborted", abortActiveRequest);
+      entry.request.removeListener("error", abortActiveRequest);
+      if (responseCloseListener) entry.response.removeListener("close", responseCloseListener);
       finishActive(entry.requiresWriter, failed);
     };
+    const abortActiveRequest = () => {
+      activeUpstreamRequest?.destroy();
+      settle(true);
+    };
+    responseCloseListener = () => {
+      if (entry.response.writableEnded) return;
+      activeUpstreamRequest?.destroy();
+      settle(true);
+    };
+    entry.request.once("aborted", abortActiveRequest);
+    entry.request.once("error", abortActiveRequest);
+    entry.response.once("close", responseCloseListener);
     const attempt = (retry = false) => {
-      if (settled || closing || entry.response.writableEnded || entry.response.destroyed) return;
+      if (settled) return;
+      if (closing || entry.response.writableEnded || entry.response.destroyed) {
+        settle(true);
+        return;
+      }
       let upstreamResponded = false;
       const upstreamRequest = http.request({
         host: selectedState.upstream.host,
@@ -308,9 +325,6 @@ export function createApiHandoffProxy({
         });
         upstreamResponse.pipe(entry.response);
         entry.response.once("finish", () => settle(false));
-        entry.response.once("close", () => {
-          if (!entry.response.writableEnded) settle(true);
-        });
       });
       activeUpstreamRequest = upstreamRequest;
       let connectionTimer = null;
@@ -350,8 +364,6 @@ export function createApiHandoffProxy({
         entry.request.resume();
       }
     };
-    entry.request.once("aborted", destroyActiveUpstream);
-    entry.request.once("error", destroyActiveUpstream);
     attempt(false);
   };
 

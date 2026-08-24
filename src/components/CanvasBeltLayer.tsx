@@ -74,6 +74,10 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
     context.clearRect(0, 0, surfaceWidth, surfaceHeight);
     const currentViewport = viewportRef.current;
     drawnViewportRef.current = currentViewport;
+    canvas.dataset.drawnViewportX = currentViewport.x.toFixed(4);
+    canvas.dataset.drawnViewportY = currentViewport.y.toFixed(4);
+    canvas.dataset.drawnViewportZoom = currentViewport.zoom.toFixed(6);
+    canvas.dataset.overscan = String(CANVAS_PAN_OVERSCAN);
     canvas.style.transform = "translate3d(0, 0, 0)";
     const margin = 96;
     const zoom = Math.max(0.01, currentViewport.zoom);

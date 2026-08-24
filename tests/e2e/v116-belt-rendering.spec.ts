@@ -79,3 +79,84 @@ test("dense belt endpoints follow measured multi-port handles", async ({ page })
   const actualTargetY = Number(await canvas.getAttribute("data-first-target-y"));
   expect(actualTargetY).toBeCloseTo(expectedTargetY, 1);
 });
+
+test("dense belt pixels stay attached after viewport pan and zoom", async ({ page }) => {
+  const raw = buildMultiPortDenseFactory();
+  await page.addInitScript((fixture) => {
+    window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.7");
+    window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
+    window.localStorage.setItem("dsp-idle-network.endgame-extreme.v1", "true");
+    window.localStorage.setItem("dsp-idle-network.endgame-extreme-ack.v1", "true");
+    window.localStorage.setItem("dsp-idle-network.save.v1", fixture);
+  }, raw);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const releaseNotesDismiss = page.getByRole("button", { name: "我知道了", exact: true });
+  if (await releaseNotesDismiss.isVisible().catch(() => false)) await releaseNotesDismiss.click();
+  const startButton = page.getByRole("button", { name: /开始游戏|继续游戏|Continue/i }).first();
+  if (await startButton.isVisible().catch(() => false)) await startButton.click();
+
+  const canvas = page.locator("canvas.canvas-belt-layer");
+  const sourceHandle = page.locator('.react-flow__handle[data-handleid="out:magnetic_coil"]').first();
+  const targetHandle = page.locator('.react-flow__handle[data-handleid="in:magnetic_coil"]').first();
+  await expect(canvas).toHaveAttribute("data-segments", "200");
+  await expect(sourceHandle).toBeVisible();
+  await expect(targetHandle).toBeVisible();
+
+  const endpointDistances = () => page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas.canvas-belt-layer");
+    const source = document.querySelector<HTMLElement>('.react-flow__handle[data-handleid="out:magnetic_coil"]');
+    const target = document.querySelector<HTMLElement>('.react-flow__handle[data-handleid="in:magnetic_coil"]');
+    if (!canvas || !source || !target) return { source: 999, target: 999, canvasSpace: "missing" };
+    const overscan = Number(canvas.dataset.overscan);
+    const drawnX = Number(canvas.dataset.drawnViewportX);
+    const drawnY = Number(canvas.dataset.drawnViewportY);
+    const drawnZoom = Number(canvas.dataset.drawnViewportZoom);
+    const firstSourceX = Number(canvas.dataset.firstSourceX);
+    const firstSourceY = Number(canvas.dataset.firstSourceY);
+    const firstTargetX = Number(canvas.dataset.firstTargetX);
+    const firstTargetY = Number(canvas.dataset.firstTargetY);
+    const bounds = canvas.getBoundingClientRect();
+    const scaleX = bounds.width / Math.max(1, canvas.offsetWidth);
+    const scaleY = bounds.height / Math.max(1, canvas.offsetHeight);
+    const toScreen = (x: number, y: number) => ({
+      x: bounds.left + (overscan + drawnX + x * drawnZoom) * scaleX,
+      y: bounds.top + (overscan + drawnY + y * drawnZoom) * scaleY,
+    });
+    const port = (element: HTMLElement, source: boolean) => {
+      const rect = element.getBoundingClientRect();
+      return { x: source ? rect.right : rect.left, y: rect.top + rect.height / 2 };
+    };
+    const sourcePoint = toScreen(firstSourceX, firstSourceY);
+    const targetPoint = toScreen(firstTargetX, firstTargetY);
+    const sourceCenter = port(source, true);
+    const targetCenter = port(target, false);
+    return {
+      source: Math.hypot(sourcePoint.x - sourceCenter.x, sourcePoint.y - sourceCenter.y),
+      target: Math.hypot(targetPoint.x - targetCenter.x, targetPoint.y - targetCenter.y),
+      canvasSpace: canvas.closest(".react-flow__viewport") ? "viewport" : "screen",
+    };
+  });
+
+  await expect.poll(endpointDistances).toMatchObject({ canvasSpace: "screen" });
+  await expect.poll(async () => Math.max((await endpointDistances()).source, (await endpointDistances()).target)).toBeLessThan(6);
+  await page.screenshot({ path: "artifacts/qa/v117-belt-viewport-initial.png", fullPage: true });
+
+  for (let index = 0; index < 2; index += 1) {
+    await page.getByRole("button", { name: "Zoom out" }).click().catch(async () => {
+      await page.locator(".react-flow__controls-zoomout").click();
+    });
+    await expect.poll(async () => Math.max((await endpointDistances()).source, (await endpointDistances()).target)).toBeLessThan(6);
+  }
+
+  const pane = page.locator(".react-flow__pane");
+  const paneBox = await pane.boundingBox();
+  if (!paneBox) throw new Error("React Flow pane geometry is unavailable");
+  await page.mouse.move(paneBox.x + paneBox.width * 0.75, paneBox.y + paneBox.height * 0.72);
+  await page.mouse.down();
+  await page.mouse.move(paneBox.x + paneBox.width * 0.75 + 140, paneBox.y + paneBox.height * 0.72 + 85, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => Math.max((await endpointDistances()).source, (await endpointDistances()).target)).toBeLessThan(6);
+  await page.screenshot({ path: "artifacts/qa/v117-belt-viewport-pan-zoom.png", fullPage: true });
+});

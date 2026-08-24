@@ -7327,7 +7327,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setStatisticsOpen(false);
     setFocusedBeltNetworkId(null);
     setHighlightedTaskId(null);
-    window.setTimeout(() => setViewport(bookmark.viewport, { duration: gameRef.current.settings.reducedMotion ? 0 : 260 }), gameRef.current.settings.reducedMotion ? 0 : 40);
+    window.setTimeout(() => {
+      // Keep the screen-space dense renderer synchronized even if a programmatic
+      // viewport transition emits its first onMove after the React render.
+      viewportRef.current = { ...bookmark.viewport };
+      setPendingBlueprintViewport({ ...bookmark.viewport });
+      canvasBeltLayerRef.current?.setViewport(bookmark.viewport);
+      void setViewport(bookmark.viewport, { duration: gameRef.current.settings.reducedMotion ? 0 : 260 });
+    }, gameRef.current.settings.reducedMotion ? 0 : 40);
     setNotice(`已打开画布书签：${bookmark.name}`);
   }, [onPlanetChange, setViewport]);
 
@@ -11737,7 +11744,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               routeCenters={edgeRouteCenters}
               topologyRevision={canvasTopology.revision}
               planetId={canvasGame.activePlanetId}
-              viewport={pendingBlueprintViewport}
+              // The dense layer paints in screen space and receives every live
+              // pan/zoom through its imperative handle. Read the same mutable
+              // viewport ref here so a deferred React render cannot replay the
+              // stale blueprint-only viewport and snap belts back after a
+              // gesture.
+              viewport={viewportRef.current}
               width={canvasViewportSize.width}
               height={canvasViewportSize.height}
               selectedBeltIds={selectedBeltIdSet}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MEMORY_CRITICAL_PENDING_SECONDS,
   MEMORY_LARGE_PENDING_SECONDS,
+  MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB,
   evaluateMemoryGuard,
   estimateSimulationRuntimeBytes,
   isLargeMemoryWorkload,
@@ -64,6 +65,52 @@ describe("memory budget governor", () => {
     });
     expect(byAllocation.shouldPause).toBe(true);
     expect(byAllocation.reason).toContain("分配");
+  });
+
+  it("honors an absolute heap watermark without weakening the browser-limit guard", () => {
+    const threshold = MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB[0];
+    const decision = evaluateMemoryGuard({
+      snapshot: { usedHeapBytes: threshold * 1024 * 1024, heapLimitBytes: 4 * 1024 * 1024 * 1024, deviceMemoryGiB: 8, sampledAtMs: 0 },
+      workload: small,
+      pendingSimulationSeconds: 0,
+      workerInFlight: false,
+      saveInFlight: false,
+      policy: { autoPauseEnabled: true, autoPauseThresholdMiB: threshold },
+    });
+    expect(decision.shouldPause).toBe(true);
+    expect(decision.reason).toContain(`${threshold} MiB`);
+
+    const highHeap = evaluateMemoryGuard({
+      snapshot: { usedHeapBytes: 900, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
+      workload: small,
+      pendingSimulationSeconds: 0,
+      workerInFlight: false,
+      saveInFlight: false,
+      policy: { autoPauseEnabled: true, autoPauseThresholdMiB: 4_096 },
+    });
+    expect(highHeap.shouldPause).toBe(true);
+  });
+
+  it("allows advanced players to disable only the heap-triggered pause", () => {
+    const disabled = evaluateMemoryGuard({
+      snapshot: { usedHeapBytes: 950, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
+      workload: small,
+      pendingSimulationSeconds: 0,
+      workerInFlight: false,
+      saveInFlight: false,
+      policy: { autoPauseEnabled: false, autoPauseThresholdMiB: 512 },
+    });
+    expect(disabled.shouldPause).toBe(false);
+
+    const backlog = evaluateMemoryGuard({
+      snapshot: { usedHeapBytes: 950, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
+      workload: small,
+      pendingSimulationSeconds: MEMORY_CRITICAL_PENDING_SECONDS,
+      workerInFlight: false,
+      saveInFlight: false,
+      policy: { autoPauseEnabled: false, autoPauseThresholdMiB: null },
+    });
+    expect(backlog.shouldPause).toBe(true);
   });
 
   it("treats slow workers as backpressure, not a false memory crash", () => {

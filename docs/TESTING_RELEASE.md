@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **1.1.8 发布候选门禁（2026-08-25，未部署）**：独立工作树 `D:\GameDev\DSPidle2-v118-memory-optimization` 的内存闸门新增设备级开关与固定 JS 堆阈值，默认自动 90%，不改变 GameState v47 / envelope v2 / cloud schema v8 / SQLite layout v3。完整 Vitest **180 文件通过 / 9 跳过；1478 项通过 / 22 跳过**，server **376/2** 加 station **4/4**，ops **56/6**，native **25/25**，许可证 **125 包**，TypeScript、生产构建和 startup budget 均通过；内存设置 E2E **1/1**、运行时持久化进度 **2/2**。真实终局存档最终 60 秒复测无 pageerror，纯挂机进程私有峰值 **2.32 GiB** 并安全暂停，建造/拉线/蓝图+自动保存峰值 **4.57 GiB** 且 3/3 自动保存完成。完整 Chromium 456 项为 **383 通过 / 34 跳过 / 39 个历史或环境失败**，分类与基线复现见 [1.1.8 内存优化交接](./releases/1.1.8-memory-optimization-handoff.md)。长时真实存档证据见 [1.1.8 长时报告](./releases/1.1.8-long-run-memory-test-2026-08-25.md)。本段只记录发布前开发门禁，不代表已部署线上。
+
 > **1.1.7 候选门禁（截至 2026-08-24，未发布）**：本轮在独立分支 `codex/1.1.7-contract-mod`（基于 1.1.6 `4f6d24f`）完成新增合同/Mod/稀疏 v47 兼容回归。当前已实测 typecheck、Vitest、server、ops、native、许可证检查、生产构建前置、聚焦与完整 Chromium；详细逐项计数、SHA 和未验证的签名/部署门禁见 [1.1.7 开发报告](./DEVELOPMENT_REPORT_1.1.7.md)。1.1.6 工作树、生产服务、下载页和玩家原文件均未修改。
 
 > **1.1.5 稳定发布验收已收口（2026-08-24）**：冻结候选的 typecheck/build、Vitest 1,457、server 376 + station 3/3、ops 56、native 25、Chromium 427、PWA、durable recovery、release-switch、完整清单/来源和公网 smoke 证据均已归档并通过。Android 签名、v2/v3、zipalign、版本元数据和历史证书连续性通过；实体 Android 设备门禁由用户明确豁免并保留残余风险。Windows stable 明确标注 `NotSigned`。正式发布后的香港/上海 health/ready、下载 Range/哈希、PWA 与 previous-stable 浏览器隔离验收见 [1.1.5 正式发布记录](./releases/1.1.5.md)。本次文档同步不声称重新运行上述门禁。

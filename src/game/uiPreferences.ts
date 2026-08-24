@@ -4,6 +4,10 @@ import type {
   CanvasInteractionDetailPreference,
   CanvasOverlapPreference,
 } from "./canvasDensityPresentation";
+import {
+  MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB,
+  type MemoryAutoPauseThresholdMiB,
+} from "./memoryBudget";
 
 /** Device-only preferences. These values never belong in GameState or cloud payloads. */
 export const UI_THEME_PREFERENCE_KEY = "dsp-idle-network.ui.theme.v1";
@@ -21,6 +25,8 @@ export const CANVAS_OVERLAP_PREFERENCE_KEY = "dsp-idle-network.ui.canvas-overlap
 export const CANVAS_INTERACTION_DETAIL_PREFERENCE_KEY = "dsp-idle-network.ui.canvas-interaction-detail.v1";
 export const BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY = "dsp-idle-network.ui.blueprint-allow-overlap.v1";
 export const LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY = "dsp-idle-network.ui.large-save-autosave-throttle.v1";
+export const MEMORY_AUTO_PAUSE_PREFERENCE_KEY = "dsp-idle-network.ui.memory-auto-pause.v1";
+export const MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY = "dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1";
 export const FACTORY_ALERTS_PREFERENCE_KEY = "dsp-idle-network.ui.factory-alerts.v1";
 /** 设备级偏好：保存（自动/手动 durable checkpoint）期间允许玩家继续编辑。
  *  默认 false = 保持既有 fail-safe（保存期间编辑被拒绝并提示）。
@@ -287,6 +293,47 @@ export function writeLargeSaveAutosaveThrottlePreference(enabled: boolean): void
   const storage = localStorageOrNull();
   if (!storage) return;
   try { storage.setItem(LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
+}
+
+/** Protect large factories from browser heap exhaustion. Device-only and on by default. */
+export function readMemoryAutoPauseEnabledPreference(): boolean {
+  const storage = localStorageOrNull();
+  if (!storage) return true;
+  try {
+    const value = storage.getItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY);
+    return value == null ? true : value !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function writeMemoryAutoPauseEnabledPreference(enabled: boolean): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  try { storage.setItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
+}
+
+/** `null` is the automatic browser-heap 90% watermark. */
+export function readMemoryAutoPauseThresholdPreference(): MemoryAutoPauseThresholdMiB {
+  const storage = localStorageOrNull();
+  if (!storage) return null;
+  try {
+    const value = storage.getItem(MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY);
+    if (value == null || value === "auto") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB.includes(parsed as (typeof MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB)[number])
+      ? parsed as MemoryAutoPauseThresholdMiB
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeMemoryAutoPauseThresholdPreference(thresholdMiB: MemoryAutoPauseThresholdMiB): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  if (thresholdMiB !== null && !MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB.includes(thresholdMiB as (typeof MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB)[number])) return;
+  try { storage.setItem(MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY, thresholdMiB === null ? "auto" : String(thresholdMiB)); } catch { /* optional preference */ }
 }
 
 /** Factory diagnostics can be disabled locally for very large factories. */

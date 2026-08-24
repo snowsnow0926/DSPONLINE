@@ -28,6 +28,24 @@ export interface MemoryGuardInput {
   saveInFlight: boolean;
   slowWorkerCount?: number;
   allocationFailure?: boolean;
+  policy?: MemoryGuardPolicy;
+}
+
+/**
+ * Device-only memory protection policy.  It is intentionally not part of
+ * GameState: a setting which is safe on one machine may be too aggressive (or
+ * too lax) on another, and it must never change deterministic save data.
+ *
+ * `null` means the browser's heap limit is used (the existing 90% guard).
+ * A numeric value adds an earlier absolute JS-heap watermark; the browser
+ * 90% guard remains a hard ceiling whenever the browser exposes the metric.
+ */
+export const MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB = [512, 768, 1_024, 1_536, 2_048, 3_072, 4_096] as const;
+export type MemoryAutoPauseThresholdMiB = (typeof MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB)[number] | null;
+
+export interface MemoryGuardPolicy {
+  autoPauseEnabled?: boolean;
+  autoPauseThresholdMiB?: MemoryAutoPauseThresholdMiB;
 }
 
 export interface MemoryGuardDecision {
@@ -52,6 +70,10 @@ export const MEMORY_LARGE_SLICE_SECONDS = 1;
 export const MEMORY_NORMAL_PENDING_SECONDS = 20;
 export const MEMORY_LARGE_PENDING_SECONDS = 8;
 export const MEMORY_CRITICAL_PENDING_SECONDS = 24;
+
+export function isMemoryAutoPauseThresholdMiB(value: unknown): value is MemoryAutoPauseThresholdMiB {
+  return value === null || (typeof value === "number" && MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB.includes(value as (typeof MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB)[number]));
+}
 
 function finiteNonNegative(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -110,12 +132,22 @@ export function evaluateMemoryGuard(input: MemoryGuardInput): MemoryGuardDecisio
   const workload = input.workload;
   const large = isLargeMemoryWorkload(workload);
   const ratio = heapRatio(input.snapshot);
+  const usedHeapBytes = finiteNonNegative(input.snapshot?.usedHeapBytes);
+  const autoPauseEnabled = input.policy?.autoPauseEnabled !== false;
+  const autoPauseThresholdMiB = input.policy?.autoPauseThresholdMiB ?? null;
   const pending = Math.max(0, input.pendingSimulationSeconds);
   const slowWorkers = Math.max(0, Math.floor(input.slowWorkerCount ?? 0));
   const maxPending = large ? MEMORY_LARGE_PENDING_SECONDS : MEMORY_NORMAL_PENDING_SECONDS;
   const estimatedRuntimeBytes = estimateSimulationRuntimeBytes(workload);
 
-  const heapCritical = ratio !== null && ratio >= 0.90;
+  const heapThresholdCritical = autoPauseThresholdMiB !== null && usedHeapBytes !== null &&
+    usedHeapBytes >= autoPauseThresholdMiB * 1024 * 1024;
+  // A fixed watermark can make protection happen earlier, but never weakens
+  // the browser-limit guard. If the browser does not expose usedHeapBytes,
+  // the ratio remains the best available signal.
+  const heapCritical = autoPauseEnabled && (
+    heapThresholdCritical || (ratio !== null && ratio >= 0.90)
+  );
   const heapElevated = ratio !== null && ratio >= 0.75;
   const backlogCritical = pending >= MEMORY_CRITICAL_PENDING_SECONDS;
   const backlogElevated = pending > maxPending;
@@ -137,6 +169,7 @@ export function evaluateMemoryGuard(input: MemoryGuardInput): MemoryGuardDecisio
 
   let reason: string | null = null;
   if (input.allocationFailure) reason = "检测到内存分配失败";
+  else if (autoPauseEnabled && heapThresholdCritical) reason = `已达到 ${autoPauseThresholdMiB} MiB 内存保护阈值`;
   else if (heapCritical) reason = "浏览器堆内存接近上限";
   else if (backlogCritical) reason = "模拟积压超过安全上限";
   else if (repeatedSlowWorkers) reason = "模拟 Worker 连续超时";

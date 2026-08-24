@@ -9,6 +9,8 @@ import {
   FULL_REALTIME_SIMULATION_PREFERENCE_KEY,
   FACTORY_ALERTS_PREFERENCE_KEY,
   LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY,
+  MEMORY_AUTO_PAUSE_PREFERENCE_KEY,
+  MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY,
   readConnectExpandAllPreference,
   readCanvasDetailPreference,
   readCanvasInteractionDetailPreference,
@@ -18,6 +20,8 @@ import {
   readFullRealtimeSimulationPreference,
   readFactoryAlertsPreference,
   readLargeSaveAutosaveThrottlePreference,
+  readMemoryAutoPauseEnabledPreference,
+  readMemoryAutoPauseThresholdPreference,
   readSettingsCategoryPreference,
   readConnectionPointSize,
   readShowRunLogPreference,
@@ -39,6 +43,8 @@ import {
   writeFullRealtimeSimulationPreference,
   writeFactoryAlertsPreference,
   writeLargeSaveAutosaveThrottlePreference,
+  writeMemoryAutoPauseEnabledPreference,
+  writeMemoryAutoPauseThresholdPreference,
 } from "./uiPreferences";
 
 function memoryStorage(): Storage {
@@ -74,6 +80,8 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("selected");
       expect(readBlueprintAllowOverlapPreference()).toBe(false);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(true);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
+      expect(readMemoryAutoPauseThresholdPreference()).toBeNull();
       writeThemePreference("light");
       writeShowRunLogPreference(false);
       writeShowItemHoverPreference(false);
@@ -89,6 +97,8 @@ describe("device-only UI preferences", () => {
       writeCanvasInteractionDetailPreference("hover");
       writeBlueprintAllowOverlapPreference(true);
       writeLargeSaveAutosaveThrottlePreference(false);
+      writeMemoryAutoPauseEnabledPreference(false);
+      writeMemoryAutoPauseThresholdPreference(1_536);
       expect(readThemePreference()).toBe("light");
       expect(readShowRunLogPreference()).toBe(false);
       expect(readShowItemHoverPreference()).toBe(false);
@@ -108,10 +118,14 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("hover");
       expect(readBlueprintAllowOverlapPreference()).toBe(true);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(false);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(false);
+      expect(readMemoryAutoPauseThresholdPreference()).toBe(1_536);
       expect(storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY)).toBe("medium");
       expect(storage.getItem(CANVAS_OVERLAP_PREFERENCE_KEY)).toBe("representative");
       expect(storage.getItem(CANVAS_INTERACTION_DETAIL_PREFERENCE_KEY)).toBe("hover");
       expect(storage.getItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY)).toBe("true");
+      expect(storage.getItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY)).toBe("false");
+      expect(storage.getItem(MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY)).toBe("1536");
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });
     }
@@ -134,6 +148,8 @@ describe("device-only UI preferences", () => {
     storage.setItem(CANVAS_INTERACTION_DETAIL_PREFERENCE_KEY, "damaged");
     storage.setItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY, "damaged");
     storage.setItem(LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY, "damaged");
+    storage.setItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY, "damaged");
+    storage.setItem(MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY, "999");
     const original = globalThis.window;
     Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }) } });
     try {
@@ -152,6 +168,8 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("selected");
       expect(readBlueprintAllowOverlapPreference()).toBe(false);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(true);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
+      expect(readMemoryAutoPauseThresholdPreference()).toBeNull();
       expect(storage.getItem(LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY)).toBe("damaged");
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });

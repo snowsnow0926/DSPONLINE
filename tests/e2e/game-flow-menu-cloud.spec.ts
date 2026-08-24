@@ -1602,15 +1602,14 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(releaseNotes).toContainText("空间站合同 ID 冲突可自愈");
-  await expect(releaseNotes).toContainText("云端校验保留兼容边界");
-  await expect(releaseNotes).toContainText("自定义建筑进入部署托盘");
-  await expect(releaseNotes).toContainText("Mod 扩展边界保持可验证");
-  await expect(releaseNotes).toContainText("旧存档与 1.1.6 可继续读取");
-  await expect(releaseNotes).toContainText("合同、托盘和服务端加入回归门禁");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toContainText("内存超限自动暂停可配置");
+  await expect(releaseNotes).toContainText("大型存档改为分块增量检查点");
+  await expect(releaseNotes).toContainText("真实终局存档长时回归");
+  await expect(releaseNotes).toContainText("旧存档与云端协议保持兼容");
+  await expect(releaseNotes).toContainText("内存策略与发布门禁加入回归");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1634,15 +1633,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v117-1440.png", fullPage: true });
+  await expect(releaseNotes).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-25-v118-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v117-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-25-v118-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1665,7 +1664,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v117-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-25-v118-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1674,16 +1673,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-24-v1.1.7");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-25-v1.1.8");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年8月24日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年8月25日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1693,9 +1692,9 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-24-v117-844x390.png", fullPage: true });

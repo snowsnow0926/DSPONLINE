@@ -2107,6 +2107,35 @@ test("operations settings and local save slots persist across reload", async ({ 
   await page.screenshot({ path: "artifacts/qa/operations-settings-390.png", fullPage: true });
 });
 
+test("memory auto-pause policy exposes safe defaults and device-only overrides", async ({ page }) => {
+  await openOperationsStageGame(page, "/?storageMigration=production");
+  await page.getByLabel("打开设置").click();
+  const operations = page.getByRole("dialog", { name: "运营中心" });
+  await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await operations.locator(".settings-category-overview").getByRole("button", { name: "终局性能" }).click();
+  const guard = operations.locator(".settings-memory-guard");
+  await expect(guard).toBeVisible();
+  await expect(guard).toContainText("浏览器堆上限 90%");
+  await expect(guard.getByRole("radio", { name: "自动 90%" })).toHaveAttribute("aria-checked", "true");
+  await guard.getByRole("radio", { name: "2 GiB" }).click();
+  await guard.locator(".setting-row").filter({ hasText: "内存超限时自动暂停" }).click();
+  await expect.poll(() => page.evaluate(() => ({
+    enabled: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1"),
+    threshold: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1"),
+  }))).toEqual({ enabled: "false", threshold: "2048" });
+  await expect(guard).toContainText("已关闭堆内存阈值保护");
+  await operations.getByLabel("关闭运营中心").click();
+  await page.reload();
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await page.getByLabel("打开设置").click();
+  const reloadedOperations = page.getByRole("dialog", { name: "运营中心" });
+  await reloadedOperations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await selectSettingsCategory(reloadedOperations, "终局性能", "performance");
+  const reloadedGuard = reloadedOperations.locator(".settings-memory-guard");
+  await expect(reloadedGuard.locator(".setting-row").filter({ hasText: "内存超限时自动暂停" }).locator("input")).not.toBeChecked();
+  await expect(reloadedGuard.getByRole("radio", { name: "2 GiB" })).toHaveAttribute("aria-checked", "true");
+});
+
 test("failed primary saves stay visible and never report false success", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.addInitScript(() => {

@@ -381,7 +381,7 @@ import { readMulticoreSimulationOptions, type MulticoreSimulationOptions } from 
 import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode";
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
 import { accumulateSimulationBudget, NORMAL_SIMULATION_SLICE_SECONDS, takeSimulationBudgetSlice } from "./game/simulationBudget";
-import { evaluateMemoryGuard, isLargeMemoryWorkload, readBrowserMemorySnapshot, type MemoryGuardDecision, type MemoryWorkload } from "./game/memoryBudget";
+import { evaluateMemoryGuard, isLargeMemoryWorkload, readBrowserMemorySnapshot, type MemoryAutoPauseThresholdMiB, type MemoryGuardDecision, type MemoryGuardPolicy, type MemoryWorkload } from "./game/memoryBudget";
 import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase } from "./game/runtimeTransitionDiagnostics";
 import {
   createTimeWarpComputeGovernor,
@@ -458,7 +458,7 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readMemoryAutoPauseEnabledPreference, readMemoryAutoPauseThresholdPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeMemoryAutoPauseEnabledPreference, writeMemoryAutoPauseThresholdPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
 
@@ -1291,6 +1291,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [game, setGame] = useState(loaded.state);
   const [largeSaveAutosaveProtection, setLargeSaveAutosaveProtection] = useState(readLargeSaveAutosaveThrottlePreference);
   const [allowEditsDuringSave, setAllowEditsDuringSave] = useState(readAllowEditsDuringSavePreference);
+  const [memoryAutoPauseEnabled, setMemoryAutoPauseEnabled] = useState(readMemoryAutoPauseEnabledPreference);
+  const [memoryAutoPauseThresholdMiB, setMemoryAutoPauseThresholdMiB] = useState<MemoryAutoPauseThresholdMiB>(readMemoryAutoPauseThresholdPreference);
+  const memoryGuardPolicy: MemoryGuardPolicy = useMemo(() => ({
+    autoPauseEnabled: memoryAutoPauseEnabled,
+    autoPauseThresholdMiB: memoryAutoPauseThresholdMiB,
+  }), [memoryAutoPauseEnabled, memoryAutoPauseThresholdMiB]);
+  const updateMemoryAutoPauseEnabled = useCallback((enabled: boolean) => {
+    setMemoryAutoPauseEnabled(enabled);
+    writeMemoryAutoPauseEnabledPreference(enabled);
+  }, []);
+  const updateMemoryAutoPauseThreshold = useCallback((thresholdMiB: MemoryAutoPauseThresholdMiB) => {
+    setMemoryAutoPauseThresholdMiB(thresholdMiB);
+    writeMemoryAutoPauseThresholdPreference(thresholdMiB);
+  }, []);
   const [persistedPrimaryBytes, setPersistedPrimaryBytes] = useState<number | null>(() => readVerifiedPrimaryByteLength(loaded.state.mode));
   const largeSaveAutosavePolicy: LargeSaveAutosavePolicy = useMemo(() => resolveLargeSaveAutosavePolicy({
     configuredIntervalSeconds: game.settings.autosaveIntervalSeconds,
@@ -3057,6 +3071,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       let saveState = requestedState ?? barrierState;
       let checkpointRevision = simulationStateRevisionRef.current;
+      const saveMemoryDecision = evaluateMemoryGuard({
+        snapshot: readBrowserMemorySnapshot(),
+        workload: memoryWorkloadForState(saveState),
+        pendingSimulationSeconds: simulationPendingSecondsRef.current,
+        workerInFlight: Boolean(simulationSubmissionRef.current),
+        saveInFlight: true,
+        slowWorkerCount: memorySlowWorkerCountRef.current,
+        policy: memoryGuardPolicy,
+      });
+      if (saveMemoryDecision.shouldPause) {
+        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留最近检查点", code: "conflict" };
+        pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
+        setSaveFailure(failure);
+        setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
+        recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed", reason: saveMemoryDecision.reason ?? "memory-pressure" });
+        if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
+        return failure;
+      }
       // The checkpoint Worker may resolve after pagehide. Do not turn that
       // late result into a new primary/IDB transaction; T0 remains the exact
       // recovery source for the next boot.
@@ -3186,7 +3218,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
     }
-  }, [requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
+  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
   persistDurablePrimaryCheckpointRef.current = persistDurablePrimaryCheckpoint;
 
   const loadVerifiedDurablePrimaryState = useCallback(async (
@@ -3588,10 +3620,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         workerInFlight: Boolean(simulationSubmissionRef.current),
         saveInFlight: true,
         slowWorkerCount: memorySlowWorkerCountRef.current,
+        policy: memoryGuardPolicy,
       });
       if (saveMemoryDecision.shouldPause) {
+        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留最近检查点", code: "conflict" };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
-        return { success: false, message: "内存压力过高，已暂停并保留最近检查点", code: "conflict" };
+        // A guard rejection is an expected, terminal save outcome rather than
+        // an exception. Publish the same failed phase/transition as the catch
+        // path so autosave overlays and diagnostics cannot remain "in flight".
+        setSaveFailure(failure);
+        setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
+        recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed", reason: saveMemoryDecision.reason ?? "memory-pressure" });
+        if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
+        else if (kind === "pure-idle-stop") completeRuntimeTransition("pure-idle-stop", "save-failed");
+        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+        return failure;
       }
       recordRuntimeTransitionPhase("save-authoritative-checkpoint", startedAt, performance.now() - startedAt, { kind });
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在准备分块检查点…" });
@@ -3692,7 +3735,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryWorkloadForState, pauseForMemoryPressure,
+  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure,
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
 
@@ -6157,6 +6200,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         workerInFlight: Boolean(simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current),
         saveInFlight: simulationCheckpointBarrierRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0 || durablePrimarySaveInFlightRef.current,
         slowWorkerCount: memorySlowWorkerCountRef.current,
+        policy: memoryGuardPolicy,
       });
       if (memoryDecision.shouldPause && !simulationSubmissionRef.current && !durableRecoveryStageInFlightRef.current) {
         pauseForMemoryPressure(memoryDecision.reason ?? "未知内存压力");
@@ -6283,7 +6327,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       publishRuntimeGame(next);
     }, 1_000);
     return () => window.clearInterval(timer);
-  }, [abortPureIdleForWorkerFailure, memoryWorkloadForState, pauseForMemoryPressure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
+  }, [abortPureIdleForWorkerFailure, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
   useEffect(() => {
     const timer = largeSaveAutosavePolicy.effectiveIntervalSeconds > 0
@@ -12710,6 +12754,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             factoryAlertsEnabled={factoryAlertsEnabled}
             largeSaveAutosaveProtection={largeSaveAutosaveProtection}
             largeSaveAutosavePolicy={largeSaveAutosavePolicy}
+            memoryAutoPauseEnabled={memoryAutoPauseEnabled}
+            memoryAutoPauseThresholdMiB={memoryAutoPauseThresholdMiB}
             allowEditsDuringSave={allowEditsDuringSave}
             onAllowEditsDuringSaveChange={setAllowEditsDuringSavePreference}
             blueprintAllowOverlap={blueprintAllowOverlap}
@@ -12732,6 +12778,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onFullRealtimeSimulationChange={setFullRealtimeSimulation}
             onFactoryAlertsEnabledChange={updateFactoryAlertsEnabled}
             onLargeSaveAutosaveProtectionChange={updateLargeSaveAutosaveProtection}
+            onMemoryAutoPauseEnabledChange={updateMemoryAutoPauseEnabled}
+            onMemoryAutoPauseThresholdChange={updateMemoryAutoPauseThreshold}
             onBlueprintAllowOverlapChange={setBlueprintAllowOverlap}
             onCanvasDetailPreferenceChange={setCanvasDetailPreference}
             onCanvasOverlapPreferenceChange={setCanvasOverlapPreference}

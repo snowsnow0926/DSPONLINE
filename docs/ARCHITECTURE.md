@@ -1,5 +1,7 @@
 # 系统架构
 
+> **1.1.8 内存策略边界（发布候选，未部署）**：`memoryBudget.ts` 是无 React/存储依赖的内存闸门。模拟调度器和保存路径共用同一 `MemoryGuardPolicy`：默认在浏览器 JS 堆达到 90% 或可选固定水位时暂停；关闭设备级堆阈值后仍保留模拟积压、Worker 连续失败和分配失败的硬暂停。固定水位只增加提前暂停，不降低浏览器上限保护。开关与阈值由 `uiPreferences.ts` 写入本机 localStorage，不进入 `GameState`、save envelope、云上传、确定性哈希或服务端 schema；浏览器不提供 `performance.memory` 时按未知处理，队列/Worker/保存互斥保护继续生效。内存闸门拒绝保存必须走与异常相同的 `failed` persistence phase/transition，避免 UI 留在进行中。详见 [1.1.8 内存优化交接](./releases/1.1.8-memory-optimization-handoff.md)。
+
 > **1.1.7 候选增量（未发布）**：v47 稀疏持久投影可以省略共享契约默认的 `quantumMode`；服务端仅在字段缺失且实体为 v47 量子端点时按 `legacy` 解释，显式 `null` 或未知值仍拒绝。空间站合同加载先以 history/settledIds 建立奖励围栏，丢弃不可再次领取的活动重复项；服务端只兼容带围栏且身份完全相同的旧版 offer/history 重叠。内容包激活后，施工目录从运行时 `CONSTRUCTION` 派生，核心顺序固定、有效自定义建筑追加，桌面和手机托盘共用按 `kind` 的安全分类；真正的传送带仍必须来自 `belts` 注册。该候选基于 1.1.6 固定提交 `4f6d24f`，不改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3，也未连接生产。
 
 > **1.1.5 稳定生产架构（2026-08-24）**：运行时 `a92c0d3157f3658523d8d4abbbb0ae654dc4fc35` 已完成香港/上海 Web/API、上海下载页、Windows 和 Android stable 的不可变目录部署与原子切换；香港 previous-stable 固定为 1.1.4 Web 目录。当前协议边界为 GameState v47、save envelope v2、cloud schema v8、SQLite layout v3。Android 实体设备门禁为用户明确豁免，Windows 按既有策略保持 `NotSigned`；发布证据、备份、健康、回滚与观察结果见 [1.1.5 正式发布记录](./releases/1.1.5.md)。

@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
@@ -10,6 +10,7 @@ export const CURRENT_RELEASE_NOTES = getCurrentReleaseNotes("zh-CN");
 
 const RELEASE_NOTES_1_1_6 = getReleaseNotes116("zh-CN");
 const RELEASE_NOTES_1_1_5 = getReleaseNotes115("zh-CN");
+const RELEASE_NOTES_1_1_7 = getReleaseNotes117("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
 const RELEASE_NOTES_1_0_42 = getReleaseNotes1042("zh-CN");
@@ -70,6 +71,10 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "memory-auto-pause-policy": ShieldCheck,
+  "chunked-incremental-save": Database,
+  "real-save-memory-benchmark": Gauge,
+  "memory-regression-gates": Check,
   "station-contract-id-repair": History,
   "station-contract-server-validation": ShieldCheck,
   "custom-building-trays": Database,
@@ -153,6 +158,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_1_7,
   RELEASE_NOTES_1_1_6,
   RELEASE_NOTES_1_1_5,
   RELEASE_NOTES_1_0_46,
@@ -516,6 +522,7 @@ export function getReleaseNotesPageForRelease(id: string, pageSize = RELEASE_HIS
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { locale } = useAppLocale();
   const localizedCurrentRelease = getCurrentReleaseNotes(locale);
+  const localizedRelease117 = getReleaseNotes117(locale);
   const localizedRelease115 = getReleaseNotes115(locale);
   const localizedRelease1046 = getReleaseNotes1046(locale);
   const localizedRelease1045 = getReleaseNotes1045(locale);
@@ -534,6 +541,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.id === RELEASE_NOTES_1_1_7.id ? localizedRelease117
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_5.id ? localizedRelease115
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_46.id ? localizedRelease1046
     : selectedReleaseRecord.id === RELEASE_NOTES_1_0_45.id ? localizedRelease1045

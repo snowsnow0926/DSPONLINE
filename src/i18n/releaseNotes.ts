@@ -27,6 +27,40 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release118Copy = {
+  date: { "zh-CN": "2026年8月25日", en: "August 25, 2026" },
+  title: { "zh-CN": "内存安全暂停与分块增量存档", en: "Memory Safety Pausing and Chunked Incremental Saves" },
+  summary: {
+    "zh-CN": "1.1.8 为大型工厂加入内存预算、模拟与保存互斥、分块增量检查点和自动安全暂停。设置页现在可以在“自动 90%”与固定 JS 堆内存阈值之间选择，也可以关闭堆阈值暂停；设置只保存在本机，不写入存档或云同步。关闭后，模拟积压失控、Worker 失败和内存分配失败保护仍然保留。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 继续兼容。",
+    en: "Version 1.1.8 adds a memory budget, save/simulation fencing, chunked incremental checkpoints, and an automatic safety pause for large factories. Settings can use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable heap-threshold pausing; the preference is device-only and never enters saves or cloud sync. Queue overflow, Worker failure, and allocation-failure safeguards remain when heap pausing is disabled. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  guardTitle: { "zh-CN": "内存超限自动暂停可配置", en: "Configurable memory-pressure auto-pause" },
+  guardDescription: {
+    "zh-CN": "默认使用浏览器 JS 堆上限的 90% 作为保护线；高级玩家可以选择 512 MiB、768 MiB、1/1.5/2/3/4 GiB 固定水位，或关闭堆阈值触发。固定水位只会更早暂停，不会降低浏览器 90% 安全上限；关闭后仍保留积压、Worker 和分配失败保护。",
+    en: "The default uses 90% of the browser JS-heap limit. Advanced players can choose 512 MiB, 768 MiB, 1/1.5/2/3/4 GiB watermarks or disable heap-threshold pausing. A fixed watermark only pauses earlier and never weakens the browser 90% ceiling; queue, Worker, and allocation-failure guards remain when disabled.",
+  },
+  saveTitle: { "zh-CN": "大型存档改为分块增量检查点", en: "Large saves use chunked incremental checkpoints" },
+  saveDescription: {
+    "zh-CN": "首次保存仍保留完整 v2 主存档；后续自动保存只写变化的实体/线路区块，手动保存和不支持 IndexedDB 的环境继续走经过验证的完整保存回退。内存闸门拒绝保存时也会正确结束保存状态并保留最近检查点。",
+    en: "The first save remains a complete v2 primary save. Later autosaves write only changed entity/belt chunks; manual saves and environments without IndexedDB use the verified full-save fallback. If the memory governor rejects a save, the save state now terminates cleanly while the latest checkpoint is retained.",
+  },
+  benchmarkTitle: { "zh-CN": "真实终局存档长时回归", en: "Long-run regression on a real endgame save" },
+  benchmarkDescription: {
+    "zh-CN": "对 80,674 个建筑、155,746 条线路的玩家存档完成挂机、建造、拉线、蓝图和自动保存压力测试；纯挂机 180 秒时 1.1.8 在约 21 秒安全暂停并停止继续涨内存，组合建造/保存峰值较 1.1.7 低约 14.7%。",
+    en: "A player save with 80,674 entities and 155,746 belts was tested through idle, building, belt edits, blueprints, and autosaves. During 180 seconds of pure idle, 1.1.8 safely paused at about 21 seconds instead of continuing to grow; the combined building/save peak was about 14.7% lower than 1.1.7.",
+  },
+  compatibilityTitle: { "zh-CN": "旧存档与云端协议保持兼容", en: "Existing saves and cloud protocols remain compatible" },
+  compatibilityDescription: {
+    "zh-CN": "不升级 GameState v47、存档 envelope v2、cloud schema v8 或 SQLite layout v3；内存设置是设备级偏好，不参与确定性模拟、上传或云端合并。",
+    en: "GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged. The memory policy is a device-only preference and does not participate in deterministic simulation, upload, or cloud merge.",
+  },
+  regressionTitle: { "zh-CN": "内存策略与发布门禁加入回归", en: "Memory policy and release gates are regression-covered" },
+  regressionDescription: {
+    "zh-CN": "新增固定阈值、关闭堆阈值后仍暂停关键积压、偏好损坏回退、设置页面可访问性、保存失败终态、类型检查、生产构建和真实存档长时证据。",
+    en: "Regression coverage adds fixed-threshold behavior, critical-backlog pausing after heap pausing is disabled, corrupted-preference fallbacks, settings accessibility, save-failure terminal state, typecheck, production build, and real-save long-run evidence.",
+  },
+} as const;
+
 const release117Copy = {
   date: { "zh-CN": "2026年8月24日", en: "August 24, 2026" },
   title: { "zh-CN": "云存档合同修复与 Mod 建筑托盘", en: "Cloud Contract Repair and Mod Building Trays" },
@@ -502,7 +536,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release117Copy): string {
+function release118Message(locale: AppLocale, key: keyof typeof release118Copy): string {
+  return release118Copy[key][locale];
+}
+
+function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
 
@@ -537,18 +575,35 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-24-v1.1.7",
-    date: currentMessage(locale, "date"),
-    version: "1.1.7",
-    title: currentMessage(locale, "title"),
-    summary: currentMessage(locale, "summary"),
+    id: "2026-08-25-v1.1.8",
+    date: release118Message(locale, "date"),
+    version: "1.1.8",
+    title: release118Message(locale, "title"),
+    summary: release118Message(locale, "summary"),
     items: [
-      { id: "station-contract-id-repair", title: currentMessage(locale, "contractTitle"), description: currentMessage(locale, "contractDescription") },
-      { id: "station-contract-server-validation", title: currentMessage(locale, "serverTitle"), description: currentMessage(locale, "serverDescription") },
-      { id: "custom-building-trays", title: currentMessage(locale, "modTrayTitle"), description: currentMessage(locale, "modTrayDescription") },
-      { id: "declarative-mod-contract", title: currentMessage(locale, "modContractTitle"), description: currentMessage(locale, "modContractDescription") },
-      { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
-      { id: "contract-mod-regression", title: currentMessage(locale, "regressionTitle"), description: currentMessage(locale, "regressionDescription") },
+      { id: "memory-auto-pause-policy", title: release118Message(locale, "guardTitle"), description: release118Message(locale, "guardDescription") },
+      { id: "chunked-incremental-save", title: release118Message(locale, "saveTitle"), description: release118Message(locale, "saveDescription") },
+      { id: "real-save-memory-benchmark", title: release118Message(locale, "benchmarkTitle"), description: release118Message(locale, "benchmarkDescription") },
+      { id: "version-upgrade", title: release118Message(locale, "compatibilityTitle"), description: release118Message(locale, "compatibilityDescription") },
+      { id: "memory-regression-gates", title: release118Message(locale, "regressionTitle"), description: release118Message(locale, "regressionDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes117(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-24-v1.1.7",
+    date: release117Message(locale, "date"),
+    version: "1.1.7",
+    title: release117Message(locale, "title"),
+    summary: release117Message(locale, "summary"),
+    items: [
+      { id: "station-contract-id-repair", title: release117Message(locale, "contractTitle"), description: release117Message(locale, "contractDescription") },
+      { id: "station-contract-server-validation", title: release117Message(locale, "serverTitle"), description: release117Message(locale, "serverDescription") },
+      { id: "custom-building-trays", title: release117Message(locale, "modTrayTitle"), description: release117Message(locale, "modTrayDescription") },
+      { id: "declarative-mod-contract", title: release117Message(locale, "modContractTitle"), description: release117Message(locale, "modContractDescription") },
+      { id: "version-upgrade", title: release117Message(locale, "compatibilityTitle"), description: release117Message(locale, "compatibilityDescription") },
+      { id: "contract-mod-regression", title: release117Message(locale, "regressionTitle"), description: release117Message(locale, "regressionDescription") },
     ],
   };
 }

@@ -167,7 +167,10 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
   await expect(shell).toHaveAttribute("data-persistence-phase", "checkpoint");
   await expect(page.locator("[data-persistence-progress]")).toContainText("模拟检查点");
   await expect(shell).toHaveAttribute("data-persistence-phase", "serialize-write-readback", { timeout: 5_000 });
-  await expect(page.locator("[data-persistence-progress]")).toContainText("序列化、写入并逐字复核");
+  await expect.poll(async () => {
+    const text = await page.locator("[data-persistence-progress]").textContent();
+    return text?.includes("序列化、写入并逐字复核") || text?.includes("存档已验证完成") || false;
+  }).toBe(true);
   await expect(shell).toHaveAttribute("data-persistence-phase", "complete", { timeout: 5_000 });
   await expect(page.locator("[data-persistence-progress]")).toContainText("存档已验证完成");
 

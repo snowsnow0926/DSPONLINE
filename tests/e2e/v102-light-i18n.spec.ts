@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.7";
+const RELEASE_NOTE_ID = "2026-08-25-v1.1.8";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,14 +110,14 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Cloud Contract Repair and Mod Building Trays" });
+  const dialog = page.getByRole("dialog", { name: "Memory Safety Pausing and Chunked Incremental Saves" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.1.7");
-  await expect(dialog).toContainText("Orbital contract ID collisions self-heal");
-  await expect(dialog).toContainText("Cloud validation keeps a narrow compatibility boundary");
-  await expect(dialog).toContainText("Custom buildings appear in deployment trays");
-  await expect(dialog).toContainText("Mod extension boundaries stay verifiable");
-  await expect(dialog).toContainText("Existing saves and 1.1.6 remain readable");
+  await expect(dialog).toContainText("1.1.8");
+  await expect(dialog).toContainText("Configurable memory-pressure auto-pause");
+  await expect(dialog).toContainText("Large saves use chunked incremental checkpoints");
+  await expect(dialog).toContainText("Long-run regression on a real endgame save");
+  await expect(dialog).toContainText("Existing saves and cloud protocols remain compatible");
+  await expect(dialog).toContainText("Memory policy and release gates are regression-covered");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

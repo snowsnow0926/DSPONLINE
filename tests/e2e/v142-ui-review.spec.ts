@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.7";
+const RELEASE_NOTE_ID = "2026-08-25-v1.1.8";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "云存档合同修复与 Mod 建筑托盘");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.7");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(dialog).toContainText("空间站合同 ID 冲突可自愈");
-  await expect(dialog).toContainText("云端校验保留兼容边界");
-  await expect(dialog).toContainText("自定义建筑进入部署托盘");
-  await expect(dialog).toContainText("Mod 扩展边界保持可验证");
-  await expect(dialog).toContainText("旧存档与 1.1.6 可继续读取");
+  await expect(dialog).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog).toContainText("内存超限自动暂停可配置");
+  await expect(dialog).toContainText("大型存档改为分块增量检查点");
+  await expect(dialog).toContainText("真实终局存档长时回归");
+  await expect(dialog).toContainText("旧存档与云端协议保持兼容");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

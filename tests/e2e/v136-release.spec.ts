@@ -178,9 +178,16 @@ test("dense planets auto-enable Canvas hit testing without extreme mode and prom
   await expect(page.locator("canvas.canvas-belt-layer")).toHaveAttribute("data-segments", "1600");
   await expect(page.locator(".react-flow__edge")).toHaveCount(0);
 
-  const source = await page.locator('.react-flow__node[data-id="v136-machine-0"]').boundingBox();
-  expect(source).not.toBeNull();
-  const hit = { x: source!.x + source!.width + 8, y: source!.y + source!.height / 2 };
+  const source = page.locator('.react-flow__node[data-id="v136-machine-0"]');
+  const sourceBox = await source.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  // The dense renderer now uses measured handle geometry. Aim just outside
+  // the first real output handle instead of assuming every belt leaves from
+  // the card's vertical centre.
+  const outputHandle = source.locator('.react-flow__handle.source').first();
+  const handleBox = await outputHandle.boundingBox();
+  expect(handleBox).not.toBeNull();
+  const hit = { x: handleBox!.x + handleBox!.width + 10, y: handleBox!.y + handleBox!.height / 2 };
   await page.mouse.move(hit.x, hit.y);
   await expect.poll(() => page.locator(".react-flow__edge").count()).toBeGreaterThan(0);
   expect(await page.locator(".react-flow__edge").count()).toBeLessThan(10);

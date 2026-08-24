@@ -520,13 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "超大存档低内存保存与压缩导出");
+  await expect(dialog).toHaveAttribute("aria-label", "传送带端口对齐与纯挂机高倍率修复");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.6");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(dialog).toContainText("保存链路不再搬运多份巨型正文");
-  await expect(dialog).toContainText("存档默认导出为 .json.gz");
-  await expect(dialog).toContainText("超大存档纯挂机纳入完整验收");
-  await expect(dialog).toContainText("银河综合榜使用五项等权对数评分");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog).toContainText("传送带线精确连接真实端口");
+  await expect(dialog).toContainText("高密度线路拓扑不随流量重建");
+  await expect(dialog).toContainText("终局纯挂机继续按高倍率结算");
+  await expect(dialog).toContainText("多端口与密集画布加入回归门禁");
+  await expect(dialog).toContainText("存档与服务端协议保持兼容");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

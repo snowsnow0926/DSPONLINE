@@ -1,16 +1,20 @@
-import type { BeltConnection, BeltInputPortIndex, EntityKind, FactoryEntity, ItemId, PlanetId } from "./types";
+import type { BeltConnection, BeltInputPortIndex, BuildingId, EntityKind, FactoryEntity, ItemId, PlanetId } from "./types";
 import type { BeltBundleInfo, PortOccupancy } from "./network";
 
 export interface CanvasEntityTopology {
   id: string;
   kind: EntityKind;
+  /** Stable building identity used to resolve special React Flow ports. */
+  buildingId?: BuildingId;
   x: number;
   y: number;
 }
 
 export type CanvasBeltTopology = Pick<BeltConnection,
   "id" | "source" | "target" | "itemId" | "tier" | "lanes" | "stackSize" |
-  "priority" | "targetPortIndex" | "routeMode" | "routeOffsetY">;
+  "priority" | "targetPortIndex" | "routeMode" | "routeOffsetY"> & {
+  planetId: PlanetId;
+};
 
 export interface FactoryCanvasTopology {
   planetId: PlanetId;
@@ -75,6 +79,7 @@ export function reconcileFactoryCanvasTopology(
   for (const belt of belts) {
     const topologyBelt: CanvasBeltTopology = {
       id: belt.id,
+      planetId,
       source: belt.source,
       target: belt.target,
       itemId: belt.itemId,
@@ -123,6 +128,7 @@ export function reconcileFactoryCanvasTopology(
     entities: entities.map((entity) => ({
       id: entity.id,
       kind: entity.kind,
+      buildingId: entity.buildingId,
       x: entity.position.x,
       y: entity.position.y,
     })),

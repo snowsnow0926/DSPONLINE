@@ -18,6 +18,43 @@ export interface CanvasLineNodeGeometry {
 }
 
 /**
+ * A belt endpoint measured from React Flow's internal handle geometry.
+ *
+ * Dense Canvas rendering used to infer both endpoints from the card centre.
+ * That is only correct for a single-port card: multi-input/output cards place
+ * handles at different vertical offsets, so the inferred line visibly misses
+ * the port (and can appear to jump when the card changes LOD).  Keep this
+ * structure in world coordinates so the renderer can apply the same viewport
+ * transform as React Flow without reading DOM pixels during a draw.
+ */
+export interface CanvasLineEndpoint {
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+}
+
+/**
+ * Immutable belt topology consumed by the dense renderer. Runtime flow
+ * counters intentionally stay out of this shape so a simulation tick cannot
+ * invalidate the packed geometry or hit index.
+ */
+export interface CanvasLineBelt {
+  id: string;
+  planetId: PlanetId;
+  source: string;
+  target: string;
+  itemId: BeltConnection["itemId"];
+  tier: BeltConnection["tier"];
+  lanes: number;
+  stackSize?: BeltConnection["stackSize"];
+  priority: BeltConnection["priority"];
+  targetPortIndex?: BeltConnection["targetPortIndex"];
+  routeMode?: BeltConnection["routeMode"];
+  routeOffsetY?: BeltConnection["routeOffsetY"];
+}
+
+/**
  * Benchmark/experimental renderer input. It intentionally does not replace
  * React Flow: selection and hit testing still use the existing belt objects.
  * The packed positions let a future Canvas/WebGL layer draw all visible lines
@@ -58,11 +95,12 @@ export function buildCanvasLineBatch(
 
 /** Builds routed endpoints from the already-mounted React Flow geometry. */
 export function buildCanvasLineBatchFromGeometry(
-  belts: readonly BeltConnection[],
+  belts: readonly CanvasLineBelt[],
   planetId: PlanetId,
   nodes: readonly CanvasLineNodeGeometry[],
   routeCenters: ReadonlyMap<string, number | undefined>,
   hiddenBeltIds: ReadonlySet<string> = new Set(),
+  endpoints: ReadonlyMap<string, CanvasLineEndpoint> = new Map(),
 ): CanvasLineBatch {
   const geometryById = new Map(nodes.map((node) => [node.id, node]));
   const beltIds: string[] = [];
@@ -75,7 +113,13 @@ export function buildCanvasLineBatchFromGeometry(
     const target = geometryById.get(belt.target);
     if (!source || !target) continue;
     beltIds.push(belt.id);
-    positions.push(source.x + source.width, source.y + source.height / 2, target.x, target.y + target.height / 2);
+    const measured = endpoints.get(belt.id);
+    positions.push(
+      measured?.sourceX ?? source.x + source.width,
+      measured?.sourceY ?? source.y + source.height / 2,
+      measured?.targetX ?? target.x,
+      measured?.targetY ?? target.y + target.height / 2,
+    );
     centers.push(routeCenters.get(belt.id) ?? Number.NaN);
     modes.push((belt.routeMode ?? "auto") === "bezier" ? 0 : 1);
   }

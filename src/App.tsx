@@ -14,6 +14,7 @@ import {
   type Edge,
   type FitViewOptions,
   type FinalConnectionState,
+  type InternalNode,
   type NodeMouseHandler,
   type OnError,
   type OnMove,
@@ -265,6 +266,7 @@ import { deliverSystemSpaceStationMaterial, getInterstellarStationUpgradeStatus,
 import { getDifficultyDefinition } from "./game/difficulty";
 import { analyzeBeltNetwork, analyzeEntityLineTrace, diagnoseBelt, predictBeltConnection } from "./game/network";
 import { buildFactoryEdgeRouteCenters, reconcileFactoryCanvasTopology, type FactoryCanvasTopology } from "./game/canvasTopology";
+import type { CanvasLineEndpoint } from "./game/canvasLineBatch";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
@@ -301,7 +303,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -521,6 +523,44 @@ function getFactoryFlowNodePresentationSize(node: FactoryFlowNode): { width: num
     width: node.measured?.width ?? CANVAS_FULL_NODE_FALLBACK_WIDTH,
     height: node.measured?.height ?? CANVAS_FULL_NODE_FALLBACK_HEIGHT,
   };
+}
+
+/**
+ * Resolve a belt's target handle using the same IDs as the React Flow edge.
+ * Keeping this in one place prevents the dense Canvas endpoint map from
+ * silently diverging from the interactive SVG edge when special ports are
+ * used (delivery hub, orbital terminal, or black-hole connector).
+ */
+function getFactoryBeltTargetHandleId(
+  belt: Pick<BeltConnection, "itemId" | "targetPortIndex">,
+  targetBuildingId: FactoryEntity["buildingId"] | undefined,
+): string {
+  if (belt.targetPortIndex === undefined) return `in:${belt.itemId}`;
+  if (targetBuildingId === "material_delivery_hub") return `in:delivery:${belt.targetPortIndex}`;
+  if (targetBuildingId === "orbital_cargo_terminal") return `in:orbital:${belt.targetPortIndex}`;
+  return `in:black-hole:${belt.targetPortIndex}`;
+}
+
+/**
+ * React Flow's internal handle bounds are already expressed in world units.
+ * Read those bounds instead of guessing from a node rectangle: multi-port
+ * cards deliberately place each input/output at a different Y coordinate.
+ */
+function getCanvasHandleEndpoint(
+  nodeLookup: ReadonlyMap<string, InternalNode<FactoryFlowNode>>,
+  nodeId: string,
+  handleId: string,
+  handleType: "source" | "target",
+): { x: number; y: number } | null {
+  const node = nodeLookup.get(nodeId);
+  const handles = node?.internals.handleBounds?.[handleType];
+  const handle = handles?.find((candidate) => candidate.id === handleId);
+  if (!node || !handle || !Number.isFinite(handle.x) || !Number.isFinite(handle.y)) return null;
+  const width = Number.isFinite(handle.width) ? handle.width : 0;
+  const height = Number.isFinite(handle.height) ? handle.height : 0;
+  const x = node.internals.positionAbsolute.x + handle.x + (handleType === "source" ? width : 0);
+  const y = node.internals.positionAbsolute.y + handle.y + height / 2;
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 function getFactoryFlowNodeInitialSize(
@@ -9024,6 +9064,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     edgeRouteCacheRef.current = { topologyRevision: canvasTopology.revision, geometryRevision: canvasGeometryRevision, simplified: largeFactoryMode, centers };
     return centers;
   }, [canvasGeometryRevision, canvasTopology, largeFactoryMode, nodes, topologyCacheFeatureActive]);
+  const canvasEntityBuildingById = useMemo(() => new Map(
+    canvasTopology.entities.map((entity) => [entity.id, entity.buildingId] as const),
+  ), [canvasTopology.entities]);
+  const canvasLineEndpoints = useMemo<ReadonlyMap<string, CanvasLineEndpoint>>(() => {
+    const lookup = flowStore.getState().nodeLookup;
+    const next = new Map<string, CanvasLineEndpoint>();
+    for (const belt of canvasTopology.belts) {
+      const sourceHandle = getCanvasHandleEndpoint(lookup, belt.source, `out:${belt.itemId}`, "source");
+      const targetHandle = getCanvasHandleEndpoint(lookup, belt.target, getFactoryBeltTargetHandleId(belt, canvasEntityBuildingById.get(belt.target)), "target");
+      if (!sourceHandle || !targetHandle) continue;
+      next.set(belt.id, {
+        sourceX: sourceHandle.x,
+        sourceY: sourceHandle.y,
+        targetX: targetHandle.x,
+        targetY: targetHandle.y,
+      });
+    }
+    return next;
+  }, [canvasEntityBuildingById, canvasGeometryRevision, canvasPresentationDetailStage, canvasTopology.belts, flowStore, nodes]);
   const canvasLineNodeGeometry = useMemo(() => nodes.map((node) => ({
     id: node.id,
     x: node.position.x,
@@ -9060,13 +9119,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const flowRatio = capacity > 0 ? Math.min(1, belt.lastFlow / capacity) : 0;
       const diagnostic = diagnoseBelt(canvasGame, belt, beltDiagnosticIndex);
       const routeColor = canvasGame.settings.beltHeatmapEnabled ? beltHeatColor(diagnostic.utilization) : item.color;
-      const targetHandle = belt.targetPortIndex === undefined
-        ? `in:${belt.itemId}`
-        : activeEntityById.get(belt.target)?.buildingId === "material_delivery_hub"
-          ? `in:delivery:${belt.targetPortIndex}`
-          : activeEntityById.get(belt.target)?.buildingId === "orbital_cargo_terminal"
-            ? `in:orbital:${belt.targetPortIndex}`
-          : `in:black-hole:${belt.targetPortIndex}`;
+      const targetHandle = getFactoryBeltTargetHandleId(belt, activeEntityById.get(belt.target)?.buildingId);
       const className = `factory-edge factory-edge--health-${diagnostic.health}${canvasGame.settings.beltHeatmapEnabled ? " factory-edge--heatmap" : ""}${diagnostic.flow > 0.001 ? " factory-edge--active" : ""}${focusTone === "focus" ? " factory-edge--task-focus" : focusTone === "dim" ? " factory-edge--task-dim" : ""}${focusTone === "line-upstream" ? " factory-edge--line-find-upstream" : focusTone === "line-downstream" ? " factory-edge--line-find-downstream" : focusTone === "line-dim" ? " factory-edge--line-find-dim" : ""}`;
       const routeCenterY = edgeRouteCenters.get(belt.id);
       const detailVisible = extremeVisualsActive ? detailBypass : viewportZoom >= 0.55;
@@ -11673,8 +11726,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <Background variant={BackgroundVariant.Dots} gap={20} size={1.1} color={resolvedTheme === "light" ? "#b7c8bf" : "#3c4743"} />
             {canvasBatchRendererEnabled ? <CanvasBeltLayer
               ref={canvasBeltLayerRef}
-              belts={activePlanetBelts}
+              belts={canvasTopology.belts}
               nodes={canvasLineNodeGeometry}
+              endpoints={canvasLineEndpoints}
               routeCenters={edgeRouteCenters}
               topologyRevision={canvasTopology.revision}
               planetId={canvasGame.activePlanetId}

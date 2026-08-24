@@ -1,14 +1,16 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import { ITEMS } from "../game/content";
-import { buildCanvasLineBatchFromGeometry, type CanvasLineNodeGeometry } from "../game/canvasLineBatch";
+import { buildCanvasLineBatchFromGeometry, type CanvasLineBelt, type CanvasLineEndpoint, type CanvasLineNodeGeometry } from "../game/canvasLineBatch";
 import { buildCanvasBeltHitIndex, collectCanvasBeltIndicesInBounds, findNearestCanvasBelt, type CanvasBeltHit } from "../game/canvasBeltSpatialIndex";
-import type { BeltConnection, CanvasViewport, PlanetId } from "../game/types";
+import type { CanvasViewport, PlanetId } from "../game/types";
 
 const CANVAS_PAN_OVERSCAN = 384;
+const EMPTY_HIDDEN_BELTS = new Set<string>();
 
 interface CanvasBeltLayerProps {
-  belts: readonly BeltConnection[];
+  belts: readonly CanvasLineBelt[];
   nodes: readonly CanvasLineNodeGeometry[];
+  endpoints: ReadonlyMap<string, CanvasLineEndpoint>;
   routeCenters: ReadonlyMap<string, number | undefined>;
   topologyRevision: number;
   planetId: PlanetId;
@@ -25,7 +27,7 @@ export interface CanvasBeltLayerHandle {
 }
 
 /** Dense renderer with its own spatial hit index; detailed React Flow edges are promoted by the parent on demand. */
-export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayerProps>(function CanvasBeltLayer({ belts, nodes, routeCenters, topologyRevision, planetId, viewport, width, height, selectedBeltIds, onUnavailable }, ref) {
+export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayerProps>(function CanvasBeltLayer({ belts, nodes, endpoints, routeCenters, topologyRevision, planetId, viewport, width, height, selectedBeltIds, onUnavailable }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef(viewport);
   const drawnViewportRef = useRef(viewport);
@@ -36,7 +38,7 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
   // Runtime belt observations do not change geometry. Repack only on an
   // explicit topology/geometry revision so hover and production refreshes do
   // not rebuild a multi-thousand-line spatial index.
-  const batch = useMemo(() => buildCanvasLineBatchFromGeometry(belts, planetId, nodes, routeCenters), [nodes, planetId, routeCenters, topologyRevision]);
+  const batch = useMemo(() => buildCanvasLineBatchFromGeometry(belts, planetId, nodes, routeCenters, EMPTY_HIDDEN_BELTS, endpoints), [belts, endpoints, nodes, planetId, routeCenters, topologyRevision]);
   const hitIndex = useMemo(() => buildCanvasBeltHitIndex(batch), [batch]);
   // Item/color belongs to topology. Runtime flow refreshes replace the belts
   // array frequently, but must not rebuild the full visual map or hit layer.

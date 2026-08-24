@@ -55,7 +55,7 @@
 
 ## 制品与发布门禁
 
-- **Commit SHA**：`46862c1da0acd2120849bc847a8e4a953582f016`
+- **Implementation commit SHA**：`45fac16ea16a212c2ff794ca773dc2b637b3ba29`
 - **Immutable Web/API/native artifacts**：尚未生成；当前 `dist/` 仅为本地验证输出，不得上传
 - **Manifest/aggregate hash**：unknown
 - **未完成门禁**：独立 clean checkout、不可变制品/清单、正式版本号、签名包（如适用）、生产备份、Nginx 原子切换、公网 smoke、历史 preview/apply

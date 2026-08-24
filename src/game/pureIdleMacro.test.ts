@@ -63,6 +63,27 @@ function addWindGeneration(state: GameState, machineCount: number): void {
   });
 }
 
+function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
+  addWindGeneration(state, 50_000_000);
+  state.entities.push({
+    id: "pure-idle-smelter",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 100, y: 0 },
+    interactionLocked: false,
+    buildingId: "arc_smelter",
+    recipeId: "iron_ingot",
+    machineCount,
+    minerCount: 0,
+    inputs: { iron_ore: machineCount * 100 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
 describe("pure idle macro session", () => {
   it("binds stop settlement, completed research, and the original pause intent before serialization", () => {
     const baseline = pureIdleState();
@@ -389,6 +410,52 @@ describe("pure idle macro session", () => {
       machineCount: 50_000_000,
     });
     expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps measured cumulative production running in the conservative high-multiplier tail", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 9;
+    addProductiveSmelter(source);
+    const sourceHash = hashGameState(source);
+    const baselineProduced = source.totalProduced.iron_ingot ?? 0;
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "large-save memory guard",
+    );
+
+    expect(session.contractVersion).toBe(1);
+    expect(session.calibrationWindowsCompleted).toBe(1);
+    expect(session.contract.deltas.some((delta) =>
+      JSON.stringify(delta.path) === JSON.stringify(["totalProduced", "iron_ingot"]),
+    )).toBe(true);
+
+    const summary = advancePureIdleMacroSession(session, 24 * 60 * 60);
+    const finalized = finalizePureIdleMacroSession(session, 24 * 60 * 60, createContentPackRegistry());
+    expect(summary.phase).toBe("conservative");
+    expect(summary.actualMultiplier).toBe(9);
+    expect(finalized.state.elapsedSeconds - source.elapsedSeconds).toBe(9 * 24 * 60 * 60);
+    expect(finalized.state.totalProduced.iron_ingot ?? 0).toBeGreaterThan(baselineProduced);
+    expect(finalized.state.tray).toEqual(session.candidate.tray);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps compact conservative counters deterministic across idle boundaries", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 9;
+    addProductiveSmelter(source, 1_000);
+    const incremental = createConservativePureIdleMacroSession(structuredClone(source), "stable", "memory guard");
+    advancePureIdleMacroSession(incremental, 60 * 60);
+    advancePureIdleMacroSession(incremental, 2 * 60 * 60);
+
+    const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "memory guard");
+    advancePureIdleMacroSession(single, 2 * 60 * 60);
+
+    expect(hashGameState(incremental.candidate)).toBe(hashGameState(single.candidate));
+    expect(incremental.conservativeIntegerRemainders).toEqual(single.conservativeIntegerRemainders);
+    expect(incremental.researchRemainder).toBe(single.researchRemainder);
   });
 
   it("honours cancellation before mutating a macro boundary", () => {

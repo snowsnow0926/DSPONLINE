@@ -893,6 +893,171 @@ export interface PureIdleAffineContract {
   calibrationWallSeconds: number;
 }
 
+/**
+ * The large-save pure-idle fallback deliberately uses a compact whitelist of
+ * cumulative counters instead of cloning/extrapolating every entity cache.
+ * Keep the haircut below 1 so a one-second warm-up probe cannot over-credit a
+ * multi-day tail.  This is a diagnostic/runtime constant, never save data.
+ */
+export const PURE_IDLE_CONSERVATIVE_RATE_FACTOR = 0.8;
+
+export interface PureIdleConservativeContractOptions {
+  /** Measured-rate haircut; values outside 0.1..1 are clamped. */
+  rateFactor?: number;
+  /** Include aggregate production counters only when resource accounting is safe. */
+  includeProduction?: boolean;
+}
+
+function appendConservativeCounterDelta(
+  deltas: AffineDelta[],
+  path: AffinePath,
+  before: unknown,
+  after: unknown,
+  rateFactor: number,
+): void {
+  if (typeof before !== "number" || typeof after !== "number" ||
+    !Number.isFinite(before) || !Number.isFinite(after)) return;
+  const rawDelta = after - before;
+  // A conservative contract must never extrapolate a counter that moved
+  // backwards during the probe. Zero/negative rates simply remain frozen.
+  if (!Number.isFinite(rawDelta) || rawDelta <= EPSILON) return;
+  const delta = rawDelta * rateFactor;
+  if (!Number.isFinite(delta) || delta <= EPSILON) return;
+  deltas.push({
+    path: [...path],
+    kind: "number",
+    delta,
+    integer: Number.isSafeInteger(before) && Number.isSafeInteger(after),
+  });
+}
+
+function appendConservativeMapDeltas(
+  deltas: AffineDelta[],
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+  pathPrefix: AffinePath,
+  rateFactor: number,
+): void {
+  if (!before || !after) return;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    appendConservativeCounterDelta(deltas, [...pathPrefix, key], before[key] ?? 0, after[key] ?? 0, rateFactor);
+  }
+}
+
+function sameStableIds<T extends { id: string }>(before: T[] | undefined, after: T[] | undefined): boolean {
+  if (!before || !after || before.length !== after.length) return false;
+  return before.every((entry, index) => entry.id === after[index]?.id);
+}
+
+/**
+ * Derive a low-memory pure-idle contract from one bounded exact prefix.
+ *
+ * Only monotonic, leaderboard-facing counters are copied.  Inventory, entity
+ * input/output caches, belts, routes, elapsed time and all cyclic diagnostics
+ * remain at the exact checkpoint; the caller advances elapsed time explicitly.
+ * This keeps the fallback useful at 8x/12x/16x without pretending that a
+ * complex factory's logistics can be reconstructed from a one-second sample.
+ */
+export function createPureIdleConservativeContract(
+  before: GameState,
+  after: GameState,
+  calibrationSeconds: number,
+  calibrationWallSeconds: number,
+  options: PureIdleConservativeContractOptions = {},
+): PureIdleAffineContract | null {
+  if (!Number.isFinite(calibrationSeconds) || calibrationSeconds <= 0 ||
+    !Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 ||
+    before.mode !== after.mode || before.version !== after.version ||
+    !sameStableIds(before.entities, after.entities) || !sameStableIds(before.belts, after.belts)) return null;
+  const rateFactor = Math.min(1, Math.max(0.1, options.rateFactor ?? PURE_IDLE_CONSERVATIVE_RATE_FACTOR));
+  const deltas: AffineDelta[] = [];
+
+  if (options.includeProduction !== false) {
+    appendConservativeMapDeltas(
+      deltas,
+      before.totalProduced as Record<string, unknown>,
+      after.totalProduced as Record<string, unknown>,
+      ["totalProduced"],
+      rateFactor,
+    );
+  }
+
+  const scalarPaths: AffinePath[] = [
+    ["manualMined"],
+    ["dysonSwarm", "totalLaunched"],
+    ["dysonSwarm", "totalExpired"],
+    ["dysonSphere", "structurePoints"],
+    ["dysonSphere", "totalRocketsLaunched"],
+    ["dysonSphere", "shellSails"],
+    ["dysonSphere", "totalSailsAbsorbed"],
+    ["dysonEngineering", "launchEnergySpentMj"],
+    ["endgame", "totalExported"],
+    ["orbitalStation", "totals", "completedContracts"],
+  ];
+  for (const path of scalarPaths) {
+    appendConservativeCounterDelta(deltas, path, readAffinePath(before, path), readAffinePath(after, path), rateFactor);
+  }
+
+  const planIds = new Set([...Object.keys(before.dysonPlans ?? {}), ...Object.keys(after.dysonPlans ?? {})]);
+  for (const systemId of planIds) {
+    appendConservativeCounterDelta(
+      deltas,
+      ["dysonPlans", systemId, "structurePoints"],
+      before.dysonPlans?.[systemId as keyof typeof before.dysonPlans]?.structurePoints,
+      after.dysonPlans?.[systemId as keyof typeof after.dysonPlans]?.structurePoints,
+      rateFactor,
+    );
+    appendConservativeCounterDelta(
+      deltas,
+      ["dysonPlans", systemId, "shellSails"],
+      before.dysonPlans?.[systemId as keyof typeof before.dysonPlans]?.shellSails,
+      after.dysonPlans?.[systemId as keyof typeof after.dysonPlans]?.shellSails,
+      rateFactor,
+    );
+  }
+
+  const projectIds = new Set([
+    ...Object.keys(before.endgame.exportProjects ?? {}),
+    ...Object.keys(after.endgame.exportProjects ?? {}),
+  ]);
+  for (const projectId of projectIds) {
+    appendConservativeCounterDelta(
+      deltas,
+      ["endgame", "exportProjects", projectId, "totalDelivered"],
+      before.endgame.exportProjects?.[projectId as keyof typeof before.endgame.exportProjects]?.totalDelivered,
+      after.endgame.exportProjects?.[projectId as keyof typeof after.endgame.exportProjects]?.totalDelivered,
+      rateFactor,
+    );
+  }
+
+  // Keep per-orbit cumulative launch/expiry counters aligned with the
+  // aggregate swarm counters when the orbit topology is unchanged.
+  for (const systemId of new Set([
+    ...Object.keys(before.dysonEngineering.orbitsBySystem ?? {}),
+    ...Object.keys(after.dysonEngineering.orbitsBySystem ?? {}),
+  ])) {
+    const beforeOrbits = before.dysonEngineering.orbitsBySystem?.[systemId as keyof typeof before.dysonEngineering.orbitsBySystem] ?? [];
+    const afterOrbits = after.dysonEngineering.orbitsBySystem?.[systemId as keyof typeof after.dysonEngineering.orbitsBySystem] ?? [];
+    if (!sameStableIds(beforeOrbits, afterOrbits)) return null;
+    for (let index = 0; index < beforeOrbits.length; index += 1) {
+      for (const field of ["totalLaunched", "totalExpired"] as const) {
+        appendConservativeCounterDelta(
+          deltas,
+          ["dysonEngineering", "orbitsBySystem", systemId, index, field],
+          beforeOrbits[index]?.[field],
+          afterOrbits[index]?.[field],
+          rateFactor,
+        );
+      }
+    }
+  }
+
+  return deltas.length > 0
+    ? { deltas, calibrationSeconds, calibrationWallSeconds }
+    : null;
+}
+
 function pathHasString(path: AffinePath, values: ReadonlySet<string>): boolean {
   return path.some((part) => typeof part === "string" && values.has(part));
 }
@@ -1081,6 +1246,8 @@ function applyFastAffineContract(
   simulationSeconds: number,
   wallSeconds: number,
   rejectPureIdleTransientPaths = false,
+  skipUnsafeIntegerPaths = false,
+  integerRemainders?: Record<string, number>,
 ): FastContractApplicationResult {
   if (!Number.isFinite(simulationSeconds) || simulationSeconds < 0 || !Number.isFinite(wallSeconds) || wallSeconds < 0) {
     return { ok: false, failure: "时间参数非法" };
@@ -1103,12 +1270,29 @@ function applyFastAffineContract(
       }
       const next = base + Number(delta.delta) * scaledSeconds / denominator;
       if (!Number.isFinite(next)) return { ok: false, failure: `预测结果非有限数值 ${pathLabel}` };
+      const carried = delta.integer ? finiteNumber(integerRemainders?.[pathLabel]) : 0;
+      const carriedNext = next + carried;
+      if (!Number.isFinite(carriedNext)) return { ok: false, failure: `预测结果非有限数值 ${pathLabel}` };
       const requiresSafeInteger = Boolean(delta.integer) && !isFastFiniteFloatPath(delta.path);
-      const normalized = requiresSafeInteger ? Math.floor(next + EPSILON) : next;
+      const normalized = requiresSafeInteger ? Math.floor(carriedNext + EPSILON) : carriedNext;
       if (requiresSafeInteger && !Number.isSafeInteger(normalized)) {
+        if (skipUnsafeIntegerPaths) {
+          // A single saturated cumulative counter must not freeze every other
+          // safe output in a large-save conservative tail.  Leave this field
+          // at its last exact checkpoint and account for the bounded loss as a
+          // correction; the next exact save can still preserve its value.
+          corrections += 1;
+          if (integerRemainders) delete integerRemainders[pathLabel];
+          continue;
+        }
         return { ok: false, failure: `预测结果超过安全整数 ${pathLabel}=${String(normalized)}` };
       }
       if (!writeAffinePath(state, delta.path, normalized)) return { ok: false, failure: `无法写入字段 ${pathLabel}` };
+      if (integerRemainders && requiresSafeInteger) {
+        const remainder = carriedNext - normalized;
+        if (remainder > EPSILON && remainder < 1) integerRemainders[pathLabel] = remainder;
+        else delete integerRemainders[pathLabel];
+      }
       continue;
     }
     const base = current === undefined && isDynamicMapEntryPath(delta.path) ? "0" : current;
@@ -1154,6 +1338,20 @@ export interface PureIdleAffineApplication {
   failure?: string;
   /** Simulation time already advanced by the ordinary exact engine. */
   exactSimulationSeconds?: number;
+}
+
+export interface PureIdleAffineApplicationOptions {
+  /**
+   * Permit the historical exact replay when a finite-resource or capacity
+   * invariant rejects the affine candidate.  Conservative large-save callers
+   * must set this to false so a one-second probe can never expand into a
+   * multi-day replay.
+   */
+  allowExactFallback?: boolean;
+  /** Skip only saturated integer counters while retaining other safe deltas. */
+  skipUnsafeIntegerPaths?: boolean;
+  /** Worker-only fractional carry for repeated integer counter buckets. */
+  integerRemainders?: Record<string, number>;
 }
 
 type ItemStore = Partial<Record<string, number | string>>;
@@ -1428,10 +1626,26 @@ export function applyPureIdleAffineContract(
   contract: PureIdleAffineContract,
   simulationSeconds: number,
   wallSeconds: number,
+  options: PureIdleAffineApplicationOptions = {},
 ): PureIdleAffineApplication {
+  const allowExactFallback = options.allowExactFallback ?? true;
   const before = captureAggregateConservationBaseline(state);
   const candidate = structuredClone(state);
-  const applied = applyFastAffineContract(candidate, contract, simulationSeconds, wallSeconds, true);
+  const integerRemainders = options.integerRemainders ? { ...options.integerRemainders } : undefined;
+  const commitIntegerRemainders = (next: Record<string, number> | undefined): void => {
+    if (!options.integerRemainders) return;
+    for (const key of Object.keys(options.integerRemainders)) delete options.integerRemainders[key];
+    if (next) Object.assign(options.integerRemainders, next);
+  };
+  const applied = applyFastAffineContract(
+    candidate,
+    contract,
+    simulationSeconds,
+    wallSeconds,
+    true,
+    options.skipUnsafeIntegerPaths ?? false,
+    integerRemainders,
+  );
   if (!applied.ok) return { ok: false, boundaryCorrections: 0, failure: applied.failure };
   const normalized = normalizeFastSettlementState(candidate);
   if (!normalized.ok) {
@@ -1446,6 +1660,13 @@ export function applyPureIdleAffineContract(
     // Capacity, transport and depletion boundaries are deterministic gameplay
     // events. Reuse the ordinary simulation for this interval instead of
     // dropping production or accepting an untraceable affine counter.
+    if (!allowExactFallback) {
+      return {
+        ok: false,
+        boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections,
+        failure: reconciliationFailure,
+      };
+    }
     const exact = runExact(structuredClone(state), simulationSeconds, wallSeconds);
     const exactNormalized = normalizeFastSettlementState(exact);
     if (!exactNormalized.ok) {
@@ -1465,6 +1686,7 @@ export function applyPureIdleAffineContract(
       };
     }
     Object.assign(state, exact);
+    commitIntegerRemainders(undefined);
     return {
       ok: true,
       boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections + exactNormalized.corrections + 1,
@@ -1487,6 +1709,7 @@ export function applyPureIdleAffineContract(
       failure: conservationFailure,
     };
   }
+  commitIntegerRemainders(integerRemainders);
   Object.assign(state, candidate);
   return {
     ok: true,

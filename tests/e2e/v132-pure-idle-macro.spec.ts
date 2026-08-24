@@ -1,12 +1,20 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
 import { inspectSave, migrateGame } from "../../src/game/storage";
 
 const fixturePath = process.env.DSP_PURE_IDLE_MACRO_FIXTURE;
 const fixtureRoute = "**/__dsp_pure_idle_macro_fixture.json";
 const harnessPath = "/__dsp_pure_idle_macro_harness.html";
+
+function readFixtureEnvelope(path: string): { raw: string; sourceBytes: Buffer } {
+  const sourceBytes = readFileSync(path);
+  const raw = path.toLowerCase().endsWith(".gz")
+    ? gunzipSync(sourceBytes).toString("utf8")
+    : sourceBytes.toString("utf8");
+  return { raw, sourceBytes };
+}
 
 async function resetPureIdleRecoveryDatabase(page: import("@playwright/test").Page): Promise<void> {
   await page.evaluate(() => new Promise<void>((resolve, reject) => {
@@ -850,8 +858,9 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
   test("30-day macro settlement of the configured real endgame save produces a canonical reloadable envelope", async ({ page }) => {
     test.skip(!fixturePath, "set DSP_PURE_IDLE_MACRO_FIXTURE to a read-only endgame save");
     test.setTimeout(300_000);
-    const raw = readFileSync(fixturePath!, "utf8");
-    const sourceHash = createHash("sha256").update(raw, "utf8").digest("hex");
+    const fixture = readFixtureEnvelope(fixturePath!);
+    const raw = fixture.raw;
+    const sourceHash = createHash("sha256").update(fixture.sourceBytes).digest("hex");
     const sourceInspection = inspectSave(raw);
     const derivedState = migrateGame(sourceInspection.state);
     if (!derivedState) throw new Error("fixture migration failed");
@@ -924,6 +933,12 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
         uploadedWhiteMatrix: state.totalProduced?.universe_matrix,
       });
       const researchBefore = state.research.selectedTechId ?? state.endgame.activeInfiniteResearchId;
+      const terminalBaseline = {
+        whiteMatrixProduced: state.totalProduced?.universe_matrix ?? 0,
+        rocketsLaunched: state.dysonSphere?.totalRocketsLaunched ?? 0,
+        structurePoints: state.dysonSphere?.structurePoints ?? 0,
+        sailsAbsorbed: state.dysonSphere?.totalSailsAbsorbed ?? 0,
+      };
       const entities = state.entities.length;
       const belts = state.belts.length;
       const registry = contentPacks.createContentPackRuntimeSnapshot(contentPacks.createContentPackRegistry());
@@ -1021,11 +1036,18 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
         researchKind: finalized.summary.research.kind,
         baselineResearch: finalized.summary.baselineResearch,
         finalResearch: finalized.summary.research,
+        terminalBaseline,
+        terminalCurrent: {
+          whiteMatrixProduced: finalized.summary.current.whiteMatrixProduced,
+          rocketsLaunched: finalized.summary.current.rocketsLaunched,
+          structurePoints: finalized.summary.current.structurePoints,
+          sailsAbsorbed: finalized.summary.current.sailsAbsorbed,
+        },
       };
     }, { syntheticControllerAdded });
 
     console.log(`PURE_IDLE_MACRO_REAL_SAVE ${JSON.stringify(result)}`);
-    expect(createHash("sha256").update(readFileSync(fixturePath!, "utf8"), "utf8").digest("hex")).toBe(sourceHash);
+    expect(createHash("sha256").update(readFileSync(fixturePath!)).digest("hex")).toBe(sourceHash);
     expect(result.sourceUnchanged).toBe(true);
     expect(result.valid).toBe(true);
     expect(result.entityCountPreserved).toBe(true);
@@ -1036,6 +1058,12 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.powerLimitedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.actualMultiplier).toBeGreaterThanOrEqual(1);
+    expect([
+      result.terminalCurrent.whiteMatrixProduced - result.terminalBaseline.whiteMatrixProduced,
+      result.terminalCurrent.rocketsLaunched - result.terminalBaseline.rocketsLaunched,
+      result.terminalCurrent.structurePoints - result.terminalBaseline.structurePoints,
+      result.terminalCurrent.sailsAbsorbed - result.terminalBaseline.sailsAbsorbed,
+    ].some((delta) => delta > 0)).toBe(true);
     if (result.researchBefore) {
       expect(result.researchKind).not.toBe("none");
       expect(result.researchAfter).toBeTruthy();

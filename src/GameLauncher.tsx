@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { ReleaseNotesDialog, hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen } from "./components/ReleaseNotesDialog";
+import { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen } from "./components/releaseNotesSeen";
 import { StartMenu } from "./components/StartMenu";
 import { DynamicImportBoundary, DynamicImportRecoveryNotice } from "./components/DynamicImportRecovery";
 import { importWithRecovery } from "./game/dynamicImportRecovery";
@@ -9,6 +9,7 @@ import { LocalSaveWriterBanner } from "./components/LocalSaveWriterBanner";
 import { canBypassFactoryMenu } from "./game/factoryBypassPolicy";
 
 const FactoryRuntime = lazy(() => importWithRecovery(() => import("./FactoryRuntime"), "行星工厂模块"));
+const ReleaseNotesDialog = lazy(() => importWithRecovery(() => import("./components/ReleaseNotesDialog").then((module) => ({ default: module.ReleaseNotesDialog })), "版本更新记录"));
 
 function FactoryLoading() {
   return <div className="workspace-loading" role="status"><i /><span>正在载入行星工厂</span></div>;
@@ -73,7 +74,7 @@ export function App() {
       </DynamicImportBoundary>
       <LocalSaveWriterBanner />
       <DynamicImportRecoveryNotice />
-      <ReleaseNotesDialog open={releaseNotesOpen} onClose={closeReleaseNotes} />
+      <Suspense fallback={null}><ReleaseNotesDialog open={releaseNotesOpen} onClose={closeReleaseNotes} /></Suspense>
     </GameDialogProvider>
   );
 }

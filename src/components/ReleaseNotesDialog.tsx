@@ -4,8 +4,7 @@ import { useAppLocale } from "../i18n/locale";
 import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
-
-export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
+export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
 
 export const CURRENT_RELEASE_NOTES = getCurrentReleaseNotes("zh-CN");
 
@@ -505,27 +504,6 @@ export function getReleaseNotesPageForRelease(id: string, pageSize = RELEASE_HIS
   const index = RELEASE_NOTES_HISTORY.findIndex((release) => release.id === id);
   if (index < 0) return null;
   return Math.floor(index / Math.max(1, Math.floor(pageSize)));
-}
-
-export function hasSeenCurrentReleaseNotes(): boolean {
-  try {
-    if (window.localStorage.getItem(RELEASE_NOTES_SEEN_KEY) === CURRENT_RELEASE_NOTES.id) return true;
-    // Isolated browser fixtures intentionally bypass first-run chrome. This
-    // keeps older release fixtures deterministic without hiding new notes for
-    // real players who have already seen a previous version.
-    const isReleaseNotesTest = new URLSearchParams(window.location.search).get("releaseNotesTest") === "1";
-    return !isReleaseNotesTest && window.sessionStorage.getItem("dsp-idle-network.test-bypass-menu") === "1";
-  } catch {
-    try { return window.sessionStorage.getItem(RELEASE_NOTES_SEEN_KEY) === CURRENT_RELEASE_NOTES.id; } catch { return false; }
-  }
-}
-
-export function markCurrentReleaseNotesSeen(): void {
-  try {
-    window.localStorage.setItem(RELEASE_NOTES_SEEN_KEY, CURRENT_RELEASE_NOTES.id);
-  } catch {
-    try { window.sessionStorage.setItem(RELEASE_NOTES_SEEN_KEY, CURRENT_RELEASE_NOTES.id); } catch { /* optional preference */ }
-  }
 }
 
 export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {

@@ -17,6 +17,10 @@
 
 > 当前生产状态（2026-08-24，1.1.5 已稳定发布）：香港/上海 Web/API 均为 `1.1.5-a92c0d3157f3`，香港 generation 35 / proxy generation 135，上海 generation 21 / proxy generation 59；两地 previous Web/API 均为 `1.1.4-7dbc149a016c`。上海下载页 current 为 `download-site-1.1.5-a92c0d3157f3`，previous 保留 1.1.4；香港 `/canary/previous/` 302 到 `web-1.1.4-7dbc149a016c`。两地 API、代理和健康 timer active，`NRestarts=0`，local/public health/ready 200，pending switch 为空。1.1.5 没有恢复或改写生产数据库、WAL/SHM、玩家存档或排行榜；数据库 schema 8 / SQLite layout 3 的正式 Backup API evidence 已保留并通过 quick_check/哈希/磁盘水位。上海切换辅助命令的非零退出已由独立 current/previous 指针、release-control audit、监听器和公网验收覆盖，禁止重复执行。回滚只允许在当前 generation、evidence 和健康条件仍匹配时按发布记录的 Web/API、下载页和原生边界分别执行，不能把 previous-stable 当作 API 或数据库灾备。
 
+> **匿名玩家统计冻结调查（2026-08-24，修复候选尚未发布）**：香港公网只读核对确认 `/api/public-status` 仍健康，但 `players.total` 为历史实测累计、`players.today/online` 为 0；当前 API 访问日志中的 `/api/presence` 为 0。活动 Nginx snippet 曾为 `/api/presence`、`/api/analytics`、`/api/errors` 安装 `return 202` telemetry 熔断，导致请求在 Nginx 被接受却没有到达 API。该熔断与 1.0.41 的临时运维记录相符，后来未被模板化清除；它不是玩家存档或 SQLite 损坏。开发修复已在 `deploy/nginx-dsp-idle-app.conf` 和三份独立模板中加入显式 API proxy 路由，并由 `deploy/nginx-config.test.mjs` 防止再次出现 synthetic 202；生产变更仍必须由 Release Agent 先备份/哈希活动 snippet、`nginx -t`、原子安装、reload 和公网 smoke 后执行。完整开发交接见 [统计冻结修复候选](./releases/player-statistics-freeze-fix-candidate-2026-08-24.md)。
+
+> **历史估算边界**：8 月 7–13 日存在 7 个完整的 service `players` 与 analytics `uniqueVisitors` 聚合日；8 月 14 日仅保留部分实测，8 月 15 日以后因熔断缺少实测。`server/player-statistics.mjs` 的 `analytics-uv-presence-ratio-v1` 只写入 `playersEstimate` 和 `playersEstimateMeta`，不修改权威 `players`、累计唯一玩家或任何账号/存档。估算以 7 日基线的中位 presence/UV 比例、同星期前一周 UV 和首个故障日的中位进入数推断，全部标记为 `low` confidence；管理员预览/回填 API 要求计划指纹、二次确认和 24 小时内已验证 SQLite 备份。估算每日活动总和不能当作累计唯一玩家，也不能与两个节点直接相加。
+
 > 当前生产状态（2026-08-19，1.0.46 No-Go 回滚后）：香港/上海 Web/API 均为 `1.0.45-8061a002fc59`，switch-state generation 分别为 21/10，云 schema v8 / SQLite layout v3；上海下载页及 Android/Windows stable 为 `1.0.44-3e580c715a5a`。香港 `/canary/previous/` 继续 302 到不可变 `1.0.43-fceca3eda51c`。两地 health/ready 200、API/proxy/node-health 正常、`NRestarts=0`，数据库未恢复或改写。1.0.46 因公网 Service Worker 错误请求 `/assets/assets/*` 而判定 No-Go；release-control 的 current 已恢复 1.0.45，但其 `previous` 当前指向被拒绝的 1.0.46，所以禁止用 `--rollback-last` 作为恢复命令。后续必须用新 SHA/Release ID 显式前进，详情见 [1.0.46 No-Go 记录](./releases/1.0.46-no-go-2026-08-19.md)。
 
 > 当前生产状态（2026-08-15）：香港 Web generation 13 current 为 `web-1.0.43-fceca3eda51c`、Build ID `1.0.43+fceca3eda51c`，直接 previous 为 `web-1.0.42-c24e6247d257`；香港 API、上海 Web/API、上海下载页和 Android/Windows stable 均保持 1.0.42。发布代理继续 forward 到 `api-1.0.42-c24e6247d257`，活动 API `NRestarts=0`，pending switch 为空。两地数据库继续独立使用 schema v7 / SQLite layout v2；本次 Web-only 发布没有 API/数据库/上海/下载/原生写入。香港 `/canary/previous/` 继续 302 到不可变 `/canary/1.0.37-853ecdb12795/`。完整 1.0.43 切换、两次安全回滚、真实附件与观察证据见 [releases/1.0.43.md](./releases/1.0.43.md)；1.0.42 双节点/原生/下载历史见 [releases/1.0.42.md](./releases/1.0.42.md)。
@@ -464,6 +468,8 @@ chmod 0600 backup-private.pem
 - `dsp-idle-leaderboard-review-report.timer`：每日 22:00（Asia/Shanghai）生成 `leaderboard-review-latest.json`；报告只读，人工确认前不改变账号或排行榜。
 - 香港 `dsp-idle-offsite-backup.timer` 与上海 `dsp-idle-restore-drill.timer`：检查最后成功时间、timer 上次结果和报告文件。
 - 玩家指标：检查 `players.total`、`players.today`、`players.online` 和 `players.onlineWindowSeconds`；两个节点分别统计，不能直接相加当作严格独立用户数。
+- Telemetry 路由：活动 Nginx 必须把 `/api/presence`、`/api/analytics`、`/api/errors` 反代到本机 API；任何精确路由 `return 202` 都是统计冻结故障。发布 smoke 需要确认请求真实出现在 API access log，不能只看公网 202。
+- 历史人数估算：先用管理员只读 `GET /api/admin/player-estimates/preview?from=<day>&to=<day>` 生成计划并人工审核。只有 SQLite Backup API snapshot 已完成完整 SHA-256、`quick_check`、schema/layout 和磁盘门禁后，才可调用受保护 backfill；apply 还要求 preview `planHash`、`CONFIRM:players-estimates:<from>:<to>` 与当前进程的已验证备份时间戳。估算字段不得覆盖 `players` 或被描述为累计唯一玩家。
 
 备份、恢复演练和节点探针 oneshot 必须从独立不可变运维包 `/usr/local/lib/dsp-idle-ops/current/deploy` 执行；不得绑定应用 `current` 软链接。CLI 入口判断必须比较真实路径；unit 只有在退出码为 0、最新状态文件为 `ok=true` 且制品/报告存在时才算成功。若 unit 显示 `success` 却没有生成对应状态文件，应按空运行故障处理，不能视为监控或备份成功。
 

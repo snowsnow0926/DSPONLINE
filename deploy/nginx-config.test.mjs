@@ -241,6 +241,19 @@ test("cache, worker scope, gzip and API transfer semantics survive security-head
   }
 });
 
+test("presence and anonymous telemetry routes are proxied instead of short-circuited", async () => {
+  for (const file of activeCloudProxyTemplates) {
+    const config = await readDeployFile(file);
+    for (const route of ["presence", "analytics", "errors"]) {
+      const escapedRoute = route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = config.match(new RegExp(`location = /api/${escapedRoute} \\{(?<body>[^}]*)\\}`, "s"));
+      assert.ok(match, `${file} must explicitly proxy /api/${route}`);
+      assert.match(match.groups.body, /proxy_pass http:\/\/127\.0\.0\.1:4330;/);
+      assert.doesNotMatch(match.groups.body, /\breturn\s+202\b/, `${file} must not synthesize telemetry acceptance`);
+    }
+  }
+});
+
 test("legacy bridge keeps version and worker cache boundaries with executable worker policy", async () => {
   const config = await readDeployFile("nginx-dsp-idle-old-bridge.conf");
   assert.match(config, /location = \/version\.json[^}]*Cache-Control "no-cache, no-store, must-revalidate" always;/s);

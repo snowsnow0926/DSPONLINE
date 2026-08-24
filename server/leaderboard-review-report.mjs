@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -163,7 +164,7 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ ...report, written }, null, 2)}\n`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(path.resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
   main().catch((error) => {
     process.stderr.write(`${error?.code ?? "LEADERBOARD_REVIEW_REPORT_FAILED"}: ${error?.message ?? String(error)}\n`);
     process.exitCode = 1;

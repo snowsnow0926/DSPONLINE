@@ -266,7 +266,19 @@ test("retention policy keeps day windows across leap-day/time-zone boundaries an
   const source = {
     dailyMetrics: {
       "2028-02-27": { requests: 1 },
-      "2028-02-28": { requests: 2 },
+      "2028-02-28": {
+        requests: 2,
+        players: 4,
+        playersEstimate: 9,
+        playersEstimateObserved: 4,
+        playersEstimateMeta: {
+          version: 1,
+          method: "analytics-uv-presence-ratio-v1",
+          planHash: "a".repeat(64),
+          status: "full-day-projection",
+          confidence: "low",
+        },
+      },
       "2028-02-29": { requests: 3 },
       "2028-03-01": { requests: 4 },
       invalid: { requests: 999 },
@@ -289,6 +301,7 @@ test("retention policy keeps day windows across leap-day/time-zone boundaries an
   });
   assert.deepEqual(Object.keys(result.retained.dailyMetrics), ["2028-02-28", "2028-02-29", "2028-03-01"]);
   assert.deepEqual(Object.keys(result.retained.analytics.daily), ["2028-02-29", "2028-03-01"]);
+  assert.deepEqual(result.retained.dailyMetrics["2028-02-28"], source.dailyMetrics["2028-02-28"]);
   assert.deepEqual(source, original);
   assert.equal(result.report.today, "2028-03-01");
 });

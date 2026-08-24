@@ -29,6 +29,8 @@ export const API_SERVER_RELEASE_FILES = Object.freeze([
   "server/account-security.test.mjs",
   "server/analytics.mjs",
   "server/analytics.test.mjs",
+  "server/player-statistics.mjs",
+  "server/player-statistics.test.mjs",
   "server/account-archive.mjs",
   "server/account-archive-file.mjs",
   "server/account-archive-file.test.mjs",

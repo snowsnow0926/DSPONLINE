@@ -61,7 +61,18 @@ interface AdminMetrics {
   };
   accounts: { users: number; activeSessions: number; cloudSaves: number; submissions: number };
   leaderboardReviews?: { pending: number };
-  players: { total: number; today: number; online: number; onlineWindowSeconds: number };
+  players: {
+    total: number;
+    today: number;
+    online: number;
+    onlineWindowSeconds: number;
+    estimates?: {
+      days: number;
+      estimatedPlayersDaySum: number;
+      latest: { day: string; playersEstimate: number; observedPlayers: number; status: string; confidence: string } | null;
+      daily: Array<{ day: string; playersEstimate: number; observedPlayers: number; status: string; confidence: string }>;
+    };
+  };
   analytics: {
     today: string;
     totalVisitors: number;
@@ -218,6 +229,7 @@ const AUDIT_LABELS: Record<string, string> = {
   "admin.account_restore_leaderboard": "管理员批准排行榜复核",
   "admin.account_approve_leaderboard_review": "管理员确认排行榜复核",
   "admin.account_delete_account": "管理员彻底注销账号",
+  "admin.player_estimates_backfilled": "管理员回填玩家估算",
   "leaderboard.review_queued": "排行榜异常进入待复核",
   "leaderboard.review_approved": "排行榜异常复核通过",
 };
@@ -531,6 +543,17 @@ export function AdminDashboard() {
             <div><dt>反馈 / 客户端错误</dt><dd>{metrics.reports.feedback} / {metrics.reports.clientErrors}</dd></div>
             <div><dt>服务运行时间</dt><dd>{formatDuration(metrics.uptimeSeconds)}</dd></div>
           </dl>
+        </article>
+
+        <article className="admin-meta-panel">
+          <header><div><small>历史玩家估算</small><strong>实测与估算分开</strong></div><em>不改写权威计数</em></header>
+          <dl>
+            <div><dt>估算覆盖天数</dt><dd>{formatNumber(metrics.players.estimates?.days ?? 0)}</dd></div>
+            <div><dt>最近估算日</dt><dd>{metrics.players.estimates?.latest?.day ?? "无"}</dd></div>
+            <div><dt>最近日估算人数</dt><dd>{metrics.players.estimates?.latest ? `${formatNumber(metrics.players.estimates.latest.playersEstimate)}（${metrics.players.estimates.latest.status}）` : "无"}</dd></div>
+            <div><dt>最近日实测进入</dt><dd>{metrics.players.estimates?.latest ? formatNumber(metrics.players.estimates.latest.observedPlayers) : "无"}</dd></div>
+          </dl>
+          <small>估算为每日进入工厂活动的回溯推断，不能与累计唯一玩家相加。</small>
         </article>
 
         <article className="admin-meta-panel admin-governance-panel">

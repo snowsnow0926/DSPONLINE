@@ -117,6 +117,11 @@ import {
   RuntimeMetricsAggregator,
 } from "./runtime-indexes.mjs";
 import {
+  applyPlayerEstimatePlan,
+  buildPlayerEstimatePlan,
+  summarizePlayerEstimates,
+} from "./player-statistics.mjs";
+import {
   SqliteRuntimeStatePersistence,
   createRuntimeStatePersistencePlan,
   runtimeAppStateFingerprint,
@@ -4477,6 +4482,7 @@ export async function createCloudServer({
           .sort(([left], [right]) => left.localeCompare(right))
           .slice(-days)
           .map(([metricDayId, metrics]) => ({ day: metricDayId, ...metrics }));
+        const playerEstimates = summarizePlayerEstimates(store.data.dailyMetrics);
         const [offsiteBackup, restoreDrill, infrastructure] = await Promise.all([
           operationalStatus(offsiteBackupStatusFile),
           operationalStatus(restoreDrillStatusFile),
@@ -4528,7 +4534,7 @@ export async function createCloudServer({
           leaderboardReviews: {
             pending: leaderboardReviewReport(store.data, { limit: 1 }).pendingCount,
           },
-          players: presenceIndex.metrics(now),
+          players: { ...presenceIndex.metrics(now), estimates: playerEstimates },
           analytics: analyticsSummary(store.data.analytics, { now, timeZone: metricsTimeZone, days }),
           reports: { feedback: store.data.feedback.length, clientErrors: store.data.errors.length },
           audit: {
@@ -4563,6 +4569,66 @@ export async function createCloudServer({
           daily: serviceDaily,
           storage: databaseFile ? "sqlite" : "json",
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/admin/player-estimates/preview") {
+        if (!secureAdminToken) return send(response, 503, { error: "管理员接口尚未配置" });
+        if (!adminAuthorized(request, secureAdminToken)) return send(response, 401, { error: "管理员凭据无效" });
+        const fromDay = url.searchParams.get("from");
+        const toDay = url.searchParams.get("to");
+        try {
+          const plan = buildPlayerEstimatePlan({
+            dailyMetrics: store.data.dailyMetrics,
+            analyticsDaily: store.data.analytics.daily,
+            fromDay,
+            toDay,
+            asOfDay: metricDay(Date.now(), metricsTimeZone),
+          });
+          return send(response, 200, { plan });
+        } catch (error) {
+          return send(response, 400, { error: error?.message || "玩家估算范围或基线无效", code: "PLAYER_ESTIMATE_PLAN_INVALID" });
+        }
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/admin/player-estimates/backfill") {
+        if (!secureAdminToken) return send(response, 503, { error: "管理员接口尚未配置" });
+        if (!adminAuthorized(request, secureAdminToken)) return send(response, 401, { error: "管理员凭据无效" });
+        const parsedBody = await readJson(request);
+        const body = parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody) ? parsedBody : {};
+        const fromDay = typeof body.fromDay === "string" ? body.fromDay : null;
+        const toDay = typeof body.toDay === "string" ? body.toDay : null;
+        const expectedConfirmation = fromDay && toDay ? `CONFIRM:players-estimates:${fromDay}:${toDay}` : "";
+        if (!fromDay || !toDay || body.confirmation !== expectedConfirmation || typeof body.planHash !== "string" || !/^[a-f0-9]{64}$/.test(body.planHash)) {
+          return send(response, 400, { error: "玩家估算范围、计划指纹或二次确认无效", code: "PLAYER_ESTIMATE_CONFIRMATION_INVALID" });
+        }
+        const verifiedBackupAt = Number(body.verifiedBackupAt);
+        if (!runtime.lastBackupAt || runtime.backup.state !== "ready" || verifiedBackupAt !== runtime.lastBackupAt || Date.now() - runtime.lastBackupAt > 24 * 60 * 60 * 1_000) {
+          return send(response, 409, { error: "历史人数回填要求 24 小时内的已验证 SQLite 备份", code: "ADMIN_BACKUP_REQUIRED", lastBackupAt: runtime.lastBackupAt });
+        }
+        let plan;
+        try {
+          plan = buildPlayerEstimatePlan({
+            dailyMetrics: store.data.dailyMetrics,
+            analyticsDaily: store.data.analytics.daily,
+            fromDay,
+            toDay,
+            asOfDay: metricDay(Date.now(), metricsTimeZone),
+          });
+        } catch (error) {
+          return send(response, 400, { error: error?.message || "玩家估算范围或基线无效", code: "PLAYER_ESTIMATE_PLAN_INVALID" });
+        }
+        if (plan.planHash !== body.planHash) {
+          return send(response, 409, { error: "统计数据在预览后发生变化，请重新生成计划", code: "PLAYER_ESTIMATE_PLAN_CHANGED", planHash: plan.planHash });
+        }
+        let result;
+        try {
+          result = applyPlayerEstimatePlan(store.data.dailyMetrics, plan);
+        } catch (error) {
+          return send(response, 409, { error: error?.message || "现有估算与计划冲突", code: "PLAYER_ESTIMATE_CONFLICT" });
+        }
+        appendAdminAudit(store, request, "admin.player_estimates_backfilled");
+        await store.persist({ operation: "player-estimates.backfill" });
+        return send(response, 200, { applied: true, result, authoritativePlayersUnchanged: true });
       }
 
       if (request.method === "GET" && url.pathname === "/api/admin/cloud-history/prune-preview") {

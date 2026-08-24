@@ -26,7 +26,23 @@ function runtimeFixture() {
       [PLAYER_A]: { firstSeenAt: 100, lastSeenAt: 150, lastActiveDay: "2026-08-13" },
     },
     dailyMetrics: {
-      "2026-08-13": { requests: 4, errors: 0, feedback: 0, leaderboardSubmissions: 0, cloudUploads: 0, players: 1 },
+      "2026-08-13": {
+        requests: 4,
+        errors: 0,
+        feedback: 0,
+        leaderboardSubmissions: 0,
+        cloudUploads: 0,
+        players: 1,
+        playersEstimate: 3,
+        playersEstimateObserved: 1,
+        playersEstimateMeta: {
+          version: 1,
+          method: "analytics-uv-presence-ratio-v1",
+          planHash: "b".repeat(64),
+          status: "full-day-projection",
+          confidence: "low",
+        },
+      },
     },
     analytics: {
       visitors: {
@@ -85,6 +101,8 @@ test("seeds legacy app_state runtime records once and hydrates the same authorit
       users: { preserved: true },
       ...seed,
     });
+    assert.equal(persistence.hydrateState({}).dailyMetrics["2026-08-13"].playersEstimate, 3);
+    assert.equal(persistence.hydrateState({}).dailyMetrics["2026-08-13"].playersEstimateMeta.method, "analytics-uv-presence-ratio-v1");
 
     const second = new SqliteRuntimeStatePersistence(database, { nowProvider: () => 2_000 });
     assert.deepEqual(second.initialize({ players: { [PLAYER_B]: { firstSeenAt: 2_000 } } }, {

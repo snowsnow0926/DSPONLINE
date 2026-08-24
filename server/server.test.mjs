@@ -1220,6 +1220,48 @@ test("protects detailed metrics and aggregates privacy-safe visits and events", 
   assert.equal(JSON.stringify(server.store.data.analytics).includes(sessionId), false);
 });
 
+test("previews historical player estimates and refuses backfill without verified backup", async () => {
+  const previousDaily = server.store.data.dailyMetrics;
+  const previousAnalytics = server.store.data.analytics.daily;
+  const dailyMetrics = {};
+  const analyticsDaily = {};
+  const service = [1000, 510, 463, 597, 543, 497, 469];
+  const visitors = [1205, 633, 607, 747, 720, 629, 635];
+  for (let index = 0; index < service.length; index += 1) {
+    const day = `2026-08-${String(index + 7).padStart(2, "0")}`;
+    dailyMetrics[day] = { requests: 1, players: service[index] };
+    analyticsDaily[day] = { uniqueVisitors: visitors[index] };
+  }
+  dailyMetrics["2026-08-14"] = { requests: 1, players: 206 };
+  server.store.data.dailyMetrics = dailyMetrics;
+  server.store.data.analytics.daily = analyticsDaily;
+  try {
+    const preview = await request("/api/admin/player-estimates/preview?from=2026-08-14&to=2026-08-15", {
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(preview.response.status, 200);
+    assert.equal(preview.body.plan.rows[0].estimatedPlayers, 510);
+    assert.match(preview.body.plan.planHash, /^[a-f0-9]{64}$/);
+    const denied = await request("/api/admin/player-estimates/backfill", {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({
+        fromDay: "2026-08-14",
+        toDay: "2026-08-15",
+        planHash: preview.body.plan.planHash,
+        confirmation: "CONFIRM:players-estimates:2026-08-14:2026-08-15",
+        verifiedBackupAt: 1,
+      }),
+    });
+    assert.equal(denied.response.status, 409);
+    assert.equal(denied.body.code, "ADMIN_BACKUP_REQUIRED");
+    assert.equal(server.store.data.dailyMetrics["2026-08-14"].playersEstimate, undefined);
+  } finally {
+    server.store.data.dailyMetrics = previousDaily;
+    server.store.data.analytics.daily = previousAnalytics;
+  }
+});
+
 test("migrates schema v3 data to v8 without losing accounts, saves or players", async () => {
   const migrationDirectory = await mkdtemp(path.join(tmpdir(), "dsp-schema-v3-"));
   const dataFile = path.join(migrationDirectory, "cloud.json");

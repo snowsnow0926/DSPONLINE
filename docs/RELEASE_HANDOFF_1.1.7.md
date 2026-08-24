@@ -9,12 +9,25 @@
 - 基线：1.1.6 `4f6d24f`
 - 目标：1.1.7 / Android versionCode `1001007`
 - 当前生产：1.1.5；正在发布的 1.1.6 工作树不得合并或重写。
+- 候选提交：以 `git rev-parse HEAD` 为准；候选 manifest 的 `git.sha` 必须与之相同。
 
 ## 发布内容
 
 1. 空间站合同重复 ID 修复：客户端迁移保护 settled rewards，服务端保留窄兼容边界并拒绝伪造碰撞。
 2. v47 sparse cloud upload compatibility：缺失的默认 `quantumMode` 按 `legacy` 解析，显式非法值仍拒绝。
 3. 内容包自定义建筑动态托盘：桌面/移动共用目录；有效成本才可部署；`belts` 与普通 `splitter` 语义分离。
+
+## 开发侧已交付制品
+
+在候选提交上已完成并复验以下交接物（`<release-id>` 为提交短 SHA 组成的候选 ID）：
+
+- `artifacts/release-bundle/<release-id>/`：Web、API、source 和 Windows unsigned-unpacked 压缩包，以及 source-gate、gate-report、SBOM。
+- `artifacts/release-manifests/<release-id>-candidate.json`：8 个候选文件的大小、SHA-256 和 aggregate hash。
+- `artifacts/release-gate/<release-id>-provenance.intoto.json`：3 个 subject，已通过 `verify-provenance`。
+- `artifacts/release-manifests/<release-id>-SHA256SUMS.txt`：候选包及全部交接元数据的可重复校验清单。
+- `dist/version.json`：由最终 Web build 生成，版本和 buildId 必须与候选 manifest 对齐。
+
+开发侧验收计数：full Vitest 1,468 通过/21 跳过；server 核心 376 通过/2 跳过、station 4/4；ops 56/6；native 25/25；full Chromium 428/26；根目录及 server production audit 均为 0 vulnerabilities。
 
 ## Release Agent 必做门禁
 

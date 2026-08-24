@@ -41,20 +41,28 @@
 
 ## 实测门禁
 
-以下数字是本候选工作树中实际运行的结果；在最终 clean commit/build 后应再复验一次：
+以下数字是本候选工作树中实际运行的结果；候选制品、清单和 provenance 均按最终 clean commit 重新生成。
 
 | 命令 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |
-| focused Vitest（合同、存档、内容包、发布说明、手机托盘等 6 文件） | 127 通过 / 0 失败 |
-| full Vitest | 1,466 通过 / 21 条件跳过，0 失败 |
-| `npm run test:server`（此前核心套件） | 376 通过 / 2 可选跳过；station 4/4 通过 |
+| focused Vitest（合同、存档、内容包、发布说明、手机托盘等） | 通过 |
+| full Vitest | 1,468 通过 / 21 条件跳过，0 失败 |
+| `npm run test:server` | 核心 376 通过 / 2 可选跳过；station 4/4 通过 |
 | `npm run test:ops` | 56 通过 / 6 Linux-only 跳过 |
 | `npm run test:native` | 25/25 通过 |
 | `npm run licenses:check` | 通过；125 个运行时包通知已检查 |
-| focused/full Chromium E2E | focused 30 通过；full 428 通过 / 26 条件跳过，0 失败 |
+| `npm audit --omit=dev`（根目录及 server） | 0 vulnerabilities |
+| Chromium E2E | targeted 40 通过；menu/cloud 9/9；full 428 通过 / 26 条件跳过，0 失败 |
+| Web build | 1,965 modules；startup gzip 195,013 B（JS 101,992 B，CSS 93,021 B）；menu gzip 251,710 B；forbidden 0 |
+| API candidate | expanded 182 files；archive source 105 files；smoke HTTP 200；schema v8 / SQLite layout v3 |
+| Release metadata | source manifest 269 files；candidate bundle 8 files；provenance 3 subjects；SHA256SUMS covers 10 files |
 
-全量 E2E 中出现的 Vite proxy `127.0.0.1:65534` 和 ResizeObserver/React Flow warning 是既有测试环境诊断输出，不是失败。最新服务端测试增量、最终构建和清单会在候选提交后补入本节。
+全量 E2E 中出现的 Vite proxy `127.0.0.1:65534` 和 ResizeObserver/React Flow warning 是既有测试环境诊断输出，不是失败。
+
+候选制品统一放在 `artifacts/release-bundle/<release-id>/`，候选 manifest 位于
+`artifacts/release-manifests/<release-id>-candidate.json`，校验和、SBOM、跳过报告和
+provenance 位于 `artifacts/release-gate/`；这些文件是版本、大小和哈希的唯一交接来源。
 
 ## 新增回归覆盖
 
@@ -69,4 +77,5 @@
 - 缺少或版本不匹配的内容包仍会阻止存档载入；本候选没有静默删除 Mod 实体。
 - 服务端兼容默认只针对 v47 且字段缺失；旧 v45/v46 非法字段行为保持原样。
 - 未执行生产部署、真实 Linux/systemd/Nginx 切换、Android 长期证书签名、Windows 签名、公网下载和玩家数据写入；这些由 Release Agent 在独立 clean checkout 完成。
+- Windows 本地 desktop pack 仅作为未签名诊断包完成，不能替代正式签名门禁；Web/API 候选包和所有校验元数据已生成。
 - 回滚为保留 1.1.6 current/previous 指针并不切换本候选；客户端若未安装 Mod，继续沿用既有缺少内容包保护。

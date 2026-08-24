@@ -73,6 +73,14 @@ For high-risk changes, broaden tests and explicitly verify backwards compatibili
 
 Read [references/deployment.md](references/deployment.md) before any server action.
 
+Before Android signing or Hong Kong/Shanghai transport, read [references/protected-release-access.md](references/protected-release-access.md) and run [scripts/test-protected-release-access.ps1](scripts/test-protected-release-access.ps1). Use [scripts/invoke-protected-android-release.ps1](scripts/invoke-protected-android-release.ps1) for the signed Android build and [scripts/invoke-protected-ssh-script.ps1](scripts/invoke-protected-ssh-script.ps1) for LF-normalized remote scripts. Never reveal or manually transcribe the protected locator, keystore path, alias, passwords, SSH targets, users, key paths, known-hosts contents, or private keys. Capability does not replace explicit release authorization.
+
+For an explicitly authorized, single-account Hong Kong current-main cloud-save export, use the maintained read-only helper [scripts/export-hk-cloud-save.ps1](scripts/export-hk-cloud-save.ps1) and follow [references/deployment.md](references/deployment.md#single-account-read-only-cloud-save-export). Do not recreate ad hoc SQL/SSH export commands when this helper is available.
+
+For an explicitly authorized single-account leaderboard inspection, restriction, restoration, or ordinary-entry republish on Hong Kong, use [scripts/invoke-hk-leaderboard-action.ps1](scripts/invoke-hk-leaderboard-action.ps1) and follow [references/deployment.md](references/deployment.md#single-account-leaderboard-only-action). It is dry-run by default, requires one exact account match, supports retained-window white-rate capacity/material audits, and emits an exact guard ID for reversible actions. `RepublishNormal` is allowed only behind a separately verified full SQLite backup; the lightweight guard exception applies only to supported admin-API restriction/restoration when the user explicitly waives the full backup. Never extend either path to login, sessions, cloud saves, account deletion, schema changes, or deployment.
+
+For the standing anomaly-review policy, use [scripts/report-hk-leaderboard-reviews.ps1](scripts/report-hk-leaderboard-reviews.ps1) for a read-only Hong Kong/Shanghai queue report. Detection must remain separate from disposition: the report and `leaderboardReviewQueue` do not ban accounts, disable login, delete cloud data, or remove an existing submission. Only an explicitly reviewed admin action may restrict or approve a matching revision.
+
 ## Implement By Task Type
 
 ### Gameplay Or Content
@@ -102,6 +110,8 @@ Follow the backup, release-directory, atomic switch, health-check, smoke-test, a
 The release role must deploy from a clean, traceable development commit and an immutable manifest. Build or test in an isolated directory before touching production; never copy a working tree, player save, SQLite database, secret, or private key into a release. Update `docs/PROJECT_STATUS.md` and `docs/releases/<version>.md` only after the live checks actually pass.
 
 After each successful stable rollout and observation window, keep the just-replaced Hong Kong Web release available as the previous-stable fallback described in [references/deployment.md](references/deployment.md). Expose only an immutable versioned route plus the controlled `/canary/previous/` redirect, preserve the current root worker and caches, require current-API compatibility and public browser isolation evidence, and record the independent Nginx rollback pointer. This fallback never authorizes an API, database, native-feed, or download-page rollback.
+
+Release closeout must update the observed baseline, not the candidate's intended state: add `docs/releases/<version>.md` with the runtime SHA, immutable manifest hashes, backup/health/smoke evidence, waivers and exact current/previous/canary rollback pointers; then reconcile `PROJECT_STATUS.md`, `DEPLOYMENT_OPERATIONS.md`, `TESTING_RELEASE.md`, `NATIVE_APPLICATIONS.md` and `ROADMAP.md` when their present-tense facts changed. Keep candidate/handoff/development evidence linked separately, record any skipped or waived gate explicitly, and never mark a production target healthy from a prior conversation or from a different artifact.
 
 When a VPN or TUN intercepts release traffic, use only the transient per-command egress methods in [references/deployment.md](references/deployment.md). Do not add persistent host routes, weaken TLS or host-key checks, or expose secured targets and key paths. Treat GitHub transport separately from VPS transport: GitHub's official SSH-over-443 endpoint may remain on the VPN path when direct physical egress is unavailable.
 

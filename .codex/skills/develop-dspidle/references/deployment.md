@@ -22,7 +22,7 @@ These addresses are operational identifiers, not authorization. Never infer perm
 2. Identify the target node explicitly.
 3. Read the live Nginx, systemd, symlink, and service state before changing it.
 4. Run local tests and build from a traceable commit.
-5. Create a verified SQLite backup through the backup API before any API switch, database write, migration or data-affecting operation. For a Web-only immutable directory plus Nginx-only canary that does not change `current`, API or data, back up and verify the exact Nginx state instead of creating unrelated large-database I/O.
+5. Create a verified SQLite backup through the backup API before any API switch, database write, migration or data-affecting operation. For a Web-only immutable directory plus Nginx-only canary that does not change `current`, API or data, back up and verify the exact Nginx state instead of creating unrelated large-database I/O. The only data-action exception is the explicitly authorized, reversible single-account leaderboard-only workflow below; its root-only action guard is not a database backup.
 6. Record the current frontend/backend release targets for rollback.
 
 ## Never Do
@@ -34,6 +34,86 @@ These addresses are operational identifiers, not authorization. Never infer perm
 - Never enable cloud login over public HTTP.
 - Never combine code rollback with data rollback by default.
 - Never use a production account for automated write tests.
+
+## Protected Signing And Transport
+
+Read [protected-release-access.md](protected-release-access.md) and the canonical `docs/PROTECTED_RELEASE_ACCESS.md` before handling Android signing or Hong Kong/Shanghai transport. Start with the read-only capability helper; do not manually recover secret values or physical paths from transcripts:
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1
+```
+
+For Android, use `scripts/invoke-protected-android-release.ps1`; it resolves the ACL-restricted vault through the private locator, injects the four signing variables only into the child build, and verifies the approved historical certificate. For servers, require the complete `DSP_HK_*` or `DSP_SH_*` contract and an existing fixed host-key entry. A `ready` result proves local capability only; it does not authorize signing, connecting, uploading, backing up, switching or modifying production.
+
+## Single-Account Read-Only Cloud Save Export
+
+Use this path only when the user explicitly authorizes recovery or delivery of one identified player's Hong Kong cloud save. It is read-only authorization, not permission to change the account, cloud metadata, payload rows, rankings, audit history, or database.
+
+Run the maintained helper from the repository root with the exact login username; a leading `@` is accepted:
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/export-hk-cloud-save.ps1 -Username '<username>'
+```
+
+When the user also supplied a display name, use it as an additional exact-match guard:
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/export-hk-cloud-save.ps1 -Username '<username>' -DisplayName '<displayName>'
+```
+
+The helper supports only the current normal-mode `main` save. It requires exactly one account match, opens SQLite read-only with `query_only`, resolves layout-v2 bodies through the active server's `readCloudPayload()`, and checks cloud metadata size/SHA-256 plus envelope integrity before accepting the local file. It streams the payload directly to ignored `artifacts/support-exports/`; it creates no remote temporary file and performs no production mutation. Historical revisions, speedrun saves, manual slots, repairs, imports, ranking writes, or bulk account exports require a separate explicitly authorized workflow.
+
+The helper resolves Hong Kong transport only from the protected `DSP_HK_*` environment or an existing verified local operations record. It retains strict host-key validation and per-command physical-egress binding. If the transport, host-key entry, exact account match, payload, checksum, or integrity gate is unavailable, stop; do not guess a host, use DNS as authority, weaken SSH checks, copy the live database, or print sensitive diagnostics.
+
+Report only the local file link, revision, size, SHA-256, envelope/state versions, mode, integrity result, and elapsed game time. Never put the account ID, email, IP/device information, SSH details, save body, or exported JSON into chat, Git, documentation, manifests, or release artifacts.
+
+## Single-Account Leaderboard-Only Action
+
+Use this workflow only when the user explicitly authorizes inspection, leaderboard restriction, leaderboard restoration, or ordinary-entry republishing for one identified Hong Kong account. It preserves the account, login control, active sessions, cloud metadata, cloud payload references and bodies, and speedrun submission records. It is not authorization to disable login, revoke sessions, delete an account or save, repair payloads, change schema, or deploy code.
+
+The helper is read-only by default. Prefer the exact login username; use a display name only when it uniquely identifies one account:
+
+```powershell
+# Inspect only; no production mutation.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>'
+
+# Deep-audit a white-matrix score. ExpectedWhiteRate may disambiguate an exact
+# display name only when the current leaderboard metric produces one account.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy DisplayName -Identifier '<display-name>' -DeepWhiteRateAudit -ExpectedWhiteRate <per-minute-value>
+
+# For a very large comparison save, inspect only its current factory shape.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -DeepWhiteRateAudit -CurrentOnly
+
+# Restrict only after the inspection reports a high-confidence anomaly.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -Action Restrict -Apply
+
+# Restore by the exact guard emitted by the original action; dry-run first.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy GuardId -Identifier '<guard-id>' -Action Restore
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy GuardId -Identifier '<guard-id>' -Action Restore -Apply
+
+# Republish a known-valid current ordinary revision only behind an independently
+# verified full SQLite backup. Dry-run first.
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -Action RepublishNormal
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -Action RepublishNormal -Apply -FullBackupVerified
+```
+
+The canonical default remains a verified full SQLite backup. The lightweight path may be used only when the user explicitly waives that backup because of its duration and authorizes a supported admin-API restriction/restoration action. `RepublishNormal` never uses that exception: `-FullBackupVerified` is mandatory and may be supplied only after the current operation has independently verified the full snapshot. Before applying, the helper writes a root-owned `0600` guard containing the prior moderation state, normal-submission snapshot, protected-data digests and table counts; it contains no password, session token or save body. The guard is narrowly scoped rollback evidence, not disaster-recovery coverage.
+
+The helper must fail closed on an ambiguous or inexact match, unsupported schema/layout, failed save/envelope validation, missing transport evidence, or service-health drift. Restriction without `-Force` additionally requires a high-confidence integrity finding. The deep white-rate audit reconstructs retained adjacent-revision windows and compares output with endpoint production topology, configured capacity and a deliberately conservative input-material upper bound. An endpoint-capacity mismatch alone is not enough: the maintained gate requires either impossible input balance, or a coordinated output/upstream-capacity contradiction across unchanged production topology. Restriction/restoration apply only through the supported admin API. The sole offline exception is `RepublishNormal`: it requires no restriction, normal visibility, a valid current main save, no ordinary submission, no integrity finding, and `current normal revision == normal revalidation threshold`; after draining/stopping the writer it transactionally removes only the normal threshold under optimistic guards, restarts the same API, and requires startup backfill to create the submission. On failure it restores only the guarded moderation/control/submission fields before returning service. Every apply verifies that account identity, login control, sessions, cloud metadata, payload references, payload-table counts and retained speedrun records did not change.
+
+Restriction deletes the ordinary leaderboard submission and hides all ordinary and speedrun public projections while retaining their underlying data. Restoration clears the restriction and makes retained speedrun entries public again. It deliberately sets a revalidation threshold: the ordinary leaderboard is rebuilt only after the player uploads a newer valid normal-mode main revision. Do not claim that restoration immediately republishes the current ordinary entry.
+
+`RepublishNormal` exists for the separately authorized case where that deliberate threshold now blocks a known-valid current ordinary revision and the operator requires immediate republishing under a full backup. It does not fabricate a score or revision: the current API's normal startup backfill derives the ordinary submission from the unchanged current main save. Report the before/after submission count, cleared normal threshold, service health, and protected-data invariants; never report account IDs, save bodies or leaderboard metrics.
+
+## Nightly Read-Only Leaderboard Review Report
+
+The anomaly detector is intentionally separate from account disposition. Use the maintained helper to read the pending queue from the target node without writing SQLite or changing account, login, cloud-save, or leaderboard state:
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/report-hk-leaderboard-reviews.ps1 -Node HongKong
+```
+
+The helper invokes `leaderboard-review-report.mjs` through the protected SSH wrapper, validates the policy flags (`automaticRestriction=false`, `automaticSubmissionRemoval=false`, `manualActionRequired=true`), and returns only a bounded, redacted summary. It must report transport or service unavailability rather than bypassing the guard. The production timer template `dsp-idle-leaderboard-review-report.timer` runs daily at 22:00 Asia/Shanghai and writes a dated plus `leaderboard-review-latest.json` report; the timer is read-only. After human review, use the admin dashboard or the exact supported account action to choose `restrict-leaderboard` or `approve-leaderboard-review`.
 
 ## VPN Or TUN Egress
 
@@ -79,6 +159,10 @@ After a stable rollout and its observation window pass, preserve the just-replac
 - State the boundary publicly: this fallback can help when new Web code regresses while Hong Kong Nginx and the current API remain available and compatible. It is not protection from an origin, API, database or network outage, and it must not be described as such.
 
 For every later stable release, update `/canary/previous/` only after the new stable observation passes. Point it to the stable Web directory that was just replaced, update the exact previous-build worker rejection, rerun all HTTP and browser checks, and record the new Nginx backup and immutable URL in the release document. Roll back this fallback by restoring its Nginx backup only; leave the current code and database untouched.
+
+### Release Documentation Closeout
+
+After all targets pass their independent health, download, cache and observation gates, create one immutable `docs/releases/<version>.md` record from observed evidence. It must identify the exact runtime SHA/Build ID, candidate and component manifest hashes, backup evidence and disk gate for each data-bearing node, current/previous pointers, the Web-only `/canary/previous/` target, native signature/`NotSigned` status, explicit waivers, and a target-specific rollback boundary. Reconcile the present-tense summaries in `docs/PROJECT_STATUS.md`, `docs/DEPLOYMENT_OPERATIONS.md`, `docs/TESTING_RELEASE.md`, `docs/NATIVE_APPLICATIONS.md` and `docs/ROADMAP.md`; leave older release paragraphs as history rather than overwriting them. A nonzero helper exit may be accepted only when independent state/audit/health evidence proves the intended switch completed, and that caveat must be recorded. Documentation closeout never authorizes a new deployment or a database rollback.
 
 ### Exceptional Historical Speedrun Recovery
 

@@ -15,6 +15,10 @@
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
 
+> 当前生产状态（2026-08-24，1.1.5 已稳定发布）：香港/上海 Web/API 均为 `1.1.5-a92c0d3157f3`，香港 generation 35 / proxy generation 135，上海 generation 21 / proxy generation 59；两地 previous Web/API 均为 `1.1.4-7dbc149a016c`。上海下载页 current 为 `download-site-1.1.5-a92c0d3157f3`，previous 保留 1.1.4；香港 `/canary/previous/` 302 到 `web-1.1.4-7dbc149a016c`。两地 API、代理和健康 timer active，`NRestarts=0`，local/public health/ready 200，pending switch 为空。1.1.5 没有恢复或改写生产数据库、WAL/SHM、玩家存档或排行榜；数据库 schema 8 / SQLite layout 3 的正式 Backup API evidence 已保留并通过 quick_check/哈希/磁盘水位。上海切换辅助命令的非零退出已由独立 current/previous 指针、release-control audit、监听器和公网验收覆盖，禁止重复执行。回滚只允许在当前 generation、evidence 和健康条件仍匹配时按发布记录的 Web/API、下载页和原生边界分别执行，不能把 previous-stable 当作 API 或数据库灾备。
+
+> 当前生产状态（2026-08-19，1.0.46 No-Go 回滚后）：香港/上海 Web/API 均为 `1.0.45-8061a002fc59`，switch-state generation 分别为 21/10，云 schema v8 / SQLite layout v3；上海下载页及 Android/Windows stable 为 `1.0.44-3e580c715a5a`。香港 `/canary/previous/` 继续 302 到不可变 `1.0.43-fceca3eda51c`。两地 health/ready 200、API/proxy/node-health 正常、`NRestarts=0`，数据库未恢复或改写。1.0.46 因公网 Service Worker 错误请求 `/assets/assets/*` 而判定 No-Go；release-control 的 current 已恢复 1.0.45，但其 `previous` 当前指向被拒绝的 1.0.46，所以禁止用 `--rollback-last` 作为恢复命令。后续必须用新 SHA/Release ID 显式前进，详情见 [1.0.46 No-Go 记录](./releases/1.0.46-no-go-2026-08-19.md)。
+
 > 当前生产状态（2026-08-15）：香港 Web generation 13 current 为 `web-1.0.43-fceca3eda51c`、Build ID `1.0.43+fceca3eda51c`，直接 previous 为 `web-1.0.42-c24e6247d257`；香港 API、上海 Web/API、上海下载页和 Android/Windows stable 均保持 1.0.42。发布代理继续 forward 到 `api-1.0.42-c24e6247d257`，活动 API `NRestarts=0`，pending switch 为空。两地数据库继续独立使用 schema v7 / SQLite layout v2；本次 Web-only 发布没有 API/数据库/上海/下载/原生写入。香港 `/canary/previous/` 继续 302 到不可变 `/canary/1.0.37-853ecdb12795/`。完整 1.0.43 切换、两次安全回滚、真实附件与观察证据见 [releases/1.0.43.md](./releases/1.0.43.md)；1.0.42 双节点/原生/下载历史见 [releases/1.0.42.md](./releases/1.0.42.md)。
 
 > 当前生产状态（1.0.44）：香港 Web/API、上海 Web/API、上海下载页与 Windows/Android stable 均已切换至 1.0.44。香港 switch-state generation 14：current Web `web-1.0.44-3e580c715a5a`、API `api-1.0.44-3e580c715a5a`，slot green / 4322，previous Web `web-1.0.43-fceca3eda51c`、previous API `api-1.0.42-c24e6247d257`；上海 switch-state generation 5：current Web/API `1.0.44`，slot blue / 4321。上海下载页 `current` = `download-site-1.0.44-3e580c715a5a`（回滚目标 `download-site-1.0.42-c24e6247d257`）；Android stable `1.0.44 / 1000044`、Windows stable setup `1.0.44`。两地发布代理分别 forward 到 `api-1.0.44-3e580c715a5a`，活动 API `NRestarts=0`，pending switch 为空；数据库继续独立使用 schema v7 / SQLite layout v2，本版为代码级稳定发布，无 schema/layout 迁移、恢复或数据写入。下载节点仍为上海（`download.dsponline.cn` → `111.229.128.211`）。**香港上一稳定版回退入口 `/canary/previous/` 已于 1.0.44 观察通过后更新为 302 → `/canary/1.0.43-fceca3eda51c/`**（活动 snippet 新 hash `822389023b94546ca0709afbf959aa8ab606a4545b0311fd48c7171d92efbbab`，回滚副本 `dsp-idle-app.conf.pre-previous-fallback-1.0.43-20260816T175329Z` 原 hash `b230cdf74bc067999e65d33347ab3ed8b860f9506641ca14b70cc2d45bc75cdc`）；`/canary/1.0.37-853ecdb12795/` 保留为历史兼容入口。完整证据见 [releases/1.0.44.md](./releases/1.0.44.md)。
@@ -128,6 +132,16 @@ Remove-Item Env:GIT_SSH_COMMAND
 ```
 
 不要为一次发布修改全局 SSH 配置或远端 URL。出口绑定只解决本地网络路径，不改变服务器权限、发布门禁、备份顺序或回滚要求。
+
+### 4.2 受保护签名与服务器连接入口
+
+Android keystore、口令、别名、SSH 私钥、真实节点和 `known_hosts` 物理位置不写入本手册。后续 Agent 统一先读 [受保护发布凭据与新会话接管](./PROTECTED_RELEASE_ACCESS.md)，再运行只读能力检查：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1
+```
+
+Android 正式构建只允许通过 `invoke-protected-android-release.ps1` 将 vault 字段临时注入子进程，并验证 clean SHA、APK v2/v3、zipalign、包名/版本及 APK/AAB 历史证书连续性。香港/上海只接受完整 `DSP_HK_*` / `DSP_SH_*` transport、固定 host key、严格 TLS/SSH 和单命令物理出口。不得把真实值复制到仓库 `.env`、命令模板、发布记录或聊天。能力检查通过也不等于授权连接或发布。
 
 ## 5. 推荐的安全发布流程
 
@@ -243,6 +257,17 @@ SQLite layout v2 将云存档正文从 `app_state` 拆到 `cloud_save_payloads`�
 
 ### 5.4 排行榜数据完整性处置
 
+#### 5.4.1 异常检测与人工复核策略
+
+服务端完整性检测（`leaderboard-integrity-v1`）与处置已经分离：检测到高置信度异常时，只在 `leaderboardReviewQueue` 中写入待复核证据（账号、普通主档 revision、校验摘要、发现代码和次数），**不会自动写入 `leaderboardModeration`、禁用登录、删除账号或移除已有排行榜 submission**。异常修订仍保留在云存档中；上一份有效 submission 继续展示，直到管理员完成复核。客户端再次请求发布该修订时返回 `LEADERBOARD_REVIEW_PENDING`，明确告知账号和云存档未被修改。
+
+每天 22:00（Asia/Shanghai）的 `dsp-idle-leaderboard-review-report.timer` 运行只读报告服务，将不含完整校验值和存档正文的摘要写入 `/var/lib/dsp-idle-cloud/leaderboard-review-reports/`；管理员也可通过 `GET /api/admin/leaderboard/reviews` 或后台“排行榜人工复核”面板查看。报告本身不执行处置。人工确认后只能选择：
+
+1. `restrict-leaderboard`：写入内部排行榜限制并移除公开 submission，但保留账号、登录、云存档和全部历史正文。
+2. `approve-leaderboard-review`：将当前 revision/finding 指纹绑定为已批准，并重新发布该修订；若证据已变化，服务端拒绝批准并要求重新复核。
+
+上述策略只覆盖服务器完整性异常。玩家主动关闭公开榜、启用内容包等既有明确规则仍按各自接口返回处理；这些路径不等同于账号封禁。夜间报告的时间可由 systemd drop-in 调整，但修改后必须记录观察窗口和管理员通知渠道。
+
 `server/moderate-leaderboard.mjs` 是受保护的运维入口，不是普通管理 API。默认 dry-run 使用只读 SQLite 和 `query_only`；实际写入必须同时提供经过 Backup API 验证的独立备份、有限来源标识和服务已停止确认。目标解析先按服务器综合榜排序锁定唯一第一名，再核对受保护的显示名输入、主档 revision、SHA-256、envelope 和官方矿脉不变量；任何一步不唯一或不一致都必须中止。
 
 处置事务只写入内部 `leaderboardModeration`、删除目标公开 submission 并追加不含 PII 的审计动作。它不能删除账号、主云档、历史正文或其他同名账号。后验必须确认主档 revision、历史数量和正文行数不变，五榜均不可见，服务重启和回填不能重建提交。普通代码回滚保留该内部状态，不恢复旧数据库；撤销处置需要新的审计批准和独立管理员流程。完整边界见 [LEADERBOARD_DATA_INTEGRITY_REMEDIATION_2026-07.md](./LEADERBOARD_DATA_INTEGRITY_REMEDIATION_2026-07.md)。
@@ -293,6 +318,31 @@ SQLite 启动审计及 `/api/ready.currentMainPayloads` 会返回无身份信息
 账号处置先用 `GET /api/admin/account?accountId=...` 核对精确账号摘要，再向 `POST /api/admin/account/action` 提交 `CONFIRM:<action>:<accountId>`。彻底注销还要求最近 24 小时内的已验证本机备份时间戳；不得用显示名、邮箱模糊匹配或直接编辑 SQLite。速通历史恢复只能离线运行 `server/speedrun-recovery.mjs`：先 dry-run 核对最新主云 revision、元数据/正文哈希、v46 速通身份和百万白糖事实；apply 前停止服务，并提供匹配 `quick_check` 备份及 `RECOVER_SPEEDRUN:<account>:<revision>`。该工具只写内部提交和最小化审计，不改云存档正文；完成后重启并复核一次，重复执行必须无变化。
 
 标准恢复工具禁止从非最新历史修订写榜，该限制不得为方便运营而放宽。只有用户明确提供目标显示名和展示时间、单独授权历史恢复，且只读检查证明唯一账号与唯一修订时，才可走例外审计流程：使用显示名哈希而非明文锁定目标；同时锁定 revision、完整正文 SHA-256、工厂身份、赛季、规则、v46、内容包为空、累计事实、权威小数秒和当前成绩数量；先创建完整 SQLite Backup API 快照和目标修订独立 `0600` 证据库，再在完整备份派生 guard 上执行同一离线事务与幂等复跑。生产 apply 必须停服务、使用乐观锁，且只允许增加目标 submission 和最小审计。人工口述的 `mm:ss` 只用于核对客户端 `Math.floor` 展示，数据库必须保存历史里程碑的权威小数秒，不能人为取整成更快成绩。公开运维记录不得包含显示名、账号 ID、工厂 ID、正文或存档哈希；已验证实例见 [2026-08-09 香港历史速通恢复记录](./releases/1.0.34-speedrun-recovery-2026-08-09.md)。
+
+### 单账号当前主云档只读导出
+
+用户明确授权交付一个香港账号的当前普通模式主云档时，使用 Skill 内维护的 [只读导出工具](../.codex/skills/develop-dspidle/scripts/export-hk-cloud-save.ps1)，不要临时拼接 SQL 或 SSH 命令：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/export-hk-cloud-save.ps1 -Username '<username>'
+```
+
+用户名必须精确匹配且全库唯一；用户同时提供显示名时追加 `-DisplayName '<displayName>'` 作为第二道精确匹配。工具固定读取香港当前 `normal/main`，以只读 SQLite `query_only` 事务和活动 API 的 `readCloudPayload()` 解析 layout-v2 正文，逐字核对 metadata size/SHA-256、JSON 和 envelope 完整性后直接流式写入本机忽略目录 `artifacts/support-exports/`。它不在 VPS 留临时文件，也不修改账号、元数据、正文、排行榜、审计或数据库。
+
+该入口不支持历史修订、速通模式、手动槽、修复、导入或批量导出。零匹配、多匹配、受保护 SSH 环境/固定主机指纹/物理出口不可用、正文缺失、大小或哈希不符时必须停止；不得猜服务器、降低 host-key 校验、复制 live SQLite 或输出敏感诊断。交付报告只写本地文件链接、revision、大小、SHA-256、envelope/GameState 版本、模式、完整性与游戏时长；账号 ID、邮箱、IP/设备信息、SSH 细节和存档正文不得进入聊天、Git、文档、manifest 或发布制品。完整门禁见 [Skill deployment reference](../.codex/skills/develop-dspidle/references/deployment.md#single-account-read-only-cloud-save-export)。
+
+### 单账号普通排行重新发布
+
+若管理员恢复排行榜后，合法普通主档的当前 revision 恰好等于 `leaderboardResumeAfterRevision`，服务端会按设计等待一次更高 revision；不得直接写分数、伪造上传或修改玩家存档。用户明确授权立即恢复该账号普通排行、且本次窗口已经独立创建并验证完整 SQLite Backup API 快照时，先 dry-run 再执行维护工具：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -Action RepublishNormal
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-hk-leaderboard-action.ps1 -MatchBy Username -Identifier '<username>' -Action RepublishNormal -Apply -FullBackupVerified
+```
+
+该路径只接受唯一精确账号，要求未封榜、登录未禁用、公开可见、当前普通主档及 envelope 合法、没有普通 submission、没有完整性异常，且普通 revision 与复核阈值精确相等。工具先写 root-only `0600` guard，再停健康/快照 timer 和 API writer，以 SQLite 事务、schema/layout 和乐观锁只清除普通模式阈值；速通阈值必须保留。随后启动同一 API，由正式 `backfillLeaderboardFromMainSaves()` 从未修改的当前普通主档生成 submission。账号、会话、云元数据、正文引用/payload 表和速通提交任一摘要变化，或 submission 未生成、健康/ready 未恢复时，工具只回滚 guard 覆盖的 moderation/control/普通 submission 字段并失败关闭。
+
+`-FullBackupVerified` 只是对已经完成的独立备份门禁作确认，不能替代备份；没有本窗口完整备份时禁止传入。公开报告只记录 revision、阈值清除、submission 数量变化、保护字段未变和服务状态，不记录 accountId、正文或排行榜指标。完整边界见 [Skill deployment reference](../.codex/skills/develop-dspidle/references/deployment.md#single-account-leaderboard-only-action)。
 
 ### 银河活动配置
 
@@ -358,6 +408,7 @@ curl https://shanghai-node.example.invalid/api/health
 - `deploy/restore-drill.mjs`：核对密文 SHA-256、认证解密、检查记录数量，并在随机本机端口启动临时云服务验证健康接口；明文副本在结束后删除。
 - `deploy/dsp-idle-offsite-backup.*`：每日异地备份 service/timer。
 - `deploy/dsp-idle-restore-drill.*`：恢复节点每月演练 service/timer。
+- `deploy/dsp-idle-leaderboard-review-report.*`：每日 22:00（Asia/Shanghai）只读生成排行榜异常待复核报告；该 service 不写 SQLite。
 
 推荐让恢复节点生成独立 RSA 3072 位密钥；私钥只留在恢复节点，香港生产节点只安装公钥：
 
@@ -410,6 +461,7 @@ chmod 0600 backup-private.pem
 - 磁盘：关注发布目录、日志、SQLite WAL 和备份增长。
 - `/api/admin/metrics`：验证管理员 token 后检查访问漏斗、错误、P95 延迟、限流、云冲突和备份状态。
 - `dsp-idle-node-health.timer`：每五分钟检查正式入口/API 延迟、磁盘可用比例和 TLS 剩余天数；状态写入受保护后台，可选 webhook 仅发送失败检查名称。
+- `dsp-idle-leaderboard-review-report.timer`：每日 22:00（Asia/Shanghai）生成 `leaderboard-review-latest.json`；报告只读，人工确认前不改变账号或排行榜。
 - 香港 `dsp-idle-offsite-backup.timer` 与上海 `dsp-idle-restore-drill.timer`：检查最后成功时间、timer 上次结果和报告文件。
 - 玩家指标：检查 `players.total`、`players.today`、`players.online` 和 `players.onlineWindowSeconds`；两个节点分别统计，不能直接相加当作严格独立用户数。
 

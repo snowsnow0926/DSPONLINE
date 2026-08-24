@@ -1,5 +1,7 @@
 # 系统架构
 
+> **1.1.5 稳定生产架构（2026-08-24）**：运行时 `a92c0d3157f3658523d8d4abbbb0ae654dc4fc35` 已完成香港/上海 Web/API、上海下载页、Windows 和 Android stable 的不可变目录部署与原子切换；香港 previous-stable 固定为 1.1.4 Web 目录。当前协议边界为 GameState v47、save envelope v2、cloud schema v8、SQLite layout v3。Android 实体设备门禁为用户明确豁免，Windows 按既有策略保持 `NotSigned`；发布证据、备份、健康、回滚与观察结果见 [1.1.5 正式发布记录](./releases/1.1.5.md)。
+
 > **1.1.5 超大存档内存边界（2026-08-24）**：模拟 Worker 仍生成唯一权威规范 JSON；保存 Worker 只在自己的对象图上做 v47 精确默认稀疏投影并生成 envelope，随后于 Worker 内 gzip，主线程只转发可转移压缩缓冲和小型 proof。持久化 Worker 解压后使用 `canonicalSaveEnvelopeInspection.ts` 的范围扫描核对 envelope、FNV checksum、模式、版本、实体/线路数量和身份，不为 primary/backup 读回再执行完整 `JSON.parse`；只有小档兼容路径允许完整解析。`hydrateCurrentPersistentSaveProjection()` 仅恢复已通过 checksum 的当前 v47 内部投影默认值，不是通用迁移器，普通导入继续由 `migrateGame()` 负责。IndexedDB 仍保存兼容的规范 JSON；gzip 是 Worker 传输与 `.json.gz` 导出格式，不改变云正文或本地存储格式。导入支持 JSON/gzip、对解压后正文设 256 MiB 上限，Android 导出使用有界 base64 分片，禁止把超大正文重新集中到主线程。
 
 > **1.1.5 纯挂机、综合榜与周期显示边界**：桌面存档估算正文不少于 64 MiB 或峰值不少于 2 GiB 时，纯挂机直接选择可取消的保守宏观路径；先精确结算可证明的 1 秒前缀，再冻结不确定尾段，最终由 `projectPersistentSaveState()` 生成可规范重载状态，绝不把估算收益当作精确收益。银河综合 `balanced-log-v2` 对五个公开指标分别计算 `max(0, log2(1 + value / baseline)) × 1,000,000` 后求和；五项等权、每次翻倍增量相同，不读取隐藏探索或殖民字段。仍在运行且语义、周期速率和倍率均不变的生产显示保持原单调视觉时钟，延迟权威快照不能在自然换圈后重新基准；暂停、目标或速率变化时立即采用新权威快照。三项均不改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3。

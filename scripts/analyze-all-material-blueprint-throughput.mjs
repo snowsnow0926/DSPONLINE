@@ -5,10 +5,15 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const STACK_COUNT = 10_000;
-const CONSTRUCTION_STOCK = 100_000_000;
+const PROFILE = process.argv.find((argument) => argument.startsWith("--profile="))?.slice("--profile=".length) ?? "10k";
+assertProfile(PROFILE);
+const HIGH_THROUGHPUT_PROFILE = PROFILE === "100k";
+const TARGET_RATE_PER_SECOND = HIGH_THROUGHPUT_PROFILE ? 100_000 : null;
+const CONSTRUCTION_STOCK = HIGH_THROUGHPUT_PROFILE ? 2_000_000_000 : 100_000_000;
+const POWER_STACK_COUNT = 100_000_000;
+const POWER_STACKS = HIGH_THROUGHPUT_PROFILE ? 10 : 1;
 const QUANTUM_RAW_STOCK = "5000000000";
-const DYSON_STRUCTURE_POINTS = 1_000_000;
+const DYSON_STRUCTURE_POINTS = HIGH_THROUGHPUT_PROFILE ? 100_000_000 : 1_000_000;
 const WARMUP_SECONDS = 28_800;
 const SAMPLE_SECONDS = 7_200;
 const SAMPLE_WINDOWS = 4;
@@ -16,10 +21,27 @@ const RAW_REFILL_INTERVAL_SECONDS = 60;
 const BATCHED_SESSION_SECONDS = 32_400;
 const SEED = 20_260_826;
 
+const EXEMPT_ITEM_IDS = new Set([
+  "small_carrier_rocket",
+  "annihilation_constraint_sphere",
+  "antimatter_fuel_rod",
+  "deuteron_fuel_rod",
+  "accumulator",
+  "charged_accumulator",
+]);
+
 const BLUEPRINTS = {
-  delivery: path.join(ROOT, "blueprints", "全物品-量子下载-配送枢纽-1万堆叠.json"),
-  quantum: path.join(ROOT, "blueprints", "全物品-量子下载-量子上传-1万堆叠.json"),
+  delivery: path.join(ROOT, "blueprints", HIGH_THROUGHPUT_PROFILE
+    ? "全物品-量子下载-配送枢纽-10万每秒.json"
+    : "全物品-量子下载-配送枢纽-1万堆叠.json"),
+  quantum: path.join(ROOT, "blueprints", HIGH_THROUGHPUT_PROFILE
+    ? "全物品-量子下载-量子上传-10万每秒.json"
+    : "全物品-量子下载-量子上传-1万堆叠.json"),
 };
+
+function assertProfile(profile) {
+  if (profile !== "10k" && profile !== "100k") throw new Error(`未知测试规格 ${profile}，仅支持 10k 或 100k`);
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -212,9 +234,12 @@ function runScenario(kind, blueprint, plan, modules) {
   assert(blueprintEntityIds.size === blueprint.entities.length, `${kind} 蓝图放置实体数不一致`);
   assert(state.belts.length - beltsBefore === blueprint.belts.length, `${kind} 蓝图放置线路数不一致`);
 
-  state.construction.wind_turbine = CONSTRUCTION_STOCK;
-  state = engine.placeBuilding(state, "wind_turbine", { x: -50_000, y: -50_000 }, CONSTRUCTION_STOCK);
-  assert(state.entities.some((entity) => entity.buildingId === "wind_turbine" && entity.machineCount === CONSTRUCTION_STOCK), `${kind} 测试电源放置失败`);
+  for (let index = 0; index < POWER_STACKS; index += 1) {
+    state.construction.wind_turbine = POWER_STACK_COUNT;
+    state = engine.placeBuilding(state, "wind_turbine", { x: -50_000 - index * 400, y: -50_000 }, POWER_STACK_COUNT);
+  }
+  assert(state.entities.filter((entity) => entity.buildingId === "wind_turbine" && entity.machineCount === POWER_STACK_COUNT).length === POWER_STACKS,
+    `${kind} 测试电源放置失败`);
 
   keepRawInputsFull(state, plan);
   saturateNormalDestinations(state, kind, plan);
@@ -317,6 +342,25 @@ async function main() {
     assert(quantumRepeatMaxDifference === 0 && quantum.finalStateHash === quantumRepeat.finalStateHash,
       `量子蓝图重复运行不确定：最大产率差 ${quantumRepeatMaxDifference}`);
 
+    const nonExemptManufacturedItemIds = manufacturedItemIds.filter((itemId) => !EXEMPT_ITEM_IDS.has(itemId));
+    const minimumNonExemptRate = (scenario) => Math.min(...nonExemptManufacturedItemIds.map((itemId) => scenario.rates[itemId] ?? 0));
+    const minimumDeliveryNonExemptRate = minimumNonExemptRate(delivery);
+    const minimumQuantumNonExemptRate = minimumNonExemptRate(quantum);
+    if (HIGH_THROUGHPUT_PROFILE) {
+      assert(minimumDeliveryNonExemptRate >= TARGET_RATE_PER_SECOND,
+        `配送蓝图非豁免最低实测产率 ${minimumDeliveryNonExemptRate}/s，低于 ${TARGET_RATE_PER_SECOND}/s`);
+      assert(minimumQuantumNonExemptRate >= TARGET_RATE_PER_SECOND,
+        `量子蓝图非豁免最低实测产率 ${minimumQuantumNonExemptRate}/s，低于 ${TARGET_RATE_PER_SECOND}/s`);
+      for (const scenario of [delivery, quantum]) {
+        assert(scenario.diagnostics.nonRunningMachines.length === 0, `${scenario.kind} 存在非运行配方节点`);
+        assert(scenario.diagnostics.minActivePowerFactor === 1, `${scenario.kind} 存在未满功率配方节点`);
+        assert(scenario.diagnostics.criticalPhotonReceiverAllocationKw === scenario.diagnostics.criticalPhotonReceiverRatedKw,
+          `${scenario.kind} 临界光子接收器未获满额戴森功率`);
+        assert(scenario.diagnostics.activeBlackHoleCount === scenario.diagnostics.blackHoleCount,
+          `${scenario.kind} 存在未启用的黑洞溢流节点`);
+      }
+    }
+
     const rows = deliveryPlan.materialItems.map((item) => ({
       itemId: item.id,
       name: item.name,
@@ -332,7 +376,17 @@ async function main() {
     }));
     const result = {
       conditions: {
-        stackCount: STACK_COUNT,
+        profile: PROFILE,
+        targetRatePerSecond: TARGET_RATE_PER_SECOND,
+        exemptItemIds: HIGH_THROUGHPUT_PROFILE ? [...EXEMPT_ITEM_IDS] : [],
+        deliveryRecipeStackRange: {
+          minimum: Math.min(...deliveryBlueprint.entities.filter((entity) => entity.recipeId).map((entity) => entity.machineCount)),
+          maximum: Math.max(...deliveryBlueprint.entities.filter((entity) => entity.recipeId).map((entity) => entity.machineCount)),
+        },
+        quantumRecipeStackRange: {
+          minimum: Math.min(...quantumBlueprint.entities.filter((entity) => entity.recipeId).map((entity) => entity.machineCount)),
+          maximum: Math.max(...quantumBlueprint.entities.filter((entity) => entity.recipeId).map((entity) => entity.machineCount)),
+        },
         warmupSeconds: WARMUP_SECONDS,
         sampleSecondsPerWindow: SAMPLE_SECONDS,
         sampleWindows: SAMPLE_WINDOWS,
@@ -342,6 +396,8 @@ async function main() {
         quantumRawStockPerItem: QUANTUM_RAW_STOCK,
         constructionStock: CONSTRUCTION_STOCK,
         dysonStructurePoints: DYSON_STRUCTURE_POINTS,
+        testPowerStacks: POWER_STACKS,
+        testPowerStackCount: POWER_STACK_COUNT,
         finiteTechnologiesCompleted: Object.keys(modules.content.TECHNOLOGIES).length,
         resourceMode: "infinite",
         bufferLimitPerItem: 100_000_000,
@@ -349,6 +405,13 @@ async function main() {
       deterministicRepeat: {
         deliveryMaxRateDifference: deliveryRepeatMaxDifference,
         quantumMaxRateDifference: quantumRepeatMaxDifference,
+      },
+      targetValidation: {
+        nonExemptManufacturedItemCount: nonExemptManufacturedItemIds.length,
+        minimumDeliveryNonExemptRatePerSecond: minimumDeliveryNonExemptRate,
+        minimumQuantumNonExemptRatePerSecond: minimumQuantumNonExemptRate,
+        deliveryPassed: TARGET_RATE_PER_SECOND === null || minimumDeliveryNonExemptRate >= TARGET_RATE_PER_SECOND,
+        quantumPassed: TARGET_RATE_PER_SECOND === null || minimumQuantumNonExemptRate >= TARGET_RATE_PER_SECOND,
       },
       delivery: {
         maxWindowRelativeSpread: delivery.maxWindowRelativeSpread,

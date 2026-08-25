@@ -82,6 +82,16 @@ function createQuantumTower(key, offset, itemIds, remoteMode) {
   };
 }
 
+function createOverflowBlackHole(key, offset) {
+  return {
+    key,
+    buildingId: "micro_black_hole_connector",
+    offset,
+    machineCount: 1,
+    operationEnabledOnDeploy: true,
+  };
+}
+
 function normalizeEntityOffsets(entities) {
   const minX = Math.min(...entities.map((entity) => entity.offset.x));
   const maxX = Math.max(...entities.map((entity) => entity.offset.x));
@@ -278,7 +288,7 @@ function buildBlueprint(kind, modules, plan) {
           ...selectedProducers(itemId),
         ].filter(Boolean));
         assert(sources.length > 0, `配送物品 ${itemId} 没有蓝图内来源`);
-        for (const sourceKey of sources) addBelt(sourceKey, hubKey, itemId, 0, portIndex);
+        for (const sourceKey of sources) addBelt(sourceKey, hubKey, itemId, 1, portIndex);
       });
     });
   } else {
@@ -289,15 +299,29 @@ function buildBlueprint(kind, modules, plan) {
       for (const itemId of itemIds) {
         const sources = stableUnique(selectedProducers(itemId));
         assert(sources.length > 0, `上传物品 ${itemId} 没有生产来源`);
-        for (const sourceKey of sources) addBelt(sourceKey, towerKey, itemId, 0);
+        for (const sourceKey of sources) addBelt(sourceKey, towerKey, itemId, 1);
       }
     });
   }
 
+  const overflowRoutes = selectedRecipes.flatMap((recipe) => recipe.outputs.map((output) => ({
+    sourceKey: recipeKeyById.get(recipe.id),
+    itemId: output.itemId,
+  })));
+  const overflowGroups = chunks(overflowRoutes, 3);
+  overflowGroups.forEach((routes, index) => {
+    const blackHoleKey = `black_hole_overflow_${String(index + 1).padStart(2, "0")}`;
+    entities.push(createOverflowBlackHole(
+      blackHoleKey,
+      { x: sinkX + 900, y: centeredY(index, overflowGroups.length, 360) },
+    ));
+    routes.forEach((route, portIndex) => addBelt(route.sourceKey, blackHoleKey, route.itemId, 0, portIndex));
+  });
+
   const blueprint = {
     id: kind === "delivery" ? "all_materials_delivery_10k" : "all_materials_quantum_upload_10k",
-    name: kind === "delivery" ? "全物品·量子下载→配送枢纽·1万堆叠" : "全物品·量子下载→量子上传·1万堆叠",
-    revision: 1,
+    name: kind === "delivery" ? "全物品·量子下载→配送枢纽·黑洞溢流·1万堆叠" : "全物品·量子下载→量子上传·黑洞溢流·1万堆叠",
+    revision: 2,
     entities: normalizeEntityOffsets(entities),
     belts,
     rotation: 0,
@@ -340,7 +364,8 @@ function verifyPlacement(envelope, modules, plan, kind) {
 
   assert(newEntities.length === envelope.blueprint.entities.length, `${envelope.blueprint.name} 放置后设备数不一致`);
   assert(newBelts.length === envelope.blueprint.belts.length, `${envelope.blueprint.name} 放置后线路数不一致`);
-  assert(newEntities.every((entity) => entity.machineCount === STACK_COUNT), `${envelope.blueprint.name} 存在非 10,000 堆叠设备`);
+  assert(newEntities.every((entity) => entity.machineCount === (entity.buildingId === "micro_black_hole_connector" ? 1 : STACK_COUNT)),
+    `${envelope.blueprint.name} 存在不符合堆叠规则的设备`);
 
   const placedRecipeIds = newEntities.flatMap((entity) => entity.recipeId ? [entity.recipeId] : []);
   for (const recipe of plan.selectedRecipes) {
@@ -349,6 +374,14 @@ function verifyPlacement(envelope, modules, plan, kind) {
 
   const quantumTowers = newEntities.filter((entity) => entity.buildingId === "interstellar_logistics_station");
   assert(quantumTowers.every((tower) => tower.quantumMode === "quantum" || tower.quantumTransition || tower.quantumTarget), `${envelope.blueprint.name} 量子接入意图丢失`);
+  const blackHoles = newEntities.filter((entity) => entity.buildingId === "micro_black_hole_connector");
+  const expectedOverflowRoutes = plan.selectedRecipes.reduce((sum, recipe) => sum + recipe.outputs.length, 0);
+  assert(blackHoles.length === Math.ceil(expectedOverflowRoutes / 3), `${envelope.blueprint.name} 黑洞溢流节点数量不一致`);
+  assert(blackHoles.every((entity) => entity.machineCount === 1 && entity.blackHolePaused === false && entity.blackHoleActivationConfirmed === true),
+    `${envelope.blueprint.name} 黑洞溢流节点没有按蓝图意图启用`);
+  const blackHoleBelts = newBelts.filter((belt) => blackHoles.some((entity) => entity.id === belt.target));
+  assert(blackHoleBelts.length === expectedOverflowRoutes && blackHoleBelts.every((belt) => belt.priority === 0 && belt.targetPortIndex !== undefined),
+    `${envelope.blueprint.name} 黑洞溢流线路不完整`);
 
   if (kind === "delivery") {
     const deliveredItems = new Set(newEntities
@@ -403,6 +436,8 @@ async function main() {
         entities: delivery.blueprint.entities.length,
         belts: delivery.blueprint.belts.length,
         deliveryHubs: delivery.blueprint.entities.filter((entity) => entity.buildingId === "material_delivery_hub").length,
+        overflowBlackHoles: delivery.blueprint.entities.filter((entity) => entity.buildingId === "micro_black_hole_connector").length,
+        overflowRoutes: delivery.blueprint.belts.filter((belt) => belt.targetKey.startsWith("black_hole_overflow_")).length,
         sha256: sha256(deliveryJson),
       },
       quantum: {
@@ -411,6 +446,8 @@ async function main() {
         belts: quantum.blueprint.belts.length,
         uploadItems: plan.uploadItemIds.length,
         uploadTowers: quantum.blueprint.entities.filter((entity) => entity.key.startsWith("quantum_upload_")).length,
+        overflowBlackHoles: quantum.blueprint.entities.filter((entity) => entity.buildingId === "micro_black_hole_connector").length,
+        overflowRoutes: quantum.blueprint.belts.filter((belt) => belt.targetKey.startsWith("black_hole_overflow_")).length,
         sha256: sha256(quantumJson),
       },
     };

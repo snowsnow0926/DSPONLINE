@@ -4,14 +4,14 @@
   "exportedAt": "2026-08-26T00:00:00.000+08:00",
   "blueprint": {
     "id": "all_materials_delivery_10k",
-    "name": "全物品·量子下载→配送枢纽·1万堆叠",
-    "revision": 1,
+    "name": "全物品·量子下载→配送枢纽·黑洞溢流·1万堆叠",
+    "revision": 2,
     "entities": [
       {
         "key": "quantum_download_01",
         "buildingId": "interstellar_logistics_station",
         "offset": {
-          "x": -3420,
+          "x": -3870,
           "y": -780
         },
         "machineCount": 10000,
@@ -85,7 +85,7 @@
         "key": "quantum_download_02",
         "buildingId": "interstellar_logistics_station",
         "offset": {
-          "x": -3420,
+          "x": -3870,
           "y": -260
         },
         "machineCount": 10000,
@@ -159,7 +159,7 @@
         "key": "quantum_download_03",
         "buildingId": "interstellar_logistics_station",
         "offset": {
-          "x": -3420,
+          "x": -3870,
           "y": 260
         },
         "machineCount": 10000,
@@ -233,7 +233,7 @@
         "key": "quantum_download_04",
         "buildingId": "interstellar_logistics_station",
         "offset": {
-          "x": -3420,
+          "x": -3870,
           "y": 780
         },
         "machineCount": 10000,
@@ -285,7 +285,7 @@
         "key": "recipe_iron_ingot",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -2100
         },
         "machineCount": 10000,
@@ -295,7 +295,7 @@
         "key": "recipe_copper_ingot",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -1800
         },
         "machineCount": 10000,
@@ -305,7 +305,7 @@
         "key": "recipe_magnet",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -1500
         },
         "machineCount": 10000,
@@ -315,7 +315,7 @@
         "key": "recipe_stone_brick",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -1200
         },
         "machineCount": 10000,
@@ -325,7 +325,7 @@
         "key": "recipe_glass",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -900
         },
         "machineCount": 10000,
@@ -335,7 +335,7 @@
         "key": "recipe_energetic_graphite",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -600
         },
         "machineCount": 10000,
@@ -345,7 +345,7 @@
         "key": "recipe_plasma_refining",
         "buildingId": "oil_refinery",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": -300
         },
         "machineCount": 10000,
@@ -355,7 +355,7 @@
         "key": "recipe_high_purity_silicon",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 0
         },
         "machineCount": 10000,
@@ -365,7 +365,7 @@
         "key": "recipe_titanium_ingot",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 300
         },
         "machineCount": 10000,
@@ -375,7 +375,7 @@
         "key": "recipe_graphene_from_fire_ice",
         "buildingId": "quantum_chemical_plant",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 600
         },
         "machineCount": 10000,
@@ -385,7 +385,7 @@
         "key": "recipe_carbon_nanotube_from_spiniform",
         "buildingId": "quantum_chemical_plant",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 900
         },
         "machineCount": 10000,
@@ -395,7 +395,7 @@
         "key": "recipe_proliferator_mk1",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 1200
         },
         "machineCount": 10000,
@@ -405,7 +405,7 @@
         "key": "recipe_crystal_silicon_from_fractal",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 1500
         },
         "machineCount": 10000,
@@ -415,7 +415,7 @@
         "key": "recipe_critical_photon",
         "buildingId": "ray_receiver",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 1800
         },
         "machineCount": 10000,
@@ -425,7 +425,7 @@
         "key": "recipe_diamond_from_kimberlite",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -2520,
+          "x": -2970,
           "y": 2100
         },
         "machineCount": 10000,
@@ -435,7 +435,7 @@
         "key": "recipe_steel",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -1950
         },
         "machineCount": 10000,
@@ -445,7 +445,7 @@
         "key": "recipe_gear",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -1650
         },
         "machineCount": 10000,
@@ -455,7 +455,7 @@
         "key": "recipe_magnetic_coil",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -1350
         },
         "machineCount": 10000,
@@ -465,7 +465,7 @@
         "key": "recipe_circuit_board",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -1050
         },
         "machineCount": 10000,
@@ -475,7 +475,7 @@
         "key": "recipe_prism",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -750
         },
         "machineCount": 10000,
@@ -485,7 +485,7 @@
         "key": "recipe_microcrystalline_component",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -450
         },
         "machineCount": 10000,
@@ -495,7 +495,7 @@
         "key": "recipe_proliferator_mk2",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": -150
         },
         "machineCount": 10000,
@@ -505,7 +505,7 @@
         "key": "recipe_particle_container_from_unipolar",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 150
         },
         "machineCount": 10000,
@@ -515,7 +515,7 @@
         "key": "recipe_hydrogen_fuel_rod",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 450
         },
         "machineCount": 10000,
@@ -525,7 +525,7 @@
         "key": "recipe_titanium_glass",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 750
         },
         "machineCount": 10000,
@@ -535,7 +535,7 @@
         "key": "recipe_casimir_crystal_advanced",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 1050
         },
         "machineCount": 10000,
@@ -545,7 +545,7 @@
         "key": "recipe_antimatter",
         "buildingId": "miniature_particle_collider",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 1350
         },
         "machineCount": 10000,
@@ -555,7 +555,7 @@
         "key": "recipe_plastic",
         "buildingId": "quantum_chemical_plant",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 1650
         },
         "machineCount": 10000,
@@ -565,7 +565,7 @@
         "key": "recipe_titanium_crystal",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1800,
+          "x": -2250,
           "y": 1950
         },
         "machineCount": 10000,
@@ -575,7 +575,7 @@
         "key": "recipe_plasma_exciter",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": -1350
         },
         "machineCount": 10000,
@@ -585,7 +585,7 @@
         "key": "recipe_titanium_alloy",
         "buildingId": "plane_smelter",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": -1050
         },
         "machineCount": 10000,
@@ -595,7 +595,7 @@
         "key": "recipe_processor",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": -750
         },
         "machineCount": 10000,
@@ -605,7 +605,7 @@
         "key": "recipe_accumulator",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": -450
         },
         "machineCount": 10000,
@@ -615,7 +615,7 @@
         "key": "recipe_proliferator_mk3",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": -150
         },
         "machineCount": 10000,
@@ -625,7 +625,7 @@
         "key": "recipe_particle_broadband",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": 150
         },
         "machineCount": 10000,
@@ -635,7 +635,7 @@
         "key": "recipe_electric_motor",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": 450
         },
         "machineCount": 10000,
@@ -645,7 +645,7 @@
         "key": "recipe_plane_filter",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": 750
         },
         "machineCount": 10000,
@@ -655,7 +655,7 @@
         "key": "recipe_strange_matter",
         "buildingId": "miniature_particle_collider",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": 1050
         },
         "machineCount": 10000,
@@ -665,7 +665,7 @@
         "key": "recipe_photon_combiner_from_grating",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -1080,
+          "x": -1530,
           "y": 1350
         },
         "machineCount": 10000,
@@ -675,7 +675,7 @@
         "key": "recipe_logistics_vessel",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": -1050
         },
         "machineCount": 10000,
@@ -685,7 +685,7 @@
         "key": "recipe_accumulator_charge",
         "buildingId": "energy_exchanger",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": -750
         },
         "machineCount": 10000,
@@ -695,7 +695,7 @@
         "key": "recipe_electromagnetic_turbine",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": -450
         },
         "machineCount": 10000,
@@ -705,7 +705,7 @@
         "key": "recipe_quantum_chip",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": -150
         },
         "machineCount": 10000,
@@ -715,7 +715,7 @@
         "key": "recipe_graviton_lens",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": 150
         },
         "machineCount": 10000,
@@ -725,7 +725,7 @@
         "key": "recipe_solar_sail",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": 450
         },
         "machineCount": 10000,
@@ -735,7 +735,7 @@
         "key": "recipe_annihilation_constraint_sphere",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": 750
         },
         "machineCount": 10000,
@@ -745,7 +745,7 @@
         "key": "recipe_frame_material",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": -360,
+          "x": -810,
           "y": 1050
         },
         "machineCount": 10000,
@@ -755,7 +755,7 @@
         "key": "recipe_logistics_drone",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 360,
+          "x": -90,
           "y": -600
         },
         "machineCount": 10000,
@@ -765,7 +765,7 @@
         "key": "recipe_space_warper",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 360,
+          "x": -90,
           "y": -300
         },
         "machineCount": 10000,
@@ -775,7 +775,7 @@
         "key": "recipe_super_magnetic_ring",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 360,
+          "x": -90,
           "y": 0
         },
         "machineCount": 10000,
@@ -785,7 +785,7 @@
         "key": "recipe_antimatter_fuel_rod",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 360,
+          "x": -90,
           "y": 300
         },
         "machineCount": 10000,
@@ -795,7 +795,7 @@
         "key": "recipe_dyson_sphere_component",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 360,
+          "x": -90,
           "y": 600
         },
         "machineCount": 10000,
@@ -805,7 +805,7 @@
         "key": "recipe_deuteron_fuel_rod",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 1080,
+          "x": 630,
           "y": 0
         },
         "machineCount": 10000,
@@ -815,7 +815,7 @@
         "key": "recipe_small_carrier_rocket",
         "buildingId": "assembling_machine_mk3",
         "offset": {
-          "x": 1800,
+          "x": 1350,
           "y": 0
         },
         "machineCount": 10000,
@@ -825,7 +825,7 @@
         "key": "delivery_hub_01",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -3220
         },
         "machineCount": 10000
@@ -834,7 +834,7 @@
         "key": "delivery_hub_02",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -2940
         },
         "machineCount": 10000
@@ -843,7 +843,7 @@
         "key": "delivery_hub_03",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -2660
         },
         "machineCount": 10000
@@ -852,7 +852,7 @@
         "key": "delivery_hub_04",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -2380
         },
         "machineCount": 10000
@@ -861,7 +861,7 @@
         "key": "delivery_hub_05",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -2100
         },
         "machineCount": 10000
@@ -870,7 +870,7 @@
         "key": "delivery_hub_06",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -1820
         },
         "machineCount": 10000
@@ -879,7 +879,7 @@
         "key": "delivery_hub_07",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -1540
         },
         "machineCount": 10000
@@ -888,7 +888,7 @@
         "key": "delivery_hub_08",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -1260
         },
         "machineCount": 10000
@@ -897,7 +897,7 @@
         "key": "delivery_hub_09",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -980
         },
         "machineCount": 10000
@@ -906,7 +906,7 @@
         "key": "delivery_hub_10",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -700
         },
         "machineCount": 10000
@@ -915,7 +915,7 @@
         "key": "delivery_hub_11",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -420
         },
         "machineCount": 10000
@@ -924,7 +924,7 @@
         "key": "delivery_hub_12",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": -140
         },
         "machineCount": 10000
@@ -933,7 +933,7 @@
         "key": "delivery_hub_13",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 140
         },
         "machineCount": 10000
@@ -942,7 +942,7 @@
         "key": "delivery_hub_14",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 420
         },
         "machineCount": 10000
@@ -951,7 +951,7 @@
         "key": "delivery_hub_15",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 700
         },
         "machineCount": 10000
@@ -960,7 +960,7 @@
         "key": "delivery_hub_16",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 980
         },
         "machineCount": 10000
@@ -969,7 +969,7 @@
         "key": "delivery_hub_17",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 1260
         },
         "machineCount": 10000
@@ -978,7 +978,7 @@
         "key": "delivery_hub_18",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 1540
         },
         "machineCount": 10000
@@ -987,7 +987,7 @@
         "key": "delivery_hub_19",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 1820
         },
         "machineCount": 10000
@@ -996,7 +996,7 @@
         "key": "delivery_hub_20",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 2100
         },
         "machineCount": 10000
@@ -1005,7 +1005,7 @@
         "key": "delivery_hub_21",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 2380
         },
         "machineCount": 10000
@@ -1014,7 +1014,7 @@
         "key": "delivery_hub_22",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 2660
         },
         "machineCount": 10000
@@ -1023,7 +1023,7 @@
         "key": "delivery_hub_23",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 2940
         },
         "machineCount": 10000
@@ -1032,10 +1032,200 @@
         "key": "delivery_hub_24",
         "buildingId": "material_delivery_hub",
         "offset": {
-          "x": 3420,
+          "x": 2970,
           "y": 3220
         },
         "machineCount": 10000
+      },
+      {
+        "key": "black_hole_overflow_01",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -3240
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_02",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -2880
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_03",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -2520
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_04",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -2160
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_05",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -1800
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_06",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -1440
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_07",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -1080
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_08",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -720
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_09",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": -360
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_10",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 0
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_11",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 360
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_12",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 720
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_13",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 1080
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_14",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 1440
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_15",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 1800
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_16",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 2160
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_17",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 2520
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_18",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 2880
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
+      },
+      {
+        "key": "black_hole_overflow_19",
+        "buildingId": "micro_black_hole_connector",
+        "offset": {
+          "x": 3870,
+          "y": 3240
+        },
+        "machineCount": 1,
+        "operationEnabledOnDeploy": true
       }
     ],
     "belts": [
@@ -2373,7 +2563,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2387,7 +2577,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2401,7 +2591,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2415,7 +2605,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2429,7 +2619,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2443,7 +2633,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2457,7 +2647,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2471,7 +2661,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2485,7 +2675,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2499,7 +2689,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2513,7 +2703,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2527,7 +2717,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2541,7 +2731,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2555,7 +2745,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2569,7 +2759,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2583,7 +2773,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2597,7 +2787,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2611,7 +2801,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2625,7 +2815,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2639,7 +2829,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2653,7 +2843,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2667,7 +2857,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2681,7 +2871,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2695,7 +2885,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2709,7 +2899,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2723,7 +2913,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2737,7 +2927,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2751,7 +2941,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2765,7 +2955,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2779,7 +2969,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2793,7 +2983,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2807,7 +2997,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2821,7 +3011,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2835,7 +3025,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2849,7 +3039,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2863,7 +3053,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2877,7 +3067,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2891,7 +3081,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2905,7 +3095,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2919,7 +3109,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2933,7 +3123,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2947,7 +3137,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2961,7 +3151,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2975,7 +3165,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -2989,7 +3179,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3003,7 +3193,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3017,7 +3207,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3031,7 +3221,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3045,7 +3235,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3059,7 +3249,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3073,7 +3263,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3087,7 +3277,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3101,7 +3291,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3115,7 +3305,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3129,7 +3319,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3143,7 +3333,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3157,7 +3347,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3171,7 +3361,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3185,7 +3375,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3199,7 +3389,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3213,7 +3403,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3227,7 +3417,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3241,7 +3431,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3255,7 +3445,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3269,7 +3459,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3283,7 +3473,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3297,7 +3487,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3311,7 +3501,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3325,7 +3515,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3339,7 +3529,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3353,7 +3543,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3367,7 +3557,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3381,7 +3571,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3395,7 +3585,7 @@
         "lanes": 4096,
         "tier": 3,
         "sorterTier": 3,
-        "priority": 0,
+        "priority": 1,
         "stackSize": 4,
         "monitorEnabled": false,
         "routeMode": "auto",
@@ -3405,6 +3595,804 @@
         "key": "belt_0177",
         "sourceKey": "recipe_titanium_crystal",
         "targetKey": "delivery_hub_24",
+        "itemId": "titanium_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 1,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0178",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "black_hole_overflow_01",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0179",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "black_hole_overflow_01",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0180",
+        "sourceKey": "recipe_magnet",
+        "targetKey": "black_hole_overflow_01",
+        "itemId": "magnet",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0181",
+        "sourceKey": "recipe_stone_brick",
+        "targetKey": "black_hole_overflow_02",
+        "itemId": "stone_brick",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0182",
+        "sourceKey": "recipe_glass",
+        "targetKey": "black_hole_overflow_02",
+        "itemId": "glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0183",
+        "sourceKey": "recipe_steel",
+        "targetKey": "black_hole_overflow_02",
+        "itemId": "steel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0184",
+        "sourceKey": "recipe_gear",
+        "targetKey": "black_hole_overflow_03",
+        "itemId": "gear",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0185",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "black_hole_overflow_03",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0186",
+        "sourceKey": "recipe_circuit_board",
+        "targetKey": "black_hole_overflow_03",
+        "itemId": "circuit_board",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0187",
+        "sourceKey": "recipe_prism",
+        "targetKey": "black_hole_overflow_04",
+        "itemId": "prism",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0188",
+        "sourceKey": "recipe_plasma_exciter",
+        "targetKey": "black_hole_overflow_04",
+        "itemId": "plasma_exciter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0189",
+        "sourceKey": "recipe_energetic_graphite",
+        "targetKey": "black_hole_overflow_04",
+        "itemId": "energetic_graphite",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0190",
+        "sourceKey": "recipe_plasma_refining",
+        "targetKey": "black_hole_overflow_05",
+        "itemId": "refined_oil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0191",
+        "sourceKey": "recipe_plasma_refining",
+        "targetKey": "black_hole_overflow_05",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0192",
+        "sourceKey": "recipe_high_purity_silicon",
+        "targetKey": "black_hole_overflow_05",
+        "itemId": "high_purity_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0193",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "black_hole_overflow_06",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0194",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "black_hole_overflow_06",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0195",
+        "sourceKey": "recipe_microcrystalline_component",
+        "targetKey": "black_hole_overflow_06",
+        "itemId": "microcrystalline_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0196",
+        "sourceKey": "recipe_processor",
+        "targetKey": "black_hole_overflow_07",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0197",
+        "sourceKey": "recipe_logistics_drone",
+        "targetKey": "black_hole_overflow_07",
+        "itemId": "logistics_drone",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0198",
+        "sourceKey": "recipe_logistics_vessel",
+        "targetKey": "black_hole_overflow_07",
+        "itemId": "logistics_vessel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0199",
+        "sourceKey": "recipe_space_warper",
+        "targetKey": "black_hole_overflow_08",
+        "itemId": "space_warper",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0200",
+        "sourceKey": "recipe_accumulator",
+        "targetKey": "black_hole_overflow_08",
+        "itemId": "accumulator",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0201",
+        "sourceKey": "recipe_accumulator_charge",
+        "targetKey": "black_hole_overflow_08",
+        "itemId": "charged_accumulator",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0202",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "black_hole_overflow_09",
+        "itemId": "graphene",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0203",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "black_hole_overflow_09",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0204",
+        "sourceKey": "recipe_carbon_nanotube_from_spiniform",
+        "targetKey": "black_hole_overflow_09",
+        "itemId": "carbon_nanotube",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0205",
+        "sourceKey": "recipe_proliferator_mk1",
+        "targetKey": "black_hole_overflow_10",
+        "itemId": "proliferator_mk1",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0206",
+        "sourceKey": "recipe_proliferator_mk2",
+        "targetKey": "black_hole_overflow_10",
+        "itemId": "proliferator_mk2",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0207",
+        "sourceKey": "recipe_proliferator_mk3",
+        "targetKey": "black_hole_overflow_10",
+        "itemId": "proliferator_mk3",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0208",
+        "sourceKey": "recipe_crystal_silicon_from_fractal",
+        "targetKey": "black_hole_overflow_11",
+        "itemId": "crystal_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0209",
+        "sourceKey": "recipe_particle_broadband",
+        "targetKey": "black_hole_overflow_11",
+        "itemId": "particle_broadband",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0210",
+        "sourceKey": "recipe_electric_motor",
+        "targetKey": "black_hole_overflow_11",
+        "itemId": "electric_motor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0211",
+        "sourceKey": "recipe_electromagnetic_turbine",
+        "targetKey": "black_hole_overflow_12",
+        "itemId": "electromagnetic_turbine",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0212",
+        "sourceKey": "recipe_super_magnetic_ring",
+        "targetKey": "black_hole_overflow_12",
+        "itemId": "super_magnetic_ring",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0213",
+        "sourceKey": "recipe_particle_container_from_unipolar",
+        "targetKey": "black_hole_overflow_12",
+        "itemId": "particle_container",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0214",
+        "sourceKey": "recipe_hydrogen_fuel_rod",
+        "targetKey": "black_hole_overflow_13",
+        "itemId": "hydrogen_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0215",
+        "sourceKey": "recipe_deuteron_fuel_rod",
+        "targetKey": "black_hole_overflow_13",
+        "itemId": "deuteron_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0216",
+        "sourceKey": "recipe_titanium_glass",
+        "targetKey": "black_hole_overflow_13",
+        "itemId": "titanium_glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0217",
+        "sourceKey": "recipe_casimir_crystal_advanced",
+        "targetKey": "black_hole_overflow_14",
+        "itemId": "casimir_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0218",
+        "sourceKey": "recipe_plane_filter",
+        "targetKey": "black_hole_overflow_14",
+        "itemId": "plane_filter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0219",
+        "sourceKey": "recipe_quantum_chip",
+        "targetKey": "black_hole_overflow_14",
+        "itemId": "quantum_chip",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0220",
+        "sourceKey": "recipe_strange_matter",
+        "targetKey": "black_hole_overflow_15",
+        "itemId": "strange_matter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0221",
+        "sourceKey": "recipe_graviton_lens",
+        "targetKey": "black_hole_overflow_15",
+        "itemId": "graviton_lens",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0222",
+        "sourceKey": "recipe_photon_combiner_from_grating",
+        "targetKey": "black_hole_overflow_15",
+        "itemId": "photon_combiner",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0223",
+        "sourceKey": "recipe_solar_sail",
+        "targetKey": "black_hole_overflow_16",
+        "itemId": "solar_sail",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0224",
+        "sourceKey": "recipe_critical_photon",
+        "targetKey": "black_hole_overflow_16",
+        "itemId": "critical_photon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0225",
+        "sourceKey": "recipe_antimatter",
+        "targetKey": "black_hole_overflow_16",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0226",
+        "sourceKey": "recipe_antimatter",
+        "targetKey": "black_hole_overflow_17",
+        "itemId": "antimatter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0227",
+        "sourceKey": "recipe_annihilation_constraint_sphere",
+        "targetKey": "black_hole_overflow_17",
+        "itemId": "annihilation_constraint_sphere",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0228",
+        "sourceKey": "recipe_antimatter_fuel_rod",
+        "targetKey": "black_hole_overflow_17",
+        "itemId": "antimatter_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0229",
+        "sourceKey": "recipe_frame_material",
+        "targetKey": "black_hole_overflow_18",
+        "itemId": "frame_material",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0230",
+        "sourceKey": "recipe_dyson_sphere_component",
+        "targetKey": "black_hole_overflow_18",
+        "itemId": "dyson_sphere_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0231",
+        "sourceKey": "recipe_small_carrier_rocket",
+        "targetKey": "black_hole_overflow_18",
+        "itemId": "small_carrier_rocket",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 2
+      },
+      {
+        "key": "belt_0232",
+        "sourceKey": "recipe_diamond_from_kimberlite",
+        "targetKey": "black_hole_overflow_19",
+        "itemId": "diamond",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 0
+      },
+      {
+        "key": "belt_0233",
+        "sourceKey": "recipe_plastic",
+        "targetKey": "black_hole_overflow_19",
+        "itemId": "plastic",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto",
+        "targetPortIndex": 1
+      },
+      {
+        "key": "belt_0234",
+        "sourceKey": "recipe_titanium_crystal",
+        "targetKey": "black_hole_overflow_19",
         "itemId": "titanium_crystal",
         "lanes": 4096,
         "tier": 3,

@@ -1,16 +1,16 @@
 # 原生应用构建与更新
 
-> 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
-> 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
-> 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。
+> 当前发布版本：Web/Windows `1.1.8`；Android 正式包 `1.1.8 / 1001008`
+> 1.1.8 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.6。
+> 当前公开稳定版本：Windows `1.1.8` 安装包按历史策略为 `NotSigned`；Android `1.1.8 / 1001008` 使用既有长期证书签名。
 > Windows 包名：`com.dspidle.network`
 > Android applicationId：`cn.dsponline.network`
-> 1.1.5 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；大存档稀疏投影与压缩不改变旧档迁移边界。
+> 1.1.8 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；分块增量 sidecar、内存保护和压缩不改变完整 v2 主存档或旧档迁移边界。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
 
-> 冻结 APK：5,211,333 B，SHA-256 `56aa74f0b5f72be320bbaffa0f3476119458137741e21745e2b4fc5281f8036e`；AAB：5,000,249 B，SHA-256 `92fe6f0759cddf8a99c740da8ee78336edf7e370186e0b5d3f1ac35285f5e6a1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户明确豁免，未创建新证书。
+> 冻结 APK：5,241,788 B，SHA-256 `fb3d3e58785a380cba6bf3b56a5bd859a2f38a7bf78a1763aefbbb6ccaf0e5de`；AAB：5,030,726 B，SHA-256 `2aaf3c86e0cfd8d33cc4e66a3db932f6b45b4ccbfda6dd5d58c2a55265233100`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；未创建新证书。实体 Android 设备门禁未执行且未标为通过。
 
-> Windows setup：110,426,594 B，SHA-256 `8304d9bae267dcff4f480daf178bbb49b71e5c39148ca9c16065500a14a9b5cb`；blockmap SHA-256 `08f555b95dd7b91f54acab651c37e9396a295788ede10bbf4e8106078b525f78`。完整下载哈希、更新清单和残余边界见 [1.1.5 正式发布记录](./releases/1.1.5.md)。
+> Windows setup：109,819,706 B，SHA-256 `48ffd89ad0382eec55e163630de49e6b4565a089d329b4c3dabe61aa2bc34a74`；blockmap 116,744 B，SHA-256 `af5c226ec24938e0a6513a32a92a89dbd28ef3f6c92dab7e62e9c4979abd3263`。完整下载哈希、更新清单和残余边界见 [1.1.8 正式发布记录](./releases/1.1.8.md)。
 
 > 历史 1.0.42 制品和门禁记录仍保留在 [1.0.42 正式发布记录](./releases/1.0.42.md)，不代表当前 stable。
 

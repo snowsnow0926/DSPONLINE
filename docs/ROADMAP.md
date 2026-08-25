@@ -1,5 +1,15 @@
 # 公开测试版后续路线图
 
+## 1.1.8 已发布（2026-08-26）
+
+- [x] 大存档分块增量 sidecar、保存/模拟互斥、线路休眠索引和设备级内存/积压自动暂停。
+- [x] 香港/上海 Web/API、上海下载页、Windows 与 Android stable 全量发布；两地 direct previous 与香港 previous-stable 为 1.1.6。
+- [x] 双节点 Backup API evidence、不可变清单、原子切换、health/ready、观察窗口、PWA 离线/路由隔离、完整下载哈希、Range 和缓存验收。
+- [x] Android 使用历史证书签名；Windows 继续 `NotSigned`。Android 实体设备门禁未执行，作为不可复用的残余风险记录。
+- [x] 发布证据与回滚边界归档至 [1.1.8 正式发布记录](./releases/1.1.8.md)。
+
+后续继续降低终局存档在组合建造/拉线/保存时的瞬时峰值，并为实体 Android 和低配 Windows 补齐设备矩阵；不得把 1.1.8 的设备缺口写成以后版本已通过。
+
 ## 1.1.5 已发布（2026-08-24）
 
 - [x] 大存档低峰值 Worker gzip、稀疏持久化、`.json.gz` 导入/导出和受限原生分享。

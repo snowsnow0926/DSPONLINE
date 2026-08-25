@@ -20,8 +20,8 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
         id: "memory-auto-pause-policy",
         title: english ? "Configurable memory-pressure auto-pause" : "内存超限自动暂停可配置",
         description: english
-          ? "Use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable heap-threshold pausing. Queue, Worker, and allocation-failure safeguards remain."
-          : "可使用浏览器堆上限 90% 自动档、固定 JS 堆内存阈值，或关闭堆阈值暂停；模拟积压、Worker 和内存分配失败保护仍保留。",
+          ? "Use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable memory/backlog auto-pausing. Disabled mode does not rewind on queue pressure; Worker/checkpoint and allocation-failure safeguards remain."
+          : "可使用浏览器堆上限 90% 自动档、固定 JS 堆内存阈值，或关闭内存与积压自动暂停；关闭后积压不会触发回档，但 Worker/检查点和内存分配失败保护仍保留。",
       },
       {
         id: "chunked-incremental-save",

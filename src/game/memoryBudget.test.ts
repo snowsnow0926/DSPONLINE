@@ -91,7 +91,7 @@ describe("memory budget governor", () => {
     expect(highHeap.shouldPause).toBe(true);
   });
 
-  it("allows advanced players to disable only the heap-triggered pause", () => {
+  it("lets advanced players disable heap and backlog rollback together", () => {
     const disabled = evaluateMemoryGuard({
       snapshot: { usedHeapBytes: 950, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
       workload: small,
@@ -101,6 +101,7 @@ describe("memory budget governor", () => {
       policy: { autoPauseEnabled: false, autoPauseThresholdMiB: 512 },
     });
     expect(disabled.shouldPause).toBe(false);
+    expect(disabled.admitSimulation).toBe(true);
 
     const backlog = evaluateMemoryGuard({
       snapshot: { usedHeapBytes: 950, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
@@ -110,7 +111,19 @@ describe("memory budget governor", () => {
       saveInFlight: false,
       policy: { autoPauseEnabled: false, autoPauseThresholdMiB: null },
     });
-    expect(backlog.shouldPause).toBe(true);
+    expect(backlog.shouldPause).toBe(false);
+    expect(backlog.admitSimulation).toBe(true);
+
+    const protectedBacklog = evaluateMemoryGuard({
+      snapshot: { usedHeapBytes: 950, heapLimitBytes: 1_000, deviceMemoryGiB: 8, sampledAtMs: 0 },
+      workload: small,
+      pendingSimulationSeconds: MEMORY_CRITICAL_PENDING_SECONDS,
+      workerInFlight: false,
+      saveInFlight: false,
+      policy: { autoPauseEnabled: true, autoPauseThresholdMiB: null },
+    });
+    expect(protectedBacklog.shouldPause).toBe(true);
+    expect(protectedBacklog.admitSimulation).toBe(false);
   });
 
   it("treats slow workers as backpressure, not a false memory crash", () => {

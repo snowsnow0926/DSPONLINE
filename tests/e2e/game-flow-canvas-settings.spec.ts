@@ -2107,7 +2107,7 @@ test("operations settings and local save slots persist across reload", async ({ 
   await page.screenshot({ path: "artifacts/qa/operations-settings-390.png", fullPage: true });
 });
 
-test("memory auto-pause policy exposes safe defaults and device-only overrides", async ({ page }) => {
+test("memory auto-pause policy exposes safe defaults and explicit no-rollback mode", async ({ page }) => {
   await openOperationsStageGame(page, "/?storageMigration=production");
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
@@ -2118,12 +2118,12 @@ test("memory auto-pause policy exposes safe defaults and device-only overrides",
   await expect(guard).toContainText("浏览器堆上限 90%");
   await expect(guard.getByRole("radio", { name: "自动 90%" })).toHaveAttribute("aria-checked", "true");
   await guard.getByRole("radio", { name: "2 GiB" }).click();
-  await guard.locator(".setting-row").filter({ hasText: "内存超限时自动暂停" }).click();
+  await guard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).click();
   await expect.poll(() => page.evaluate(() => ({
     enabled: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1"),
     threshold: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1"),
   }))).toEqual({ enabled: "false", threshold: "2048" });
-  await expect(guard).toContainText("已关闭堆内存阈值保护");
+  await expect(guard).toContainText("已关闭内存与模拟积压自动暂停/回档");
   await operations.getByLabel("关闭运营中心").click();
   await page.reload();
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
@@ -2132,8 +2132,79 @@ test("memory auto-pause policy exposes safe defaults and device-only overrides",
   await reloadedOperations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
   await selectSettingsCategory(reloadedOperations, "终局性能", "performance");
   const reloadedGuard = reloadedOperations.locator(".settings-memory-guard");
-  await expect(reloadedGuard.locator(".setting-row").filter({ hasText: "内存超限时自动暂停" }).locator("input")).not.toBeChecked();
+  await expect(reloadedGuard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).locator("input")).not.toBeChecked();
   await expect(reloadedGuard.getByRole("radio", { name: "2 GiB" })).toHaveAttribute("aria-checked", "true");
+});
+
+test("disabled memory guard does not rewind after a critical simulation backlog", async ({ page }) => {
+  test.setTimeout(75_000);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("dsp-idle-network.ui.memory-auto-pause.v1", "false");
+    const NativeWorker = window.Worker;
+    const tracker = { delayedResponses: 0, timers: new Set<number>() };
+    Object.assign(window, { __memoryBacklogDelayTracker: tracker });
+    class DelayedSimulationWorker extends NativeWorker {
+      private readonly delayResponses: boolean;
+      private readonly delayedIds = new Set<number>();
+      private assignedOnMessage: ((this: Worker, event: MessageEvent) => unknown) | null = null;
+
+      constructor(scriptURL: string | URL, options?: WorkerOptions) {
+        super(scriptURL, options);
+        this.delayResponses = String(scriptURL).includes("/simulation.worker") && options?.name === "factory-simulation";
+      }
+
+      override postMessage(message: unknown, transfer?: Transferable[]): void {
+        const request = message as { id?: unknown; kind?: unknown; simulationSeconds?: unknown } | null;
+        const requestId = Number(request?.id);
+        if (this.delayResponses && request?.kind === "advance" && Number(request.simulationSeconds) > 0 && Number.isSafeInteger(requestId)) {
+          this.delayedIds.add(requestId);
+        }
+        super.postMessage(message, transfer ?? []);
+      }
+
+      override set onmessage(listener: ((this: Worker, event: MessageEvent) => unknown) | null) {
+        this.assignedOnMessage = listener;
+        super.onmessage = listener ? (event) => {
+          const responseId = Number((event.data as { id?: unknown } | null)?.id);
+          if (!this.delayResponses || !this.delayedIds.has(responseId)) {
+            listener.call(this, event);
+            return;
+          }
+          this.delayedIds.delete(responseId);
+          tracker.delayedResponses += 1;
+          const timer = window.setTimeout(() => {
+            tracker.timers.delete(timer);
+            listener.call(this, event);
+          }, 26_000);
+          tracker.timers.add(timer);
+        } : null;
+      }
+
+      override get onmessage(): ((this: Worker, event: MessageEvent) => unknown) | null {
+        return this.assignedOnMessage;
+      }
+
+      override terminate(): void {
+        for (const timer of tracker.timers) window.clearTimeout(timer);
+        tracker.timers.clear();
+        this.delayedIds.clear();
+        super.terminate();
+      }
+    }
+    Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: DelayedSimulationWorker });
+  });
+  await openOperationsStageGame(page);
+  const shell = page.locator(".game-shell");
+  await expect(shell).toHaveAttribute("data-simulation-paused", "false");
+  await expect.poll(() => page.evaluate(() =>
+    (window as typeof window & { __memoryBacklogDelayTracker?: { delayedResponses: number } }).__memoryBacklogDelayTracker?.delayedResponses ?? 0,
+  ), { timeout: 5_000 }).toBeGreaterThan(0);
+  // The first delayed response lands after the normal 24-second backlog
+  // watermark. The old implementation rewound and paused at that point;
+  // disabled mode must keep the current state and continue running instead.
+  await page.waitForTimeout(30_000);
+  await expect(shell).toHaveAttribute("data-simulation-paused", "false");
+  await expect(page.locator(".game-notice")).not.toContainText("回到最近检查点");
 });
 
 test("failed primary saves stay visible and never report false success", async ({ page }) => {

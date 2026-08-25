@@ -31,13 +31,13 @@ const release118Copy = {
   date: { "zh-CN": "2026年8月25日", en: "August 25, 2026" },
   title: { "zh-CN": "内存安全暂停与分块增量存档", en: "Memory Safety Pausing and Chunked Incremental Saves" },
   summary: {
-    "zh-CN": "1.1.8 为大型工厂加入内存预算、模拟与保存互斥、分块增量检查点和自动安全暂停。设置页现在可以在“自动 90%”与固定 JS 堆内存阈值之间选择，也可以关闭堆阈值暂停；设置只保存在本机，不写入存档或云同步。关闭后，模拟积压失控、Worker 失败和内存分配失败保护仍然保留。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 继续兼容。",
-    en: "Version 1.1.8 adds a memory budget, save/simulation fencing, chunked incremental checkpoints, and an automatic safety pause for large factories. Settings can use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable heap-threshold pausing; the preference is device-only and never enters saves or cloud sync. Queue overflow, Worker failure, and allocation-failure safeguards remain when heap pausing is disabled. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+    "zh-CN": "1.1.8 为大型工厂加入内存预算、模拟与保存互斥、分块增量检查点和自动安全暂停。设置页现在可以在“自动 90%”与固定 JS 堆内存阈值之间选择，也可以关闭内存与积压自动暂停；设置只保存在本机，不写入存档或云同步。关闭后不会因堆水位或模拟积压把状态切回旧检查点，但 Worker/检查点失败和内存分配失败保护仍然保留。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 继续兼容。",
+    en: "Version 1.1.8 adds a memory budget, save/simulation fencing, chunked incremental checkpoints, and an automatic safety pause for large factories. Settings can use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable memory/backlog auto-pausing; the preference is device-only and never enters saves or cloud sync. With it disabled, heap or simulation backlog pressure no longer rewinds to an older checkpoint, while Worker/checkpoint and allocation-failure safeguards remain. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
   },
   guardTitle: { "zh-CN": "内存超限自动暂停可配置", en: "Configurable memory-pressure auto-pause" },
   guardDescription: {
-    "zh-CN": "默认使用浏览器 JS 堆上限的 90% 作为保护线；高级玩家可以选择 512 MiB、768 MiB、1/1.5/2/3/4 GiB 固定水位，或关闭堆阈值触发。固定水位只会更早暂停，不会降低浏览器 90% 安全上限；关闭后仍保留积压、Worker 和分配失败保护。",
-    en: "The default uses 90% of the browser JS-heap limit. Advanced players can choose 512 MiB, 768 MiB, 1/1.5/2/3/4 GiB watermarks or disable heap-threshold pausing. A fixed watermark only pauses earlier and never weakens the browser 90% ceiling; queue, Worker, and allocation-failure guards remain when disabled.",
+    "zh-CN": "默认使用浏览器 JS 堆上限的 90% 作为保护线；高级玩家可以选择 512 MiB、768 MiB、1/1.5/2/3/4 GiB 固定水位，或关闭内存与积压自动暂停。关闭后超过水位或 24 秒积压不会回档或清空未提交时间；Worker/检查点和分配失败仍可能停止运行以保护存档。",
+    en: "The default uses 90% of the browser JS-heap limit. Advanced players can choose 512 MiB, 768 MiB, 1/1.5/2/3/4 GiB watermarks or disable memory/backlog auto-pausing. With it disabled, crossing a watermark or the 24-second backlog does not rewind or clear unsubmitted time; Worker/checkpoint and allocation failures may still stop the run to protect saves.",
   },
   saveTitle: { "zh-CN": "大型存档改为分块增量检查点", en: "Large saves use chunked incremental checkpoints" },
   saveDescription: {
@@ -56,8 +56,8 @@ const release118Copy = {
   },
   regressionTitle: { "zh-CN": "内存策略与发布门禁加入回归", en: "Memory policy and release gates are regression-covered" },
   regressionDescription: {
-    "zh-CN": "新增固定阈值、关闭堆阈值后仍暂停关键积压、偏好损坏回退、设置页面可访问性、保存失败终态、类型检查、生产构建和真实存档长时证据。",
-    en: "Regression coverage adds fixed-threshold behavior, critical-backlog pausing after heap pausing is disabled, corrupted-preference fallbacks, settings accessibility, save-failure terminal state, typecheck, production build, and real-save long-run evidence.",
+    "zh-CN": "新增固定阈值、关闭内存保护后积压不回档、偏好损坏回退、设置页面可访问性、保存失败终态、类型检查、生产构建和真实存档长时证据。",
+    en: "Regression coverage adds fixed-threshold behavior, no rollback when memory/backlog protection is disabled, corrupted-preference fallbacks, settings accessibility, save-failure terminal state, typecheck, production build, and real-save long-run evidence.",
   },
 } as const;
 

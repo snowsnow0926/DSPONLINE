@@ -39,6 +39,12 @@ export interface MemoryGuardInput {
  * `null` means the browser's heap limit is used (the existing 90% guard).
  * A numeric value adds an earlier absolute JS-heap watermark; the browser
  * 90% guard remains a hard ceiling whenever the browser exposes the metric.
+ *
+ * `autoPauseEnabled: false` is an explicit advanced/unsafe run mode. It
+ * bypasses the heap and simulation-backlog pause gates *and* their queue
+ * admission backpressure, so the scheduler never rewinds to an older
+ * checkpoint merely because it is behind. It does not bypass an explicit
+ * allocation-failure signal; that remains an integrity fail-safe.
  */
 export const MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB = [512, 768, 1_024, 1_536, 2_048, 3_072, 4_096] as const;
 export type MemoryAutoPauseThresholdMiB = (typeof MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB)[number] | null;
@@ -156,13 +162,19 @@ export function evaluateMemoryGuard(input: MemoryGuardInput): MemoryGuardDecisio
   // new slice and let the Worker drain. Only the larger critical boundary
   // pauses the factory, so a temporarily slow large-save Worker does not
   // turn an otherwise healthy running game into a false-positive pause.
-  const shouldPause = Boolean(input.allocationFailure || heapCritical || backlogCritical);
+  // When the player explicitly disables the guard, do not turn simulation
+  // debt into a rollback. This is deliberately different from merely
+  // ignoring the heap watermark: the backlog gate and its admission
+  // backpressure must be bypassed together, otherwise a delayed Worker would
+  // still eventually force the app back to the last confirmed checkpoint.
+  const backlogProtectionEnabled = autoPauseEnabled;
+  const shouldPause = Boolean(input.allocationFailure || heapCritical || (backlogProtectionEnabled && backlogCritical));
   const pressure: MemoryPressure = shouldPause
     ? "critical"
     : heapElevated || backlogElevated || repeatedSlowWorkers || large
       ? "elevated"
       : "normal";
-  const admitSimulation = !shouldPause && !backlogElevated && !input.saveInFlight && !input.workerInFlight;
+  const admitSimulation = !shouldPause && (!backlogProtectionEnabled || !backlogElevated) && !input.saveInFlight && !input.workerInFlight;
   const maxSimulationSliceSeconds = pressure === "elevated" || large
     ? MEMORY_LARGE_SLICE_SECONDS
     : MEMORY_NORMAL_SLICE_SECONDS;
@@ -171,7 +183,7 @@ export function evaluateMemoryGuard(input: MemoryGuardInput): MemoryGuardDecisio
   if (input.allocationFailure) reason = "检测到内存分配失败";
   else if (autoPauseEnabled && heapThresholdCritical) reason = `已达到 ${autoPauseThresholdMiB} MiB 内存保护阈值`;
   else if (heapCritical) reason = "浏览器堆内存接近上限";
-  else if (backlogCritical) reason = "模拟积压超过安全上限";
+  else if (backlogProtectionEnabled && backlogCritical) reason = "模拟积压超过安全上限";
   else if (repeatedSlowWorkers) reason = "模拟 Worker 连续超时";
   else if (input.saveInFlight) reason = "存档检查点正在写入";
   else if (large) reason = "大型工厂启用保守切片";

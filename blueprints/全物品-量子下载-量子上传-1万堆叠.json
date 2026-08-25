@@ -1,0 +1,3712 @@
+{
+  "type": "dsp-idle-blueprint",
+  "formatVersion": 2,
+  "exportedAt": "2026-08-26T00:00:00.000+08:00",
+  "blueprint": {
+    "id": "all_materials_quantum_upload_10k",
+    "name": "全物品·量子下载→量子上传·1万堆叠",
+    "revision": 1,
+    "entities": [
+      {
+        "key": "quantum_download_01",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": -3420,
+          "y": -780
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "iron_ore",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "copper_ore",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "coal",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "stone",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "crude_oil",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_download_02",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": -3420,
+          "y": -260
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "silicon_ore",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "titanium_ore",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "fire_ice",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "kimberlite_ore",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "fractal_silicon",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_download_03",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": -3420,
+          "y": 260
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "optical_grating_crystal",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "spiniform_stalagmite_crystal",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "unipolar_magnet",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "water",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "sulfuric_acid",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_download_04",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": -3420,
+          "y": 780
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "hydrogen",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "deuterium",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "organic_crystal",
+            "localMode": "storage",
+            "remoteMode": "demand",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 2,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "recipe_iron_ingot",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -2100
+        },
+        "machineCount": 10000,
+        "recipeId": "iron_ingot"
+      },
+      {
+        "key": "recipe_copper_ingot",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -1800
+        },
+        "machineCount": 10000,
+        "recipeId": "copper_ingot"
+      },
+      {
+        "key": "recipe_magnet",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -1500
+        },
+        "machineCount": 10000,
+        "recipeId": "magnet"
+      },
+      {
+        "key": "recipe_stone_brick",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -1200
+        },
+        "machineCount": 10000,
+        "recipeId": "stone_brick"
+      },
+      {
+        "key": "recipe_glass",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -900
+        },
+        "machineCount": 10000,
+        "recipeId": "glass"
+      },
+      {
+        "key": "recipe_energetic_graphite",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": -600
+        },
+        "machineCount": 10000,
+        "recipeId": "energetic_graphite"
+      },
+      {
+        "key": "recipe_plasma_refining",
+        "buildingId": "oil_refinery",
+        "offset": {
+          "x": -2520,
+          "y": -300
+        },
+        "machineCount": 10000,
+        "recipeId": "plasma_refining"
+      },
+      {
+        "key": "recipe_high_purity_silicon",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": 0
+        },
+        "machineCount": 10000,
+        "recipeId": "high_purity_silicon"
+      },
+      {
+        "key": "recipe_titanium_ingot",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": 300
+        },
+        "machineCount": 10000,
+        "recipeId": "titanium_ingot"
+      },
+      {
+        "key": "recipe_graphene_from_fire_ice",
+        "buildingId": "quantum_chemical_plant",
+        "offset": {
+          "x": -2520,
+          "y": 600
+        },
+        "machineCount": 10000,
+        "recipeId": "graphene_from_fire_ice"
+      },
+      {
+        "key": "recipe_carbon_nanotube_from_spiniform",
+        "buildingId": "quantum_chemical_plant",
+        "offset": {
+          "x": -2520,
+          "y": 900
+        },
+        "machineCount": 10000,
+        "recipeId": "carbon_nanotube_from_spiniform"
+      },
+      {
+        "key": "recipe_proliferator_mk1",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -2520,
+          "y": 1200
+        },
+        "machineCount": 10000,
+        "recipeId": "proliferator_mk1"
+      },
+      {
+        "key": "recipe_crystal_silicon_from_fractal",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": 1500
+        },
+        "machineCount": 10000,
+        "recipeId": "crystal_silicon_from_fractal"
+      },
+      {
+        "key": "recipe_critical_photon",
+        "buildingId": "ray_receiver",
+        "offset": {
+          "x": -2520,
+          "y": 1800
+        },
+        "machineCount": 10000,
+        "recipeId": "critical_photon"
+      },
+      {
+        "key": "recipe_diamond_from_kimberlite",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -2520,
+          "y": 2100
+        },
+        "machineCount": 10000,
+        "recipeId": "diamond_from_kimberlite"
+      },
+      {
+        "key": "recipe_steel",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -1800,
+          "y": -1950
+        },
+        "machineCount": 10000,
+        "recipeId": "steel"
+      },
+      {
+        "key": "recipe_gear",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -1650
+        },
+        "machineCount": 10000,
+        "recipeId": "gear"
+      },
+      {
+        "key": "recipe_magnetic_coil",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -1350
+        },
+        "machineCount": 10000,
+        "recipeId": "magnetic_coil"
+      },
+      {
+        "key": "recipe_circuit_board",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -1050
+        },
+        "machineCount": 10000,
+        "recipeId": "circuit_board"
+      },
+      {
+        "key": "recipe_prism",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -750
+        },
+        "machineCount": 10000,
+        "recipeId": "prism"
+      },
+      {
+        "key": "recipe_microcrystalline_component",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -450
+        },
+        "machineCount": 10000,
+        "recipeId": "microcrystalline_component"
+      },
+      {
+        "key": "recipe_proliferator_mk2",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": -150
+        },
+        "machineCount": 10000,
+        "recipeId": "proliferator_mk2"
+      },
+      {
+        "key": "recipe_particle_container_from_unipolar",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": 150
+        },
+        "machineCount": 10000,
+        "recipeId": "particle_container_from_unipolar"
+      },
+      {
+        "key": "recipe_hydrogen_fuel_rod",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": 450
+        },
+        "machineCount": 10000,
+        "recipeId": "hydrogen_fuel_rod"
+      },
+      {
+        "key": "recipe_titanium_glass",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": 750
+        },
+        "machineCount": 10000,
+        "recipeId": "titanium_glass"
+      },
+      {
+        "key": "recipe_casimir_crystal_advanced",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": 1050
+        },
+        "machineCount": 10000,
+        "recipeId": "casimir_crystal_advanced"
+      },
+      {
+        "key": "recipe_antimatter",
+        "buildingId": "miniature_particle_collider",
+        "offset": {
+          "x": -1800,
+          "y": 1350
+        },
+        "machineCount": 10000,
+        "recipeId": "antimatter"
+      },
+      {
+        "key": "recipe_plastic",
+        "buildingId": "quantum_chemical_plant",
+        "offset": {
+          "x": -1800,
+          "y": 1650
+        },
+        "machineCount": 10000,
+        "recipeId": "plastic"
+      },
+      {
+        "key": "recipe_titanium_crystal",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1800,
+          "y": 1950
+        },
+        "machineCount": 10000,
+        "recipeId": "titanium_crystal"
+      },
+      {
+        "key": "recipe_plasma_exciter",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": -1350
+        },
+        "machineCount": 10000,
+        "recipeId": "plasma_exciter"
+      },
+      {
+        "key": "recipe_titanium_alloy",
+        "buildingId": "plane_smelter",
+        "offset": {
+          "x": -1080,
+          "y": -1050
+        },
+        "machineCount": 10000,
+        "recipeId": "titanium_alloy"
+      },
+      {
+        "key": "recipe_processor",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": -750
+        },
+        "machineCount": 10000,
+        "recipeId": "processor"
+      },
+      {
+        "key": "recipe_accumulator",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": -450
+        },
+        "machineCount": 10000,
+        "recipeId": "accumulator"
+      },
+      {
+        "key": "recipe_proliferator_mk3",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": -150
+        },
+        "machineCount": 10000,
+        "recipeId": "proliferator_mk3"
+      },
+      {
+        "key": "recipe_particle_broadband",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": 150
+        },
+        "machineCount": 10000,
+        "recipeId": "particle_broadband"
+      },
+      {
+        "key": "recipe_electric_motor",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": 450
+        },
+        "machineCount": 10000,
+        "recipeId": "electric_motor"
+      },
+      {
+        "key": "recipe_plane_filter",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": 750
+        },
+        "machineCount": 10000,
+        "recipeId": "plane_filter"
+      },
+      {
+        "key": "recipe_strange_matter",
+        "buildingId": "miniature_particle_collider",
+        "offset": {
+          "x": -1080,
+          "y": 1050
+        },
+        "machineCount": 10000,
+        "recipeId": "strange_matter"
+      },
+      {
+        "key": "recipe_photon_combiner_from_grating",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -1080,
+          "y": 1350
+        },
+        "machineCount": 10000,
+        "recipeId": "photon_combiner_from_grating"
+      },
+      {
+        "key": "recipe_logistics_vessel",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": -1050
+        },
+        "machineCount": 10000,
+        "recipeId": "logistics_vessel"
+      },
+      {
+        "key": "recipe_accumulator_charge",
+        "buildingId": "energy_exchanger",
+        "offset": {
+          "x": -360,
+          "y": -750
+        },
+        "machineCount": 10000,
+        "recipeId": "accumulator_charge"
+      },
+      {
+        "key": "recipe_electromagnetic_turbine",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": -450
+        },
+        "machineCount": 10000,
+        "recipeId": "electromagnetic_turbine"
+      },
+      {
+        "key": "recipe_quantum_chip",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": -150
+        },
+        "machineCount": 10000,
+        "recipeId": "quantum_chip"
+      },
+      {
+        "key": "recipe_graviton_lens",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": 150
+        },
+        "machineCount": 10000,
+        "recipeId": "graviton_lens"
+      },
+      {
+        "key": "recipe_solar_sail",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": 450
+        },
+        "machineCount": 10000,
+        "recipeId": "solar_sail"
+      },
+      {
+        "key": "recipe_annihilation_constraint_sphere",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": 750
+        },
+        "machineCount": 10000,
+        "recipeId": "annihilation_constraint_sphere"
+      },
+      {
+        "key": "recipe_frame_material",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": -360,
+          "y": 1050
+        },
+        "machineCount": 10000,
+        "recipeId": "frame_material"
+      },
+      {
+        "key": "recipe_logistics_drone",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 360,
+          "y": -600
+        },
+        "machineCount": 10000,
+        "recipeId": "logistics_drone"
+      },
+      {
+        "key": "recipe_space_warper",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 360,
+          "y": -300
+        },
+        "machineCount": 10000,
+        "recipeId": "space_warper"
+      },
+      {
+        "key": "recipe_super_magnetic_ring",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 360,
+          "y": 0
+        },
+        "machineCount": 10000,
+        "recipeId": "super_magnetic_ring"
+      },
+      {
+        "key": "recipe_antimatter_fuel_rod",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 360,
+          "y": 300
+        },
+        "machineCount": 10000,
+        "recipeId": "antimatter_fuel_rod"
+      },
+      {
+        "key": "recipe_dyson_sphere_component",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 360,
+          "y": 600
+        },
+        "machineCount": 10000,
+        "recipeId": "dyson_sphere_component"
+      },
+      {
+        "key": "recipe_deuteron_fuel_rod",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 1080,
+          "y": 0
+        },
+        "machineCount": 10000,
+        "recipeId": "deuteron_fuel_rod"
+      },
+      {
+        "key": "recipe_small_carrier_rocket",
+        "buildingId": "assembling_machine_mk3",
+        "offset": {
+          "x": 1800,
+          "y": 0
+        },
+        "machineCount": 10000,
+        "recipeId": "small_carrier_rocket"
+      },
+      {
+        "key": "quantum_upload_01",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": -2600
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "iron_ingot",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "copper_ingot",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "magnet",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "stone_brick",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "glass",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_02",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": -2080
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "steel",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "gear",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "magnetic_coil",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "circuit_board",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "prism",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_03",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": -1560
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "plasma_exciter",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "energetic_graphite",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "refined_oil",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "hydrogen",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "high_purity_silicon",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_04",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": -1040
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "titanium_ingot",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "titanium_alloy",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "microcrystalline_component",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "processor",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "logistics_drone",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_05",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": -520
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "logistics_vessel",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "space_warper",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "accumulator",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "charged_accumulator",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "graphene",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_06",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 0
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "carbon_nanotube",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "proliferator_mk1",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "proliferator_mk2",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "proliferator_mk3",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "crystal_silicon",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_07",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 520
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "particle_broadband",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "electric_motor",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "electromagnetic_turbine",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "super_magnetic_ring",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "particle_container",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_08",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 1040
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "hydrogen_fuel_rod",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "deuteron_fuel_rod",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "titanium_glass",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "casimir_crystal",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "plane_filter",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_09",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 1560
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "quantum_chip",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "strange_matter",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "graviton_lens",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "photon_combiner",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "solar_sail",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_10",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 2080
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "critical_photon",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "antimatter",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "annihilation_constraint_sphere",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "antimatter_fuel_rod",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "frame_material",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      },
+      {
+        "key": "quantum_upload_11",
+        "buildingId": "interstellar_logistics_station",
+        "offset": {
+          "x": 3420,
+          "y": 2600
+        },
+        "machineCount": 10000,
+        "stationTier": 2,
+        "stationOperationMode": "legacy",
+        "quantumTarget": true,
+        "stationMinimumLoad": 1,
+        "stationWarpEnabled": false,
+        "stationWarperAutoRefill": false,
+        "stationDroneTarget": 0,
+        "stationVesselTarget": 0,
+        "stationSlots": [
+          {
+            "itemId": "dyson_sphere_component",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "small_carrier_rocket",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "diamond",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "plastic",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          },
+          {
+            "itemId": "titanium_crystal",
+            "localMode": "storage",
+            "remoteMode": "supply",
+            "minimumLoad": 1,
+            "minStock": 0,
+            "maxStock": 100000000,
+            "priority": 1,
+            "routePolicy": "relay-preferred",
+            "warperBudget": 2
+          }
+        ]
+      }
+    ],
+    "belts": [
+      {
+        "key": "belt_0001",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_iron_ingot",
+        "itemId": "iron_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0002",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_copper_ingot",
+        "itemId": "copper_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0003",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_magnet",
+        "itemId": "iron_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0004",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_stone_brick",
+        "itemId": "stone",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0005",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_glass",
+        "itemId": "stone",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0006",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_steel",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0007",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_gear",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0008",
+        "sourceKey": "recipe_magnet",
+        "targetKey": "recipe_magnetic_coil",
+        "itemId": "magnet",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0009",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "recipe_magnetic_coil",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0010",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_circuit_board",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0011",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "recipe_circuit_board",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0012",
+        "sourceKey": "recipe_glass",
+        "targetKey": "recipe_prism",
+        "itemId": "glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0013",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "recipe_plasma_exciter",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0014",
+        "sourceKey": "recipe_prism",
+        "targetKey": "recipe_plasma_exciter",
+        "itemId": "prism",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0015",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_energetic_graphite",
+        "itemId": "coal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0016",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_plasma_refining",
+        "itemId": "crude_oil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0017",
+        "sourceKey": "quantum_download_02",
+        "targetKey": "recipe_high_purity_silicon",
+        "itemId": "silicon_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0018",
+        "sourceKey": "quantum_download_02",
+        "targetKey": "recipe_titanium_ingot",
+        "itemId": "titanium_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0019",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "recipe_titanium_alloy",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0020",
+        "sourceKey": "recipe_steel",
+        "targetKey": "recipe_titanium_alloy",
+        "itemId": "steel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0021",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_titanium_alloy",
+        "itemId": "sulfuric_acid",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0022",
+        "sourceKey": "recipe_high_purity_silicon",
+        "targetKey": "recipe_microcrystalline_component",
+        "itemId": "high_purity_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0023",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "recipe_microcrystalline_component",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0024",
+        "sourceKey": "recipe_circuit_board",
+        "targetKey": "recipe_processor",
+        "itemId": "circuit_board",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0025",
+        "sourceKey": "recipe_microcrystalline_component",
+        "targetKey": "recipe_processor",
+        "itemId": "microcrystalline_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0026",
+        "sourceKey": "recipe_steel",
+        "targetKey": "recipe_logistics_drone",
+        "itemId": "steel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0027",
+        "sourceKey": "recipe_processor",
+        "targetKey": "recipe_logistics_drone",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0028",
+        "sourceKey": "recipe_electromagnetic_turbine",
+        "targetKey": "recipe_logistics_drone",
+        "itemId": "electromagnetic_turbine",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0029",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "recipe_logistics_vessel",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0030",
+        "sourceKey": "recipe_processor",
+        "targetKey": "recipe_logistics_vessel",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0031",
+        "sourceKey": "recipe_plasma_exciter",
+        "targetKey": "recipe_logistics_vessel",
+        "itemId": "plasma_exciter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0032",
+        "sourceKey": "recipe_graviton_lens",
+        "targetKey": "recipe_space_warper",
+        "itemId": "graviton_lens",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0033",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_accumulator",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0034",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "recipe_accumulator",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0035",
+        "sourceKey": "recipe_circuit_board",
+        "targetKey": "recipe_accumulator",
+        "itemId": "circuit_board",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0036",
+        "sourceKey": "recipe_accumulator",
+        "targetKey": "recipe_accumulator_charge",
+        "itemId": "accumulator",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0037",
+        "sourceKey": "quantum_download_02",
+        "targetKey": "recipe_graphene_from_fire_ice",
+        "itemId": "fire_ice",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0038",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_carbon_nanotube_from_spiniform",
+        "itemId": "spiniform_stalagmite_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0039",
+        "sourceKey": "quantum_download_01",
+        "targetKey": "recipe_proliferator_mk1",
+        "itemId": "coal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0040",
+        "sourceKey": "recipe_proliferator_mk1",
+        "targetKey": "recipe_proliferator_mk2",
+        "itemId": "proliferator_mk1",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0041",
+        "sourceKey": "recipe_diamond_from_kimberlite",
+        "targetKey": "recipe_proliferator_mk2",
+        "itemId": "diamond",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0042",
+        "sourceKey": "recipe_proliferator_mk2",
+        "targetKey": "recipe_proliferator_mk3",
+        "itemId": "proliferator_mk2",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0043",
+        "sourceKey": "recipe_carbon_nanotube_from_spiniform",
+        "targetKey": "recipe_proliferator_mk3",
+        "itemId": "carbon_nanotube",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0044",
+        "sourceKey": "quantum_download_02",
+        "targetKey": "recipe_crystal_silicon_from_fractal",
+        "itemId": "fractal_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0045",
+        "sourceKey": "recipe_carbon_nanotube_from_spiniform",
+        "targetKey": "recipe_particle_broadband",
+        "itemId": "carbon_nanotube",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0046",
+        "sourceKey": "recipe_crystal_silicon_from_fractal",
+        "targetKey": "recipe_particle_broadband",
+        "itemId": "crystal_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0047",
+        "sourceKey": "recipe_plastic",
+        "targetKey": "recipe_particle_broadband",
+        "itemId": "plastic",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0048",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_electric_motor",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0049",
+        "sourceKey": "recipe_gear",
+        "targetKey": "recipe_electric_motor",
+        "itemId": "gear",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0050",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "recipe_electric_motor",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0051",
+        "sourceKey": "recipe_electric_motor",
+        "targetKey": "recipe_electromagnetic_turbine",
+        "itemId": "electric_motor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0052",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "recipe_electromagnetic_turbine",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0053",
+        "sourceKey": "recipe_electromagnetic_turbine",
+        "targetKey": "recipe_super_magnetic_ring",
+        "itemId": "electromagnetic_turbine",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0054",
+        "sourceKey": "recipe_magnet",
+        "targetKey": "recipe_super_magnetic_ring",
+        "itemId": "magnet",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0055",
+        "sourceKey": "recipe_energetic_graphite",
+        "targetKey": "recipe_super_magnetic_ring",
+        "itemId": "energetic_graphite",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0056",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_particle_container_from_unipolar",
+        "itemId": "unipolar_magnet",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0057",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "recipe_particle_container_from_unipolar",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0058",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "recipe_hydrogen_fuel_rod",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0059",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_hydrogen_fuel_rod",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0060",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "recipe_deuteron_fuel_rod",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0061",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_deuteron_fuel_rod",
+        "itemId": "deuterium",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0062",
+        "sourceKey": "recipe_super_magnetic_ring",
+        "targetKey": "recipe_deuteron_fuel_rod",
+        "itemId": "super_magnetic_ring",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0063",
+        "sourceKey": "recipe_glass",
+        "targetKey": "recipe_titanium_glass",
+        "itemId": "glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0064",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "recipe_titanium_glass",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0065",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_titanium_glass",
+        "itemId": "water",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0066",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_casimir_crystal_advanced",
+        "itemId": "optical_grating_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0067",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "recipe_casimir_crystal_advanced",
+        "itemId": "graphene",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0068",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_casimir_crystal_advanced",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0069",
+        "sourceKey": "recipe_casimir_crystal_advanced",
+        "targetKey": "recipe_plane_filter",
+        "itemId": "casimir_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0070",
+        "sourceKey": "recipe_titanium_glass",
+        "targetKey": "recipe_plane_filter",
+        "itemId": "titanium_glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0071",
+        "sourceKey": "recipe_processor",
+        "targetKey": "recipe_quantum_chip",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0072",
+        "sourceKey": "recipe_plane_filter",
+        "targetKey": "recipe_quantum_chip",
+        "itemId": "plane_filter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0073",
+        "sourceKey": "recipe_particle_container_from_unipolar",
+        "targetKey": "recipe_strange_matter",
+        "itemId": "particle_container",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0074",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "recipe_strange_matter",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0075",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_strange_matter",
+        "itemId": "deuterium",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0076",
+        "sourceKey": "recipe_diamond_from_kimberlite",
+        "targetKey": "recipe_graviton_lens",
+        "itemId": "diamond",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0077",
+        "sourceKey": "recipe_strange_matter",
+        "targetKey": "recipe_graviton_lens",
+        "itemId": "strange_matter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0078",
+        "sourceKey": "quantum_download_03",
+        "targetKey": "recipe_photon_combiner_from_grating",
+        "itemId": "optical_grating_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0079",
+        "sourceKey": "recipe_circuit_board",
+        "targetKey": "recipe_photon_combiner_from_grating",
+        "itemId": "circuit_board",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0080",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "recipe_solar_sail",
+        "itemId": "graphene",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0081",
+        "sourceKey": "recipe_photon_combiner_from_grating",
+        "targetKey": "recipe_solar_sail",
+        "itemId": "photon_combiner",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0082",
+        "sourceKey": "recipe_critical_photon",
+        "targetKey": "recipe_antimatter",
+        "itemId": "critical_photon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0083",
+        "sourceKey": "recipe_particle_container_from_unipolar",
+        "targetKey": "recipe_annihilation_constraint_sphere",
+        "itemId": "particle_container",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0084",
+        "sourceKey": "recipe_processor",
+        "targetKey": "recipe_annihilation_constraint_sphere",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0085",
+        "sourceKey": "recipe_antimatter",
+        "targetKey": "recipe_antimatter_fuel_rod",
+        "itemId": "antimatter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0086",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_antimatter_fuel_rod",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0087",
+        "sourceKey": "recipe_annihilation_constraint_sphere",
+        "targetKey": "recipe_antimatter_fuel_rod",
+        "itemId": "annihilation_constraint_sphere",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0088",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "recipe_antimatter_fuel_rod",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0089",
+        "sourceKey": "recipe_carbon_nanotube_from_spiniform",
+        "targetKey": "recipe_frame_material",
+        "itemId": "carbon_nanotube",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0090",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "recipe_frame_material",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0091",
+        "sourceKey": "recipe_high_purity_silicon",
+        "targetKey": "recipe_frame_material",
+        "itemId": "high_purity_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0092",
+        "sourceKey": "recipe_frame_material",
+        "targetKey": "recipe_dyson_sphere_component",
+        "itemId": "frame_material",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0093",
+        "sourceKey": "recipe_solar_sail",
+        "targetKey": "recipe_dyson_sphere_component",
+        "itemId": "solar_sail",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0094",
+        "sourceKey": "recipe_processor",
+        "targetKey": "recipe_dyson_sphere_component",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0095",
+        "sourceKey": "recipe_dyson_sphere_component",
+        "targetKey": "recipe_small_carrier_rocket",
+        "itemId": "dyson_sphere_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0096",
+        "sourceKey": "recipe_deuteron_fuel_rod",
+        "targetKey": "recipe_small_carrier_rocket",
+        "itemId": "deuteron_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0097",
+        "sourceKey": "recipe_quantum_chip",
+        "targetKey": "recipe_small_carrier_rocket",
+        "itemId": "quantum_chip",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0098",
+        "sourceKey": "quantum_download_02",
+        "targetKey": "recipe_diamond_from_kimberlite",
+        "itemId": "kimberlite_ore",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0099",
+        "sourceKey": "recipe_plasma_refining",
+        "targetKey": "recipe_plastic",
+        "itemId": "refined_oil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0100",
+        "sourceKey": "recipe_energetic_graphite",
+        "targetKey": "recipe_plastic",
+        "itemId": "energetic_graphite",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0101",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "recipe_titanium_crystal",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0102",
+        "sourceKey": "quantum_download_04",
+        "targetKey": "recipe_titanium_crystal",
+        "itemId": "organic_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 2,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0103",
+        "sourceKey": "recipe_iron_ingot",
+        "targetKey": "quantum_upload_01",
+        "itemId": "iron_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0104",
+        "sourceKey": "recipe_copper_ingot",
+        "targetKey": "quantum_upload_01",
+        "itemId": "copper_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0105",
+        "sourceKey": "recipe_magnet",
+        "targetKey": "quantum_upload_01",
+        "itemId": "magnet",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0106",
+        "sourceKey": "recipe_stone_brick",
+        "targetKey": "quantum_upload_01",
+        "itemId": "stone_brick",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0107",
+        "sourceKey": "recipe_glass",
+        "targetKey": "quantum_upload_01",
+        "itemId": "glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0108",
+        "sourceKey": "recipe_steel",
+        "targetKey": "quantum_upload_02",
+        "itemId": "steel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0109",
+        "sourceKey": "recipe_gear",
+        "targetKey": "quantum_upload_02",
+        "itemId": "gear",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0110",
+        "sourceKey": "recipe_magnetic_coil",
+        "targetKey": "quantum_upload_02",
+        "itemId": "magnetic_coil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0111",
+        "sourceKey": "recipe_circuit_board",
+        "targetKey": "quantum_upload_02",
+        "itemId": "circuit_board",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0112",
+        "sourceKey": "recipe_prism",
+        "targetKey": "quantum_upload_02",
+        "itemId": "prism",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0113",
+        "sourceKey": "recipe_plasma_exciter",
+        "targetKey": "quantum_upload_03",
+        "itemId": "plasma_exciter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0114",
+        "sourceKey": "recipe_energetic_graphite",
+        "targetKey": "quantum_upload_03",
+        "itemId": "energetic_graphite",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0115",
+        "sourceKey": "recipe_plasma_refining",
+        "targetKey": "quantum_upload_03",
+        "itemId": "refined_oil",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0116",
+        "sourceKey": "recipe_plasma_refining",
+        "targetKey": "quantum_upload_03",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0117",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "quantum_upload_03",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0118",
+        "sourceKey": "recipe_antimatter",
+        "targetKey": "quantum_upload_03",
+        "itemId": "hydrogen",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0119",
+        "sourceKey": "recipe_high_purity_silicon",
+        "targetKey": "quantum_upload_03",
+        "itemId": "high_purity_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0120",
+        "sourceKey": "recipe_titanium_ingot",
+        "targetKey": "quantum_upload_04",
+        "itemId": "titanium_ingot",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0121",
+        "sourceKey": "recipe_titanium_alloy",
+        "targetKey": "quantum_upload_04",
+        "itemId": "titanium_alloy",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0122",
+        "sourceKey": "recipe_microcrystalline_component",
+        "targetKey": "quantum_upload_04",
+        "itemId": "microcrystalline_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0123",
+        "sourceKey": "recipe_processor",
+        "targetKey": "quantum_upload_04",
+        "itemId": "processor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0124",
+        "sourceKey": "recipe_logistics_drone",
+        "targetKey": "quantum_upload_04",
+        "itemId": "logistics_drone",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0125",
+        "sourceKey": "recipe_logistics_vessel",
+        "targetKey": "quantum_upload_05",
+        "itemId": "logistics_vessel",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0126",
+        "sourceKey": "recipe_space_warper",
+        "targetKey": "quantum_upload_05",
+        "itemId": "space_warper",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0127",
+        "sourceKey": "recipe_accumulator",
+        "targetKey": "quantum_upload_05",
+        "itemId": "accumulator",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0128",
+        "sourceKey": "recipe_accumulator_charge",
+        "targetKey": "quantum_upload_05",
+        "itemId": "charged_accumulator",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0129",
+        "sourceKey": "recipe_graphene_from_fire_ice",
+        "targetKey": "quantum_upload_05",
+        "itemId": "graphene",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0130",
+        "sourceKey": "recipe_carbon_nanotube_from_spiniform",
+        "targetKey": "quantum_upload_06",
+        "itemId": "carbon_nanotube",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0131",
+        "sourceKey": "recipe_proliferator_mk1",
+        "targetKey": "quantum_upload_06",
+        "itemId": "proliferator_mk1",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0132",
+        "sourceKey": "recipe_proliferator_mk2",
+        "targetKey": "quantum_upload_06",
+        "itemId": "proliferator_mk2",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0133",
+        "sourceKey": "recipe_proliferator_mk3",
+        "targetKey": "quantum_upload_06",
+        "itemId": "proliferator_mk3",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0134",
+        "sourceKey": "recipe_crystal_silicon_from_fractal",
+        "targetKey": "quantum_upload_06",
+        "itemId": "crystal_silicon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0135",
+        "sourceKey": "recipe_particle_broadband",
+        "targetKey": "quantum_upload_07",
+        "itemId": "particle_broadband",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0136",
+        "sourceKey": "recipe_electric_motor",
+        "targetKey": "quantum_upload_07",
+        "itemId": "electric_motor",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0137",
+        "sourceKey": "recipe_electromagnetic_turbine",
+        "targetKey": "quantum_upload_07",
+        "itemId": "electromagnetic_turbine",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0138",
+        "sourceKey": "recipe_super_magnetic_ring",
+        "targetKey": "quantum_upload_07",
+        "itemId": "super_magnetic_ring",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0139",
+        "sourceKey": "recipe_particle_container_from_unipolar",
+        "targetKey": "quantum_upload_07",
+        "itemId": "particle_container",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0140",
+        "sourceKey": "recipe_hydrogen_fuel_rod",
+        "targetKey": "quantum_upload_08",
+        "itemId": "hydrogen_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0141",
+        "sourceKey": "recipe_deuteron_fuel_rod",
+        "targetKey": "quantum_upload_08",
+        "itemId": "deuteron_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0142",
+        "sourceKey": "recipe_titanium_glass",
+        "targetKey": "quantum_upload_08",
+        "itemId": "titanium_glass",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0143",
+        "sourceKey": "recipe_casimir_crystal_advanced",
+        "targetKey": "quantum_upload_08",
+        "itemId": "casimir_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0144",
+        "sourceKey": "recipe_plane_filter",
+        "targetKey": "quantum_upload_08",
+        "itemId": "plane_filter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0145",
+        "sourceKey": "recipe_quantum_chip",
+        "targetKey": "quantum_upload_09",
+        "itemId": "quantum_chip",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0146",
+        "sourceKey": "recipe_strange_matter",
+        "targetKey": "quantum_upload_09",
+        "itemId": "strange_matter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0147",
+        "sourceKey": "recipe_graviton_lens",
+        "targetKey": "quantum_upload_09",
+        "itemId": "graviton_lens",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0148",
+        "sourceKey": "recipe_photon_combiner_from_grating",
+        "targetKey": "quantum_upload_09",
+        "itemId": "photon_combiner",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0149",
+        "sourceKey": "recipe_solar_sail",
+        "targetKey": "quantum_upload_09",
+        "itemId": "solar_sail",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0150",
+        "sourceKey": "recipe_critical_photon",
+        "targetKey": "quantum_upload_10",
+        "itemId": "critical_photon",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0151",
+        "sourceKey": "recipe_antimatter",
+        "targetKey": "quantum_upload_10",
+        "itemId": "antimatter",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0152",
+        "sourceKey": "recipe_annihilation_constraint_sphere",
+        "targetKey": "quantum_upload_10",
+        "itemId": "annihilation_constraint_sphere",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0153",
+        "sourceKey": "recipe_antimatter_fuel_rod",
+        "targetKey": "quantum_upload_10",
+        "itemId": "antimatter_fuel_rod",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0154",
+        "sourceKey": "recipe_frame_material",
+        "targetKey": "quantum_upload_10",
+        "itemId": "frame_material",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0155",
+        "sourceKey": "recipe_dyson_sphere_component",
+        "targetKey": "quantum_upload_11",
+        "itemId": "dyson_sphere_component",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0156",
+        "sourceKey": "recipe_small_carrier_rocket",
+        "targetKey": "quantum_upload_11",
+        "itemId": "small_carrier_rocket",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0157",
+        "sourceKey": "recipe_diamond_from_kimberlite",
+        "targetKey": "quantum_upload_11",
+        "itemId": "diamond",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0158",
+        "sourceKey": "recipe_plastic",
+        "targetKey": "quantum_upload_11",
+        "itemId": "plastic",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      },
+      {
+        "key": "belt_0159",
+        "sourceKey": "recipe_titanium_crystal",
+        "targetKey": "quantum_upload_11",
+        "itemId": "titanium_crystal",
+        "lanes": 4096,
+        "tier": 3,
+        "sorterTier": 3,
+        "priority": 0,
+        "stackSize": 4,
+        "monitorEnabled": false,
+        "routeMode": "auto"
+      }
+    ],
+    "rotation": 0,
+    "mirror": "none",
+    "recipeOverrides": {}
+  }
+}

@@ -6,6 +6,7 @@ import {
   advanceSimulation,
   advanceSimulationBudget,
   connectBeltWithResult,
+  createEntityDisplayLookup,
   createInitialState,
   createPersistentSimulationRuntime,
   createSimulationPlanetPhaseLookup,
@@ -23,6 +24,7 @@ import {
   queueBlueprint,
   setFuelItem,
   setLogisticsItem,
+  setPaused,
   setStationMode,
 } from "./engine";
 import { hashGameState } from "./benchmark";
@@ -254,10 +256,21 @@ describe("1.0.36 runtime indexes", () => {
     state = setLogisticsItem(state, supply.id, "iron_ingot");
     state = setLogisticsItem(state, demand.id, "iron_ingot");
     state = setStationMode(state, demand.id, "demand");
+    state = setPaused(state, false);
+    state = { ...state, belts: state.belts.map((belt) => ({ ...belt, lastFlow: 1 })) };
     const lookup = createSimulationPlanetPhaseLookup(state);
+    const displayLookup = createEntityDisplayLookup(state);
+    expect(displayLookup.entityById.size).toBeLessThan(state.entities.length);
+    expect([...displayLookup.entityById.values()].every((entity) => entity.kind === "station")).toBe(true);
+    expect("beltRoutes" in displayLookup).toBe(false);
+    expect("machineRuntimesByPlanet" in displayLookup).toBe(false);
     for (const entity of state.entities) {
       expect(getEntityOperatingStatus(state, entity, lookup)).toEqual(getEntityOperatingStatus(state, entity));
+      expect(getEntityOperatingStatus(state, entity, displayLookup)).toEqual(getEntityOperatingStatus(state, entity));
       expect(getEntityCycleRatePerSimulationSecond(state, entity, lookup)).toBe(
+        getEntityCycleRatePerSimulationSecond(state, entity),
+      );
+      expect(getEntityCycleRatePerSimulationSecond(state, entity, displayLookup)).toBe(
         getEntityCycleRatePerSimulationSecond(state, entity),
       );
     }

@@ -1134,7 +1134,7 @@ function getCachedInterstellarPath(
   source: FactoryEntity,
   target: FactoryEntity,
   options: InterstellarRouteOptions,
-  lookup: SimulationLookupContext,
+  lookup: EntityStatusLookup,
   profiler?: SimulationProfiler,
 ): PlannedInterstellarPath | null {
   if (getPlanet(source.planetId).systemId === getPlanet(target.planetId).systemId) return null;
@@ -1161,7 +1161,7 @@ function getCachedInterstellarRouteEconomics(
   target: FactoryEntity,
   vehicleCount: number,
   options: InterstellarRouteOptions,
-  lookup?: SimulationLookupContext,
+  lookup?: EntityStatusLookup,
   profiler?: SimulationProfiler,
 ): InterstellarRouteEconomics {
   const key = lookup ? [
@@ -1419,7 +1419,7 @@ export function getPowerGridMetrics(state: GameState, planetId: PlanetId, gridId
   return state.powerGridMetrics?.[planetId]?.[gridId] ?? emptyPowerGridMetrics(gridId);
 }
 
-export function getEntityPowerFactor(state: GameState, entity: FactoryEntity, lookup?: SimulationLookupContext): number {
+export function getEntityPowerFactor(state: GameState, entity: FactoryEntity, lookup?: EntityStatusLookup): number {
   // Orbital collectors are self-powered infrastructure. Treating their gas
   // giant grid (which intentionally has no generators) as a route endpoint
   // made otherwise healthy interstellar routes alternate between no-power
@@ -1996,6 +1996,32 @@ export interface SimulationLookupContext {
   constructionAutomationPlanCache: Map<string, CachedConstructionAutomationPlan>;
 }
 
+/**
+ * Read-only indexes used by the canvas status presentation. Unlike the exact
+ * simulation lookup, this intentionally does not retain machine runtimes,
+ * belt routes, settlement ledgers, or planet-wide entity partitions.
+ */
+export interface EntityDisplayLookup {
+  readonly purpose: "entity-display";
+  /** Only stations are indexed because display route economics resolve waypoint stations by id. */
+  readonly entityById: ReadonlyMap<string, FactoryEntity>;
+  readonly powerSourceGridKeys: ReadonlySet<string>;
+  readonly stationSlotsByKey: ReadonlyMap<string, IndexedStationSlot[]>;
+  readonly stationPeerMatches: Map<string, StationPeerMatch[]>;
+  readonly busyVehicles: ReadonlyMap<string, number>;
+  readonly reservedOutgoing: ReadonlyMap<string, number>;
+  readonly inFlightCargo: ReadonlyMap<string, number>;
+  readonly activeRoutesByStation: ReadonlyMap<string, Array<{ demand: FactoryEntity; route: StationRoute }>>;
+  readonly routeEconomics: Map<string, InterstellarRouteEconomics>;
+  readonly interstellarPaths: Map<string, PlannedInterstellarPath | null>;
+  readonly routeEnvironmentKey: string;
+  readonly flowingIncomingEntityIds: ReadonlySet<string>;
+  readonly flowingOutgoingEntityIds: ReadonlySet<string>;
+  readonly connectedPortInputCountByTarget: ReadonlyMap<string, number>;
+}
+
+export type EntityStatusLookup = SimulationLookupContext | EntityDisplayLookup;
+
 function profileNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
@@ -2388,12 +2414,144 @@ export function createSimulationLookupContext(
   return context;
 }
 
+/**
+ * Builds the small index needed to render operating status on a dense canvas.
+ * The previous UI path reused createSimulationPlanetPhaseLookup(), which also
+ * built every machine runtime and every belt settlement route on each React
+ * snapshot. Large factories retained tens of megabytes per render generation.
+ */
+export function createEntityDisplayLookup(state: GameState): EntityDisplayLookup {
+  const entityById = new Map<string, FactoryEntity>();
+  const powerSourceGridKeys = new Set<string>();
+  const stations: FactoryEntity[] = [];
+  const flowStatusEntityIds = new Set<string>();
+  const blackHoleTargetIds = new Set<string>();
+  const stationSlotsByKey = new Map<string, IndexedStationSlot[]>();
+  const stationPeerMatches = new Map<string, StationPeerMatch[]>();
+  const busyVehicles = new Map<string, number>();
+  const reservedOutgoing = new Map<string, number>();
+  const inFlightCargo = new Map<string, number>();
+  const activeRoutesByStation = new Map<string, Array<{ demand: FactoryEntity; route: StationRoute }>>();
+  const routeEconomics = new Map<string, InterstellarRouteEconomics>();
+  const interstellarPaths = new Map<string, PlannedInterstellarPath | null>();
+  const flowingIncomingEntityIds = new Set<string>();
+  const flowingOutgoingEntityIds = new Set<string>();
+  const connectedPortInputCountByTarget = new Map<string, number>();
+
+  const addStationSlot = (key: string, value: IndexedStationSlot) => {
+    const values = stationSlotsByKey.get(key);
+    if (values) values.push(value);
+    else stationSlotsByKey.set(key, [value]);
+  };
+  const addCount = (map: Map<string, number>, key: string, amount: number) => {
+    map.set(key, (map.get(key) ?? 0) + amount);
+  };
+  const addActiveRoute = (stationId: string, demand: FactoryEntity, route: StationRoute) => {
+    const routes = activeRoutesByStation.get(stationId);
+    if (routes) routes.push({ demand, route });
+    else activeRoutesByStation.set(stationId, [{ demand, route }]);
+  };
+
+  for (const entity of state.entities) {
+    if (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")) {
+      powerSourceGridKeys.add(`${entity.planetId}|${getEntityPowerGridId(entity)}`);
+    }
+    if (entity.kind === "station") {
+      stations.push(entity);
+      entityById.set(entity.id, entity);
+    }
+    if (entity.kind === "storage" || entity.kind === "splitter") flowStatusEntityIds.add(entity.id);
+    if (entity.buildingId === "micro_black_hole_connector") blackHoleTargetIds.add(entity.id);
+  }
+
+  for (const station of stations) {
+    if (!isElevatorStation(station)) {
+      if (station.buildingId === "orbital_collector") {
+        if (!isTraditionalStationScopeDisabled(station, "remote") && station.storedItemId) {
+          addStationSlot(stationSlotIndexKey("remote", "*", station.storedItemId, "supply"), {
+            peer: station,
+            peerSlotIndex: 0,
+            slot: { ...emptyStationSlot(), itemId: station.storedItemId, remoteMode: "supply" },
+          });
+        }
+      } else {
+        const slots = getStationSlots(station);
+        for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+          const slot = slots[slotIndex];
+          if (!slot.itemId) continue;
+          if (!isTraditionalStationScopeDisabled(station, "local")) {
+            addStationSlot(stationSlotIndexKey("local", station.planetId, slot.itemId, slot.localMode), {
+              peer: station,
+              peerSlotIndex: slotIndex,
+              slot,
+            });
+          }
+          if (station.buildingId === "interstellar_logistics_station" &&
+            !isTraditionalStationScopeDisabled(station, "remote")) {
+            addStationSlot(stationSlotIndexKey("remote", "*", slot.itemId, slot.remoteMode), {
+              peer: station,
+              peerSlotIndex: slotIndex,
+              slot,
+            });
+          }
+        }
+      }
+    }
+
+    for (const route of station.stationRoutes ?? []) {
+      const ownerId = routeVehicleStationId(station, route);
+      addCount(busyVehicles, routeLookupKey(ownerId, route.scope), route.vehicleCount);
+      addCount(reservedOutgoing, routeLookupKey(route.peerId, route.itemId), route.cargo);
+      addCount(inFlightCargo, routeLookupKey(station.id, route.itemId), route.cargo);
+      for (const stationId of new Set([station.id, route.peerId, ownerId, ...(route.waypointStationIds ?? [])])) {
+        addActiveRoute(stationId, station, route);
+      }
+    }
+  }
+
+  for (const values of stationSlotsByKey.values()) {
+    values.sort((left, right) => right.slot.priority - left.slot.priority ||
+      left.peer.id.localeCompare(right.peer.id) || left.peerSlotIndex - right.peerSlotIndex);
+  }
+
+  for (const belt of state.belts) {
+    if (belt.lastFlow > 0.001) {
+      if (flowStatusEntityIds.has(belt.source)) flowingOutgoingEntityIds.add(belt.source);
+      if (flowStatusEntityIds.has(belt.target)) flowingIncomingEntityIds.add(belt.target);
+    }
+    if (belt.targetPortIndex !== undefined && blackHoleTargetIds.has(belt.target)) {
+      connectedPortInputCountByTarget.set(
+        belt.target,
+        (connectedPortInputCountByTarget.get(belt.target) ?? 0) + 1,
+      );
+    }
+  }
+
+  return {
+    purpose: "entity-display",
+    entityById,
+    powerSourceGridKeys,
+    stationSlotsByKey,
+    stationPeerMatches,
+    busyVehicles,
+    reservedOutgoing,
+    inFlightCargo,
+    activeRoutesByStation,
+    routeEconomics,
+    interstellarPaths,
+    routeEnvironmentKey: routeEnvironmentKey(state),
+    flowingIncomingEntityIds,
+    flowingOutgoingEntityIds,
+    connectedPortInputCountByTarget,
+  };
+}
+
 export function findStationSlotPeers(
   state: GameState,
   station: FactoryEntity,
   slotIndex: number,
   scope: StationLogisticsScope,
-  lookup?: SimulationLookupContext,
+  lookup?: EntityStatusLookup,
   profiler?: SimulationProfiler,
 ): StationPeerMatch[] {
   const startedAt = profileNow();
@@ -2465,7 +2623,7 @@ export function findStationSlotPeer(
   station: FactoryEntity,
   slotIndex: number,
   scope: StationLogisticsScope,
-  lookup?: SimulationLookupContext,
+  lookup?: EntityStatusLookup,
   profiler?: SimulationProfiler,
 ): StationPeerMatch | undefined {
   return findStationSlotPeers(state, station, slotIndex, scope, lookup, profiler)[0];
@@ -3722,15 +3880,26 @@ function gridPowerSources(state: GameState, planetId: PlanetId, gridId: PowerGri
     (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")));
 }
 
-function powerCoverageLabel(state: GameState, entity: FactoryEntity, lookup?: SimulationLookupContext): string {
-  return gridPowerSources(state, entity.planetId, getEntityPowerGridId(entity), lookup).length > 0
+function isEntityDisplayLookup(lookup: EntityStatusLookup): lookup is EntityDisplayLookup {
+  return "purpose" in lookup && lookup.purpose === "entity-display";
+}
+
+function gridHasPowerSource(state: GameState, entity: FactoryEntity, lookup?: EntityStatusLookup): boolean {
+  const key = `${entity.planetId}|${getEntityPowerGridId(entity)}`;
+  return lookup && isEntityDisplayLookup(lookup)
+    ? lookup.powerSourceGridKeys.has(key)
+    : gridPowerSources(state, entity.planetId, getEntityPowerGridId(entity), lookup).length > 0;
+}
+
+function powerCoverageLabel(state: GameState, entity: FactoryEntity, lookup?: EntityStatusLookup): string {
+  return gridHasPowerSource(state, entity, lookup)
     ? "电网供电不足"
     : "电网断电";
 }
 
-export function isEntityInPowerCoverage(state: GameState, entity: FactoryEntity, lookup?: SimulationLookupContext): boolean {
+export function isEntityInPowerCoverage(state: GameState, entity: FactoryEntity, lookup?: EntityStatusLookup): boolean {
   if (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")) return true;
-  return gridPowerSources(state, entity.planetId, getEntityPowerGridId(entity), lookup).length > 0;
+  return gridHasPowerSource(state, entity, lookup);
 }
 
 interface PowerConsumer {
@@ -5312,7 +5481,7 @@ function refreshRouteEnvironment(state: GameState, lookup: SimulationLookupConte
   lookup.interstellarPaths.clear();
 }
 
-function stationBusyVehicles(state: GameState, station: FactoryEntity, scope: StationLogisticsScope, lookup?: SimulationLookupContext): number {
+function stationBusyVehicles(state: GameState, station: FactoryEntity, scope: StationLogisticsScope, lookup?: EntityStatusLookup): number {
   if (lookup) return lookup.busyVehicles.get(routeLookupKey(station.id, scope)) ?? 0;
   return state.entities.reduce((sum, demand) => sum + (demand.stationRoutes ?? []).reduce((routeSum, route) =>
     route.scope === scope && routeVehicleStationId(demand, route) === station.id
@@ -5320,7 +5489,7 @@ function stationBusyVehicles(state: GameState, station: FactoryEntity, scope: St
       : routeSum, 0), 0);
 }
 
-function stationActiveRoutes(state: GameState, station: FactoryEntity, lookup?: SimulationLookupContext): Array<{ demand: FactoryEntity; route: StationRoute }> {
+function stationActiveRoutes(state: GameState, station: FactoryEntity, lookup?: EntityStatusLookup): Array<{ demand: FactoryEntity; route: StationRoute }> {
   if (lookup) return lookup.activeRoutesByStation.get(station.id) ?? [];
   return state.entities.flatMap((demand) => (demand.stationRoutes ?? []).flatMap((route) =>
     demand.id === station.id || route.peerId === station.id || routeVehicleStationId(demand, route) === station.id ||
@@ -5485,12 +5654,12 @@ export function getStationFleetDiagnostic(state: GameState, stationId: string): 
   };
 }
 
-function stationInFlightCargo(station: FactoryEntity, itemId: ItemId, lookup?: SimulationLookupContext): number {
+function stationInFlightCargo(station: FactoryEntity, itemId: ItemId, lookup?: EntityStatusLookup): number {
   if (lookup) return lookup.inFlightCargo.get(routeLookupKey(station.id, itemId)) ?? 0;
   return (station.stationRoutes ?? []).reduce((sum, route) => route.itemId === itemId ? sum + route.cargo : sum, 0);
 }
 
-function stationReservedOutgoing(state: GameState, sourceId: string, itemId: ItemId, lookup?: SimulationLookupContext): number {
+function stationReservedOutgoing(state: GameState, sourceId: string, itemId: ItemId, lookup?: EntityStatusLookup): number {
   if (lookup) return lookup.reservedOutgoing.get(routeLookupKey(sourceId, itemId)) ?? 0;
   return state.entities.reduce((sum, station) => sum + (station.stationRoutes ?? []).reduce((routeSum, route) =>
     route.peerId === sourceId && route.itemId === itemId ? routeSum + route.cargo : routeSum, 0), 0);
@@ -10850,7 +11019,7 @@ function constructionAutomationStepDuration(state: GameState, step: Construction
 export function getEntityRecipeCycleCapacityPerSimulationSecond(
   state: GameState,
   entity: FactoryEntity,
-  lookup?: SimulationLookupContext,
+  lookup?: EntityStatusLookup,
 ): number {
   if (state.paused) return 0;
   if (entity.kind === "vein") return Math.max(0, entity.productionRate / 60);
@@ -10882,7 +11051,7 @@ export function getEntityRecipeCycleCapacityPerSimulationSecond(
 export function getEntityCycleRatePerSimulationSecond(
   state: GameState,
   entity: FactoryEntity,
-  lookup?: SimulationLookupContext,
+  lookup?: EntityStatusLookup,
 ): number {
   if (entity.utilization <= EPSILON) return 0;
   return getEntityRecipeCycleCapacityPerSimulationSecond(state, entity, lookup);
@@ -14403,7 +14572,27 @@ export function getResourceReserveSnapshot(state: GameState, entity: FactoryEnti
   };
 }
 
-export function getEntityOperatingStatus(state: GameState, entity: FactoryEntity, lookup?: SimulationLookupContext): EntityOperatingStatus {
+function hasFlowingIncomingBelt(state: GameState, entityId: string, lookup?: EntityStatusLookup): boolean {
+  if (lookup && isEntityDisplayLookup(lookup)) return lookup.flowingIncomingEntityIds.has(entityId);
+  return lookup
+    ? (lookup.incomingBeltsByTarget.get(entityId)?.some((belt) => belt.lastFlow > 0.001) ?? false)
+    : state.belts.some((belt) => belt.target === entityId && belt.lastFlow > 0.001);
+}
+
+function hasFlowingOutgoingBelt(state: GameState, entityId: string, lookup?: EntityStatusLookup): boolean {
+  if (lookup && isEntityDisplayLookup(lookup)) return lookup.flowingOutgoingEntityIds.has(entityId);
+  return lookup
+    ? (lookup.outgoingBeltsBySource.get(entityId)?.some((belt) => belt.lastFlow > 0.001) ?? false)
+    : state.belts.some((belt) => belt.source === entityId && belt.lastFlow > 0.001);
+}
+
+function connectedPortInputCount(state: GameState, entityId: string, lookup?: EntityStatusLookup): number {
+  if (lookup && isEntityDisplayLookup(lookup)) return lookup.connectedPortInputCountByTarget.get(entityId) ?? 0;
+  const belts = lookup?.incomingBeltsByTarget.get(entityId) ?? state.belts;
+  return belts.filter((belt) => belt.target === entityId && belt.targetPortIndex !== undefined).length;
+}
+
+export function getEntityOperatingStatus(state: GameState, entity: FactoryEntity, lookup?: EntityStatusLookup): EntityOperatingStatus {
   if (state.paused) return { code: "paused", label: "模拟已暂停", tone: "idle" };
   const entityPowerFactor = getEntityPowerFactor(state, entity, lookup);
 
@@ -14620,17 +14809,13 @@ export function getEntityOperatingStatus(state: GameState, entity: FactoryEntity
         const current = Math.max(0, Math.floor(trayForPlanet(state, entity.planetId)[fullItemId] ?? 0));
         return { code: "output-blocked", label: `${ITEMS[fullItemId].name}托盘已达上限 · ${current}/${getPlanetTrayItemLimit(state, entity.planetId)}`, tone: "blocked" };
       }
-      const flowing = (lookup?.incomingBeltsByTarget.get(entity.id) ?? state.belts)
-        .some((belt) => belt.target === entity.id && belt.lastFlow > 0.001);
+      const flowing = hasFlowingIncomingBelt(state, entity.id, lookup);
       return flowing
         ? { code: "running", label: "物资直送托盘中", tone: "running" }
         : { code: "missing-input", label: `等待物料 · ${configured.length}/${MATERIAL_DELIVERY_SLOT_COUNT} 接口`, tone: "idle" };
     }
     if (!entity.storedItemId) return { code: "unconfigured", label: "未选择物流物品", tone: "blocked" };
-    const flowing = lookup
-      ? (lookup.outgoingBeltsBySource.get(entity.id)?.some((belt) => belt.lastFlow > 0.001) ?? false) ||
-        (lookup.incomingBeltsByTarget.get(entity.id)?.some((belt) => belt.lastFlow > 0.001) ?? false)
-      : state.belts.some((belt) => (belt.source === entity.id || belt.target === entity.id) && belt.lastFlow > 0.001);
+    const flowing = hasFlowingOutgoingBelt(state, entity.id, lookup) || hasFlowingIncomingBelt(state, entity.id, lookup);
     if (flowing) return { code: "running", label: "物流运行中", tone: "running" };
     const buffered = (entity.inputs[entity.storedItemId] ?? 0) + (entity.outputs[entity.storedItemId] ?? 0);
     return buffered > 0
@@ -14641,8 +14826,7 @@ export function getEntityOperatingStatus(state: GameState, entity: FactoryEntity
   if (entity.buildingId === "micro_black_hole_connector") {
     if (entity.blackHolePaused !== false) return { code: "paused", label: "微型黑洞已暂停", tone: "idle" };
     if (!entity.blackHoleActivationConfirmed) return { code: "paused", label: "等待二次确认启动", tone: "warning" };
-    const connected = (lookup?.incomingBeltsByTarget.get(entity.id) ?? state.belts)
-      .filter((belt) => belt.target === entity.id && belt.targetPortIndex !== undefined).length;
+    const connected = connectedPortInputCount(state, entity.id, lookup);
     return connected > 0
       ? { code: "running", label: `销毁通道运行中 · ${connected}/3`, tone: "running" }
       : { code: "missing-input", label: "等待连接物资输入", tone: "idle" };

@@ -96,7 +96,7 @@ import {
   connectDysonNodes,
   craftConstruction,
   craftConstructionWithUpstream,
-  createSimulationPlanetPhaseLookup,
+  createEntityDisplayLookup,
   createSimulationProfiler,
   createBlueprint,
   createStandardDysonLayer,
@@ -9030,7 +9030,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     !regionMode && !lineFindMode;
   const canvasDisplayLookup = useMemo(
     () => automaticDenseCanvasMode && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
-      createSimulationPlanetPhaseLookup(canvasGame), {
+      createEntityDisplayLookup(canvasGame), {
         entities: canvasGame.entities.length,
         belts: canvasGame.belts.length,
       }) : undefined,

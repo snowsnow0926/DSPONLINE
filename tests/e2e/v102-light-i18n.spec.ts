@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-25-v1.1.8";
+const RELEASE_NOTE_ID = "2026-08-26-v1.1.9";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -112,7 +112,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await page.goto("/?menu=1&lang=en");
   const dialog = page.getByRole("dialog", { name: "Memory Safety Pausing and Chunked Incremental Saves" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.1.8");
+  await expect(dialog).toContainText("1.1.9");
   await expect(dialog).toContainText("Configurable memory-pressure auto-pause");
   await expect(dialog).toContainText("Large saves use chunked incremental checkpoints");
   await expect(dialog).toContainText("Long-run regression on a real endgame save");

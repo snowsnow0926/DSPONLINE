@@ -159,6 +159,7 @@ import {
   resolveOrbitalCargoPortIndex,
   settleOrbitalCargoTerminals,
 } from "./stationCargoTerminal";
+import { recordGameStateEditLineage } from "./gameStateEditLineage";
 
 export const ACCUMULATOR_ENERGY_MJ = 90;
 export const SOLAR_SAIL_POWER_KW = 88;
@@ -236,6 +237,29 @@ export function isPortableFleetItem(itemId: ItemId | ConstructionId): itemId is 
   return PORTABLE_FLEET_ITEM_IDS.includes(itemId as PortableFleetItemId);
 }
 
+function cloneFactoryEntity(entity: FactoryEntity): FactoryEntity {
+  return {
+    ...entity,
+    position: { ...entity.position },
+    inputs: { ...entity.inputs },
+    outputs: { ...entity.outputs },
+    stationSlots: entity.stationSlots?.map((slot) => ({ ...slot })),
+    deliveryItemIds: entity.deliveryItemIds ? [...entity.deliveryItemIds] : undefined,
+    deliverySlots: entity.deliverySlots?.map((slot) => ({ ...slot })),
+    orbitalCargoPortItems: entity.buildingId === "orbital_cargo_terminal"
+      ? Array.from({ length: 4 }, (_, index) => entity.orbitalCargoPortItems?.[index] ?? null)
+      : undefined,
+    orbitalCargoBinding: entity.orbitalCargoBinding ? { ...entity.orbitalCargoBinding } : entity.orbitalCargoBinding,
+    stationRoutes: entity.stationRoutes?.map((route) => ({
+      ...route,
+      waypointStationIds: route.waypointStationIds ? [...route.waypointStationIds] : [],
+    })),
+    stationLastSupplyPeerBySlot: { ...entity.stationLastSupplyPeerBySlot },
+    blackHolePorts: entity.blackHolePorts?.map((port) => ({ ...port })),
+    proliferatorBonusProgress: { ...entity.proliferatorBonusProgress },
+  };
+}
+
 function copyState(state: GameState): GameState {
   const sourceEndgame = state.endgame ?? createEndgameState();
   const planetTrays = Object.fromEntries(Object.entries(state.planetTrays).map(([planetId, tray]) => [
@@ -244,26 +268,7 @@ function copyState(state: GameState): GameState {
   ])) as GameState["planetTrays"];
   return {
     ...state,
-    entities: state.entities.map((entity) => ({
-      ...entity,
-      position: { ...entity.position },
-      inputs: { ...entity.inputs },
-      outputs: { ...entity.outputs },
-      stationSlots: entity.stationSlots?.map((slot) => ({ ...slot })),
-      deliveryItemIds: entity.deliveryItemIds ? [...entity.deliveryItemIds] : undefined,
-      deliverySlots: entity.deliverySlots?.map((slot) => ({ ...slot })),
-      orbitalCargoPortItems: entity.buildingId === "orbital_cargo_terminal"
-        ? Array.from({ length: 4 }, (_, index) => entity.orbitalCargoPortItems?.[index] ?? null)
-        : undefined,
-      orbitalCargoBinding: entity.orbitalCargoBinding ? { ...entity.orbitalCargoBinding } : entity.orbitalCargoBinding,
-      stationRoutes: entity.stationRoutes?.map((route) => ({
-        ...route,
-        waypointStationIds: route.waypointStationIds ? [...route.waypointStationIds] : [],
-      })),
-      stationLastSupplyPeerBySlot: { ...entity.stationLastSupplyPeerBySlot },
-      blackHolePorts: entity.blackHolePorts?.map((port) => ({ ...port })),
-      proliferatorBonusProgress: { ...entity.proliferatorBonusProgress },
-    })),
+    entities: state.entities.map(cloneFactoryEntity),
     belts: state.belts.map((belt) => ({ ...belt })),
     canvasBookmarks: state.canvasBookmarks.map((bookmark) => ({ ...bookmark, viewport: { ...bookmark.viewport } })),
     canvasRegions: state.canvasRegions.map((region) => ({ ...region })),
@@ -7409,6 +7414,60 @@ export function advanceSimulationBudget(state: GameState, simulationSeconds: num
 export interface PersistentSimulationRuntime {
   state: GameState;
   lookup?: SimulationLookupContext;
+  /** Stable ID indexes exist even while paused, when the full simulation
+   * lookup is intentionally absent. They let a small command avoid scanning
+   * every entity/belt merely to find its edited records. */
+  records: {
+    entityById: Map<string, FactoryEntity>;
+    beltById: Map<string, BeltConnection>;
+  };
+  dirty: {
+    entityIds: Set<string>;
+    beltIds: Set<string>;
+    planetIds: Set<PlanetId>;
+    topologyRevision: number;
+    overflowed: boolean;
+  };
+}
+
+export const PERSISTENT_SIMULATION_DIRTY_ID_LIMIT = 8_192;
+
+function createPersistentSimulationDirtyIndex(topologyRevision = 0): PersistentSimulationRuntime["dirty"] {
+  return {
+    entityIds: new Set(),
+    beltIds: new Set(),
+    planetIds: new Set(),
+    topologyRevision,
+    overflowed: false,
+  };
+}
+
+export function markPersistentSimulationRuntimeDirty(
+  runtime: PersistentSimulationRuntime,
+  changes: { entityIds?: readonly string[]; beltIds?: readonly string[]; planetIds?: readonly PlanetId[] },
+): void {
+  const addBounded = (target: Set<string>, ids: readonly string[]) => {
+    if (runtime.dirty.overflowed) return;
+    for (const id of ids) {
+      target.add(id);
+      if (runtime.dirty.entityIds.size + runtime.dirty.beltIds.size > PERSISTENT_SIMULATION_DIRTY_ID_LIMIT) {
+        runtime.dirty.entityIds.clear();
+        runtime.dirty.beltIds.clear();
+        runtime.dirty.overflowed = true;
+        return;
+      }
+    }
+  };
+  addBounded(runtime.dirty.entityIds, changes.entityIds ?? []);
+  addBounded(runtime.dirty.beltIds, changes.beltIds ?? []);
+  for (const id of changes.planetIds ?? []) runtime.dirty.planetIds.add(id);
+}
+
+export function clearPersistentSimulationRuntimeDirty(runtime: PersistentSimulationRuntime): void {
+  runtime.dirty.entityIds.clear();
+  runtime.dirty.beltIds.clear();
+  runtime.dirty.planetIds.clear();
+  runtime.dirty.overflowed = false;
 }
 
 function normalizePersistentRuntimeShape(state: GameState): void {
@@ -7424,16 +7483,28 @@ function normalizePersistentRuntimeShape(state: GameState): void {
 
 export function createPersistentSimulationRuntime(state: GameState, profiler?: SimulationProfiler): PersistentSimulationRuntime {
   normalizePersistentRuntimeShape(state);
+  const lookup = state.paused ? undefined : createSimulationLookupContext(state, profiler);
   return {
     state,
-    lookup: state.paused ? undefined : createSimulationLookupContext(state, profiler),
+    lookup,
+    records: {
+      entityById: lookup?.entityById ?? new Map(state.entities.map((entity) => [entity.id, entity])),
+      beltById: lookup?.beltById ?? new Map(state.belts.map((belt) => [belt.id, belt])),
+    },
+    dirty: createPersistentSimulationDirtyIndex(),
   };
 }
 
 export function replacePersistentSimulationRuntimeState(runtime: PersistentSimulationRuntime, state: GameState, profiler?: SimulationProfiler): void {
   normalizePersistentRuntimeShape(state);
+  const topologyRevision = runtime.dirty.topologyRevision + 1;
   runtime.state = state;
   runtime.lookup = state.paused ? undefined : createSimulationLookupContext(state, profiler);
+  runtime.records = {
+    entityById: runtime.lookup?.entityById ?? new Map(state.entities.map((entity) => [entity.id, entity])),
+    beltById: runtime.lookup?.beltById ?? new Map(state.belts.map((belt) => [belt.id, belt])),
+  };
+  runtime.dirty = createPersistentSimulationDirtyIndex(topologyRevision);
 }
 
 export function advancePersistentSimulationRuntime(
@@ -7442,7 +7513,10 @@ export function advancePersistentSimulationRuntime(
   wallSeconds: number,
   profiler?: SimulationProfiler,
 ): { state: GameState; changed: boolean; cacheRebuilt: boolean } {
-  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) {
+    runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+    runtime.records = { entityById: runtime.lookup.entityById, beltById: runtime.lookup.beltById };
+  }
   const before = runtime.state;
   const entitiesBefore = before.entities;
   const beltsBefore = before.belts;
@@ -7466,7 +7540,12 @@ export function advancePersistentSimulationRuntime(
     runtime.lookup = next.paused
       ? undefined
       : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+    runtime.records = {
+      entityById: runtime.lookup?.entityById ?? new Map(next.entities.map((entity) => [entity.id, entity])),
+      beltById: runtime.lookup?.beltById ?? new Map(next.belts.map((belt) => [belt.id, belt])),
+    };
   }
+  clearPersistentSimulationRuntimeDirty(runtime);
   return { state: next, changed: session.changed, cacheRebuilt };
 }
 
@@ -7477,7 +7556,10 @@ export async function advancePersistentSimulationRuntimeMulticore(
   execute: SimulationPlanetPhaseExecutor,
   profiler?: SimulationProfiler,
 ): Promise<{ state: GameState; changed: boolean; cacheRebuilt: boolean }> {
-  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+  if (!runtime.lookup && !runtime.state.paused && simulationSeconds > 0) {
+    runtime.lookup = createSimulationLookupContext(runtime.state, profiler);
+    runtime.records = { entityById: runtime.lookup.entityById, beltById: runtime.lookup.beltById };
+  }
   const before = runtime.state;
   const entitiesBefore = before.entities;
   const beltsBefore = before.belts;
@@ -7496,7 +7578,12 @@ export async function advancePersistentSimulationRuntimeMulticore(
     runtime.lookup = next.paused
       ? undefined
       : createSimulationLookupContext(next, profiler, constructionAutomationPlanCache);
+    runtime.records = {
+      entityById: runtime.lookup?.entityById ?? new Map(next.entities.map((entity) => [entity.id, entity])),
+      beltById: runtime.lookup?.beltById ?? new Map(next.belts.map((belt) => [belt.id, belt])),
+    };
   }
+  clearPersistentSimulationRuntimeDirty(runtime);
   return { state: next, changed: session.changed, cacheRebuilt };
 }
 
@@ -7968,19 +8055,23 @@ export function createBlueprint(state: GameState, entityIds: string[], name?: st
     mirror: "none",
     recipeOverrides: {},
   };
-  const next = copyState(state);
-  next.blueprints.push(blueprint);
-  next.nextId += 1;
-  return next;
+  // A blueprint definition is assembled from fresh records above. Cloning the
+  // complete 80k/150k factory merely to append that isolated definition kept a
+  // second full object graph alive until the next GC cycle.
+  return recordGameStateEditLineage({
+    ...state,
+    blueprints: [...state.blueprints, blueprint],
+    nextId: state.nextId + 1,
+  }, state, {});
 }
 
 export function renameBlueprint(state: GameState, blueprintId: string, name: string): GameState {
   const normalized = name.trim().slice(0, 32);
   if (!normalized || !state.blueprints.some((blueprint) => blueprint.id === blueprintId)) return state;
-  return {
+  return recordGameStateEditLineage({
     ...state,
     blueprints: state.blueprints.map((blueprint) => blueprint.id === blueprintId ? { ...blueprint, name: normalized, revision: Math.max(1, blueprint.revision ?? 1) + 1 } : blueprint),
-  };
+  }, state, {});
 }
 
 function cloneBlueprintDefinition(blueprint: BlueprintDefinition): BlueprintDefinition {
@@ -8002,10 +8093,10 @@ function cloneBlueprintDefinition(blueprint: BlueprintDefinition): BlueprintDefi
 
 export function removeBlueprint(state: GameState, blueprintId: string): GameState {
   if (!state.blueprints.some((blueprint) => blueprint.id === blueprintId)) return state;
-  return {
+  return recordGameStateEditLineage({
     ...state,
     blueprints: state.blueprints.filter((blueprint) => blueprint.id !== blueprintId),
-  };
+  }, state, {});
 }
 
 export function setBlueprintTransform(
@@ -8016,12 +8107,12 @@ export function setBlueprintTransform(
 ): GameState {
   if (![0, 90, 180, 270].includes(rotation) || (mirror !== "none" && mirror !== "horizontal") ||
     !state.blueprints.some((blueprint) => blueprint.id === blueprintId)) return state;
-  return {
+  return recordGameStateEditLineage({
     ...state,
     blueprints: state.blueprints.map((blueprint) => blueprint.id === blueprintId
       ? { ...blueprint, rotation, mirror, revision: Math.max(1, blueprint.revision ?? 1) + 1 }
       : blueprint),
-  };
+  }, state, {});
 }
 
 export function setBlueprintRecipeOverride(
@@ -8039,10 +8130,10 @@ export function setBlueprintRecipeOverride(
   const overrides = { ...blueprint.recipeOverrides };
   if (sourceRecipeId === targetRecipeId) delete overrides[sourceRecipeId];
   else overrides[sourceRecipeId] = targetRecipeId;
-  return {
+  return recordGameStateEditLineage({
     ...state,
     blueprints: state.blueprints.map((candidate) => candidate.id === blueprintId ? { ...candidate, recipeOverrides: overrides, revision: Math.max(1, candidate.revision ?? 1) + 1 } : candidate),
-  };
+  }, state, {});
 }
 
 interface ResolvedBlueprintResourceAnchor {
@@ -8327,7 +8418,26 @@ export function placeBlueprint(
   const plan = createBlueprintDeploymentPlan(state, blueprintId, position, options);
   if (!plan?.canPlace) return state;
   const { blueprint, planetId, rotation, mirror, matches, requirements } = plan;
-  let next = copyState(state);
+  // One blueprint is one draft, but the draft must not deep-clone an 80k/155k
+  // factory. Existing resource anchors are the only live records mutated;
+  // every placed entity/belt is new and unrelated records stay shared.
+  const touchedExistingIds = new Set(matches.resolved.map(({ entity }) => entity.id));
+  const deploymentEntityById = new Map<string, FactoryEntity>();
+  const entities = state.entities.map((entity) => {
+    if (!touchedExistingIds.has(entity.id)) return entity;
+    const cloned = cloneFactoryEntity(entity);
+    deploymentEntityById.set(cloned.id, cloned);
+    return cloned;
+  });
+  let next: GameState = {
+    ...state,
+    construction: { ...state.construction },
+    portableFleet: { ...state.portableFleet },
+    entities,
+    belts: [...state.belts],
+  };
+  const changedEntityIds = new Set(touchedExistingIds);
+  const changedBeltIds: string[] = [];
   for (const requirement of requirements) {
     next.construction[requirement.constructionId] = (next.construction[requirement.constructionId] ?? 0) - requirement.amount;
     if (!Number.isSafeInteger(next.construction[requirement.constructionId]) || next.construction[requirement.constructionId]! < 0) return state;
@@ -8335,7 +8445,8 @@ export function placeBlueprint(
   const entityIdByKey = new Map<string, string>(matches.resolved.map(({ anchor, entity }) => [anchor.key, entity.id]));
   for (const match of matches.resolved) {
     if (match.installCount < 1) continue;
-    const target = next.entities.find((entity) => entity.id === match.entity.id)!;
+    const target = deploymentEntityById.get(match.entity.id);
+    if (!target) return state;
     target.minerCount = Math.floor(target.minerCount + match.installCount);
     target.extractorBuildingId = match.anchor.extractorBuildingId;
   }
@@ -8351,7 +8462,7 @@ export function placeBlueprint(
       (!recipe.requiredTechId || isTechnologyCompleted(next, recipe.requiredTechId))
       ? recipe.id
       : getRecipesForBuilding(template.buildingId).find((candidate) => !candidate.requiredTechId || isTechnologyCompleted(next, candidate.requiredTechId))?.id;
-    next.entities.push({
+    const placed: FactoryEntity = {
       id: entityId,
       kind: building.kind === "power" ? "power" : building.kind === "storage" ? "storage" :
         building.kind === "splitter" ? "splitter" : building.kind === "station" ? "station" : "machine",
@@ -8436,8 +8547,10 @@ export function placeBlueprint(
       routingCursor: 0,
       utilization: 0,
       productionRate: 0,
-    });
-    const placed = next.entities.at(-1)!;
+    };
+    next.entities.push(placed);
+    deploymentEntityById.set(placed.id, placed);
+    changedEntityIds.add(placed.id);
     if (placed.buildingId === "planetary_logistics_station" || placed.buildingId === "interstellar_logistics_station") {
       const target = Math.min(getStationDroneCapacity(placed), Math.max(0, Math.floor(template.stationDroneTarget ?? 0)));
       const loaded = Math.min(target, Math.max(0, Math.floor(next.portableFleet.logistics_drone ?? 0)));
@@ -8459,7 +8572,13 @@ export function placeBlueprint(
       const attached = beginQuantumAttachments(next, plannedStationIds);
       if (attached.startedIds.length > 0) {
         const started = new Set(attached.startedIds);
-        next = { ...attached.state, entities: attached.state.entities.map((entity) => started.has(entity.id) ? { ...entity, quantumTarget: undefined } : entity) };
+        for (const id of attached.startedIds) changedEntityIds.add(id);
+        next = { ...attached.state, entities: attached.state.entities.map((entity) => {
+          if (!started.has(entity.id)) return entity;
+          const updated = { ...entity, quantumTarget: undefined };
+          deploymentEntityById.set(updated.id, updated);
+          return updated;
+        }) };
       }
     }
   }
@@ -8467,8 +8586,9 @@ export function placeBlueprint(
     const source = entityIdByKey.get(template.sourceKey);
     const target = entityIdByKey.get(template.targetKey);
     if (!source || !target) continue;
-    const targetEntity = next.entities.find((entity) => entity.id === target)!;
-    const sourceEntity = next.entities.find((entity) => entity.id === source)!;
+    const targetEntity = deploymentEntityById.get(target);
+    const sourceEntity = deploymentEntityById.get(source);
+    if (!targetEntity || !sourceEntity) return state;
     if (template.elevatorOutputIndex !== undefined) {
       if (!isElevatorStation(sourceEntity)) return state;
       const outputItems = Array.from({ length: 5 }, (_, index) => sourceEntity.elevatorOutputItems?.[index] ?? null);
@@ -8487,8 +8607,9 @@ export function placeBlueprint(
         : undefined;
     if ((targetEntity.buildingId === "material_delivery_hub" || targetEntity.buildingId === "orbital_cargo_terminal" || targetEntity.buildingId === "micro_black_hole_connector") && targetPortIndex === undefined) return state;
     configureTargetItem(targetEntity, template.itemId, targetPortIndex);
+    const beltId = `belt_${next.nextId}`;
     next.belts.push({
-      id: `belt_${next.nextId}`,
+      id: beltId,
       planetId,
       source,
       target,
@@ -8508,9 +8629,13 @@ export function placeBlueprint(
       congestion: 0,
       lastFlow: 0,
     });
+    changedBeltIds.push(beltId);
     next.nextId += 1;
   }
-  return next;
+  return recordGameStateEditLineage(next, state, {
+    entityIds: [...changedEntityIds],
+    beltIds: changedBeltIds,
+  });
 }
 
 export const MAX_BLUEPRINT_CONSTRUCTION_ORDERS = 100;
@@ -8972,7 +9097,20 @@ export function placeBuilding(state: GameState, buildingId: BuildingId, position
   if (buildingId === "orbital_cargo_terminal" && state.entities.some((entity) => entity.planetId === state.activePlanetId && entity.buildingId === buildingId)) return state;
   if (building.kind === "miner" || !canPlaceBuildingOnPlanet(buildingId, state.activePlanetId, state) ||
     (state.construction[buildingId] ?? 0) < amount) return state;
-  const next = copyState(state);
+  // Placement touches one top-level collection and a handful of small records.
+  // Keep the immutable command boundary without deep-cloning every existing
+  // entity and belt in a large factory.
+  const next: GameState = {
+    ...state,
+    construction: { ...state.construction },
+    entities: [...state.entities],
+    ...(buildingId === "galactic_material_exporter" ? {
+      endgame: { ...state.endgame },
+    } : {}),
+    ...(buildingId === "time_warp_device" ? {
+      timeWarp: { ...state.timeWarp },
+    } : {}),
+  };
   const recipe = getRecipesForBuilding(buildingId).find((candidate) =>
     !candidate.requiredTechId || isTechnologyCompleted(state, candidate.requiredTechId));
   next.construction[buildingId] = (next.construction[buildingId] ?? 0) - amount;
@@ -8981,7 +9119,7 @@ export function placeBuilding(state: GameState, buildingId: BuildingId, position
     kind: building.kind === "power" ? "power" : building.kind === "storage" ? "storage" :
       building.kind === "splitter" ? "splitter" : building.kind === "station" ? "station" : "machine",
     planetId: state.activePlanetId,
-    position,
+    position: { ...position },
     interactionLocked: false,
     buildingId,
     powerGridId: "grid-a",
@@ -9048,8 +9186,9 @@ export function placeBuilding(state: GameState, buildingId: BuildingId, position
     next.timeWarp.controllerEntityId = `entity_${next.nextId}`;
     next.timeWarp.enabled = false;
   }
+  const placedEntityId = `entity_${next.nextId}`;
   next.nextId += 1;
-  return next;
+  return recordGameStateEditLineage(next, state, { entityIds: [placedEntityId] });
 }
 
 export function addBuildingToGroup(state: GameState, entityId: string, buildingId: BuildingId, count = 1): GameState {
@@ -11981,8 +12120,26 @@ function connectBeltOnDraft(state: GameState, sourceId: string, targetId: string
 
 export function connectBeltWithResult(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): ConnectBeltResult {
   if (!canConnectBelt(state, sourceId, targetId, itemId, tier, targetPortIndex, lanes)) return { state, beltId: null, created: false };
-  const next = copyState(state);
-  return connectBeltOnDraft(next, sourceId, targetId, itemId, tier, targetPortIndex, lanes);
+  const targetIndex = state.entities.findIndex((entity) => entity.id === targetId);
+  if (targetIndex < 0) return { state, beltId: null, created: false };
+  const entities = [...state.entities];
+  entities[targetIndex] = cloneFactoryEntity(entities[targetIndex]);
+  // connectBeltOnDraft can increase an existing parallel line. Clone only a
+  // possible matching line; every unrelated belt remains structurally shared.
+  const belts = state.belts.map((belt) => belt.source === sourceId && belt.target === targetId &&
+    belt.itemId === itemId && belt.tier === tier ? { ...belt } : belt);
+  const next: GameState = {
+    ...state,
+    entities,
+    belts,
+    construction: { ...state.construction },
+  };
+  const result = connectBeltOnDraft(next, sourceId, targetId, itemId, tier, targetPortIndex, lanes);
+  if (result.beltId) recordGameStateEditLineage(result.state, state, {
+    entityIds: [targetId],
+    beltIds: [result.beltId],
+  });
+  return result;
 }
 
 export function connectBelt(state: GameState, sourceId: string, targetId: string, itemId: ItemId, tier: BeltTier = 1, targetPortIndex?: BeltInputPortIndex, lanes = 1): GameState {
@@ -12088,10 +12245,12 @@ export function removeBelt(state: GameState, beltId: string): GameState {
   const constructionId = getBeltConstructionId(belt.tier);
   const returned = safeInventoryAdd(state.construction[constructionId], belt.lanes);
   if (returned === null) return state;
-  const next = copyState(state);
-  next.belts = next.belts.filter((item) => item.id !== beltId);
-  next.construction[constructionId] = returned;
-  return next;
+  const next: GameState = {
+    ...state,
+    belts: state.belts.filter((item) => item.id !== beltId),
+    construction: { ...state.construction, [constructionId]: returned },
+  };
+  return recordGameStateEditLineage(next, state, { beltIds: [beltId] });
 }
 
 export type BeltLaneAdjustmentCheck =
@@ -12996,8 +13155,15 @@ export function removeEntity(state: GameState, entityId: string, count?: number)
     const extractorId = getExtractorBuildingId(entity.resourceId);
     const returned = safeInventoryAdd(state.construction[extractorId], recovered);
     if (returned === null) return state;
-    const next = copyState(state);
-    const target = next.entities.find((item) => item.id === entityId)!;
+    const targetIndex = state.entities.findIndex((item) => item.id === entityId);
+    const entities = [...state.entities];
+    entities[targetIndex] = cloneFactoryEntity(entities[targetIndex]);
+    const next: GameState = {
+      ...state,
+      entities,
+      construction: { ...state.construction },
+    };
+    const target = entities[targetIndex];
     target.minerCount -= recovered;
     next.construction[extractorId] = returned;
     if (target.minerCount === 0) {
@@ -13005,19 +13171,45 @@ export function removeEntity(state: GameState, entityId: string, count?: number)
       target.productionRate = 0;
       target.powerFactor = undefined;
     }
-    return next;
+    return recordGameStateEditLineage(next, state, { entityIds: [entityId] });
   }
   const requested = count === undefined ? entity.machineCount : Math.max(1, Math.floor(count));
   if (entity.buildingId && entity.machineCount > requested) {
     const returned = safeInventoryAdd(state.construction[entity.buildingId], requested);
     if (returned === null) return state;
-    const next = copyState(state);
-    const target = next.entities.find((item) => item.id === entityId)!;
+    const targetIndex = state.entities.findIndex((item) => item.id === entityId);
+    const entities = [...state.entities];
+    entities[targetIndex] = cloneFactoryEntity(entities[targetIndex]);
+    const next: GameState = {
+      ...state,
+      entities,
+      construction: { ...state.construction },
+    };
+    const target = entities[targetIndex];
     target.machineCount -= requested;
     next.construction[target.buildingId!] = returned;
-    return next;
+    return recordGameStateEditLineage(next, state, { entityIds: [entityId] });
   }
   if (!getEntityRemovalPreview(state, [entityId]).refundSafe) return state;
+  const simpleRemoval = entity.kind !== "station" && entity.buildingId !== "construction_center" &&
+    entity.buildingId !== "micro_black_hole_connector" && entity.buildingId !== "time_warp_device" &&
+    entity.buildingId !== "galactic_material_exporter" && entity.buildingId !== "orbital_cargo_terminal" &&
+    !entity.sprayCoaterInstalled && Object.values(entity.inputs).every((value) => !value) &&
+    Object.values(entity.outputs).every((value) => !value) &&
+    !state.belts.some((belt) => belt.source === entityId || belt.target === entityId);
+  if (simpleRemoval && entity.buildingId) {
+    const returned = safeInventoryAdd(state.construction[entity.buildingId], entity.machineCount);
+    if (returned === null) return state;
+    const next: GameState = {
+      ...state,
+      construction: { ...state.construction, [entity.buildingId]: returned },
+      entities: state.entities.filter((item) => item.id !== entityId),
+      constructionQueue: state.constructionQueue.filter((entry) =>
+        (entry.status ?? "pending-materials") !== "waiting-fleet" ||
+        !Object.values(entry.placedEntityIdsByKey ?? {}).includes(entityId)),
+    };
+    return recordGameStateEditLineage(pruneBlueprintVersions(next), state, { entityIds: [entityId] });
+  }
   const next = copyState(state);
   const target = next.entities.find((item) => item.id === entityId)!;
   if (target.buildingId === "construction_center") {

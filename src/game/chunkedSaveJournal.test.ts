@@ -5,10 +5,15 @@ import { createContentPackRegistry } from "./contentPacks";
 import { createInitialState } from "./engine";
 import {
   buildChunkedSaveJournal,
+  buildChunkedSaveJournalCommitFromRuntimeState,
   clearChunkedSaveJournal,
+  commitChunkedSaveJournal,
+  chunkedRuntimeSavePartsForTest,
   chunkedSavePartsForTest,
   persistChunkedSaveJournal,
+  prepareChunkedSaveJournalContext,
   restoreChunkedSavePayload,
+  streamChunkedSaveJournalFromRuntimeState,
 } from "./chunkedSaveJournal";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import { commitLocalSaveInternalRecords, flushLocalSaveWrites, listLocalSaveInternalKeys, readLocalSaveInternalValue, setLocalSaveValue } from "./localSaveStore";
@@ -39,6 +44,19 @@ describe("v1 chunked save journal", () => {
     expect(first.manifest.chunks.some((chunk) => chunk.kind === "entities")).toBe(true);
     expect(second.changedChunkIds).toEqual(["base"]);
     expect(second.totalBytes).toBe(first.totalBytes);
+  });
+
+  it("streams the same v47 chunk bytes without constructing a full projected graph", () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState();
+    const full = chunkedSavePartsForTest(projectPersistentSaveState(state, registry));
+    const streamed = chunkedRuntimeSavePartsForTest(state, registry);
+    const { savedAt: _fullSavedAt, ...fullManifest } = full.manifest;
+    const { savedAt: _streamedSavedAt, ...streamedManifest } = streamed.manifest;
+    expect(streamedManifest).toEqual(fullManifest);
+    expect([...streamed.chunks.entries()]).toEqual([...full.chunks.entries()]);
+    expect(streamed.changedChunkIds).toEqual(full.changedChunkIds);
+    expect(streamed.totalBytes).toBe(full.totalBytes);
   });
 
   it("writes changed chunks and restores a valid v2 envelope over the old primary", async () => {
@@ -73,6 +91,74 @@ describe("v1 chunked save journal", () => {
     expect(parsed.checksum).toBe(computeSaveStateChecksum(2, parsed.state));
     const loadedThroughStore = await readLocalSavePayloadWithChunkJournal("dsp-idle-network.save.v1");
     expect(loadedThroughStore).toBe(restored!.raw);
+    await clearChunkedSaveJournal("normal");
+  });
+
+  it("atomically commits a Worker-built bounded projection through the page writer", async () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState();
+    const projected = projectPersistentSaveState(state, registry);
+    const baseChecksum = computeSaveStateChecksum(2, projected);
+    const baseRaw = JSON.stringify({
+      formatVersion: 2,
+      kind: "primary",
+      mode: "normal",
+      slot: "main",
+      savedAt: 10,
+      state: projected,
+      checksum: baseChecksum,
+    });
+    setLocalSaveValue("dsp-idle-network.save.v1", baseRaw);
+    await flushLocalSaveWrites();
+    const context = await prepareChunkedSaveJournalContext("normal", baseChecksum);
+    const commit = buildChunkedSaveJournalCommitFromRuntimeState(
+      state,
+      registry,
+      { mode: "normal", basePrimaryChecksum: baseChecksum, savedAt: 30 },
+      context,
+    );
+    expect(commit.writes.at(-1)?.key).toContain("manifest");
+    await expect(commitChunkedSaveJournal(commit)).resolves.toMatchObject({ success: true, savedAt: 30 });
+    const restored = await restoreChunkedSavePayload(baseRaw, "normal");
+    expect(restored).not.toBeNull();
+    expect((JSON.parse(restored!.raw) as { state: typeof projected }).state).toEqual(projected);
+    await clearChunkedSaveJournal("normal");
+  });
+
+  it("streams changed records in bounded acknowledged batches and publishes the manifest last", async () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState();
+    const projected = projectPersistentSaveState(state, registry);
+    const baseChecksum = computeSaveStateChecksum(2, projected);
+    const baseRaw = JSON.stringify({
+      formatVersion: 2,
+      kind: "primary",
+      mode: "normal",
+      slot: "main",
+      savedAt: 10,
+      state: projected,
+      checksum: baseChecksum,
+    });
+    const context = await prepareChunkedSaveJournalContext("normal", baseChecksum);
+    const batchSizes: number[] = [];
+    const lastKeys: string[] = [];
+    const result = await streamChunkedSaveJournalFromRuntimeState(
+      state,
+      registry,
+      { mode: "normal", basePrimaryChecksum: baseChecksum, savedAt: 40 },
+      context,
+      async (records) => {
+        batchSizes.push(records.length);
+        lastKeys.push(records.at(-1)?.key ?? "");
+        await commitLocalSaveInternalRecords(records);
+      },
+    );
+    expect(result.success).toBe(true);
+    expect(batchSizes.slice(0, -1).every((size) => size <= 8)).toBe(true);
+    expect(lastKeys.at(-1)).toContain("manifest");
+    const restored = await restoreChunkedSavePayload(baseRaw, "normal");
+    expect(restored).not.toBeNull();
+    expect((JSON.parse(restored!.raw) as { state: typeof projected }).state).toEqual(projected);
     await clearChunkedSaveJournal("normal");
   });
 

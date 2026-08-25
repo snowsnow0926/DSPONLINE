@@ -38,14 +38,29 @@ export interface SimulationProjection {
   alerts?: FactoryAlertProjection;
 }
 
+interface ProjectionFieldBaseline {
+  /** Detached structural node. It never retains an authoritative mutable
+   * GameState object and is updated in place without per-step JSON strings. */
+  kind: "primitive" | "array" | "object";
+  value: unknown;
+}
+
+interface ProjectionRecordBaseline {
+  fields: Map<string, ProjectionFieldBaseline>;
+  topologySignature: string;
+  seenGeneration: number;
+}
+
 export interface SimulationProjectionBaseline {
   kind: "simulation-projection-baseline";
   activePlanetId: PlanetId;
-  entitySignatures: ReadonlyMap<string, string>;
-  beltSignatures: ReadonlyMap<string, string>;
-  entityTopologySignatures: ReadonlyMap<string, string>;
-  beltTopologySignatures: ReadonlyMap<string, string>;
-  topLevelSignatures: ReadonlyMap<string, string | undefined>;
+  /** Persistent field snapshots are advanced in place after each successful
+   * publication. This removes whole-record stringify/parse churn while still
+   * detecting mutations made in place by the authoritative runtime. */
+  entitySnapshots: Map<string, ProjectionRecordBaseline>;
+  beltSnapshots: Map<string, ProjectionRecordBaseline>;
+  generation: number;
+  topLevelSnapshots: Map<string, ProjectionFieldBaseline>;
   includesDeferredTopLevel: boolean;
 }
 
@@ -203,14 +218,6 @@ function beltTopologySignature(belt: BeltConnection): string {
   ].join("|");
 }
 
-function entitySignature(entity: GameState["entities"][number]): string {
-  return JSON.stringify(entity);
-}
-
-function beltSignature(belt: GameState["belts"][number]): string {
-  return JSON.stringify(belt);
-}
-
 function topLevelEntries(state: GameState, includeDeferredTopLevel = false): Array<[string, unknown]> {
   return Object.keys(state)
     .filter((key) => !EXCLUDED_TOP_LEVEL_PROJECTION_KEYS.has(key as keyof GameState) ||
@@ -218,42 +225,312 @@ function topLevelEntries(state: GameState, includeDeferredTopLevel = false): Arr
     .map((key) => [key, (state as unknown as Record<string, unknown>)[key]]);
 }
 
+function captureProjectionField(value: unknown): ProjectionFieldBaseline {
+  if (Array.isArray(value)) {
+    return { kind: "array", value: value.map(captureProjectionField) };
+  }
+  if (value !== null && typeof value === "object") {
+    const fields = new Map<string, ProjectionFieldBaseline>();
+    const source = value as Record<string, unknown>;
+    for (const key in source) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) fields.set(key, captureProjectionField(source[key]));
+    }
+    return { kind: "object", value: fields };
+  }
+  return { kind: "primitive", value };
+}
+
+/** Compare against a detached value snapshot, then advance that snapshot in
+ * place. The baseline never retains a mutable GameState child object. */
+function advanceProjectionField(baseline: ProjectionFieldBaseline, value: unknown): boolean {
+  if (Array.isArray(value)) {
+    if (baseline.kind !== "array") {
+      const captured = captureProjectionField(value);
+      baseline.kind = captured.kind;
+      baseline.value = captured.value;
+      return true;
+    }
+    const values = baseline.value as ProjectionFieldBaseline[];
+    const previousLength = values.length;
+    let changed = previousLength !== value.length;
+    if (values.length > value.length) values.length = value.length;
+    for (let index = 0; index < value.length; index += 1) {
+      if (index >= previousLength) {
+        values.push(captureProjectionField(value[index]));
+        continue;
+      }
+      if (advanceProjectionField(values[index], value[index])) changed = true;
+    }
+    return changed;
+  }
+  if (value !== null && typeof value === "object") {
+    if (baseline.kind !== "object") {
+      const captured = captureProjectionField(value);
+      baseline.kind = captured.kind;
+      baseline.value = captured.value;
+      return true;
+    }
+    const fields = baseline.value as Map<string, ProjectionFieldBaseline>;
+    const source = value as Record<string, unknown>;
+    let fieldCount = 0;
+    let changed = false;
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      fieldCount += 1;
+      const field = fields.get(key);
+      if (!field) {
+        fields.set(key, captureProjectionField(source[key]));
+        changed = true;
+      } else if (advanceProjectionField(field, source[key])) {
+        changed = true;
+      }
+    }
+    if (fieldCount < fields.size) {
+      for (const key of fields.keys()) {
+        if (!(key in source)) {
+          fields.delete(key);
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+  const changed = baseline.kind !== "primitive" || !Object.is(baseline.value, value);
+  if (changed) {
+    baseline.kind = "primitive";
+    baseline.value = value;
+  }
+  return changed;
+}
+
+function captureRecordBaseline<T extends { id: string }>(
+  record: T,
+  topologySignature: (record: T) => string,
+  generation: number,
+): ProjectionRecordBaseline {
+  const fields = new Map<string, ProjectionFieldBaseline>();
+  const source = record as unknown as Record<string, unknown>;
+  for (const key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) fields.set(key, captureProjectionField(source[key]));
+  }
+  return { fields, topologySignature: topologySignature(record), seenGeneration: generation };
+}
+
+const ENTITY_TOPOLOGY_FIELDS = new Set(["planetId", "kind", "buildingId", "resourceId", "position"]);
+const BELT_TOPOLOGY_FIELDS = new Set([
+  "planetId", "source", "target", "itemId", "tier", "lanes", "stackSize", "priority",
+  "targetPortIndex", "routeMode", "routeOffsetY",
+]);
+
+interface ProjectionRecordReconcileResult<T> {
+  changedIds: string[];
+  changedRecords: T[];
+  removedIds: string[];
+  topologyChangedIds: string[];
+  columns: Record<string, Array<[number, unknown]>>;
+  removedFields: Record<string, number[]>;
+}
+
+function reconcileProjectionRecords<T extends { id: string; planetId: PlanetId }>(
+  records: readonly T[],
+  activePlanetId: PlanetId,
+  snapshots: Map<string, ProjectionRecordBaseline>,
+  generation: number,
+  compact: boolean,
+  topologyFields: ReadonlySet<string>,
+  topologySignature: (record: T) => string,
+): ProjectionRecordReconcileResult<T> {
+  const changedIds: string[] = [];
+  const changedRecords: T[] = [];
+  const topologyChangedIds: string[] = [];
+  let columns: Record<string, Array<[number, unknown]>> = {};
+  let removedFields: Record<string, number[]> = {};
+  let introducedRecord = false;
+
+  for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+    const record = records[recordIndex];
+    if (record.planetId !== activePlanetId) continue;
+    const existing = snapshots.get(record.id);
+    if (!existing) {
+      snapshots.set(record.id, captureRecordBaseline(record, topologySignature, generation));
+      changedIds.push(record.id);
+      changedRecords.push(record);
+      topologyChangedIds.push(record.id);
+      introducedRecord = true;
+      continue;
+    }
+
+    existing.seenGeneration = generation;
+    const source = record as unknown as Record<string, unknown>;
+    let fieldCount = 0;
+    let changed = false;
+    let topologyCandidate = false;
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      fieldCount += 1;
+      const value = source[key];
+      const field = existing.fields.get(key);
+      const fieldChanged = field ? advanceProjectionField(field, value) : true;
+      if (!field) existing.fields.set(key, captureProjectionField(value));
+      if (!fieldChanged) continue;
+      changed = true;
+      if (topologyFields.has(key)) topologyCandidate = true;
+      if (compact) (columns[key] ??= []).push([recordIndex, value]);
+    }
+    if (fieldCount < existing.fields.size) {
+      for (const key of existing.fields.keys()) {
+        if (key in source) continue;
+        existing.fields.delete(key);
+        changed = true;
+        if (topologyFields.has(key)) topologyCandidate = true;
+        if (compact) (removedFields[key] ??= []).push(recordIndex);
+      }
+    }
+    if (!changed) continue;
+    changedIds.push(record.id);
+    changedRecords.push(record);
+    if (topologyCandidate) {
+      const nextTopologySignature = topologySignature(record);
+      if (existing.topologySignature !== nextTopologySignature) topologyChangedIds.push(record.id);
+      existing.topologySignature = nextTopologySignature;
+    }
+  }
+
+  const removedIds: string[] = [];
+  for (const [id, snapshot] of snapshots) {
+    if (snapshot.seenGeneration === generation) continue;
+    removedIds.push(id);
+    snapshots.delete(id);
+  }
+
+  // Record insertion/removal changes global array addressing. Publish complete
+  // changed records for this rare barrier instead of mixing stale column
+  // offsets with topology changes.
+  if (!compact || introducedRecord || removedIds.length > 0) {
+    columns = {};
+    removedFields = {};
+  }
+  return {
+    changedIds,
+    changedRecords: compact && !introducedRecord && removedIds.length === 0 ? [] : changedRecords,
+    removedIds,
+    topologyChangedIds: [...topologyChangedIds, ...removedIds],
+    columns,
+    removedFields,
+  };
+}
+
+function createEmptySimulationProjectionBaseline(activePlanetId: PlanetId): SimulationProjectionBaseline {
+  return {
+    kind: "simulation-projection-baseline",
+    activePlanetId,
+    entitySnapshots: new Map(),
+    beltSnapshots: new Map(),
+    generation: 0,
+    topLevelSnapshots: new Map(),
+    includesDeferredTopLevel: false,
+  };
+}
+
 export function captureSimulationProjectionBaseline(
   state: GameState,
   options: { includeDeferredTopLevel?: boolean } = {},
 ): SimulationProjectionBaseline {
-  const entities = state.entities.filter((entity) => entity.planetId === state.activePlanetId);
-  const belts = state.belts.filter((belt) => belt.planetId === state.activePlanetId);
-  return {
-    kind: "simulation-projection-baseline",
-    activePlanetId: state.activePlanetId,
-    entitySignatures: new Map(entities.map((entity) => [entity.id, entitySignature(entity)])),
-    beltSignatures: new Map(belts.map((belt) => [belt.id, beltSignature(belt)])),
-    entityTopologySignatures: new Map(entities.map((entity) => [entity.id, entityTopologySignature(entity)])),
-    beltTopologySignatures: new Map(belts.map((belt) => [belt.id, beltTopologySignature(belt)])),
-    topLevelSignatures: new Map(topLevelEntries(state, options.includeDeferredTopLevel).map(([key, value]) => [key, JSON.stringify(value)])),
-    includesDeferredTopLevel: options.includeDeferredTopLevel === true,
-  };
-}
-
-function appendRecordColumns<T extends { id: string }>(
-  previous: T,
-  current: T,
-  index: number,
-  columns: Record<string, Array<[number, unknown]>>,
-  removedFields: Record<string, number[]>,
-): void {
-  const before = previous as unknown as Record<string, unknown>;
-  const after = current as unknown as Record<string, unknown>;
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (!(key in after)) {
-      (removedFields[key] ??= []).push(index);
-      continue;
-    }
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
-      (columns[key] ??= []).push([index, after[key]]);
+  const baseline = createEmptySimulationProjectionBaseline(state.activePlanetId);
+  baseline.generation = 1;
+  for (const entity of state.entities) {
+    if (entity.planetId === state.activePlanetId) {
+      baseline.entitySnapshots.set(entity.id, captureRecordBaseline(entity, entityTopologySignature, baseline.generation));
     }
   }
+  for (const belt of state.belts) {
+    if (belt.planetId === state.activePlanetId) {
+      baseline.beltSnapshots.set(belt.id, captureRecordBaseline(belt, beltTopologySignature, baseline.generation));
+    }
+  }
+  for (const [key, value] of topLevelEntries(state, options.includeDeferredTopLevel)) {
+    baseline.topLevelSnapshots.set(key, captureProjectionField(value));
+  }
+  baseline.includesDeferredTopLevel = options.includeDeferredTopLevel === true;
+  return baseline;
+}
+
+export function createSimulationProjectionWithBaseline(
+  previous: GameState | SimulationProjectionBaseline | null,
+  current: GameState,
+  options: { compact?: boolean; includeDeferredTopLevel?: boolean } = {},
+): { projection: SimulationProjection; baseline: SimulationProjectionBaseline } {
+  // Projection work is bounded by the visible planet. Other planets remain in
+  // the authoritative state and are rebuilt once if the player switches to them.
+  // A supplied baseline is deliberately consumed and advanced: the Worker is
+  // its sole owner, so persistent snapshots do not allocate a replacement Map
+  // and thousands of complete JSON record strings every simulated second.
+  const baseline = previous ? isSimulationProjectionBaseline(previous)
+    ? previous
+    : captureSimulationProjectionBaseline(previous, options)
+    : createEmptySimulationProjectionBaseline(current.activePlanetId);
+  const previousActivePlanetId = baseline.activePlanetId;
+  baseline.generation += 1;
+  const entities = reconcileProjectionRecords(
+    current.entities,
+    current.activePlanetId,
+    baseline.entitySnapshots,
+    baseline.generation,
+    options.compact === true,
+    ENTITY_TOPOLOGY_FIELDS,
+    entityTopologySignature,
+  );
+  const belts = reconcileProjectionRecords(
+    current.belts,
+    current.activePlanetId,
+    baseline.beltSnapshots,
+    baseline.generation,
+    options.compact === true,
+    BELT_TOPOLOGY_FIELDS,
+    beltTopologySignature,
+  );
+  const topLevel = {} as SimulationProjection["topLevel"];
+  const projectedTopLevelEntries = topLevelEntries(current, options.includeDeferredTopLevel);
+  const projectedTopLevelKeys = new Set(projectedTopLevelEntries.map(([key]) => key));
+  for (const [key, value] of projectedTopLevelEntries) {
+    const snapshot = baseline.topLevelSnapshots.get(key);
+    if (!snapshot) {
+      baseline.topLevelSnapshots.set(key, captureProjectionField(value));
+      (topLevel as Record<string, unknown>)[key] = value;
+    } else if (advanceProjectionField(snapshot, value)) {
+      (topLevel as Record<string, unknown>)[key] = value;
+    }
+  }
+  for (const key of baseline.topLevelSnapshots.keys()) {
+    if (!projectedTopLevelKeys.has(key)) baseline.topLevelSnapshots.delete(key);
+  }
+  baseline.activePlanetId = current.activePlanetId;
+  baseline.includesDeferredTopLevel = options.includeDeferredTopLevel === true;
+  const totalProduced = Object.values(current.totalProduced ?? {}).reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0);
+  const projection: SimulationProjection = {
+    protocolVersion: 2,
+    elapsedSeconds: current.elapsedSeconds,
+    activePlanetId: current.activePlanetId,
+    changedEntityIds: entities.changedIds,
+    changedBeltIds: belts.changedIds,
+    changedEntities: entities.changedRecords,
+    changedBelts: belts.changedRecords,
+    entityColumns: entities.columns,
+    beltColumns: belts.columns,
+    entityRemovedFields: entities.removedFields,
+    beltRemovedFields: belts.removedFields,
+    topLevel,
+    removedEntityIds: entities.removedIds,
+    removedBeltIds: belts.removedIds,
+    topologyChangedEntityIds: entities.topologyChangedIds,
+    topologyChangedBeltIds: belts.topologyChangedIds,
+    requiresFullSnapshot: Boolean(previous && previousActivePlanetId !== current.activePlanetId),
+    entityCount: current.entities.length,
+    beltCount: current.belts.length,
+    inFlightRouteCount: current.entities.reduce((sum, entity) => sum + (entity.stationRoutes?.length ?? 0), 0),
+    totalProduced,
+  };
+  return { projection, baseline };
 }
 
 export function createSimulationProjection(
@@ -261,88 +538,7 @@ export function createSimulationProjection(
   current: GameState,
   options: { compact?: boolean; includeDeferredTopLevel?: boolean } = {},
 ): SimulationProjection {
-  // Projection work is bounded by the visible planet. Other planets remain in
-  // the authoritative state and are rebuilt once if the player switches to them.
-  const baseline = previous ? isSimulationProjectionBaseline(previous)
-    ? previous
-    : captureSimulationProjectionBaseline(previous, options)
-    : null;
-  const previousEntities = baseline?.entitySignatures ?? new Map<string, string>();
-  const previousBelts = baseline?.beltSignatures ?? new Map<string, string>();
-  const currentPlanetEntities = current.entities.filter((entity) => entity.planetId === current.activePlanetId);
-  const currentPlanetBelts = current.belts.filter((belt) => belt.planetId === current.activePlanetId);
-  const changedEntities = currentPlanetEntities.filter((entity) => previousEntities.get(entity.id) !== entitySignature(entity));
-  const changedBelts = currentPlanetBelts.filter((belt) => previousBelts.get(belt.id) !== beltSignature(belt));
-  const currentEntityIds = new Set(currentPlanetEntities.map((entity) => entity.id));
-  const currentBeltIds = new Set(currentPlanetBelts.map((belt) => belt.id));
-  const removedEntityIds = [...previousEntities.keys()].filter((id) => !currentEntityIds.has(id));
-  const removedBeltIds = [...previousBelts.keys()].filter((id) => !currentBeltIds.has(id));
-  const compactEntities = Boolean(options.compact && removedEntityIds.length === 0 && changedEntities.every((entity) => previousEntities.has(entity.id)));
-  const compactBelts = Boolean(options.compact && removedBeltIds.length === 0 && changedBelts.every((belt) => previousBelts.has(belt.id)));
-  const entityColumns: SimulationProjection["entityColumns"] = {};
-  const beltColumns: SimulationProjection["beltColumns"] = {};
-  const entityRemovedFields: SimulationProjection["entityRemovedFields"] = {};
-  const beltRemovedFields: SimulationProjection["beltRemovedFields"] = {};
-  if (compactEntities) {
-    const indexById = new Map(current.entities.map((entity, index) => [entity.id, index]));
-    for (const entity of changedEntities) {
-      appendRecordColumns(
-        JSON.parse(previousEntities.get(entity.id)!) as FactoryEntity,
-        entity,
-        indexById.get(entity.id)!,
-        entityColumns,
-        entityRemovedFields,
-      );
-    }
-  }
-  if (compactBelts) {
-    const indexById = new Map(current.belts.map((belt, index) => [belt.id, index]));
-    for (const belt of changedBelts) {
-      appendRecordColumns(
-        JSON.parse(previousBelts.get(belt.id)!) as BeltConnection,
-        belt,
-        indexById.get(belt.id)!,
-        beltColumns,
-        beltRemovedFields,
-      );
-    }
-  }
-  const topLevel = {} as SimulationProjection["topLevel"];
-  for (const [key, value] of topLevelEntries(current, options.includeDeferredTopLevel)) {
-    if (!baseline || baseline.topLevelSignatures.get(key) !== JSON.stringify(value)) {
-      (topLevel as Record<string, unknown>)[key] = value;
-    }
-  }
-  const topologyChangedEntityIds = changedEntities
-    .filter((entity) => baseline?.entityTopologySignatures.get(entity.id) !== entityTopologySignature(entity))
-    .map((entity) => entity.id);
-  const topologyChangedBeltIds = changedBelts
-    .filter((belt) => baseline?.beltTopologySignatures.get(belt.id) !== beltTopologySignature(belt))
-    .map((belt) => belt.id);
-  const totalProduced = Object.values(current.totalProduced ?? {}).reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0);
-  return {
-    protocolVersion: 2,
-    elapsedSeconds: current.elapsedSeconds,
-    activePlanetId: current.activePlanetId,
-    changedEntityIds: changedEntities.map((entity) => entity.id),
-    changedBeltIds: changedBelts.map((belt) => belt.id),
-    changedEntities: compactEntities ? [] : changedEntities,
-    changedBelts: compactBelts ? [] : changedBelts,
-    entityColumns,
-    beltColumns,
-    entityRemovedFields,
-    beltRemovedFields,
-    topLevel,
-    removedEntityIds,
-    removedBeltIds,
-    topologyChangedEntityIds: [...topologyChangedEntityIds, ...removedEntityIds],
-    topologyChangedBeltIds: [...topologyChangedBeltIds, ...removedBeltIds],
-    requiresFullSnapshot: Boolean(previous && previous.activePlanetId !== current.activePlanetId),
-    entityCount: current.entities.length,
-    beltCount: current.belts.length,
-    inFlightRouteCount: current.entities.reduce((sum, entity) => sum + (entity.stationRoutes?.length ?? 0), 0),
-    totalProduced,
-  };
+  return createSimulationProjectionWithBaseline(previous, current, options).projection;
 }
 
 function mergeRecords<T extends { id: string }>(
@@ -418,27 +614,12 @@ function mergeRemovedFieldColumns(
 export interface SimulationProjectionStateIndex {
   entities: readonly FactoryEntity[];
   belts: readonly BeltConnection[];
-  entityIndexById: Map<string, number>;
-  beltIndexById: Map<string, number>;
 }
 
 export function createSimulationProjectionStateIndex(state: GameState): SimulationProjectionStateIndex {
-  const entityIndexById = new Map<string, number>();
-  const beltIndexById = new Map<string, number>();
-  // Fill the maps directly. `new Map(records.map(...))` temporarily allocated
-  // another 75k pair arrays on a real large save and amplified the GC pause at
-  // pure-idle authority adoption.
-  for (let index = 0; index < state.entities.length; index += 1) {
-    entityIndexById.set(state.entities[index].id, index);
-  }
-  for (let index = 0; index < state.belts.length; index += 1) {
-    beltIndexById.set(state.belts[index].id, index);
-  }
   return {
     entities: state.entities,
     belts: state.belts,
-    entityIndexById,
-    beltIndexById,
   };
 }
 
@@ -448,11 +629,10 @@ function applyProjectedRecords<T extends { id: string }>(
   columns: Record<string, Array<[number, unknown]>>,
   removedFields: Record<string, number[]>,
   removedIds: readonly string[],
-  indexById: ReadonlyMap<string, number>,
-): { records: T[]; indexById: Map<string, number> } {
+): T[] {
   const hasColumns = Object.keys(columns).length > 0 || Object.keys(removedFields).length > 0;
   if (changed.length === 0 && !hasColumns && removedIds.length === 0) {
-    return { records: previous as T[], indexById: indexById as Map<string, number> };
+    return previous as T[];
   }
   if (removedIds.length > 0) {
     const removed = new Set(removedIds);
@@ -460,14 +640,21 @@ function applyProjectedRecords<T extends { id: string }>(
     const records = previous.flatMap((record) => removed.has(record.id) ? [] : [changedById.get(record.id) ?? record]);
     const existing = new Set(records.map((record) => record.id));
     for (const record of changed) if (!existing.has(record.id)) records.push(record);
-    return { records, indexById: new Map(records.map((record, index) => [record.id, index])) };
+    return records;
   }
   const records = [...previous];
-  const nextIndex = new Map(indexById);
+  // Steady-state compact projections contain only global array indexes and do
+  // not enter this branch. Build an id map only for the rare topology/full-
+  // planet publication, then release it with this call.
+  let transientIndex: Map<string, number> | null = null;
   for (const record of changed) {
-    const index = nextIndex.get(record.id);
+    if (!transientIndex) {
+      transientIndex = new Map<string, number>();
+      for (let index = 0; index < previous.length; index += 1) transientIndex.set(previous[index].id, index);
+    }
+    const index = transientIndex.get(record.id);
     if (index === undefined) {
-      nextIndex.set(record.id, records.length);
+      transientIndex.set(record.id, records.length);
       records.push(record);
     } else {
       records[index] = record;
@@ -494,7 +681,7 @@ function applyProjectedRecords<T extends { id: string }>(
       if (record) delete record[field];
     }
   }
-  return { records, indexById: nextIndex };
+  return records;
 }
 
 /**
@@ -515,42 +702,51 @@ export function applySimulationProjectionToState(
   // complete changed-record snapshot.
   const removedEntityIds = projection.requiresFullSnapshot ? [] : projection.removedEntityIds;
   const removedBeltIds = projection.requiresFullSnapshot ? [] : projection.removedBeltIds;
-  const entities = applyProjectedRecords(state.entities, projection.changedEntities, projection.entityColumns, projection.entityRemovedFields, removedEntityIds, index.entityIndexById);
-  const belts = applyProjectedRecords(state.belts, projection.changedBelts, projection.beltColumns, projection.beltRemovedFields, removedBeltIds, index.beltIndexById);
+  const entities = applyProjectedRecords(state.entities, projection.changedEntities, projection.entityColumns, projection.entityRemovedFields, removedEntityIds);
+  const belts = applyProjectedRecords(state.belts, projection.changedBelts, projection.beltColumns, projection.beltRemovedFields, removedBeltIds);
   const next = {
     ...state,
     ...projection.topLevel,
     elapsedSeconds: projection.elapsedSeconds,
     activePlanetId: projection.activePlanetId,
-    entities: entities.records,
-    belts: belts.records,
+    entities,
+    belts,
   } as GameState;
   return {
     state: next,
     index: {
       entities: next.entities,
       belts: next.belts,
-      entityIndexById: entities.indexById,
-      beltIndexById: belts.indexById,
     },
   };
+}
+
+function projectedColumnIndexes(
+  columns: Record<string, Array<[number, unknown]>>,
+  removedFields: Record<string, number[]>,
+): number[] {
+  const indexes = new Set<number>();
+  for (const values of Object.values(columns)) for (const [index] of values) indexes.add(index);
+  for (const values of Object.values(removedFields)) for (const index of values) indexes.add(index);
+  return [...indexes];
 }
 
 /** Converts a compact Worker projection into the full changed records expected by the canvas cache. */
 export function hydrateSimulationProjection(
   projection: SimulationProjection,
   state: GameState,
-  index: SimulationProjectionStateIndex,
+  _index: SimulationProjectionStateIndex,
 ): SimulationProjection {
-  if (Object.keys(projection.entityColumns).length === 0 && Object.keys(projection.beltColumns).length === 0) return projection;
-  const changedEntities = projection.changedEntityIds.flatMap((id) => {
-    const recordIndex = index.entityIndexById.get(id);
-    return recordIndex === undefined ? [] : [state.entities[recordIndex]];
-  });
-  const changedBelts = projection.changedBeltIds.flatMap((id) => {
-    const recordIndex = index.beltIndexById.get(id);
-    return recordIndex === undefined ? [] : [state.belts[recordIndex]];
-  });
+  if (Object.keys(projection.entityColumns).length === 0 && Object.keys(projection.beltColumns).length === 0 &&
+    Object.keys(projection.entityRemovedFields).length === 0 && Object.keys(projection.beltRemovedFields).length === 0) return projection;
+  const entityIndexes = projectedColumnIndexes(projection.entityColumns, projection.entityRemovedFields);
+  const beltIndexes = projectedColumnIndexes(projection.beltColumns, projection.beltRemovedFields);
+  const changedEntities = entityIndexes.length > 0
+    ? entityIndexes.flatMap((recordIndex) => state.entities[recordIndex] ? [state.entities[recordIndex]] : [])
+    : projection.changedEntities;
+  const changedBelts = beltIndexes.length > 0
+    ? beltIndexes.flatMap((recordIndex) => state.belts[recordIndex] ? [state.belts[recordIndex]] : [])
+    : projection.changedBelts;
   return {
     ...projection,
     changedEntities,

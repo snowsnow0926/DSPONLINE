@@ -4,6 +4,7 @@ import {
   completeRuntimeTransition,
   measureRuntimeTransitionPhase,
   recordActiveRuntimeTransitionPhase,
+  recordRuntimeTransitionPhase,
   type RuntimeTransitionDiagnosticState,
 } from "./runtimeTransitionDiagnostics";
 
@@ -45,5 +46,17 @@ describe("runtime transition diagnostics", () => {
     beginRuntimeTransition("pure-idle-stop");
     expect(diagnostics.active["pure-idle-stop"]).toBe(startedAt);
     expect(diagnostics.events.filter((event) => event.phase === "transition-start")).toHaveLength(1);
+  });
+
+  it("keeps aggregate counters after bounded raw events are evicted", () => {
+    const diagnostics: RuntimeTransitionDiagnosticState = { enabled: true, events: [], active: {} };
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { __DSP_RUNTIME_TRANSITIONS__: diagnostics } });
+    for (let index = 0; index < 505; index += 1) {
+      recordRuntimeTransitionPhase(`phase-${index}`, index, index);
+    }
+    expect(diagnostics.events).toHaveLength(500);
+    expect(diagnostics.events[0].phase).toBe("phase-5");
+    expect(diagnostics.counters?.["phase-0"]).toMatchObject({ count: 1, totalMs: 0, maxMs: 0 });
+    expect(diagnostics.counters?.["phase-504"]).toMatchObject({ count: 1, totalMs: 504, maxMs: 504 });
   });
 });

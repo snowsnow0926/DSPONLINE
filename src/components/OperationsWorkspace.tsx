@@ -550,7 +550,7 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           label={locale === "en" ? "Pause automatically on memory or backlog pressure" : "内存或模拟积压超限时自动暂停"}
           value={memoryAutoPauseEnabled
             ? locale === "en" ? `Device-only · ${memoryThresholdLabel}` : `仅本机 · ${memoryThresholdLabel}`
-            : locale === "en" ? "Off; no automatic rollback" : "关闭；不自动回档"}
+            : locale === "en" ? "Off; no automatic pause" : "关闭；不自动暂停"}
           icon={<ShieldCheck size={16} />}
           onChange={onMemoryAutoPauseEnabledChange}
         />
@@ -563,11 +563,11 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         </div>
         <p className={memoryAutoPauseEnabled ? "settings-help" : "settings-warning"} role={memoryAutoPauseEnabled ? undefined : "alert"}>{memoryAutoPauseEnabled
           ? locale === "en"
-            ? "Device-only; it never enters saves or cloud sync. Auto uses the browser JS heap limit. A fixed value pauses at that JS-heap watermark, while the browser 90% ceiling remains protective."
-            : "仅保存在当前设备，不进入存档或云同步。自动档使用浏览器 JS 堆上限；固定档达到对应 JS 堆用量就暂停，同时保留浏览器 90% 上限保护。"
+            ? "Device-only; it never enters saves or cloud sync. Auto uses the browser JS heap limit. A fixed value pauses the current visible state at that watermark without installing an older checkpoint."
+            : "仅保存在当前设备，不进入存档或云同步。自动档使用浏览器 JS 堆上限；固定档达到水位时暂停当前可见进度，不再安装旧检查点。"
           : locale === "en"
-            ? "Memory and simulation-backlog auto-pause/rollback is off. The current state and unsubmitted simulation time are kept running past the normal watermarks, so the browser may freeze or crash. Worker protocol/checkpoint failures and allocation failures can still stop the game to protect save integrity; export a backup first."
-            : "已关闭内存与模拟积压自动暂停/回档。超过堆内存或 24 秒积压线时会继续使用当前状态，不切回旧检查点，也不清空未提交时间；浏览器可能卡死或崩溃。Worker 协议/检查点失败和内存分配失败仍可能为保护存档而停止，请先导出备份。"}</p>
+            ? "Memory and simulation-backlog auto-pause is off. The current state and unsubmitted simulation time continue past the normal watermarks, so the browser may freeze or crash. Worker protocol/checkpoint failures and allocation failures can still stop the game to protect save integrity; export a backup first."
+            : "已关闭内存与模拟积压自动暂停。超过堆内存或 24 秒积压线时会继续使用当前状态和未提交时间；浏览器可能卡死或崩溃。Worker 协议/检查点失败和内存分配失败仍可能为保护存档而停止，请先导出备份。"}</p>
       </section>
       <section className="settings-group settings-production-refresh" data-settings-category="performance">
         <header><Gauge size={14} /><span>生产画面刷新频率</span><small>{productionRefreshIntervalMs < 1_000 ? `${productionRefreshIntervalMs} ms` : `${productionRefreshIntervalMs / 1_000} 秒`}</small></header>

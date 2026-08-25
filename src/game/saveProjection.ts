@@ -89,35 +89,27 @@ export function hydrateCurrentPersistentSaveProjection(state: unknown): GameStat
  * Pure, Worker-safe projection of runtime state into the v47 persistent JSON
  * shape. This module must never construct or import a Worker.
  */
-export function projectPersistentSaveState(state: GameState, contentPackRegistry: ContentPackRegistry): GameState {
-  const { runtimeFlow: _runtimeFlow, ...quantumLogisticsNetwork } = state.quantumLogisticsNetwork;
-  // M0 bridge: a v46 build must not write the orbital-station namespace. A
-  // bridge build reading a v47 save keeps the namespace untouched.
-  const { orbitalStation: _omittedOrbitalStation, ...stateWithoutOrbitalStation } = state;
-  const compactRecord = (value: Partial<Record<ItemId, number>>): Partial<Record<ItemId, number>> => ({ ...value });
+function createPersistentRecordProjector(state: GameState, owned: boolean) {
+  const compactRecord = (value: Partial<Record<ItemId, number>>): Partial<Record<ItemId, number>> => owned ? value : { ...value };
   const compactStationSlots = (slots: StationSlot[] | undefined): StationSlot[] | undefined => {
     if (!slots) return undefined;
-    const compact = slots.map((slot) => {
-      const projected = { ...slot } as Record<string, any>;
+    const compact = owned ? slots : slots.map((slot) => ({ ...slot }));
+    for (const slot of compact) {
+      const projected = slot as Record<string, any>;
       omitSaveContractDefaults(projected, "station-slot", state.version);
-      return projected as StationSlot;
-    });
-    // Slot indexes are authoritative for routes and cursors. Only trim a
-    // JSON-empty suffix; never filter the array or collapse an interior slot.
+    }
     while (compact.length > 0 && Object.values(compact.at(-1) as unknown as Record<string, unknown>)
       .every((value) => value === undefined)) compact.pop();
     return compact;
   };
   const compactEntity = (entity: FactoryEntity): FactoryEntity => {
-    const compact = {
+    const compact = (owned ? entity : {
       ...entity,
       inputs: compactRecord(entity.inputs),
       outputs: compactRecord(entity.outputs),
-      ...(entity.stationSlots ? { stationSlots: compactStationSlots(entity.stationSlots) } : {}),
-      ...(entity.proliferatorBonusProgress
-        ? { proliferatorBonusProgress: compactRecord(entity.proliferatorBonusProgress) }
-        : {}),
-    } as Record<string, any>;
+    }) as Record<string, any>;
+    if (entity.stationSlots) compact.stationSlots = compactStationSlots(entity.stationSlots);
+    if (entity.proliferatorBonusProgress) compact.proliferatorBonusProgress = compactRecord(entity.proliferatorBonusProgress);
     if (entity.buildingId === "micro_black_hole_connector" && state.version >= 46) {
       if (typeof entity.blackHolePaused !== "boolean" || typeof entity.blackHoleActivationConfirmed !== "boolean") {
         throw new TypeError("A current micro black hole must have explicit pause and activation-confirmation state before saving");
@@ -134,15 +126,8 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
         throw new TypeError("A current orbital cargo terminal must have one machine, four stable ports, and valid upload state before saving");
       }
     }
-    // Older clients briefly wrote quantumTarget to every entity. It remains a
-    // persisted field only for the interstellar station where it is meaningful.
     if (entity.buildingId !== "interstellar_logistics_station") delete compact.quantumTarget;
     omitSaveContractDefaults(compact, "entity", state.version);
-    // v47 migration already restores these exact inactive defaults. Keeping
-    // them on every late-game entity added several MiB and multiplied the
-    // temporary JSON/TextEncoder memory needed by every autosave. Omit only
-    // values whose absence is explicitly normalized back to the same runtime
-    // state; active transitions, fuel and coater configuration stay intact.
     if (compact.fuelRemainingMj === 0) delete compact.fuelRemainingMj;
     if (compact.sprayCoaterInstalled === false) delete compact.sprayCoaterInstalled;
     if (compact.stationModeTransition === null) delete compact.stationModeTransition;
@@ -152,33 +137,44 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
       delete compact.elevatorOutputItems;
     }
     if (entity.buildingId === "micro_black_hole_connector" && state.version >= 46) {
-      // This final assignment deliberately runs after sparse-default omission.
-      // A future shared-contract entry cannot silently turn an active,
-      // player-confirmed sink into the fail-closed load default.
       compact.blackHolePaused = entity.blackHolePaused;
       compact.blackHoleActivationConfirmed = entity.blackHoleActivationConfirmed;
     }
     return compact as FactoryEntity;
   };
   const compactBelt = (belt: BeltConnection): BeltConnection => {
-    const compact = { ...belt } as Record<string, any>;
+    const compact = (owned ? belt : { ...belt }) as Record<string, any>;
     omitSaveContractDefaults(compact, "belt", state.version);
     return compact as BeltConnection;
   };
+  return { compactEntity, compactBelt };
+}
+
+function projectPersistentSaveStateInternal(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+  owned: boolean,
+): GameState {
+  const { runtimeFlow: _runtimeFlow, ...quantumLogisticsNetwork } = state.quantumLogisticsNetwork;
+  const { compactEntity, compactBelt } = createPersistentRecordProjector(state, owned);
   const persistentEntities = state.entities.map(compactEntity);
-  const sanitizeBlueprint = (blueprint: BlueprintDefinition): BlueprintDefinition => ({
-    ...blueprint,
-    entities: blueprint.entities.map((entity) => {
+  const sanitizeBlueprint = (blueprint: BlueprintDefinition): BlueprintDefinition => {
+    const projected = (owned ? blueprint : { ...blueprint }) as BlueprintDefinition;
+    projected.entities = blueprint.entities.map((entity) => {
       const { quantumTarget: _legacyQuantumTarget, operationEnabledOnDeploy: _legacyOperation, ...withoutLegacyFields } = entity;
       if (entity.buildingId === "interstellar_logistics_station") return { ...withoutLegacyFields, quantumTarget: entity.quantumTarget === true };
       if (entity.buildingId === "micro_black_hole_connector") return typeof entity.operationEnabledOnDeploy === "boolean"
         ? { ...withoutLegacyFields, operationEnabledOnDeploy: entity.operationEnabledOnDeploy }
         : withoutLegacyFields;
       return withoutLegacyFields;
-    }),
-  });
-  return {
-    ...(state.version >= 47 ? state : stateWithoutOrbitalStation),
+    });
+    return projected;
+  };
+  const projected = (owned ? state : { ...state }) as GameState;
+  // M0 bridge: a v46 build must not write the orbital-station namespace. A
+  // bridge build reading a v47 save keeps the namespace untouched.
+  if (state.version < 47) delete (projected as unknown as Record<string, unknown>).orbitalStation;
+  Object.assign(projected, {
     mode: state.mode === "speedrun" ? "speedrun" : "normal",
     idleSettlement: normalizeIdleSettlementState(state.idleSettlement),
     productionHistory: [],
@@ -193,5 +189,52 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
     blueprintVersions: state.blueprintVersions.map((snapshot) => ({ ...snapshot, definition: sanitizeBlueprint(snapshot.definition) })),
     planetTrays: { ...state.planetTrays, [state.activePlanetId]: { ...state.tray } },
     quantumLogisticsNetwork,
-  } as unknown as GameState;
+  });
+  return projected;
+}
+
+export function projectPersistentSaveState(state: GameState, contentPackRegistry: ContentPackRegistry): GameState {
+  return projectPersistentSaveStateInternal(state, contentPackRegistry, false);
+}
+
+export interface PersistentSaveProjectionParts {
+  base: Omit<GameState, "entities" | "belts">;
+  entityCount: number;
+  beltCount: number;
+  projectEntityRange: (offset: number, count: number) => GameState["entities"];
+  projectBeltRange: (offset: number, count: number) => GameState["belts"];
+}
+
+/**
+ * Bounded-memory view of the exact v47 projection. The authoritative
+ * Simulation Worker can serialize one entity/belt page at a time without
+ * first constructing a second 80k/155k record graph or a 77 MB JSON transfer.
+ *
+ * Each range deliberately delegates to the same projection implementation as
+ * the public full-save boundary. That keeps the streaming sidecar byte-for-
+ * byte equivalent while the first-layer architecture is still JavaScript.
+ */
+export function createPersistentSaveProjectionParts(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+): PersistentSaveProjectionParts {
+  const projectedBase = projectPersistentSaveStateInternal({ ...state, entities: [], belts: [] }, contentPackRegistry, false);
+  const { compactEntity, compactBelt } = createPersistentRecordProjector(state, false);
+  const { entities: _entities, belts: _belts, ...base } = projectedBase;
+  return {
+    base,
+    entityCount: state.entities.length,
+    beltCount: state.belts.length,
+    projectEntityRange: (offset, count) => state.entities.slice(offset, offset + count).map(compactEntity),
+    projectBeltRange: (offset, count) => state.belts.slice(offset, offset + count).map(compactBelt),
+  };
+}
+
+/**
+ * Save-Worker-only projection for an exclusively owned decoded checkpoint.
+ * It drops runtime-only leaves in place, avoiding a second 80k/150k record
+ * graph while the original transferable bytes remain the exact return source.
+ */
+export function projectPersistentSaveStateInPlaceOwned(state: GameState, contentPackRegistry: ContentPackRegistry): GameState {
+  return projectPersistentSaveStateInternal(state, contentPackRegistry, true);
 }

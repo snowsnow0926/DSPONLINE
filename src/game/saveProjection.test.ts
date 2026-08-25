@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createContentPackRegistry } from "./contentPacks";
 import { createInitialState } from "./engine";
-import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveState } from "./saveProjection";
+import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveState, projectPersistentSaveStateInPlaceOwned } from "./saveProjection";
 import type { FactoryEntity } from "./types";
 
 describe("current persistent save projection hydration", () => {
@@ -44,5 +44,22 @@ describe("current persistent save projection hydration", () => {
     expect(() => hydrateCurrentPersistentSaveProjection({ version: 46, mode: "normal", entities: [], belts: [] }))
       .toThrow("当前持久化投影身份无效");
     expect(() => hydrateCurrentPersistentSaveProjection(null)).toThrow("当前持久化投影结构无效");
+  });
+
+  it("produces the same canonical save from an exclusively owned in-place checkpoint", () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState(1_156, false);
+    state.entities[0].inputs.iron_ore = 12;
+    const source = structuredClone(state);
+    const owned = structuredClone(state);
+
+    const expected = projectPersistentSaveState(source, registry);
+    const projected = projectPersistentSaveStateInPlaceOwned(owned, registry);
+
+    expect(projected).toEqual(expected);
+    expect(source).toEqual(state);
+    expect(projected).toBe(owned);
+    expect(projected.entities[0]).toBe(owned.entities[0]);
+    expect(projected.productionHistory).toEqual([]);
   });
 });

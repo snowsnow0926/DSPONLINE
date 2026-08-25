@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -28,13 +30,98 @@ const sampleSeconds = Math.max(1, Number(args.get("sample") ?? 2));
 const warmupSeconds = Math.max(0, Number(args.get("warmup") ?? 5));
 const operationEverySeconds = Math.max(5, Number(args.get("operation-every") ?? 15));
 const operationRounds = Math.max(1, Math.min(100, Math.floor(Number(args.get("operation-rounds") ?? 20))));
+const checkpointEverySeconds = Math.max(0, Number(args.get("checkpoint-every") ?? 60));
+const heapProfileEnabled = args.get("heap-profile") === "true";
 const scenario = args.get("scenario") ?? "pure";
+const autoPauseArgument = args.get("auto-pause");
+const requestedAutoPause = autoPauseArgument === undefined ? null : autoPauseArgument !== "false";
 const label = (args.get("label") ?? `${scenario}-${durationSeconds}s`).replace(/[^a-zA-Z0-9_-]/g, "-");
 const outputPath = resolve(args.get("output") ?? `artifacts/performance/${label}.json`);
 const executablePath = resolve(args.get("browser") ?? "C:/Program Files/Google/Chrome/Application/chrome.exe");
 
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function summarizeHeapSamplingProfile(profile, limit = 50) {
+  const totals = new Map();
+  const visit = (node) => {
+    if (!node) return;
+    const frame = node.callFrame ?? {};
+    const key = `${frame.functionName || "(anonymous)"}|${frame.url || "(unknown)"}|${Number(frame.lineNumber ?? -1) + 1}|${Number(frame.columnNumber ?? -1) + 1}`;
+    const current = totals.get(key) ?? {
+      functionName: frame.functionName || "(anonymous)",
+      url: frame.url || "(unknown)",
+      line: Number(frame.lineNumber ?? -1) + 1,
+      column: Number(frame.columnNumber ?? -1) + 1,
+      sampledLiveBytes: 0,
+    };
+    current.sampledLiveBytes += Number(node.selfSize ?? 0);
+    totals.set(key, current);
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(profile?.head);
+  return [...totals.values()]
+    .sort((left, right) => right.sampledLiveBytes - left.sampledLiveBytes)
+    .slice(0, limit);
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function commandOutput(file, commandArgs) {
+  try {
+    const { stdout } = await execFileAsync(file, commandArgs, { maxBuffer: 4 * 1024 * 1024 });
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function windowsMachineEvidence() {
+  const script = `
+    $os = Get-CimInstance Win32_OperatingSystem
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+    $system = Get-CimInstance Win32_ComputerSystem
+    $page = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object { [PSCustomObject]@{ name = $_.Name; allocatedMiB = [int64]$_.AllocatedBaseSize; currentMiB = [int64]$_.CurrentUsage; peakMiB = [int64]$_.PeakUsage } })
+    [PSCustomObject]@{
+      caption = $os.Caption
+      version = $os.Version
+      buildNumber = $os.BuildNumber
+      cpu = $cpu.Name
+      logicalProcessors = [int]$cpu.NumberOfLogicalProcessors
+      physicalMemoryBytes = [int64]$system.TotalPhysicalMemory
+      pageFiles = $page
+    } | ConvertTo-Json -Compress -Depth 4
+  `;
+  const raw = await commandOutput("powershell.exe", ["-NoProfile", "-Command", script]);
+  try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+}
+
+function linearSlopeBytesPerMinute(samples) {
+  const points = samples
+    .map((sample) => [Number(sample.elapsedSeconds), Number(sample.bytes)])
+    .filter(([seconds, bytes]) => Number.isFinite(seconds) && Number.isFinite(bytes));
+  if (points.length < 2) return null;
+  const meanX = points.reduce((sum, [x]) => sum + x, 0) / points.length;
+  const meanY = points.reduce((sum, [, y]) => sum + y, 0) / points.length;
+  const denominator = points.reduce((sum, [x]) => sum + (x - meanX) ** 2, 0);
+  if (denominator <= 0) return null;
+  const bytesPerSecond = points.reduce((sum, [x, y]) => sum + (x - meanX) * (y - meanY), 0) / denominator;
+  return Math.round(bytesPerSecond * 60);
+}
+
+function quantile(values, probability) {
+  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+  if (sorted.length === 0) return null;
+  const index = (sorted.length - 1) * Math.max(0, Math.min(1, probability));
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return Math.round(sorted[lower]);
+  return Math.round(sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower));
 }
 
 async function browserProcessMemory(profileDirectory) {
@@ -98,6 +185,8 @@ async function waitForImportedFactory(page) {
 
 async function runEngineOperations(page, rounds) {
   return page.evaluate(async ({ rounds: count }) => {
+    const productionHarness = globalThis.__DSP_PERFORMANCE_HARNESS__;
+    if (productionHarness?.runEngineOperations) return productionHarness.runEngineOperations(count);
     const [storage, localStore, engine] = await Promise.all([
       import("/src/game/storage.ts"),
       import("/src/game/localSaveStore.ts"),
@@ -189,21 +278,27 @@ async function runEngineOperations(page, rounds) {
   }, { rounds });
 }
 
-async function triggerAutosave(page, expectedCompleted) {
-  const triggered = await page.evaluate(() => {
+async function triggerAutosave(page) {
+  const trigger = await page.evaluate(() => {
     const tracker = globalThis.__dspRealSaveAutosaveTracker;
-    if (!tracker || typeof tracker.autosaveHandler !== "function") return false;
+    if (!tracker || typeof tracker.autosaveHandler !== "function") return { triggered: false, marker: performance.now() };
+    const marker = performance.now();
     tracker.autosaveHandler();
-    return true;
+    return { triggered: true, marker };
   });
-  if (!triggered) return { triggered: false, completed: false };
+  if (!trigger.triggered) return { triggered: false, completed: false };
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const completed = await page.evaluate((minimum) => {
+    const completed = await page.evaluate((marker) => {
       const events = globalThis.__DSP_RUNTIME_TRANSITIONS__?.events ?? [];
-      return events.filter((event) => event.phase === "persistence-phase" && event.detail?.kind === "autosave" && event.detail.phase === "complete").length;
-    }, expectedCompleted);
-    if (completed >= expectedCompleted) return { triggered: true, completed: true };
+      return events.some((event) => event.startedAt >= marker && event.phase === "persistence-phase" &&
+        event.detail?.kind === "autosave" && event.detail.phase === "complete");
+    }, trigger.marker);
+    if (completed) {
+      const chunkedSave = await page.evaluate(() =>
+        globalThis.__DSP_PERFORMANCE_HARNESS__?.getLastChunkedSaveMetrics?.() ?? null);
+      return { triggered: true, completed: true, chunkedSave };
+    }
     await delay(500);
   }
   return { triggered: true, completed: false };
@@ -218,7 +313,12 @@ const operationResults = [];
 const pageErrors = [];
 
 try {
-  const fixtureStat = await readFile(savePath);
+  const [fixtureStat, fixtureSha256, gitSha, machine] = await Promise.all([
+    stat(savePath),
+    sha256File(savePath),
+    commandOutput("git", ["rev-parse", "HEAD"]),
+    windowsMachineEvidence(),
+  ]);
   context = await chromium.launchPersistentContext(profileDirectory, {
     executablePath,
     headless: true,
@@ -231,12 +331,14 @@ try {
     ],
     viewport: { width: 1440, height: 900 },
   });
+  browser = context.browser();
   const page = context.pages()[0] ?? await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-25-v1.1.8");
+  await page.addInitScript(({ autoPause }) => {
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-26-v1.1.9");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.ui.large-save-autosave-throttle.v1", "false");
+    if (autoPause !== null) localStorage.setItem("dsp-idle-network.ui.memory-auto-pause.v1", String(autoPause));
     globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {}, counters: {} };
     const tracker = { autosaveHandler: null };
     globalThis.__dspRealSaveAutosaveTracker = tracker;
@@ -259,8 +361,8 @@ try {
       });
     };
     globalThis.__DSP_MEMORY_SAMPLE_TIMER__ = window.setInterval(sampleMemory, 250);
-  });
-  await page.goto(`${url.replace(/\/$/, "")}/?menu=1`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  }, { autoPause: requestedAutoPause });
+  await page.goto(`${url.replace(/\/$/, "")}/?menu=1&dspPerformanceHarness=1`, { waitUntil: "domcontentloaded", timeout: 120_000 });
   await page.getByLabel("选择存档文件").setInputFiles(savePath);
   const enter = page.getByRole("button", { name: "确认导入并进入" });
   await enter.waitFor({ state: "visible", timeout: 120_000 });
@@ -279,6 +381,9 @@ try {
   await cdp.send("Memory.enable").catch(() => undefined);
   await cdp.send("HeapProfiler.collectGarbage").catch(() => undefined);
   await delay(warmupSeconds * 1_000);
+  if (heapProfileEnabled) {
+    await cdp.send("HeapProfiler.startSampling", { samplingInterval: 32_768, includeObjectsCollectedByMajorGC: false });
+  }
   await page.evaluate(() => { globalThis.__DSP_MEMORY_SAMPLES__ = []; });
   const startedAt = Date.now();
   const sample = async (kind = "interval") => {
@@ -291,7 +396,9 @@ try {
         worker: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
         paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
         persistencePhase: document.querySelector(".game-shell")?.getAttribute("data-persistence-phase") ?? null,
-        workerCount: globalThis.__DSP_MEMORY_SAMPLES__?.length ?? 0,
+        localSaveRawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
+        memorySampleCount: globalThis.__DSP_MEMORY_SAMPLES__?.length ?? 0,
+        serviceWorkerControlled: Boolean(navigator.serviceWorker?.controller),
       })),
     ]);
     const metrics = Object.fromEntries((performanceResult.metrics ?? []).map((entry) => [entry.name, entry.value]));
@@ -332,7 +439,7 @@ try {
 
   let nextSampleAt = sampleSeconds * 1_000;
   let nextOperationAt = operationEverySeconds * 1_000;
-  let autosaveCount = 0;
+  let nextCheckpointAt = checkpointEverySeconds > 0 ? checkpointEverySeconds * 1_000 : Number.POSITIVE_INFINITY;
   const deadline = startedAt + durationSeconds * 1_000;
   while (Date.now() < deadline) {
     const elapsed = Date.now() - startedAt;
@@ -347,11 +454,28 @@ try {
         operationResults.push({ kind: "engine-operations", elapsedSeconds: Number(((Date.now() - startedAt) / 1_000).toFixed(2)), durationMs: Date.now() - operationStartedAt, result });
       }
       if (scenario.includes("save")) {
-        autosaveCount += 1;
-        const saveResult = await triggerAutosave(page, autosaveCount);
+        const saveResult = await triggerAutosave(page);
         operationResults.push({ kind: "autosave", elapsedSeconds: Number(((Date.now() - startedAt) / 1_000).toFixed(2)), result: saveResult });
       }
       nextOperationAt += operationEverySeconds * 1_000;
+    }
+    if (elapsed >= nextCheckpointAt) {
+      await mkdir(dirname(outputPath), { recursive: true });
+      await writeFile(`${outputPath}.partial.json`, `${JSON.stringify({
+        schemaVersion: 2,
+        partial: true,
+        label,
+        scenario,
+        elapsedSeconds: Number((elapsed / 1_000).toFixed(2)),
+        targetDurationSeconds: durationSeconds,
+        fixture: { path: savePath, bytes: fixtureStat.size, sha256: fixtureSha256 },
+        build: { gitSha },
+        environment: { browserVersion: browser?.version() ?? null, machine },
+        pageErrors,
+        operationResults,
+        processSamples,
+      }, null, 2)}\n`, "utf8");
+      nextCheckpointAt += checkpointEverySeconds * 1_000;
     }
     await delay(250);
   }
@@ -361,6 +485,9 @@ try {
   await cdp.send("HeapProfiler.collectGarbage").catch(() => undefined);
   await delay(500);
   await sample("post-gc");
+  const heapSamplingProfile = heapProfileEnabled
+    ? await cdp.send("HeapProfiler.stopSampling").then((result) => summarizeHeapSamplingProfile(result.profile)).catch(() => [])
+    : [];
   const pageMemorySamples = await page.evaluate(() => {
     window.clearInterval(globalThis.__DSP_MEMORY_SAMPLE_TIMER__);
     return globalThis.__DSP_MEMORY_SAMPLES__ ?? [];
@@ -375,23 +502,71 @@ try {
     .map((row) => Number(row[field] ?? 0)));
   const cdpHeapPeak = Math.max(0, ...processSamples.filter((entry) => entry.heap).map((entry) => Number(entry.heap.usedBytes ?? 0)));
   const pageHeapPeak = Math.max(0, ...pageMemorySamples.map((entry) => Number(entry.usedBytes ?? 0)));
-  const finalState = await page.evaluate(() => ({
-    worker: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
-    paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
-    events: globalThis.__DSP_RUNTIME_TRANSITIONS__?.events?.slice(-20) ?? [],
-  }));
+  const sampledMemorySeries = processSamples
+    .filter((entry) => entry.kind !== "process" && Number.isFinite(entry.elapsedSeconds))
+    .map((entry) => ({
+      elapsedSeconds: entry.elapsedSeconds,
+      aggregatePrivateBytes: Number(entry.processTotals?.privateBytes ?? 0),
+      rendererPrivateBytes: Math.max(0, ...(entry.processes ?? [])
+        .filter((row) => String(row.role).toLowerCase().includes("renderer"))
+        .map((row) => Number(row.privateBytes ?? 0))),
+    }));
+  const steadyStateStartSeconds = durationSeconds / 2;
+  const steadyStateMemorySeries = sampledMemorySeries.filter((entry) => entry.elapsedSeconds >= steadyStateStartSeconds);
+  const finalState = await page.evaluate(() => {
+    const diagnostics = globalThis.__DSP_RUNTIME_TRANSITIONS__;
+    const phaseStats = {};
+    for (const event of diagnostics?.events ?? []) {
+      const current = phaseStats[event.phase] ?? { count: 0, totalMs: 0, maxMs: 0 };
+      current.count += 1;
+      current.totalMs += Number(event.durationMs ?? 0);
+      current.maxMs = Math.max(current.maxMs, Number(event.durationMs ?? 0));
+      phaseStats[event.phase] = current;
+    }
+    return {
+      worker: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker") ?? "unknown",
+      paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") ?? "unknown",
+      localSaveRawCacheSize: Number(document.querySelector(".game-shell")?.getAttribute("data-local-save-raw-cache-size") ?? -1),
+      events: diagnostics?.events?.slice(-20) ?? [],
+      runtimeDiagnostics: {
+        retainedEventCount: diagnostics?.events?.length ?? 0,
+        counters: diagnostics?.counters ?? {},
+        phaseStats,
+      },
+      serviceWorkerControlled: Boolean(navigator.serviceWorker?.controller),
+      memoryGuard: {
+        autoPauseEnabled: localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1") !== "false",
+        thresholdMiB: localStorage.getItem("dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1"),
+      },
+    };
+  });
+  const applicationVersion = await page.evaluate(async () => {
+    const response = await fetch(`/version.json?benchmark=${Date.now()}`, { cache: "no-store" });
+    return response.ok ? response.json() : null;
+  }).catch(() => null);
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     label,
     scenario,
     url,
     executablePath,
-    fixture: { path: savePath, bytes: fixtureStat.byteLength },
+    fixture: { path: savePath, bytes: fixtureStat.size, sha256: fixtureSha256 },
+    build: { gitSha, applicationVersion },
+    environment: {
+      node: process.version,
+      browserVersion: browser?.version() ?? null,
+      userAgent: await page.evaluate(() => navigator.userAgent),
+      machine,
+      serviceWorkerControlled: finalState.serviceWorkerControlled,
+      memoryGuard: finalState.memoryGuard,
+    },
     durationSeconds,
     warmupSeconds,
     sampleSeconds,
     operationEverySeconds,
     operationRounds,
+    requestedAutoPause,
+    heapProfileEnabled,
     startedAt: new Date(startedAt).toISOString(),
     completedAt: new Date().toISOString(),
     pageErrors,
@@ -401,6 +576,8 @@ try {
       pagePerformanceMemoryUsedBytes: pageHeapPeak,
       rendererWorkingSetBytes: rendererPeak("workingSetBytes"),
       rendererPrivateBytes: rendererPeak("privateBytes"),
+      aggregateWorkingSetBytes: aggregateProcessPeak("workingSetBytes"),
+      aggregatePrivateBytes: aggregateProcessPeak("privateBytes"),
       browserProcessWorkingSetBytes: aggregateProcessPeak("workingSetBytes"),
       browserProcessPrivateBytes: aggregateProcessPeak("privateBytes"),
       // Kept for compatibility with the first draft of this harness. These
@@ -408,6 +585,25 @@ try {
       allBrowserProcessWorkingSetBytes: processPeak("workingSetBytes"),
       allBrowserProcessPrivateBytes: processPeak("privateBytes"),
     },
+    trends: {
+      aggregatePrivateBytesPerMinute: linearSlopeBytesPerMinute(sampledMemorySeries.map((entry) => ({ elapsedSeconds: entry.elapsedSeconds, bytes: entry.aggregatePrivateBytes }))),
+      rendererPrivateBytesPerMinute: linearSlopeBytesPerMinute(sampledMemorySeries.map((entry) => ({ elapsedSeconds: entry.elapsedSeconds, bytes: entry.rendererPrivateBytes }))),
+      steadyStateStartSeconds,
+      steadyAggregatePrivateBytesPerMinute: linearSlopeBytesPerMinute(steadyStateMemorySeries.map((entry) => ({ elapsedSeconds: entry.elapsedSeconds, bytes: entry.aggregatePrivateBytes }))),
+      steadyRendererPrivateBytesPerMinute: linearSlopeBytesPerMinute(steadyStateMemorySeries.map((entry) => ({ elapsedSeconds: entry.elapsedSeconds, bytes: entry.rendererPrivateBytes }))),
+      firstAggregatePrivateBytes: sampledMemorySeries.at(0)?.aggregatePrivateBytes ?? null,
+      lastAggregatePrivateBytes: sampledMemorySeries.at(-1)?.aggregatePrivateBytes ?? null,
+      postGcAggregatePrivateBytes: processSamples.at(-1)?.processTotals?.privateBytes ?? null,
+    },
+    steadyState: {
+      startSeconds: steadyStateStartSeconds,
+      sampleCount: steadyStateMemorySeries.length,
+      aggregatePrivateBytesP50: quantile(steadyStateMemorySeries.map((entry) => entry.aggregatePrivateBytes), 0.5),
+      aggregatePrivateBytesP95: quantile(steadyStateMemorySeries.map((entry) => entry.aggregatePrivateBytes), 0.95),
+      rendererPrivateBytesP50: quantile(steadyStateMemorySeries.map((entry) => entry.rendererPrivateBytes), 0.5),
+      rendererPrivateBytesP95: quantile(steadyStateMemorySeries.map((entry) => entry.rendererPrivateBytes), 0.95),
+    },
+    ...(heapProfileEnabled ? { heapSamplingProfile } : {}),
     finalState,
     pageMemorySamples,
     processSamples,

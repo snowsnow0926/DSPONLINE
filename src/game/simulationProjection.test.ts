@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "./engine";
-import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection } from "./simulationProjection";
+import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, createSimulationProjectionStateIndex, createSimulationProjectionWithBaseline } from "./simulationProjection";
 
 describe("simulation projection", () => {
   it("reports only changed runtime ids while preserving aggregate counts", () => {
@@ -26,6 +26,80 @@ describe("simulation projection", () => {
     const projection = createSimulationProjection(baseline, current);
     expect(projection.changedEntityIds).toContain(current.entities[0].id);
     expect(projection.topologyChangedEntityIds).not.toContain(current.entities[0].id);
+  });
+
+  it("reuses topology indexes across in-place runtime projections", () => {
+    const current = createInitialState(11_908, false);
+    const baseline = captureSimulationProjectionBaseline(current);
+    current.entities[0].progress = 0.5;
+    const first = createSimulationProjectionWithBaseline(baseline, current, { compact: true });
+
+    expect(first.baseline).not.toHaveProperty("entityIndexes");
+    expect(first.baseline).not.toHaveProperty("beltIndexes");
+    const uiState = createInitialState(11_908, false);
+    const uiIndex = createSimulationProjectionStateIndex(uiState);
+    const applied = applySimulationProjectionToState(uiState, first.projection, uiIndex);
+    expect(applied.index.entities).toBe(applied.state.entities);
+    expect(applied.index.belts).toBe(applied.state.belts);
+    expect(applied.index).not.toHaveProperty("entityIndexById");
+    expect(applied.index).not.toHaveProperty("beltIndexById");
+  });
+
+  it("advances one persistent field baseline across repeated in-place mutations", () => {
+    const authoritative = createInitialState(11_908, false);
+    const uiState = structuredClone(authoritative);
+    const baseline = captureSimulationProjectionBaseline(authoritative);
+    const entitySnapshots = baseline.entitySnapshots;
+    const target = authoritative.entities[0];
+    target.progress = 0.25;
+    target.outputs.iron_ore = 3;
+
+    const first = createSimulationProjectionWithBaseline(baseline, authoritative, { compact: true });
+    expect(first.baseline).toBe(baseline);
+    expect(first.baseline.entitySnapshots).toBe(entitySnapshots);
+    expect(first.projection.entityColumns.progress).toEqual([[0, 0.25]]);
+    expect(first.projection.entityColumns.outputs).toEqual([[0, { iron_ore: 3 }]]);
+    const firstApplied = applySimulationProjectionToState(uiState, first.projection).state;
+    expect(firstApplied.entities[0].progress).toBe(0.25);
+    expect(firstApplied.entities[0].outputs.iron_ore).toBe(3);
+
+    target.progress = 0.5;
+    target.outputs.iron_ore = 7;
+    const second = createSimulationProjectionWithBaseline(first.baseline, authoritative, { compact: true });
+    expect(second.projection.entityColumns.progress).toEqual([[0, 0.5]]);
+    expect(second.projection.entityColumns.outputs).toEqual([[0, { iron_ore: 7 }]]);
+    const secondApplied = applySimulationProjectionToState(firstApplied, second.projection).state;
+    expect(secondApplied.entities[0].progress).toBe(0.5);
+    expect(secondApplied.entities[0].outputs.iron_ore).toBe(7);
+
+    const unchanged = createSimulationProjectionWithBaseline(second.baseline, authoritative, { compact: true });
+    expect(unchanged.projection.changedEntityIds).toEqual([]);
+    expect(unchanged.projection.entityColumns).toEqual({});
+  });
+
+  it("publishes the cumulative final values after an intermediate projection is deferred", () => {
+    const authoritative = createInitialState(11_908, false);
+    const uiState = structuredClone(authoritative);
+    const publishedBaseline = captureSimulationProjectionBaseline(authoritative);
+    const target = authoritative.entities[0];
+
+    // This first authoritative step is deliberately not projected. The
+    // baseline must remain the last state actually visible to the UI.
+    target.progress = 0.25;
+    target.outputs.iron_ore = 3;
+    authoritative.elapsedSeconds = 1;
+
+    target.progress = 0.75;
+    target.outputs.iron_ore = 9;
+    authoritative.elapsedSeconds = 2;
+    const cumulative = createSimulationProjectionWithBaseline(publishedBaseline, authoritative, { compact: true });
+    const applied = applySimulationProjectionToState(uiState, cumulative.projection).state;
+
+    expect(cumulative.projection.entityColumns.progress).toEqual([[0, 0.75]]);
+    expect(cumulative.projection.entityColumns.outputs).toEqual([[0, { iron_ore: 9 }]]);
+    expect(applied.elapsedSeconds).toBe(2);
+    expect(applied.entities[0].progress).toBe(0.75);
+    expect(applied.entities[0].outputs.iron_ore).toBe(9);
   });
 
   it("applies active records and live aggregates without overwriting deferred history fields", () => {

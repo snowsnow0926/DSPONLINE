@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { decodeVerifiedSaveTransfer, serializeSaveEnvelopeToTransfer } from "./saveTransfer";
-import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveState } from "./saveProjection";
+import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveStateInPlaceOwned } from "./saveProjection";
 import { deserializeSimulationStateTransfer, serializeSimulationStateForTransfer } from "./simulationRuntimeProtocol";
 import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
 import { sha256Bytes } from "./payloadDigest";
@@ -16,13 +16,13 @@ import type {
   AuthoritativeSavePayloadProof,
 } from "./authoritativeSavePersistenceProtocol";
 import type {
-  AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveSerializationRequest,
   AuthoritativeSaveSerializationResponse,
   AuthoritativeSaveSerializationSummary,
 } from "./authoritativeSaveSerializationProtocol";
 import type { SaveWorkerRequest, SaveWorkerResponse } from "./saveWorkerProtocol";
 import type { GameState } from "./types";
+import { applyAuthoritativeSaveCheckpointOverlay as applyCheckpointOverlay } from "./saveCheckpointOverlay";
 import {
   createImmutableWorkerBinaryPayload,
   workerBinaryPayloadToArrayBuffer,
@@ -31,9 +31,6 @@ import {
 } from "./workerBinaryPayload";
 
 const SETTINGS_MAX_BYTES = 2 * 1024;
-const MIN_CANVAS_ZOOM = 0.25;
-const MAX_CANVAS_ZOOM = 1.8;
-const MAX_PENDING_TIME_WARP_SECONDS = 30 * 24 * 60 * 60;
 
 type SaveSerializationRequest = SaveWorkerRequest | AuthoritativeSaveSerializationRequest;
 
@@ -89,59 +86,6 @@ async function deserializeAuthoritativeEnvelopeTransfer(
   return state;
 }
 
-function applyCheckpointOverlay(
-  state: GameState,
-  overlay: AuthoritativeSaveCheckpointOverlay | undefined,
-): GameState {
-  if (!overlay) return state;
-  let next = state;
-  if (overlay.planetViewports !== undefined) {
-    if (!Array.isArray(overlay.planetViewports) || overlay.planetViewports.length > Object.keys(state.planetViewports).length) {
-      throw new Error("save checkpoint viewport overlay 不合法");
-    }
-    let planetViewports = state.planetViewports;
-    const seenPlanetIds = new Set<string>();
-    for (const entry of overlay.planetViewports) {
-      const viewport = entry?.viewport;
-      if (!entry || !viewport ||
-        typeof entry.planetId !== "string" || !Object.hasOwn(state.planetViewports, entry.planetId) ||
-        seenPlanetIds.has(entry.planetId) ||
-        !Number.isFinite(viewport.x) || !Number.isFinite(viewport.y) ||
-        !Number.isFinite(viewport.zoom) || viewport.zoom < MIN_CANVAS_ZOOM || viewport.zoom > MAX_CANVAS_ZOOM) {
-        throw new Error("save checkpoint viewport overlay 不合法");
-      }
-      seenPlanetIds.add(entry.planetId);
-      const previous = planetViewports[entry.planetId];
-      if (previous?.x === viewport.x && previous.y === viewport.y && previous.zoom === viewport.zoom) continue;
-      if (planetViewports === state.planetViewports) planetViewports = { ...state.planetViewports };
-      planetViewports[entry.planetId] = { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
-    }
-    if (planetViewports !== state.planetViewports) next = { ...next, planetViewports };
-  }
-  if (overlay.timeWarp !== undefined && (
-    !Number.isFinite(overlay.timeWarp.pendingSimulationSeconds) || !Number.isFinite(overlay.timeWarp.pendingWallSeconds) ||
-    overlay.timeWarp.pendingSimulationSeconds < 0 || overlay.timeWarp.pendingWallSeconds < 0 ||
-    overlay.timeWarp.pendingSimulationSeconds > MAX_PENDING_TIME_WARP_SECONDS ||
-    overlay.timeWarp.pendingWallSeconds > MAX_PENDING_TIME_WARP_SECONDS
-  )) {
-    throw new Error("save checkpoint time warp overlay 不合法");
-  }
-  const pendingSimulationSeconds = overlay.timeWarp?.pendingSimulationSeconds;
-  const pendingWallSeconds = overlay.timeWarp?.pendingWallSeconds;
-  if (pendingSimulationSeconds !== undefined && pendingWallSeconds !== undefined &&
-    (next.timeWarp.pendingSimulationSeconds !== pendingSimulationSeconds || next.timeWarp.pendingWallSeconds !== pendingWallSeconds)) {
-    next = {
-      ...next,
-      timeWarp: {
-        ...next.timeWarp,
-        pendingSimulationSeconds,
-        pendingWallSeconds,
-      },
-    };
-  }
-  return next;
-}
-
 self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
   const startedAt = performance.now();
   const request = event.data;
@@ -169,7 +113,10 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
       ? serializeSimulationStateForTransfer(state)
       : sourceTransfer;
     const binaryTransport = envelopeTransfer?.buffer instanceof Blob ? "blob" : "array-buffer";
-    const persistent = projectPersistentSaveState(state, request.contentPackRegistry);
+    // `state` is exclusively owned by this Worker (decoded transfer/envelope or
+    // a structured-cloned request). Compact it in place so persistence does not
+    // retain a second complete entity/belt object graph beside the checkpoint.
+    const persistent = projectPersistentSaveStateInPlaceOwned(state, request.contentPackRegistry);
     const mode = persistent.mode === "speedrun" ? "speedrun" : "normal";
     if (authoritativeProof) {
       const expected = request.expectedStateIdentity;

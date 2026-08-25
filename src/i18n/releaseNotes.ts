@@ -27,6 +27,50 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release119Copy = {
+  date: { "zh-CN": "2026年8月26日", en: "August 26, 2026" },
+  title: { "zh-CN": "大型工厂 JavaScript 架构优化", en: "Large-factory JavaScript Architecture Optimization" },
+  summary: {
+    "zh-CN": "1.1.9 完成 Windows 高性能架构第一层：常见建造、拆除、线路和蓝图命令改用写时复制，撤销历史保存有界差异而不是完整工厂；大型 UI 投影合并发布，分块自动保存从权威 Worker 流式提交。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.1.9 delivers the first Windows performance layer: common factory commands use copy-on-write, bounded deltas replace full-factory undo snapshots, large UI projections are coalesced, and chunked autosaves stream from the authority Worker. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  editTitle: { "zh-CN": "工厂编辑不再深拷贝全部记录", en: "Factory edits no longer deep-clone every record" },
+  editDescription: {
+    "zh-CN": "放置建筑、回收空建筑、拆除/重连单条线路和创建蓝图只复制实际变化的集合与记录；未变化的实体和线路保持稳定引用。",
+    en: "Building placement, empty-building removal, single-belt removal/reconnection, and blueprint creation copy only changed collections and records while unchanged entities and belts retain stable references.",
+  },
+  historyTitle: { "zh-CN": "撤销/重做改为有界差异日志", en: "Undo/redo uses a bounded delta log" },
+  historyDescription: {
+    "zh-CN": "历史按条目数和估算字节双重限制；撤销只反转该次操作的字段，保留之后已经结算的模拟时间，不再用旧完整状态造成体感回档。",
+    en: "History is bounded by entry count and estimated bytes. Undo reverses only the edited leaves and preserves simulation time settled afterward instead of reinstalling an old full state.",
+  },
+  saveTitle: { "zh-CN": "大型自动保存流式提交有界数据页", en: "Large autosaves stream bounded pages" },
+  saveDescription: {
+    "zh-CN": "权威 Worker 只构造一次顶层投影，再以有界实体/线路页和 ACK 回压交给页面持有租约的 IndexedDB writer；普通大档自动保存不再传输第二份完整检查点。",
+    en: "The authority Worker projects the top level once, then sends bounded entity/belt pages with ACK backpressure to the page-owned IndexedDB writer; ordinary large autosaves no longer transfer a second full checkpoint.",
+  },
+  projectionTitle: { "zh-CN": "大型工厂界面复制合并处理", en: "Large-factory UI copies are coalesced" },
+  projectionDescription: {
+    "zh-CN": "Worker 继续按原精确步长提交模拟 revision；没有活动编辑时，每两个大工厂回执发布一次累计记录投影，命令、选中、放置和连线仍立即刷新。",
+    en: "The Worker continues committing exact simulation revisions at the original step size. Without active editing, every two large-factory responses publish one cumulative record projection; commands, selection, placement, and connections still refresh immediately.",
+  },
+  runtimeTitle: { "zh-CN": "模拟命令使用脏索引和稳定运行时记录", en: "Simulation commands use dirty indexes and stable runtime records" },
+  runtimeDescription: {
+    "zh-CN": "仅运行时字段在 Worker 内原地应用并标记实体、线路和行星脏集合；配方、拓扑等索引敏感变化继续走确定性的完整重建回退。",
+    en: "Runtime-only leaves apply in place and mark entity, belt, and planet dirty sets. Recipe and topology changes still use the deterministic full-index rebuild fallback.",
+  },
+  pauseTitle: { "zh-CN": "内存保护暂停不再安装旧检查点", en: "Memory protection no longer installs an older checkpoint" },
+  pauseDescription: {
+    "zh-CN": "达到内存或积压保护线时暂停当前可见进度并保留未结算时间；关闭保护时继续运行，两种模式都不会由内存闸门主动回档。",
+    en: "At a memory/backlog watermark the current visible progress and unsettled time are preserved. With protection disabled the game keeps running; neither mode lets the memory governor actively rewind state.",
+  },
+  compatibilityTitle: { "zh-CN": "存档与云端格式不升级", en: "Save and cloud formats remain unchanged" },
+  compatibilityDescription: {
+    "zh-CN": "继续读写 GameState v47 / envelope v2；1.1.8 存档、云存档和分块 sidecar 无需转换即可进入 1.1.9。",
+    en: "GameState v47 and envelope v2 remain the read/write boundary; 1.1.8 local saves, cloud saves, and chunked sidecars enter 1.1.9 without format conversion.",
+  },
+} as const;
+
 const release118Copy = {
   date: { "zh-CN": "2026年8月25日", en: "August 25, 2026" },
   title: { "zh-CN": "内存安全暂停与分块增量存档", en: "Memory Safety Pausing and Chunked Incremental Saves" },
@@ -540,6 +584,10 @@ function release118Message(locale: AppLocale, key: keyof typeof release118Copy):
   return release118Copy[key][locale];
 }
 
+function release119Message(locale: AppLocale, key: keyof typeof release119Copy): string {
+  return release119Copy[key][locale];
+}
+
 function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
@@ -574,6 +622,25 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-26-v1.1.9",
+    date: release119Message(locale, "date"),
+    version: "1.1.9",
+    title: release119Message(locale, "title"),
+    summary: release119Message(locale, "summary"),
+    items: [
+      { id: "copy-on-write-factory-edits", title: release119Message(locale, "editTitle"), description: release119Message(locale, "editDescription") },
+      { id: "bounded-delta-history", title: release119Message(locale, "historyTitle"), description: release119Message(locale, "historyDescription") },
+      { id: "single-owner-chunk-save", title: release119Message(locale, "saveTitle"), description: release119Message(locale, "saveDescription") },
+      { id: "cumulative-large-factory-projection", title: release119Message(locale, "projectionTitle"), description: release119Message(locale, "projectionDescription") },
+      { id: "dirty-runtime-index", title: release119Message(locale, "runtimeTitle"), description: release119Message(locale, "runtimeDescription") },
+      { id: "memory-pause-no-rollback", title: release119Message(locale, "pauseTitle"), description: release119Message(locale, "pauseDescription") },
+      { id: "version-compatibility", title: release119Message(locale, "compatibilityTitle"), description: release119Message(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes118(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-25-v1.1.8",
     date: release118Message(locale, "date"),

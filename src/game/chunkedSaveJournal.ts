@@ -7,6 +7,8 @@ import {
 } from "./localSaveStore";
 import { computeSaveStateChecksum, inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
+import { createPersistentSaveProjectionParts } from "./saveProjection";
+import type { ContentPackRegistry } from "./contentPacks";
 import type { GameState, SaveMode } from "./types";
 
 /** Internal v1 sidecar format. The public envelope remains format v2/state v47. */
@@ -48,6 +50,8 @@ export interface ChunkedSaveBuildResult {
   projectedState: GameState;
 }
 
+export interface ChunkedSavePartsBuildResult extends Omit<ChunkedSaveBuildResult, "projectedState"> {}
+
 export interface PersistChunkedSaveOptions {
   mode: SaveMode;
   basePrimaryChecksum: string;
@@ -62,6 +66,22 @@ export interface PersistChunkedSaveResult {
   chunkCount: number;
   savedAt: number;
   manifest: ChunkedSaveManifest;
+}
+
+export interface ChunkedSaveJournalContext {
+  mode: SaveMode;
+  basePrimaryChecksum: string;
+  previous: ChunkedSaveManifest | null;
+  previousChunkIds: string[];
+  existingKeys: string[];
+}
+
+export interface ChunkedSaveJournalCommit {
+  context: Pick<ChunkedSaveJournalContext, "mode" | "basePrimaryChecksum"> & {
+    previousChunkRootChecksum: string | null;
+  };
+  writes: LocalSaveInternalWrite[];
+  result: PersistChunkedSaveResult;
 }
 
 export interface RestoredChunkedSave {
@@ -157,10 +177,40 @@ function visitProjectedParts(
   visitArray(belts, "belts", CHUNKED_BELT_SIZE);
 }
 
-export function buildChunkedSaveJournal(
-  projectedState: GameState,
+function visitRuntimeProjectionParts(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+  visit: (part: { metadata: ChunkedSaveChunkMetadata; text: string }) => void,
+): { stateVersion: number; entityCount: number; beltCount: number } {
+  const projection = createPersistentSaveProjectionParts(state, contentPackRegistry);
+  visit(makeChunk("base", "base", 0, projection.base));
+  const visitRanges = (
+    total: number,
+    kind: "entities" | "belts",
+    size: number,
+    project: (offset: number, count: number) => unknown[],
+  ) => {
+    let visited = false;
+    for (let offset = 0; offset < total; offset += size) {
+      visited = true;
+      visit(makeChunk(`${kind}:${String(offset).padStart(8, "0")}`, kind, offset, project(offset, size)));
+    }
+    if (!visited) visit(makeChunk(`${kind}:00000000`, kind, 0, []));
+  };
+  visitRanges(projection.entityCount, "entities", CHUNKED_ENTITY_SIZE, projection.projectEntityRange);
+  visitRanges(projection.beltCount, "belts", CHUNKED_BELT_SIZE, projection.projectBeltRange);
+  return {
+    stateVersion: projection.base.version,
+    entityCount: projection.entityCount,
+    beltCount: projection.beltCount,
+  };
+}
+
+function buildChunkedSaveJournalParts(
+  identity: { stateVersion: number; entityCount: number; beltCount: number },
   options: { mode: SaveMode; basePrimaryChecksum: string; savedAt?: number; previous?: ChunkedSaveManifest | null; previousChunkTexts?: ReadonlyMap<string, string>; previousChunkIds?: ReadonlySet<string>; retainAllChunks?: boolean },
-): ChunkedSaveBuildResult {
+  visitParts: (visit: (part: { metadata: ChunkedSaveChunkMetadata; text: string }) => void) => void,
+): ChunkedSavePartsBuildResult {
   const metadata: ChunkedSaveChunkMetadata[] = [];
   const chunks = new Map<string, string>();
   const previous = options.previous ?? null;
@@ -168,7 +218,7 @@ export function buildChunkedSaveJournal(
   const changedChunkIds: string[] = [];
   const changedChunkSet = new Set<string>();
   let changedBytes = 0;
-  visitProjectedParts(projectedState, (part) => {
+  visitParts((part) => {
     metadata.push(part.metadata);
     const old = previousById.get(part.metadata.id);
     const oldText = options.previousChunkTexts?.get(part.metadata.id);
@@ -187,16 +237,34 @@ export function buildChunkedSaveJournal(
     envelopeFormatVersion: CHUNKED_SAVE_ENVELOPE_FORMAT_VERSION,
     mode: options.mode,
     slot: "main",
-    stateVersion: projectedState.version,
+    stateVersion: identity.stateVersion,
     savedAt: options.savedAt ?? Date.now(),
     basePrimaryChecksum: options.basePrimaryChecksum,
     chunkRootChecksum: chunkRootChecksum(metadata),
     totalBytes: metadata.reduce((sum, chunk) => sum + chunk.bytes, 0),
-    entityCount: projectedState.entities.length,
-    beltCount: projectedState.belts.length,
+    entityCount: identity.entityCount,
+    beltCount: identity.beltCount,
     chunks: metadata,
   };
-  return { manifest, chunks, changedChunkIds, changedBytes, totalBytes: manifest.totalBytes, projectedState };
+  return { manifest, chunks, changedChunkIds, changedBytes, totalBytes: manifest.totalBytes };
+}
+
+export function buildChunkedSaveJournal(
+  projectedState: GameState,
+  options: { mode: SaveMode; basePrimaryChecksum: string; savedAt?: number; previous?: ChunkedSaveManifest | null; previousChunkTexts?: ReadonlyMap<string, string>; previousChunkIds?: ReadonlySet<string>; retainAllChunks?: boolean },
+): ChunkedSaveBuildResult {
+  return {
+    ...buildChunkedSaveJournalParts(
+      {
+        stateVersion: projectedState.version,
+        entityCount: projectedState.entities.length,
+        beltCount: projectedState.belts.length,
+      },
+      options,
+      (visit) => visitProjectedParts(projectedState, visit),
+    ),
+    projectedState,
+  };
 }
 
 function assembleState(manifest: ChunkedSaveManifest, values: ReadonlyMap<string, string>): GameState | null {
@@ -247,41 +315,229 @@ function buildEnvelope(state: GameState, manifest: ChunkedSaveManifest): string 
   });
 }
 
-export async function persistChunkedSaveJournal(
-  projectedState: GameState,
+export async function prepareChunkedSaveJournalContext(
+  mode: SaveMode,
+  basePrimaryChecksum: string,
+): Promise<ChunkedSaveJournalContext> {
+  const previous = parseManifest(await readLocalSaveInternalValue(manifestKey(mode)));
+  const existingKeys = await listLocalSaveInternalKeys(journalPrefix(mode));
+  const matchingPrevious = previous?.basePrimaryChecksum === basePrimaryChecksum ? previous : null;
+  const existingKeySet = new Set(existingKeys);
+  const previousChunkIds = matchingPrevious?.chunks
+    .filter((chunk) => existingKeySet.has(chunkKey(mode, chunk.id)))
+    .map((chunk) => chunk.id) ?? [];
+  return { mode, basePrimaryChecksum, previous: matchingPrevious, previousChunkIds, existingKeys };
+}
+
+function buildChunkedSaveJournalCommitParts(
+  identity: { stateVersion: number; entityCount: number; beltCount: number },
   options: PersistChunkedSaveOptions,
-): Promise<PersistChunkedSaveResult> {
-  const previous = parseManifest(await readLocalSaveInternalValue(manifestKey(options.mode)));
-  const existingKeys = new Set(await listLocalSaveInternalKeys(journalPrefix(options.mode)));
-  const previousChunkIds = new Set(
-    previous?.basePrimaryChecksum === options.basePrimaryChecksum
-      ? previous.chunks.filter((chunk) => existingKeys.has(chunkKey(options.mode, chunk.id))).map((chunk) => chunk.id)
-      : [],
-  );
-  const build = buildChunkedSaveJournal(projectedState, {
+  context: ChunkedSaveJournalContext,
+  visitParts: (visit: (part: { metadata: ChunkedSaveChunkMetadata; text: string }) => void) => void,
+): ChunkedSaveJournalCommit {
+  if (context.mode !== options.mode || context.basePrimaryChecksum !== options.basePrimaryChecksum) {
+    throw new Error("分块保存上下文与主存档身份不一致");
+  }
+  const previousChunkIds = new Set(context.previousChunkIds);
+  const build = buildChunkedSaveJournalParts(identity, {
     mode: options.mode,
     basePrimaryChecksum: options.basePrimaryChecksum,
     savedAt: options.savedAt,
-    previous: previous?.basePrimaryChecksum === options.basePrimaryChecksum ? previous : null,
+    previous: context.previous,
     previousChunkIds,
     retainAllChunks: false,
-  });
-  const staleKeys = (await listLocalSaveInternalKeys(journalPrefix(options.mode))).filter((key) =>
+  }, visitParts);
+  const staleKeys = context.existingKeys.filter((key) =>
     key !== manifestKey(options.mode) && !build.manifest.chunks.some((chunk) => key === chunkKey(options.mode, chunk.id)));
   const writes: LocalSaveInternalWrite[] = [];
   for (const id of build.changedChunkIds) writes.push({ key: chunkKey(options.mode, id), value: build.chunks.get(id)! });
   for (const key of staleKeys) writes.push({ key, value: null });
   // Manifest is intentionally last in the transaction.
   writes.push({ key: manifestKey(options.mode), value: JSON.stringify(build.manifest) });
-  await commitLocalSaveInternalRecords(writes);
+  return {
+    context: {
+      mode: options.mode,
+      basePrimaryChecksum: options.basePrimaryChecksum,
+      previousChunkRootChecksum: context.previous?.chunkRootChecksum ?? null,
+    },
+    writes,
+    result: {
+      success: true,
+      changedChunks: build.changedChunkIds.length,
+      changedBytes: build.changedBytes,
+      totalBytes: build.totalBytes,
+      chunkCount: build.manifest.chunks.length,
+      savedAt: build.manifest.savedAt,
+      manifest: build.manifest,
+    },
+  };
+}
+
+export async function commitChunkedSaveJournal(
+  commit: ChunkedSaveJournalCommit,
+): Promise<PersistChunkedSaveResult> {
+  const currentIdentity = await prepareChunkedSaveJournalContext(commit.context.mode, commit.context.basePrimaryChecksum);
+  // A newer sidecar commit must never be overwritten by a build produced from
+  // an older manifest while another async boundary was in flight.
+  const expectedManifest = commit.result.manifest;
+  const previousRoot = currentIdentity.previous?.chunkRootChecksum ?? null;
+  const builtFromRoot = (() => {
+    const manifestWrite = commit.writes.at(-1)?.value;
+    if (!manifestWrite) return null;
+    try {
+      const parsed = JSON.parse(manifestWrite) as ChunkedSaveManifest;
+      return parsed.chunkRootChecksum === expectedManifest.chunkRootChecksum ? parsed : null;
+    } catch { return null; }
+  })();
+  if (!builtFromRoot || currentIdentity.basePrimaryChecksum !== commit.context.basePrimaryChecksum ||
+    previousRoot !== commit.context.previousChunkRootChecksum) {
+    throw new Error("分块保存提交清单校验失败");
+  }
+  await commitLocalSaveInternalRecords(commit.writes);
+  return commit.result;
+}
+
+export async function persistChunkedSaveJournal(
+  projectedState: GameState,
+  options: PersistChunkedSaveOptions,
+): Promise<PersistChunkedSaveResult> {
+  const context = await prepareChunkedSaveJournalContext(options.mode, options.basePrimaryChecksum);
+  const commit = buildChunkedSaveJournalCommit(projectedState, options, context);
+  return commitChunkedSaveJournal(commit);
+}
+
+export function buildChunkedSaveJournalCommit(
+  projectedState: GameState,
+  options: PersistChunkedSaveOptions,
+  context: ChunkedSaveJournalContext,
+): ChunkedSaveJournalCommit {
+  return buildChunkedSaveJournalCommitParts(
+    {
+      stateVersion: projectedState.version,
+      entityCount: projectedState.entities.length,
+      beltCount: projectedState.belts.length,
+    },
+    options,
+    context,
+    (visit) => visitProjectedParts(projectedState, visit),
+  );
+}
+
+/**
+ * Persist the sidecar directly from Worker-owned authority. Only one bounded
+ * record page and the changed chunk strings are alive at once; no full JSON
+ * transfer or decoded mirror is created.
+ */
+export async function persistChunkedSaveJournalFromRuntimeState(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+  options: PersistChunkedSaveOptions,
+): Promise<PersistChunkedSaveResult> {
+  const context = await prepareChunkedSaveJournalContext(options.mode, options.basePrimaryChecksum);
+  const commit = buildChunkedSaveJournalCommitFromRuntimeState(state, contentPackRegistry, options, context);
+  return commitChunkedSaveJournal(commit);
+}
+
+export function buildChunkedSaveJournalCommitFromRuntimeState(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+  options: PersistChunkedSaveOptions,
+  context: ChunkedSaveJournalContext,
+): ChunkedSaveJournalCommit {
+  const visitParts = (visit: (part: { metadata: ChunkedSaveChunkMetadata; text: string }) => void) => {
+    visitRuntimeProjectionParts(state, contentPackRegistry, visit);
+  };
+  const projectedIdentity = { stateVersion: state.version, entityCount: state.entities.length, beltCount: state.belts.length };
+  return buildChunkedSaveJournalCommitParts(projectedIdentity, options, context, visitParts);
+}
+
+const STREAMING_SAVE_WRITE_BATCH_SIZE = 8;
+
+/**
+ * Project and durably write a large authority in bounded batches. The caller
+ * supplies the page-owned writer callback, normally bridged over a
+ * back-pressured MessagePort from the Simulation Worker. The old manifest is
+ * left in place until every changed chunk has been acknowledged; if the page
+ * dies mid-stream, checksum validation ignores the incomplete sidecar and the
+ * compatible full primary remains recoverable.
+ */
+export async function streamChunkedSaveJournalFromRuntimeState(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+  options: PersistChunkedSaveOptions,
+  context: ChunkedSaveJournalContext,
+  writeBatch: (records: LocalSaveInternalWrite[]) => Promise<void>,
+): Promise<PersistChunkedSaveResult> {
+  if (context.mode !== options.mode || context.basePrimaryChecksum !== options.basePrimaryChecksum) {
+    throw new Error("流式分块保存上下文与主存档身份不一致");
+  }
+  const projection = createPersistentSaveProjectionParts(state, contentPackRegistry);
+  const previousById = new Map(context.previous?.chunks.map((chunk) => [chunk.id, chunk]) ?? []);
+  const previousChunkIds = new Set(context.previousChunkIds);
+  const metadata: ChunkedSaveChunkMetadata[] = [];
+  const changedChunkIds: string[] = [];
+  const pendingWrites: LocalSaveInternalWrite[] = [];
+  let changedBytes = 0;
+  const flush = async () => {
+    if (pendingWrites.length === 0) return;
+    const records = pendingWrites.splice(0, pendingWrites.length);
+    await writeBatch(records);
+  };
+  const consume = async (part: { metadata: ChunkedSaveChunkMetadata; text: string }) => {
+    metadata.push(part.metadata);
+    const previous = previousById.get(part.metadata.id);
+    if (previous && previous.checksum === part.metadata.checksum && previousChunkIds.has(part.metadata.id)) return;
+    changedChunkIds.push(part.metadata.id);
+    changedBytes += part.metadata.bytes;
+    pendingWrites.push({ key: chunkKey(options.mode, part.metadata.id), value: part.text });
+    if (pendingWrites.length >= STREAMING_SAVE_WRITE_BATCH_SIZE) await flush();
+  };
+  await consume(makeChunk("base", "base", 0, projection.base));
+  const consumeRanges = async (
+    total: number,
+    kind: "entities" | "belts",
+    size: number,
+    project: (offset: number, count: number) => unknown[],
+  ) => {
+    if (total === 0) {
+      await consume(makeChunk(`${kind}:00000000`, kind, 0, []));
+      return;
+    }
+    for (let offset = 0; offset < total; offset += size) {
+      await consume(makeChunk(`${kind}:${String(offset).padStart(8, "0")}`, kind, offset, project(offset, size)));
+    }
+  };
+  await consumeRanges(projection.entityCount, "entities", CHUNKED_ENTITY_SIZE, projection.projectEntityRange);
+  await consumeRanges(projection.beltCount, "belts", CHUNKED_BELT_SIZE, projection.projectBeltRange);
+  await flush();
+  const manifest: ChunkedSaveManifest = {
+    formatVersion: CHUNKED_SAVE_FORMAT_VERSION,
+    envelopeFormatVersion: CHUNKED_SAVE_ENVELOPE_FORMAT_VERSION,
+    mode: options.mode,
+    slot: "main",
+    stateVersion: projection.base.version,
+    savedAt: options.savedAt ?? Date.now(),
+    basePrimaryChecksum: options.basePrimaryChecksum,
+    chunkRootChecksum: chunkRootChecksum(metadata),
+    totalBytes: metadata.reduce((sum, chunk) => sum + chunk.bytes, 0),
+    entityCount: projection.entityCount,
+    beltCount: projection.beltCount,
+    chunks: metadata,
+  };
+  const staleKeys = context.existingKeys.filter((key) =>
+    key !== manifestKey(options.mode) && !manifest.chunks.some((chunk) => key === chunkKey(options.mode, chunk.id)));
+  await writeBatch([
+    ...staleKeys.map((key) => ({ key, value: null })),
+    { key: manifestKey(options.mode), value: JSON.stringify(manifest) },
+  ]);
   return {
     success: true,
-    changedChunks: build.changedChunkIds.length,
-    changedBytes: build.changedBytes,
-    totalBytes: build.totalBytes,
-    chunkCount: build.manifest.chunks.length,
-    savedAt: build.manifest.savedAt,
-    manifest: build.manifest,
+    changedChunks: changedChunkIds.length,
+    changedBytes,
+    totalBytes: manifest.totalBytes,
+    chunkCount: manifest.chunks.length,
+    savedAt: manifest.savedAt,
+    manifest,
   };
 }
 
@@ -320,4 +576,16 @@ export async function restoreChunkedSavePayload(baseRaw: string, mode: SaveMode)
 /** Exposed for the benchmark and unit tests without touching IndexedDB. */
 export function chunkedSavePartsForTest(projectedState: GameState, previous?: ChunkedSaveManifest | null): ChunkedSaveBuildResult {
   return buildChunkedSaveJournal(projectedState, { mode: projectedState.mode, basePrimaryChecksum: "00000000", previous });
+}
+
+/** Exposed only for byte-equivalence tests of the bounded projection path. */
+export function chunkedRuntimeSavePartsForTest(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry,
+): ChunkedSavePartsBuildResult {
+  return buildChunkedSaveJournalParts(
+    { stateVersion: state.version, entityCount: state.entities.length, beltCount: state.belts.length },
+    { mode: state.mode, basePrimaryChecksum: "00000000" },
+    (visit) => { visitRuntimeProjectionParts(state, contentPackRegistry, visit); },
+  );
 }

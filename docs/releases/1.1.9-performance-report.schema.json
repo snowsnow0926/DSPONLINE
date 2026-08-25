@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dspidle:performance-report:v2",
+  "title": "DSPidle production real-save performance report",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "label",
+    "scenario",
+    "url",
+    "fixture",
+    "build",
+    "environment",
+    "durationSeconds",
+    "pageErrors",
+    "peaks",
+    "trends",
+    "steadyState",
+    "finalState",
+    "processSamples"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "label": { "type": "string", "minLength": 1 },
+    "scenario": { "enum": ["pure", "operations", "save", "operations-save"] },
+    "url": { "type": "string" },
+    "fixture": {
+      "type": "object",
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "build": {
+      "type": "object",
+      "required": ["gitSha", "applicationVersion"],
+      "properties": {
+        "gitSha": { "type": ["string", "null"] },
+        "applicationVersion": { "type": ["object", "null"] }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["node", "browserVersion", "userAgent", "machine", "serviceWorkerControlled", "memoryGuard"],
+      "properties": {
+        "node": { "type": "string" },
+        "browserVersion": { "type": ["string", "null"] },
+        "userAgent": { "type": "string" },
+        "machine": { "type": ["object", "null"] },
+        "serviceWorkerControlled": { "type": "boolean" },
+        "memoryGuard": { "type": "object" }
+      }
+    },
+    "durationSeconds": { "type": "integer", "minimum": 10 },
+    "requestedAutoPause": { "type": ["boolean", "null"] },
+    "pageErrors": { "type": "array", "items": { "type": "string" } },
+    "operationResults": { "type": "array" },
+    "peaks": {
+      "type": "object",
+      "required": ["rendererPrivateBytes", "browserProcessPrivateBytes", "cdpHeapUsedBytes"],
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "trends": {
+      "type": "object",
+      "required": [
+        "aggregatePrivateBytesPerMinute",
+        "rendererPrivateBytesPerMinute",
+        "steadyStateStartSeconds",
+        "steadyAggregatePrivateBytesPerMinute",
+        "steadyRendererPrivateBytesPerMinute"
+      ],
+      "properties": {
+        "aggregatePrivateBytesPerMinute": { "type": ["integer", "null"] },
+        "rendererPrivateBytesPerMinute": { "type": ["integer", "null"] },
+        "steadyStateStartSeconds": { "type": "number", "minimum": 0 },
+        "steadyAggregatePrivateBytesPerMinute": { "type": ["integer", "null"] },
+        "steadyRendererPrivateBytesPerMinute": { "type": ["integer", "null"] },
+        "firstAggregatePrivateBytes": { "type": ["number", "null"] },
+        "lastAggregatePrivateBytes": { "type": ["number", "null"] },
+        "postGcAggregatePrivateBytes": { "type": ["number", "null"] }
+      }
+    },
+    "steadyState": {
+      "type": "object",
+      "required": [
+        "startSeconds",
+        "sampleCount",
+        "aggregatePrivateBytesP50",
+        "aggregatePrivateBytesP95",
+        "rendererPrivateBytesP50",
+        "rendererPrivateBytesP95"
+      ],
+      "properties": {
+        "startSeconds": { "type": "number", "minimum": 0 },
+        "sampleCount": { "type": "integer", "minimum": 0 },
+        "aggregatePrivateBytesP50": { "type": ["integer", "null"], "minimum": 0 },
+        "aggregatePrivateBytesP95": { "type": ["integer", "null"], "minimum": 0 },
+        "rendererPrivateBytesP50": { "type": ["integer", "null"], "minimum": 0 },
+        "rendererPrivateBytesP95": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "finalState": { "type": "object" },
+    "pageMemorySamples": { "type": "array" },
+    "processSamples": { "type": "array" }
+  }
+}

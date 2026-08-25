@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-25-v1.1.8";
+const RELEASE_NOTE_ID = "2026-08-26-v1.1.9";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -521,7 +521,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.8");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.9");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(dialog).toContainText("内存超限自动暂停可配置");
   await expect(dialog).toContainText("大型存档改为分块增量检查点");

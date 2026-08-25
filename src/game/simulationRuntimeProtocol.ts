@@ -1,4 +1,5 @@
 import type { BeltConnection, FactoryEntity, GameState } from "./types";
+import { collectGameStateEditLineage } from "./gameStateEditLineage";
 
 export const SIMULATION_RUNTIME_PROTOCOL_VERSION = 1 as const;
 
@@ -229,6 +230,50 @@ function createRecordPatches<T extends { id: string }>(previous: readonly T[], c
   };
 }
 
+function createRecordPatchesForTouchedIds<T extends { id: string }>(
+  previous: readonly T[],
+  current: readonly T[],
+  touchedIds: ReadonlySet<string>,
+) {
+  if (touchedIds.size === 0) {
+    return {
+      changed: [] as SimulationRecordPatch[],
+      added: [] as Array<{ index: number; value: T }>,
+      removed: [] as string[],
+    };
+  }
+  // Scan the ordinary v47 arrays once but retain only touched records. A
+  // one-building edit no longer allocates two 80k/155k Map/Set indexes merely
+  // to encode its revisioned command.
+  const previousById = new Map<string, T>();
+  const currentById = new Map<string, { index: number; value: T }>();
+  const currentTouched: Array<{ index: number; value: T }> = [];
+  for (const record of previous) if (touchedIds.has(record.id)) previousById.set(record.id, record);
+  current.forEach((record, index) => {
+    if (!touchedIds.has(record.id)) return;
+    const indexed = { index, value: record };
+    currentById.set(record.id, indexed);
+    currentTouched.push(indexed);
+  });
+  const changed: SimulationRecordPatch[] = [];
+  const added: Array<{ index: number; value: T }> = [];
+  for (const indexed of currentTouched) {
+    const before = previousById.get(indexed.value.id);
+    if (!before) {
+      added.push(indexed);
+      continue;
+    }
+    if (before === indexed.value) continue;
+    const changes = createValuePatches(before, indexed.value);
+    if (changes.length > 0) changed.push({ id: indexed.value.id, changes });
+  }
+  const removed: string[] = [];
+  for (const record of previous) {
+    if (touchedIds.has(record.id) && !currentById.has(record.id)) removed.push(record.id);
+  }
+  return { changed, added, removed };
+}
+
 export function createSimulationCommandPatch(
   previous: GameState,
   current: GameState,
@@ -248,8 +293,13 @@ export function createSimulationCommandPatch(
     }
     topLevelChanges.push(...createValuePatches(before, afterRecord[key], [key]));
   }
-  const entities = createRecordPatches(previous.entities, current.entities);
-  const belts = createRecordPatches(previous.belts, current.belts);
+  const lineage = collectGameStateEditLineage(previous, current);
+  const entities = lineage
+    ? createRecordPatchesForTouchedIds(previous.entities, current.entities, lineage.entityIds)
+    : createRecordPatches(previous.entities, current.entities);
+  const belts = lineage
+    ? createRecordPatchesForTouchedIds(previous.belts, current.belts, lineage.beltIds)
+    : createRecordPatches(previous.belts, current.belts);
   if (topLevelChanges.length === 0 && entities.changed.length === 0 && entities.added.length === 0 && entities.removed.length === 0 &&
     belts.changed.length === 0 && belts.added.length === 0 && belts.removed.length === 0) return null;
   return {
@@ -262,6 +312,116 @@ export function createSimulationCommandPatch(
     changedBelts: belts.changed,
     addedBelts: belts.added,
     removedBeltIds: belts.removed,
+  };
+}
+
+interface PatchPathValue {
+  exists: boolean;
+  value?: unknown;
+}
+
+function readPatchPath(root: unknown, path: readonly SimulationPatchPathSegment[]): PatchPathValue {
+  if (path.length === 0) return { exists: true, value: root };
+  let cursor = root;
+  for (const segment of path) {
+    if (!isContainer(cursor) || !Object.prototype.hasOwnProperty.call(cursor, segment)) {
+      return { exists: false };
+    }
+    cursor = (cursor as Record<string | number, unknown>)[segment];
+  }
+  return { exists: true, value: cursor };
+}
+
+function invertValuePatch(root: unknown, patch: SimulationValuePatch): SimulationValuePatch {
+  const previous = readPatchPath(root, patch.path);
+  return previous.exists
+    ? { path: [...patch.path], operation: "set", value: previous.value }
+    : { path: [...patch.path], operation: "delete" };
+}
+
+function collectInverseRecordSources<T extends { id: string }>(
+  previous: readonly T[],
+  changed: readonly SimulationRecordPatch[],
+  removedIds: readonly string[],
+): Map<string, { index: number; value: T }> {
+  const wanted = new Set<string>([
+    ...changed.map((record) => record.id),
+    ...removedIds,
+  ]);
+  const result = new Map<string, { index: number; value: T }>();
+  if (wanted.size === 0) return result;
+  previous.forEach((value, index) => {
+    if (wanted.has(value.id)) result.set(value.id, { index, value });
+  });
+  return result;
+}
+
+function invertRecordPatches<T extends { id: string }>(
+  previous: readonly T[],
+  changed: readonly SimulationRecordPatch[],
+  added: readonly { index: number; value: T }[],
+  removedIds: readonly string[],
+): {
+  changed: SimulationRecordPatch[];
+  added: Array<{ index: number; value: T }>;
+  removedIds: string[];
+} {
+  const sources = collectInverseRecordSources(previous, changed, removedIds);
+  const inverseChanged = changed.map((record) => {
+    const source = sources.get(record.id)?.value;
+    if (!source) throw new Error(`无法为记录 ${record.id} 创建逆向模拟命令`);
+    return {
+      id: record.id,
+      changes: record.changes.map((change) => invertValuePatch(source, change)),
+    };
+  });
+  const inverseAdded = removedIds.map((id) => {
+    const source = sources.get(id);
+    if (!source) throw new Error(`无法为已删除记录 ${id} 创建逆向模拟命令`);
+    return source;
+  });
+  return {
+    changed: inverseChanged,
+    added: inverseAdded,
+    removedIds: added.map((entry) => entry.value.id),
+  };
+}
+
+/**
+ * Build the undo command from the already-computed forward patch. This scans
+ * ordinary v47 arrays once for only the touched/removed ids and avoids a
+ * second global 80k/155k diff (and its temporary Maps) for every history item.
+ */
+export function invertSimulationCommandPatch(
+  previous: GameState,
+  patch: SimulationCommandPatch,
+  baseRevision = patch.baseRevision,
+): SimulationCommandPatch {
+  if (patch.protocolVersion !== SIMULATION_RUNTIME_PROTOCOL_VERSION) {
+    throw new Error(`不支持的模拟命令协议 ${patch.protocolVersion}`);
+  }
+  const entities = invertRecordPatches(
+    previous.entities,
+    patch.changedEntities,
+    patch.addedEntities,
+    patch.removedEntityIds,
+  );
+  const belts = invertRecordPatches(
+    previous.belts,
+    patch.changedBelts,
+    patch.addedBelts,
+    patch.removedBeltIds,
+  );
+  return {
+    protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
+    baseRevision,
+    topLevelChanges: patch.topLevelChanges.map((change) => invertValuePatch(previous, change)),
+    changedEntities: entities.changed,
+    addedEntities: entities.added,
+    removedEntityIds: entities.removedIds,
+    changedBelts: belts.changed,
+    addedBelts: belts.added,
+    removedBeltIds: belts.removedIds,
   };
 }
 
@@ -313,6 +473,145 @@ export function applySimulationCommandPatch(state: GameState, patch: SimulationC
     ...topLevel,
     entities: applyRecordPatches(topLevel.entities, patch.changedEntities, patch.addedEntities, patch.removedEntityIds),
     belts: applyRecordPatches(topLevel.belts, patch.changedBelts, patch.addedBelts, patch.removedBeltIds),
+  };
+}
+
+export interface MutableSimulationCommandResult {
+  state: GameState;
+  topologyDirty: boolean;
+  dynamicRouteDirty: boolean;
+  changedEntityIds: string[];
+  changedBeltIds: string[];
+  dirtyPlanetIds: GameState["activePlanetId"][];
+}
+
+export interface MutableSimulationCommandIndex {
+  entityById?: ReadonlyMap<string, FactoryEntity>;
+  beltById?: ReadonlyMap<string, BeltConnection>;
+}
+
+const SAFE_MUTABLE_ENTITY_FIELDS = new Set([
+  "position", "inputs", "outputs", "progress", "routingCursor", "utilization", "productionRate", "powerFactor",
+  "stationProgress", "stationTrips", "stationLastTransfer", "stationDrones", "stationVessels", "stationWarpers",
+  "stationCongestion", "stationDispatchCursor", "stationLastSupplyPeerBySlot", "fuelRemainingMj", "powerOutputKw",
+  "powerInputKw", "storedEnergyMj", "orbitalCargoProgress", "orbitalCargoTotalUploaded", "blackHolePorts",
+  "proliferatorBonusProgress",
+]);
+const SAFE_MUTABLE_BELT_FIELDS = new Set(["progress", "totalTransferred", "congestion", "lastFlow", "monitorEnabled"]);
+const SAFE_MUTABLE_TOP_LEVEL_FIELDS = new Set([
+  "paused", "elapsedSeconds", "lastSavedAt", "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
+  "canvasBookmarks", "canvasRegions", "planetViewports", "timeWarp", "idleSettlement",
+]);
+
+function applyValuePatchMutable(root: unknown, patch: SimulationValuePatch): unknown {
+  if (patch.path.length === 0) return patch.operation === "delete" ? undefined : patch.value;
+  let cursor = root as Record<string | number, unknown> | unknown[];
+  for (let index = 0; index < patch.path.length - 1; index += 1) {
+    const segment = patch.path[index];
+    let child = (cursor as Record<string | number, unknown>)[segment];
+    if (!isContainer(child)) {
+      child = typeof patch.path[index + 1] === "number" ? [] : {};
+      (cursor as Record<string | number, unknown>)[segment] = child;
+    }
+    cursor = child as Record<string | number, unknown> | unknown[];
+  }
+  const leaf = patch.path.at(-1)!;
+  if (patch.operation === "delete") {
+    if (Array.isArray(cursor) && typeof leaf === "number") cursor.splice(leaf, 1);
+    else delete (cursor as Record<string | number, unknown>)[leaf];
+  } else {
+    (cursor as Record<string | number, unknown>)[leaf] = patch.value;
+  }
+  return root;
+}
+
+/**
+ * Worker-only command application. Runtime records are mutated in place so
+ * stable simulation indexes keep their entity/belt references. Index-sensitive
+ * edits are explicitly marked dirty and still fall back to the full rebuild.
+ */
+export function applySimulationCommandPatchMutable(
+  state: GameState,
+  patch: SimulationCommandPatch,
+  index: MutableSimulationCommandIndex = {},
+): MutableSimulationCommandResult {
+  if (patch.protocolVersion !== SIMULATION_RUNTIME_PROTOCOL_VERSION) {
+    throw new Error(`不支持的模拟命令协议 ${patch.protocolVersion}`);
+  }
+  let topologyDirty = patch.addedEntities.length > 0 || patch.removedEntityIds.length > 0 ||
+    patch.addedBelts.length > 0 || patch.removedBeltIds.length > 0;
+  let dynamicRouteDirty = false;
+  const dirtyPlanets = new Set<GameState["activePlanetId"]>();
+  for (const change of patch.topLevelChanges) {
+    const root = String(change.path[0] ?? "");
+    if (!SAFE_MUTABLE_TOP_LEVEL_FIELDS.has(root)) topologyDirty = true;
+    applyValuePatchMutable(state, change);
+  }
+
+  const entityIndex = patch.changedEntities.length > 0 && !index.entityById
+    ? new Map(state.entities.map((entity) => [entity.id, entity]))
+    : index.entityById;
+  for (const record of patch.changedEntities) {
+    let entity = entityIndex?.get(record.id);
+    if (!entity) {
+      topologyDirty = true;
+      continue;
+    }
+    dirtyPlanets.add(entity.planetId);
+    for (const change of record.changes) {
+      const root = String(change.path[0] ?? "");
+      if (root === "stationRoutes") dynamicRouteDirty = true;
+      else if (!SAFE_MUTABLE_ENTITY_FIELDS.has(root)) topologyDirty = true;
+      entity = applyValuePatchMutable(entity, change) as FactoryEntity;
+    }
+    dirtyPlanets.add(entity.planetId);
+  }
+
+  const beltIndex = patch.changedBelts.length > 0 && !index.beltById
+    ? new Map(state.belts.map((belt) => [belt.id, belt]))
+    : index.beltById;
+  for (const record of patch.changedBelts) {
+    let belt = beltIndex?.get(record.id);
+    if (!belt) {
+      topologyDirty = true;
+      continue;
+    }
+    dirtyPlanets.add(belt.planetId);
+    for (const change of record.changes) {
+      const root = String(change.path[0] ?? "");
+      if (!SAFE_MUTABLE_BELT_FIELDS.has(root)) topologyDirty = true;
+      belt = applyValuePatchMutable(belt, change) as BeltConnection;
+    }
+    dirtyPlanets.add(belt.planetId);
+  }
+
+  if (patch.removedEntityIds.length > 0) {
+    const removed = new Set(patch.removedEntityIds);
+    for (const entity of state.entities) if (removed.has(entity.id)) dirtyPlanets.add(entity.planetId);
+    state.entities = state.entities.filter((entity) => !removed.has(entity.id));
+  }
+  for (const addition of [...patch.addedEntities].sort((left, right) => left.index - right.index)) {
+    if (state.entities.some((entity) => entity.id === addition.value.id)) continue;
+    state.entities.splice(Math.max(0, Math.min(state.entities.length, addition.index)), 0, addition.value);
+    dirtyPlanets.add(addition.value.planetId);
+  }
+  if (patch.removedBeltIds.length > 0) {
+    const removed = new Set(patch.removedBeltIds);
+    for (const belt of state.belts) if (removed.has(belt.id)) dirtyPlanets.add(belt.planetId);
+    state.belts = state.belts.filter((belt) => !removed.has(belt.id));
+  }
+  for (const addition of [...patch.addedBelts].sort((left, right) => left.index - right.index)) {
+    if (state.belts.some((belt) => belt.id === addition.value.id)) continue;
+    state.belts.splice(Math.max(0, Math.min(state.belts.length, addition.index)), 0, addition.value);
+    dirtyPlanets.add(addition.value.planetId);
+  }
+  return {
+    state,
+    topologyDirty,
+    dynamicRouteDirty,
+    changedEntityIds: patch.changedEntities.map((record) => record.id),
+    changedBeltIds: patch.changedBelts.map((record) => record.id),
+    dirtyPlanetIds: [...dirtyPlanets],
   };
 }
 

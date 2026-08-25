@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState } from "./engine";
+import { createInitialState, placeBuilding, removeEntity } from "./engine";
+import { collectGameStateEditLineage } from "./gameStateEditLineage";
 import {
   applySimulationCommandPatch,
+  applySimulationCommandPatchMutable,
   createSimulationStateIdentity,
   createSimulationCommandPatch,
   deserializeSimulationStateTransfer,
@@ -91,6 +93,31 @@ describe("authoritative simulation runtime protocol", () => {
     expect(entityIdReads).toBe(0);
   });
 
+  it("encodes a copy-on-write edit lineage from only its touched record ids", () => {
+    const previous = createInitialState(14_046);
+    previous.construction.arc_smelter = 10;
+    const placed = placeBuilding(previous, "arc_smelter", { x: 700, y: 800 });
+    const placedId = placed.entities.at(-1)!.id;
+    const lineage = collectGameStateEditLineage(previous, placed);
+    expect(lineage?.entityIds).toEqual(new Set([placedId]));
+    expect(lineage?.beltIds).toEqual(new Set());
+
+    const placementPatch = createSimulationCommandPatch(previous, placed, 21)!;
+    expect(placementPatch.addedEntities).toHaveLength(1);
+    expect(placementPatch.addedEntities[0].value.id).toBe(placedId);
+    expect(placementPatch.changedEntities).toEqual([]);
+    expect(applySimulationCommandPatch(previous, placementPatch)).toEqual(placed);
+
+    const removed = removeEntity(placed, placedId);
+    const chained = collectGameStateEditLineage(previous, removed);
+    expect(chained?.depth).toBe(2);
+    expect(chained?.entityIds).toEqual(new Set([placedId]));
+    const chainedPatch = createSimulationCommandPatch(previous, removed, 22)!;
+    expect(chainedPatch.addedEntities).toEqual([]);
+    expect(chainedPatch.removedEntityIds).toEqual([]);
+    expect(applySimulationCommandPatch(previous, chainedPatch)).toEqual(removed);
+  });
+
   it("preserves concurrent Worker leaves that a stale UI command did not touch", () => {
     const uiBaseline = createInitialState(14_044);
     uiBaseline.entities[0].inputs = { iron_ore: 10, copper_ore: 5 };
@@ -117,5 +144,38 @@ describe("authoritative simulation runtime protocol", () => {
     const patch = createSimulationCommandPatch(previous, current, 4)!;
     const applied = applySimulationCommandPatch(previous, patch);
     expect(applied.entities).toEqual(current.entities);
+  });
+
+  it("mutates runtime-only leaves in place without invalidating topology indexes", () => {
+    const previous = createInitialState(14_044);
+    const desired = structuredClone(previous);
+    desired.entities[0].progress = 0.75;
+    desired.entities[0].inputs.iron_ore = 42;
+    const patch = createSimulationCommandPatch(previous, desired, 9)!;
+    const authority = structuredClone(previous);
+    const entityReference = authority.entities[0];
+
+    const entityById = new Map(authority.entities.map((entity) => [entity.id, entity]));
+    const result = applySimulationCommandPatchMutable(authority, patch, { entityById });
+
+    expect(result.topologyDirty).toBe(false);
+    expect(result.changedEntityIds).toEqual([entityReference.id]);
+    expect(result.state.entities[0]).toBe(entityReference);
+    expect(result.state.entities[0].progress).toBe(0.75);
+    expect(result.state.entities[0].inputs.iron_ore).toBe(42);
+    expect(entityById.get(entityReference.id)).toBe(entityReference);
+  });
+
+  it("marks index-sensitive commands dirty while preserving exact patch semantics", () => {
+    const previous = createInitialState(14_044);
+    const desired = structuredClone(previous);
+    desired.entities[0].recipeId = desired.entities[0].recipeId === "iron_ingot" ? "copper_ingot" : "iron_ingot";
+    const patch = createSimulationCommandPatch(previous, desired, 3)!;
+    const authority = structuredClone(previous);
+
+    const result = applySimulationCommandPatchMutable(authority, patch);
+
+    expect(result.topologyDirty).toBe(true);
+    expect(result.state).toEqual(applySimulationCommandPatch(previous, patch));
   });
 });

@@ -29,6 +29,19 @@ function state(): RuntimeTransitionDiagnosticState | null {
   return diagnostics?.enabled ? diagnostics : null;
 }
 
+function addCounter(
+  diagnostics: RuntimeTransitionDiagnosticState,
+  phase: string,
+  durationMs: number,
+): void {
+  diagnostics.counters ??= {};
+  const current = diagnostics.counters[phase] ?? { count: 0, totalMs: 0, maxMs: 0 };
+  current.count += 1;
+  current.totalMs += Math.max(0, durationMs);
+  current.maxMs = Math.max(current.maxMs, durationMs);
+  diagnostics.counters[phase] = current;
+}
+
 export function runtimeTransitionDiagnosticsEnabled(): boolean {
   return state() !== null;
 }
@@ -51,13 +64,15 @@ export function recordRuntimeTransitionPhase(
 ): void {
   const diagnostics = state();
   if (!diagnostics) return;
+  const boundedDurationMs = Math.max(0, durationMs);
   diagnostics.events.push({
     phase,
     startedAt,
-    durationMs: Math.max(0, durationMs),
+    durationMs: boundedDurationMs,
     ...(transition ? { transition } : {}),
     ...(detail ? { detail } : {}),
   });
+  addCounter(diagnostics, phase, boundedDurationMs);
   if (diagnostics.events.length > MAX_EVENTS) diagnostics.events.splice(0, diagnostics.events.length - MAX_EVENTS);
 }
 
@@ -78,12 +93,7 @@ export function recordActiveRuntimeTransitionPhase(
 export function recordRuntimeTransitionCounter(phase: string, durationMs: number): void {
   const diagnostics = state();
   if (!diagnostics) return;
-  diagnostics.counters ??= {};
-  const current = diagnostics.counters[phase] ?? { count: 0, totalMs: 0, maxMs: 0 };
-  current.count += 1;
-  current.totalMs += Math.max(0, durationMs);
-  current.maxMs = Math.max(current.maxMs, durationMs);
-  diagnostics.counters[phase] = current;
+  addCounter(diagnostics, phase, durationMs);
 }
 
 export function completeRuntimeTransition(

@@ -6,7 +6,7 @@ test.use({ hasTouch: true });
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-25-v1.1.8");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-26-v1.1.9");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   });
 });

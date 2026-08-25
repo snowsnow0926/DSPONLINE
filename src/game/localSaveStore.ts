@@ -1967,8 +1967,13 @@ export async function commitLocalSaveInternalRecords(records: readonly LocalSave
       throw new Error("本地 sidecar 写入失败");
     }
   }
+  // IndexedDB is already the authoritative read path for sidecar records.
+  // Mirroring every 1.1.9 entity/belt chunk in this page-local Map retained an
+  // extra ~70 MiB of UTF-16 text (and its allocator arenas) after each large
+  // autosave. Keep the Map only for the memory/localStorage fallbacks that
+  // actually read from it.
   for (const record of records) {
-    if (record.value === null) internalCache.delete(record.key);
+    if (record.value === null || backend === "indexeddb") internalCache.delete(record.key);
     else internalCache.set(record.key, record.value);
   }
 }

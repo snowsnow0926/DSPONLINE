@@ -8,7 +8,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-25-v1.1.8");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-26-v1.1.9");
     }
   });
 }
@@ -2123,7 +2123,7 @@ test("memory auto-pause policy exposes safe defaults and explicit no-rollback mo
     enabled: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1"),
     threshold: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1"),
   }))).toEqual({ enabled: "false", threshold: "2048" });
-  await expect(guard).toContainText("已关闭内存与模拟积压自动暂停/回档");
+  await expect(guard).toContainText("已关闭内存与模拟积压自动暂停");
   await operations.getByLabel("关闭运营中心").click();
   await page.reload();
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });

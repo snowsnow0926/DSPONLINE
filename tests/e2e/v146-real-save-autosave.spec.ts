@@ -13,7 +13,7 @@ test.describe("real save autosave acceptance", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-25-v1.1.8");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-26-v1.1.9");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       // Exercise the player's configured 30-second interval rather than the
       // optional large-save cadence throttle. The handler is called by the
@@ -196,7 +196,7 @@ test.describe("real save autosave acceptance", () => {
     expect(autosaveMetrics.snapshots[0]?.bytes ?? 0).toBeGreaterThan(0);
     const legacyCompressedAutosave = autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "gzip" &&
       entry.transportBytes > 0 && entry.transportBytes < entry.bytes / 10);
-    // 1.1.8 seeds a v1 chunk journal on the first large autosave and writes
+    // 1.1.9 seeds a v1 chunk journal on the first large autosave and writes
     // only changed chunks afterwards. Its sidecar result intentionally has
     // no full-envelope gzip timing; the second write must nevertheless be
     // materially smaller than the initial seed.

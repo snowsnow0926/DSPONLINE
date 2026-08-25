@@ -8,37 +8,58 @@ import type { AppLocale } from "./locale";
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const english = locale === "en";
   return {
-    id: "2026-08-25-v1.1.8",
-    date: english ? "August 25, 2026" : "2026年8月25日",
-    version: "1.1.8",
-    title: english ? "Memory Safety Pausing and Chunked Incremental Saves" : "内存安全暂停与分块增量存档",
+    id: "2026-08-26-v1.1.9",
+    date: english ? "August 26, 2026" : "2026年8月26日",
+    version: "1.1.9",
+    title: english ? "Large-factory JavaScript Architecture Optimization" : "大型工厂 JavaScript 架构优化",
     summary: english
-      ? "Version 1.1.8 adds a memory budget, save/simulation fencing, chunked incremental checkpoints, and a configurable device-only memory-pressure pause. Existing v47 / envelope v2 saves remain compatible."
-      : "1.1.8 为大型工厂加入内存预算、保存与模拟互斥、分块增量检查点和可配置的设备级内存保护暂停；旧版 v47 / envelope v2 存档继续兼容。",
+      ? "Version 1.1.9 adds copy-on-write edits, bounded delta history, cumulative large-factory UI projections, and back-pressured single-owner saves. Existing v47 / envelope v2 saves remain compatible."
+      : "1.1.9 为大型工厂加入写时复制编辑、有界差异历史、累计 UI 投影和带回压的单所有权保存；旧版 v47 / envelope v2 存档继续兼容。",
     items: [
       {
-        id: "memory-auto-pause-policy",
-        title: english ? "Configurable memory-pressure auto-pause" : "内存超限自动暂停可配置",
+        id: "copy-on-write-factory-edits",
+        title: english ? "Factory edits copy only changed records" : "工厂编辑只复制变化记录",
         description: english
-          ? "Use the automatic 90% browser-heap watermark, choose a fixed JS-heap threshold, or disable memory/backlog auto-pausing. Disabled mode does not rewind on queue pressure; Worker/checkpoint and allocation-failure safeguards remain."
-          : "可使用浏览器堆上限 90% 自动档、固定 JS 堆内存阈值，或关闭内存与积压自动暂停；关闭后积压不会触发回档，但 Worker/检查点和内存分配失败保护仍保留。",
+          ? "Common building, removal, belt, and blueprint commands preserve unchanged entity and belt references instead of deep-cloning the full factory."
+          : "常见建造、回收、线路和蓝图命令保留未变化实体与线路的引用，不再深拷贝整个工厂。",
       },
       {
-        id: "chunked-incremental-save",
-        title: english ? "Large saves use chunked incremental checkpoints" : "大型存档改为分块增量检查点",
+        id: "bounded-delta-history",
+        title: english ? "Undo uses bounded inverse deltas" : "撤销使用有界逆向差异",
         description: english
-          ? "After the first full checkpoint, autosaves write changed entity/belt chunks while verified full-save fallback remains available."
-          : "首次完整检查点后，自动保存只写变化的实体/线路区块；经过验证的完整保存回退继续可用。",
+          ? "Undo no longer retains full GameState snapshots or rewinds simulation time settled after an edit."
+          : "撤销不再保留完整 GameState 快照，也不会回退操作之后已经结算的模拟时间。",
       },
       {
-        id: "real-save-memory-benchmark",
-        title: english ? "Real endgame save long-run regression" : "真实终局存档长时回归",
+        id: "single-owner-chunk-save",
+        title: english ? "Large autosaves stream bounded pages" : "大型自动保存流式提交有界数据页",
         description: english
-          ? "Idle, building, belt, blueprint, and autosave stress runs now have measured 1.1.8 evidence and a safe-pause stopping point."
-          : "挂机、建造、拉线、蓝图和自动保存压力测试已有 1.1.8 实测证据，并能在内存压力下安全停在最近检查点。",
+          ? "The authority Worker projects bounded pages into the page-owned IndexedDB writer with ACK backpressure, without transferring a second complete checkpoint."
+          : "权威 Worker 以 ACK 回压把有界数据页交给页面持有的 IndexedDB writer，不再传输第二份完整检查点。",
       },
       {
-        id: "version-upgrade",
+        id: "cumulative-large-factory-projection",
+        title: english ? "Large-factory UI copies are coalesced" : "大型工厂界面复制合并处理",
+        description: english
+          ? "Exact simulation revisions continue normally while idle record projections are accumulated; commands and active editing still publish immediately."
+          : "精确模拟 revision 正常推进，空闲时的记录投影合并后发布；玩家命令和活动编辑仍立即刷新。",
+      },
+      {
+        id: "dirty-runtime-index",
+        title: english ? "Simulation commands use stable dirty indexes" : "模拟命令使用稳定脏索引",
+        description: english
+          ? "Runtime-only leaves apply in place; recipe and topology changes retain the deterministic full-rebuild fallback."
+          : "仅运行时字段在 Worker 内原地应用；配方和拓扑变化继续保留确定性的完整重建回退。",
+      },
+      {
+        id: "memory-pause-no-rollback",
+        title: english ? "Memory protection preserves visible progress" : "内存保护保留当前可见进度",
+        description: english
+          ? "A protection pause no longer installs an older checkpoint or drops queued simulation time."
+          : "保护暂停不再安装旧检查点，也不再清空已经积累的待结算时间。",
+      },
+      {
+        id: "version-compatibility",
         title: english ? "Existing saves and cloud protocols remain compatible" : "旧存档与云端协议保持兼容",
         description: english
           ? "GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged."

@@ -1,18 +1,21 @@
 /// <reference lib="webworker" />
 
 import { applyContentPackRuntimeSnapshot, type ContentPackRuntimeSnapshot } from "./contentPacks";
-import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";
+import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, markPersistentSimulationRuntimeDirty, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";
 import { BrowserMulticoreExecutor, planMulticoreSimulation, type MulticoreSimulationOptions } from "./multicoreSimulation";
 import type { GameState } from "./types";
-import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, type SimulationProjection } from "./simulationProjection";
+import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjectionWithBaseline, type SimulationProjection, type SimulationProjectionBaseline } from "./simulationProjection";
 import { createSimulationStateDelta, shouldUseSimulationDelta, type SimulationStateDelta } from "./simulationDelta";
 import { runTimeWarpApproximateSettlement, type TimeWarpApproximationReport } from "./offlineApproximation";
 import { createFactoryAlertProjection } from "./alerts";
+import { streamChunkedSaveJournalFromRuntimeState, type ChunkedSaveJournalContext, type PersistChunkedSaveOptions, type PersistChunkedSaveResult } from "./chunkedSaveJournal";
+import type { LocalSaveInternalWrite } from "./localSaveStore";
+import type { AuthoritativeSaveCheckpointOverlay } from "./authoritativeSaveSerializationProtocol";
+import { applyAuthoritativeSaveCheckpointOverlay } from "./saveCheckpointOverlay";
 import {
-  applySimulationCommandPatch,
+  applySimulationCommandPatchMutable,
   createSimulationStateIdentity,
   deserializeSimulationStateTransfer,
-  serializeSimulationStateCheckpoint,
   serializeSimulationStateForTransfer,
   type SimulationCommandPatch,
   type SimulationStateIdentity,
@@ -52,6 +55,11 @@ export interface SimulationWorkerRequest {
   includeFactoryAlerts?: boolean;
   /** Echoed so the UI cannot accept an alert snapshot from before a toggle. */
   factoryAlertsGeneration?: number;
+  /** A very large normal-play factory may deliberately skip this one UI
+   * projection. The authoritative simulation step and revision still commit;
+   * the next non-deferred projection is compared with the last published
+   * baseline and therefore contains every accumulated record change. */
+  deferUiProjection?: boolean;
   /** Validated durable journal; accepted only with a transferred checkpoint. */
   durableReplay?: SimulationRuntimeDurableReplayPlan;
   /** MessagePort lets a long replay observe cancellation between RLE steps. */
@@ -63,6 +71,15 @@ export interface SimulationWorkerRequest {
    * This mode returns only its bounded identity proof and deliberately skips
    * the second JSON.parse plus full-state mirror clones. */
   checkpointIdentityOnly?: boolean;
+  /** Large autosaves can be projected and committed directly from the
+   * Worker-owned authority. This avoids a full JSON transfer and decoded save
+   * mirror while retaining the same internal v1 chunk journal. */
+  chunkedSave?: {
+    options: PersistChunkedSaveOptions;
+    context: ChunkedSaveJournalContext;
+    checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  };
+  chunkedSaveWritePort?: MessagePort;
   /** Pure-idle authority replacement keeps the full state in the Worker and
    * streams only bounded current-planet UI projection chunks. */
   streamAuthorityProjection?: boolean;
@@ -94,6 +111,11 @@ export interface SimulationWorkerResponse {
   registryError?: string;
   /** Optional P4 projection; `state` remains the compatibility oracle. */
   projection?: SimulationProjection;
+  /** The authoritative revision advanced, but this response intentionally
+   * omitted the large record projection. */
+  projectionDeferred?: boolean;
+  /** Small clock update retained while the record projection is deferred. */
+  deferredElapsedSeconds?: number;
   factoryAlertsGeneration?: number;
   protocol?: "full" | "delta" | "projection";
   stateRevision?: number;
@@ -107,6 +129,8 @@ export interface SimulationWorkerResponse {
   /** Large checkpoint mirrors are streamed in ordered small clones before the final buffer response. */
   checkpointStateChunk?: SimulationCheckpointStateChunk;
   checkpointIdentity?: SimulationStateIdentity;
+  chunkedSaveResult?: PersistChunkedSaveResult;
+  chunkedSaveError?: string;
   authorityProjectionChunk?: { index: number; total: number };
   authorityProjectionChunkCount?: number;
   commandApplied?: boolean;
@@ -117,6 +141,19 @@ export interface SimulationWorkerResponse {
   sourceCheckpointTransfer?: SimulationStateTransfer;
 }
 
+export interface SimulationChunkedSaveWriteRequest {
+  id: number;
+  sequence: number;
+  records: LocalSaveInternalWrite[];
+}
+
+export interface SimulationChunkedSaveWriteAck {
+  id: number;
+  sequence: number;
+  ok: boolean;
+  error?: string;
+}
+
 let runtime: PersistentSimulationRuntime | null = null;
 let activeRegistryFingerprint: string | null = null;
 let runtimeRevision = 0;
@@ -125,6 +162,32 @@ let multicoreExecutorWorkerCount = 0;
 let activeRegistrySnapshot: ContentPackRuntimeSnapshot | undefined;
 let simulationMessageQueue: Promise<void> = Promise.resolve();
 let runtimeInvalidated = false;
+/** Last state actually projected to the UI. It is updated in one pass while
+ * building the next response, so steady simulation no longer allocates two
+ * complete signature/index baselines per second. */
+let uiProjectionBaseline: SimulationProjectionBaseline | null = null;
+
+function applyCommandToPersistentRuntime(command: SimulationCommandPatch, profiler?: SimulationProfiler): void {
+  if (!runtime) throw new Error("模拟 Worker 尚未建立权威运行时");
+  const applied = applySimulationCommandPatchMutable(runtime.state, command, runtime.records);
+  if (applied.topologyDirty) {
+    replacePersistentSimulationRuntimeState(runtime, applied.state, profiler);
+    return;
+  }
+  runtime.state = applied.state;
+  markPersistentSimulationRuntimeDirty(runtime, {
+    entityIds: applied.changedEntityIds,
+    beltIds: applied.changedBeltIds,
+    planetIds: applied.dirtyPlanetIds,
+  });
+  if (applied.dynamicRouteDirty && runtime.lookup) runtime.lookup.dynamicRouteLookupDirty = true;
+  if (runtime.state.paused && runtime.lookup) {
+    // Paused factories keep only the compact ID indexes. Release the larger
+    // simulation lookup graph until the next admitted advance.
+    runtime.records = { entityById: runtime.lookup.entityById, beltById: runtime.lookup.beltById };
+    runtime.lookup = undefined;
+  }
+}
 
 const CHECKPOINT_CHUNK_THRESHOLD_BYTES = 1024 * 1024;
 const CHECKPOINT_ENTITY_CHUNK_SIZE = 1024;
@@ -154,6 +217,24 @@ function postCheckpointStateChunks(id: number, state: GameState): void {
       checkpointStateChunk: { kind: "belts", offset, values: belts.slice(offset, offset + CHECKPOINT_BELT_CHUNK_SIZE) },
     } satisfies SimulationWorkerResponse);
   }
+}
+
+function serializeCheckpointResponse(
+  id: number,
+  state: GameState,
+): { checkpoint: SimulationStateTransfer; checkpointState?: GameState } {
+  const checkpoint = serializeSimulationStateForTransfer(state);
+  if (checkpoint.byteLength >= CHECKPOINT_CHUNK_THRESHOLD_BYTES) {
+    // Stream the already-owned authority graph. The former path parsed the
+    // complete JSON back into a second GameState before slicing it, so a 77 MB
+    // save briefly retained authority + JSON + bytes + parsed mirror.
+    postCheckpointStateChunks(id, state);
+    return { checkpoint };
+  }
+  return {
+    checkpoint,
+    checkpointState: deserializeSimulationStateTransfer(checkpoint),
+  };
 }
 
 function attachFactoryAlertProjection(projection: SimulationProjection, includeFactoryAlerts: boolean): SimulationProjection {
@@ -315,6 +396,7 @@ async function processDurableReplayRequest(
     activateRuntimeRegistry(registry);
     if (runtime) replacePersistentSimulationRuntimeState(runtime, state);
     else runtime = createPersistentSimulationRuntime(state);
+    uiProjectionBaseline = null;
     runtimeRevision = durableReplay.checkpointStateRevision;
     runtimeInvalidated = false;
 
@@ -335,7 +417,7 @@ async function processDurableReplayRequest(
         if (command.baseRevision !== runtimeRevision) {
           throw new SimulationRuntimeDurableReplayError("revision-mismatch", "durable replay command revision 不匹配");
         }
-        replacePersistentSimulationRuntimeState(runtime, applySimulationCommandPatch(runtime.state, command));
+        applyCommandToPersistentRuntime(command);
         runtimeRevision += 1;
       }
       const advanced = await advanceAuthoritativeRuntime(simulationSeconds, wallSeconds, multicore, approximate);
@@ -382,13 +464,9 @@ async function processDurableReplayRequest(
     let checkpointState: GameState | undefined;
     let checkpointIdentity: SimulationStateIdentity | undefined;
     if (event.data.includeCheckpointStateMirror) {
-      const serialized = serializeSimulationStateCheckpoint(runtime.state);
+      const serialized = serializeCheckpointResponse(id, runtime.state);
       checkpoint = serialized.checkpoint;
       checkpointState = serialized.checkpointState;
-      if (checkpoint.byteLength >= CHECKPOINT_CHUNK_THRESHOLD_BYTES) {
-        postCheckpointStateChunks(id, checkpointState);
-        checkpointState = undefined;
-      }
     } else if (event.data.streamAuthorityProjection) {
       // The exact full state remains authoritative in this Worker. The UI only
       // needs the bounded identity proof for its ordered current-planet mirror;
@@ -399,6 +477,7 @@ async function processDurableReplayRequest(
       createFullCurrentPlanetSimulationProjection(runtime.state),
       event.data.includeFactoryAlerts === true,
     );
+    uiProjectionBaseline = captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel: true });
     const projectionChunks = event.data.streamAuthorityProjection
       ? chunkFullRecordSimulationProjection(fullProjection)
       : [];
@@ -519,6 +598,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
   if (state) {
     if (runtime) replacePersistentSimulationRuntimeState(runtime, state, profiler);
     else runtime = createPersistentSimulationRuntime(state, profiler);
+    uiProjectionBaseline = null;
     runtimeRevision = Math.max(runtimeRevision + 1, stateRevision ?? 0);
     runtimeInvalidated = false;
   }
@@ -533,12 +613,11 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     return;
   }
   const includeDeferredTopLevel = event.data.projectionScope === "full-top-level";
-  // Capture the old active planet before an ordered command. A planet switch
-  // must publish every record on the new planet, including records whose
-  // runtime fields did not change during this slice.
-  const commandProjectionBaseline = event.data.command
-    ? captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel })
-    : null;
+  // This baseline represents the last state sent to the UI, not merely the
+  // state at the start of this one-second request. Keeping it across requests
+  // removes a second full signature/index allocation from every projection.
+  const requestProjectionBaseline = uiProjectionBaseline ??
+    captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel });
   let commandApplied = false;
   if (event.data.command) {
     if (event.data.command.baseRevision !== runtimeRevision) {
@@ -547,7 +626,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       if (event.data.checkpointIdentityOnly) {
         checkpoint = serializeSimulationStateForTransfer(runtime.state);
       } else {
-        const serialized = serializeSimulationStateCheckpoint(runtime.state);
+        const serialized = serializeCheckpointResponse(id, runtime.state);
         checkpoint = serialized.checkpoint;
         checkpointState = serialized.checkpointState;
       }
@@ -564,13 +643,83 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
       return;
     }
-    const commandedState = applySimulationCommandPatch(runtime.state, event.data.command);
-    replacePersistentSimulationRuntimeState(runtime, commandedState, profiler);
+    applyCommandToPersistentRuntime(event.data.command, profiler);
     runtimeRevision += 1;
     commandApplied = true;
   }
   if (event.data.kind === "checkpoint") {
+    if (commandApplied) {
+      uiProjectionBaseline = captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel });
+    }
     if (event.data.checkpointIdentityOnly) {
+      if (event.data.chunkedSave) {
+        const writePort = event.data.chunkedSaveWritePort;
+        try {
+          if (!activeRegistrySnapshot) throw new Error("模拟 Worker 缺少分块保存内容包目录");
+          if (!writePort) throw new Error("模拟 Worker 缺少分块保存回压通道");
+          writePort.start();
+          let writeSequence = 0;
+          const writeBatch = (records: LocalSaveInternalWrite[]): Promise<void> => new Promise((resolve, reject) => {
+            const sequence = ++writeSequence;
+            const timeout = setTimeout(() => {
+              writePort.removeEventListener("message", onAck);
+              reject(new Error("分块保存批次确认超时"));
+            }, 120_000);
+            const onAck = (ackEvent: MessageEvent<SimulationChunkedSaveWriteAck>) => {
+              const ack = ackEvent.data;
+              if (ack.id !== id || ack.sequence !== sequence) return;
+              clearTimeout(timeout);
+              writePort.removeEventListener("message", onAck);
+              if (ack.ok) resolve();
+              else reject(new Error(ack.error ?? "分块保存批次提交失败"));
+            };
+            writePort.addEventListener("message", onAck);
+            writePort.postMessage({ id, sequence, records } satisfies SimulationChunkedSaveWriteRequest);
+          });
+          const saveState = applyAuthoritativeSaveCheckpointOverlay(
+            runtime.state,
+            event.data.chunkedSave.checkpointOverlay,
+          );
+          const chunkedSaveResult = await streamChunkedSaveJournalFromRuntimeState(
+            saveState,
+            activeRegistrySnapshot.registry,
+            event.data.chunkedSave.options,
+            event.data.chunkedSave.context,
+            writeBatch,
+          );
+          writePort.close();
+          self.postMessage({
+            id,
+            changed: commandApplied,
+            commandApplied,
+            durationMs: Math.max(0, performance.now() - receivedAt),
+            protocol: event.data.protocol ?? "projection",
+            stateRevision: runtimeRevision,
+            registryFingerprint: activeRegistryFingerprint ?? undefined,
+            checkpointIdentity: createSimulationStateIdentity(saveState),
+            chunkedSaveResult,
+          } satisfies SimulationWorkerResponse);
+          return;
+        } catch (error) {
+          writePort?.close();
+          // Preserve the verified full-save fallback. The failure response
+          // returns one transferable checkpoint, never a second object mirror.
+          const checkpoint = serializeSimulationStateForTransfer(runtime.state);
+          self.postMessage({
+            id,
+            changed: commandApplied,
+            commandApplied,
+            durationMs: Math.max(0, performance.now() - receivedAt),
+            protocol: event.data.protocol ?? "projection",
+            stateRevision: runtimeRevision,
+            registryFingerprint: activeRegistryFingerprint ?? undefined,
+            checkpoint,
+            checkpointIdentity: createSimulationStateIdentity(runtime.state),
+            chunkedSaveError: error instanceof Error ? error.message : "权威分块保存失败",
+          } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
+          return;
+        }
+      }
       const checkpoint = serializeSimulationStateForTransfer(runtime.state);
       self.postMessage({
         id,
@@ -585,9 +734,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
       return;
     }
-    const { checkpoint, checkpointState } = serializeSimulationStateCheckpoint(runtime.state);
-    const chunkedCheckpointState = checkpoint.byteLength >= CHECKPOINT_CHUNK_THRESHOLD_BYTES;
-    if (chunkedCheckpointState) postCheckpointStateChunks(id, checkpointState);
+    const { checkpoint, checkpointState } = serializeCheckpointResponse(id, runtime.state);
     self.postMessage({
       id,
       changed: commandApplied,
@@ -597,12 +744,13 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       stateRevision: runtimeRevision,
       registryFingerprint: activeRegistryFingerprint ?? undefined,
       checkpoint,
-      ...(!chunkedCheckpointState ? { checkpointState } : {}),
+      ...(checkpointState ? { checkpointState } : {}),
     } satisfies SimulationWorkerResponse, [checkpoint.buffer]);
     return;
   }
   if (event.data.kind === "sync-projection") {
     const projection = attachFactoryAlertProjection(createDeferredTopLevelSimulationProjection(runtime.state), event.data.includeFactoryAlerts === true);
+    uiProjectionBaseline = captureSimulationProjectionBaseline(runtime.state, { includeDeferredTopLevel: true });
     const response: SimulationWorkerResponse = {
       id,
       // This is a forced publication even when no simulation field changed.
@@ -632,7 +780,6 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
   // oracle because the persistent engine mutates runtime records in place.
   // This expensive clone remains isolated behind its opt-in device switch.
   const deltaBaseline = event.data.protocol === "delta" && !suppliedState ? structuredClone(previousState) : null;
-  const projectionBaseline = commandProjectionBaseline ?? captureSimulationProjectionBaseline(previousState, { includeDeferredTopLevel });
   const previousRevision = runtimeRevision;
   const advanced = await advanceAuthoritativeRuntime(
     simulationSeconds,
@@ -644,6 +791,15 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
   const { result, multicorePlan, multicoreUsed, multicoreFallback, timeWarpApproximation } = advanced;
   if (result.changed) runtimeRevision += 1;
   if (profiler && result.cacheRebuilt) profiler.persistentRuntimeRebuilds += 1;
+  const projectionDeferred = result.changed && event.data.deferUiProjection === true &&
+    event.data.protocol === "projection" && !commandApplied && !suppliedState && uiProjectionBaseline !== null;
+  const projected = !projectionDeferred && (result.changed || commandApplied || (suppliedState && event.data.includeFactoryAlerts === true))
+    ? createSimulationProjectionWithBaseline(requestProjectionBaseline, result.state, {
+      compact: event.data.protocol === "projection",
+      includeDeferredTopLevel,
+    })
+    : null;
+  if (projected) uiProjectionBaseline = projected.baseline;
   const response: SimulationWorkerResponse = {
     id,
     changed: result.changed || commandApplied,
@@ -657,10 +813,11 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     cacheRebuilt: result.cacheRebuilt,
     registryFingerprint: activeRegistryFingerprint ?? undefined,
     factoryAlertsGeneration: event.data.factoryAlertsGeneration,
-    ...((result.changed || commandApplied || (suppliedState && event.data.includeFactoryAlerts === true)) ? { projection: attachFactoryAlertProjection(createSimulationProjection(projectionBaseline, result.state, {
-      compact: event.data.protocol === "projection",
-      includeDeferredTopLevel,
-    }), event.data.includeFactoryAlerts === true) } : {}),
+    ...(projected ? { projection: attachFactoryAlertProjection(projected.projection, event.data.includeFactoryAlerts === true) } : {}),
+    ...(projectionDeferred ? {
+      projectionDeferred: true,
+      deferredElapsedSeconds: result.state.elapsedSeconds,
+    } : {}),
     ...(event.data.multicore ? { multicore: {
       enabled: multicoreUsed,
       workerCount: multicoreUsed ? multicoreExecutor?.workerCount ?? multicorePlan.workerCount : multicorePlan.workerCount,

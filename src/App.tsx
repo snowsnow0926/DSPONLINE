@@ -2289,6 +2289,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       changedBelts: result.changedBeltCount,
       fullRebuild: result.fullRebuild,
     });
+    if (result.fullRebuild) {
+      recordRuntimeTransitionPhase("canvas-snapshot-full-rebuild", performance.now(), 0, {
+        force,
+        changedEntities: result.changedEntityCount,
+        changedBelts: result.changedBeltCount,
+      });
+    }
     if (performanceMonitor.isActive()) {
       performanceMonitor.recordCanvas({
         snapshotMs: performance.now() - startedAt,
@@ -5990,7 +5997,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // 80k/155k mirror for this clock-only intermediate response.
           deferredProjectionGameRef.current = next;
           gameRef.current = next;
-          latestCanvasGameRef.current = next;
+          // Canvas deliberately stays on the last record projection. Publishing
+          // this clock-only wrapper would reach the refresh timer without a
+          // projection and force a complete 80k/155k snapshot rebuild.
         } else {
           publishRuntimeGame(next);
         }

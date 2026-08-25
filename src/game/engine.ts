@@ -276,6 +276,12 @@ function copyState(state: GameState): GameState {
       ...state.constructionAutomation,
       targetStock: { ...state.constructionAutomation.targetStock },
       destroyedByproducts: { ...state.constructionAutomation.destroyedByproducts },
+      ...(state.constructionAutomation.quantumMaterialBuffer ? {
+        quantumMaterialBuffer: Object.fromEntries(Object.entries(state.constructionAutomation.quantumMaterialBuffer).map(([entityId, inventory]) => [
+          entityId,
+          { ...inventory },
+        ])),
+      } : {}),
       jobs: Object.fromEntries(Object.entries(state.constructionAutomation.jobs).map(([entityId, job]) => [
         entityId,
         {
@@ -713,6 +719,8 @@ export function createInitialState(seed = DEFAULT_GALAXY_SEED, preserveBaseline 
     },
     constructionAutomation: {
       enabled: true,
+      // The quantum bridge is opt-in so existing saves keep their original
+      // local-tray material semantics until the player enables it.
       targetStock: {},
       cursor: 0,
       totalCrafted: 0,
@@ -1933,6 +1941,8 @@ export interface SimulationLookupContext {
   entitiesByPlanetGrid: Map<string, FactoryEntity[]>;
   /** Stable entity-kind views reused by every exact simulation step. */
   machinesByPlanet: Map<PlanetId, FactoryEntity[]>;
+  /** Construction centers are indexed because quantum boundaries must not scan the full entity list. */
+  constructionCentersByPlanet: Map<PlanetId, FactoryEntity[]>;
   rayReceivers: FactoryEntity[];
   machineRuntimesByPlanet: Map<PlanetId, IndexedMachineRuntime[]>;
   machineRuntimeById: Map<string, IndexedMachineRuntime>;
@@ -2042,6 +2052,7 @@ export function createSimulationLookupContext(
     entitiesByPlanet: new Map(),
     entitiesByPlanetGrid: new Map(),
     machinesByPlanet: new Map(),
+    constructionCentersByPlanet: new Map(),
     rayReceivers: [],
     machineRuntimesByPlanet: new Map(),
     machineRuntimeById: new Map(),
@@ -2145,6 +2156,11 @@ export function createSimulationLookupContext(
         }
       }
       if (entity.buildingId === "ray_receiver") context.rayReceivers.push(entity);
+    }
+    if (entity.buildingId === "construction_center") {
+      const centers = context.constructionCentersByPlanet.get(entity.planetId);
+      if (centers) centers.push(entity);
+      else context.constructionCentersByPlanet.set(entity.planetId, [entity]);
     }
     if (entity.kind === "vein") {
       const veins = context.veinsByPlanet.get(entity.planetId);
@@ -5967,6 +5983,236 @@ function createQuantumBoundaryFlow(state: GameState, boundarySecond: number, loo
   };
 }
 
+interface ConstructionQuantumDemand {
+  key: string;
+  entityId: string;
+  itemId: ItemId;
+  requested: number;
+  capacity: number;
+}
+
+/** Keep ordinary centers bounded while allowing an ultra-large center to fill
+ * one complete five-second work horizon in a single quantum boundary. */
+const CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS = 10_000_000;
+export const CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS = 100_000_000;
+
+function constructionQuantumSafeAdd(left: number, right: number): number {
+  const normalizedLeft = Number.isFinite(left) ? Math.max(0, Math.floor(left)) : 0;
+  const normalizedRight = Number.isFinite(right) ? Math.max(0, Math.floor(right)) : 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, normalizedLeft + normalizedRight);
+}
+
+function constructionQuantumSafeMultiply(left: number, right: number): number {
+  const normalizedLeft = Number.isFinite(left) ? Math.max(0, Math.floor(left)) : 0;
+  const normalizedRight = Number.isFinite(right) ? Math.max(0, Math.floor(right)) : 0;
+  if (normalizedLeft < 1 || normalizedRight < 1) return 0;
+  if (normalizedLeft > Math.floor(Number.MAX_SAFE_INTEGER / normalizedRight)) return Number.MAX_SAFE_INTEGER;
+  return normalizedLeft * normalizedRight;
+}
+
+function constructionQuantumAvailable(
+  tray: Partial<Record<ItemId, number>>,
+  jobInventory: Partial<Record<ItemId, number>>,
+  quantumBuffer: Partial<Record<ItemId, number>>,
+  itemId: ItemId,
+): number {
+  return Math.min(Number.MAX_SAFE_INTEGER,
+    Math.max(0, Math.floor(tray[itemId] ?? 0)) +
+    Math.max(0, Math.floor(jobInventory[itemId] ?? 0)) +
+    Math.max(0, Math.floor(quantumBuffer[itemId] ?? 0)));
+}
+
+function constructionQuantumPrefetchJobs(
+  state: GameState,
+  center: FactoryEntity,
+  definition: ConstructionAutomationTargetDefinition | undefined,
+  workSeconds: number,
+  hasExistingJob: boolean,
+): number {
+  const target = definition ? Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0)) : 0;
+  const current = definition ? constructionAutomationCurrentStock(state, definition.id) : 0;
+  const pending = definition ? constructionAutomationPending(state, definition.id) : 0;
+  const outputAmount = Math.max(1, definition?.outputAmount ?? 1);
+  const targetJobs = Math.max(0, Math.ceil(Math.max(0, target - current - pending) / outputAmount));
+  const machineCount = Number.isFinite(center.machineCount) ? Math.max(1, Math.floor(center.machineCount)) : 1;
+  const normalizedWorkSeconds = Number.isFinite(workSeconds) ? Math.max(EPSILON, workSeconds) : 1;
+  const workJobs = Math.max(1, Math.ceil(machineCount * QUANTUM_SETTLEMENT_SECONDS / normalizedWorkSeconds));
+  const requestedJobs = Math.max(1, targetJobs + (hasExistingJob ? 1 : 0));
+  const prefetchLimit = machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD
+    ? CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS
+    : CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS;
+  return Math.min(prefetchLimit, Math.max(1, Math.min(requestedJobs, workJobs)));
+}
+
+function constructionQuantumMissingForBatch(
+  state: GameState,
+  center: FactoryEntity,
+  definition: ConstructionAutomationTargetDefinition,
+  plan: ConstructionAutomationPlan,
+  tray: Partial<Record<ItemId, number>>,
+  jobInventory: Partial<Record<ItemId, number>>,
+  quantumBuffer: Partial<Record<ItemId, number>>,
+  hasExistingJob: boolean,
+): Array<{ itemId: ItemId; amount: number }> | null {
+  const batch = analyzeRepeatableConstructionAutomationPlan(state, definition, plan);
+  if (!batch) return null;
+  const jobs = constructionQuantumPrefetchJobs(state, center, definition, batch.workSeconds, hasExistingJob);
+  const missing = new Map<ItemId, number>();
+  for (const [itemId, rawAmount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
+    if (isPortableFleetItem(itemId)) continue;
+    const required = constructionQuantumSafeMultiply(rawAmount, jobs);
+    const available = constructionQuantumAvailable(tray, jobInventory, quantumBuffer, itemId);
+    const amount = Math.max(0, required - available);
+    if (amount > 0) missing.set(itemId, amount);
+  }
+  return [...missing.entries()]
+    .map(([itemId, amount]) => ({ itemId, amount }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+}
+
+/**
+ * Return the materials a center is currently unable to consume.  For an
+ * existing job this is the complete blocked step.  Before a job exists, walk
+ * raw recursive blockers with a virtual inventory and then prefetch a bounded
+ * work horizon. This keeps a high-stack center from receiving only one job's
+ * worth of material every five seconds.
+ */
+function constructionQuantumMissingMaterials(
+  state: GameState,
+  center: FactoryEntity,
+): Array<{ itemId: ItemId; amount: number }> {
+  if (!state.constructionAutomation.enabled) return [];
+  // Do not fill a stopped center's private cache while its previous power
+  // calculation already proves that it cannot consume material.
+  if (center.powerFactor !== undefined && center.powerFactor <= EPSILON) return [];
+  const tray = trayForPlanet(state, center.planetId);
+  const quantumBuffer = constructionAutomationQuantumBuffer(state, center.id);
+  const job = state.constructionAutomation.jobs[center.id];
+  if (job) {
+    const step = job.steps[job.stepIndex];
+    if (!step) return [];
+    const definition = getConstructionAutomationTargetDefinition(job.constructionId);
+    const remainingPlan: ConstructionAutomationPlan = {
+      steps: job.steps.slice(job.stepIndex),
+      recipeDecisions: job.recipeDecisions,
+    };
+    const batchMissing = definition
+      ? constructionQuantumMissingForBatch(state, center, definition, remainingPlan, tray, job.inventory, quantumBuffer, true)
+      : null;
+    if (batchMissing) return batchMissing;
+    const requiredByItem = new Map<ItemId, number>();
+    for (const requirement of constructionAutomationRequirements(step)) {
+      if (isPortableFleetItem(requirement.itemId)) continue;
+      requiredByItem.set(requirement.itemId, Math.min(Number.MAX_SAFE_INTEGER,
+        (requiredByItem.get(requirement.itemId) ?? 0) + Math.max(0, Math.floor(requirement.amount))));
+    }
+    const missingMaterials: Array<{ itemId: ItemId; amount: number }> = [];
+    for (const [itemId, required] of requiredByItem) {
+      const available = constructionQuantumAvailable(tray, job.inventory, quantumBuffer, itemId);
+      const missingAmount = Math.max(0, required - available);
+      if (missingAmount > 0) missingMaterials.push({ itemId, amount: missingAmount });
+    }
+    return missingMaterials;
+  }
+  const target = constructionAutomationTarget(state);
+  if (!target) return [];
+  const virtualInventory = { ...quantumBuffer };
+  const seedMissingByItem = new Map<ItemId, number>();
+  let completePlan: ConstructionAutomationPlan | undefined;
+  for (let probe = 0; probe < 128; probe += 1) {
+    const plan = buildConstructionAutomationPlan(state, target.definition, center.planetId, virtualInventory);
+    // Never use the warehouse to bypass a technology or recipe-availability
+    // blocker.  The bridge supplies raw shortages only; the normal construction
+    // planner still owns all progression gates.
+    if (!plan.blocker) {
+      completePlan = plan;
+      break;
+    }
+    if (plan.blocker.reason !== "raw-shortage" || isPortableFleetItem(plan.blocker.itemId)) break;
+    const amount = Math.max(0, Math.floor(plan.blocker.required - plan.blocker.current));
+    if (amount < 1) break;
+    seedMissingByItem.set(plan.blocker.itemId, constructionQuantumSafeAdd(seedMissingByItem.get(plan.blocker.itemId) ?? 0, amount));
+    virtualInventory[plan.blocker.itemId] = constructionQuantumSafeAdd(virtualInventory[plan.blocker.itemId] ?? 0, amount);
+  }
+  if (completePlan) {
+    const batchMissing = constructionQuantumMissingForBatch(
+      state,
+      center,
+      target.definition,
+      completePlan,
+      tray,
+      {},
+      quantumBuffer,
+      false,
+    );
+    if (batchMissing) return batchMissing;
+  }
+  return [...seedMissingByItem.entries()]
+    .filter(([itemId]) => !isPortableFleetItem(itemId))
+    .map(([itemId, amount]) => ({ itemId, amount }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+}
+
+function constructionQuantumCenters(state: GameState, lookup?: SimulationLookupContext): FactoryEntity[] {
+  if (!state.constructionAutomation.quantumSourceEnabled) return [];
+  const indexed = lookup?.constructionCentersByPlanet;
+  if (indexed) {
+    const centers: FactoryEntity[] = [];
+    for (const values of indexed.values()) centers.push(...values);
+    return centers.sort((left, right) => left.id.localeCompare(right.id));
+  }
+  return state.entities
+    .filter((entity) => entity.buildingId === "construction_center")
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+/** Build one direct endpoint per center/item so quantum material never passes through a planet tray. */
+function collectConstructionQuantumDemands(
+  state: GameState,
+  lookup?: SimulationLookupContext,
+): Map<string, ConstructionQuantumDemand> {
+  const demands = new Map<string, ConstructionQuantumDemand>();
+  for (const center of constructionQuantumCenters(state, lookup)) {
+    for (const missing of constructionQuantumMissingMaterials(state, center)) {
+      if (missing.amount < 1) continue;
+      // This is a direct receiver, not another warehouse slot.  Its capacity
+      // is the center's outstanding requirement, so an over-capacity quantum
+      // warehouse can still drain into the center instead of being treated as
+      // unable to serve the request.
+      const free = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, missing.amount));
+      if (free < 1) continue;
+      const key = `construction-direct:${center.id}:${missing.itemId}`;
+      const existing = demands.get(key);
+      if (existing) {
+        existing.requested = Math.min(Number.MAX_SAFE_INTEGER, existing.requested + missing.amount);
+        existing.capacity = Math.min(Number.MAX_SAFE_INTEGER, existing.capacity + free);
+        continue;
+      }
+      demands.set(key, {
+        key,
+        entityId: center.id,
+        itemId: missing.itemId,
+        requested: Math.min(Number.MAX_SAFE_INTEGER, missing.amount),
+        capacity: Math.min(Number.MAX_SAFE_INTEGER, Math.min(free, missing.amount)),
+      });
+    }
+  }
+  return demands;
+}
+
+/** Apply a direct-delivery amount without routing it through a planet tray. */
+function applyConstructionQuantumDelivery(
+  state: GameState,
+  demand: ConstructionQuantumDemand,
+  delivered: number,
+): number {
+  if (delivered < 1 || demand.entityId.length === 0) return 0;
+  const amountToApply = Math.min(Math.floor(delivered), demand.capacity, demand.requested);
+  if (amountToApply < 1) return 0;
+  addConstructionAutomationQuantumBuffer(state, demand.entityId, demand.itemId, amountToApply);
+  return amountToApply;
+}
+
 /** Download before output belts so a demand tower can use reserved line space. */
 function settleQuantumNetworkDownloads(
   state: GameState,
@@ -5981,6 +6227,7 @@ function settleQuantumNetworkDownloads(
   const stations = lookup?.quantumStations ?? state.entities.filter(isQuantumStation);
   const stationById = lookup?.entityById ?? new Map(stations.map((station) => [station.id, station]));
   const requestByStationItem = new Map<string, QuantumSettlementOutput>();
+  const constructionDemands = collectConstructionQuantumDemands(state, lookup);
   const downloadPlans = lookup?.quantumDownloadSlots ?? stations.flatMap((endpoint): IndexedQuantumSlotPlan[] => {
     const byKey = new Map<string, IndexedQuantumSlotPlan>();
     for (const slot of getStationSlots(endpoint)) {
@@ -6015,6 +6262,19 @@ function settleQuantumNetworkDownloads(
         });
       }
   }
+  for (const demand of constructionDemands.values()) {
+    requestByStationItem.set(demand.key, {
+      key: demand.key,
+      // The settlement layer only needs a stable endpoint key. Construction
+      // centers are applied below, after the shared network has allocated the
+      // exact amount, so no fake station entity is created.
+      stationId: demand.key,
+      itemId: demand.itemId,
+      requested: demand.requested,
+      capacity: demand.capacity,
+      priority: 1,
+    });
+  }
   const outputs = [...requestByStationItem.values()];
   if (profiler) {
     profiler.quantumStationCount += stations.length;
@@ -6030,10 +6290,16 @@ function settleQuantumNetworkDownloads(
   // same-step local drone deliveries can append their immediate uploads.
   state.quantumLogisticsNetwork.runtimeFlow = flow;
   for (const request of outputs) {
+    const constructionDemand = constructionDemands.get(request.key);
     const station = stationById.get(request.stationId);
-    if (!station) continue;
     const delivered = Math.max(0, Math.floor(Number(result.outputDelivered[request.key] ?? "0")));
     if (delivered < 1) continue;
+    if (constructionDemand) {
+      const applied = applyConstructionQuantumDelivery(state, constructionDemand, delivered);
+      if (applied > 0) addQuantumBoundaryFlow(flow.downloaded, request.itemId, applied);
+      continue;
+    }
+    if (!station) continue;
     station.outputs[request.itemId] = Math.floor((station.outputs[request.itemId] ?? 0) + delivered);
     station.stationLastTransfer = delivered;
     station.productionRate += seconds > EPSILON ? delivered * 60 / seconds : 0;
@@ -10013,6 +10279,15 @@ export function setConstructionAutomationEnabled(state: GameState, enabled: bool
   return { ...state, constructionAutomation: { ...state.constructionAutomation, enabled } };
 }
 
+export function setConstructionAutomationQuantumSourceEnabled(state: GameState, enabled: boolean): GameState {
+  const current = state.constructionAutomation.quantumSourceEnabled === true;
+  if (current === enabled) return state;
+  const constructionAutomation = { ...state.constructionAutomation };
+  if (enabled) constructionAutomation.quantumSourceEnabled = true;
+  else delete constructionAutomation.quantumSourceEnabled;
+  return { ...state, constructionAutomation };
+}
+
 export function setGalacticMaterialExporterPaused(state: GameState, entityId: string, paused: boolean): GameState {
   const entity = state.entities.find((candidate) => candidate.id === entityId && candidate.buildingId === "galactic_material_exporter");
   if (!entity || entity.interactionLocked || (entity.galacticExporterPaused !== false) === paused) return state;
@@ -10031,6 +10306,69 @@ function refundConstructionAutomationJob(state: GameState, entityId: string, job
     if (isPortableFleetItem(itemId)) state.portableFleet[itemId] = Math.floor((state.portableFleet[itemId] ?? 0) + refund);
     else tray[itemId] = Math.floor((tray[itemId] ?? 0) + refund);
   }
+}
+
+function constructionAutomationQuantumBuffer(
+  state: GameState,
+  entityId: string,
+): Partial<Record<ItemId, number>> {
+  return state.constructionAutomation.quantumMaterialBuffer?.[entityId] ?? {};
+}
+
+function setConstructionAutomationQuantumBuffer(
+  state: GameState,
+  entityId: string,
+  inventory: Partial<Record<ItemId, number>>,
+): void {
+  const normalized = Object.fromEntries((Object.entries(inventory) as Array<[ItemId, number]>)
+    .map(([itemId, amount]) => [itemId, Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(amount ?? 0)))] as const)
+    .filter(([, amount]) => amount > 0)) as Partial<Record<ItemId, number>>;
+  const buffers = state.constructionAutomation.quantumMaterialBuffer
+    ? { ...state.constructionAutomation.quantumMaterialBuffer }
+    : {};
+  if (Object.keys(normalized).length > 0) buffers[entityId] = normalized;
+  else delete buffers[entityId];
+  if (Object.keys(buffers).length > 0) state.constructionAutomation.quantumMaterialBuffer = buffers;
+  else delete state.constructionAutomation.quantumMaterialBuffer;
+}
+
+function addConstructionAutomationQuantumBuffer(
+  state: GameState,
+  entityId: string,
+  itemId: ItemId,
+  amount: number,
+): void {
+  const current = constructionAutomationQuantumBuffer(state, entityId);
+  setConstructionAutomationQuantumBuffer(state, entityId, {
+    ...current,
+    [itemId]: Math.min(Number.MAX_SAFE_INTEGER, Math.floor((current[itemId] ?? 0) + Math.max(0, amount))),
+  });
+}
+
+/** Return direct-delivery material to the shared warehouse when a center is removed. */
+function refundConstructionAutomationQuantumBuffer(state: GameState, entityId: string): void {
+  const buffer = constructionAutomationQuantumBuffer(state, entityId);
+  if (Object.keys(buffer).length === 0) return;
+  const planetId = state.entities.find((entity) => entity.id === entityId)?.planetId ?? state.activePlanetId;
+  for (const [itemId, rawAmount] of Object.entries(buffer) as Array<[ItemId, number]>) {
+    const amount = Math.max(0, Math.floor(rawAmount ?? 0));
+    if (amount < 1) continue;
+    const deposited = state.quantumLogisticsNetwork?.enabled
+      ? depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, amount)
+      : null;
+    if (deposited) {
+      state.quantumLogisticsNetwork = deposited.state;
+      const remainder = Math.max(0, Math.floor(Number(deposited.remainder)));
+      if (remainder > 0) {
+        const tray = trayForPlanet(state, planetId);
+        tray[itemId] = Math.floor((tray[itemId] ?? 0) + remainder);
+      }
+    } else {
+      const tray = trayForPlanet(state, planetId);
+      tray[itemId] = Math.floor((tray[itemId] ?? 0) + amount);
+    }
+  }
+  setConstructionAutomationQuantumBuffer(state, entityId, {});
 }
 
 interface ConstructionAutomationTargetDefinition {
@@ -10093,6 +10431,12 @@ export function setConstructionAutomationTarget(state: GameState, constructionId
       if (job.constructionId !== constructionId) continue;
       refundConstructionAutomationJob(next, entityId, job);
       delete next.constructionAutomation.jobs[entityId];
+    }
+    // A center may have received direct quantum material before its job was
+    // materialized. Return those reservations as part of the same cancel
+    // transaction instead of leaving an orphaned per-center buffer.
+    for (const entityId of Object.keys(next.constructionAutomation.quantumMaterialBuffer ?? {})) {
+      refundConstructionAutomationQuantumBuffer(next, entityId);
     }
     return next;
   }
@@ -10232,12 +10576,21 @@ function constructionAutomationRecipeDecisions(decisions: RecursiveCraftDecision
   }));
 }
 
-function buildConstructionAutomationPlan(state: GameState, definition: ConstructionAutomationTargetDefinition, planetId: PlanetId): ConstructionAutomationPlan {
+function buildConstructionAutomationPlan(
+  state: GameState,
+  definition: ConstructionAutomationTargetDefinition,
+  planetId: PlanetId,
+  extraInventory: Partial<Record<ItemId, number>> = {},
+): ConstructionAutomationPlan {
   const tray = trayForPlanet(state, planetId);
   const inventory = Object.fromEntries((Object.entries(tray) as Array<[ItemId, number]>).map(([itemId, amount]) => [
     itemId,
     Math.max(0, Math.floor(amount ?? 0)),
   ])) as Partial<Record<ItemId, number>>;
+  for (const [itemId, amount] of Object.entries(extraInventory) as Array<[ItemId, number]>) {
+    const normalized = Math.max(0, Math.floor(amount ?? 0));
+    if (normalized > 0) inventory[itemId] = Math.min(Number.MAX_SAFE_INTEGER, (inventory[itemId] ?? 0) + normalized);
+  }
   const recipes = recursiveManufacturingRecipes();
   const plan = definition.kind === "fleet" && definition.recipeId
     ? planSelectedRecipe({
@@ -10277,7 +10630,9 @@ function buildConstructionAutomationPlan(state: GameState, definition: Construct
 
 function constructionAutomationHasDeficit(state: GameState): boolean {
   return Boolean(state.constructionAutomation.enabled &&
-    (Object.keys(state.constructionAutomation.jobs).length > 0 || constructionAutomationTarget(state)));
+    (Object.keys(state.constructionAutomation.jobs).length > 0 ||
+      Object.keys(state.constructionAutomation.quantumMaterialBuffer ?? {}).length > 0 ||
+      constructionAutomationTarget(state)));
 }
 
 export function getConstructionAutomationMaterialSeconds(state: GameState): number {
@@ -10304,6 +10659,22 @@ export interface ConstructionAutomationStatus {
 export const CONSTRUCTION_AUTOMATION_PROTECTION_STACK_THRESHOLD = 10_000;
 export const CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND = 256;
 export const CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND = 24;
+/**
+ * Extremely large stacks amortize a larger bounded planning prefix well. Keep
+ * the normal guard unchanged for ordinary high-stack saves and opt in only
+ * once the stack is large enough that the extra work is materially useful.
+ */
+export const CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD = 1_000_000;
+export const CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND = 512;
+export const CONSTRUCTION_AUTOMATION_EXTENDED_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND = 512;
+/**
+ * The extended scheduler is still bounded, but a 4,096-job fair-share cap
+ * leaves an ultra-large center idle after only a tiny prefix of its available
+ * work.  One million jobs is a bounded arithmetic batch (not a per-job loop)
+ * and is below the safe-integer margin for the v47 construction target limit.
+ * Ordinary stacks retain the conservative 4,096-job cap.
+ */
+export const CONSTRUCTION_AUTOMATION_EXTENDED_MAX_FAIR_BATCH_JOBS = 1_000_000;
 const CONSTRUCTION_AUTOMATION_MAX_FAIR_BATCH_JOBS = 4_096;
 
 function constructionAutomationProtectedStage(entity: FactoryEntity, stage: string): Pick<ConstructionAutomationStatus, "stage" | "protectionReason"> {
@@ -10394,9 +10765,10 @@ export function getConstructionAutomationStatus(state: GameState, entityId: stri
     if (!step) return { stage: "准备下一项", progress: 0, etaSeconds: 0 };
     const duration = constructionAutomationStepDuration(state, step);
     const tray = trayForPlanet(state, entity.planetId);
+    const quantumBuffer = constructionAutomationQuantumBuffer(state, entityId);
     const requirements = constructionAutomationRequirements(step);
     const missing = requirements.find((requirement) =>
-      (tray[requirement.itemId] ?? 0) + (job.inventory[requirement.itemId] ?? 0) + EPSILON < requirement.amount);
+      (tray[requirement.itemId] ?? 0) + (job.inventory[requirement.itemId] ?? 0) + (quantumBuffer[requirement.itemId] ?? 0) + EPSILON < requirement.amount);
     const paused = state.paused || !state.constructionAutomation.enabled;
     const noPower = !paused && getEntityPowerFactor(state, entity) <= EPSILON;
     const blockedByMaterials = !paused && !noPower && Boolean(missing);
@@ -10413,7 +10785,7 @@ export function getConstructionAutomationStatus(state: GameState, entityId: stri
       etaSeconds: Math.max(0, (duration - job.elapsedSeconds) + job.steps.slice(job.stepIndex + 1).reduce((sum, pending) => sum + constructionAutomationStepDuration(state, pending), 0)) /
         Math.max(1, entity.machineCount),
       missingItemId: blockedByMaterials ? missing?.itemId : undefined,
-      missingAmount: blockedByMaterials && missing ? Math.max(0, missing.amount - Math.floor(tray[missing.itemId] ?? 0) - Math.floor(job.inventory[missing.itemId] ?? 0)) : undefined,
+      missingAmount: blockedByMaterials && missing ? Math.max(0, missing.amount - Math.floor(tray[missing.itemId] ?? 0) - Math.floor(job.inventory[missing.itemId] ?? 0) - Math.floor(quantumBuffer[missing.itemId] ?? 0)) : undefined,
       blockerReason: paused ? "paused" : noPower ? "no-power" : blockedByMaterials ? "raw-shortage" : undefined,
       recipeName: step.kind === "material" ? getRecipe(step.recipeId)?.name : undefined,
       recipeFallbackReason: recipeDecision?.fallbackReason,
@@ -10435,7 +10807,7 @@ export function getConstructionAutomationStatus(state: GameState, entityId: stri
     destroyedByproductItems,
   };
   if (!target) return { stage: "目标库存已满足", progress: 0, etaSeconds: 0, wipCount: 0, wipItems: [], destroyedByproductCount, destroyedByproductItems };
-  const plan = buildConstructionAutomationPlan(state, target.definition, entity.planetId);
+  const plan = buildConstructionAutomationPlan(state, target.definition, entity.planetId, constructionAutomationQuantumBuffer(state, entityId));
   if (plan.blocker) {
     return {
       ...constructionAutomationProtectedStage(entity, "等待材料"),
@@ -10519,8 +10891,25 @@ function planConstructionAutomationConsumption(
   tray: Partial<Record<ItemId, number>>,
   requirements: Array<{ itemId: ItemId; amount: number }>,
 ): { inventory: Partial<Record<ItemId, number>>; tray: Partial<Record<ItemId, number>> } | null {
+  const consumed = planConstructionAutomationConsumptionWithQuantum(inventory, tray, {}, requirements);
+  return consumed ? { inventory: consumed.inventory, tray: consumed.tray } : null;
+}
+
+interface ConstructionAutomationConsumption {
+  inventory: Partial<Record<ItemId, number>>;
+  tray: Partial<Record<ItemId, number>>;
+  quantumBuffer: Partial<Record<ItemId, number>>;
+}
+
+function planConstructionAutomationConsumptionWithQuantum(
+  inventory: Partial<Record<ItemId, number>>,
+  tray: Partial<Record<ItemId, number>>,
+  quantumBuffer: Partial<Record<ItemId, number>>,
+  requirements: Array<{ itemId: ItemId; amount: number }>,
+): ConstructionAutomationConsumption | null {
   const nextInventory = { ...inventory };
   const nextTray = { ...tray };
+  const nextQuantumBuffer = { ...quantumBuffer };
   for (const requirement of requirements) {
     let remaining = Math.max(0, Math.floor(requirement.amount));
     const inJob = Math.max(0, Math.floor(nextInventory[requirement.itemId] ?? 0));
@@ -10528,10 +10917,14 @@ function planConstructionAutomationConsumption(
     nextInventory[requirement.itemId] = inJob - fromJob;
     remaining -= fromJob;
     const inTray = Math.max(0, Math.floor(nextTray[requirement.itemId] ?? 0));
-    if (inTray < remaining) return null;
-    nextTray[requirement.itemId] = inTray - remaining;
+    const fromTray = Math.min(remaining, inTray);
+    nextTray[requirement.itemId] = inTray - fromTray;
+    remaining -= fromTray;
+    const inQuantum = Math.max(0, Math.floor(nextQuantumBuffer[requirement.itemId] ?? 0));
+    if (inQuantum < remaining) return null;
+    nextQuantumBuffer[requirement.itemId] = inQuantum - remaining;
   }
-  return { inventory: nextInventory, tray: nextTray };
+  return { inventory: nextInventory, tray: nextTray, quantumBuffer: nextQuantumBuffer };
 }
 
 function constructionAutomationRemainingInventoryNeed(
@@ -10585,20 +10978,38 @@ function settleConstructionAutomationExcess(
   job.inventory = retained;
 }
 
-function constructionAutomationInputsAvailable(state: GameState, planetId: PlanetId, job: ConstructionAutomationJob, step: ConstructionAutomationStep): boolean {
+function constructionAutomationInputsAvailable(
+  state: GameState,
+  planetId: PlanetId,
+  job: ConstructionAutomationJob,
+  step: ConstructionAutomationStep,
+  entityId?: string,
+): boolean {
   const tray = trayForPlanet(state, planetId);
-  return Boolean(planConstructionAutomationConsumption(job.inventory, tray, constructionAutomationRequirements(step)));
+  const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
+  return Boolean(planConstructionAutomationConsumptionWithQuantum(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step)));
 }
 
-function finishConstructionAutomationStep(state: GameState, planetId: PlanetId, job: ConstructionAutomationJob, step: ConstructionAutomationStep): boolean {
+function finishConstructionAutomationStep(
+  state: GameState,
+  planetId: PlanetId,
+  job: ConstructionAutomationJob,
+  step: ConstructionAutomationStep,
+  entityId?: string,
+): boolean {
   const tray = trayForPlanet(state, planetId);
-  const consumed = planConstructionAutomationConsumption(job.inventory, tray, constructionAutomationRequirements(step));
+  const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
+  const consumed = planConstructionAutomationConsumptionWithQuantum(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step));
   if (!consumed) return false;
+  const commitConsumed = () => {
+    Object.assign(tray, consumed.tray);
+    job.inventory = consumed.inventory;
+    if (entityId) setConstructionAutomationQuantumBuffer(state, entityId, consumed.quantumBuffer);
+  };
   if (step.kind === "building") {
     const definition = getConstructionDefinition(step.constructionId);
     if (!definition) return false;
-    Object.assign(tray, consumed.tray);
-    job.inventory = consumed.inventory;
+    commitConsumed();
     settleConstructionAutomationExcess(state, planetId, job, job.steps.length);
     state.construction[step.constructionId] = Math.floor((state.construction[step.constructionId] ?? 0) + definition.outputAmount);
     state.constructionAutomation.totalCrafted += definition.outputAmount;
@@ -10606,8 +11017,7 @@ function finishConstructionAutomationStep(state: GameState, planetId: PlanetId, 
     return true;
   }
   if (step.kind === "fleet") {
-    Object.assign(tray, consumed.tray);
-    job.inventory = consumed.inventory;
+    commitConsumed();
     state.portableFleet[step.itemId] = Math.floor((state.portableFleet[step.itemId] ?? 0) + step.amount);
     state.constructionAutomation.totalCrafted += step.amount;
     state.constructionAutomation.lastCraftedId = step.itemId;
@@ -10621,6 +11031,7 @@ function finishConstructionAutomationStep(state: GameState, planetId: PlanetId, 
   }
   Object.assign(tray, consumed.tray);
   job.inventory = producedInventory;
+  if (entityId) setConstructionAutomationQuantumBuffer(state, entityId, consumed.quantumBuffer);
   settleConstructionAutomationExcess(state, planetId, job, job.stepIndex + 1);
   for (const output of recipe.outputs) {
     state.totalProduced[output.itemId] = Math.floor((state.totalProduced[output.itemId] ?? 0) + output.amount * step.batches);
@@ -10725,13 +11136,17 @@ function analyzeRepeatableConstructionAutomationPlan(
   };
 }
 
-function hasSingleConstructionAutomationTarget(state: GameState, targetId: ConstructionAutomationTargetId): boolean {
-  const activeTargets = getConstructionAutomationTargets().filter((definition) => {
+function getActiveConstructionAutomationTargets(state: GameState): ConstructionAutomationTargetDefinition[] {
+  return getConstructionAutomationTargets().filter((definition) => {
     if (!constructionDomainUnlocked(state, definition.id)) return false;
     if (definition.requiredTechId && !isTechnologyCompleted(state, definition.requiredTechId)) return false;
     const target = state.constructionAutomation.targetStock[definition.id] ?? 0;
     return target > constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id);
   });
+}
+
+function hasSingleConstructionAutomationTarget(state: GameState, targetId: ConstructionAutomationTargetId): boolean {
+  const activeTargets = getActiveConstructionAutomationTargets(state);
   return activeTargets.length === 1 && activeTargets[0].id === targetId;
 }
 
@@ -10797,10 +11212,12 @@ function constructionAutomationBatchInputsAvailable(
   planetId: PlanetId,
   batch: RepeatableConstructionAutomationBatch,
   cycles = 1,
+  entityId?: string,
 ): boolean {
   const tray = trayForPlanet(state, planetId);
+  const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
   return (Object.entries(batch.trayCosts) as Array<[ItemId, number]>).every(([itemId, amount]) =>
-    Math.max(0, Math.floor(tray[itemId] ?? 0)) >= Math.max(0, Math.floor(amount)) * cycles);
+    constructionQuantumAvailable(tray, {}, quantumBuffer, itemId) >= constructionQuantumSafeMultiply(amount, cycles));
 }
 
 function constructionAutomationCachedPlanValid(
@@ -11030,8 +11447,16 @@ function resolveConstructionAutomationPlan(
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
   const resolved = {
     plan,
+    // A finite by-product cycle is useful when one target can consume the
+    // whole center continuously.  With several active targets the fair-share
+    // scheduler must switch targets at every boundary; probing a private cycle
+    // there spends the same per-second plan-build budget that should be used
+    // for those target plans, and can starve the rotation.  Keep the original
+    // bounded batch fallback for the multi-target case.
     batch: batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
-      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+      ? (hasSingleConstructionAutomationTarget(state, definition.id)
+        ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+        : batch)
       : batch,
     inventorySnapshot,
     materialInventoryVersion: constructionAutomationInventoryVersion(inventorySnapshot),
@@ -11066,16 +11491,40 @@ function applyConstructionAutomationBatch(
   definition: ConstructionAutomationTargetDefinition,
   batch: RepeatableConstructionAutomationBatch,
   cycles: number,
+  entityId?: string,
 ): number {
   const cycleCount = Math.max(1, Math.floor(cycles));
   const count = cycleCount * Math.max(1, Math.floor(batch.jobsPerCycle));
   const tray = trayForPlanet(state, planetId);
-  for (const itemId of batch.touchedTrayItems) {
-    if (tray[itemId] === undefined) tray[itemId] = 0;
+  const quantumBuffer = entityId ? { ...constructionAutomationQuantumBuffer(state, entityId) } : undefined;
+  if (!entityId) {
+    for (const itemId of batch.touchedTrayItems) {
+      if (tray[itemId] === undefined) tray[itemId] = 0;
+    }
   }
   for (const [itemId, amount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
-    tray[itemId] = Math.max(0, Math.floor((tray[itemId] ?? 0) - amount * cycleCount));
+    let remaining = constructionQuantumSafeMultiply(amount, cycleCount);
+    const fromTray = Math.min(remaining, Math.max(0, Math.floor(tray[itemId] ?? 0)));
+    if (fromTray > 0) {
+      const nextTrayAmount = Math.max(0, Math.floor(tray[itemId] ?? 0) - fromTray);
+      if (entityId && nextTrayAmount < 1) delete tray[itemId];
+      else tray[itemId] = nextTrayAmount;
+      remaining -= fromTray;
+    }
+    if (entityId && quantumBuffer && remaining > 0) {
+      const fromQuantum = Math.min(remaining, Math.max(0, Math.floor(quantumBuffer[itemId] ?? 0)));
+      if (fromQuantum > 0) {
+        const nextQuantumAmount = Math.max(0, Math.floor(quantumBuffer[itemId] ?? 0) - fromQuantum);
+        if (nextQuantumAmount < 1) delete quantumBuffer[itemId];
+        else quantumBuffer[itemId] = nextQuantumAmount;
+        remaining -= fromQuantum;
+      }
+    }
+    // The caller checks availability first. Clamp rather than inventing a
+    // negative stack if a malformed imported batch reaches this path.
+    if (remaining > 0 && !entityId) tray[itemId] = 0;
   }
+  if (entityId && quantumBuffer) setConstructionAutomationQuantumBuffer(state, entityId, quantumBuffer);
   for (const [itemId, amount] of Object.entries(batch.trayReturns) as Array<[ItemId, number]>) {
     const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned < 1) continue;
@@ -11119,25 +11568,32 @@ function tryRunConstructionAutomationBatch(
   remainingWork: number,
   activeTargetCount: number,
   highLoadProtection: boolean,
+  maxFairBatchJobs: number,
 ): { usedWork: number; completed: number; jobs: number } | null {
   if (repeatable.workSeconds <= EPSILON || definition.outputAmount < 1) return null;
+  const hasDirectSource = state.constructionAutomation.quantumSourceEnabled === true ||
+    Object.keys(constructionAutomationQuantumBuffer(state, entity.id)).length > 0;
+  const directEntityId = hasDirectSource ? entity.id : undefined;
   const target = Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0));
   const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id);
   const jobsForTarget = Math.ceil(Math.max(0, target - current) / definition.outputAmount);
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
-  if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable)) return null;
+  if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable, 1, directEntityId)) return null;
   const tray = trayForPlanet(state, entity.planetId);
+  const quantumBuffer = directEntityId ? constructionAutomationQuantumBuffer(state, entity.id) : {};
   let cyclesForStock = Number.MAX_SAFE_INTEGER;
   for (const [itemId, amount] of Object.entries(repeatable.trayCosts) as Array<[ItemId, number]>) {
     if (amount < 1) continue;
-    cyclesForStock = Math.min(cyclesForStock, Math.floor(Math.max(0, tray[itemId] ?? 0) / amount));
+    cyclesForStock = Math.min(cyclesForStock, Math.floor(
+      constructionQuantumAvailable(tray, {}, quantumBuffer, itemId) / Math.max(1, Math.floor(amount)),
+    ));
   }
   const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id) &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
     constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
   const canFairBatch = highLoadProtection && constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
   const fairShare = Math.max(1, Math.min(
-    CONSTRUCTION_AUTOMATION_MAX_FAIR_BATCH_JOBS,
+    maxFairBatchJobs,
     Math.ceil(jobsForWork / Math.max(1, activeTargetCount)),
   ));
   const jobsPerCycle = Math.max(1, Math.floor(repeatable.jobsPerCycle));
@@ -11149,7 +11605,7 @@ function tryRunConstructionAutomationBatch(
     ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock)
     : canFairBatch ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock, Math.floor(fairShare / jobsPerCycle)) : 1;
   if (cycles < 1) return null;
-  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles);
+  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles, directEntityId);
   return { usedWork: repeatable.workSeconds * cycles, completed, jobs: cycles * jobsPerCycle };
 }
 
@@ -11165,16 +11621,28 @@ function runConstructionCenters(
 ): void {
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+  const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
+  const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
+    centerEntities.some((entity) => entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD);
+  const maxIterationsPerSecond = extendedBudget
+    ? CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND
+    : CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND;
+  const maxPlanBuildsPerSecond = extendedBudget
+    ? CONSTRUCTION_AUTOMATION_EXTENDED_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND
+    : CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND;
+  const maxFairBatchJobs = extendedBudget
+    ? CONSTRUCTION_AUTOMATION_EXTENDED_MAX_FAIR_BATCH_JOBS
+    : CONSTRUCTION_AUTOMATION_MAX_FAIR_BATCH_JOBS;
   // A single planet-wide FIFO budget allowed a very large first center to
   // consume every guarded iteration before later centers were visited. Keep
   // the same deterministic total cap, but hand out a fair prefix to each
   // center and return unused tokens to the pool. This preserves single-center
   // throughput while ensuring a second center always gets a chance to work.
   let remainingIterationPool = batchConstructionAutomation
-    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND))
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * maxIterationsPerSecond))
     : Number.MAX_SAFE_INTEGER;
   let remainingPlanBuildPool = batchConstructionAutomation
-    ? Math.max(1, Math.ceil(Math.max(0, seconds) * CONSTRUCTION_AUTOMATION_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND))
+    ? Math.max(1, Math.ceil(Math.max(0, seconds) * maxPlanBuildsPerSecond))
     : Number.MAX_SAFE_INTEGER;
   for (let centerIndex = 0; centerIndex < centerEntities.length; centerIndex += 1) {
     const entity = centerEntities[centerIndex];
@@ -11210,6 +11678,12 @@ function runConstructionCenters(
       continue;
     }
     let job: ConstructionAutomationJob | undefined = state.constructionAutomation.jobs[entity.id];
+    // A direct quantum buffer can change between simulation seconds, but it
+    // does not change the recipe topology on every inner batch iteration.
+    // Keep one successful direct plan for this center/target during the
+    // current second; rebuilding it for every buffered batch consumes the
+    // guarded plan-build budget before the center can do useful work.
+    const directResolvedByTarget = new Map<ConstructionAutomationTargetId, { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null }>();
     let remainingWork = Math.max(0, seconds) * Math.max(1, entity.machineCount) * powerFactor;
     let completed = 0;
     let worked = false;
@@ -11224,23 +11698,50 @@ function runConstructionCenters(
       const jobBeforeIteration = job;
       const stepBeforeIteration = job?.stepIndex;
       if (!job) {
+        const quantumBuffer = constructionAutomationQuantumBuffer(state, entity.id);
         const target = constructionAutomationTarget(state);
-        if (!target) break;
-        const resolved = batchConstructionAutomation
-          ? resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler)
-          : { plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId), batch: null };
+        if (!target) {
+          // A direct request can outlive the final completion by one boundary
+          // if a recipe produced a smaller net amount than its raw probe. Do
+          // not strand that reservation in a center that no longer has a goal.
+          if (Object.keys(quantumBuffer).length > 0) refundConstructionAutomationQuantumBuffer(state, entity.id);
+          break;
+        }
+        let resolved: CachedConstructionAutomationPlan | { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null } | null;
+        if (Object.keys(quantumBuffer).length > 0) {
+          // A direct quantum delivery changes the planner's virtual input set;
+          // bypass the tray-only cache and spend one bounded plan build. The
+          // resulting repeatable batch consumes the center buffer directly,
+          // so a high-stack center is not reduced to one atomic job per loop.
+          const cachedDirect = directResolvedByTarget.get(target.definition.id);
+          if (cachedDirect && !cachedDirect.plan.blocker) {
+            resolved = cachedDirect;
+          } else {
+            if (budget.remainingPlanBuilds < 1) {
+              if (profiler) profiler.constructionGuardHits += 1;
+              break;
+            }
+            budget.remainingPlanBuilds -= 1;
+            if (profiler) profiler.constructionPlanBuilds += 1;
+            const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer);
+            resolved = {
+              plan: directPlan,
+              batch: directPlan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan),
+            };
+            if (!directPlan.blocker) directResolvedByTarget.set(target.definition.id, resolved);
+          }
+        } else {
+          resolved = batchConstructionAutomation
+            ? resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler)
+            : { plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId), batch: null };
+        }
         if (!resolved) {
           if (profiler) profiler.constructionGuardHits += 1;
           break;
         }
         const plan = resolved.plan;
         if (plan.blocker) break;
-        const activeTargetCount = Math.max(1, getConstructionAutomationTargets().filter((candidate) => {
-          if (!constructionDomainUnlocked(state, candidate.id)) return false;
-          if (candidate.requiredTechId && !isTechnologyCompleted(state, candidate.requiredTechId)) return false;
-          return (state.constructionAutomation.targetStock[candidate.id] ?? 0) >
-            constructionAutomationCurrentStock(state, candidate.id) + constructionAutomationPending(state, candidate.id);
-        }).length);
+        const activeTargetCount = Math.max(1, getActiveConstructionAutomationTargets(state).length);
         const highLoadProtection = entity.machineCount >= CONSTRUCTION_AUTOMATION_PROTECTION_STACK_THRESHOLD ||
           remainingWork > CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND;
         const batched = batchConstructionAutomation && resolved.batch
@@ -11253,6 +11754,7 @@ function runConstructionCenters(
             remainingWork,
             activeTargetCount,
             highLoadProtection,
+            maxFairBatchJobs,
           )
           : null;
         if (batched) {
@@ -11281,7 +11783,7 @@ function runConstructionCenters(
         continue;
       }
       const duration = constructionAutomationStepDuration(state, step);
-      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step)) break;
+      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) break;
       const needed = Math.max(0, duration - job.elapsedSeconds);
       const used = Math.min(remainingWork, needed);
       job.elapsedSeconds = round(job.elapsedSeconds + used, 6);
@@ -11289,7 +11791,7 @@ function runConstructionCenters(
       worked ||= used > EPSILON;
       entity.progress = round(Math.min(1, job.elapsedSeconds / duration), 6);
       if (job.elapsedSeconds + EPSILON < duration) break;
-      if (!finishConstructionAutomationStep(state, entity.planetId, job, step)) break;
+      if (!finishConstructionAutomationStep(state, entity.planetId, job, step, entity.id)) break;
       if (step.kind === "building") completed += getConstructionDefinition(step.constructionId)?.outputAmount ?? 0;
       else if (step.kind === "fleet") completed += step.amount;
       job.stepIndex += 1;
@@ -11298,6 +11800,9 @@ function runConstructionCenters(
       if (job.stepIndex >= job.steps.length) {
         delete state.constructionAutomation.jobs[entity.id];
         job = undefined;
+        if (!constructionAutomationTarget(state) && Object.keys(constructionAutomationQuantumBuffer(state, entity.id)).length > 0) {
+          refundConstructionAutomationQuantumBuffer(state, entity.id);
+        }
       }
       if (remainingWork + EPSILON >= remainingBeforeIteration && job === jobBeforeIteration && job?.stepIndex === stepBeforeIteration) break;
     }
@@ -12518,6 +13023,7 @@ export function removeEntity(state: GameState, entityId: string, count?: number)
   if (target.buildingId === "construction_center") {
     const job = next.constructionAutomation.jobs[entityId];
     if (job) refundConstructionAutomationJob(next, entityId, job);
+    refundConstructionAutomationQuantumBuffer(next, entityId);
     delete next.constructionAutomation.jobs[entityId];
   }
   cancelStationRoutes(next, (demand, route) =>

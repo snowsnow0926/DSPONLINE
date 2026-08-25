@@ -178,6 +178,7 @@ import {
   setBeltMonitorEnabled,
   setBeltStackSize,
   setConstructionAutomationEnabled,
+  setConstructionAutomationQuantumSourceEnabled,
   setConstructionAutomationTarget,
   setConstructionAutomationTargetsForBuildings,
   setActivePlanet,
@@ -1600,6 +1601,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     submissionId: number | null;
     pendingViewportSignature: string;
   } | null>(null);
+  const persistPrimarySaveRef = useRef<(
+    state?: GameState,
+    kind?: RuntimePersistenceKind,
+  ) => Promise<SaveGameResult>>(() => Promise.resolve({ success: false, message: "未就绪", code: "unavailable" }));
+  const stateWithSimulationDebtRef = useRef<(state: GameState) => GameState>((state) => state);
+  const isCurrentPrimarySaveSourceRef = useRef<(
+    expected: NonNullable<typeof controlledReturnCommitRef.current>,
+  ) => boolean>(() => false);
   const returnToMenuSaveInFlightRef = useRef(false);
   const lastCanvasPublishedGameRef = useRef(game);
   const canvasRenderSnapshotRef = useRef(canvasRenderSnapshot);
@@ -1767,6 +1776,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // visibility/native callback cannot promote a mirror after the lifecycle
   // decision.  `pageshow` clears this for BFCache restores.
   const lifecycleExitStartedRef = useRef(false);
+  // React runs this effect's cleanup before re-running it when a dynamic
+  // policy dependency changes. Keep a generation so that cleanup can
+  // distinguish a real unmount from that ordinary dependency turnover.
+  const lifecycleSaveEffectGenerationRef = useRef(0);
   const simulationStateRevisionRef = useRef(durableSimulationRuntimeEnabled ? loaded.runtimeRecovery?.stateRevision ?? 0 : 0);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
@@ -2415,6 +2428,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const stateWithSimulationDebt = useCallback((state: GameState): GameState => {
     return applyAuthoritativeCheckpointOverlay(state, createAuthoritativeCheckpointOverlay(state));
   }, [createAuthoritativeCheckpointOverlay]);
+  stateWithSimulationDebtRef.current = stateWithSimulationDebt;
 
   /**
    * Stage an ordered simulation operation in the persistence Worker before
@@ -3738,6 +3752,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure,
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
+  persistPrimarySaveRef.current = persistPrimarySave;
+  isCurrentPrimarySaveSourceRef.current = isCurrentPrimarySaveSource;
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
@@ -6329,22 +6345,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return () => window.clearInterval(timer);
   }, [abortPureIdleForWorkerFailure, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
+  // Keep the autosave timer responsive to the player's interval/throttle
+  // preference, but do not couple it to lifecycle listener cleanup. A
+  // preference or byte-count update must never trigger a second synchronous
+  // primary write while an authoritative save is winning its CAS revision.
   useEffect(() => {
-    const timer = largeSaveAutosavePolicy.effectiveIntervalSeconds > 0
+    const intervalSeconds = largeSaveAutosavePolicy.effectiveIntervalSeconds;
+    const timer = intervalSeconds > 0
       ? window.setInterval(() => {
         // Pure idle owns an independently fenced checkpoint and heartbeat.
         // Saving the dormant regular simulation Worker here would overwrite
         // that boundary with stale state, so its terminal handoff is the only
         // primary-save path while the macro session is active.
         if (pureIdleMacroActiveRef.current) return;
-        void persistPrimarySave(undefined, "autosave");
-      }, largeSaveAutosavePolicy.effectiveIntervalSeconds * 1000)
+        void persistPrimarySaveRef.current(undefined, "autosave");
+      }, intervalSeconds * 1000)
       : null;
+    return () => {
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [largeSaveAutosavePolicy.effectiveIntervalSeconds]);
+
+  // Lifecycle listeners are installed once for the mounted game surface.
+  // Dynamic save callbacks are read through refs so changing autosave policy,
+  // memory settings, or the published state cannot run their cleanup path.
+  useEffect(() => {
+    const effectGeneration = lifecycleSaveEffectGenerationRef.current + 1;
+    lifecycleSaveEffectGenerationRef.current = effectGeneration;
     let lifecycleSaveStarted = false;
     const saveNow = () => {
       if (lifecycleExitStartedRef.current) return;
       if (pureIdleMacroActiveRef.current) return;
-      void persistPrimarySave(undefined, "lifecycle");
+      void persistPrimarySaveRef.current(undefined, "lifecycle");
     };
     const saveBeforeUnload = (_event: Event) => {
       if (lifecycleSaveStarted) return;
@@ -6386,7 +6418,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     document.addEventListener("visibilitychange", saveWhenHidden);
     window.addEventListener(NATIVE_APP_STATE_EVENT, saveWhenNativeInactive);
     return () => {
-      if (timer !== null) window.clearInterval(timer);
       window.removeEventListener("beforeunload", saveBeforeUnload);
       window.removeEventListener("pagehide", saveBeforeUnload);
       window.removeEventListener("pageshow", restoreFromBfcache);
@@ -6395,17 +6426,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // Dependency changes and in-app unmounts still save. During a real page
       // exit the lifecycle handler already wrote the one authoritative
       // emergency candidate, so a second, newer cleanup save must not leave
-      // that mirror stale and manufacture a conflict on reload.
-      const controlledCommit = controlledReturnCommitRef.current;
-      if (!lifecycleSaveStarted && !lifecycleExitStartedRef.current && durableRecoveryLifecycleRef.current !== "active" &&
-        (!controlledCommit || !isCurrentPrimarySaveSource(controlledCommit))) {
+      // that mirror stale and manufacture a conflict on reload. Defer the
+      // fallback by one microtask so a dependency-driven cleanup can observe
+      // the next effect generation and skip itself.
+      queueMicrotask(() => {
+        if (lifecycleSaveEffectGenerationRef.current !== effectGeneration) return;
+        const controlledCommit = controlledReturnCommitRef.current;
+        if (lifecycleSaveStarted || lifecycleExitStartedRef.current || durableRecoveryLifecycleRef.current === "active" ||
+          (controlledCommit && isCurrentPrimarySaveSourceRef.current(controlledCommit))) return;
         const cleanupState = durableSimulationRuntimeEnabled
           ? latestAuthoritativeCheckpointRef.current
           : gameRef.current;
-        saveGame(stateWithSimulationDebt(cleanupState));
-      }
+        saveGame(stateWithSimulationDebtRef.current(cleanupState));
+      });
     };
-  }, [durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.effectiveIntervalSeconds, isCurrentPrimarySaveSource, persistPrimarySave, stateWithSimulationDebt]);
+  }, [durableSimulationRuntimeEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -12495,6 +12530,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             game={game}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
             onEnabledChange={(enabled) => commitGame((current) => setConstructionAutomationEnabled(current, enabled))}
+            onQuantumSourceChange={(enabled) => commitGame((current) => setConstructionAutomationQuantumSourceEnabled(current, enabled))}
             onTargetChange={(constructionId: ConstructionAutomationTargetId, target: number) => commitGame((current) => setConstructionAutomationTarget(current, constructionId, target))}
             onBatchTargetChange={async (target) => {
               if (!await gameDialog.confirm(`将把所有已解锁建筑的自动补足目标统一设置为 ${target.toLocaleString("zh-CN")}。不会生成建筑，也不会取消现有制造任务。是否继续？`, { confirmLabel: "应用全部目标" })) return;

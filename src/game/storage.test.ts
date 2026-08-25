@@ -31,6 +31,21 @@ describe("game storage", () => {
     expect(migrated.endgame.constructionActivity.endsAtMs).toBe(Number.MAX_SAFE_INTEGER);
   });
 
+  it("round-trips the opt-in construction-center quantum material source", () => {
+    const state = createInitialState();
+    state.version = 47;
+    state.entities.push({
+      id: "save-center", kind: "machine", planetId: "home", position: { x: 0, y: 0 }, interactionLocked: false,
+      buildingId: "construction_center", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+      routingCursor: 0, machineCount: 1, minerCount: 0,
+    });
+    state.constructionAutomation.quantumSourceEnabled = true;
+    state.constructionAutomation.quantumMaterialBuffer = { "save-center": { iron_ore: 12 } };
+    const reloaded = importGame(exportGame(state));
+    expect(reloaded?.constructionAutomation.quantumSourceEnabled).toBe(true);
+    expect(reloaded?.constructionAutomation.quantumMaterialBuffer).toEqual({ "save-center": { iron_ore: 12 } });
+  });
+
   it("repairs duplicate station contract IDs through the normal import/export path", () => {
     const source = createInitialState();
     source.version = 47;

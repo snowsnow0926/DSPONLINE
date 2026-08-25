@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { hashGameState } from "./benchmark";
-import { TECHNOLOGIES } from "./content";
+import { ITEMS, TECHNOLOGIES } from "./content";
 import {
   advancePersistentSimulationRuntime,
+  CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND,
+  CONSTRUCTION_AUTOMATION_EXTENDED_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND,
   createInitialState,
   createPersistentSimulationRuntime,
   createSimulationProfiler,
@@ -65,6 +67,7 @@ function expectSafeIntegerInventories(state: GameState): void {
     state.construction,
     state.totalProduced,
     state.constructionAutomation.destroyedByproducts,
+    ...Object.values(state.constructionAutomation.quantumMaterialBuffer ?? {}),
     ...Object.values(state.constructionAutomation.jobs).map((job) => job.inventory),
   ];
   for (const record of records) {
@@ -108,6 +111,53 @@ describe("construction automation compute protection", () => {
     expect(getConstructionAutomationStatus(result.state, center.id)).toMatchObject({ protectionReason: "high-stack" });
     expect(Object.keys(result.state.constructionAutomation.targetStock)).toHaveLength(Object.keys(initial.constructionAutomation.targetStock).length);
     expectSafeIntegerInventories(result.state);
+  });
+
+  it("uses the extended deterministic budget only for an ultra-high multi-target stack", () => {
+    const initial = createProtectedConstructionState();
+    const center = initial.entities.find((entity) => entity.buildingId === "construction_center")!;
+    center.machineCount = 8_000_000;
+    // Supply every recipe tier so this fixture reaches the scheduler budget
+    // instead of stopping early on an unrelated intermediate-material gap.
+    initial.tray = Object.fromEntries(Object.keys(ITEMS).map((itemId) => [itemId, 100_000_000])) as Partial<Record<ItemId, number>>;
+    initial.planetTrays.home = initial.tray;
+
+    const run = () => {
+      const profiler = createSimulationProfiler();
+      const runtime = createPersistentSimulationRuntime(structuredClone(initial));
+      const beforeCrafted = runtime.state.constructionAutomation.totalCrafted;
+      advancePersistentSimulationRuntime(runtime, 1, 1, profiler);
+      return {
+        hash: hashGameState(runtime.state),
+        crafted: runtime.state.constructionAutomation.totalCrafted - beforeCrafted,
+        profiler,
+        state: runtime.state,
+      };
+    };
+
+    const first = run();
+    const second = run();
+
+    expect(first.profiler.constructionIterations).toBeGreaterThan(256);
+    expect(first.profiler.constructionIterations).toBeLessThanOrEqual(
+      CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND,
+    );
+    expect(first.profiler.constructionPlanBuilds).toBeGreaterThan(24);
+    expect(first.profiler.constructionPlanBuilds).toBeLessThanOrEqual(
+      CONSTRUCTION_AUTOMATION_EXTENDED_MAX_PLAN_BUILDS_PER_SIMULATION_SECOND,
+    );
+    // The enlarged fair batch must release more than the former
+    // 512 × 4,096-job ceiling while remaining below the hard iteration cap.
+    expect(first.profiler.constructionJobsBatched).toBeGreaterThan(
+      CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND * 4_096,
+    );
+    expect(first.profiler.constructionIterations).toBeLessThan(
+      CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND,
+    );
+    expect(first.crafted).toBeGreaterThan(0);
+    expect(first.hash).toBe(second.hash);
+    expect(first.crafted).toBe(second.crafted);
+    expectSafeIntegerInventories(first.state);
   });
 
   it("shares the guarded budget so a second high-stack center also makes progress", () => {

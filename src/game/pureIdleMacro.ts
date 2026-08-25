@@ -410,6 +410,55 @@ function conservativeProductionIsSafe(state: GameState): boolean {
   );
 }
 
+/**
+ * Quantum-fed construction centers have a deliberately stateful boundary:
+ * every five seconds the engine may create a new per-center job or direct
+ * material buffer.  The affine pure-idle contract cannot safely invent or
+ * remove those map entries, so opt-in direct-feed sessions keep their tail on
+ * the ordinary exact engine.  This is a correctness guard for the feature,
+ * not a change to the default local-tray pure-idle path.
+ */
+function hasQuantumFedConstructionWork(state: GameState): boolean {
+  if (state.constructionAutomation.quantumSourceEnabled !== true || !state.constructionAutomation.enabled) return false;
+  if (!state.entities.some((entity) => entity.buildingId === "construction_center")) return false;
+  if (Object.keys(state.constructionAutomation.jobs).length > 0 ||
+    Object.keys(state.constructionAutomation.quantumMaterialBuffer ?? {}).length > 0) return true;
+  return Object.entries(state.constructionAutomation.targetStock).some(([targetId, amount]) => {
+    const target = Math.max(0, Math.floor(amount ?? 0));
+    if (target < 1) return false;
+    const current = Object.prototype.hasOwnProperty.call(state.portableFleet, targetId)
+      ? Math.max(0, Math.floor(state.portableFleet[targetId as keyof typeof state.portableFleet] ?? 0))
+      : Math.max(0, Math.floor(state.construction[targetId as keyof typeof state.construction] ?? 0));
+    return target > current;
+  });
+}
+
+const PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS = 900;
+
+function advanceQuantumConstructionExactWindow(
+  source: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+  options: PureIdleMacroOperationOptions,
+): GameState {
+  let state = source;
+  let remainingSimulation = Math.max(0, simulationSeconds);
+  let remainingWall = Math.max(0, wallSeconds);
+  while (remainingSimulation > 1e-9 || remainingWall > 1e-9) {
+    throwIfMacroInterrupted(options);
+    const fraction = remainingSimulation > PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS
+      ? PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS / remainingSimulation
+      : 1;
+    const simulationChunk = remainingSimulation * fraction;
+    const wallChunk = remainingWall * fraction;
+    state = advanceExactSimulationWindow(state, simulationChunk, wallChunk);
+    remainingSimulation = Math.max(0, remainingSimulation - simulationChunk);
+    remainingWall = Math.max(0, remainingWall - wallChunk);
+  }
+  throwIfMacroInterrupted(options);
+  return state;
+}
+
 /** Consumes an isolated Worker-owned state. The main-thread source is never mutated. */
 export function createConservativePureIdleMacroSession(
   state: GameState,
@@ -682,8 +731,29 @@ export function advancePureIdleMacroSession(
     const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     session.actualMultiplier = multiplier;
     const macroSimulationSeconds = macroWallSeconds * multiplier;
+    let exactQuantumConstructionTail = false;
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
+      : !session.conservativeOnly && hasQuantumFedConstructionWork(session.candidate)
+        ? (() => {
+          const terminalBeforeExact = capturePureIdleTerminalSnapshot(session.candidate);
+          // Direct quantum delivery changes jobs and center-local buffers at
+          // five-second boundaries. Replay this bounded tail through the
+          // authoritative engine instead of extrapolating a stale job map.
+          session.candidate = advanceQuantumConstructionExactWindow(
+            session.candidate,
+            macroSimulationSeconds,
+            macroWallSeconds,
+            options,
+          );
+          session.currentRate = rateBetween(
+            terminalBeforeExact,
+            capturePureIdleTerminalSnapshot(session.candidate),
+            macroSimulationSeconds,
+          );
+          exactQuantumConstructionTail = true;
+          return { ok: true as const, boundaryCorrections: 0 };
+        })()
       : session.conservativeOnly
         ? session.contract.deltas.length > 0
           ? applyPureIdleAffineContract(
@@ -720,7 +790,9 @@ export function advancePureIdleMacroSession(
         session.candidate.elapsedSeconds += macroSimulationSeconds;
       }
     }
-    const macroResearchSeconds = Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
+    const macroResearchSeconds = exactQuantumConstructionTail
+      ? 0
+      : Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
     const research = macroResearchSeconds > 1e-9
       ? advanceResearchMacroInPlace(
         session.candidate,

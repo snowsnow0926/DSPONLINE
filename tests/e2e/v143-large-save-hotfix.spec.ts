@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const BACKUP_KEY = `${SAVE_KEY}.backup`;
-const RELEASE_NOTE_ID = "2026-08-24-v1.1.7";
+const RELEASE_NOTE_ID = "2026-08-25-v1.1.8";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(({ releaseNoteId }) => {

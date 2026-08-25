@@ -1512,10 +1512,25 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
   const constructionAutomationLimit = completedTechIds.includes("construction_capacity_2")
     ? MAX_CONSTRUCTION_AUTOMATION_TARGET
     : completedTechIds.includes("construction_capacity_1") ? 500 : 100;
+  const constructionCenterIds = new Set(entities
+    .filter((entity) => entity.buildingId === "construction_center")
+    .map((entity) => entity.id));
   const validConstructionAutomationTargetId = (value: string): value is ConstructionAutomationTargetId =>
     value in initial.construction || value === "logistics_drone" || value === "logistics_vessel";
+  const quantumMaterialBuffer = saved.version >= 47 && saved.constructionAutomation?.quantumMaterialBuffer &&
+    typeof saved.constructionAutomation.quantumMaterialBuffer === "object" && !Array.isArray(saved.constructionAutomation.quantumMaterialBuffer)
+    ? Object.fromEntries(Object.entries(saved.constructionAutomation.quantumMaterialBuffer).flatMap(([entityId, inventory]) => {
+      if (!constructionCenterIds.has(entityId)) return [];
+      const normalized = constructionAutomationInventoryRecord(inventory);
+      return Object.keys(normalized).length > 0 ? [[entityId, normalized]] : [];
+    })) as GameState["constructionAutomation"]["quantumMaterialBuffer"]
+    : undefined;
   const constructionAutomation: GameState["constructionAutomation"] = {
     enabled: saved.version >= 26 ? saved.constructionAutomation?.enabled !== false : true,
+    ...(saved.version >= 47 && saved.constructionAutomation?.quantumSourceEnabled === true
+      ? { quantumSourceEnabled: true }
+      : {}),
+    ...(quantumMaterialBuffer ? { quantumMaterialBuffer } : {}),
     targetStock: Object.fromEntries(Object.entries(saved.version >= 26 ? saved.constructionAutomation?.targetStock ?? {} : {}).flatMap(([constructionId, amount]) =>
       validConstructionAutomationTargetId(constructionId)
         ? [[constructionId, Math.min(constructionAutomationLimit, nonNegativeInteger(amount))]]
@@ -1534,7 +1549,7 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     jobs: {},
   };
   if (saved.version >= 31 && saved.constructionAutomation?.jobs && typeof saved.constructionAutomation.jobs === "object") {
-    const centerIds = new Set(entities.filter((entity) => entity.buildingId === "construction_center").map((entity) => entity.id));
+    const centerIds = constructionCenterIds;
     for (const [entityId, rawJob] of Object.entries(saved.constructionAutomation.jobs as Record<string, any>)) {
       if (!centerIds.has(entityId) || !rawJob || typeof rawJob !== "object" ||
         typeof rawJob.constructionId !== "string" || !validConstructionAutomationTargetId(rawJob.constructionId) || !Array.isArray(rawJob.steps)) continue;
@@ -3218,11 +3233,17 @@ function authoritativePersistenceFailure(
  * backup contract is retained.
  */
 function primaryCanUseProofBoundTransfer(mode: SaveMode): boolean {
-  if (mode !== "normal") return true;
   const primaryKey = primarySaveKey(mode);
   const catalog = getLocalSaveCatalog(primaryKey);
   if (!catalog) return !listLocalSaveKeys().includes(primaryKey);
-  return catalog.integrity === "valid" && catalog.mode === "normal" && catalog.modeExplicit === true;
+  // A catalog can be indexed asynchronously for a legacy/localStorage
+  // payload before its coordinated revision record exists. The proof-bound
+  // Worker path requires both records; route that first write through the
+  // coordinated compatibility path so it can establish revision 1 atomically.
+  const revision = getPrimaryLocalSaveRevision(mode);
+  if (revision < 1 || catalog.revision !== revision) return false;
+  return catalog.integrity === "valid" && (mode === "speedrun" ||
+    catalog.mode === "normal" && catalog.modeExplicit === true);
 }
 
 /**

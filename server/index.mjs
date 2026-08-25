@@ -2794,7 +2794,25 @@ function validateParsedSavePayload(parsed, integrity = inspectParsedSavePayloadI
       }
     }
     if (state.version >= 38) {
-      const destroyed = state.constructionAutomation?.destroyedByproducts;
+      const automation = state.constructionAutomation;
+      if (!automation || typeof automation !== "object" || Array.isArray(automation) ||
+        (state.version < 47 && (automation.quantumSourceEnabled !== undefined || automation.quantumMaterialBuffer !== undefined)) ||
+        (automation.quantumSourceEnabled !== undefined && typeof automation.quantumSourceEnabled !== "boolean")) return false;
+      const directBuffer = automation.quantumMaterialBuffer;
+      if (directBuffer !== undefined) {
+        const centers = new Set(state.entities
+          .filter((entity) => entity?.buildingId === "construction_center")
+          .map((entity) => entity.id));
+        if (!directBuffer || typeof directBuffer !== "object" || Array.isArray(directBuffer) ||
+          Object.keys(directBuffer).length > Math.min(4_096, centers.size) ||
+          Object.entries(directBuffer).some(([entityId, inventory]) => {
+            if (!centers.has(entityId) || !inventory || typeof inventory !== "object" || Array.isArray(inventory) ||
+              Object.keys(inventory).length > 128) return true;
+            return Object.entries(inventory).some(([itemId, amount]) =>
+              !/^[a-z][a-z0-9_]{1,80}$/.test(itemId) || !Number.isSafeInteger(amount) || amount < 0);
+          })) return false;
+      }
+      const destroyed = automation.destroyedByproducts;
       if (!destroyed || typeof destroyed !== "object" || Array.isArray(destroyed) ||
         Object.entries(destroyed).some(([itemId, amount]) => !/^[a-z][a-z0-9_]{1,80}$/.test(itemId) || !Number.isSafeInteger(amount) || amount < 0)) return false;
       if (!Array.isArray(state.blueprints) || state.blueprints.some((blueprint) => {

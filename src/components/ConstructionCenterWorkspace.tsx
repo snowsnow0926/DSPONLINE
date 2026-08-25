@@ -113,11 +113,12 @@ function ConstructionTargetControl({ definition, target, stockLimit, unlocked, o
   </div>;
 }
 
-export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChange, onTargetChange, onBatchTargetChange }: {
+export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChange, onQuantumSourceChange, onTargetChange, onBatchTargetChange }: {
   open: boolean;
   game: GameState;
   onClose: () => void;
   onEnabledChange: (enabled: boolean) => void;
+  onQuantumSourceChange: (enabled: boolean) => void;
   onTargetChange: (constructionId: ConstructionAutomationTargetId, target: number) => void;
   onBatchTargetChange: (target: number) => void;
 }) {
@@ -131,6 +132,21 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
   const stockLimit = getConstructionAutomationStockLimit(game);
   const cycleSeconds = getConstructionAutomationCycleSeconds(game);
   const materialSeconds = getConstructionAutomationMaterialSeconds(game);
+  const quantumSourceEnabled = game.constructionAutomation.quantumSourceEnabled === true;
+  const quantumNetworkEnabled = game.quantumLogisticsNetwork.enabled;
+  const quantumBufferTotals = Object.values(game.constructionAutomation.quantumMaterialBuffer ?? {}).reduce<Partial<Record<ItemId, number>>>((totals, inventory) => {
+    for (const [itemId, amount] of Object.entries(inventory) as Array<[ItemId, number]>) {
+      totals[itemId] = Math.floor((totals[itemId] ?? 0) + Math.max(0, Math.floor(amount ?? 0)));
+    }
+    return totals;
+  }, {});
+  const quantumBufferTotal = Object.values(quantumBufferTotals).reduce((sum, amount) => sum + (amount ?? 0), 0);
+  const displayedMaterialInventory = quantumSourceEnabled
+    ? Object.fromEntries(Object.keys({ ...sourceTray, ...quantumBufferTotals }).map((itemId) => [
+      itemId,
+      Math.floor((sourceTray[itemId as ItemId] ?? 0) + (quantumBufferTotals[itemId as ItemId] ?? 0)),
+    ])) as Partial<Record<ItemId, number>>
+    : sourceTray;
   const term = query.trim().toLocaleLowerCase("zh-CN");
   const definitions = useMemo(() => automationDefinitions().filter((definition) => {
     if (definition.id === "orbital_cargo_terminal" && (game.mode !== "normal" || game.orbitalStation.status === "locked")) return false;
@@ -182,6 +198,7 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
 
       <div className="construction-center-toolbar">
         <label className="construction-center-toggle"><input type="checkbox" checked={game.constructionAutomation.enabled} onChange={(event) => onEnabledChange(event.target.checked)} /><i /><span><strong>自动补足</strong><small>{game.constructionAutomation.enabled ? "制造协议运行" : "制造协议暂停"}</small></span></label>
+        <label className="construction-center-toggle"><input type="checkbox" checked={quantumSourceEnabled} disabled={!quantumNetworkEnabled} onChange={(event) => onQuantumSourceChange(event.target.checked)} /><i /><span><strong>量子仓库直供</strong><small>{!quantumNetworkEnabled ? "需先启用量子网络" : quantumSourceEnabled ? "五秒边界直送中心，不经过行星托盘" : "仅使用行星托盘"}</small></span></label>
         <label className="construction-center-search"><Search size={14} /><StableTextInput draftId="construction-center-search" value={query} onValueChange={setQuery} placeholder="搜索建筑或材料" aria-label="搜索自动制造建筑" /></label>
         <div className="construction-center-categories" role="group" aria-label="建筑制造分类">
           {(["all", "power", "production", "logistics", "dyson"] as CenterCategory[]).map((id) => <button className={category === id ? "active" : ""} type="button" key={id} onClick={() => setCategory(id)}>{{ all: "全部", power: "能源", production: "生产", logistics: "物流", dyson: "戴森" }[id]}</button>)}
@@ -200,6 +217,8 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
 
       <div className="construction-center-status">
         <span><PackageOpen size={14} />取料行星 <strong>{getPlanet(sourcePlanetId).name}</strong></span>
+        <span>量子直供 <strong>{!quantumNetworkEnabled ? "未启用" : quantumSourceEnabled ? "已启用" : "未启用"}</strong></span>
+        {quantumSourceEnabled && quantumBufferTotal > 0 ? <span>中心直供缓存 <strong><QuantityValue value={quantumBufferTotal} /></strong></span> : null}
         <span>累计制造 <strong><QuantityValue value={game.constructionAutomation.totalCrafted} /></strong></span>
         <span>最近完成 <strong>{game.constructionAutomation.lastCraftedId ? isPortableFleetItem(game.constructionAutomation.lastCraftedId) ? ITEMS[game.constructionAutomation.lastCraftedId].name : getConstructionDefinition(game.constructionAutomation.lastCraftedId)?.name ?? "未知" : "尚无"}</strong></span>
         {centers.map((center) => {
@@ -218,12 +237,12 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
           const unlocked = (definition.id !== "orbital_cargo_terminal" || game.mode === "normal" && game.orbitalStation.status !== "locked") &&
             (!definition.requiredTechId || isTechnologyCompleted(game, definition.requiredTechId));
           const complete = target > 0 && current >= target;
-          const missing = definition.costs.filter((cost) => (sourceTray[cost.itemId] ?? 0) < cost.amount);
+          const missing = definition.costs.filter((cost) => (displayedMaterialInventory[cost.itemId] ?? 0) < cost.amount);
           return <article className={`${target > 0 ? "construction-center-row construction-center-row--targeted" : "construction-center-row"}${complete ? " construction-center-row--complete" : ""}`} key={definition.id}>
             <i><DefinitionIcon id={definition.id} /></i>
             <div className="construction-center-identity"><strong>{definition.name}</strong><small>{unlocked ? <>每批 ×<QuantityValue value={definition.outputAmount} /></> : `需要科技：${getTechnology(definition.requiredTechId)?.name ?? "未解锁"}`}</small></div>
             <div className="construction-center-materials">
-              {definition.costs.map((cost) => <ItemHoverCard itemId={cost.itemId} key={cost.itemId}><span className={(sourceTray[cost.itemId] ?? 0) >= cost.amount ? "ready" : "missing"}><ItemGlyph itemId={cost.itemId} /><b><QuantityValue value={cost.amount} /></b></span></ItemHoverCard>)}
+              {definition.costs.map((cost) => <ItemHoverCard itemId={cost.itemId} key={cost.itemId}><span className={(displayedMaterialInventory[cost.itemId] ?? 0) >= cost.amount ? "ready" : "missing"}><ItemGlyph itemId={cost.itemId} /><b><QuantityValue value={cost.amount} /></b></span></ItemHoverCard>)}
             </div>
             <div className="construction-center-stock"><small>{isPortableFleetItem(definition.id) ? "随身载具" : "施工库存"}</small><strong><QuantityValue value={current} /></strong>{target > 0 ? <span className={complete ? "ready" : missing.length > 0 ? "missing" : "working"}>{complete ? <Check size={12} /> : null}{complete ? "已补足" : missing.length > 0 ? `递归检查 ${ITEMS[missing[0].itemId].name}` : "补货中"}</span> : <span>未设目标</span>}</div>
             <ConstructionTargetControl definition={definition} target={target} stockLimit={stockLimit} unlocked={unlocked} onChange={onTargetChange} />

@@ -6,7 +6,7 @@ const REFRESH_PREFERENCE_KEY = "dsp-idle-network.production-refresh.v1";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-24-v1.1.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-25-v1.1.8");
   });
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
   await page.addLocatorHandler(offlineReport, async () => {
@@ -127,7 +127,15 @@ test("production refresh profiles stay device-local and fixed choices are never 
 
   await operations.getByRole("tab", { name: "存档" }).click();
   await operations.getByRole("button", { name: "立即保存" }).click();
-  const persistedSettings = await page.evaluate(() => JSON.parse(window.localStorage.getItem("dsp-idle-network.save.v1")!).state.settings as Record<string, unknown>);
+  await expect(shell).toHaveAttribute("data-persistence-phase", "complete", { timeout: 15_000 });
+  const persistedSettings = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    await store.initializeLocalSaveStore();
+    await store.flushLocalSaveWrites();
+    const raw = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    if (!raw) throw new Error("missing persisted main save");
+    return JSON.parse(raw).state.settings as Record<string, unknown>;
+  });
   expect(persistedSettings).not.toHaveProperty("productionRefreshPreference");
   expect(persistedSettings).not.toHaveProperty("productionRefreshIntervalMs");
 

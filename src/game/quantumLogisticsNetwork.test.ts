@@ -13,9 +13,44 @@ import {
   settleQuantumAttachment,
   settleQuantumLogisticsNetwork,
 } from "./quantumLogisticsNetwork";
-import { advanceSimulation, attachAllInterstellarStationsToQuantumNetwork, createPlayerInitialState, setAllOrbitalCollectorsQuantumMode } from "./engine";
+import { advanceSimulation, attachAllInterstellarStationsToQuantumNetwork, createPlayerInitialState, setAllOrbitalCollectorsQuantumMode, setConstructionAutomationTarget } from "./engine";
 import { advancePureIdleMacroSession, createPureIdleMacroSession } from "./pureIdleMacro";
 import type { FactoryEntity, StationSlot } from "./types";
+
+function createQuantumConstructionState(enabled: boolean, centerMachines = 1, towerMachines = 100) {
+  const state = createPlayerInitialState();
+  state.quantumLogisticsNetwork.enabled = true;
+  state.tray = {};
+  state.planetTrays.home = {};
+  state.construction.arc_smelter = 0;
+  state.quantumLogisticsNetwork.inventory = {
+    iron_ore: "1000000000",
+    copper_ore: "1000000000",
+    stone: "1000000000",
+  };
+  state.constructionAutomation.quantumSourceEnabled = enabled;
+  state.research.completedTechIds.push("construction_automation");
+  state.constructionAutomation.targetStock.arc_smelter = 1;
+  state.entities.push(
+    {
+      id: "quantum-construction-center", kind: "machine", planetId: "home", position: { x: 40, y: 0 }, interactionLocked: false,
+      buildingId: "construction_center", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+      routingCursor: 0, machineCount: centerMachines, minerCount: 0,
+    },
+    {
+      id: "quantum-bandwidth-tower", kind: "station", planetId: "home", position: { x: 80, y: 0 }, interactionLocked: false,
+      buildingId: "interstellar_logistics_station", stationTier: 2, quantumMode: "quantum", stationSlots: [], stationRoutes: [],
+      inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+      routingCursor: 0, machineCount: towerMachines, minerCount: 0,
+    },
+    {
+      id: "quantum-construction-power", kind: "power", planetId: "home", position: { x: 120, y: 0 }, interactionLocked: false,
+      buildingId: "wind_turbine", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+      routingCursor: 0, machineCount: Math.max(100, centerMachines * 100), minerCount: 0,
+    },
+  );
+  return state;
+}
 
 describe("quantum logistics network", () => {
   it("deposits immediately up to per-item capacity and returns the exact remainder", () => {
@@ -549,6 +584,120 @@ describe("quantum logistics network", () => {
     expect(demand.stationRoutes).toEqual([]);
     expect(demand.outputs.iron_ore).toBe(100);
     expect(supply.outputs.iron_ore).toBe(0);
+  });
+
+  it("可选地把建筑制造中心直连量子仓库，并在五秒边界后写入中心直供缓存", () => {
+    const disabled = advanceSimulation(createQuantumConstructionState(false), 5);
+    expect(disabled.quantumLogisticsNetwork.inventory.iron_ore).toBe("1000000000");
+    expect(disabled.tray.iron_ore).toBeUndefined();
+    expect(disabled.construction.arc_smelter ?? 0).toBe(0);
+
+    const enabled = createQuantumConstructionState(true);
+    const afterBoundary = advanceSimulation(enabled, 5);
+    expect(Number(afterBoundary.quantumLogisticsNetwork.inventory.iron_ore ?? "0")).toBeLessThan(1000000000);
+    expect((afterBoundary.tray.iron_ore ?? 0) + (afterBoundary.tray.copper_ore ?? 0) + (afterBoundary.tray.stone ?? 0)).toBe(0);
+    expect(Object.values(afterBoundary.constructionAutomation.quantumMaterialBuffer ?? {})
+      .some((inventory) => Object.values(inventory).some((amount) => (amount ?? 0) > 0))).toBe(true);
+    const afterWork = advanceSimulation(afterBoundary, 120);
+    expect(afterWork.construction.arc_smelter).toBe(1);
+    expect(Number(afterWork.quantumLogisticsNetwork.inventory.iron_ore ?? "0") + (afterWork.tray.iron_ore ?? 0)).toBeLessThan(1000000000);
+  });
+
+  it("高堆叠中心按量子带宽预取批量材料，不会每五秒只制造一件", () => {
+    let state = createQuantumConstructionState(true, 1_000_000, 1_000_000);
+    state.constructionAutomation.targetStock.arc_smelter = 100_000_000;
+    const before = state.constructionAutomation.totalCrafted;
+    for (let second = 0; second < 10; second += 1) state = advanceSimulation(state, 1);
+    expect(state.constructionAutomation.totalCrafted - before).toBeGreaterThan(100_000);
+    expect(Object.values(state.tray).every((amount) => amount === 0)).toBe(true);
+  });
+
+  it("直供缓存不占用行星托盘，取消目标时把未消费物料退回量子仓库", () => {
+    const state = createPlayerInitialState();
+    state.quantumLogisticsNetwork.enabled = true;
+    state.quantumLogisticsNetwork.inventory = { iron_ore: "1000", copper_ore: "1000", stone: "1000" };
+    state.tray = {};
+    state.planetTrays.home = {};
+    state.construction.arc_smelter = 0;
+    state.research.completedTechIds.push("construction_automation");
+    state.constructionAutomation.quantumSourceEnabled = true;
+    state.constructionAutomation.targetStock.arc_smelter = 1;
+    state.entities.push(
+      {
+        id: "direct-refund-center", kind: "machine", planetId: "home", position: { x: 40, y: 0 }, interactionLocked: false,
+        buildingId: "construction_center", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 1, minerCount: 0,
+      },
+      {
+        id: "direct-refund-tower", kind: "station", planetId: "home", position: { x: 80, y: 0 }, interactionLocked: false,
+        buildingId: "interstellar_logistics_station", stationTier: 2, quantumMode: "quantum", stationSlots: [], stationRoutes: [],
+        inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 100, minerCount: 0,
+      },
+      {
+        id: "direct-refund-power", kind: "power", planetId: "home", position: { x: 120, y: 0 }, interactionLocked: false,
+        buildingId: "wind_turbine", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 100, minerCount: 0,
+      },
+    );
+    const afterBoundary = advanceSimulation(state, 5);
+    const buffered = Object.values(afterBoundary.constructionAutomation.quantumMaterialBuffer ?? {})
+      .reduce((sum, inventory) => sum + Object.values(inventory).reduce((inner, amount) => inner + (amount ?? 0), 0), 0);
+    expect(buffered).toBeGreaterThan(0);
+    expect(Object.keys(afterBoundary.tray)).toHaveLength(0);
+    const cancelled = setConstructionAutomationTarget(afterBoundary, "arc_smelter", 0);
+    expect(cancelled.constructionAutomation.quantumMaterialBuffer).toBeUndefined();
+    expect(Object.keys(cancelled.tray)).toHaveLength(0);
+    expect(Object.values(cancelled.quantumLogisticsNetwork.inventory)
+      .reduce((sum, amount) => sum + Number(amount), 0)).toBe(3000);
+  });
+
+  it("纯挂机直供模式在宏观边界仍走精确制造，不会冻结在第一件建筑前", () => {
+    const state = createPlayerInitialState();
+    state.quantumLogisticsNetwork.enabled = true;
+    state.quantumLogisticsNetwork.inventory = { iron_ore: "100000", copper_ore: "100000", stone: "100000" };
+    state.tray = {};
+    state.planetTrays.home = {};
+    state.construction.arc_smelter = 0;
+    state.research.completedTechIds.push("construction_automation");
+    state.constructionAutomation.quantumSourceEnabled = true;
+    state.constructionAutomation.targetStock.arc_smelter = 10;
+    state.entities.push(
+      {
+        id: "pure-direct-center", kind: "machine", planetId: "home", position: { x: 40, y: 0 }, interactionLocked: false,
+        buildingId: "construction_center", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 1, minerCount: 0,
+      },
+      {
+        id: "pure-direct-tower", kind: "station", planetId: "home", position: { x: 80, y: 0 }, interactionLocked: false,
+        buildingId: "interstellar_logistics_station", stationTier: 2, quantumMode: "quantum", stationSlots: [], stationRoutes: [],
+        inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 100, minerCount: 0,
+      },
+      {
+        id: "pure-direct-power", kind: "power", planetId: "home", position: { x: 120, y: 0 }, interactionLocked: false,
+        buildingId: "wind_turbine", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 100, minerCount: 0,
+      },
+      {
+        id: "pure-direct-warp", kind: "machine", planetId: "home", position: { x: 160, y: 0 }, interactionLocked: false,
+        buildingId: "time_warp_device", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
+        routingCursor: 0, machineCount: 1, minerCount: 0,
+      },
+    );
+    state.timeWarp = {
+      ...state.timeWarp,
+      enabled: true,
+      controllerEntityId: "pure-direct-warp",
+      requestedMultiplier: 12,
+      effectiveMultiplier: 12,
+      pendingSimulationSeconds: 0,
+      pendingWallSeconds: 0,
+    };
+    const session = createPureIdleMacroSession(state, "extreme");
+    advancePureIdleMacroSession(session, 600);
+    expect(session.candidate.construction.arc_smelter).toBeGreaterThan(0);
+    expect(Object.values(session.candidate.tray).every((amount) => amount === 0)).toBe(true);
   });
 
   it("starts all eligible stations in stable order and scopes a batch to one star system", () => {

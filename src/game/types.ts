@@ -1557,6 +1557,10 @@ export type ConstructionAutomationTargetId = ConstructionId | PortableFleetItemI
 
 export interface ConstructionAutomationState {
   enabled: boolean;
+  /** Opt-in bridge: construction centers may request missing materials from the shared quantum warehouse. */
+  quantumSourceEnabled?: boolean;
+  /** Per-center direct-delivery buffer; never mirrored into a planet tray. */
+  quantumMaterialBuffer?: Record<string, Partial<Record<ItemId, number>>>;
   targetStock: Partial<Record<ConstructionAutomationTargetId, number>>;
   cursor: number;
   totalCrafted: number;

@@ -120,7 +120,7 @@ export function recordNativeCoreShadowComparison(
     compatibleFallback?: NativeCoreRevisionProof;
   },
 ): NativeCoreAuthorityState {
-  if (current.phase !== "shadow" || current.authority !== "javascript" || !current.sessionId) {
+  if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" || !current.sessionId) {
     throw new Error("当前没有可比较的原生影子");
   }
   if (!validProof(input.javascriptProof) || !validProof(input.nativeProof) ||
@@ -136,7 +136,7 @@ export function recordNativeCoreShadowComparison(
       reason: "shadow-state-diverged",
     };
   }
-  const fallback = input.compatibleFallback ?? current.exactCompatibleFallback;
+  const fallback = input.compatibleFallback;
   if (fallback && (!validProof(fallback) || !sameNativeCoreRevisionProof(fallback, input.javascriptProof))) {
     throw new Error("兼容回退检查点与影子 revision 不一致");
   }
@@ -144,7 +144,7 @@ export function recordNativeCoreShadowComparison(
     ...current,
     comparisonCount: current.comparisonCount + 1,
     latestVerifiedProof: input.javascriptProof,
-    exactCompatibleFallback: fallback ?? null,
+    exactCompatibleFallback: fallback ?? current.exactCompatibleFallback,
     reason: null,
   };
 }
@@ -165,7 +165,7 @@ export function recordNativeCoreGateEvidence(
   current: NativeCoreAuthorityState,
   evidence: NativeCoreGateEvidence,
 ): NativeCoreAuthorityState {
-  if (current.phase !== "shadow" || current.authority !== "javascript" || current.shadowStartedAtMs === null) {
+  if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" || current.shadowStartedAtMs === null) {
     throw new Error("原生 Gate 只能绑定正在运行的影子");
   }
   if (evidence.shadowStartedAtMs !== current.shadowStartedAtMs || evidence.comparisonCount > current.comparisonCount) {
@@ -215,6 +215,28 @@ export function recordNativeCoreAuthorityCheckpoint(
     throw new Error("原生权威检查点证明无效");
   }
   return { ...current, latestVerifiedProof: nativeProof, exactCompatibleFallback: exactCompatibleCheckpoint };
+}
+
+/**
+ * Advance the last replayable native proof after a durable WAL operation.
+ * The compatible JavaScript fallback intentionally remains at its older
+ * checkpoint until a same-revision v47 checkpoint is written and verified.
+ */
+export function recordNativeCoreAuthorityProgress(
+  current: NativeCoreAuthorityState,
+  nativeProof: NativeCoreRevisionProof,
+): NativeCoreAuthorityState {
+  if (current.phase !== "native-authoritative" || current.authority !== "native" ||
+    !current.latestVerifiedProof || !validProof(nativeProof) ||
+    nativeProof.revision < current.latestVerifiedProof.revision ||
+    nativeProof.registryFingerprint !== current.latestVerifiedProof.registryFingerprint) {
+    throw new Error("原生权威 WAL 进度证明无效");
+  }
+  if (nativeProof.revision === current.latestVerifiedProof.revision &&
+    !sameNativeCoreRevisionProof(nativeProof, current.latestVerifiedProof)) {
+    throw new Error("原生权威同 revision 出现不同证明");
+  }
+  return { ...current, latestVerifiedProof: nativeProof, reason: null };
 }
 
 export function handleNativeCoreExit(
@@ -269,4 +291,3 @@ export function fallbackNativeCoreToJavaScript(
     reason: "explicit-javascript-fallback",
   };
 }
-

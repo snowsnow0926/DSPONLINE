@@ -7,6 +7,7 @@ import {
   handleNativeCoreExit,
   nativeCoreGateIssues,
   promoteNativeCoreAuthority,
+  recordNativeCoreAuthorityProgress,
   recordNativeCoreAuthorityCheckpoint,
   recordNativeCoreGateEvidence,
   recordNativeCoreShadowComparison,
@@ -67,6 +68,20 @@ describe("native core authority state machine", () => {
     expect(state).toMatchObject({ phase: "native-authoritative", authority: "native" });
   });
 
+  it("continues comparing a ready shadow and keeps the latest exact fallback", () => {
+    let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
+      sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
+    });
+    state = recordNativeCoreShadowComparison(state, {
+      javascriptProof: proof(2), nativeProof: proof(2), compatibleFallback: proof(2),
+    });
+    state = recordNativeCoreGateEvidence(state, gate());
+    state = recordNativeCoreShadowComparison(state, {
+      javascriptProof: proof(3, "d"), nativeProof: proof(3, "d"), compatibleFallback: proof(3, "d"),
+    });
+    expect(state).toMatchObject({ phase: "native-ready", comparisonCount: 3, latestVerifiedProof: proof(3, "d") });
+  });
+
   it("pauses after a native crash and rejects an older silent JavaScript rollback", () => {
     let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
       sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
@@ -84,6 +99,23 @@ describe("native core authority state machine", () => {
     expect(restored).toMatchObject({ phase: "native-authoritative", authority: "native", sessionId: "core-2" });
   });
 
+  it("records replayable WAL progress without moving the older JavaScript fallback", () => {
+    let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
+      sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
+    });
+    state = recordNativeCoreShadowComparison(state, {
+      javascriptProof: proof(2), nativeProof: proof(2), compatibleFallback: proof(2),
+    });
+    state = promoteNativeCoreAuthority(recordNativeCoreGateEvidence(state, gate()), proof(2));
+    state = recordNativeCoreAuthorityProgress(state, proof(4, "d"));
+    expect(state.latestVerifiedProof).toEqual(proof(4, "d"));
+    expect(state.exactCompatibleFallback).toEqual(proof(2));
+    const paused = handleNativeCoreExit(state);
+    expect(fallbackNativeCoreToJavaScript(paused, proof(2))).toMatchObject({
+      phase: "paused-recovery-required", authority: "none",
+    });
+  });
+
   it("allows explicit JS fallback only from the exact verified native revision", () => {
     let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
       sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
@@ -96,4 +128,3 @@ describe("native core authority state machine", () => {
     expect(fallback).toMatchObject({ phase: "js-only", authority: "javascript", reason: "explicit-javascript-fallback" });
   });
 });
-

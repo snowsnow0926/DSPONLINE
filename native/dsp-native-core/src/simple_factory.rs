@@ -2201,6 +2201,11 @@ fn simulate_step(
         &state.factory_topology.station_indices,
     )?;
     profile_mark!("local-runtime-reset");
+    let local_step_directory = crate::local_logistics::prepare_step_directory(
+        entities,
+        &state.factory_topology.station_indices,
+    )?;
+    profile_mark!("local-step-directory");
     transfer_logistics_buffers(
         state,
         base,
@@ -2208,7 +2213,7 @@ fn simulate_step(
         &state.factory_topology.logistics_buffer_indices,
     )?;
     profile_mark!("ordinary-logistics-buffers");
-    crate::local_logistics::transfer_buffers(state, base, entities)?;
+    crate::local_logistics::transfer_buffers(state, base, entities, &local_step_directory)?;
     profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
     profile_mark!("quantum-supply-buffers");
@@ -2419,7 +2424,12 @@ fn simulate_step(
     }
     profile_mark!("power-source-index");
 
-    let mut ready_stations = crate::local_logistics::ready_station_indices(state, base, entities)?;
+    let mut ready_stations = crate::local_logistics::ready_station_indices(
+        state,
+        base,
+        entities,
+        &local_step_directory,
+    )?;
     profile_mark!("local-ready-stations");
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
         state, base, entities,
@@ -3420,16 +3430,29 @@ fn simulate_step(
         })
         .collect::<HashMap<_, _>>();
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::dispatch(state, base, entities, &station_powers)?;
+    crate::local_logistics::dispatch(
+        state,
+        base,
+        entities,
+        &station_powers,
+        &local_step_directory,
+    )?;
     profile_mark!("local-dispatch");
     crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
     profile_mark!("interstellar-dispatch");
-    crate::local_logistics::advance_routes(state, base, entities, seconds, &station_powers)?;
+    crate::local_logistics::advance_routes(
+        state,
+        base,
+        entities,
+        seconds,
+        &station_powers,
+        &local_step_directory,
+    )?;
     profile_mark!("local-route-advance");
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
     profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::update_congestion(state, entities)?;
+    crate::local_logistics::update_congestion(state, entities, &local_step_directory)?;
     profile_mark!("local-congestion");
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
     profile_mark!("interstellar-congestion");

@@ -5421,6 +5421,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 changedChunks: committedChunkedSave.changedChunks,
                 changedBytes: committedChunkedSave.changedBytes,
                 totalBytes: committedChunkedSave.totalBytes,
+                chunkCount: committedChunkedSave.chunkCount,
               });
               checkpointRequest.resolve(saveState);
               return;

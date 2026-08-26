@@ -148,6 +148,10 @@ test.describe("real save autosave acceptance", () => {
               transportBytes?: number;
               transportEncoding?: "raw" | "gzip";
               bytes?: number;
+              changedChunks?: number;
+              changedBytes?: number;
+              totalBytes?: number;
+              chunkCount?: number;
             };
           }>;
         };
@@ -182,30 +186,45 @@ test.describe("real save autosave acceptance", () => {
       const confirmedBoundarySources = events
         .filter((event) => event.phase === "autosave-confirmed-checkpoint")
         .map((event) => String(event.detail?.source ?? ""));
+      const directChunkedCheckpoints = events
+        .filter((event) => event.phase === "save-authority-direct-chunked")
+        .map((event) => ({
+          changedChunks: Number(event.detail?.changedChunks ?? 0),
+          changedBytes: Number(event.detail?.changedBytes ?? 0),
+          totalBytes: Number(event.detail?.totalBytes ?? 0),
+          chunkCount: Number(event.detail?.chunkCount ?? 0),
+        }));
       const transferOnlyCheckpointCount = events
         .filter((event) => event.phase === "save-transfer-only-checkpoint").length;
-      return { snapshots, serializationCount: serializations.length, confirmedBoundarySources, transferOnlyCheckpointCount };
+      return {
+        snapshots,
+        serializationCount: serializations.length,
+        confirmedBoundarySources,
+        directChunkedCheckpoints,
+        transferOnlyCheckpointCount,
+      };
     });
     console.log(`REAL_SAVE_AUTOSAVE_METRICS ${JSON.stringify(autosaveMetrics)}`);
     expect(autosaveMetrics.snapshots).toHaveLength(2);
     expect(autosaveMetrics.serializationCount).toBe(2);
-    // A sidecar autosave may legitimately be a no-op when no chunk changed;
-    // in that case its committed byte count is zero. The initial seed must
-    // still carry a positive payload, and every save must have a real duration.
+    // This real factory changes most runtime-bearing chunks every simulation
+    // step, so layer one does not promise that the second disk write is tiny.
+    // What matters here is that both autosaves used the authority Worker's
+    // back-pressured direct journal path instead of transferring a second full
+    // checkpoint graph through the renderer.
     expect(autosaveMetrics.snapshots.every((entry) => entry.durationMs > 0 && entry.bytes >= 0)).toBe(true);
     expect(autosaveMetrics.snapshots[0]?.bytes ?? 0).toBeGreaterThan(0);
-    const legacyCompressedAutosave = autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "gzip" &&
-      entry.transportBytes > 0 && entry.transportBytes < entry.bytes / 10);
-    // 1.1.9 seeds a v1 chunk journal on the first large autosave and writes
-    // only changed chunks afterwards. Its sidecar result intentionally has
-    // no full-envelope gzip timing; the second write must nevertheless be
-    // materially smaller than the initial seed.
-    const incrementalChunkAutosave = autosaveMetrics.snapshots.length >= 2 &&
-      autosaveMetrics.snapshots.every((entry) => entry.transportEncoding === "raw" && entry.transportBytes === entry.bytes) &&
-      autosaveMetrics.snapshots[1].bytes < autosaveMetrics.snapshots[0].bytes / 2;
-    expect(legacyCompressedAutosave || incrementalChunkAutosave).toBe(true);
+    expect(autosaveMetrics.snapshots.every((entry) =>
+      entry.transportEncoding === "raw" && entry.transportBytes === entry.bytes)).toBe(true);
+    expect(autosaveMetrics.directChunkedCheckpoints).toHaveLength(2);
+    expect(autosaveMetrics.directChunkedCheckpoints.every((entry) =>
+      entry.totalBytes > 0 && entry.chunkCount > 0 && entry.chunkCount >= entry.changedChunks &&
+      entry.totalBytes >= entry.changedBytes &&
+      (entry.changedChunks === 0 ? entry.changedBytes === 0 : entry.changedBytes > 0))).toBe(true);
+    expect(autosaveMetrics.directChunkedCheckpoints.map((entry) => entry.changedBytes))
+      .toEqual(autosaveMetrics.snapshots.map((entry) => entry.bytes));
     expect(autosaveMetrics.confirmedBoundarySources).toEqual([]);
-    expect(autosaveMetrics.transferOnlyCheckpointCount).toBeGreaterThanOrEqual(2);
+    expect(autosaveMetrics.transferOnlyCheckpointCount).toBe(0);
 
     // The report is produced asynchronously after the shell becomes visible;
     // close it at the exact UI boundary where it would otherwise intercept the

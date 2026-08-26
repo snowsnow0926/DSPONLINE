@@ -223,6 +223,7 @@ export interface DesktopNativeCoreDomainCoverage {
   ordinaryProduction: boolean;
   proliferatedProduction: boolean;
   finiteResearch: boolean;
+  infiniteResearch: boolean;
   ordinaryBelts: boolean;
   storageAndSplitters: boolean;
   mining: boolean;

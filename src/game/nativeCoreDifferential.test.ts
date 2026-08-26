@@ -239,6 +239,30 @@ function finiteResearchState(): GameState {
   return state;
 }
 
+function infiniteResearchState(): GameState {
+  const state = finiteResearchState();
+  if (!state.research.completedTechIds.includes("universe_matrix")) {
+    state.research.completedTechIds.push("universe_matrix");
+  }
+  state.research.selectedTechId = null;
+  state.research.queuedTechIds = [];
+  state.endgame.activeInfiniteResearchId = "matrix_compression";
+  state.endgame.autoResearch = true;
+  state.endgame.infiniteResearch.matrix_compression = { level: 9, progress: "12900" };
+  const labs = state.entities.filter((entity) => entity.recipeId === "matrix_research");
+  for (const lab of labs) {
+    lab.inputs = { universe_matrix: 100_000 };
+    lab.machineCount = 4;
+    lab.progress = 0.25;
+  }
+  labs[0].sprayCoaterInstalled = true;
+  labs[0].proliferatorTier = 3;
+  labs[0].proliferatorMode = "speed";
+  labs[0].proliferatorPoints = 8;
+  labs[0].inputs.proliferator_mk3 = 20;
+  return state;
+}
+
 function dispatchablePowerState(): GameState {
   let state = simpleMiningState();
   const template = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
@@ -530,6 +554,45 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.summary.canonicalSha256, `research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
+  }, 60_000);
+
+  it("matches BigInt infinite research levels, automatic continuation, and lab reset order", async () => {
+    const initial = infiniteResearchState();
+    const checkpoint = await seed(initial, 185);
+    for (const seconds of [1, 3, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `infinite-research-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["endgame", "research"],
+      });
+      expect(projection.entities, `infinite-research-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.endgame, `infinite-research-${seconds} 无限科研`).toEqual(JSON.parse(JSON.stringify(expected.endgame)));
+      expect(advanced.summary.canonicalFields, `infinite-research-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `infinite-research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `infinite-research-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalSha256, "infinite-research-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 60_000);
 
   it("matches fuel dispatch, generation priorities, accumulators, and energy exchangers", async () => {

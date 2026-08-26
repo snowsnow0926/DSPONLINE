@@ -454,14 +454,10 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     let endgame = base.get("endgame");
     if endgame
         .and_then(Value::as_object)
-        .and_then(|value| value.get("activeInfiniteResearchId"))
+        .and_then(|value| value.get("constructionActivity"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("activityId"))
         .is_some_and(|value| !value.is_null())
-        || endgame
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("constructionActivity"))
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("activityId"))
-            .is_some_and(|value| !value.is_null())
         || endgame
             .and_then(Value::as_object)
             .and_then(|value| value.get("exportProjects"))
@@ -652,6 +648,11 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             });
         if selected_invalid || queue_invalid {
             return Ok(Some("simple-factory-research-catalog-invalid"));
+        }
+    }
+    if let Some(infinite_id) = active_infinite_research_id(base) {
+        if !crate::infinite_research::valid_id(infinite_id) || !endgame_unlocked(base) {
+            return Ok(Some("simple-factory-infinite-research-invalid"));
         }
     }
     let profiles = base
@@ -1040,6 +1041,22 @@ fn selected_technology_id(base: &Map<String, Value>) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+fn active_infinite_research_id(base: &Map<String, Value>) -> Option<&str> {
+    base.get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("activeInfiniteResearchId"))
+        .and_then(Value::as_str)
+}
+
+fn endgame_unlocked(base: &Map<String, Value>) -> bool {
+    completed_tech(base, "universe_matrix")
+}
+
+fn has_active_research(base: &Map<String, Value>) -> bool {
+    selected_technology_id(base).is_some()
+        || active_infinite_research_id(base).is_some() && endgame_unlocked(base)
+}
+
 fn remaining_research_costs(state: &CoreState, base: &Map<String, Value>) -> Vec<(String, f64)> {
     let Some(technology_id) = selected_technology_id(base) else {
         return Vec::new();
@@ -1331,6 +1348,88 @@ fn invest_finite_research(
     Ok((consumed, completed))
 }
 
+fn parse_decimal_u128(value: Option<&str>) -> anyhow::Result<u128> {
+    let value = value.unwrap_or("0");
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(0);
+    }
+    value
+        .parse::<u128>()
+        .map_err(|_| anyhow!("native infinite research integer exceeds u128"))
+}
+
+fn invest_infinite_research(
+    base: &mut Map<String, Value>,
+    entity: &mut Map<String, Value>,
+    requested_cycles: f64,
+) -> anyhow::Result<(f64, bool)> {
+    if requested_cycles < 1.0 || !endgame_unlocked(base) {
+        return Ok((0.0, false));
+    }
+    let Some(research_id) = active_infinite_research_id(base).map(str::to_owned) else {
+        return Ok((0.0, false));
+    };
+    let available = (item_amount(entity, "inputs", "universe_matrix") + EPSILON).floor();
+    let requested = requested_cycles.floor().min(available).max(0.0) as u128;
+    if requested == 0 {
+        return Ok((0.0, false));
+    }
+    let (level, progress, auto_research) = {
+        let endgame = base
+            .get("endgame")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native endgame state is missing"))?;
+        let progress = endgame
+            .get("infiniteResearch")
+            .and_then(Value::as_object)
+            .and_then(|values| values.get(&research_id))
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native infinite research progress is missing"))?;
+        (
+            finite_number(progress.get("level")).floor().max(0.0) as u32,
+            parse_decimal_u128(progress.get("progress").and_then(Value::as_str))?,
+            endgame
+                .get("autoResearch")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    };
+    let settlement =
+        crate::infinite_research::settle(&research_id, level, progress, requested, auto_research)?;
+    let consumed = settlement.consumed as f64;
+    if settlement.consumed > 0 {
+        set_item_amount(entity, "inputs", "universe_matrix", available - consumed)?;
+    }
+    let endgame = base
+        .get_mut("endgame")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native endgame state is missing"))?;
+    let progress = endgame
+        .get_mut("infiniteResearch")
+        .and_then(Value::as_object_mut)
+        .and_then(|values| values.get_mut(&research_id))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native infinite research progress is missing"))?;
+    progress.insert("level".to_owned(), Value::from(settlement.level));
+    progress.insert(
+        "progress".to_owned(),
+        Value::from(settlement.progress.to_string()),
+    );
+    let score_gain = settlement
+        .completed_levels
+        .iter()
+        .map(|level| 1_000.0 + f64::from(*level) * 250.0)
+        .sum::<f64>();
+    if score_gain > 0.0 {
+        let score = finite_number(endgame.get("galacticScore"));
+        set_number(endgame, "galacticScore", (score + score_gain).floor())?;
+    }
+    if settlement.reached_maximum || !auto_research && !settlement.completed_levels.is_empty() {
+        endgame.insert("activeInfiniteResearchId".to_owned(), Value::Null);
+    }
+    Ok((consumed, settlement.consumed > 0))
+}
+
 fn machine_input_cycles(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -1339,6 +1438,15 @@ fn machine_input_cycles(
 ) -> f64 {
     let inputs = entity.get("inputs").and_then(Value::as_object);
     if recipe.id == "matrix_research" {
+        if selected_technology_id(base).is_none()
+            && active_infinite_research_id(base).is_some()
+            && endgame_unlocked(base)
+        {
+            return inputs
+                .and_then(|values| values.get("universe_matrix"))
+                .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+                .unwrap_or(0.0);
+        }
         return remaining_research_costs(state, base)
             .iter()
             .map(|(item_id, remaining)| {
@@ -1456,7 +1564,7 @@ fn machine_can_run(
         finite_number(entity.get("machineCount")),
         buffer_limit,
     );
-    if recipe.id == "matrix_research" && selected_technology_id(base).is_none() {
+    if recipe.id == "matrix_research" && !has_active_research(base) {
         return false;
     }
     (machine_input_cycles(state, base, entity, recipe) + EPSILON).floor() >= 1.0
@@ -2491,13 +2599,17 @@ fn simulate_step(
             let cycles = maximum_cycles.min((progressed + EPSILON).floor());
             let sprayed_cycles = cycles.min(sprayed_cycle_limit);
             if recipe.id == "matrix_research" {
-                let (consumed, completed) = invest_finite_research(
-                    state,
-                    base,
-                    object,
-                    cycles,
-                    has_galactic_material_exporter,
-                )?;
+                let (consumed, completed) = if selected_technology_id(base).is_some() {
+                    invest_finite_research(
+                        state,
+                        base,
+                        object,
+                        cycles,
+                        has_galactic_material_exporter,
+                    )?
+                } else {
+                    invest_infinite_research(base, object, cycles)?
+                };
                 consume_proliferator_points(state, object, recipe, sprayed_cycles.min(consumed))?;
                 reset_research_progress_before_next_entity |= completed;
             } else {

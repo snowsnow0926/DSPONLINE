@@ -453,9 +453,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         if station
             .get("stationModeTransition")
             .is_some_and(|value| !value.is_null())
-            || station
-                .get("quantumTransition")
-                .is_some_and(|value| !value.is_null())
         {
             return Ok(Some("local-logistics-transition-unsupported"));
         }

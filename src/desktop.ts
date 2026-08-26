@@ -248,6 +248,7 @@ export interface DesktopNativeCoreDomainCoverage {
   quantumBeltBridge: boolean;
   persistedConstructionJobs: boolean;
   constructionQuantumPrefetch: boolean;
+  quantumAttachmentTransitions: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use num_bigint::BigUint;
@@ -58,6 +58,17 @@ struct Request {
     item_id: String,
     amount: BigUint,
     priority: i64,
+}
+
+#[derive(Debug, Clone)]
+struct TransitionRoute {
+    demand_id: String,
+    route_id: String,
+    item_id: String,
+    peer_id: String,
+    cargo: String,
+    duration: f64,
+    progress: f64,
 }
 
 #[derive(Debug, Default)]
@@ -448,12 +459,27 @@ fn logistics_level(base: &Map<String, Value>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn bandwidth(base: &Map<String, Value>, entities: &[Value]) -> (f64, f64, f64) {
+fn endpoint_was_indexed(
+    entity: &Map<String, Value>,
+    indexed_endpoint_ids: Option<&HashSet<String>>,
+) -> bool {
+    indexed_endpoint_ids
+        .is_none_or(|ids| string_at(entity, "id").is_some_and(|entity_id| ids.contains(entity_id)))
+}
+
+fn bandwidth_for_index(
+    base: &Map<String, Value>,
+    entities: &[Value],
+    indexed_endpoint_ids: Option<&HashSet<String>>,
+) -> (f64, f64, f64) {
     let level = logistics_level(base);
     let multiplier = (1.0 + 0.05 * level).powi(2);
     let mut tower_stacks = 0.0;
     let mut collector_stacks = 0.0;
     for entity in entities.iter().filter_map(Value::as_object) {
+        if !endpoint_was_indexed(entity, indexed_endpoint_ids) {
+            continue;
+        }
         if is_quantum_station(entity) {
             tower_stacks += finite_number(entity.get("machineCount")).floor().max(0.0);
         } else if is_quantum_collector(entity) {
@@ -468,7 +494,7 @@ fn bandwidth(base: &Map<String, Value>, entities: &[Value]) -> (f64, f64, f64) {
 }
 
 pub(crate) fn runtime_bandwidth(base: &Map<String, Value>, entities: &[Value]) -> RuntimeBandwidth {
-    let (per_minute, tower_stacks, collector_stacks) = bandwidth(base, entities);
+    let (per_minute, tower_stacks, collector_stacks) = bandwidth_for_index(base, entities, None);
     RuntimeBandwidth {
         per_minute,
         tower_stacks,
@@ -800,19 +826,33 @@ pub(crate) fn flush_supply_buffers(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
 ) -> anyhow::Result<()> {
+    flush_supply_buffers_for_index(base, entities, None)
+}
+
+fn flush_supply_buffers_for_index(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    indexed_endpoint_ids: Option<&HashSet<String>>,
+) -> anyhow::Result<()> {
     let mut network = parse_network(base)?;
     if !network.enabled {
         return Ok(());
     }
     let reserved = reserved_outgoing(entities);
     let snapshots = entities.to_vec();
-    let runtime_bandwidth = runtime_bandwidth(base, &snapshots);
+    let (per_minute, tower_stacks, collector_stacks) =
+        bandwidth_for_index(base, &snapshots, indexed_endpoint_ids);
+    let runtime_bandwidth = RuntimeBandwidth {
+        per_minute,
+        tower_stacks,
+        collector_stacks,
+    };
     let mut normalized_for_deposit = false;
     for entity_index in 0..entities.len() {
         let snapshot = snapshots[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !is_quantum_station(snapshot) {
+        if !endpoint_was_indexed(snapshot, indexed_endpoint_ids) || !is_quantum_station(snapshot) {
             continue;
         }
         let station_id = string_at(snapshot, "id").unwrap_or_default();
@@ -1061,6 +1101,7 @@ pub(crate) fn settle_uploads(
     boundary_second: f64,
     previous_flow: Option<BoundaryFlow>,
     seconds: f64,
+    indexed_endpoint_ids: &HashSet<String>,
 ) -> anyhow::Result<()> {
     let mut network = parse_network(base)?;
     if !network.enabled {
@@ -1077,7 +1118,8 @@ pub(crate) fn settle_uploads(
             }
         }
     }
-    let (per_minute, tower_stacks, collector_stacks) = bandwidth(base, entities);
+    let (per_minute, tower_stacks, collector_stacks) =
+        bandwidth_for_index(base, entities, Some(indexed_endpoint_ids));
     flow.global_upload_per_minute = per_minute;
     flow.global_download_per_minute = per_minute;
     flow.quantum_tower_stacks = tower_stacks;
@@ -1085,7 +1127,7 @@ pub(crate) fn settle_uploads(
     network.runtime_flow = Some(flow.clone());
     write_network(base, &network)?;
 
-    flush_supply_buffers(base, entities)?;
+    flush_supply_buffers_for_index(base, entities, Some(indexed_endpoint_ids))?;
     network = parse_network(base)?;
 
     let reserved = reserved_outgoing(entities);
@@ -1094,6 +1136,9 @@ pub(crate) fn settle_uploads(
         let endpoint = entity
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+        if !endpoint_was_indexed(endpoint, Some(indexed_endpoint_ids)) {
+            continue;
+        }
         if is_quantum_collector(endpoint) {
             let Some(item_id) = string_at(endpoint, "storedItemId") else {
                 continue;
@@ -1188,6 +1233,193 @@ pub(crate) fn settle_uploads(
     write_network(base, &network)
 }
 
+fn completed_tech(base: &Map<String, Value>, id: &str) -> bool {
+    base.get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+}
+
+fn transition_routes(entities: &[Value], station_id: &str) -> Vec<TransitionRoute> {
+    let mut result = Vec::new();
+    for demand in entities.iter().filter_map(Value::as_object) {
+        let demand_id = string_at(demand, "id").unwrap_or_default();
+        let Some(routes) = demand.get("stationRoutes").and_then(Value::as_array) else {
+            continue;
+        };
+        for route in routes.iter().filter_map(Value::as_object) {
+            if string_at(route, "scope") != Some("remote") {
+                continue;
+            }
+            let peer_id = string_at(route, "peerId").unwrap_or_default();
+            let vehicle_station_id = string_at(route, "vehicleStationId").unwrap_or(demand_id);
+            let waypoint = route
+                .get("waypointStationIds")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(station_id)));
+            if demand_id != station_id
+                && peer_id != station_id
+                && vehicle_station_id != station_id
+                && !waypoint
+            {
+                continue;
+            }
+            result.push(TransitionRoute {
+                demand_id: demand_id.to_owned(),
+                route_id: string_at(route, "id").unwrap_or_default().to_owned(),
+                item_id: string_at(route, "itemId").unwrap_or_default().to_owned(),
+                peer_id: peer_id.to_owned(),
+                cargo: decimal(&BigUint::from(floor_u64(finite_number(route.get("cargo"))))),
+                duration: finite_number(route.get("duration")),
+                progress: finite_number(route.get("progress")).clamp(0.0, 1.0),
+            });
+        }
+    }
+    result
+}
+
+fn transition_bridge(station_id: &str, route: &TransitionRoute, elapsed: f64) -> Value {
+    serde_json::json!({
+        "id": format!("quantum_bridge_{station_id}_{}", route.route_id),
+        "itemId": route.item_id,
+        "sourceStationId": route.peer_id,
+        "targetStationId": route.demand_id,
+        "cargo": route.cargo,
+        "remainingCargo": route.cargo,
+        "arriveAtSecond": elapsed + (route.duration * (1.0 - route.progress)).max(1.0),
+    })
+}
+
+fn bridge_matches(station_id: &str, bridge_id: &str, route_id: &str) -> bool {
+    bridge_id == format!("quantum_bridge_{route_id}")
+        || bridge_id == format!("quantum_bridge_{station_id}_{route_id}")
+}
+
+fn synchronized_bridges(
+    station_id: &str,
+    transition: &Map<String, Value>,
+    routes: &[TransitionRoute],
+    elapsed: f64,
+) -> anyhow::Result<Vec<Value>> {
+    let persisted = transition
+        .get("bridges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native quantum transition bridges are missing"))?;
+    let mut used = HashSet::new();
+    let mut bridges = Vec::new();
+    for bridge in persisted {
+        let bridge_object = bridge
+            .as_object()
+            .ok_or_else(|| anyhow!("native quantum transition bridge is invalid"))?;
+        let bridge_id = string_at(bridge_object, "id").unwrap_or_default();
+        let matched = routes.iter().find(|route| {
+            !used.contains(&route.route_id)
+                && bridge_matches(station_id, bridge_id, &route.route_id)
+        });
+        if let Some(route) = matched {
+            used.insert(route.route_id.clone());
+            bridges.push(transition_bridge(station_id, route, elapsed));
+        } else {
+            let mut settled = bridge_object.clone();
+            settled.insert("remainingCargo".to_owned(), Value::from("0"));
+            bridges.push(Value::Object(settled));
+        }
+    }
+    for route in routes {
+        if used.insert(route.route_id.clone()) {
+            bridges.push(transition_bridge(station_id, route, elapsed));
+        }
+    }
+    Ok(bridges)
+}
+
+pub(crate) fn settle_transitions(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    let elapsed = finite_number(base.get("elapsedSeconds"));
+    if completed_tech(base, "quantum_logistics_network") {
+        let mut planned = entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                let entity = entity.as_object()?;
+                (string_at(entity, "buildingId") == Some("interstellar_logistics_station")
+                    && entity.get("quantumTarget").and_then(Value::as_bool) == Some(true)
+                    && finite_number(entity.get("stationTier")).floor() >= 2.0
+                    && string_at(entity, "quantumMode") != Some("quantum")
+                    && entity.get("quantumTransition").is_none_or(Value::is_null))
+                .then(|| {
+                    (
+                        string_at(entity, "id").unwrap_or_default().to_owned(),
+                        index,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        planned.sort_by(|left, right| left.0.cmp(&right.0));
+        for (station_id, index) in planned {
+            let bridges = transition_routes(entities, &station_id)
+                .iter()
+                .map(|route| transition_bridge(&station_id, route, elapsed))
+                .collect::<Vec<_>>();
+            let station = entities[index]
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("native quantum target station is invalid"))?;
+            station.insert("quantumMode".to_owned(), Value::from("transitioning"));
+            station.insert(
+                "quantumTransition".to_owned(),
+                serde_json::json!({
+                    "targetMode": "quantum",
+                    "startedAtSecond": elapsed,
+                    "boundarySecond": ((elapsed / SETTLEMENT_SECONDS).floor() + 1.0) * SETTLEMENT_SECONDS,
+                    "bridges": bridges,
+                }),
+            );
+            station.remove("quantumTarget");
+        }
+    }
+
+    let snapshots = entities.to_vec();
+    let mut enable_network = false;
+    for index in 0..snapshots.len() {
+        let Some(station) = snapshots[index].as_object() else {
+            continue;
+        };
+        let Some(transition) = station.get("quantumTransition").and_then(Value::as_object) else {
+            continue;
+        };
+        let station_id = string_at(station, "id").unwrap_or_default();
+        let routes = transition_routes(&snapshots, station_id);
+        let bridges = synchronized_bridges(station_id, transition, &routes, elapsed)?;
+        let boundary = finite_number(transition.get("boundarySecond"));
+        let bridge_cargo_pending = bridges.iter().filter_map(Value::as_object).any(|bridge| {
+            !normalized_decimal(bridge.get("remainingCargo"), &BigUint::zero()).is_zero()
+        });
+        let target_mode = string_at(transition, "targetMode").unwrap_or("legacy");
+        let entity = entities[index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native quantum transition station is invalid"))?;
+        if elapsed < boundary || !routes.is_empty() || bridge_cargo_pending {
+            let mut next = transition.clone();
+            next.insert("bridges".to_owned(), Value::Array(bridges));
+            entity.insert("quantumTransition".to_owned(), Value::Object(next));
+        } else {
+            entity.insert("quantumMode".to_owned(), Value::from(target_mode));
+            entity.insert("quantumTransition".to_owned(), Value::Null);
+            enable_network |= target_mode == "quantum";
+        }
+    }
+    if enable_network {
+        base.get_mut("quantumLogisticsNetwork")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native quantum network is missing"))?
+            .insert("enabled".to_owned(), Value::Bool(true));
+    }
+    Ok(())
+}
+
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     let network = parse_network(base)?;
@@ -1196,12 +1428,58 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         let entity = entity
             .as_object()
             .ok_or_else(|| anyhow!("native quantum admission entity is invalid"))?;
-        if entity
+        if entity.get("quantumTarget").is_some_and(|value| {
+            !value.is_boolean()
+                || string_at(entity, "buildingId") != Some("interstellar_logistics_station")
+        }) {
+            return Ok(Some("quantum-target-invalid"));
+        }
+        let transition = entity
             .get("quantumTransition")
-            .is_some_and(|value| !value.is_null())
-            || entity.get("quantumTarget").and_then(Value::as_bool) == Some(true)
-        {
-            return Ok(Some("quantum-transition-unsupported"));
+            .filter(|value| !value.is_null());
+        if let Some(transition) = transition {
+            let Some(transition) = transition.as_object() else {
+                return Ok(Some("quantum-transition-invalid"));
+            };
+            let target = string_at(transition, "targetMode");
+            let building = string_at(entity, "buildingId");
+            let transition_building_valid = match building {
+                Some("interstellar_logistics_station") => {
+                    target == Some("quantum")
+                        && finite_number(entity.get("stationTier")).floor() >= 2.0
+                }
+                Some("orbital_collector") => matches!(target, Some("quantum" | "legacy")),
+                _ => false,
+            };
+            let bridges_valid = transition
+                .get("bridges")
+                .and_then(Value::as_array)
+                .is_some_and(|bridges| {
+                    bridges.iter().all(|bridge| {
+                        bridge.as_object().is_some_and(|bridge| {
+                            string_at(bridge, "id").is_some_and(|id| !id.is_empty())
+                                && string_at(bridge, "itemId")
+                                    .is_some_and(|id| state.catalog.items.contains_key(id))
+                                && string_at(bridge, "sourceStationId")
+                                    .is_some_and(|id| !id.is_empty())
+                                && string_at(bridge, "targetStationId")
+                                    .is_some_and(|id| !id.is_empty())
+                                && matches!(bridge.get("cargo"), Some(Value::String(_)))
+                                && matches!(bridge.get("remainingCargo"), Some(Value::String(_)))
+                                && finite_number(bridge.get("arriveAtSecond")) >= 0.0
+                        })
+                    })
+                });
+            if string_at(entity, "quantumMode") != Some("transitioning")
+                || !transition_building_valid
+                || finite_number(transition.get("startedAtSecond")) < 0.0
+                || finite_number(transition.get("boundarySecond")) < 0.0
+                || !bridges_valid
+            {
+                return Ok(Some("quantum-transition-invalid"));
+            }
+        } else if string_at(entity, "quantumMode") == Some("transitioning") {
+            return Ok(Some("quantum-transition-invalid"));
         }
         if is_quantum_station(entity) {
             if !network.enabled
@@ -1221,7 +1499,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         } else if is_quantum_collector(entity) && !network.enabled {
             return Ok(Some("quantum-collector-invalid"));
         } else if string_at(entity, "quantumMode")
-            .is_some_and(|mode| !matches!(mode, "legacy" | "quantum"))
+            .is_some_and(|mode| !matches!(mode, "legacy" | "quantum" | "transitioning"))
         {
             return Ok(Some("quantum-mode-invalid"));
         }

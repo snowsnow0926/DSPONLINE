@@ -817,6 +817,21 @@ function quantumConstructionState(): GameState {
   return state;
 }
 
+function quantumAttachmentTransitionState(): GameState {
+  const state = interstellarLogisticsState();
+  state.research.completedTechIds.push("quantum_logistics_network");
+  state.quantumLogisticsNetwork.enabled = false;
+  const stations = state.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station");
+  for (const station of stations) {
+    station.stationTier = 2;
+    station.quantumMode = "legacy";
+    station.quantumTransition = null;
+  }
+  const supply = stations.find((station) => station.planetId === "home")!;
+  supply.quantumTarget = true;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1507,6 +1522,50 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "quantum-construction-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "quantum-construction-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches a planned quantum attachment while legacy vessel tails drain", async () => {
+    const initial = quantumAttachmentTransitionState();
+    const checkpoint = await seed(initial, 206);
+    for (const seconds of [1, 4, 5, 6, 10, 20, 30, 35, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `quantum-transition-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: [
+          "quantumLogisticsNetwork", "productionHistory", "metrics",
+          "planetMetrics", "powerGridMetrics", "nextId",
+        ],
+      });
+      expect(projection.entities, `quantum-transition-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.quantumLogisticsNetwork, `quantum-transition-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+      expect(advanced.summary.canonicalFields, `quantum-transition-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `quantum-transition-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `quantum-transition-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "quantum-transition-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "quantum-transition-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

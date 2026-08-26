@@ -1142,18 +1142,14 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let planet_id = string_at(station, "planetId").unwrap_or_default();
                 if !matches!(
                     string_at(station, "quantumMode"),
-                    None | Some("legacy" | "quantum")
-                ) || station
-                    .get("quantumTransition")
-                    .is_some_and(|value| !value.is_null())
-                    || item_id.is_none_or(|id| {
-                        !state.catalog.items.contains_key(id)
-                            || orbital_yield(base, planet_id, id) <= 0.0
-                    })
-                    || station
-                        .get("stationRoutes")
-                        .and_then(Value::as_array)
-                        .is_none_or(|routes| !routes.is_empty())
+                    None | Some("legacy" | "quantum" | "transitioning")
+                ) || item_id.is_none_or(|id| {
+                    !state.catalog.items.contains_key(id)
+                        || orbital_yield(base, planet_id, id) <= 0.0
+                }) || station
+                    .get("stationRoutes")
+                    .and_then(Value::as_array)
+                    .is_none_or(|routes| !routes.is_empty())
                     || planet(state, station)
                         .is_none_or(|planet| !system_unlocked(base, &planet.system_id))
                 {
@@ -1171,12 +1167,8 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             .is_some_and(|value| !value.is_null())
             || !matches!(
                 string_at(station, "quantumMode"),
-                None | Some("legacy" | "quantum")
+                None | Some("legacy" | "quantum" | "transitioning")
             )
-            || station
-                .get("quantumTransition")
-                .is_some_and(|value| !value.is_null())
-            || station.get("quantumTarget").and_then(Value::as_bool) == Some(true)
         {
             return Ok(Some("interstellar-station-mode-unsupported"));
         }

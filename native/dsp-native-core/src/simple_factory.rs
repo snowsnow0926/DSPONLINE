@@ -1979,6 +1979,23 @@ fn simulate_step(
     let first_quantum_boundary = (elapsed_before_step / 5.0).floor() as u64 + 1;
     let last_quantum_boundary = (projected_elapsed / 5.0).floor() as u64;
     let crossed_quantum_boundary = first_quantum_boundary <= last_quantum_boundary;
+    // The TypeScript engine builds its quantum endpoint lookup before this
+    // simulation call. A tower that completes attachment at a boundary is
+    // intentionally absent from uploads until the next call refreshes that
+    // lookup, even when this call crosses more than one boundary.
+    let indexed_quantum_endpoint_ids = entities
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|entity| {
+            string_at(entity, "kind") == Some("station")
+                && string_at(entity, "quantumMode") == Some("quantum")
+                && matches!(
+                    string_at(entity, "buildingId"),
+                    Some("interstellar_logistics_station" | "orbital_collector")
+                )
+        })
+        .filter_map(|entity| string_at(entity, "id").map(str::to_owned))
+        .collect::<HashSet<_>>();
     crate::local_logistics::reset_runtime(entities)?;
     transfer_logistics_buffers(state, base, entities)?;
     crate::local_logistics::transfer_buffers(state, base, entities)?;
@@ -3087,12 +3104,14 @@ fn simulate_step(
     set_number(base, "elapsedSeconds", elapsed)?;
     if crossed_quantum_boundary {
         for boundary in first_quantum_boundary..=last_quantum_boundary {
+            crate::quantum_logistics::settle_transitions(base, entities)?;
             crate::quantum_logistics::settle_uploads(
                 base,
                 entities,
                 boundary as f64 * 5.0,
                 quantum_flow.clone(),
                 5.0,
+                &indexed_quantum_endpoint_ids,
             )?;
         }
     }

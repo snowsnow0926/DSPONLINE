@@ -237,6 +237,24 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(opened.replayedWalEntries, 2);
   assert.equal(opened.replayedRevision, 3);
   assert.equal(opened.summary.paused, false);
+  const nativeCheckpoint = await client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 2,
+  });
+  assert.equal(nativeCheckpoint.checkpoint.generation, 2);
+  assert.equal(nativeCheckpoint.checkpoint.revision, 3);
+  assert.equal(nativeCheckpoint.summary.revision, 3);
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+  opened = await client.request({
+    ...coreOpenRequest,
+    generation: nativeCheckpoint.checkpoint.generation,
+    rootHash: nativeCheckpoint.checkpoint.rootHash,
+    revision: nativeCheckpoint.checkpoint.revision,
+  });
+  assert.equal(opened.replayedWalEntries, 0);
+  assert.equal(opened.replayedRevision, 3);
+  assert.equal(opened.summary.paused, false);
   const unsupportedAdvance = await client.request({
     operation: "coreAdvance",
     sessionId: opened.sessionId,

@@ -65,6 +65,7 @@ fn handle_request(
                     "native-core-command-v1",
                     "native-core-projection-v1",
                     "native-core-authority-wal-v1",
+                    "native-core-checkpoint-v1",
                 ],
             })?
         }
@@ -165,6 +166,10 @@ fn handle_request(
             session_id,
             request,
         } => to_value(cores.commit_operation(store, &session_id, request)?)?,
+        ControlRequest::CoreCheckpoint {
+            session_id,
+            saved_at_ms,
+        } => to_value(cores.checkpoint(store, &session_id, saved_at_ms)?)?,
         ControlRequest::CoreCompare {
             session_id,
             revision,

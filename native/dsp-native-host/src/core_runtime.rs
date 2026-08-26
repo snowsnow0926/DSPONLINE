@@ -10,7 +10,7 @@ use dsp_native_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::save_store::{SaveStore, WalEntry};
+use crate::save_store::{SaveCommitResult, SaveStore, WalEntry};
 
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -233,6 +233,13 @@ pub struct CoreCommitOperationResult {
     pub summary: Option<CoreStateSummary>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCheckpointResult {
+    pub checkpoint: SaveCommitResult,
+    pub summary: CoreStateSummary,
+}
+
 pub struct CoreRegistry {
     next_session_id: u64,
     sessions: HashMap<String, CoreState>,
@@ -289,6 +296,7 @@ impl CoreRegistry {
                 state_version: recovery.state_version,
                 mode: recovery.mode,
                 registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: recovery.base_checksum,
             },
             &records,
             catalog,
@@ -482,6 +490,100 @@ impl CoreRegistry {
                 .include_diagnostics
                 .then(|| state.summary())
                 .transpose()?,
+        })
+    }
+
+    /// Publishes a new content-addressed generation directly from native-owned
+    /// records. Records are streamed in bounded chunks and the save manifest is
+    /// atomically published by `SaveStore`; no full JSON state crosses IPC.
+    pub fn checkpoint(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        saved_at_ms: u64,
+    ) -> anyhow::Result<CoreCheckpointResult> {
+        validate_session_id(session_id)?;
+        if saved_at_ms > MAX_SAFE_INTEGER {
+            bail!("native core checkpoint timestamp is invalid");
+        }
+        let (
+            slot,
+            mode,
+            state_version,
+            fingerprint,
+            base_checksum,
+            generation,
+            root_hash,
+            revision,
+        ) = {
+            let state = self.session(session_id)?;
+            (
+                state.identity.slot.clone(),
+                state.identity.mode.clone(),
+                state.identity.state_version,
+                state.identity.registry_fingerprint.clone(),
+                state.identity.base_primary_checksum.clone(),
+                state.identity.generation,
+                state.identity.root_hash.clone(),
+                state.revision,
+            )
+        };
+        let recovery = store
+            .recover(&slot)?
+            .ok_or_else(|| anyhow!("native core checkpoint slot disappeared"))?;
+        if recovery.generation != generation
+            || recovery.root_hash != root_hash
+            || recovery.revision != self.session(session_id)?.identity.revision
+        {
+            bail!("native core checkpoint base generation changed");
+        }
+        let previous_keys = recovery.record_keys;
+        let begin = store.begin(
+            &slot,
+            &mode,
+            state_version,
+            &base_checksum,
+            &fingerprint,
+            revision,
+            saved_at_ms,
+        )?;
+        let transaction_id = begin.transaction_id;
+        let written = self
+            .session(session_id)?
+            .visit_internal_checkpoint_records(saved_at_ms, |key, value| {
+                store.put(&transaction_id, key, Some(value))
+            });
+        let active_keys = match written {
+            Ok(keys) => keys,
+            Err(error) => {
+                store.abort(&transaction_id);
+                return Err(error.context("stream native core checkpoint records"));
+            }
+        };
+        let active = active_keys
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let prefix = format!("dsp-idle-network.internal.v1.chunked.v1.{mode}.");
+        for key in previous_keys {
+            if key.starts_with(&prefix) && !active.contains(&key) {
+                if let Err(error) = store.put(&transaction_id, &key, None) {
+                    store.abort(&transaction_id);
+                    return Err(error.context("remove stale native core checkpoint record"));
+                }
+            }
+        }
+        let checkpoint = match store.commit(&transaction_id) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                store.abort(&transaction_id);
+                return Err(error.context("publish native core checkpoint"));
+            }
+        };
+        let state = self.session_mut(session_id)?;
+        state.install_checkpoint_identity(checkpoint.generation, checkpoint.root_hash.clone());
+        Ok(CoreCheckpointResult {
+            checkpoint,
+            summary: state.summary()?,
         })
     }
 

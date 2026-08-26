@@ -2,6 +2,7 @@ import {
   getDesktopBridge,
   type DesktopNativeCoreCompareResult,
   type DesktopNativeCoreCommitOperationResult,
+  type DesktopNativeCoreCheckpointResult,
   type DesktopNativeCoreOpenResult,
   type DesktopNativeCoreSummary,
   type DesktopNativeCoreProjectionResult,
@@ -27,6 +28,7 @@ export interface WindowsNativeCoreShadow {
     wallSeconds: number;
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult>;
+  createCheckpoint(savedAtMs?: number): Promise<DesktopNativeCoreCheckpointResult>;
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult>;
   close(): Promise<void>;
 }
@@ -97,6 +99,19 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       ...request,
       command: request.command as unknown as Record<string, unknown> | null | undefined,
     });
+  }
+
+  async createCheckpoint(savedAtMs = Date.now()): Promise<DesktopNativeCoreCheckpointResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    const result = await desktop.checkpointNativeCore({ sessionId: this.sessionId, savedAtMs });
+    if (result.checkpoint.slot !== this.checkpoint.slot ||
+      result.checkpoint.revision !== result.summary.revision ||
+      result.checkpoint.generation <= this.checkpoint.generation) {
+      throw new Error("Windows 原生核心检查点回执与权威 revision 不一致");
+    }
+    return result;
   }
 
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult> {

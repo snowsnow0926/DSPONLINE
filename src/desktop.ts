@@ -36,6 +36,7 @@ export interface DesktopBridge {
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   commitNativeCoreOperation: (request: DesktopNativeCoreCommitOperationRequest) => Promise<DesktopNativeCoreCommitOperationResult>;
+  checkpointNativeCore: (request: DesktopNativeCoreCheckpointRequest) => Promise<DesktopNativeCoreCheckpointResult>;
   compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
   closeNativeCore: (request: DesktopNativeCoreSessionRequest) => Promise<{ closed: boolean }>;
   requestApi: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
@@ -369,6 +370,15 @@ export interface DesktopNativeCoreCommitOperationResult {
   walBytes: number;
   duplicate: boolean;
   summary?: DesktopNativeCoreSummary;
+}
+
+export interface DesktopNativeCoreCheckpointRequest extends DesktopNativeCoreSessionRequest {
+  savedAtMs: number;
+}
+
+export interface DesktopNativeCoreCheckpointResult {
+  checkpoint: DesktopNativeSaveCommitResult;
+  summary: DesktopNativeCoreSummary;
 }
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {

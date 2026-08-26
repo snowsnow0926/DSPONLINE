@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   applyNativeCoreCommand: (request) => ipcRenderer.invoke("desktop:native-core-apply-command", request),
   advanceNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-advance", request),
   commitNativeCoreOperation: (request) => ipcRenderer.invoke("desktop:native-core-commit-operation", request),
+  checkpointNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-checkpoint", request),
   compareNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-compare", request),
   closeNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-close", request),
   requestApi: (request) => ipcRenderer.invoke("desktop:api-request", request),

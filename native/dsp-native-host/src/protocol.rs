@@ -87,6 +87,10 @@ pub enum ControlRequest {
         session_id: String,
         request: CoreCommitOperationRequest,
     },
+    CoreCheckpoint {
+        session_id: String,
+        saved_at_ms: u64,
+    },
     CoreCompare {
         session_id: String,
         revision: u64,

@@ -592,6 +592,11 @@ ipcMain.handle("desktop:native-core-commit-operation", async (event, request) =>
   return nativeCoreSessions.commitOperation(ownerId, request);
 });
 
+ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.checkpoint(ownerId, request);
+});
+
 ipcMain.handle("desktop:native-core-compare", async (event, request) => {
   const ownerId = requireTrustedNativeSender(event);
   return nativeCoreSessions.compare(ownerId, request);

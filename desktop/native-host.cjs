@@ -428,6 +428,18 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  checkpoint(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
+      throw new TypeError("native core checkpoint timestamp is invalid");
+    }
+    return this.client.request({
+      operation: "coreCheckpoint",
+      sessionId: request.sessionId,
+      savedAtMs: request.savedAtMs,
+    });
+  }
+
   compare(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.revision) || request.revision < 0 ||

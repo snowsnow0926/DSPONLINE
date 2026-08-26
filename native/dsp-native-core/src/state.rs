@@ -67,6 +67,11 @@ pub struct CoreCheckpointIdentity {
     pub state_version: u16,
     pub mode: String,
     pub registry_fingerprint: String,
+    /// Checksum of the last compatible v47 primary on which this sidecar is
+    /// based. It intentionally remains stable while native generations move
+    /// forward so the existing v47 recovery adapter can rebuild an exact,
+    /// newer envelope without changing the public save format.
+    pub base_primary_checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,7 +207,7 @@ pub struct CoreStateSummary {
     pub coverage: DomainCoverage,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChunkMetadata {
     id: String,
@@ -574,6 +579,11 @@ impl CoreState {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
             || identity.root_hash.len() != 64
+            || identity.base_primary_checksum.len() != 8
+            || !identity
+                .base_primary_checksum
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
         {
             bail!("native core checkpoint identity is invalid");
         }
@@ -673,6 +683,126 @@ impl CoreState {
             state.refresh_prepared_belt_routes()?;
         }
         Ok(state)
+    }
+
+    /// Streams one bounded internal checkpoint record at a time. The caller
+    /// owns durability and must publish the returned manifest record last.
+    /// No complete GameState or 77 MB JSON string is assembled here.
+    pub fn visit_internal_checkpoint_records(
+        &self,
+        saved_at_ms: u64,
+        mut visit: impl FnMut(&str, &str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<String>> {
+        const ENTITY_CHUNK_SIZE: usize = 1_024;
+        const BELT_CHUNK_SIZE: usize = 2_048;
+        let prefix = format!(
+            "dsp-idle-network.internal.v1.chunked.v1.{}.",
+            self.identity.mode
+        );
+        let mut metadata = Vec::<ChunkMetadata>::new();
+        let mut active_keys = Vec::<String>::new();
+        let mut total_bytes = 0_usize;
+
+        let mut emit = |id: String,
+                        kind: &str,
+                        offset: usize,
+                        count: usize,
+                        text: String|
+         -> anyhow::Result<()> {
+            let bytes = text.len();
+            metadata.push(ChunkMetadata {
+                id: id.clone(),
+                kind: kind.to_owned(),
+                offset,
+                count,
+                checksum: fnv1a_utf8(text.as_bytes()),
+                bytes,
+            });
+            total_bytes = total_bytes.saturating_add(bytes);
+            let key = format!("{prefix}chunk.{}", encoded_chunk_id(&id));
+            visit(&key, &text)?;
+            active_keys.push(key);
+            Ok(())
+        };
+
+        emit(
+            "base".to_owned(),
+            "base",
+            0,
+            1,
+            serde_json::to_string(&Value::Object(self.base.clone()))?,
+        )?;
+        let emit_raw_ranges =
+            |values: &[Box<str>],
+             kind: &str,
+             chunk_size: usize,
+             emit: &mut dyn FnMut(String, &str, usize, usize, String) -> anyhow::Result<()>|
+             -> anyhow::Result<()> {
+                if values.is_empty() {
+                    return emit(format!("{kind}:00000000"), kind, 0, 0, "[]".to_owned());
+                }
+                for offset in (0..values.len()).step_by(chunk_size) {
+                    let end = (offset + chunk_size).min(values.len());
+                    let capacity = values[offset..end]
+                        .iter()
+                        .map(|raw| raw.len() + 1)
+                        .sum::<usize>()
+                        .saturating_add(1);
+                    let mut text = String::with_capacity(capacity);
+                    text.push('[');
+                    for (relative, raw) in values[offset..end].iter().enumerate() {
+                        if relative > 0 {
+                            text.push(',');
+                        }
+                        text.push_str(raw);
+                    }
+                    text.push(']');
+                    emit(
+                        format!("{kind}:{offset:08}"),
+                        kind,
+                        offset,
+                        end - offset,
+                        text,
+                    )?;
+                }
+                Ok(())
+            };
+        emit_raw_ranges(&self.entity_raw, "entities", ENTITY_CHUNK_SIZE, &mut emit)?;
+        emit_raw_ranges(&self.belt_raw, "belts", BELT_CHUNK_SIZE, &mut emit)?;
+
+        let mut root_material = String::new();
+        for chunk in &metadata {
+            use std::fmt::Write as _;
+            write!(
+                root_material,
+                "{}:{}:{}:{}:{}:{};",
+                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
+            )?;
+        }
+        let manifest_key = format!("{prefix}manifest");
+        let manifest = serde_json::to_string(&serde_json::json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": self.identity.mode,
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": saved_at_ms,
+            "basePrimaryChecksum": self.identity.base_primary_checksum,
+            "chunkRootChecksum": fnv1a_utf8(root_material.as_bytes()),
+            "totalBytes": total_bytes,
+            "entityCount": self.entity_raw.len(),
+            "beltCount": self.belt_raw.len(),
+            "chunks": metadata,
+        }))?;
+        visit(&manifest_key, &manifest)?;
+        active_keys.push(manifest_key);
+        Ok(active_keys)
+    }
+
+    pub fn install_checkpoint_identity(&mut self, generation: u64, root_hash: String) {
+        self.identity.generation = generation;
+        self.identity.root_hash = root_hash;
+        self.identity.revision = self.revision;
     }
 
     pub(crate) fn refresh_factory_static_admission(&mut self) -> anyhow::Result<()> {
@@ -1402,6 +1532,7 @@ mod tests {
                 state_version: 47,
                 mode: "normal".into(),
                 registry_fingerprint: "core".into(),
+                base_primary_checksum: "12345678".into(),
             },
             &fixture_records(),
             fixture_catalog(),
@@ -1414,6 +1545,45 @@ mod tests {
         assert!(summary.coverage.state_container);
         assert!(!summary.coverage.authority_eligible);
         assert_eq!(state.materialize().unwrap()["entities"][0]["id"], "vein");
+    }
+
+    #[test]
+    fn streams_a_compatible_bounded_checkpoint_without_materializing_game_state() {
+        let identity = CoreCheckpointIdentity {
+            slot: "normal-main".into(),
+            generation: 1,
+            root_hash: "a".repeat(64),
+            revision: 7,
+            state_version: 47,
+            mode: "normal".into(),
+            registry_fingerprint: "core".into(),
+            base_primary_checksum: "12345678".into(),
+        };
+        let state = CoreState::from_internal_records(
+            identity.clone(),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        let keys = state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                assert!(value.len() < 8 * 1024 * 1024);
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(keys.len(), streamed.len());
+        let restored =
+            CoreState::from_internal_records(identity, &streamed, fixture_catalog()).unwrap();
+        assert_eq!(
+            restored.canonical_sha256().unwrap(),
+            state.canonical_sha256().unwrap()
+        );
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
+        assert_eq!(manifest["savedAt"], 42);
+        assert_eq!(manifest["basePrimaryChecksum"], "12345678");
     }
 
     #[test]
@@ -1442,6 +1612,7 @@ mod tests {
                 state_version: 47,
                 mode: "normal".into(),
                 registry_fingerprint: "core".into(),
+                base_primary_checksum: "12345678".into(),
             },
             &records,
             fixture_catalog(),

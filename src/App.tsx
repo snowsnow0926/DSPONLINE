@@ -269,6 +269,7 @@ import { analyzeBeltNetwork, analyzeEntityLineTrace, diagnoseBelt, predictBeltCo
 import { buildFactoryEdgeRouteCenters, reconcileFactoryCanvasTopology, type FactoryCanvasTopology } from "./game/canvasTopology";
 import type { CanvasLineEndpoint } from "./game/canvasLineBatch";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
+import { createCanvasNodeSemanticRevisionToken, isCanvasNodeSemanticRevisionApplied } from "./game/canvasNodeSemanticRevision";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
@@ -9090,10 +9091,62 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
 
+  const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
+    canvasGame.activePlanetId,
+    canvasRenderSnapshot.runtimeRevision,
+    canvasRenderSnapshot.topologyRevision,
+    canvasPresentationDetailStage,
+    canvasDetailPreference,
+    canvasInteractionDetailPreference,
+    canvasOverlapPreference,
+    canvasPresentationZoom.toFixed(4),
+    viewportZoom.toFixed(4),
+    JSON.stringify(activeConnectionViewportBounds),
+    canvasVisibleNodeCount,
+    automaticDenseCanvasMode,
+    denseNodeLodActive,
+    reactFlowBelts.length,
+    canvasConnectedEntityIds.size,
+    placement ?? "",
+    placementCount,
+    blueprintPlacementId ?? "",
+    connectionDraft ? `${connectionDraft.nodeId}:${connectionDraft.handleType}:${connectionDraft.handleId}:${connectionDraft.itemId ?? "*"}` : "",
+    connectExpandAll,
+    connectionCandidateNodeId ?? "",
+    selectedEntityIds.join(","),
+    selectedBeltId ?? "",
+    selectedBeltIds.join(","),
+    [...fullDetailCanvasNodeIds].join(","),
+    hoveredNodeId ?? "",
+    focusedNodeId ?? "",
+    draggedEntityIds.join(","),
+    miningEntityId ?? "",
+    focusedBeltNetworkId ?? "",
+    highlightedTaskId ?? "",
+    productionLineFocus?.planetId ?? "",
+    productionLineFocus?.relatedEntityIds.join(",") ?? "",
+    lineFindMode,
+    lineFindTrace?.entityId ?? "",
+    nextMobileShell,
+    game.settings.fontScale,
+    extremeVisualsActive,
+  ]);
+  const appliedCanvasNodeSemanticRevisionTokenRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (nodeDragActiveRef.current) return;
+    if (isCanvasNodeSemanticRevisionApplied(appliedCanvasNodeSemanticRevisionTokenRef.current, canvasNodeSemanticRevisionToken)) {
+      recordRuntimeTransitionPhase("canvas-node-semantic-deduplicated", performance.now(), 0);
+      return;
+    }
     const frame = window.requestAnimationFrame(() => {
       if (nodeDragActiveRef.current) return;
+      // Mark the revision only after the frame actually starts. React may
+      // cancel a scheduled frame when an identity-only dependency changes;
+      // marking it earlier would let that rerender suppress the only real
+      // derivation for this semantic revision.
+      appliedCanvasNodeSemanticRevisionTokenRef.current = canvasNodeSemanticRevisionToken;
+      recordRuntimeTransitionPhase("canvas-node-semantic-change", performance.now(), 0);
       const derivationStartedAt = performance.now();
       canvasNodeCommitStartedAtRef.current = derivationStartedAt;
       const setNodesStartedAt = derivationStartedAt;
@@ -9500,7 +9553,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;

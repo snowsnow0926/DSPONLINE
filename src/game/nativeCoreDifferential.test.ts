@@ -927,6 +927,134 @@ function quantumAttachmentTransitionState(): GameState {
   return state;
 }
 
+function orbitalCargoConstructionState(): GameState {
+  let state = simpleMiningState();
+  state.orbitalStation.status = "core-building";
+  state.construction.orbital_cargo_terminal = 1;
+  state.construction.conveyor_belt_mk3 = 128;
+  state = placeBuilding(state, "orbital_cargo_terminal", { x: 1_450, y: 420 }, 1);
+  const terminal = state.entities.find((entity) => entity.buildingId === "orbital_cargo_terminal")!;
+  terminal.orbitalCargoBinding = { kind: "construction" };
+  terminal.orbitalCargoPortItems = ["titanium_alloy", null, "processor", null];
+  terminal.orbitalCargoProgress = 0.375;
+  terminal.routingCursor = 2;
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storage,
+      id: "native_orbital_titanium_feed",
+      position: { x: 1_050, y: 360 },
+      storedItemId: "titanium_alloy",
+      inputs: { titanium_alloy: 0 },
+      outputs: { titanium_alloy: 100_000 },
+      routingCursor: 0,
+    },
+    {
+      ...storage,
+      id: "native_orbital_processor_feed",
+      position: { x: 1_050, y: 520 },
+      storedItemId: "processor",
+      inputs: { processor: 0 },
+      outputs: { processor: 100_000 },
+      routingCursor: 0,
+    },
+  );
+  state = connectBeltWithResult(
+    state, "native_orbital_titanium_feed", terminal.id, "titanium_alloy", 3, 0, 32,
+  ).state;
+  state = connectBeltWithResult(
+    state, "native_orbital_processor_feed", terminal.id, "processor", 3, 2, 32,
+  ).state;
+  state.entities.find((entity) => entity.buildingId === "wind_turbine")!.machineCount = 100_000;
+  return state;
+}
+
+function orbitalCargoContractState(): GameState {
+  let state = simpleMiningState();
+  state.orbitalStation.status = "operational";
+  const contract = {
+    id: "native-orbital-contract",
+    templateId: "multi-origin",
+    slot: 0 as const,
+    title: "原生合同差分",
+    summary: "验证轨道终端自动交付。",
+    taskDay: state.orbitalStation.contractBoard.taskDay,
+    expiresAtTaskDay: state.orbitalStation.contractBoard.taskDay + 3,
+    special: false,
+    difficulty: "P2" as const,
+    status: "accepted" as const,
+    requirements: [
+      {
+        itemId: "titanium_alloy" as const,
+        amount: "10000",
+        delivered: "125",
+        sourcePlanetIds: ["home" as const],
+        channel: "terminal" as const,
+        weight: 4,
+      },
+      {
+        itemId: "processor" as const,
+        amount: "12000",
+        delivered: "0",
+        channel: "any" as const,
+        weight: 3,
+      },
+    ],
+    rewards: {
+      baseMarks: "120",
+      baseReputation: "80",
+      completionMarks: "65",
+      completionReputation: "40",
+    },
+    acceptedAtTaskDay: state.orbitalStation.contractBoard.taskDay,
+  };
+  state.orbitalStation.contractBoard.accepted = [contract];
+  state.orbitalStation.contractBoard.offers = [{
+    ...contract,
+    id: "native-orbital-offer",
+    status: "offered",
+    acceptedAtTaskDay: undefined,
+    requirements: contract.requirements.map((requirement) => ({ ...requirement, delivered: "0" })),
+  }];
+  state.construction.orbital_cargo_terminal = 1;
+  state.construction.conveyor_belt_mk3 = 128;
+  state = placeBuilding(state, "orbital_cargo_terminal", { x: 1_450, y: 420 }, 1);
+  const terminal = state.entities.find((entity) => entity.buildingId === "orbital_cargo_terminal")!;
+  terminal.orbitalCargoBinding = { kind: "contract", contractId: contract.id };
+  terminal.orbitalCargoPortItems = ["titanium_alloy", "processor", null, null];
+  terminal.orbitalCargoProgress = 0.625;
+  terminal.routingCursor = 1;
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storage,
+      id: "native_contract_titanium_feed",
+      position: { x: 1_050, y: 360 },
+      storedItemId: "titanium_alloy",
+      inputs: { titanium_alloy: 0 },
+      outputs: { titanium_alloy: 100_000 },
+      routingCursor: 0,
+    },
+    {
+      ...storage,
+      id: "native_contract_processor_feed",
+      position: { x: 1_050, y: 520 },
+      storedItemId: "processor",
+      inputs: { processor: 0 },
+      outputs: { processor: 100_000 },
+      routingCursor: 0,
+    },
+  );
+  state = connectBeltWithResult(
+    state, "native_contract_titanium_feed", terminal.id, "titanium_alloy", 3, 0, 32,
+  ).state;
+  state = connectBeltWithResult(
+    state, "native_contract_processor_feed", terminal.id, "processor", 3, 1, 32,
+  ).state;
+  state.entities.find((entity) => entity.buildingId === "wind_turbine")!.machineCount = 100_000;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1736,6 +1864,57 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     expect(advanced.summary.canonicalFields, "quantum-transition-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "quantum-transition-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches orbital cargo ports, fair upload budgets, and station construction delivery", async () => {
+    const initial = orbitalCargoConstructionState();
+    const checkpoint = await seed(initial, 207);
+    for (const seconds of [1, 5, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `orbital-cargo-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `orbital-cargo-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `orbital-cargo-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+      expect(projection.base.orbitalStation, `orbital-cargo-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
+      expect(advanced.summary.canonicalFields, `orbital-cargo-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `orbital-cargo-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("matches orbital cargo contract restrictions, totals, and claimable transition", async () => {
+    const initial = orbitalCargoContractState();
+    const checkpoint = await seed(initial, 208);
+    for (const seconds of [1, 5, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `orbital-contract-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `orbital-contract-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.orbitalStation, `orbital-contract-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
+      expect(advanced.summary.canonicalFields, `orbital-contract-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `orbital-contract-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
   }, 90_000);
 
   it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(

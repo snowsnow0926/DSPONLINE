@@ -103,9 +103,23 @@ struct PreparedGroup {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TargetSlotKey {
-    Entity { target_index: usize, item: u32 },
-    BlackHole { target_index: usize, port: i16 },
-    Tray { planet: u32, item: u32 },
+    Entity {
+        target_index: usize,
+        item: u32,
+    },
+    BlackHole {
+        target_index: usize,
+        port: i16,
+    },
+    OrbitalCargo {
+        target_index: usize,
+        item: u32,
+        port: i16,
+    },
+    Tray {
+        planet: u32,
+        item: u32,
+    },
 }
 
 impl PreparedRoutes {
@@ -465,7 +479,15 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
     }
 }
 
-fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str) -> bool {
+fn target_consumes(
+    state: &CoreState,
+    target: &Map<String, Value>,
+    item_id: &str,
+    target_port_index: Option<u8>,
+) -> bool {
+    if string_at(target, "buildingId") == Some("orbital_cargo_terminal") {
+        return crate::orbital_station::terminal_accepts(state, target, item_id, target_port_index);
+    }
     if matches!(
         string_at(target, "buildingId"),
         Some("micro_black_hole_connector" | "material_delivery_hub")
@@ -791,6 +813,12 @@ pub(crate) fn prepare_routes(
                 planet: state.entities.planets[route.target_index],
                 item: item_symbol,
             }
+        } else if string_at(target, "buildingId") == Some("orbital_cargo_terminal") {
+            TargetSlotKey::OrbitalCargo {
+                target_index: route.target_index,
+                item: item_symbol,
+                port: route.target_port_index.map_or(-1_i16, i16::from),
+            }
         } else {
             TargetSlotKey::Entity {
                 target_index: route.target_index,
@@ -893,6 +921,11 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             if !material_delivery_slot_accepts(target, item_id, target_port_index) {
                 return Ok(Some("material-delivery-belt-port-invalid"));
             }
+        } else if string_at(target, "buildingId") == Some("orbital_cargo_terminal") {
+            if !crate::orbital_station::terminal_accepts(state, target, item_id, target_port_index)
+            {
+                return Ok(Some("orbital-cargo-belt-port-invalid"));
+            }
         } else if belt
             .get("targetPortIndex")
             .is_some_and(|value| !value.is_null())
@@ -903,7 +936,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         if planet != string_at(source, "planetId") || planet != string_at(target, "planetId") {
             return Ok(Some("ordinary-belt-planet-invalid"));
         }
-        if !source_produces(state, source, item_id) || !target_consumes(state, target, item_id) {
+        if !source_produces(state, source, item_id)
+            || !target_consumes(state, target, item_id, target_port_index)
+        {
             return Ok(Some("ordinary-belt-route-unsupported"));
         }
         let tier = belt

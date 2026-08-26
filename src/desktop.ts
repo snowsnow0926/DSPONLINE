@@ -258,6 +258,7 @@ export interface DesktopNativeCoreDomainCoverage {
   dysonSwarmAndSphere: boolean;
   dysonLaunchers: boolean;
   dysonRayReceivers: boolean;
+  orbitalCargoTerminals: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

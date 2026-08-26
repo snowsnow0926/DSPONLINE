@@ -437,15 +437,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     {
         return Some("endgame-activity-active");
     }
-    if !base
-        .get("orbitalStation")
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("status"))
-        .and_then(Value::as_str)
-        .is_some_and(|status| matches!(status, "locked" | "eligible"))
-    {
-        return Some("orbital-station-boundary-active");
-    }
     None
 }
 
@@ -648,6 +639,9 @@ pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Optio
             || grid_metrics.is_none_or(|values| !values.contains_key(&planet.id))
     }) {
         return Ok(Some("simple-factory-planet-directory-incomplete"));
+    }
+    if let Some(reason) = crate::orbital_station::admission_reason(state)? {
+        return Ok(Some(reason));
     }
     if let Some(reason) = crate::belts::admission_reason(state)? {
         return Ok(Some(reason));
@@ -3225,6 +3219,9 @@ fn simulate_step(
     )?;
     profile_mark!("ray-receivers");
 
+    crate::orbital_station::settle(state, base, entities, seconds)?;
+    profile_mark!("orbital-cargo-terminals");
+
     if !produced_by_item.is_empty() {
         let total = base
             .get_mut("totalProduced")
@@ -3502,13 +3499,26 @@ pub(crate) fn prepare_advance(
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-before");
     let total = simulation_seconds;
-    let step_size = if total >= 24.0 * 60.0 * 60.0 {
+    let mut step_size: f64 = if total >= 24.0 * 60.0 * 60.0 {
         30.0
     } else if total > 8.0 * 60.0 * 60.0 {
         10.0
     } else {
         1.0
     };
+    if state
+        .factory_topology
+        .orbital_cargo_terminal_indices
+        .iter()
+        .any(|&index| {
+            entities[index]
+                .as_object()
+                .and_then(|entity| entity.get("orbitalCargoBinding"))
+                .is_some_and(|binding| !binding.is_null())
+        })
+    {
+        step_size = step_size.min(5.0);
+    }
     let mut remaining = total;
     while remaining > EPSILON {
         let step = remaining.min(step_size);

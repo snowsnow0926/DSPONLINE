@@ -120,6 +120,7 @@ pub struct DomainCoverage {
     pub dyson_swarm_and_sphere: bool,
     pub dyson_launchers: bool,
     pub dyson_ray_receivers: bool,
+    pub orbital_cargo_terminals: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -170,6 +171,7 @@ impl DomainCoverage {
             dyson_swarm_and_sphere: true,
             dyson_launchers: true,
             dyson_ray_receivers: true,
+            orbital_cargo_terminals: true,
             mining: false,
             production: false,
             research: false,
@@ -320,6 +322,7 @@ pub(crate) struct FactoryTopology {
     pub time_warp_indices: Vec<usize>,
     pub logistics_buffer_indices: Vec<usize>,
     pub material_delivery_hub_indices: Vec<usize>,
+    pub orbital_cargo_terminal_indices: Vec<usize>,
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
     pub ordinary_machine_indices: Vec<usize>,
@@ -338,6 +341,7 @@ impl FactoryTopology {
             + self.time_warp_indices.capacity()
             + self.logistics_buffer_indices.capacity()
             + self.material_delivery_hub_indices.capacity()
+            + self.orbital_cargo_terminal_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
@@ -919,6 +923,9 @@ impl CoreState {
             }
             if building == "material_delivery_hub" {
                 factory_topology.material_delivery_hub_indices.push(index);
+            }
+            if building == "orbital_cargo_terminal" {
+                factory_topology.orbital_cargo_terminal_indices.push(index);
             }
             if kind == "power"
                 || (kind == "machine" && building == "ray_receiver" && recipe == "ray_power")

@@ -13,6 +13,7 @@ mod dyson;
 mod infinite_research;
 mod interstellar_logistics;
 mod local_logistics;
+mod orbital_station;
 pub mod production_history;
 mod quantum_logistics;
 pub mod replay;

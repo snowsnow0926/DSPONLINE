@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
+import { hashGameState } from "./benchmark";
 import { createInitialState } from "./engine";
 import {
   PureIdleMacroClient,
@@ -32,6 +33,10 @@ class FakeWorker {
 
   respond(response: PureIdleMacroWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<PureIdleMacroWorkerResponse>);
+  }
+
+  crash(): void {
+    this.onerror?.({ message: "synthetic Worker crash" } as ErrorEvent);
   }
 
   terminate(): void {
@@ -143,6 +148,27 @@ afterEach(() => {
 });
 
 describe("pure idle final envelope ownership", () => {
+  it("keeps the source checkpoint hash unchanged across a Worker crash and clean restart", async () => {
+    const source = createInitialState(43, false);
+    const sourceHash = hashGameState(source);
+    const worker = new FakeWorker();
+    installWorker(worker);
+    const client = new PureIdleMacroClient();
+    await initializeClient(client, worker, source);
+    const pending = client.advance(60);
+    worker.crash();
+    await expect(pending).rejects.toMatchObject({ code: "worker-crash", recoverable: true });
+    expect(hashGameState(source)).toBe(sourceHash);
+    client.close();
+
+    const restartedWorker = new FakeWorker();
+    installWorker(restartedWorker);
+    const restarted = new PureIdleMacroClient();
+    await initializeClient(restarted, restartedWorker, source);
+    expect(hashGameState(source)).toBe(sourceHash);
+    restarted.close();
+  });
+
   it("returns the original verified payload buffer with proof and finalized identity", async () => {
     const worker = new FakeWorker();
     installWorker(worker);

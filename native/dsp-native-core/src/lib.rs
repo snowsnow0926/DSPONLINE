@@ -19,6 +19,7 @@ mod interstellar_logistics;
 mod local_logistics;
 mod orbital_station;
 pub mod production_history;
+mod pure_idle;
 mod quantum_logistics;
 pub mod replay;
 mod simple_factory;
@@ -34,7 +35,7 @@ pub use catalog::{
     TechnologyDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
-pub use simulation::{CoreAdvanceRequest, CoreAdvanceResult};
+pub use simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 pub use state::{
     CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage, RuntimeMemoryEstimate,
 };

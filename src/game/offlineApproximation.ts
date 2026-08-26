@@ -1,4 +1,5 @@
 import { getRecipe, ITEMS } from "./content";
+import { GALACTIC_EXPORT_DEFINITIONS } from "./endgame";
 import {
   advanceSimulationSession,
   completeSimulationAdvanceSession,
@@ -7,6 +8,7 @@ import {
   getEntityOutputCapacity,
   hasActiveResearch,
   normalizeConstructionAutomationCursor,
+  refreshDysonGenerationSnapshot,
   getResourceReserveSnapshot,
   getVeinConsumptionMultiplier,
   type SimulationAdvanceSession,
@@ -200,6 +202,10 @@ const AFFINE_IGNORED_KEYS = new Set([
   // Research is a discrete cost/reward ledger. Generic affine deltas must
   // never write progress, levels, queue selection, rewards, or score.
   "research", "infiniteResearch", "activeInfiniteResearchId", "galacticScore",
+  // Contract completion and launch-energy diagnostics are discrete subsystem
+  // results. Material delivery is guarded separately; these counters are
+  // never independently extrapolated from a sampled prefix.
+  "completedContracts", "launchEnergySpentMj", "orbitalCargoTotalUploaded",
 ]);
 
 function finiteNumber(value: unknown, fallback = 0): number {
@@ -893,56 +899,12 @@ export interface PureIdleAffineContract {
   calibrationWallSeconds: number;
 }
 
-/**
- * The large-save pure-idle fallback deliberately uses a compact whitelist of
- * cumulative counters instead of cloning/extrapolating every entity cache.
- * Keep the haircut below 1 so a one-second warm-up probe cannot over-credit a
- * multi-day tail.  This is a diagnostic/runtime constant, never save data.
- */
-export const PURE_IDLE_CONSERVATIVE_RATE_FACTOR = 0.8;
-
+/** Legacy worker-call shape retained while conservative sampled tails are disabled. */
 export interface PureIdleConservativeContractOptions {
-  /** Measured-rate haircut; values outside 0.1..1 are clamped. */
+  /** Retained for worker source compatibility; no sampled tail is applied. */
   rateFactor?: number;
-  /** Include aggregate production counters only when resource accounting is safe. */
+  /** Retained for worker source compatibility; production remains frozen. */
   includeProduction?: boolean;
-}
-
-function appendConservativeCounterDelta(
-  deltas: AffineDelta[],
-  path: AffinePath,
-  before: unknown,
-  after: unknown,
-  rateFactor: number,
-): void {
-  if (typeof before !== "number" || typeof after !== "number" ||
-    !Number.isFinite(before) || !Number.isFinite(after)) return;
-  const rawDelta = after - before;
-  // A conservative contract must never extrapolate a counter that moved
-  // backwards during the probe. Zero/negative rates simply remain frozen.
-  if (!Number.isFinite(rawDelta) || rawDelta <= EPSILON) return;
-  const delta = rawDelta * rateFactor;
-  if (!Number.isFinite(delta) || delta <= EPSILON) return;
-  deltas.push({
-    path: [...path],
-    kind: "number",
-    delta,
-    integer: Number.isSafeInteger(before) && Number.isSafeInteger(after),
-  });
-}
-
-function appendConservativeMapDeltas(
-  deltas: AffineDelta[],
-  before: Record<string, unknown> | undefined,
-  after: Record<string, unknown> | undefined,
-  pathPrefix: AffinePath,
-  rateFactor: number,
-): void {
-  if (!before || !after) return;
-  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
-  for (const key of keys) {
-    appendConservativeCounterDelta(deltas, [...pathPrefix, key], before[key] ?? 0, after[key] ?? 0, rateFactor);
-  }
 }
 
 function sameStableIds<T extends { id: string }>(before: T[] | undefined, after: T[] | undefined): boolean {
@@ -951,13 +913,18 @@ function sameStableIds<T extends { id: string }>(before: T[] | undefined, after:
 }
 
 /**
- * Derive a low-memory pure-idle contract from one bounded exact prefix.
+ * Conservative pure-idle deliberately has no affine production tail.
  *
- * Only monotonic, leaderboard-facing counters are copied.  Inventory, entity
- * input/output caches, belts, routes, elapsed time and all cyclic diagnostics
- * remain at the exact checkpoint; the caller advances elapsed time explicitly.
- * This keeps the fallback useful at 8x/12x/16x without pretending that a
- * complex factory's logistics can be reconstructed from a one-second sample.
+ * Before 1.2.0 this function copied cumulative production, launch, export and
+ * Dyson counters measured during a one-second probe while freezing the stores
+ * that supplied those results. Repeating the counter deltas therefore created
+ * terminal output without consuming material. A haircut cannot make an open
+ * ledger safe, so callers now keep only their bounded exact prefix and freeze
+ * every material-affecting subsystem for the uncertain tail.
+ *
+ * The signature remains available for source compatibility with workers built
+ * during the 1.1.8/1.1.9 transition. A future productive conservative mode
+ * must replace this with a closed per-item flow ledger, not sampled counters.
  */
 export function createPureIdleConservativeContract(
   before: GameState,
@@ -970,92 +937,8 @@ export function createPureIdleConservativeContract(
     !Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 ||
     before.mode !== after.mode || before.version !== after.version ||
     !sameStableIds(before.entities, after.entities) || !sameStableIds(before.belts, after.belts)) return null;
-  const rateFactor = Math.min(1, Math.max(0.1, options.rateFactor ?? PURE_IDLE_CONSERVATIVE_RATE_FACTOR));
-  const deltas: AffineDelta[] = [];
-
-  if (options.includeProduction !== false) {
-    appendConservativeMapDeltas(
-      deltas,
-      before.totalProduced as Record<string, unknown>,
-      after.totalProduced as Record<string, unknown>,
-      ["totalProduced"],
-      rateFactor,
-    );
-  }
-
-  const scalarPaths: AffinePath[] = [
-    ["manualMined"],
-    ["dysonSwarm", "totalLaunched"],
-    ["dysonSwarm", "totalExpired"],
-    ["dysonSphere", "structurePoints"],
-    ["dysonSphere", "totalRocketsLaunched"],
-    ["dysonSphere", "shellSails"],
-    ["dysonSphere", "totalSailsAbsorbed"],
-    ["dysonEngineering", "launchEnergySpentMj"],
-    ["endgame", "totalExported"],
-    ["orbitalStation", "totals", "completedContracts"],
-  ];
-  for (const path of scalarPaths) {
-    appendConservativeCounterDelta(deltas, path, readAffinePath(before, path), readAffinePath(after, path), rateFactor);
-  }
-
-  const planIds = new Set([...Object.keys(before.dysonPlans ?? {}), ...Object.keys(after.dysonPlans ?? {})]);
-  for (const systemId of planIds) {
-    appendConservativeCounterDelta(
-      deltas,
-      ["dysonPlans", systemId, "structurePoints"],
-      before.dysonPlans?.[systemId as keyof typeof before.dysonPlans]?.structurePoints,
-      after.dysonPlans?.[systemId as keyof typeof after.dysonPlans]?.structurePoints,
-      rateFactor,
-    );
-    appendConservativeCounterDelta(
-      deltas,
-      ["dysonPlans", systemId, "shellSails"],
-      before.dysonPlans?.[systemId as keyof typeof before.dysonPlans]?.shellSails,
-      after.dysonPlans?.[systemId as keyof typeof after.dysonPlans]?.shellSails,
-      rateFactor,
-    );
-  }
-
-  const projectIds = new Set([
-    ...Object.keys(before.endgame.exportProjects ?? {}),
-    ...Object.keys(after.endgame.exportProjects ?? {}),
-  ]);
-  for (const projectId of projectIds) {
-    appendConservativeCounterDelta(
-      deltas,
-      ["endgame", "exportProjects", projectId, "totalDelivered"],
-      before.endgame.exportProjects?.[projectId as keyof typeof before.endgame.exportProjects]?.totalDelivered,
-      after.endgame.exportProjects?.[projectId as keyof typeof after.endgame.exportProjects]?.totalDelivered,
-      rateFactor,
-    );
-  }
-
-  // Keep per-orbit cumulative launch/expiry counters aligned with the
-  // aggregate swarm counters when the orbit topology is unchanged.
-  for (const systemId of new Set([
-    ...Object.keys(before.dysonEngineering.orbitsBySystem ?? {}),
-    ...Object.keys(after.dysonEngineering.orbitsBySystem ?? {}),
-  ])) {
-    const beforeOrbits = before.dysonEngineering.orbitsBySystem?.[systemId as keyof typeof before.dysonEngineering.orbitsBySystem] ?? [];
-    const afterOrbits = after.dysonEngineering.orbitsBySystem?.[systemId as keyof typeof after.dysonEngineering.orbitsBySystem] ?? [];
-    if (!sameStableIds(beforeOrbits, afterOrbits)) return null;
-    for (let index = 0; index < beforeOrbits.length; index += 1) {
-      for (const field of ["totalLaunched", "totalExpired"] as const) {
-        appendConservativeCounterDelta(
-          deltas,
-          ["dysonEngineering", "orbitsBySystem", systemId, index, field],
-          beforeOrbits[index]?.[field],
-          afterOrbits[index]?.[field],
-          rateFactor,
-        );
-      }
-    }
-  }
-
-  return deltas.length > 0
-    ? { deltas, calibrationSeconds, calibrationWallSeconds }
-    : null;
+  void options;
+  return null;
 }
 
 function pathHasString(path: AffinePath, values: ReadonlySet<string>): boolean {
@@ -1356,62 +1239,181 @@ export interface PureIdleAffineApplicationOptions {
 
 type ItemStore = Partial<Record<string, number | string>>;
 
+interface AggregateItemStoreCapture {
+  totals: Map<string, bigint>;
+  failure?: string;
+}
+
+function aggregateItemAmount(raw: unknown): bigint | null {
+  try {
+    if (typeof raw === "number") return Number.isSafeInteger(raw) && raw >= 0 ? BigInt(raw) : null;
+    return typeof raw === "string" && /^(0|[1-9]\d*)$/.test(raw) ? BigInt(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function addAggregateAmount(totals: Map<string, bigint>, itemId: string, amount: bigint): void {
+  totals.set(itemId, (totals.get(itemId) ?? 0n) + amount);
+}
+
 function addAggregateStore(
   totals: Map<string, bigint>,
   store: ItemStore | undefined,
   seen: Set<object>,
-): void {
-  if (!store || typeof store !== "object" || seen.has(store)) return;
+  label: string,
+): string | null {
+  if (!store || typeof store !== "object" || seen.has(store)) return null;
   seen.add(store);
   for (const [itemId, raw] of Object.entries(store)) {
-    try {
-      const amount = typeof raw === "number"
-        ? (Number.isSafeInteger(raw) && raw >= 0 ? BigInt(raw) : null)
-        : (typeof raw === "string" && /^\d+$/.test(raw) ? BigInt(raw) : null);
-      if (amount === null) continue;
-      totals.set(itemId, (totals.get(itemId) ?? 0n) + amount);
-    } catch {
-      // Formal numeric validation reports malformed values separately.
-    }
+    const amount = aggregateItemAmount(raw);
+    if (amount === null) return `${label}.${itemId} 不是非负安全整数`;
+    addAggregateAmount(totals, itemId, amount);
   }
+  return null;
 }
 
 /**
  * Aggregate every persisted item ownership location once. This is a safety
  * invariant, not a production estimator: transfers between locations cancel
  * out, while a net increase must be backed by a production counter delta.
+ * Belt progress is transport credit rather than cargo. Legacy StationRoute
+ * cargo is reserved in the source output until arrival, so the source reserve
+ * is replaced by (not added to) the explicit in-flight route amount.
  */
-function captureAggregateItemStores(state: GameState): Map<string, bigint> {
+function captureAggregateItemStores(state: GameState): AggregateItemStoreCapture {
   const totals = new Map<string, bigint>();
   const seen = new Set<object>();
-  addAggregateStore(totals, state.tray, seen);
-  for (const tray of Object.values(state.planetTrays)) addAggregateStore(totals, tray, seen);
+  let failure: string | undefined;
+  const addStore = (store: ItemStore | undefined, label: string): void => {
+    failure ??= addAggregateStore(totals, store, seen, label) ?? undefined;
+  };
+
+  // `tray` is the authoritative active-planet view. Serialized JSON cannot
+  // preserve its runtime alias to planetTrays, so skip the active duplicate.
+  addStore(state.tray, "tray");
+  for (const [planetId, tray] of Object.entries(state.planetTrays)) {
+    if (planetId !== state.activePlanetId) addStore(tray, `planetTrays.${planetId}`);
+  }
+
+  const entityById = new Map(state.entities.map((entity) => [entity.id, entity]));
+  const routeReservations = new Map<string, Map<string, bigint>>();
+  const seenRouteIds = new Set<string>();
   for (const entity of state.entities) {
-    addAggregateStore(totals, entity.inputs, seen);
-    addAggregateStore(totals, entity.outputs, seen);
+    addStore(entity.inputs, `entities.${entity.id}.inputs`);
+    addStore(entity.outputs, `entities.${entity.id}.outputs`);
+    if (Number.isSafeInteger(entity.stationWarpers) && (entity.stationWarpers ?? 0) >= 0) {
+      addAggregateAmount(totals, "space_warper", BigInt(entity.stationWarpers ?? 0));
+    }
+    if (Number.isSafeInteger(entity.stationDrones) && (entity.stationDrones ?? 0) >= 0) {
+      addAggregateAmount(totals, "logistics_drone", BigInt(entity.stationDrones ?? 0));
+    }
+    if (Number.isSafeInteger(entity.stationVessels) && (entity.stationVessels ?? 0) >= 0) {
+      addAggregateAmount(totals, "logistics_vessel", BigInt(entity.stationVessels ?? 0));
+    }
     for (const route of entity.stationRoutes ?? []) {
-      if (Number.isSafeInteger(route.cargo) && route.cargo >= 0) {
-        totals.set(route.itemId, (totals.get(route.itemId) ?? 0n) + BigInt(route.cargo));
+      if (seenRouteIds.has(route.id)) continue;
+      seenRouteIds.add(route.id);
+      const cargo = aggregateItemAmount(route.cargo);
+      if (cargo === null) {
+        failure ??= `stationRoutes.${route.id}.cargo 不是非负安全整数`;
+        continue;
       }
+      addAggregateAmount(totals, route.itemId, cargo);
+      let byItem = routeReservations.get(route.peerId);
+      if (!byItem) routeReservations.set(route.peerId, byItem = new Map());
+      byItem.set(route.itemId, (byItem.get(route.itemId) ?? 0n) + cargo);
     }
   }
-  for (const job of Object.values(state.constructionAutomation.jobs)) addAggregateStore(totals, job.inventory, seen);
-  addAggregateStore(totals, state.portableFleet, seen);
-  if (state.cargo && Number.isSafeInteger(state.cargo.amount) && state.cargo.amount >= 0) {
-    totals.set(state.cargo.itemId, (totals.get(state.cargo.itemId) ?? 0n) + BigInt(state.cargo.amount));
+
+  // A route's cargo remains reserved in its supply endpoint output. Replace
+  // the reserved part with the route ledger so it is represented exactly once.
+  for (const [sourceId, byItem] of routeReservations) {
+    const source = entityById.get(sourceId);
+    for (const [itemId, reserved] of byItem) {
+      const sourceAmount = aggregateItemAmount(source?.outputs?.[itemId as ItemId]) ?? 0n;
+      addAggregateAmount(totals, itemId, -(reserved < sourceAmount ? reserved : sourceAmount));
+    }
   }
-  addAggregateStore(totals, state.quantumLogisticsNetwork.inventory, seen);
+
+  addStore(state.construction as ItemStore, "construction");
+  for (const [jobId, job] of Object.entries(state.constructionAutomation.jobs)) addStore(job.inventory, `constructionAutomation.jobs.${jobId}.inventory`);
+  for (const [entityId, inventory] of Object.entries(state.constructionAutomation.quantumMaterialBuffer ?? {})) {
+    addStore(inventory, `constructionAutomation.quantumMaterialBuffer.${entityId}`);
+  }
+  for (const entry of state.constructionQueue) {
+    addStore(entry.reservedConstruction as ItemStore | undefined, `constructionQueue.${entry.id}.reservedConstruction`);
+    addStore(entry.reservedFleet as ItemStore | undefined, `constructionQueue.${entry.id}.reservedFleet`);
+  }
+  addStore(state.portableFleet, "portableFleet");
+  if (state.cargo && Number.isSafeInteger(state.cargo.amount) && state.cargo.amount >= 0) {
+    addAggregateAmount(totals, state.cargo.itemId, BigInt(state.cargo.amount));
+  }
+  addStore(state.quantumLogisticsNetwork.inventory, "quantumLogisticsNetwork.inventory");
+  for (const [systemId, station] of Object.entries(state.systemSpaceStations)) {
+    if (!station) continue;
+    addStore(station.inventory, `systemSpaceStations.${systemId}.inventory`);
+    addStore(station.constructionBuffer, `systemSpaceStations.${systemId}.constructionBuffer`);
+  }
+  const hubWarpers = aggregateItemAmount(state.galacticHubNetwork.warpers);
+  if (hubWarpers === null) failure ??= "galacticHubNetwork.warpers 不是非负整数";
+  else addAggregateAmount(totals, "space_warper", hubWarpers);
   for (const batch of Object.values(state.endgame.constructionActivity.pendingBatches)) {
     if (batch && Number.isSafeInteger(batch.amount) && batch.amount >= 0) {
-      totals.set(batch.itemId, (totals.get(batch.itemId) ?? 0n) + BigInt(batch.amount));
+      addAggregateAmount(totals, batch.itemId, BigInt(batch.amount));
+    } else if (batch) {
+      failure ??= `constructionActivity.pendingBatches.${batch.id}.amount 不是非负安全整数`;
     }
   }
-  return totals;
+  return { totals, ...(failure ? { failure } : {}) };
 }
 
 interface AggregateConservationBaseline {
   totals: Map<string, bigint>;
   totalProduced: Map<string, bigint>;
+  knownConsumed: Map<string, bigint>;
+  failure?: string;
+}
+
+function captureKnownMaterialConsumption(state: GameState): { totals: Map<string, bigint>; failure?: string } {
+  const totals = new Map<string, bigint>();
+  let failure: string | undefined;
+  const addCounter = (itemId: string, raw: unknown, label: string): void => {
+    const amount = aggregateItemAmount(raw ?? 0);
+    if (amount === null) failure ??= `${label} 不是非负安全整数`;
+    else addAggregateAmount(totals, itemId, amount);
+  };
+  for (const definition of GALACTIC_EXPORT_DEFINITIONS) {
+    addCounter(definition.itemId, state.endgame.exportProjects[definition.id]?.totalDelivered,
+      `endgame.exportProjects.${definition.id}.totalDelivered`);
+  }
+  for (const [itemId, amount] of Object.entries(state.orbitalStation?.totals?.exportedByItem ?? {})) {
+    addCounter(itemId, amount, `orbitalStation.totals.exportedByItem.${itemId}`);
+  }
+  for (const stage of state.orbitalStation?.construction?.stageRequirements ?? []) {
+    for (const [itemId, amount] of Object.entries(stage.delivered)) {
+      addCounter(itemId, amount, `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
+    }
+  }
+  for (const [itemId, amount] of Object.entries(state.endgame.constructionActivity.personalDelivered)) {
+    addCounter(itemId, amount, `endgame.constructionActivity.personalDelivered.${itemId}`);
+  }
+  for (const [itemId, amount] of Object.entries(state.constructionAutomation.destroyedByproducts)) {
+    addCounter(itemId, amount, `constructionAutomation.destroyedByproducts.${itemId}`);
+  }
+  for (const [systemId, station] of Object.entries(state.systemSpaceStations)) {
+    if (!station) continue;
+    for (const [itemId, amount] of Object.entries(station.delivered)) {
+      addCounter(itemId, amount, `systemSpaceStations.${systemId}.delivered.${itemId}`);
+    }
+  }
+  for (const entity of state.entities) {
+    for (const port of entity.blackHolePorts ?? []) {
+      if (port.currentItemId) addCounter(port.currentItemId, port.totalDestroyed,
+        `entities.${entity.id}.blackHolePorts.${port.index}.totalDestroyed`);
+    }
+  }
+  return { totals, ...(failure ? { failure } : {}) };
 }
 
 function captureAggregateConservationBaseline(state: GameState): AggregateConservationBaseline {
@@ -1419,21 +1421,179 @@ function captureAggregateConservationBaseline(state: GameState): AggregateConser
   for (const [itemId, raw] of Object.entries(state.totalProduced)) {
     if (Number.isSafeInteger(raw) && raw >= 0) totalProduced.set(itemId, BigInt(raw));
   }
-  return { totals: captureAggregateItemStores(state), totalProduced };
+  const captured = captureAggregateItemStores(state);
+  const consumed = captureKnownMaterialConsumption(state);
+  const failure = captured.failure ?? consumed.failure;
+  return {
+    totals: captured.totals,
+    totalProduced,
+    knownConsumed: consumed.totals,
+    ...(failure ? { failure } : {}),
+  };
 }
 
 function validateAggregateConservation(before: AggregateConservationBaseline, after: GameState): string | null {
-  const afterTotals = captureAggregateItemStores(after);
-  const itemIds = new Set([...before.totals.keys(), ...afterTotals.keys(), ...before.totalProduced.keys(), ...Object.keys(after.totalProduced)]);
+  if (before.failure) return `物资守恒基线无效：${before.failure}`;
+  const capturedAfter = captureAggregateItemStores(after);
+  if (capturedAfter.failure) return `物资守恒候选无效：${capturedAfter.failure}`;
+  const consumedAfter = captureKnownMaterialConsumption(after);
+  if (consumedAfter.failure) return `物资守恒候选无效：${consumedAfter.failure}`;
+  const afterTotals = capturedAfter.totals;
+  const itemIds = new Set([
+    ...before.totals.keys(), ...afterTotals.keys(), ...before.totalProduced.keys(), ...Object.keys(after.totalProduced),
+    ...before.knownConsumed.keys(), ...consumedAfter.totals.keys(),
+  ]);
   for (const itemId of itemIds) {
     const stockDelta = (afterTotals.get(itemId) ?? 0n) - (before.totals.get(itemId) ?? 0n);
     const producedDelta = BigInt(Math.max(0, Math.floor(finiteNumber(after.totalProduced[itemId as ItemId])))) -
       (before.totalProduced.get(itemId) ?? 0n);
+    const consumedDelta = (consumedAfter.totals.get(itemId) ?? 0n) - (before.knownConsumed.get(itemId) ?? 0n);
+    if (producedDelta < 0n) return `物资守恒失败：${itemId} 的累计生产发生回退`;
+    if (consumedDelta < 0n) return `物资守恒失败：${itemId} 的累计出口/销毁/交付发生回退`;
     if (stockDelta > producedDelta) {
       return `物资守恒失败：${itemId} 库存净增 ${stockDelta.toString()} 超过累计生产增量 ${producedDelta.toString()}`;
     }
+    if (consumedDelta > producedDelta - stockDelta) {
+      return `物资守恒失败：${itemId} 出口/销毁/交付 ${consumedDelta.toString()} 超过生产与库存来源 ${(producedDelta - stockDelta).toString()}`;
+    }
   }
   return null;
+}
+
+const PURE_IDLE_TERMINAL_MATERIALS = ["small_carrier_rocket", "solar_sail"] as const;
+type PureIdleTerminalMaterialId = typeof PURE_IDLE_TERMINAL_MATERIALS[number];
+
+function ledgerCounter(value: unknown, label: string): bigint {
+  const parsed = aggregateItemAmount(value);
+  if (parsed === null) throw new Error(`${label} 不是非负安全整数`);
+  return parsed;
+}
+
+function knownTerminalConsumption(state: GameState, itemId: PureIdleTerminalMaterialId): bigint {
+  let total = 0n;
+  for (const definition of GALACTIC_EXPORT_DEFINITIONS) {
+    if (definition.itemId !== itemId) continue;
+    total += ledgerCounter(state.endgame.exportProjects[definition.id]?.totalDelivered ?? 0,
+      `endgame.exportProjects.${definition.id}.totalDelivered`);
+  }
+  total += ledgerCounter(state.orbitalStation?.totals?.exportedByItem?.[itemId] ?? "0",
+    `orbitalStation.totals.exportedByItem.${itemId}`);
+  for (const stage of state.orbitalStation?.construction?.stageRequirements ?? []) {
+    total += ledgerCounter(stage.delivered[itemId] ?? "0",
+      `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
+  }
+  total += ledgerCounter(state.endgame.constructionActivity.personalDelivered[itemId] ?? 0,
+    `endgame.constructionActivity.personalDelivered.${itemId}`);
+  total += ledgerCounter(state.constructionAutomation.destroyedByproducts[itemId] ?? 0,
+    `constructionAutomation.destroyedByproducts.${itemId}`);
+  for (const entity of state.entities) {
+    for (const port of entity.blackHolePorts ?? []) {
+      if (port.currentItemId === itemId) {
+        total += ledgerCounter(port.totalDestroyed, `entities.${entity.id}.blackHolePorts.${port.index}.totalDestroyed`);
+      }
+    }
+  }
+  for (const [systemId, station] of Object.entries(state.systemSpaceStations)) {
+    if (station) total += ledgerCounter(station.delivered[itemId] ?? "0", `systemSpaceStations.${systemId}.delivered.${itemId}`);
+  }
+  return total;
+}
+
+function sumDysonPlans(state: GameState, field: "structurePoints" | "shellSails"): bigint {
+  return Object.entries(state.dysonPlans).reduce((sum, [systemId, plan]) =>
+    sum + ledgerCounter(plan[field], `dysonPlans.${systemId}.${field}`), 0n);
+}
+
+function sumDysonOrbits(state: GameState, field: "sailsInOrbit" | "totalLaunched" | "totalExpired"): bigint {
+  let total = 0n;
+  for (const [systemId, orbits] of Object.entries(state.dysonEngineering.orbitsBySystem)) {
+    for (const orbit of orbits ?? []) total += ledgerCounter(orbit[field], `dysonEngineering.orbitsBySystem.${systemId}.${orbit.id}.${field}`);
+  }
+  return total;
+}
+
+/**
+ * Closed material ledger for leaderboard-facing pure-idle terminal results.
+ * A failure means the whole affine candidate must be discarded; callers may
+ * replay exactly or freeze from their last acknowledged checkpoint.
+ */
+export function validatePureIdleTerminalMaterialConservation(before: GameState, after: GameState): string | null {
+  try {
+    const beforeStocks = captureAggregateItemStores(before);
+    const afterStocks = captureAggregateItemStores(after);
+    if (beforeStocks.failure) return `终端物资守恒基线无效：${beforeStocks.failure}`;
+    if (afterStocks.failure) return `终端物资守恒候选无效：${afterStocks.failure}`;
+
+    const rocketLaunchDelta = ledgerCounter(after.dysonSphere.totalRocketsLaunched, "dysonSphere.totalRocketsLaunched") -
+      ledgerCounter(before.dysonSphere.totalRocketsLaunched, "dysonSphere.totalRocketsLaunched");
+    const structureDelta = ledgerCounter(after.dysonSphere.structurePoints, "dysonSphere.structurePoints") -
+      ledgerCounter(before.dysonSphere.structurePoints, "dysonSphere.structurePoints");
+    const sailLaunchDelta = ledgerCounter(after.dysonSwarm.totalLaunched, "dysonSwarm.totalLaunched") -
+      ledgerCounter(before.dysonSwarm.totalLaunched, "dysonSwarm.totalLaunched");
+    const sailExpiredDelta = ledgerCounter(after.dysonSwarm.totalExpired, "dysonSwarm.totalExpired") -
+      ledgerCounter(before.dysonSwarm.totalExpired, "dysonSwarm.totalExpired");
+    const sailAbsorbedDelta = ledgerCounter(after.dysonSphere.totalSailsAbsorbed, "dysonSphere.totalSailsAbsorbed") -
+      ledgerCounter(before.dysonSphere.totalSailsAbsorbed, "dysonSphere.totalSailsAbsorbed");
+    const shellDelta = ledgerCounter(after.dysonSphere.shellSails, "dysonSphere.shellSails") -
+      ledgerCounter(before.dysonSphere.shellSails, "dysonSphere.shellSails");
+    const orbitStockDelta = ledgerCounter(after.dysonSwarm.sailsInOrbit, "dysonSwarm.sailsInOrbit") -
+      ledgerCounter(before.dysonSwarm.sailsInOrbit, "dysonSwarm.sailsInOrbit");
+
+    for (const [label, delta] of [
+      ["火箭发射", rocketLaunchDelta], ["结构点", structureDelta], ["太阳帆发射", sailLaunchDelta],
+      ["太阳帆过期", sailExpiredDelta], ["太阳帆吸附", sailAbsorbedDelta], ["壳面帆", shellDelta],
+    ] as const) {
+      if (delta < 0n) return `终端物资守恒失败：${label}累计值发生回退`;
+    }
+
+    if (structureDelta !== rocketLaunchDelta) {
+      return `终端物资守恒失败：结构点增量 ${structureDelta} 与合法火箭发射增量 ${rocketLaunchDelta} 不一致`;
+    }
+    if (shellDelta !== sailAbsorbedDelta) {
+      return `终端物资守恒失败：壳面帆增量 ${shellDelta} 与太阳帆吸附增量 ${sailAbsorbedDelta} 不一致`;
+    }
+    if (sailLaunchDelta !== orbitStockDelta + sailExpiredDelta + sailAbsorbedDelta) {
+      return `终端物资守恒失败：太阳帆发射 ${sailLaunchDelta} 无法闭合在轨、过期和吸附流量`;
+    }
+
+    const planStructureDelta = sumDysonPlans(after, "structurePoints") - sumDysonPlans(before, "structurePoints");
+    const planShellDelta = sumDysonPlans(after, "shellSails") - sumDysonPlans(before, "shellSails");
+    if (planStructureDelta !== structureDelta) {
+      return `终端物资守恒失败：各恒星系结构增量 ${planStructureDelta} 与全局增量 ${structureDelta} 不一致`;
+    }
+    if (planShellDelta !== shellDelta) {
+      return `终端物资守恒失败：各恒星系壳面增量 ${planShellDelta} 与全局增量 ${shellDelta} 不一致`;
+    }
+    for (const field of ["sailsInOrbit", "totalLaunched", "totalExpired"] as const) {
+      const systemDelta = sumDysonOrbits(after, field) - sumDysonOrbits(before, field);
+      const globalDelta = ledgerCounter(after.dysonSwarm[field], `dysonSwarm.${field}`) -
+        ledgerCounter(before.dysonSwarm[field], `dysonSwarm.${field}`);
+      if (systemDelta !== globalDelta) {
+        return `终端物资守恒失败：各恒星系太阳帆 ${field} 增量 ${systemDelta} 与全局增量 ${globalDelta} 不一致`;
+      }
+    }
+
+    const launchedByItem: Record<PureIdleTerminalMaterialId, bigint> = {
+      small_carrier_rocket: rocketLaunchDelta,
+      solar_sail: sailLaunchDelta,
+    };
+    for (const itemId of PURE_IDLE_TERMINAL_MATERIALS) {
+      const producedDelta = ledgerCounter(after.totalProduced[itemId] ?? 0, `totalProduced.${itemId}`) -
+        ledgerCounter(before.totalProduced[itemId] ?? 0, `totalProduced.${itemId}`);
+      const consumedDelta = knownTerminalConsumption(after, itemId) - knownTerminalConsumption(before, itemId);
+      if (producedDelta < 0n || consumedDelta < 0n) {
+        return `终端物资守恒失败：${itemId} 的累计生产或已知消耗发生回退`;
+      }
+      const available = producedDelta + (beforeStocks.totals.get(itemId) ?? 0n) - (afterStocks.totals.get(itemId) ?? 0n);
+      const used = launchedByItem[itemId] + consumedDelta;
+      if (used > available) {
+        return `终端物资守恒失败：${itemId} 发射/出口/销毁 ${used} 超过生产与库存来源 ${available}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    return `终端物资守恒失败：${error instanceof Error ? error.message : "计数器无法读取"}`;
+  }
 }
 
 function veinConsumptionTenths(state: GameState, itemId: ItemId): number {
@@ -1678,13 +1838,15 @@ export function applyPureIdleAffineContract(
     }
     const exactResourceFailure = validatePureIdleResourceAccounting(state, exact);
     const exactConservationFailure = validateAggregateConservation(before, exact);
-    if (exactResourceFailure || exactConservationFailure) {
+    const exactTerminalFailure = validatePureIdleTerminalMaterialConservation(state, exact);
+    if (exactResourceFailure || exactConservationFailure || exactTerminalFailure) {
       return {
         ok: false,
         boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections + exactNormalized.corrections,
-        failure: exactResourceFailure ?? exactConservationFailure ?? reconciliationFailure,
+        failure: exactResourceFailure ?? exactConservationFailure ?? exactTerminalFailure ?? reconciliationFailure,
       };
     }
+    refreshDysonGenerationSnapshot(exact);
     Object.assign(state, exact);
     commitIntegerRemainders(undefined);
     return {
@@ -1709,6 +1871,17 @@ export function applyPureIdleAffineContract(
       failure: conservationFailure,
     };
   }
+  const terminalFailure = validatePureIdleTerminalMaterialConservation(state, candidate);
+  if (terminalFailure) {
+    return {
+      ok: false,
+      boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections,
+      failure: terminalFailure,
+    };
+  }
+  // Power is derived only after structure and sail ledgers are accepted. It is
+  // never trusted as independent evidence for a candidate's legitimacy.
+  refreshDysonGenerationSnapshot(candidate);
   commitIntegerRemainders(integerRemainders);
   Object.assign(state, candidate);
   return {
@@ -2081,6 +2254,54 @@ function exactTimeWarpResult(
   };
 }
 
+/**
+ * Material-safe fallback for an approximate realtime time-warp slice.
+ *
+ * `candidate` must be an isolated state that has only crossed exact or
+ * conservation-validated work. The unproven remainder advances the clock but
+ * freezes every material-bearing subsystem. This intentionally underpays a
+ * player instead of replaying a sampled rocket/sail/export result or falling
+ * back to an unbounded exact replay on a very large factory.
+ */
+function conservativeTimeWarpResult(
+  source: GameState,
+  candidate: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+  provenSimulationSeconds: number,
+  reason: string,
+  boundaryCorrections = 0,
+): TimeWarpApproximationResult {
+  let safeCandidate = candidate;
+  const aggregateBefore = captureAggregateConservationBaseline(source);
+  const resourceFailure = validatePureIdleResourceAccounting(source, safeCandidate);
+  const aggregateFailure = validateAggregateConservation(aggregateBefore, safeCandidate);
+  const terminalFailure = validatePureIdleTerminalMaterialConservation(source, safeCandidate);
+  if (resourceFailure || aggregateFailure || terminalFailure) {
+    // Never publish a partially applied candidate. A clock-only clone of the
+    // source is the final safe boundary when even the bounded prefix fails.
+    safeCandidate = structuredClone(source);
+    provenSimulationSeconds = 0;
+    reason = `${reason}；已丢弃未通过守恒门禁的候选：${resourceFailure ?? aggregateFailure ?? terminalFailure}`;
+  }
+  safeCandidate.elapsedSeconds = source.elapsedSeconds + simulationSeconds;
+  boundaryCorrections += normalizeFastSpeedrunClock(safeCandidate, source, wallSeconds);
+  refreshDysonGenerationSnapshot(safeCandidate);
+  return {
+    state: safeCandidate,
+    report: {
+      mode: "approximate",
+      algorithmVersion: TIME_WARP_APPROXIMATION_ALGORITHM_VERSION,
+      requestedSimulationSeconds: simulationSeconds,
+      exactCalibrationSeconds: Math.max(0, Math.min(simulationSeconds, provenSimulationSeconds)),
+      approximatedSeconds: Math.max(0, simulationSeconds - provenSimulationSeconds),
+      maxCriticalError: 1,
+      boundaryCorrections,
+      fallbackReason: `${reason}；未证明尾段已冻结，仅推进时间`,
+    },
+  };
+}
+
 function runTimeWarpApproximateSettlementUnsafe(
   state: GameState,
   simulationSeconds: number,
@@ -2110,7 +2331,10 @@ function runTimeWarpApproximateSettlementUnsafe(
   const contract = createFastAffineContract([state, calibrated], calibrationSeconds, calibrationWallSeconds);
   const researchLedger = createResearchMacroLedger([state, calibrated], calibrationSeconds);
   if (!contract || !researchLedger) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds, "短校准没有形成可用的状态增量", calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, calibrated, simulationSeconds, wallSeconds, calibrationSeconds,
+      "短校准没有形成可用的守恒状态增量",
+    );
   }
 
   const macroSeconds = simulationSeconds - calibrationSeconds - validationSeconds;
@@ -2119,20 +2343,36 @@ function runTimeWarpApproximateSettlementUnsafe(
   // Reuse it as the macro candidate so large pure-idle saves do not pay for a
   // second full-state clone before every slice.
   const macro = calibrated;
-  const macroApplication = applyFastAffineContract(macro, contract, macroSeconds, macroWallSeconds);
+  const macroApplication = applyPureIdleAffineContract(
+    macro,
+    contract,
+    macroSeconds,
+    macroWallSeconds,
+    { allowExactFallback: false },
+  );
   if (!macroApplication.ok) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds,
-      `宏观切片越过安全边界：${macroApplication.failure ?? "未知字段"}`, calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, macro, simulationSeconds, wallSeconds, calibrationSeconds,
+      `宏观切片未通过物料守恒门禁：${macroApplication.failure ?? "未知字段"}`,
+    );
   }
   const macroResearch = advanceResearchMacroInPlace(macro, researchLedger, macroSeconds);
   const normalizedMacro = normalizeFastSettlementState(macro);
   if (!normalizedMacro.ok) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds,
-      `宏观切片未通过结构与数值校验${normalizedMacro.failure ? `：${normalizedMacro.failure}` : ""}`, calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, calibrated, simulationSeconds, wallSeconds, calibrationSeconds,
+      `宏观切片未通过结构与数值校验${normalizedMacro.failure ? `：${normalizedMacro.failure}` : ""}`,
+    );
   }
 
   const expected = structuredClone(macro);
-  const validationApplication = applyFastAffineContract(expected, contract, validationSeconds, validationWallSeconds);
+  const validationApplication = applyPureIdleAffineContract(
+    expected,
+    contract,
+    validationSeconds,
+    validationWallSeconds,
+    { allowExactFallback: false },
+  );
   advanceResearchMacroInPlace(
     expected,
     researchLedger,
@@ -2144,8 +2384,11 @@ function runTimeWarpApproximateSettlementUnsafe(
     ? normalizeFastSettlementState(expected)
     : { ok: false, corrections: 0 };
   if (!validationApplication.ok || !normalizedExpected.ok) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds,
-      `尾验预测越过安全边界：${validationApplication.failure ?? normalizedExpected.failure ?? "状态规范化失败"}`, calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, macro, simulationSeconds, wallSeconds, calibrationSeconds + macroSeconds,
+      `尾验预测未通过物料守恒门禁：${validationApplication.failure ?? normalizedExpected.failure ?? "状态规范化失败"}`,
+      macroApplication.boundaryCorrections + normalizedMacro.corrections,
+    );
   }
 
   const validationBaseline = captureTimeWarpCriticalSnapshot(macro);
@@ -2154,8 +2397,12 @@ function runTimeWarpApproximateSettlementUnsafe(
   const actual = runExact(macro, validationSeconds, validationWallSeconds);
   const normalizedActual = normalizeFastSettlementState(actual);
   if (!normalizedActual.ok) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds,
-      `尾验结果未通过结构与数值校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}`, calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, expected, simulationSeconds, wallSeconds, simulationSeconds,
+      `精确尾验未通过结构与数值校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}，已保留守恒预测`,
+      macroApplication.boundaryCorrections + normalizedMacro.corrections +
+        validationApplication.boundaryCorrections + normalizedExpected.corrections,
+    );
   }
   const speedrunCorrection = normalizeFastSpeedrunClock(actual, state, wallSeconds);
   const maxCriticalError = compareTimeWarpCriticalSnapshots(
@@ -2164,8 +2411,12 @@ function runTimeWarpApproximateSettlementUnsafe(
     captureTimeWarpCriticalSnapshot(actual),
   );
   if (!Number.isFinite(maxCriticalError) || maxCriticalError > TIME_WARP_MAX_CRITICAL_ERROR) {
-    return exactTimeWarpResult(state, simulationSeconds, wallSeconds,
-      `白糖或戴森关键指标尾验误差 ${(maxCriticalError * 100).toFixed(2)}% 超过 100%`, calibrationSeconds);
+    return conservativeTimeWarpResult(
+      state, actual, simulationSeconds, wallSeconds, simulationSeconds,
+      `白糖或戴森关键指标尾验误差 ${(maxCriticalError * 100).toFixed(2)}% 超过 100%，已保留精确尾验检查点`,
+      macroApplication.boundaryCorrections + normalizedMacro.corrections +
+        validationApplication.boundaryCorrections + normalizedExpected.corrections + normalizedActual.corrections,
+    );
   }
   return {
     state: actual,
@@ -2176,8 +2427,8 @@ function runTimeWarpApproximateSettlementUnsafe(
       exactCalibrationSeconds: calibrationSeconds + validationSeconds,
       approximatedSeconds: macroSeconds,
       maxCriticalError,
-      boundaryCorrections: (macroApplication.corrections ?? 0) + normalizedMacro.corrections +
-        (validationApplication.corrections ?? 0) + normalizedExpected.corrections + normalizedActual.corrections + speedrunCorrection,
+      boundaryCorrections: macroApplication.boundaryCorrections + normalizedMacro.corrections +
+        validationApplication.boundaryCorrections + normalizedExpected.corrections + normalizedActual.corrections + speedrunCorrection,
     },
   };
 }
@@ -2586,17 +2837,21 @@ export async function runFastOfflineSettlementAsync(
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") throw error;
     if (seconds > FAST_OFFLINE_CALIBRATION_SECONDS && !state.speedrun?.enabled) {
+      const deadlineReached = error instanceof OfflineApproximationDeadlineError;
       const result = runConservativeOfflineSettlement(
         state,
         seconds,
         options.wallSeconds ?? seconds,
-        error instanceof OfflineApproximationDeadlineError
+        deadlineReached
           ? "精确校准达到现实时间上限，已使用保守宏观结算"
           : fastSettlementExceptionReport(error).fallbackReason,
-        undefined,
+        // The timed-out calibration is an uncommitted candidate. Do not pay
+        // for a second exact prefix after the deadline; freeze from a clean
+        // source clone and advance only the clock.
+        deadlineReached ? structuredClone(state) : undefined,
         0,
         undefined,
-        error instanceof OfflineApproximationDeadlineError,
+        deadlineReached,
       );
       result.report.wallClockMs = Math.max(0, approximationNow() - startedAt);
       return result;
@@ -2668,7 +2923,11 @@ async function runExactAsync(
   while (session.remainingSeconds > EPSILON) {
     throwIfApproximationCancelled(options);
     throwIfApproximationDeadlineReached(options);
-    advanceSimulationSession(session, 256);
+    // One authoritative step can already be expensive on an 80k-entity /
+    // 155k-belt save. Re-check cancellation and the wall deadline after every
+    // step; the yield timer still batches cheap factories without adding a
+    // task hop for each step.
+    advanceSimulationSession(session, 1);
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     if (now - sliceStartedAt >= yieldAfterMs) {
       await yieldToWorker();

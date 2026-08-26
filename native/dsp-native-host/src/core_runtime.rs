@@ -4,8 +4,8 @@ use anyhow::{anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
 use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
-    CommandApplyResult, CoreAdvanceRequest, CoreAdvanceResult, CoreCheckpointIdentity, CoreState,
-    CoreStateSummary, SimulationCommandPatch,
+    CommandApplyResult, CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult,
+    CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -44,6 +44,8 @@ struct DurableWalIntent {
     command: Option<SimulationCommandPatch>,
     simulation_seconds: f64,
     wall_seconds: f64,
+    #[serde(default)]
+    advance_mode: CoreAdvanceMode,
     #[allow(dead_code)]
     #[serde(default)]
     approximate: bool,
@@ -61,6 +63,8 @@ enum AcceptedWalPayload {
         command: Option<SimulationCommandPatch>,
         simulation_seconds: f64,
         wall_seconds: f64,
+        #[serde(default)]
+        advance_mode: CoreAdvanceMode,
         registry: WalRegistryIdentity,
     },
     #[serde(rename = "durable-operation-v1", rename_all = "camelCase")]
@@ -76,6 +80,7 @@ struct ReplayOperation {
     command: Option<SimulationCommandPatch>,
     simulation_seconds: f64,
     wall_seconds: f64,
+    advance_mode: CoreAdvanceMode,
     registry_fingerprint: String,
 }
 
@@ -130,6 +135,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             command,
             simulation_seconds,
             wall_seconds,
+            advance_mode,
             registry,
         } => ReplayOperation {
             base_revision: base_state_revision,
@@ -137,6 +143,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             command,
             simulation_seconds,
             wall_seconds,
+            advance_mode,
             registry_fingerprint: registry.fingerprint,
         },
         AcceptedWalPayload::Durable {
@@ -165,6 +172,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
                 command: intent.command,
                 simulation_seconds: intent.simulation_seconds,
                 wall_seconds: intent.wall_seconds,
+                advance_mode: intent.advance_mode,
                 registry_fingerprint: intent.registry.fingerprint,
             }
         }
@@ -188,6 +196,7 @@ fn replay_wal_entry(state: &mut CoreState, entry: &WalEntry) -> anyhow::Result<(
         operation.command.as_ref(),
         operation.simulation_seconds,
         operation.wall_seconds,
+        operation.advance_mode,
     )?;
     Ok(())
 }
@@ -212,6 +221,8 @@ pub struct CoreCommitOperationRequest {
     pub command: Option<SimulationCommandPatch>,
     pub simulation_seconds: f64,
     pub wall_seconds: f64,
+    #[serde(default)]
+    pub advance_mode: CoreAdvanceMode,
     #[serde(default)]
     pub include_diagnostics: bool,
 }
@@ -393,6 +404,7 @@ impl CoreRegistry {
                 || operation.registry_fingerprint != fingerprint
                 || operation.simulation_seconds.to_bits() != request.simulation_seconds.to_bits()
                 || operation.wall_seconds.to_bits() != request.wall_seconds.to_bits()
+                || operation.advance_mode != request.advance_mode
                 || requested_command != accepted_command
             {
                 bail!("native authoritative idempotency key conflicts with another operation");
@@ -408,6 +420,7 @@ impl CoreRegistry {
                     operation.command.as_ref(),
                     operation.simulation_seconds,
                     operation.wall_seconds,
+                    operation.advance_mode,
                 )?;
             }
             let state = self.session(session_id)?;
@@ -447,6 +460,7 @@ impl CoreRegistry {
             base_revision: prepared.revision,
             simulation_seconds: request.simulation_seconds,
             wall_seconds: request.wall_seconds,
+            advance_mode: request.advance_mode,
             include_diagnostics: false,
         })?;
         if !advanced.supported {
@@ -466,7 +480,8 @@ impl CoreRegistry {
             "command": request.command,
             "simulationSeconds": request.simulation_seconds,
             "wallSeconds": request.wall_seconds,
-            "approximate": false,
+            "advanceMode": request.advance_mode,
+            "approximate": request.advance_mode != CoreAdvanceMode::Exact,
             "registry": { "fingerprint": fingerprint },
         });
         let receipt = store.append_wal_idempotent(

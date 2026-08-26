@@ -19,7 +19,12 @@ export interface WindowsNativeCoreShadow {
   status(): Promise<DesktopNativeCoreSummary>;
   projection(request: { baseFields?: string[]; entityIds?: string[]; beltIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
-  advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }>;
+  advance(request: {
+    baseRevision: number;
+    simulationSeconds: number;
+    wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
+  }): Promise<{ supported: boolean; revision: number; reason?: string }>;
   advanceSegmented(request: NativeCoreSegmentedAdvanceRequest): Promise<NativeCoreSegmentedAdvanceResult>;
   commitOperation(request: {
     commandId: string;
@@ -27,6 +32,7 @@ export interface WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult>;
   createCheckpoint(savedAtMs?: number): Promise<DesktopNativeCoreCheckpointResult>;
@@ -194,7 +200,12 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     return { revision: result.revision, topologyDirty: result.topologyDirty };
   }
 
-  async advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }> {
+  async advance(request: {
+    baseRevision: number;
+    simulationSeconds: number;
+    wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
+  }): Promise<{ supported: boolean; revision: number; reason?: string }> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
     if (!desktop) throw new Error("Windows 原生核心桥接已断开");
@@ -216,6 +227,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");

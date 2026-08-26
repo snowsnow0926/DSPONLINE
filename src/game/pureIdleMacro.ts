@@ -9,22 +9,18 @@ import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
-  createPureIdleConservativeContract,
   createPureIdleAffineCalibration,
-  PURE_IDLE_CONSERVATIVE_RATE_FACTOR,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
 import {
   advanceResearchMacroInPlace,
   captureResearchMacroStatus,
-  captureResearchMacroCalibrationSnapshot,
-  createResearchMacroLedgerFromSnapshots,
   type ResearchMacroLedger,
   type ResearchMacroStatus,
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v3";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v4";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -259,22 +255,6 @@ function cloneRate(rate: PureIdleRateSnapshot): PureIdleRateSnapshot {
   return { ...rate, activityDelivered: { ...rate.activityDelivered } };
 }
 
-function scaleRate(rate: PureIdleRateSnapshot, factor: number): PureIdleRateSnapshot {
-  const scale = (value: number): number => Math.max(0, Number.isFinite(value) ? value * factor : 0);
-  return {
-    dysonGenerationKw: scale(rate.dysonGenerationKw),
-    whiteMatrixProduced: scale(rate.whiteMatrixProduced),
-    rocketsLaunched: scale(rate.rocketsLaunched),
-    sailsAbsorbed: scale(rate.sailsAbsorbed),
-    structurePoints: scale(rate.structurePoints),
-    shellSails: scale(rate.shellSails),
-    sailsInOrbit: scale(rate.sailsInOrbit),
-    activityDelivered: Object.fromEntries(
-      Object.entries(rate.activityDelivered).map(([itemId, value]) => [itemId, scale(value)]),
-    ),
-  };
-}
-
 function relativeDifference(left: number, right: number): number {
   const scale = Math.max(1, Math.abs(left), Math.abs(right));
   return Math.abs(left - right) / scale;
@@ -398,18 +378,6 @@ function calibrate(state: GameState): {
   };
 }
 
-function conservativeProductionIsSafe(state: GameState): boolean {
-  if (state.settings.resourceMode === "infinite") return true;
-  // A finite miner can cross a depletion boundary between the one-second
-  // probe and a long tail.  Do not extrapolate production/terminal counters
-  // in that case; elapsed time and the independent research ledger still
-  // advance, and the next ordinary exact settlement can account for the
-  // boundary without an unbounded replay.
-  return !state.entities.some((entity) =>
-    entity.kind === "vein" && entity.minerCount > 0 && (entity.resourceRemaining ?? 0) > 0,
-  );
-}
-
 /**
  * Quantum-fed construction centers have a deliberately stateful boundary:
  * every five seconds the engine may create a new per-center job or direct
@@ -484,8 +452,7 @@ export function createConservativePureIdleMacroSession(
   let candidate = state;
   let measuredRate = cloneRate(emptyRate);
   const prefixSeconds = PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS;
-  let conservativeContract: PureIdleAffineContract | null = null;
-  let researchLedger: ResearchMacroLedger = {
+  const researchLedger: ResearchMacroLedger = {
     unitsPerWindow: 0n,
     windowSeconds: prefixSeconds,
     observedUnits: 0n,
@@ -508,24 +475,6 @@ export function createConservativePureIdleMacroSession(
       capturePureIdleTerminalSnapshot(candidate),
       prefixSeconds,
     );
-    const productionSafe = conservativeProductionIsSafe(state);
-    if (productionSafe) {
-      conservativeContract = createPureIdleConservativeContract(
-        state,
-        candidate,
-        prefixSeconds,
-        prefixSeconds / actualMultiplier,
-        {
-          includeProduction: productionSafe,
-          rateFactor: PURE_IDLE_CONSERVATIVE_RATE_FACTOR,
-        },
-      );
-    }
-    const researchLedgerCandidate = createResearchMacroLedgerFromSnapshots(
-      [captureResearchMacroCalibrationSnapshot(state), captureResearchMacroCalibrationSnapshot(candidate)],
-      prefixSeconds,
-    );
-    if (researchLedgerCandidate) researchLedger = researchLedgerCandidate;
     calibrationCheckpoint = {
       baseWallSeconds: 0,
       baseSimulationSeconds: 0,
@@ -542,14 +491,12 @@ export function createConservativePureIdleMacroSession(
   }
   const degradedReason = prefixFailure
     ? `${reason}；短窗口精确结算未完成：${prefixFailure}`
-    : conservativeContract
-      ? `${reason}；已精确校准 ${prefixSeconds} 秒，之后按 ${Math.round(PURE_IDLE_CONSERVATIVE_RATE_FACTOR * 100)}% 测得安全累计速率继续以高倍率结算；物流缓存等不确定瞬时字段保持检查点`
-      : `${reason}；已先精确结算 ${prefixSeconds} 秒；检测到有限资源或无可证明累计速率，尾段仅推进时间与科研`;
+    : `${reason}；已先精确结算 ${prefixSeconds} 秒；尾段产线与科研缺少闭合物料账本，已冻结，仅推进时间`;
   return {
     mode,
     phase: "conservative",
     candidate,
-    contract: conservativeContract ?? {
+    contract: {
       deltas: [],
       calibrationSeconds: prefixSeconds,
       calibrationWallSeconds: prefixSeconds / actualMultiplier,
@@ -560,20 +507,18 @@ export function createConservativePureIdleMacroSession(
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
-    currentRate: conservativeContract
-      ? scaleRate(measuredRate, PURE_IDLE_CONSERVATIVE_RATE_FACTOR)
-      : cloneRate(measuredRate),
+    currentRate: cloneRate(emptyRate),
     settledWallSeconds: 0,
     settledSimulationSeconds: 0,
-    contractVersion: conservativeContract ? 1 : 0,
+    contractVersion: 0,
     validationCount: 0,
-    validationFailures: conservativeContract ? 0 : 1,
+    validationFailures: 1,
     lastValidationDurationMs: 0,
-    lastValidationDeviation: conservativeContract ? 0 : 1,
+    lastValidationDeviation: 1,
     lastValidationReason: `已切换保守宏观：${degradedReason}`,
     nextValidationAtWallSeconds: null,
     boundaryCorrections: 0,
-    calibrationWindowsCompleted: conservativeContract ? 1 : 0,
+    calibrationWindowsCompleted: 0,
     actualMultiplier,
     degradedReason,
     computationDurationMs: 0,
@@ -772,8 +717,8 @@ export function advancePureIdleMacroSession(
     throwIfMacroInterrupted(options);
     if (!applied.ok) {
       // The last complete candidate remains intact because affine application
-      // is transactional. Freeze uncertain factory subsystems, advance time
-      // and the exact research ledger, and keep the session recoverable.
+      // is transactional. Freeze uncertain factory and research subsystems,
+      // advance time only, and keep the session recoverable.
       session.phase = "conservative";
       session.degradedReason = applied.failure ?? "宏观守恒桶未通过安全校验";
       session.lastValidationReason = `已切换保守宏观：${session.degradedReason}`;
@@ -790,9 +735,11 @@ export function advancePureIdleMacroSession(
         session.candidate.elapsedSeconds += macroSimulationSeconds;
       }
     }
-    const macroResearchSeconds = exactQuantumConstructionTail
+    const macroResearchSeconds = session.conservativeOnly
       ? 0
-      : Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
+      : exactQuantumConstructionTail
+        ? 0
+        : Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
     const research = macroResearchSeconds > 1e-9
       ? advanceResearchMacroInPlace(
         session.candidate,

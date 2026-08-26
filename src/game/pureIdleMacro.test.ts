@@ -12,7 +12,12 @@ import {
   PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS,
 } from "./pureIdleMacro";
 import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
-import { applyPureIdleAffineContract, type PureIdleAffineContract } from "./offlineApproximation";
+import {
+  applyPureIdleAffineContract,
+  validatePureIdleTerminalMaterialConservation,
+  type PureIdleAffineContract,
+} from "./offlineApproximation";
+import { inspectSave, serializeEnvelope } from "./storage";
 import type { GameState } from "./types";
 
 function pureIdleState(): GameState {
@@ -81,6 +86,63 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
     routingCursor: 0,
     utilization: 0,
     productionRate: 0,
+  });
+}
+
+function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000_000): void {
+  addWindGeneration(state, 1_000_000_000_000_000);
+  if (!state.research.completedTechIds.includes("vertical_launching_silo")) {
+    state.research.completedTechIds.push("vertical_launching_silo");
+  }
+  state.dysonEngineering.launchEnabled = true;
+  state.dysonEngineering.launchMode = "sphere";
+  state.dysonEngineering.launchThrottle = 1;
+  state.entities.push({
+    id: "slow-rocket-producer",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 100, y: 0 },
+    interactionLocked: false,
+    buildingId: "assembling_machine_mk1",
+    recipeId: "small_carrier_rocket",
+    machineCount: 6,
+    minerCount: 0,
+    inputs: { dyson_sphere_component: 10_000, deuteron_fuel_rod: 20_000, quantum_chip: 10_000 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "prefilled-rocket-silo",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 200, y: 0 },
+    interactionLocked: false,
+    buildingId: "vertical_launching_silo",
+    recipeId: "carrier_rocket_launch",
+    machineCount: 1_000_000,
+    minerCount: 0,
+    inputs: { small_carrier_rocket: prefilledRockets },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.belts.push({
+    id: "slow-rocket-feed",
+    planetId: "home",
+    source: "slow-rocket-producer",
+    target: "prefilled-rocket-silo",
+    itemId: "small_carrier_rocket",
+    lanes: 1,
+    tier: 1,
+    sorterTier: 1,
+    progress: 0,
+    priority: 1,
+    totalTransferred: 0,
+    lastFlow: 0,
   });
 }
 
@@ -412,7 +474,7 @@ describe("pure idle macro session", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
-  it("keeps measured cumulative production running in the conservative high-multiplier tail", () => {
+  it("keeps only measured exact-prefix production and freezes the conservative high-multiplier tail", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 9;
@@ -425,18 +487,18 @@ describe("pure idle macro session", () => {
       "large-save memory guard",
     );
 
-    expect(session.contractVersion).toBe(1);
-    expect(session.calibrationWindowsCompleted).toBe(1);
-    expect(session.contract.deltas.some((delta) =>
-      JSON.stringify(delta.path) === JSON.stringify(["totalProduced", "iron_ingot"]),
-    )).toBe(true);
+    const prefixProduced = session.candidate.totalProduced.iron_ingot ?? 0;
+    expect(session.contractVersion).toBe(0);
+    expect(session.calibrationWindowsCompleted).toBe(0);
+    expect(session.contract.deltas).toEqual([]);
+    expect(prefixProduced).toBeGreaterThan(baselineProduced);
 
     const summary = advancePureIdleMacroSession(session, 24 * 60 * 60);
     const finalized = finalizePureIdleMacroSession(session, 24 * 60 * 60, createContentPackRegistry());
     expect(summary.phase).toBe("conservative");
     expect(summary.actualMultiplier).toBe(9);
     expect(finalized.state.elapsedSeconds - source.elapsedSeconds).toBe(9 * 24 * 60 * 60);
-    expect(finalized.state.totalProduced.iron_ingot ?? 0).toBeGreaterThan(baselineProduced);
+    expect(finalized.state.totalProduced.iron_ingot ?? 0).toBe(prefixProduced);
     expect(finalized.state.tray).toEqual(session.candidate.tray);
     expect(hashGameState(source)).toBe(sourceHash);
   });
@@ -457,6 +519,176 @@ describe("pure idle macro session", () => {
     expect(incremental.conservativeIntegerRemainders).toEqual(single.conservativeIntegerRemainders);
     expect(incremental.researchRemainder).toBe(single.researchRemainder);
   });
+
+  it("does not duplicate prefilled silo launches when low-rate production cannot fund a conservative tail", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source);
+    const sourceHash = hashGameState(source);
+    const initialRockets = source.entities.find((entity) => entity.id === "prefilled-rocket-silo")!.inputs.small_carrier_rocket ?? 0;
+    const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
+    const exactPrefixLaunches = session.candidate.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched;
+
+    advancePureIdleMacroSession(session, 30);
+    const finalized = finalizePureIdleMacroSession(session, 30, createContentPackRegistry()).state;
+    const launches = finalized.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched;
+    const produced = (finalized.totalProduced.small_carrier_rocket ?? 0) - (source.totalProduced.small_carrier_rocket ?? 0);
+    const endingRockets = finalized.entities.find((entity) => entity.id === "prefilled-rocket-silo")!.inputs.small_carrier_rocket ?? 0;
+
+    expect(session.actualMultiplier).toBe(15);
+    expect(exactPrefixLaunches).toBeGreaterThan(0);
+    expect(launches).toBe(exactPrefixLaunches);
+    expect(launches).toBeLessThanOrEqual(produced + initialRockets - endingRockets);
+    expect(validatePureIdleTerminalMaterialConservation(source, finalized)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps the terminal material ledger closed after serialization, inspectSave and reload", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "forced conservative reload regression",
+    );
+    const finalized = finalizePureIdleMacroSession(session, 10 * 60, createContentPackRegistry()).state;
+    const raw = serializeEnvelope(finalized, 1_788_000_000_000);
+    const inspection = inspectSave(raw);
+
+    expect(inspection).toMatchObject({ valid: true, checksum: "valid", stateVersion: 47 });
+    expect(inspection.state).toBeDefined();
+    expect(validatePureIdleTerminalMaterialConservation(source, inspection.state!)).toBeNull();
+  });
+
+  it.each([8, 12, 15, 16] as const)(
+    "keeps %ix conservative settlement deterministic for one long call and segmented calls in finite/infinite modes",
+    (multiplier) => {
+      for (const resourceMode of ["finite", "infinite"] as const) {
+        const source = pureIdleState();
+        source.settings.simulationSpeed = 4;
+        source.settings.resourceMode = resourceMode;
+        source.timeWarp.requestedMultiplier = multiplier;
+        addRocketConservationFixture(source, 250_000);
+
+        const segmented = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
+        advancePureIdleMacroSession(segmented, 7);
+        advancePureIdleMacroSession(segmented, 19);
+        advancePureIdleMacroSession(segmented, 60);
+
+        const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
+        advancePureIdleMacroSession(single, 60);
+
+        expect(segmented.actualMultiplier).toBe(multiplier);
+        expect(single.actualMultiplier).toBe(multiplier);
+        expect(hashGameState(segmented.candidate), `${multiplier}x ${resourceMode}`).toBe(hashGameState(single.candidate));
+        expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+      }
+    },
+  );
+
+  it("closes multi-system rocket, sail, absorption and orbit counters before accepting a candidate", () => {
+    const before = pureIdleState();
+    const after = structuredClone(before);
+    before.tray.small_carrier_rocket = 4;
+    before.tray.solar_sail = 5;
+    after.tray.small_carrier_rocket = 0;
+    after.tray.solar_sail = 0;
+    const systems = Object.keys(after.dysonPlans);
+    const targetSystem = (systems[1] ?? systems[0]) as keyof GameState["dysonPlans"];
+    const orbit = after.dysonEngineering.orbitsBySystem[targetSystem]?.[0];
+    expect(orbit).toBeDefined();
+
+    after.dysonSphere.totalRocketsLaunched += 4;
+    after.dysonSphere.structurePoints += 4;
+    after.dysonPlans[targetSystem].structurePoints += 4;
+    after.dysonSwarm.totalLaunched += 5;
+    after.dysonSwarm.sailsInOrbit += 3;
+    after.dysonSphere.totalSailsAbsorbed += 2;
+    after.dysonSphere.shellSails += 2;
+    after.dysonPlans[targetSystem].shellSails += 2;
+    orbit!.totalLaunched += 5;
+    orbit!.sailsInOrbit += 3;
+
+    expect(validatePureIdleTerminalMaterialConservation(before, after)).toBeNull();
+    after.dysonPlans[targetSystem].structurePoints += 1;
+    expect(validatePureIdleTerminalMaterialConservation(before, after)).toContain("各恒星系结构增量");
+  });
+
+  it("rejects a candidate that copies rocket and structure counters without consuming their material", () => {
+    const before = pureIdleState();
+    const after = structuredClone(before);
+    before.tray.small_carrier_rocket = 1;
+    after.tray.small_carrier_rocket = 0;
+    after.dysonSphere.totalRocketsLaunched += 100;
+    after.dysonSphere.structurePoints += 100;
+    after.dysonPlans.helios.structurePoints += 100;
+
+    expect(validatePureIdleTerminalMaterialConservation(before, after)).toContain("超过生产与库存来源");
+  });
+
+  it("discards an unfunded affine terminal candidate without changing the source hash", () => {
+    const state = pureIdleState();
+    const sourceHash = hashGameState(state);
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["dysonSphere", "totalRocketsLaunched"], kind: "number", delta: 10, integer: true },
+        { path: ["dysonSphere", "structurePoints"], kind: "number", delta: 10, integer: true },
+        { path: ["dysonPlans", "helios", "structurePoints"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
+    expect(result.ok).toBe(false);
+    expect(result.failure).toContain("终端物资守恒失败");
+    expect(hashGameState(state)).toBe(sourceHash);
+  });
+
+  it("rejects unfunded galactic delivery counters even when inventory itself does not grow", () => {
+    const state = pureIdleState();
+    const sourceHash = hashGameState(state);
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["endgame", "exportProjects", "universe_archive", "totalDelivered"], kind: "number", delta: 10, integer: true },
+        { path: ["endgame", "totalExported"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
+    expect(result.ok).toBe(false);
+    expect(result.failure).toContain("出口/销毁/交付");
+    expect(hashGameState(state)).toBe(sourceHash);
+  });
+
+  it.each(["inventory-exhausted", "output-blocked", "no-power", "low-power", "production-stopped"])(
+    "freezes the conservative tail at the last exact checkpoint for %s",
+    (condition) => {
+      const source = pureIdleState();
+      source.settings.simulationSpeed = 4;
+      source.timeWarp.requestedMultiplier = 8;
+      addProductiveSmelter(source, 1_000);
+      const smelter = source.entities.find((entity) => entity.id === "pure-idle-smelter")!;
+      if (condition === "inventory-exhausted") smelter.inputs.iron_ore = 1;
+      if (condition === "output-blocked") smelter.outputs.iron_ingot = source.settings.productionBufferLimit;
+      if (condition === "production-stopped") smelter.inputs.iron_ore = 0;
+      if (condition === "no-power") source.entities = source.entities.filter((entity) => entity.kind !== "power");
+      if (condition === "low-power") {
+        const wind = source.entities.find((entity) => entity.kind === "power");
+        if (wind) wind.machineCount = 1;
+      }
+      const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative boundary");
+      const prefixProduced = session.candidate.totalProduced.iron_ingot ?? 0;
+      advancePureIdleMacroSession(session, 60 * 60);
+      expect(session.candidate.totalProduced.iron_ingot ?? 0).toBe(prefixProduced);
+      expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
+    },
+  );
 
   it("honours cancellation before mutating a macro boundary", () => {
     const session = createPureIdleMacroSession(structuredClone(pureIdleState()), "extreme");

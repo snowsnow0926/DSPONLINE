@@ -1567,6 +1567,35 @@ describe("game storage", () => {
     expect(loadGameDeferredOffline().state.elapsedSeconds).toBe(321);
   });
 
+  it("keeps the previous primary bytes unchanged when a pure-idle terminal payload cannot be saved", async () => {
+    const checkpoint = createInitialState(90_001, false);
+    checkpoint.elapsedSeconds = 10;
+    const checkpointRaw = exportGame(checkpoint);
+    expect((await saveVerifiedPayload(checkpointRaw, { verified: true })).success).toBe(true);
+    const persistedBefore = window.localStorage.getItem(SAVE_KEY);
+    expect(persistedBefore).toBe(checkpointRaw);
+
+    const candidate = structuredClone(checkpoint);
+    candidate.elapsedSeconds = 10_000;
+    candidate.dysonSphere.totalRocketsLaunched += 1;
+    candidate.dysonSphere.structurePoints += 1;
+    const candidateRaw = exportGame(candidate);
+    const nativeSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key: string, value: string) {
+      if (key === SAVE_KEY) throw new DOMException("quota", "QuotaExceededError");
+      nativeSetItem.call(this, key, value);
+    });
+
+    const result = await saveVerifiedPayload(candidateRaw, { verified: true });
+    expect(result).toMatchObject({ success: false, code: "quota" });
+    expect(window.localStorage.getItem(SAVE_KEY)).toBe(persistedBefore);
+    expect(inspectSave(window.localStorage.getItem(SAVE_KEY)!)).toMatchObject({
+      valid: true,
+      checksum: "valid",
+      state: { elapsedSeconds: 10 },
+    });
+  });
+
   it("migrates v15 research and Dyson plans into the v17 operations model", () => {
     let state = createInitialState();
     state.research.completedTechIds.push("dyson_sphere_program", "dyson_shell", "mining_speed_1");

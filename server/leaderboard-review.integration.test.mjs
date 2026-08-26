@@ -9,6 +9,52 @@ import { computeSaveStateChecksum } from "./save-integrity.mjs";
 
 const ADMIN_TOKEN = "synthetic-admin-token-leaderboard-review-123456";
 
+function createLockedOrbitalStation() {
+  const stage = (stageId, costs, fleetCosts = {}) => ({
+    stageId,
+    costs,
+    fleetCosts,
+    delivered: {},
+    deliveredFleet: {},
+  });
+  return {
+    stateVersion: 1,
+    status: "locked",
+    construction: {
+      costRevision: 1,
+      stageRequirements: [
+        stage("core", [
+          { itemId: "titanium_alloy", amount: "200000" }, { itemId: "frame_material", amount: "100000" },
+          { itemId: "processor", amount: "200000" }, { itemId: "universe_matrix", amount: "20000" },
+        ]),
+        stage("dock", [
+          { itemId: "quantum_chip", amount: "100000" }, { itemId: "particle_container", amount: "200000" },
+          { itemId: "space_warper", amount: "20000" },
+        ], { logistics_vessel: 200 }),
+        stage("showcase", [
+          { itemId: "titanium_glass", amount: "300000" }, { itemId: "particle_broadband", amount: "200000" },
+          { itemId: "plastic", amount: "500000" }, { itemId: "universe_matrix", amount: "50000" },
+        ]),
+      ],
+    },
+    viewport: { x: 0, y: 0, zoom: 0.72 },
+    contractBoard: {
+      rulesVersion: 1,
+      taskDay: 0,
+      lastConfirmedWallClockMs: 0,
+      offers: [],
+      accepted: [],
+      history: [],
+      settledIds: [],
+      featuredContractId: null,
+    },
+    economy: { orbitalMarks: "0", stationReputation: "0", unlockedDecorationIds: [] },
+    layout: { themeId: "orbital_teal", placements: [], featuredAchievementIds: [] },
+    profile: { title: "轨道空间站", motto: "", featuredMetricKeys: [] },
+    totals: { completedContracts: 0, exportedByItem: {} },
+  };
+}
+
 function createState({ anomalous = false, elapsedSeconds = 600 } = {}) {
   return {
     version: 46,
@@ -58,6 +104,53 @@ function createState({ anomalous = false, elapsedSeconds = 600 } = {}) {
     totalProduced: anomalous ? { universe_matrix: 1_000_000_000_000 } : { universe_matrix: 1 },
     metrics: { generationKw: 0, totalItemsPerMinute: 0, rayGenerationKw: 0 },
     exploration: { unlockedSystemIds: ["helios"], colonizedPlanetIds: ["home"] },
+  };
+}
+
+function createV47MaterialState({ rocketStock = 100, rocketProduced = 1_000, elapsedSeconds = 600 } = {}) {
+  return {
+    ...createState({ elapsedSeconds }),
+    version: 47,
+    activePlanetId: "home",
+    tray: { small_carrier_rocket: rocketStock },
+    planetTrays: { home: { small_carrier_rocket: rocketStock } },
+    entities: [{ id: "storage", kind: "storage", buildingId: "storage_mk1", inputs: {}, outputs: {}, stationRoutes: [] }],
+    belts: [],
+    construction: {},
+    constructionQueue: [],
+    portableFleet: {},
+    cargo: null,
+    systemSpaceStations: {},
+    constructionAutomation: { jobs: {}, destroyedByproducts: {}, quantumMaterialBuffer: {} },
+    endgame: {
+      ...createState().endgame,
+      exportProjects: {
+        universe_archive: { totalDelivered: 0 },
+        solar_sail_array: { totalDelivered: 0 },
+        carrier_rocket_fleet: { totalDelivered: 0 },
+        antimatter_exchange: { totalDelivered: 0 },
+      },
+      constructionActivity: { pendingBatches: {} },
+    },
+    orbitalStation: createLockedOrbitalStation(),
+    achievements: { unlockedIds: [] },
+    totalProduced: { universe_matrix: 1, small_carrier_rocket: rocketProduced, solar_sail: 0 },
+    dysonSphere: {
+      generationKw: 0,
+      structurePoints: 0,
+      totalRocketsLaunched: 0,
+      shellSails: 0,
+      totalSailsAbsorbed: 0,
+    },
+    dysonSwarm: { generationKw: 0, sailsInOrbit: 0, totalLaunched: 0, totalExpired: 0 },
+    dysonPlans: {
+      helios: { systemId: "helios", activeLayerId: null, structurePoints: 0, shellSails: 0, layers: [] },
+    },
+    dysonEngineering: {
+      orbitsBySystem: {
+        helios: [{ id: "helios-orbit", sailsInOrbit: 0, totalLaunched: 0, totalExpired: 0 }],
+      },
+    },
   };
 }
 
@@ -191,4 +284,34 @@ test("an admin approval is bound to the reviewed revision and republishes it", a
   const published = await request(baseUrl, "/api/leaderboard/me?category=galaxy", { headers: account.headers });
   assert.equal(published.body.status, "ranked", JSON.stringify(published.body));
   assert.equal(published.body.latestCloudRevision, 2);
+});
+
+test("v47 unfunded Dyson growth enters manual review while the previous leaderboard score remains", async (t) => {
+  const { baseUrl } = await startServer(t);
+  const account = await register(baseUrl, "review_v47_rocket_ledger");
+  const baseline = createV47MaterialState();
+  const first = await upload(baseUrl, account.headers, payloadFor(baseline, 500), 0);
+  assert.equal(first.response.status, 200, JSON.stringify(first.body));
+  const before = await request(baseUrl, "/api/leaderboard/me?category=galaxy", { headers: account.headers });
+  assert.equal(before.body.status, "ranked", JSON.stringify(before.body));
+
+  const forged = structuredClone(baseline);
+  forged.elapsedSeconds += 30;
+  forged.tray.small_carrier_rocket = 99;
+  forged.planetTrays.home.small_carrier_rocket = 99;
+  forged.totalProduced.small_carrier_rocket += 1;
+  forged.dysonSphere.totalRocketsLaunched += 100;
+  forged.dysonSphere.structurePoints += 100;
+  forged.dysonPlans.helios.structurePoints += 100;
+  forged.dysonSphere.generationKw = 100_000_000;
+  const second = await upload(baseUrl, account.headers, payloadFor(forged, 600), 1);
+  assert.equal(second.response.status, 200, JSON.stringify(second.body));
+  assert.deepEqual(second.body.leaderboard, { status: "review_pending", automaticRestriction: false });
+
+  const report = await request(baseUrl, "/api/admin/leaderboard/reviews", { headers: adminHeaders() });
+  assert.equal(report.body.pendingCount, 1, JSON.stringify(report.body));
+  assert.ok(report.body.entries[0].findings.some((finding) => finding.code === "ROCKET_MATERIAL_SOURCE_EXCEEDED"));
+  const retained = await request(baseUrl, "/api/leaderboard/me?category=galaxy", { headers: account.headers });
+  assert.equal(retained.body.status, "ranked", JSON.stringify(retained.body));
+  assert.equal(retained.body.latestCloudRevision, 2);
 });

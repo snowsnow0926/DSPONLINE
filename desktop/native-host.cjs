@@ -332,7 +332,8 @@ function normalizeNativeCoreCommitOperation(value) {
     !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0 ||
     !Number.isFinite(value.simulationSeconds) || value.simulationSeconds < 0 ||
     !Number.isFinite(value.wallSeconds) || value.wallSeconds < 0 ||
-    value.includeDiagnostics !== undefined && typeof value.includeDiagnostics !== "boolean") {
+    value.includeDiagnostics !== undefined && typeof value.includeDiagnostics !== "boolean" ||
+    value.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2"].includes(value.advanceMode)) {
     throw new TypeError("native core authoritative operation is invalid");
   }
   const command = value.command == null ? null : normalizeNativeCoreCommand(value.command);
@@ -348,6 +349,7 @@ function normalizeNativeCoreCommitOperation(value) {
     command,
     simulationSeconds: value.simulationSeconds,
     wallSeconds: value.wallSeconds,
+    advanceMode: value.advanceMode ?? "exact",
     includeDiagnostics: value.includeDiagnostics ?? false,
   };
   if (Buffer.byteLength(JSON.stringify(request), "utf8") > MAX_FRAME_PAYLOAD_BYTES - 16_384) {
@@ -404,7 +406,8 @@ class NativeCoreSessionRegistry {
     if (!Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
       !Number.isFinite(request?.simulationSeconds) || request.simulationSeconds < 0 ||
       !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0 ||
-      request?.includeDiagnostics !== undefined && typeof request.includeDiagnostics !== "boolean") {
+      request?.includeDiagnostics !== undefined && typeof request.includeDiagnostics !== "boolean" ||
+      request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2"].includes(request.advanceMode)) {
       throw new TypeError("native core advance request is invalid");
     }
     return this.client.request({
@@ -414,6 +417,7 @@ class NativeCoreSessionRegistry {
         baseRevision: request.baseRevision,
         simulationSeconds: request.simulationSeconds,
         wallSeconds: request.wallSeconds,
+        advanceMode: request.advanceMode ?? "exact",
         includeDiagnostics: request.includeDiagnostics ?? true,
       },
     });

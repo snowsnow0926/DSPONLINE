@@ -348,7 +348,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.durationMs).toBeLessThan(30_000);
   });
 
-  test("migrates a pure-idle-macro-v2 recovery summary with active research to v3", async ({ page }) => {
+  test("migrates a pure-idle-macro-v2 recovery summary with active research to v4", async ({ page }) => {
     const result = await page.evaluate(async () => {
       const contentPacks = await import("/src/game/contentPacks.ts");
       const engine = await import("/src/game/engine.ts");
@@ -423,7 +423,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v3");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v4");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -1053,7 +1053,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v3");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v4");
     expect(result.complexityStrategy).toBe("conservative");
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.powerLimitedMultiplier).toBeGreaterThanOrEqual(1);

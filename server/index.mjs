@@ -86,7 +86,11 @@ import {
   publicLoginSecurityEvents,
   recordSuccessfulLogin,
 } from "./account-security.mjs";
-import { evaluateLeaderboardIntegrity, LEADERBOARD_INTEGRITY_VERSION } from "./leaderboard-integrity.mjs";
+import {
+  createLeaderboardMaterialSnapshot,
+  evaluateLeaderboardIntegrity,
+  LEADERBOARD_INTEGRITY_VERSION,
+} from "./leaderboard-integrity.mjs";
 import { AccountArchiveError, createAccountArchiveZipStream } from "./account-archive.mjs";
 import {
   ACCOUNT_ARCHIVE_IMPORT_CONFIRMATION_HEADER,
@@ -3005,6 +3009,7 @@ function leaderboardProjectionFromState(state) {
     exploration: state.exploration,
     dysonSwarm: { generationKw: state.dysonSwarm?.generationKw },
     dysonSphere: { generationKw: state.dysonSphere?.generationKw },
+    leaderboardMaterialSnapshot: createLeaderboardMaterialSnapshot(state),
   };
 }
 
@@ -3345,14 +3350,26 @@ function removeUserLeaderboardSubmissions(store, userId) {
   return removed;
 }
 
-function applyLeaderboardIntegrityGate(store, userId, currentSave, currentState, previousStateOverride = undefined) {
+function applyLeaderboardIntegrityGate(
+  store,
+  userId,
+  currentSave,
+  currentState,
+  previousStateOverride = undefined,
+  { trustCurrentMaterialSnapshot = false } = {},
+) {
   // A restore created by this server is already protected by expectedRevision
   // and an audit entry. Its cumulative counters can legitimately be lower than
   // the immediately preceding revision, so it must not be treated as a forged
   // client rollback. The restored revision is still excluded from producing a
   // faster historical peak by the existing adjacent-window rules.
   if (Number.isInteger(currentSave?.restoredFromRevision)) {
-    return { version: LEADERBOARD_INTEGRITY_VERSION, freeze: false, findings: [{ code: "SERVER_RESTORE", severity: "info" }] };
+    return {
+      version: LEADERBOARD_INTEGRITY_VERSION,
+      verification: "unverifiable",
+      freeze: false,
+      findings: [{ code: "SERVER_RESTORE", severity: "info" }],
+    };
   }
   let previousState = previousStateOverride;
   if (previousState === undefined) {
@@ -3362,7 +3379,7 @@ function applyLeaderboardIntegrityGate(store, userId, currentSave, currentState,
     const previous = previousMetadata ? materializeCloudSave(store, userId, "main", previousMetadata) : null;
     previousState = parseSaveState(previous?.payload);
   }
-  const result = evaluateLeaderboardIntegrity(currentState, previousState);
+  const result = evaluateLeaderboardIntegrity(currentState, previousState, { trustCurrentMaterialSnapshot });
   if (!result.freeze) return result;
   const fingerprint = leaderboardReviewFingerprint(result.findings);
   if (isLeaderboardReviewApproved(store.data, userId, { revision: currentSave?.revision, fingerprint })) {
@@ -3416,7 +3433,9 @@ function updateLeaderboardFromMainSave(store, userId, { save = null, now = Date.
   const previousState = parseSaveState(previousMaterialized?.payload);
   const key = `${ACTIVE_LEADERBOARD_SEASON_ID}:${userId}`;
   const retainedSubmission = store.data.submissions[key] ?? null;
-  const integrity = applyLeaderboardIntegrityGate(store, userId, materialized, state, previousState);
+  const integrity = applyLeaderboardIntegrityGate(store, userId, materialized, state, previousState, {
+    trustCurrentMaterialSnapshot: inspection?.leaderboardProjection === state,
+  });
   if (integrity.freeze) {
     return {
       changed: integrity.reviewChanged === true,

@@ -7,12 +7,23 @@ use crate::state::{CoreState, CoreStateSummary};
 const MAX_ADVANCE_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 const EPSILON: f64 = 0.0001;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum CoreAdvanceMode {
+    #[default]
+    #[serde(rename = "exact")]
+    Exact,
+    #[serde(rename = "pure-idle-conservative-v2")]
+    PureIdleConservativeV2,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreAdvanceRequest {
     pub base_revision: u64,
     pub simulation_seconds: f64,
     pub wall_seconds: f64,
+    #[serde(default)]
+    pub advance_mode: CoreAdvanceMode,
     #[serde(default = "default_include_diagnostics")]
     pub include_diagnostics: bool,
 }
@@ -31,6 +42,12 @@ pub struct CoreAdvanceResult {
     pub revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algorithm_version: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_calibration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approximated_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<CoreStateSummary>,
 }
@@ -195,6 +212,16 @@ fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
 
 impl CoreState {
     pub fn advance(&mut self, request: &CoreAdvanceRequest) -> anyhow::Result<CoreAdvanceResult> {
+        if request.advance_mode == CoreAdvanceMode::PureIdleConservativeV2 {
+            return crate::pure_idle::advance(self, request);
+        }
+        self.advance_exact(request)
+    }
+
+    pub(crate) fn advance_exact(
+        &mut self,
+        request: &CoreAdvanceRequest,
+    ) -> anyhow::Result<CoreAdvanceResult> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -257,6 +284,9 @@ impl CoreState {
                 previous_revision,
                 revision: self.revision,
                 reason: None,
+                algorithm_version: None,
+                exact_calibration_seconds: None,
+                approximated_seconds: None,
                 summary: request
                     .include_diagnostics
                     .then(|| self.summary())
@@ -281,6 +311,9 @@ impl CoreState {
                 } else {
                     clock_reason.to_owned()
                 }),
+                algorithm_version: None,
+                exact_calibration_seconds: None,
+                approximated_seconds: None,
                 summary: request
                     .include_diagnostics
                     .then(|| self.summary())
@@ -326,6 +359,9 @@ impl CoreState {
                 previous_revision,
                 revision: self.revision,
                 reason: None,
+                algorithm_version: None,
+                exact_calibration_seconds: None,
+                approximated_seconds: None,
                 summary,
             });
         }
@@ -407,6 +443,9 @@ impl CoreState {
             previous_revision,
             revision: self.revision,
             reason: None,
+            algorithm_version: None,
+            exact_calibration_seconds: None,
+            approximated_seconds: None,
             summary,
         })
     }

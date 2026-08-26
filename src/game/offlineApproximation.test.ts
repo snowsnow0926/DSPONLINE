@@ -304,6 +304,24 @@ describe("offline macro contract experiment", () => {
     expect(hashGameState(source)).toBe(before);
   });
 
+  it("freezes from the original checkpoint when the offline calibration deadline is already exhausted", async () => {
+    const source = stableEmptyState();
+    source.tray.iron_ore = 25;
+    const before = hashGameState(source);
+    const result = await runFastOfflineSettlementAsync(source, 3_600, {
+      deadlineAtMs: -1,
+    });
+
+    expect(result.status).toBe("conservative");
+    if (result.status === "conservative") {
+      expect(result.report.deadlineReached).toBe(true);
+      expect(result.report.calibrationWindowSeconds).toBe(0);
+      expect(result.state.elapsedSeconds - source.elapsedSeconds).toBe(3_600);
+      expect(result.state.tray.iron_ore).toBe(25);
+    }
+    expect(hashGameState(source)).toBe(before);
+  });
+
   it("keeps short offline intervals on the exact path", () => {
     const source = stableEmptyState();
     const result = runFastOfflineSettlement(source, 30);
@@ -393,11 +411,12 @@ describe("offline macro contract experiment", () => {
       mode: "approximate",
       algorithmVersion: TIME_WARP_APPROXIMATION_ALGORITHM_VERSION,
       requestedSimulationSeconds: 16,
-      exactCalibrationSeconds: 2,
-      approximatedSeconds: 14,
+      exactCalibrationSeconds: 1,
+      approximatedSeconds: 15,
     });
     expect(first.state.elapsedSeconds).toBe(16);
-    expect(first.report.maxCriticalError).toBeLessThanOrEqual(0.2);
+    expect(first.report.maxCriticalError).toBe(1);
+    expect(first.report.fallbackReason).toContain("未证明尾段已冻结");
     expect(hashGameState(first.state)).toBe(hashGameState(second.state));
     expect(hashGameState(source)).toBe(before);
   });

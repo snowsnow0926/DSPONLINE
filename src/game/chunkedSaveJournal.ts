@@ -573,6 +573,35 @@ export async function restoreChunkedSavePayload(baseRaw: string, mode: SaveMode)
   return { raw, manifest };
 }
 
+/**
+ * Rebuild a compatible envelope from an already verified internal-record
+ * snapshot. Windows native recovery uses this exact adapter, so IndexedDB and
+ * the Rust store cannot drift into two different v47 reconstruction rules.
+ */
+export function restoreChunkedSavePayloadFromRecords(
+  baseRaw: string,
+  mode: SaveMode,
+  records: ReadonlyMap<string, string>,
+): RestoredChunkedSave | null {
+  const integrity = inspectSaveEnvelopeChecksum(baseRaw);
+  const baseChecksum = integrity.recordedChecksum;
+  if (!baseChecksum || integrity.status === "invalid") return null;
+  const manifest = parseManifest(records.get(manifestKey(mode)) ?? null);
+  if (!manifest || manifest.mode !== mode || manifest.basePrimaryChecksum !== baseChecksum) return null;
+  const values = new Map<string, string>();
+  for (const chunk of manifest.chunks) {
+    const text = records.get(chunkKey(mode, chunk.id));
+    if (text === undefined) return null;
+    const identity = computeSavePayloadTextChecksum(text);
+    if (identity.checksum !== chunk.checksum || identity.byteLength !== chunk.bytes) return null;
+    values.set(chunk.id, text);
+  }
+  const state = assembleState(manifest, values);
+  if (!state || state.version !== manifest.stateVersion || state.mode !== mode) return null;
+  const raw = buildEnvelope(state, manifest);
+  return inspectSaveEnvelopeChecksum(raw).status === "valid" ? { raw, manifest } : null;
+}
+
 /** Exposed for the benchmark and unit tests without touching IndexedDB. */
 export function chunkedSavePartsForTest(projectedState: GameState, previous?: ChunkedSaveManifest | null): ChunkedSaveBuildResult {
   return buildChunkedSaveJournal(projectedState, { mode: projectedState.mode, basePrimaryChecksum: "00000000", previous });

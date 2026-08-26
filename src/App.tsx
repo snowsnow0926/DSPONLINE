@@ -377,6 +377,7 @@ import { clearLocalSaveRawPayloadCache, commitLocalSaveInternalRecords, getLocal
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
 import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type PersistChunkedSaveResult } from "./game/chunkedSaveJournal";
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
+import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import type {
   AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveExpectedStateIdentity,
@@ -1843,6 +1844,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     command: SimulationCommandPatch | null;
     chunkedSave?: SimulationWorkerRequest["chunkedSave"];
     chunkedSaveWritePort?: MessagePort;
+    nativeSaveTransaction?: NativeSaveTransaction;
     checkpointChunks?: SimulationCheckpointAccumulator;
   } | null>(null);
   const dispatchSimulationCheckpointRef = useRef<() => void>(() => undefined);
@@ -2805,9 +2807,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       channel.port1.onmessage = (writeEvent: MessageEvent<SimulationChunkedSaveWriteRequest>) => {
         const write = writeEvent.data;
         if (write.id !== request.id || !Number.isSafeInteger(write.sequence) || write.sequence < 1 || !Array.isArray(write.records)) return;
-        void commitLocalSaveInternalRecords(write.records).then(() => {
+        // The native transaction is staged before IndexedDB. Neither backend
+        // publishes its manifest until the final batch/commit, and a failure
+        // on either side is reported to the authority Worker instead of being
+        // presented as a successful Windows beta double-write.
+        void (pending.nativeSaveTransaction?.write(write.records) ?? Promise.resolve()).then(() =>
+          commitLocalSaveInternalRecords(write.records)).then(() => {
           channel.port1.postMessage({ id: write.id, sequence: write.sequence, ok: true } satisfies SimulationChunkedSaveWriteAck);
         }).catch((error) => {
+          void pending.nativeSaveTransaction?.abort();
           channel.port1.postMessage({
             id: write.id,
             sequence: write.sequence,
@@ -2828,6 +2836,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch (error) {
       pending.chunkedSaveWritePort?.close();
       delete pending.chunkedSaveWritePort;
+      void pending.nativeSaveTransaction?.abort();
+      delete pending.nativeSaveTransaction;
       simulationCheckpointRequestRef.current = null;
       simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
       pending.reject(error instanceof Error ? error : new Error("模拟检查点请求失败"));
@@ -2869,14 +2879,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const requestAuthoritativePersistenceCheckpoint = useCallback((
     chunkedSave?: NonNullable<SimulationWorkerRequest["chunkedSave"]>,
+    nativeSaveTransaction?: NativeSaveTransaction | null,
   ): Promise<GameState> => {
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint" || existing.mode === "persistence-checkpoint"
         ? existing.promise
-        : existing.promise.then(() => requestAuthoritativePersistenceCheckpoint(chunkedSave));
+        : existing.promise.then(() => requestAuthoritativePersistenceCheckpoint(chunkedSave, nativeSaveTransaction));
     }
     if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
+      void nativeSaveTransaction?.abort();
+      if (nativeSaveTransaction) {
+        return Promise.reject(new Error("Windows 原生双写需要可用的权威模拟 Worker"));
+      }
       return Promise.resolve(stateWithSimulationDebt(gameRef.current));
     }
     let resolve!: (state: GameState) => void;
@@ -2896,6 +2911,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       state: null,
       command: null,
       ...(chunkedSave ? { chunkedSave } : {}),
+      ...(nativeSaveTransaction ? { nativeSaveTransaction } : {}),
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
     return promise;
@@ -3774,12 +3790,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             checkpointOverlay: createAuthoritativeCheckpointOverlay(checkpointCandidate),
           }
         : undefined;
-      const barrierState = canUseConfirmedAutosaveBoundary
-        ? stateWithSimulationDebt(confirmedState)
-        : state === undefined && checkpointCandidateIsLarge
-          ? await requestAuthoritativePersistenceCheckpoint(directChunkedSave)
-          : await requestAuthoritativeSimulationCheckpoint();
-      if (canUseConfirmedAutosaveBoundary) {
+      const confirmedNativeBase = lastSimulationResultRef.current;
+      const pendingNativeCommand = directChunkedSave && confirmedNativeBase
+        ? createSimulationCommandPatch(confirmedNativeBase, checkpointCandidate, simulationStateRevisionRef.current)
+        : null;
+      const nativeSaveTransaction = directChunkedSave && checkpointBaseIdentity && checkpointCandidate.version === 47
+        ? await beginWindowsNativeSave({
+            slot: checkpointMode === "speedrun" ? "speedrun-main" : "normal-main",
+            mode: checkpointMode,
+            stateVersion: 47,
+            baseChecksum: checkpointBaseIdentity.checksum,
+            registryFingerprint: contentPackRuntimeSnapshotRef.current.fingerprint,
+            revision: simulationStateRevisionRef.current + (pendingNativeCommand ? 1 : 0),
+            savedAtMs: Date.now(),
+          })
+        : null;
+      let barrierState: GameState;
+      const useConfirmedAutosaveBoundary = canUseConfirmedAutosaveBoundary && !nativeSaveTransaction;
+      try {
+        barrierState = useConfirmedAutosaveBoundary
+          ? stateWithSimulationDebt(confirmedState)
+          : state === undefined && checkpointCandidateIsLarge
+            ? await requestAuthoritativePersistenceCheckpoint(directChunkedSave, nativeSaveTransaction)
+            : await requestAuthoritativeSimulationCheckpoint();
+      } catch (error) {
+        await nativeSaveTransaction?.abort();
+        throw error;
+      }
+      // A confirmed-state shortcut or explicit non-large checkpoint does not
+      // stream records through the native transaction. Never leave a staged
+      // transaction alive when that path is selected.
+      if (nativeSaveTransaction && (state !== undefined || !checkpointCandidateIsLarge)) {
+        await nativeSaveTransaction.abort();
+      }
+      if (useConfirmedAutosaveBoundary) {
         recordRuntimeTransitionPhase("autosave-confirmed-checkpoint", startedAt, performance.now() - startedAt, {
           pendingSimulationSeconds: activeSubmission?.simulationSeconds ?? simulationPendingSecondsRef.current,
           pendingWallSeconds: activeSubmission?.wallSeconds ?? simulationPendingWallSecondsRef.current,
@@ -5282,6 +5326,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       const checkpointRequest = simulationCheckpointRequestRef.current;
       if (checkpointRequest?.id === event.data.id) {
+        const abortNativeSaveTransaction = () => {
+          void checkpointRequest.nativeSaveTransaction?.abort();
+          delete checkpointRequest.nativeSaveTransaction;
+        };
         if (event.data.checkpointStateChunk) {
           if (checkpointRequest.mode === "deferred-top-level") {
             simulationCheckpointRequestRef.current = null;
@@ -5292,6 +5340,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           if (checkpointRequest.mode === "persistence-checkpoint") {
             checkpointRequest.chunkedSaveWritePort?.close();
             delete checkpointRequest.chunkedSaveWritePort;
+            abortNativeSaveTransaction();
             simulationCheckpointRequestRef.current = null;
             simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
             checkpointRequest.reject(new Error("低内存保存检查点收到意外的完整状态分块"));
@@ -5367,6 +5416,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
         if (event.data.needsRegistry || event.data.registryError || event.data.needsState ||
           (!event.data.checkpoint && !event.data.chunkedSaveResult) || typeof event.data.stateRevision !== "number") {
+          abortNativeSaveTransaction();
           simulationCheckpointRequestRef.current = null;
           simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
           checkpointRequest.reject(new Error(event.data.registryError ?? "模拟 Worker 未返回有效检查点"));
@@ -5374,6 +5424,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
         if (checkpointRequest.mode === "persistence-checkpoint") {
           if (event.data.needsResync) {
+            if (checkpointRequest.nativeSaveTransaction) {
+              abortNativeSaveTransaction();
+              simulationCheckpointRequestRef.current = null;
+              simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+              checkpointRequest.reject(new Error("Windows 原生双写 revision 需要重新同步，请重试保存"));
+              return;
+            }
             // A revision mismatch is rare and needs the normal authoritative
             // mirror once so the pending UI command can be rebased safely.
             // Discard this transfer and retry through the established full
@@ -5402,6 +5459,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 throw new Error("权威分块保存身份与请求 revision 不一致");
               }
               const committedChunkedSave = event.data.chunkedSaveResult;
+              const nativeCommit = await checkpointRequest.nativeSaveTransaction?.commit();
+              delete checkpointRequest.nativeSaveTransaction;
               latestAuthoritativeCheckpointTransferRef.current = null;
               latestChunkedAutosaveResultRef.current = { state: saveState, result: committedChunkedSave };
               latestPerformanceChunkedSaveRef.current = {
@@ -5422,9 +5481,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 changedBytes: committedChunkedSave.changedBytes,
                 totalBytes: committedChunkedSave.totalBytes,
                 chunkCount: committedChunkedSave.chunkCount,
+                ...(nativeCommit ? {
+                  nativeGeneration: nativeCommit.generation,
+                  nativeChangedBytes: nativeCommit.changedBytes,
+                } : {}),
               });
               checkpointRequest.resolve(saveState);
               return;
+            }
+            if (checkpointRequest.nativeSaveTransaction) {
+              abortNativeSaveTransaction();
+              throw new Error(event.data.chunkedSaveError ?? "Windows 原生双写未完成，未报告保存成功");
             }
             const checkpointTransfer = event.data.checkpoint;
             if (!checkpointTransfer) throw new Error(event.data.chunkedSaveError ?? "模拟 Worker 未返还保存检查点");
@@ -5455,6 +5522,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             });
             checkpointRequest.resolve(saveState);
           } catch (error) {
+            abortNativeSaveTransaction();
             simulationCheckpointRequestRef.current = null;
             simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
             checkpointRequest.reject(error instanceof Error ? error : new Error("低内存保存检查点校验失败"));
@@ -5709,8 +5777,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           submission.durableIntent.intentSha256,
           event.data.stateRevision,
           { ownerId: status.writerId, fencingToken: status.fencingToken },
-        ).then((result) => {
+        ).then(async (result) => {
           if (!result.ok) throw new Error(result.message);
+          if (result.proof.stateRevision > submission.durableIntent!.baseStateRevision) {
+            await appendWindowsNativeWal(
+              submission.state.mode,
+              result.proof.stateRevision,
+              `intent-${submission.durableIntent!.intentSha256}`,
+              {
+                kind: "durable-operation-v1",
+                intent: submission.durableIntent!,
+                resultStateRevision: result.proof.stateRevision,
+              },
+            );
+          }
           durableRecoveryHeadRef.current = advanceSimulationRuntimeDurableAppHead(
             durableRecoveryHeadRef.current!, submission.durableIntent!, result.proof,
           );
@@ -6008,6 +6088,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         responseAccepted = false;
       }
       if (responseAccepted) {
+        const confirmedRevision = simulationStateRevisionRef.current;
+        if (!durableSimulationRuntimeEnabled && submission.kind === "advance" &&
+          submission.baseStateRevision !== null && confirmedRevision > submission.baseStateRevision) {
+          try {
+            await appendWindowsNativeWal(
+              submission.state.mode,
+              confirmedRevision,
+              `stable-${submission.baseStateRevision}-${confirmedRevision}-${submission.id}`,
+              {
+                kind: "stable-operation-v1",
+                baseStateRevision: submission.baseStateRevision,
+                resultStateRevision: confirmedRevision,
+                command: submission.command,
+                simulationSeconds: submission.simulationSeconds,
+                wallSeconds: submission.wallSeconds,
+                multicore: submission.multicore,
+                approximate: submission.approximate,
+                registry: submission.registry,
+              },
+            );
+          } catch (error) {
+            // The JS authority and compatible v47 save remain exact. Native
+            // authority promotion is blocked until the next full native
+            // checkpoint heals this WAL gap.
+            setNotice(`Windows 原生 WAL 未确认，本轮继续使用兼容存档保护：${error instanceof Error ? error.message : "未知错误"}`);
+          }
+        }
         acceptFactoryAlertProjection(event.data.projection?.alerts, event.data.factoryAlertsGeneration);
         simulationProjectionIndexRef.current = projectionIndex;
         lastSimulationResultRef.current = confirmed;
@@ -6016,7 +6123,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // never submitted twice, including when the command was Pause. Update
         // the imperative refs before publishing React state: a following undo
         // or redo may queue its durable command in this same event turn.
-        const confirmedRevision = simulationStateRevisionRef.current;
         const rebaseConfirmedView = (view: GameState) => {
           const pending = view === submission.state
             ? null
@@ -6071,7 +6177,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (simulationWorkerRef.current !== worker) return;
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
-      if (checkpointWriteRequest) delete checkpointWriteRequest.chunkedSaveWritePort;
+      if (checkpointWriteRequest) {
+        delete checkpointWriteRequest.chunkedSaveWritePort;
+        void checkpointWriteRequest.nativeSaveTransaction?.abort();
+        delete checkpointWriteRequest.nativeSaveTransaction;
+      }
       setInitialSimulationWorkerReady(true);
       const submission = simulationSubmissionRef.current;
       if (submission?.state.timeWarp.enabled || gameRef.current.timeWarp.enabled) {
@@ -6178,7 +6288,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return () => {
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
-      if (checkpointWriteRequest) delete checkpointWriteRequest.chunkedSaveWritePort;
+      if (checkpointWriteRequest) {
+        delete checkpointWriteRequest.chunkedSaveWritePort;
+        void checkpointWriteRequest.nativeSaveTransaction?.abort();
+        delete checkpointWriteRequest.nativeSaveTransaction;
+      }
       worker.terminate();
       if (simulationWorkerRef.current === worker) simulationWorkerRef.current = null;
       if (installedSubmission && simulationSubmissionRef.current === installedSubmission) {

@@ -1,4 +1,5 @@
 node_modules/
+native/target/
 dist/
 test-results/
 playwright-report/

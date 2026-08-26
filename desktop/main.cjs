@@ -19,6 +19,11 @@ const {
   sanitizeArchiveFileName,
   serializeAccountArchiveDownloadError,
 } = require("./account-archive-download.cjs");
+const {
+  NativeHostClient,
+  NativeSaveSessionRegistry,
+  nativeHostBinaryPath,
+} = require("./native-host.cjs");
 const packageMetadata = require("../package.json");
 
 const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
@@ -57,6 +62,16 @@ const activeAccountArchiveDownloads = new AccountArchiveDownloadRegistry(1);
 const activeAccountArchiveDownloadCompletions = new Set();
 let accountArchiveQuitDrainPromise = null;
 let accountArchiveQuitDrainComplete = false;
+let nativeHostClient = null;
+let nativeSaveSessions = null;
+let nativeHostQuitDrainPromise = null;
+let nativeHostQuitDrainComplete = false;
+let nativeHostState = {
+  available: false,
+  state: process.platform === "win32" ? "starting" : "unsupported",
+  message: process.platform === "win32" ? "Windows 原生性能服务尚未启动" : "当前平台不启用 Windows 原生性能服务",
+  capabilities: [],
+};
 let updateState = {
   state: isDevelopment ? "development" : "idle",
   message: isDevelopment ? "开发环境不检查更新" : channel.url ? "尚未检查" : "此构建未配置更新源",
@@ -137,6 +152,50 @@ function publishUpdateState(next) {
 
 function trustedSender(event) {
   return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+}
+
+function requireTrustedNativeSender(event) {
+  if (!trustedSender(event)) throw new Error("原生性能服务调用来源无效");
+  if (!nativeHostClient || !nativeSaveSessions || !nativeHostState.available) throw new Error("Windows 原生性能服务不可用");
+  return event.sender.id;
+}
+
+function validNativeLogicalId(value, maximumLength = 128) {
+  return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+async function initializeNativeHost() {
+  if (process.platform !== "win32") return nativeHostState;
+  const binaryPath = nativeHostBinaryPath({
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    isPackaged: app.isPackaged,
+  });
+  const rootPath = path.join(app.getPath("userData"), "native-saves-v1");
+  try {
+    nativeHostClient = new NativeHostClient({ binaryPath, rootPath });
+    const hello = await nativeHostClient.start(app.getVersion());
+    nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
+    nativeHostState = {
+      available: true,
+      state: "ready",
+      message: "Windows 原生存档服务已就绪",
+      protocolVersion: hello.protocolVersion,
+      nativeFormatVersion: hello.nativeFormatVersion,
+      hostVersion: hello.hostVersion,
+      capabilities: Array.isArray(hello.capabilities) ? hello.capabilities : [],
+    };
+  } catch (error) {
+    nativeHostState = {
+      available: false,
+      state: "unavailable",
+      message: `Windows 原生性能服务启动失败：${error instanceof Error ? error.message : "未知错误"}`,
+      capabilities: [],
+    };
+    nativeHostClient = null;
+    nativeSaveSessions = null;
+  }
+  return nativeHostState;
 }
 
 function resolveApiRequestUrl(requestPath) {
@@ -362,6 +421,8 @@ function createWindow() {
   mainWindow.on("move", scheduleWindowStateSave);
   mainWindow.on("close", persistWindowState);
   mainWindow.on("closed", () => {
+    const ownerId = mainWindow?.webContents?.id;
+    if (ownerId && nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
     cancelAllApiRequests();
     cancelAllAccountArchiveDownloads();
     mainWindow = null;
@@ -419,6 +480,78 @@ ipcMain.handle("desktop:release-info", () => ({
 ipcMain.handle("desktop:set-font-scale", (_event, requestedScale) => {
   fontScale = [0.8, 1, 1.25, 1.5, 2].includes(requestedScale) ? requestedScale : 1;
   return { scale: fontScale, zoomFactor: applyReadableDesktopZoom() };
+});
+
+ipcMain.handle("desktop:native-status", (event) => {
+  if (!trustedSender(event)) throw new Error("原生性能服务调用来源无效");
+  return nativeHostState;
+});
+
+ipcMain.handle("desktop:native-save-begin", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeSaveSessions.begin(ownerId, request);
+});
+
+ipcMain.handle("desktop:native-save-write", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeSaveSessions.write(ownerId, request?.transactionId, request?.records);
+});
+
+ipcMain.handle("desktop:native-save-commit", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeSaveSessions.commit(ownerId, request?.transactionId);
+});
+
+ipcMain.handle("desktop:native-save-abort", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeSaveSessions.abort(ownerId, request?.transactionId);
+});
+
+ipcMain.handle("desktop:native-save-recover", async (event, request) => {
+  requireTrustedNativeSender(event);
+  if (!validNativeLogicalId(request?.slot, 64)) throw new Error("原生存档槽位无效");
+  return nativeHostClient.request({ operation: "saveRecover", slot: request.slot });
+});
+
+ipcMain.handle("desktop:native-save-read", async (event, request) => {
+  requireTrustedNativeSender(event);
+  if (!validNativeLogicalId(request?.slot, 64) || !Number.isSafeInteger(request?.generation) || request.generation < 1 ||
+    typeof request?.rootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.rootHash) ||
+    typeof request?.key !== "string" || request.key.length < 1 || request.key.length > 512 ||
+    request.key.includes("..") || /[\\/\0]/.test(request.key)) {
+    throw new Error("原生存档读取请求无效");
+  }
+  return nativeHostClient.request({
+    operation: "saveRead",
+    slot: request.slot,
+    key: request.key,
+    generation: request.generation,
+    rootHash: request.rootHash,
+  });
+});
+
+ipcMain.handle("desktop:native-wal-append", async (event, request) => {
+  requireTrustedNativeSender(event);
+  if (!validNativeLogicalId(request?.slot, 64) || !validNativeLogicalId(request?.commandId, 128) ||
+    !Number.isSafeInteger(request?.revision) || request.revision < 1 || !request.payload || typeof request.payload !== "object") {
+    throw new Error("原生 WAL 请求无效");
+  }
+  return nativeHostClient.request({
+    operation: "walAppend",
+    slot: request.slot,
+    revision: request.revision,
+    commandId: request.commandId,
+    payload: request.payload,
+  });
+});
+
+ipcMain.handle("desktop:native-save-compact", async (event, request) => {
+  requireTrustedNativeSender(event);
+  if (!validNativeLogicalId(request?.slot, 64)) throw new Error("原生存档槽位无效");
+  const retainGenerations = Number.isSafeInteger(request?.retainGenerations)
+    ? Math.max(2, Math.min(8, request.retainGenerations))
+    : 2;
+  return nativeHostClient.request({ operation: "compact", slot: request.slot, retainGenerations });
 });
 
 ipcMain.handle("desktop:api-request", requestCloudApi);
@@ -682,10 +815,11 @@ if (!hasSingleInstanceLock) {
     mainWindow.show();
     mainWindow.focus();
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     app.setAppUserModelId("com.dspidle.network");
     Menu.setApplicationMenu(null);
     configureAutoUpdater();
+    await initializeNativeHost();
     createWindow();
     if (updater) {
       setTimeout(() => void updater.checkForUpdates().catch((error) => {
@@ -707,14 +841,19 @@ app.on("before-quit", (event) => {
   persistWindowState();
   cancelAllAccountArchiveDownloads();
   if (updateTimer) clearInterval(updateTimer);
-  if (accountArchiveQuitDrainComplete || activeAccountArchiveDownloadCompletions.size === 0) return;
+  const accountArchiveReady = accountArchiveQuitDrainComplete || activeAccountArchiveDownloadCompletions.size === 0;
+  const nativeHostReady = nativeHostQuitDrainComplete || !nativeHostClient || nativeHostClient.exited;
+  if (accountArchiveReady && nativeHostReady) return;
   event.preventDefault();
-  if (accountArchiveQuitDrainPromise) return;
+  if (accountArchiveQuitDrainPromise || nativeHostQuitDrainPromise) return;
   const pending = [...activeAccountArchiveDownloadCompletions];
   accountArchiveQuitDrainPromise = Promise.allSettled(pending).finally(() => {
     accountArchiveQuitDrainComplete = true;
-    app.quit();
   });
+  nativeHostQuitDrainPromise = (nativeHostClient ? nativeHostClient.stop() : Promise.resolve()).finally(() => {
+    nativeHostQuitDrainComplete = true;
+  });
+  void Promise.allSettled([accountArchiveQuitDrainPromise, nativeHostQuitDrainPromise]).finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {

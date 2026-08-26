@@ -4,6 +4,15 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   isDesktop: true,
   setFontScale: (scale) => ipcRenderer.invoke("desktop:set-font-scale", scale),
   getReleaseInfo: () => ipcRenderer.invoke("desktop:release-info"),
+  getNativePerformanceStatus: () => ipcRenderer.invoke("desktop:native-status"),
+  beginNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-begin", request),
+  writeNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-write", request),
+  commitNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-commit", request),
+  abortNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-abort", request),
+  recoverNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-recover", request),
+  readNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-read", request),
+  appendNativeWal: (request) => ipcRenderer.invoke("desktop:native-wal-append", request),
+  compactNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-compact", request),
   requestApi: (request) => ipcRenderer.invoke("desktop:api-request", request),
   requestApiTransfer: (request, body) => new Promise((resolve, reject) => {
     if (!(body instanceof ArrayBuffer)) {

@@ -13,6 +13,7 @@ import {
   persistChunkedSaveJournal,
   prepareChunkedSaveJournalContext,
   restoreChunkedSavePayload,
+  restoreChunkedSavePayloadFromRecords,
   streamChunkedSaveJournalFromRuntimeState,
 } from "./chunkedSaveJournal";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
@@ -123,6 +124,36 @@ describe("v1 chunked save journal", () => {
     expect(restored).not.toBeNull();
     expect((JSON.parse(restored!.raw) as { state: typeof projected }).state).toEqual(projected);
     await clearChunkedSaveJournal("normal");
+  });
+
+  it("uses the same exact v47 adapter for native internal-record readback", async () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState();
+    const projected = projectPersistentSaveState(state, registry);
+    const baseChecksum = computeSaveStateChecksum(2, projected);
+    const baseRaw = JSON.stringify({
+      formatVersion: 2,
+      kind: "primary",
+      mode: "normal",
+      slot: "main",
+      savedAt: 10,
+      state: projected,
+      checksum: baseChecksum,
+    });
+    const commit = buildChunkedSaveJournalCommitFromRuntimeState(
+      state,
+      registry,
+      { mode: "normal", basePrimaryChecksum: baseChecksum, savedAt: 35 },
+      { mode: "normal", basePrimaryChecksum: baseChecksum, previous: null, previousChunkIds: [], existingKeys: [] },
+    );
+    const records = new Map(commit.writes.flatMap((write) => write.value === null ? [] : [[write.key, write.value] as const]));
+    const restored = restoreChunkedSavePayloadFromRecords(baseRaw, "normal", records);
+    expect(restored).not.toBeNull();
+    expect((JSON.parse(restored!.raw) as { state: typeof projected }).state).toEqual(projected);
+    const firstChunkKey = [...records.keys()].find((key) => key.includes(".chunk."));
+    expect(firstChunkKey).toBeDefined();
+    records.set(firstChunkKey!, `${records.get(firstChunkKey!)} `);
+    expect(restoreChunkedSavePayloadFromRecords(baseRaw, "normal", records)).toBeNull();
   });
 
   it("streams changed records in bounded acknowledged batches and publishes the manifest last", async () => {

@@ -1,8 +1,8 @@
 {
   "name": "dsp-idle-network",
   "private": true,
-  "version": "1.1.9",
-  "releaseChannel": "stable",
+  "version": "1.2.0",
+  "releaseChannel": "beta",
   "updateBaseUrl": "",
   "cloudApiBaseUrl": "",
   "description": "戴森球计划风格的 2D 生产网络挂机游戏",
@@ -28,7 +28,8 @@
     "test:e2e:durable": "cross-env VITE_DURABLE_RUNTIME_RECOVERY=true playwright test tests/e2e/v144-runtime-wal-integration.spec.ts",
     "test:e2e:nightly": "playwright test --config=playwright.nightly.config.ts",
     "test:server": "npm --prefix server test && npm --prefix server run test:station",
-    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs android/security-boundary.test.mjs",
+    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs android/security-boundary.test.mjs",
+    "test:native-core": "cargo test --manifest-path native/Cargo.toml --locked",
     "test:backup": "node --test deploy/backup-tools.test.mjs",
     "test:ops": "node --test --test-concurrency=2 deploy/backup-tools.test.mjs deploy/nginx-config.test.mjs deploy/probe-node-health.test.mjs deploy/probe-api-readiness.test.mjs deploy/active-api-environment.test.mjs deploy/direct-invocation-symlink.test.mjs deploy/linux-release-control.test.mjs deploy/api-package-layout.test.mjs",
     "test:quick": "npm run typecheck && npm run test:server && npm run test:ops",
@@ -41,6 +42,7 @@
     "benchmark:v106-belts": "cross-env DSP_RUN_V106_BELT_BENCHMARK=1 vitest run src/game/v106BeltBenchmark.test.ts --reporter=verbose",
     "benchmark:multicore": "node --expose-gc scripts/benchmark-multicore-simulation.mjs",
     "benchmark:canvas": "node scripts/benchmark-canvas-batch.mjs",
+    "benchmark:native-save": "node scripts/benchmark-native-save.mjs",
     "server:dev": "node server/index.mjs",
     "typecheck": "tsc -b --pretty false",
     "budget:startup": "node scripts/verify-startup-budget.mjs",
@@ -48,7 +50,7 @@
     "release:verify": "node deploy/create-release-manifest.mjs --verify",
     "download:page": "node scripts/create-download-site.mjs",
     "release:test-switch": "node --test deploy/release-backup-evidence.test.mjs deploy/api-handoff-proxy.test.mjs deploy/release-switch.test.mjs",
-    "build:desktop": "node scripts/build-platform.mjs desktop",
+    "build:desktop": "node scripts/build-native-host.mjs && node scripts/build-platform.mjs desktop",
     "build:android": "node scripts/build-platform.mjs android",
     "desktop:dev": "cross-env DSP_DESKTOP_DEV_URL=http://127.0.0.1:4318 electron .",
     "desktop:pack": "npm run build:desktop && node desktop/pack.cjs pack",
@@ -59,6 +61,7 @@
     "android:release:unsigned": "npm run android:sync && android\\gradlew.bat -p android bundleRelease assembleRelease",
     "android:release": "node scripts/verify-android-signing-env.mjs && npm run android:release:unsigned",
     "native:assets": "node scripts/generate-native-assets.mjs",
+    "native:build-host": "node scripts/build-native-host.mjs",
     "native:manifests": "node scripts/create-native-update-manifests.mjs",
     "licenses:generate": "node scripts/generate-third-party-notices.mjs",
     "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
@@ -113,6 +116,12 @@
       "COMMERCIAL_USE.md",
       "THIRD_PARTY_NOTICES.md",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/target/release/dsp-native-host.exe",
+        "to": "native/dsp-native-host.exe"
+      }
     ],
     "win": {
       "target": [

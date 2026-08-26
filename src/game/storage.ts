@@ -4104,8 +4104,18 @@ export async function readLocalSavePayloadWithChunkJournal(key: string): Promise
   if (raw === null || (key !== SAVE_KEY && key !== `${SAVE_KEY}.speedrun`)) return raw;
   try {
     const { restoreChunkedSavePayload } = await import("./chunkedSaveJournal");
-    const restored = await restoreChunkedSavePayload(raw, key.endsWith(".speedrun") ? "speedrun" : "normal");
-    return restored?.raw ?? raw;
+    const { restoreWindowsNativeSavePayload } = await import("./nativeSaveRecovery");
+    const mode = key.endsWith(".speedrun") ? "speedrun" : "normal";
+    const [indexedDb, windowsNative] = await Promise.allSettled([
+      restoreChunkedSavePayload(raw, mode),
+      restoreWindowsNativeSavePayload(raw, mode),
+    ]);
+    const candidates = [
+      indexedDb.status === "fulfilled" ? indexedDb.value : null,
+      windowsNative.status === "fulfilled" ? windowsNative.value : null,
+    ].filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+    candidates.sort((left, right) => right.manifest.savedAt - left.manifest.savedAt);
+    return candidates[0]?.raw ?? raw;
   } catch {
     return raw;
   }

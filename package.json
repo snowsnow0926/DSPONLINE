@@ -43,6 +43,7 @@
     "benchmark:multicore": "node --expose-gc scripts/benchmark-multicore-simulation.mjs",
     "benchmark:canvas": "node scripts/benchmark-canvas-batch.mjs",
     "benchmark:native-save": "node scripts/benchmark-native-save.mjs",
+    "benchmark:native-core": "cross-env DSP_RUN_NATIVE_CORE_BENCHMARK=1 vitest run src/game/nativeCoreRealSaveBenchmark.test.ts --reporter=verbose",
     "server:dev": "node server/index.mjs",
     "typecheck": "tsc -b --pretty false",
     "budget:startup": "node scripts/verify-startup-budget.mjs",

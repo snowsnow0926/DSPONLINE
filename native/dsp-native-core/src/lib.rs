@@ -1,0 +1,22 @@
+//! Deterministic Windows-native simulation state and protocol primitives.
+//!
+//! The crate deliberately has no Electron, Node or filesystem dependency. The
+//! host process supplies already verified checkpoint records; this library
+//! owns the compact runtime state and exposes bounded summaries/operations.
+
+pub mod canonical;
+pub mod catalog;
+pub mod command;
+pub mod state;
+
+pub use catalog::{
+    BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
+    RecipeDefinition,
+};
+pub use command::{CommandApplyResult, SimulationCommandPatch};
+pub use state::{
+    CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage, RuntimeMemoryEstimate,
+};
+
+pub const CORE_PROTOCOL_VERSION: u16 = 1;
+pub const CORE_STATE_FORMAT_VERSION: u16 = 1;

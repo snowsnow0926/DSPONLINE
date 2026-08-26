@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use dsp_native_core::SimulationCommandPatch;
+
 #[derive(Debug, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -49,6 +51,30 @@ pub enum ControlRequest {
     Compact {
         slot: String,
         retain_generations: Option<usize>,
+    },
+    CoreOpen {
+        slot: String,
+        generation: u64,
+        root_hash: String,
+        revision: u64,
+        registry_fingerprint: String,
+        catalog: Value,
+    },
+    CoreStatus {
+        session_id: String,
+    },
+    CoreApplyCommand {
+        session_id: String,
+        command: SimulationCommandPatch,
+    },
+    CoreCompare {
+        session_id: String,
+        revision: u64,
+        canonical_sha256: String,
+        domain_sha256: String,
+    },
+    CoreClose {
+        session_id: String,
     },
     Shutdown,
 }

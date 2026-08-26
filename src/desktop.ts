@@ -30,6 +30,11 @@ export interface DesktopBridge {
   readNativeSave: (request: DesktopNativeSaveReadRequest) => Promise<DesktopNativeSaveReadResult>;
   appendNativeWal: (request: DesktopNativeWalAppendRequest) => Promise<DesktopNativeWalAppendResult>;
   compactNativeSave: (request: DesktopNativeSaveSlotRequest & { retainGenerations?: number }) => Promise<{ removedGenerations: number }>;
+  openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
+  getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
+  applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
+  compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
+  closeNativeCore: (request: DesktopNativeCoreSessionRequest) => Promise<{ closed: boolean }>;
   requestApi: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
   requestApiTransfer: (request: DesktopApiTransferRequest, body: ArrayBuffer) => Promise<DesktopApiTransferResponse>;
   cancelApiRequest: (requestId: string) => void;
@@ -129,6 +134,125 @@ export interface DesktopNativeWalAppendResult {
   revision: number;
   entryHash: string;
   walBytes: number;
+}
+
+export interface DesktopNativeCoreItemDefinition {
+  id: string;
+  kind: "solid" | "fluid" | "matrix";
+}
+
+export interface DesktopNativeCoreBuildingDefinition {
+  id: string;
+  kind: string;
+  speed: number;
+  inputCapacity: number;
+  outputCapacity: number;
+  powerDemandKw: number;
+  powerGenerationKw: number;
+  family?: string;
+}
+
+export interface DesktopNativeCoreRecipeDefinition {
+  id: string;
+  buildingId: string;
+  duration: number;
+  requiredTechId?: string;
+  inputs: Array<{ itemId: string; amount: number }>;
+  outputs: Array<{ itemId: string; amount: number }>;
+}
+
+export interface DesktopNativeCoreCatalog {
+  protocolVersion: 1;
+  registryFingerprint: string;
+  items: DesktopNativeCoreItemDefinition[];
+  buildings: DesktopNativeCoreBuildingDefinition[];
+  recipes: DesktopNativeCoreRecipeDefinition[];
+  belts: Array<{ tier: number; speed: number }>;
+}
+
+export interface DesktopNativeCoreOpenRequest extends DesktopNativeSaveSlotRequest {
+  generation: number;
+  rootHash: string;
+  revision: number;
+  registryFingerprint: string;
+  catalog: DesktopNativeCoreCatalog;
+}
+
+export interface DesktopNativeCoreDomainCoverage {
+  stateContainer: boolean;
+  commandPatches: boolean;
+  mining: boolean;
+  production: boolean;
+  research: boolean;
+  belts: boolean;
+  logistics: boolean;
+  power: boolean;
+  dyson: boolean;
+  construction: boolean;
+  spaceStation: boolean;
+  offlineAndTimeWarp: boolean;
+  contentPacks: boolean;
+  authorityEligible: boolean;
+}
+
+export interface DesktopNativeCoreSummary {
+  revision: number;
+  stateVersion: number;
+  mode: "normal" | "speedrun";
+  activePlanetId: string;
+  elapsedSeconds: number;
+  paused: boolean;
+  entityCount: number;
+  beltCount: number;
+  canonicalSha256: string;
+  canonicalComponents: Record<"base" | "entities" | "belts", string>;
+  domainSha256: string;
+  catalogSha256: string;
+  registryFingerprint: string;
+  memory: {
+    rawRecordBytes: number;
+    indexedStringBytes: number;
+    inventoryEntryCount: number;
+    estimatedRuntimeBytes: number;
+  };
+  coverage: DesktopNativeCoreDomainCoverage;
+}
+
+export interface DesktopNativeCoreOpenResult {
+  sessionId: string;
+  authority: "shadow";
+  summary: DesktopNativeCoreSummary;
+}
+
+export interface DesktopNativeCoreSessionRequest {
+  sessionId: string;
+}
+
+export interface DesktopNativeCoreCommandRequest extends DesktopNativeCoreSessionRequest {
+  command: Record<string, unknown>;
+}
+
+export interface DesktopNativeCoreCommandResult {
+  previousRevision: number;
+  revision: number;
+  changedEntityIds: string[];
+  changedBeltIds: string[];
+  topologyDirty: boolean;
+}
+
+export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {
+  revision: number;
+  canonicalSha256: string;
+  domainSha256: string;
+}
+
+export interface DesktopNativeCoreCompareResult {
+  matches: boolean;
+  revisionMatches: boolean;
+  canonicalMatches: boolean;
+  domainMatches: boolean;
+  promotionBlocked: boolean;
+  summary: DesktopNativeCoreSummary;
 }
 
 export interface DesktopApiRequest {

@@ -21,6 +21,7 @@ const {
 } = require("./account-archive-download.cjs");
 const {
   NativeHostClient,
+  NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   nativeHostBinaryPath,
 } = require("./native-host.cjs");
@@ -64,6 +65,7 @@ let accountArchiveQuitDrainPromise = null;
 let accountArchiveQuitDrainComplete = false;
 let nativeHostClient = null;
 let nativeSaveSessions = null;
+let nativeCoreSessions = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeHostState = {
@@ -156,7 +158,7 @@ function trustedSender(event) {
 
 function requireTrustedNativeSender(event) {
   if (!trustedSender(event)) throw new Error("原生性能服务调用来源无效");
-  if (!nativeHostClient || !nativeSaveSessions || !nativeHostState.available) throw new Error("Windows 原生性能服务不可用");
+  if (!nativeHostClient || !nativeSaveSessions || !nativeCoreSessions || !nativeHostState.available) throw new Error("Windows 原生性能服务不可用");
   return event.sender.id;
 }
 
@@ -176,6 +178,7 @@ async function initializeNativeHost() {
     nativeHostClient = new NativeHostClient({ binaryPath, rootPath });
     const hello = await nativeHostClient.start(app.getVersion());
     nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
+    nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
     nativeHostState = {
       available: true,
       state: "ready",
@@ -194,6 +197,7 @@ async function initializeNativeHost() {
     };
     nativeHostClient = null;
     nativeSaveSessions = null;
+    nativeCoreSessions = null;
   }
   return nativeHostState;
 }
@@ -423,6 +427,7 @@ function createWindow() {
   mainWindow.on("closed", () => {
     const ownerId = mainWindow?.webContents?.id;
     if (ownerId && nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
+    if (ownerId && nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
     cancelAllApiRequests();
     cancelAllAccountArchiveDownloads();
     mainWindow = null;
@@ -552,6 +557,31 @@ ipcMain.handle("desktop:native-save-compact", async (event, request) => {
     ? Math.max(2, Math.min(8, request.retainGenerations))
     : 2;
   return nativeHostClient.request({ operation: "compact", slot: request.slot, retainGenerations });
+});
+
+ipcMain.handle("desktop:native-core-open", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.open(ownerId, request);
+});
+
+ipcMain.handle("desktop:native-core-status", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.status(ownerId, request?.sessionId);
+});
+
+ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
+});
+
+ipcMain.handle("desktop:native-core-compare", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.compare(ownerId, request);
+});
+
+ipcMain.handle("desktop:native-core-close", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.close(ownerId, request?.sessionId);
 });
 
 ipcMain.handle("desktop:api-request", requestCloudApi);

@@ -1,5 +1,5 @@
 [workspace]
-members = ["dsp-native-host"]
+members = ["dsp-native-core", "dsp-native-host"]
 resolver = "2"
 
 [workspace.package]
@@ -12,8 +12,8 @@ anyhow = "1.0.99"
 crc32fast = "1.5.0"
 hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = { version = "1.0.145", features = ["float_roundtrip"] }
+ryu-js = "1.0.3"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
 zstd = "0.13.3"
-

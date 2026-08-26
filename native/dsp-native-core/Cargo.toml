@@ -1,5 +1,5 @@
 [package]
-name = "dsp-native-host"
+name = "dsp-native-core"
 version = "1.2.0"
 edition.workspace = true
 license.workspace = true
@@ -7,14 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-crc32fast.workspace = true
-dsp-native-core = { path = "../dsp-native-core" }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ryu-js.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-zstd.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"

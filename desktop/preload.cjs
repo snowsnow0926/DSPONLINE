@@ -13,6 +13,11 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   readNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-read", request),
   appendNativeWal: (request) => ipcRenderer.invoke("desktop:native-wal-append", request),
   compactNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-compact", request),
+  openNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-open", request),
+  getNativeCoreStatus: (request) => ipcRenderer.invoke("desktop:native-core-status", request),
+  applyNativeCoreCommand: (request) => ipcRenderer.invoke("desktop:native-core-apply-command", request),
+  compareNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-compare", request),
+  closeNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-close", request),
   requestApi: (request) => ipcRenderer.invoke("desktop:api-request", request),
   requestApiTransfer: (request, body) => new Promise((resolve, reject) => {
     if (!(body instanceof ArrayBuffer)) {

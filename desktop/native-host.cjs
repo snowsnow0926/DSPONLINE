@@ -286,6 +286,107 @@ class NativeSaveSessionRegistry {
   }
 }
 
+function normalizeNativeCoreOpen(value) {
+  if (!value || typeof value !== "object") throw new TypeError("native core open request is invalid");
+  if (!validLogicalId(value.slot, 64)) throw new TypeError("native core slot is invalid");
+  if (!Number.isSafeInteger(value.generation) || value.generation < 1) throw new TypeError("native core generation is invalid");
+  if (!Number.isSafeInteger(value.revision) || value.revision < 0) throw new TypeError("native core revision is invalid");
+  if (typeof value.rootHash !== "string" || !/^[a-f0-9]{64}$/.test(value.rootHash)) throw new TypeError("native core root hash is invalid");
+  if (!validLogicalId(value.registryFingerprint, 256)) throw new TypeError("native core registry fingerprint is invalid");
+  const catalog = value.catalog;
+  if (!catalog || typeof catalog !== "object" || catalog.protocolVersion !== 1 ||
+    catalog.registryFingerprint !== value.registryFingerprint || !Array.isArray(catalog.items) ||
+    !Array.isArray(catalog.buildings) || !Array.isArray(catalog.recipes) || !Array.isArray(catalog.belts)) {
+    throw new TypeError("native core catalog is invalid");
+  }
+  const entryCount = catalog.items.length + catalog.buildings.length + catalog.recipes.length + catalog.belts.length;
+  if (entryCount < 1 || entryCount > 65_536) throw new RangeError("native core catalog entry count is invalid");
+  const encodedBytes = Buffer.byteLength(JSON.stringify(catalog), "utf8");
+  if (encodedBytes > MAX_FRAME_PAYLOAD_BYTES - 16_384) throw new RangeError("native core catalog exceeds the bounded IPC limit");
+  return {
+    operation: "coreOpen",
+    slot: value.slot,
+    generation: value.generation,
+    rootHash: value.rootHash,
+    revision: value.revision,
+    registryFingerprint: value.registryFingerprint,
+    catalog,
+  };
+}
+
+function normalizeNativeCoreCommand(value) {
+  if (!value || typeof value !== "object" || value.protocolVersion !== 1 ||
+    !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0) {
+    throw new TypeError("native core command is invalid");
+  }
+  for (const key of ["topLevelChanges", "changedEntities", "addedEntities", "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds"]) {
+    if (!Array.isArray(value[key])) throw new TypeError(`native core command ${key} is invalid`);
+  }
+  const encodedBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (encodedBytes > MAX_FRAME_PAYLOAD_BYTES - 16_384) throw new RangeError("native core command exceeds the bounded IPC limit");
+  return value;
+}
+
+class NativeCoreSessionRegistry {
+  constructor(client) {
+    this.client = client;
+    this.sessions = new Map();
+  }
+
+  async open(ownerId, request) {
+    const value = await this.client.request(normalizeNativeCoreOpen(request));
+    if (!validLogicalId(value?.sessionId, 128) || this.sessions.has(value.sessionId) || value?.authority !== "shadow") {
+      throw new NativeHostError("native host returned an invalid core session", "NATIVE_PROTOCOL_INVALID");
+    }
+    this.sessions.set(value.sessionId, { ownerId, slot: request.slot });
+    return value;
+  }
+
+  status(ownerId, sessionId) {
+    this.assertOwner(ownerId, sessionId);
+    return this.client.request({ operation: "coreStatus", sessionId });
+  }
+
+  applyCommand(ownerId, sessionId, command) {
+    this.assertOwner(ownerId, sessionId);
+    return this.client.request({ operation: "coreApplyCommand", sessionId, command: normalizeNativeCoreCommand(command) });
+  }
+
+  compare(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!Number.isSafeInteger(request?.revision) || request.revision < 0 ||
+      typeof request?.canonicalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(request.canonicalSha256) ||
+      typeof request?.domainSha256 !== "string" || !/^[a-f0-9]{64}$/.test(request.domainSha256)) {
+      throw new TypeError("native core comparison request is invalid");
+    }
+    return this.client.request({
+      operation: "coreCompare",
+      sessionId: request.sessionId,
+      revision: request.revision,
+      canonicalSha256: request.canonicalSha256,
+      domainSha256: request.domainSha256,
+    });
+  }
+
+  async close(ownerId, sessionId) {
+    this.assertOwner(ownerId, sessionId);
+    this.sessions.delete(sessionId);
+    return this.client.request({ operation: "coreClose", sessionId });
+  }
+
+  async closeOwner(ownerId) {
+    const owned = [...this.sessions.entries()].filter(([, session]) => session.ownerId === ownerId);
+    await Promise.allSettled(owned.map(([sessionId]) => this.client.request({ operation: "coreClose", sessionId })));
+    for (const [sessionId] of owned) this.sessions.delete(sessionId);
+  }
+
+  assertOwner(ownerId, sessionId) {
+    if (!validLogicalId(sessionId, 128) || this.sessions.get(sessionId)?.ownerId !== ownerId) {
+      throw new NativeHostError("native core session is not owned by this renderer", "NATIVE_CORE_SESSION_INVALID");
+    }
+  }
+}
+
 module.exports = {
   CONTROL_REQUEST_KIND,
   CONTROL_RESPONSE_KIND,
@@ -295,11 +396,14 @@ module.exports = {
   MAX_FRAME_PAYLOAD_BYTES,
   NativeHostClient,
   NativeHostError,
+  NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   crc32,
   encodeFrame,
   nativeHostBinaryPath,
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
+  normalizeNativeCoreCommand,
+  normalizeNativeCoreOpen,
   parseFrames,
 };

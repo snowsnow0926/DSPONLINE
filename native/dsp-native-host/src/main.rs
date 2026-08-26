@@ -3,6 +3,7 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
+use dsp_native_host::core_runtime::CoreRegistry;
 use dsp_native_host::frame::{Frame, FrameKind, read_frame, write_frame};
 use dsp_native_host::protocol::{ControlRequest, ControlResponse, HelloResponse};
 use dsp_native_host::save_store::SaveStore;
@@ -39,7 +40,11 @@ fn parse_serve_root() -> anyhow::Result<PathBuf> {
     Ok(root)
 }
 
-fn handle_request(store: &mut SaveStore, request: ControlRequest) -> anyhow::Result<HostAction> {
+fn handle_request(
+    store: &mut SaveStore,
+    cores: &mut CoreRegistry,
+    request: ControlRequest,
+) -> anyhow::Result<HostAction> {
     let value = match request {
         ControlRequest::Hello { client_version } => {
             if client_version.is_empty() || client_version.len() > 64 {
@@ -55,6 +60,9 @@ fn handle_request(store: &mut SaveStore, request: ControlRequest) -> anyhow::Res
                     "content-addressed-chunks",
                     "contiguous-wal",
                     "compaction-v1",
+                    "native-core-state-v1",
+                    "native-core-shadow-v1",
+                    "native-core-command-v1",
                 ],
             })?
         }
@@ -119,7 +127,40 @@ fn handle_request(store: &mut SaveStore, request: ControlRequest) -> anyhow::Res
         } => {
             json!({ "removedGenerations": store.compact(&slot, retain_generations.unwrap_or(2))? })
         }
-        ControlRequest::Shutdown => return Ok(HostAction::Shutdown(json!({ "accepted": true }))),
+        ControlRequest::CoreOpen {
+            slot,
+            generation,
+            root_hash,
+            revision,
+            registry_fingerprint,
+            catalog,
+        } => to_value(cores.open(
+            store,
+            &slot,
+            generation,
+            &root_hash,
+            revision,
+            &registry_fingerprint,
+            catalog,
+        )?)?,
+        ControlRequest::CoreStatus { session_id } => to_value(cores.status(&session_id)?)?,
+        ControlRequest::CoreApplyCommand {
+            session_id,
+            command,
+        } => to_value(cores.apply_command(&session_id, &command)?)?,
+        ControlRequest::CoreCompare {
+            session_id,
+            revision,
+            canonical_sha256,
+            domain_sha256,
+        } => to_value(cores.compare(&session_id, revision, &canonical_sha256, &domain_sha256)?)?,
+        ControlRequest::CoreClose { session_id } => {
+            json!({ "closed": cores.close(&session_id)? })
+        }
+        ControlRequest::Shutdown => {
+            cores.close_all();
+            return Ok(HostAction::Shutdown(json!({ "accepted": true })));
+        }
     };
     Ok(HostAction::Continue(value))
 }
@@ -142,6 +183,7 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
 
 fn serve(root: PathBuf) -> anyhow::Result<()> {
     let mut store = SaveStore::open(root).context("open native save store")?;
+    let mut cores = CoreRegistry::default();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -153,7 +195,7 @@ fn serve(root: PathBuf) -> anyhow::Result<()> {
         let request = serde_json::from_slice::<ControlRequest>(&frame.payload)
             .context("decode native host request");
         let (payload, shutdown) = match request {
-            Ok(request) => response_bytes(handle_request(&mut store, request))?,
+            Ok(request) => response_bytes(handle_request(&mut store, &mut cores, request))?,
             Err(error) => response_bytes(Err(error))?,
         };
         write_frame(

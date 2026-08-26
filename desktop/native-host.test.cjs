@@ -5,11 +5,13 @@ const test = require("node:test");
 
 const {
   CONTROL_RESPONSE_KIND,
+  NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   crc32,
   encodeFrame,
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
+  normalizeNativeCoreOpen,
   parseFrames,
 } = require("./native-host.cjs");
 
@@ -75,6 +77,41 @@ test("session registry binds transactions to one renderer", async () => {
   assert.deepEqual(calls.map((call) => call.operation), ["saveBegin", "savePut", "saveCommit"]);
 });
 
+test("core registry validates bounded catalogs and binds shadow sessions to one renderer", async () => {
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  assert.equal(normalizeNativeCoreOpen({
+    slot: "normal-main",
+    generation: 1,
+    rootHash: "a".repeat(64),
+    revision: 1,
+    registryFingerprint: "builtin:test",
+    catalog,
+  }).operation, "coreOpen");
+  assert.throws(() => normalizeNativeCoreOpen({
+    slot: "../outside", generation: 1, rootHash: "a".repeat(64), revision: 1, registryFingerprint: "builtin:test", catalog,
+  }), /slot/);
+  const calls = [];
+  const client = { async request(request) {
+    calls.push(request);
+    if (request.operation === "coreOpen") return { sessionId: "core-1", authority: "shadow", summary: {} };
+    return { revision: 2 };
+  } };
+  const registry = new NativeCoreSessionRegistry(client);
+  await registry.open(7, { slot: "normal-main", generation: 1, rootHash: "a".repeat(64), revision: 1, registryFingerprint: "builtin:test", catalog });
+  assert.throws(() => registry.status(8, "core-1"), /not owned/);
+  await registry.status(7, "core-1");
+  await registry.close(7, "core-1");
+  assert.throws(() => registry.status(7, "core-1"), /not owned/);
+  assert.deepEqual(calls.map((call) => call.operation), ["coreOpen", "coreStatus", "coreClose"]);
+});
+
 test("mock child primitives remain compatible with client event expectations", () => {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
@@ -82,4 +119,3 @@ test("mock child primitives remain compatible with client event expectations", (
   child.stderr = new PassThrough();
   assert.equal(typeof child.stdout.on, "function");
 });
-

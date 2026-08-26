@@ -451,6 +451,34 @@ test.describe("real save canvas density acceptance", () => {
     expect(pageErrors).toEqual([]);
   });
 
+  test("a reused real-save stack marker keeps its latest interaction handler", async ({ page }) => {
+    test.setTimeout(180_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await importFixture(page);
+
+    const shell = page.locator(".game-shell");
+    const resume = page.getByLabel("继续模拟");
+    if (await resume.isVisible()) await resume.click();
+    await expect(shell).toHaveAttribute("data-simulation-paused", "false", { timeout: 30_000 });
+    await centerLargestCanvasStack(page);
+    const markerAction = page.locator(".factory-node-stack-marker__action").first();
+    await expect(markerAction).toBeVisible({ timeout: 60_000 });
+
+    // Let several simulation/canvas projections replace the surrounding
+    // array while this unchanged marker node is reused. Its stable proxy must
+    // still dispatch to the current FactoryGame interaction state.
+    await page.waitForTimeout(8_000);
+    await markerAction.click();
+    // Selecting one member can promote that member to a full card and assign
+    // the remaining overlap marker to a different leader ID. Assert the
+    // product outcome instead of requiring the old marker wrapper to survive.
+    await expect(page.locator(".react-flow__node.selected")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".game-notice").filter({ hasText: /已展开重叠建筑/ })).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
   test("selected and hovered real-save recipe cards stay painted above nearby nodes", async ({ page }) => {
     test.setTimeout(240_000);
     await page.setViewportSize({ width: 1440, height: 900 });

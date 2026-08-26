@@ -47,6 +47,7 @@ import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
 import { usePerformanceMonitor } from "./hooks/usePerformanceMonitor";
+import { useStableEventCallback } from "./hooks/useStableEventCallback";
 import { MobilePlacementBar, MobileSelectionContextBar, type MobileCanvasMode } from "./components/mobile/MobileFactoryPanels";
 import type { OperationsTab } from "./components/OperationsWorkspace";
 import type { StatisticsTab } from "./components/StatisticsWorkspace";
@@ -385,7 +386,7 @@ import { isDurableSimulationRuntimeEnabled } from "./game/runtimePersistenceMode
 import { getOnboardingFocusTarget, getOnboardingStep, recordBasicOnboardingEvent, type OnboardingActionId } from "./game/onboarding";
 import { accumulateSimulationBudget, NORMAL_SIMULATION_SLICE_SECONDS, takeSimulationBudgetSlice } from "./game/simulationBudget";
 import { evaluateMemoryGuard, isLargeMemoryWorkload, readBrowserMemorySnapshot, type MemoryAutoPauseThresholdMiB, type MemoryGuardDecision, type MemoryGuardPolicy, type MemoryWorkload } from "./game/memoryBudget";
-import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase } from "./game/runtimeTransitionDiagnostics";
+import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTaskDiagnostics, measureRuntimeTransitionPhase, recordActiveRuntimeTransitionPhase, recordRuntimeTransitionPhase, trackRuntimeRetentionReference } from "./game/runtimeTransitionDiagnostics";
 import {
   createTimeWarpComputeGovernor,
   forceTimeWarpApproximation,
@@ -1590,6 +1591,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }, isLargeRuntimeState(pending) ? 1_500 : 750);
   };
   const publishRuntimeGame = useCallback((next: GameState, immediate = false) => {
+    trackRuntimeRetentionReference("runtime-publication-state", next);
+    trackRuntimeRetentionReference("runtime-publication-entities", next.entities);
+    trackRuntimeRetentionReference("runtime-publication-belts", next.belts);
     if (deferredProjectionGameRef.current !== next) deferredProjectionGameRef.current = null;
     gameRef.current = next;
     latestCanvasGameRef.current = next;
@@ -2280,6 +2284,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     lastCanvasPublishedGameRef.current = state;
     canvasRenderSnapshotRef.current = result.snapshot;
     canvasSnapshotPublicationInFlightRef.current = result.snapshot;
+    trackRuntimeRetentionReference("canvas-snapshot", result.snapshot);
+    trackRuntimeRetentionReference("canvas-snapshot-game", result.snapshot.game);
+    trackRuntimeRetentionReference("canvas-snapshot-entities", result.snapshot.game.entities);
+    trackRuntimeRetentionReference("canvas-snapshot-belts", result.snapshot.game.belts);
     const publishStartedAt = performance.now();
     // As with the main projection, do not stack superseded concurrent renders
     // that each retain a complete large canvas snapshot.
@@ -5955,12 +5963,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           elapsedSeconds: event.data.deferredElapsedSeconds ?? null,
         });
       } else if (event.data.projection) {
+        trackRuntimeRetentionReference("projection-submission-state", submission.state);
+        trackRuntimeRetentionReference("projection-wire", event.data.projection);
         const applied = measureRuntimeTransitionPhase("worker-projection-apply", () =>
           applySimulationProjectionToState(submission.state, event.data.projection!, projectionIndex), {
           changedEntities: event.data.projection.changedEntityIds.length,
           changedBelts: event.data.projection.changedBeltIds.length,
         });
         confirmed = applied.state;
+        trackRuntimeRetentionReference("projection-result-state", confirmed);
+        trackRuntimeRetentionReference("projection-result-entities", confirmed.entities);
+        trackRuntimeRetentionReference("projection-result-belts", confirmed.belts);
         projectionIndex = applied.index;
         const canvasProjection = measureRuntimeTransitionPhase("worker-projection-hydrate", () =>
           hydrateSimulationProjection(event.data.projection!, confirmed, projectionIndex), {
@@ -5968,6 +5981,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           changedBelts: event.data.projection.changedBeltIds.length,
         });
         pendingCanvasProjectionRef.current = mergeSimulationProjections(pendingCanvasProjectionRef.current, canvasProjection);
+        trackRuntimeRetentionReference("projection-hydrated", canvasProjection);
+        trackRuntimeRetentionReference("projection-hydrated-entity-sample", canvasProjection.changedEntities[0]);
+        trackRuntimeRetentionReference("projection-hydrated-belt-sample", canvasProjection.changedBelts[0]);
         if (typeof event.data.stateRevision === "number") simulationStateRevisionRef.current = event.data.stateRevision;
       } else if (!event.data.commandApplied) {
         simulationPendingSecondsRef.current += submission.simulationSeconds;
@@ -9048,6 +9064,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else setMobilePanel("inspector");
     setNotice(`已展开重叠建筑 ${memberIds.indexOf(targetId) + 1}/${memberIds.length}`);
   }, [mobileNavigation, nextMobileShell]);
+  const changeCanvasEntityInteractionLock = useCallback((entityId: string, locked: boolean) => {
+    commitGame((current) => setEntitiesInteractionLocked(current, [entityId], locked));
+    setNotice(locked ? "建筑已锁定" : "建筑已解锁");
+  }, [commitGame]);
+
+  // Node records are intentionally reused for unchanged buildings. Never put
+  // an ordinary FactoryGame render closure in those long-lived records: V8's
+  // shared render context would let one reused node retain its entire previous
+  // 8k-node canvas generation. These hook-scoped proxies have stable identity
+  // and route interactions to the latest handlers through a single ref.
+  const stableOnMiningStart = useStableEventCallback(onMiningStart);
+  const stableOnMiningStop = useStableEventCallback(onMiningStop);
+  const stableOnPickOutput = useStableEventCallback(onPickOutput);
+  const stableOnPickInput = useStableEventCallback(onPickInput);
+  const stableOnDropCargo = useStableEventCallback(onDropCargo);
+  const stableOnDropDraggedItem = useStableEventCallback(onDropDraggedItem);
+  const stableOnInstallMiner = useStableEventCallback(onInstallMiner);
+  const stableOnAddBuilding = useStableEventCallback(onAddBuilding);
+  const stableOnRecipeChange = useStableEventCallback(onRecipeChange);
+  const stableOnFuelChange = useStableEventCallback(onFuelChange);
+  const stableOnEnergyModeChange = useStableEventCallback(onEnergyModeChange);
+  const stableOnInteractionLockChange = useStableEventCallback(changeCanvasEntityInteractionLock);
+  const stableOnStackActivate = useStableEventCallback(activateCanvasStack);
 
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
@@ -9058,22 +9097,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       placement,
       placementCount,
       miningEntityId,
-      onMiningStart,
-      onMiningStop,
-      onPickOutput,
-      onPickInput,
-      onDropCargo,
-      onDropDraggedItem,
-      onInstallMiner,
-      onAddBuilding,
-      onRecipeChange,
-      onFuelChange,
-      onEnergyModeChange,
-      onInteractionLockChange: (entityId: string, locked: boolean) => {
-        commitGame((current) => setEntitiesInteractionLocked(current, [entityId], locked));
-        setNotice(locked ? "建筑已锁定" : "建筑已解锁");
-      },
-      onStackActivate: activateCanvasStack,
+      onMiningStart: stableOnMiningStart,
+      onMiningStop: stableOnMiningStop,
+      onPickOutput: stableOnPickOutput,
+      onPickInput: stableOnPickInput,
+      onDropCargo: stableOnDropCargo,
+      onDropDraggedItem: stableOnDropDraggedItem,
+      onInstallMiner: stableOnInstallMiner,
+      onAddBuilding: stableOnAddBuilding,
+      onRecipeChange: stableOnRecipeChange,
+      onFuelChange: stableOnFuelChange,
+      onEnergyModeChange: stableOnEnergyModeChange,
+      onInteractionLockChange: stableOnInteractionLockChange,
+      onStackActivate: stableOnStackActivate,
       researchLabel: technology?.name ?? null,
       researchCosts: technology?.costs.filter((cost) => (progress[cost.itemId] ?? 0) < cost.amount) ?? [],
       completedTechIds: canvasGame.research.completedTechIds,
@@ -9089,7 +9125,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [activateCanvasStack, beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, commitGame, extremeVisualsActive, miningEntityId, onAddBuilding, onDropCargo, onDropDraggedItem, onEnergyModeChange, onFuelChange, onInstallMiner, onMiningStart, onMiningStop, onPickInput, onPickOutput, onRecipeChange, placement, placementCount]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, miningEntityId, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
     canvasGame.activePlanetId,
@@ -9151,6 +9187,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       canvasNodeCommitStartedAtRef.current = derivationStartedAt;
       const setNodesStartedAt = derivationStartedAt;
       setNodes((current) => {
+        trackRuntimeRetentionReference("reactflow-current-nodes", current);
         const nodeMapStartedAt = performance.now();
         const existing = new Map(current.map((node) => [node.id, node]));
         let stableNodeCount = 0;
@@ -9522,6 +9559,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             domAttributes: hiddenWrapperAttributes,
           } satisfies FactoryFlowNode;
         });
+        trackRuntimeRetentionReference("reactflow-next-nodes", next);
+        trackRuntimeRetentionReference("reactflow-next-node-entity-sample", next[0]?.data.entity);
         const derivationMs = performance.now() - derivationStartedAt;
         const changedNodeCount = next.reduce((count, node, index) => count + (node === current[index] ? 0 : 1), 0);
         const canvasElement = factoryCanvasRef.current;
@@ -11662,7 +11701,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ? EMPTY_FACTORY_FLOW_NODES
     : canvasFlowFullyDeferred ? canvasFitRecoveryNodes : viewportFlowNodes;
   const renderedFlowEdges = pureIdleActive || canvasFlowFullyDeferred ? EMPTY_FACTORY_FLOW_EDGES : edges;
-
   if (!initialSimulationWorkerReady) {
     return <main className="game-shell game-shell--runtime-loading" data-simulation-worker="initializing">
       <div className="workspace-loading" role="status"><i /><span>正在验证工厂运行时</span></div>

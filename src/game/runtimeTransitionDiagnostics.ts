@@ -15,13 +15,30 @@ export interface RuntimeTransitionDiagnosticState {
   counters?: Record<string, { count: number; totalMs: number; maxMs: number }>;
 }
 
+export interface RuntimeRetentionDiagnosticEntry {
+  sequence: number;
+  reference: WeakRef<object>;
+}
+
+export interface RuntimeRetentionDiagnosticGroup {
+  totalTracked: number;
+  entries: RuntimeRetentionDiagnosticEntry[];
+}
+
+export interface RuntimeRetentionDiagnosticState {
+  nextSequence: number;
+  groups: Record<string, RuntimeRetentionDiagnosticGroup>;
+}
+
 declare global {
   interface Window {
     __DSP_RUNTIME_TRANSITIONS__?: RuntimeTransitionDiagnosticState;
+    __DSP_RUNTIME_RETENTION__?: RuntimeRetentionDiagnosticState;
   }
 }
 
 const MAX_EVENTS = 500;
+const MAX_RETENTION_REFERENCES_PER_GROUP = 1_024;
 
 function state(): RuntimeTransitionDiagnosticState | null {
   if (typeof window === "undefined") return null;
@@ -44,6 +61,32 @@ function addCounter(
 
 export function runtimeTransitionDiagnosticsEnabled(): boolean {
   return state() !== null;
+}
+
+/**
+ * Retains only WeakRefs and is therefore safe for finding which runtime
+ * generations survive a forced GC. Production sessions never allocate the
+ * tracker because transition diagnostics are disabled there.
+ */
+export function trackRuntimeRetentionReference(label: string, value: object | null | undefined): void {
+  if (!value || !state() || typeof WeakRef === "undefined") return;
+  const diagnostics = window.__DSP_RUNTIME_RETENTION__ ??= { nextSequence: 1, groups: {} };
+  const group = diagnostics.groups[label] ??= { totalTracked: 0, entries: [] };
+  group.totalTracked += 1;
+  const sequence = diagnostics.nextSequence;
+  try {
+    if (!("__dspRetentionDiagnostic" in value)) {
+      Object.defineProperty(value, "__dspRetentionDiagnostic", {
+        value: { label, sequence },
+        configurable: true,
+      });
+    }
+  } catch { /* optional heap-snapshot marker */ }
+  group.entries.push({ sequence, reference: new WeakRef(value) });
+  diagnostics.nextSequence += 1;
+  if (group.entries.length > MAX_RETENTION_REFERENCES_PER_GROUP) {
+    group.entries.splice(0, group.entries.length - MAX_RETENTION_REFERENCES_PER_GROUP);
+  }
 }
 
 export function beginRuntimeTransition(transition: RuntimeTransitionName): void {

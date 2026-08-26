@@ -5,6 +5,7 @@ import {
   measureRuntimeTransitionPhase,
   recordActiveRuntimeTransitionPhase,
   recordRuntimeTransitionPhase,
+  trackRuntimeRetentionReference,
   type RuntimeTransitionDiagnosticState,
 } from "./runtimeTransitionDiagnostics";
 
@@ -58,5 +59,17 @@ describe("runtime transition diagnostics", () => {
     expect(diagnostics.events[0].phase).toBe("phase-5");
     expect(diagnostics.counters?.["phase-0"]).toMatchObject({ count: 1, totalMs: 0, maxMs: 0 });
     expect(diagnostics.counters?.["phase-504"]).toMatchObject({ count: 1, totalMs: 504, maxMs: 504 });
+  });
+
+  it("tracks diagnostic generations through weak references", () => {
+    const diagnostics: RuntimeTransitionDiagnosticState = { enabled: true, events: [], active: {} };
+    const diagnosticWindow: Pick<Window, "__DSP_RUNTIME_TRANSITIONS__" | "__DSP_RUNTIME_RETENTION__"> = {
+      __DSP_RUNTIME_TRANSITIONS__: diagnostics,
+    };
+    Object.defineProperty(globalThis, "window", { configurable: true, value: diagnosticWindow });
+    const target = {};
+    trackRuntimeRetentionReference("projection", target);
+    expect(diagnosticWindow.__DSP_RUNTIME_RETENTION__?.groups.projection.totalTracked).toBe(1);
+    expect(diagnosticWindow.__DSP_RUNTIME_RETENTION__?.groups.projection.entries[0].reference.deref()).toBe(target);
   });
 });

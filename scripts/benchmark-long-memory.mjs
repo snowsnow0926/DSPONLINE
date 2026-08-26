@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -32,6 +32,7 @@ const operationEverySeconds = Math.max(5, Number(args.get("operation-every") ?? 
 const operationRounds = Math.max(1, Math.min(100, Math.floor(Number(args.get("operation-rounds") ?? 20))));
 const checkpointEverySeconds = Math.max(0, Number(args.get("checkpoint-every") ?? 60));
 const heapProfileEnabled = args.get("heap-profile") === "true";
+const heapSnapshotEnabled = args.get("heap-snapshot") === "true";
 const scenario = args.get("scenario") ?? "pure";
 const autoPauseArgument = args.get("auto-pause");
 const requestedAutoPause = autoPauseArgument === undefined ? null : autoPauseArgument !== "false";
@@ -485,6 +486,23 @@ try {
   await cdp.send("HeapProfiler.collectGarbage").catch(() => undefined);
   await delay(500);
   await sample("post-gc");
+  let heapSnapshotPath = null;
+  if (heapSnapshotEnabled) {
+    heapSnapshotPath = `${outputPath}.heapsnapshot`;
+    await mkdir(dirname(heapSnapshotPath), { recursive: true });
+    const snapshotStream = createWriteStream(heapSnapshotPath, { encoding: "utf8" });
+    const onSnapshotChunk = ({ chunk }) => snapshotStream.write(chunk);
+    cdp.on("HeapProfiler.addHeapSnapshotChunk", onSnapshotChunk);
+    try {
+      await cdp.send("HeapProfiler.takeHeapSnapshot", { reportProgress: false, captureNumericValue: true });
+    } finally {
+      cdp.off("HeapProfiler.addHeapSnapshotChunk", onSnapshotChunk);
+      await new Promise((resolveSnapshot, rejectSnapshot) => {
+        snapshotStream.on("error", rejectSnapshot);
+        snapshotStream.end(resolveSnapshot);
+      });
+    }
+  }
   const heapSamplingProfile = heapProfileEnabled
     ? await cdp.send("HeapProfiler.stopSampling").then((result) => summarizeHeapSamplingProfile(result.profile)).catch(() => [])
     : [];
@@ -515,6 +533,7 @@ try {
   const steadyStateMemorySeries = sampledMemorySeries.filter((entry) => entry.elapsedSeconds >= steadyStateStartSeconds);
   const finalState = await page.evaluate(() => {
     const diagnostics = globalThis.__DSP_RUNTIME_TRANSITIONS__;
+    const retentionDiagnostics = globalThis.__DSP_RUNTIME_RETENTION__;
     const phaseStats = {};
     for (const event of diagnostics?.events ?? []) {
       const current = phaseStats[event.phase] ?? { count: 0, totalMs: 0, maxMs: 0 };
@@ -533,6 +552,20 @@ try {
         counters: diagnostics?.counters ?? {},
         phaseStats,
       },
+      runtimeRetention: Object.fromEntries(Object.entries(retentionDiagnostics?.groups ?? {}).map(([label, group]) => {
+        const alive = group.entries.flatMap((entry) => {
+          const value = entry.reference.deref();
+          return value ? [{ sequence: entry.sequence, value }] : [];
+        });
+        return [label, {
+          totalTracked: group.totalTracked,
+          retainedWindow: group.entries.length,
+          aliveReferences: alive.length,
+          aliveDistinctObjects: new Set(alive.map((entry) => entry.value)).size,
+          oldestAliveSequence: alive[0]?.sequence ?? null,
+          newestAliveSequence: alive.at(-1)?.sequence ?? null,
+        }];
+      })),
       serviceWorkerControlled: Boolean(navigator.serviceWorker?.controller),
       memoryGuard: {
         autoPauseEnabled: localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1") !== "false",
@@ -567,6 +600,8 @@ try {
     operationRounds,
     requestedAutoPause,
     heapProfileEnabled,
+    heapSnapshotEnabled,
+    heapSnapshotPath,
     startedAt: new Date(startedAt).toISOString(),
     completedAt: new Date().toISOString(),
     pageErrors,

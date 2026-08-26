@@ -150,7 +150,14 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     catalog: {
       protocolVersion: 1,
       registryFingerprint: "builtin:test",
-      planets: [{ id: "home", systemId: "helios" }],
+      planets: [{
+        id: "home",
+        systemId: "helios",
+        kind: "terrestrial",
+        orbitIndex: 1,
+        simulationOrder: 0,
+        orbitalYields: {},
+      }],
       items: [{ id: "iron_ore", kind: "solid" }],
       buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
       recipes: [],

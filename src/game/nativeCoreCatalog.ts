@@ -28,11 +28,12 @@ export function createNativeCoreCatalog(
   return {
     protocolVersion: 1,
     registryFingerprint: runtime.fingerprint,
-    planets: byId(PLANET_LIST.map((planet) => ({
+    planets: byId(PLANET_LIST.map((planet, simulationOrder) => ({
       id: planet.id,
       systemId: planet.systemId,
       kind: planet.kind,
       orbitIndex: planet.orbitIndex,
+      simulationOrder,
       orbitalYields: { ...planet.orbitalYields },
     }))),
     items: byId(Object.values(ITEMS).map((item) => ({

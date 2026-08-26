@@ -190,10 +190,6 @@ fn empty_array(value: Option<&Value>) -> bool {
     value.and_then(Value::as_array).is_some_and(Vec::is_empty)
 }
 
-fn empty_object(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_object).is_some_and(Map::is_empty)
-}
-
 fn grid_index(entity: &Map<String, Value>) -> Option<usize> {
     let id = string_at(entity, "powerGridId").unwrap_or("grid-a");
     GRID_IDS.iter().position(|candidate| *candidate == id)
@@ -413,25 +409,30 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     {
         return Some("time-warp-active");
     }
-    if !empty_object(base.get("systemSpaceStations")) {
+    if base
+        .get("systemSpaceStations")
+        .and_then(Value::as_object)
+        .is_some_and(|stations| {
+            stations.values().any(|station| {
+                station
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_none_or(|status| status != "not-started")
+            })
+        })
+    {
         return Some("system-space-station-active");
     }
     let endgame = base.get("endgame");
     if endgame
         .and_then(Value::as_object)
-        .and_then(|value| value.get("constructionActivity"))
+        .and_then(|value| value.get("exportProjects"))
         .and_then(Value::as_object)
-        .and_then(|value| value.get("activityId"))
-        .is_some_and(|value| !value.is_null())
-        || endgame
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("exportProjects"))
-            .and_then(Value::as_object)
-            .is_some_and(|projects| {
-                projects
-                    .values()
-                    .any(|project| bool_at(Some(project), &["enabled"]))
-            })
+        .is_some_and(|projects| {
+            projects
+                .values()
+                .any(|project| bool_at(Some(project), &["enabled"]))
+        })
     {
         return Some("endgame-activity-active");
     }
@@ -542,7 +543,10 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let Some(building) = state.catalog.buildings.get(building_id) else {
                     return Ok(Some("simple-factory-machine-building-missing"));
                 };
-                if matches!(building_id, "construction_center" | "time_warp_device") {
+                if matches!(
+                    building_id,
+                    "construction_center" | "time_warp_device" | "micro_black_hole_connector"
+                ) {
                     if building.kind != "machine" {
                         return Ok(Some("simple-factory-machine-feature-unsupported"));
                     }
@@ -1968,6 +1972,144 @@ fn transfer_logistics_buffers(
     Ok(())
 }
 
+fn material_delivery_items(state: &CoreState, entity: &Map<String, Value>) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut append = |item_id: &str| {
+        if state.catalog.items.contains_key(item_id) && !items.iter().any(|id| id == item_id) {
+            items.push(item_id.to_owned());
+        }
+    };
+    let mut used_slots = false;
+    if let Some(slots) = entity.get("deliverySlots").and_then(Value::as_array) {
+        used_slots = true;
+        for slot in slots.iter().take(3).filter_map(Value::as_object) {
+            if string_at(slot, "mode") == Some("disabled") {
+                continue;
+            }
+            if let Some(item_id) = string_at(slot, "itemId") {
+                append(item_id);
+            }
+        }
+    }
+    if !used_slots {
+        if let Some(legacy) = entity.get("deliveryItemIds").and_then(Value::as_array) {
+            for item_id in legacy.iter().filter_map(Value::as_str).take(3) {
+                append(item_id);
+            }
+        }
+    }
+    items
+}
+
+fn drain_material_delivery_hubs(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+) -> anyhow::Result<()> {
+    let active_planet_id = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    for entity_index in 0..entities.len() {
+        let Some(entity) = entities[entity_index].as_object() else {
+            continue;
+        };
+        if string_at(entity, "buildingId") != Some("material_delivery_hub") {
+            continue;
+        }
+        let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
+        let items = material_delivery_items(state, entity);
+        let amounts = items
+            .iter()
+            .map(|item_id| {
+                (
+                    item_id.clone(),
+                    (item_amount(entity, "inputs", item_id) + EPSILON)
+                        .floor()
+                        .max(0.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut moved_by_item = Vec::with_capacity(amounts.len());
+        let mut delivered = 0.0;
+        for (item_id, amount) in amounts {
+            if amount < 1.0 {
+                moved_by_item.push((item_id, 0.0));
+                continue;
+            }
+            if matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel") {
+                let fleet = base
+                    .get_mut("portableFleet")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| anyhow!("native portable fleet state is missing"))?;
+                let current = finite_number(fleet.get(&item_id));
+                set_number(fleet, &item_id, (current + amount + EPSILON).floor())?;
+                delivered += amount;
+                moved_by_item.push((item_id, amount));
+                continue;
+            }
+            let limit = base
+                .get("planetTrayItemLimits")
+                .and_then(Value::as_object)
+                .and_then(|limits| limits.get(&planet_id))
+                .map(|value| {
+                    finite_number(Some(value))
+                        .floor()
+                        .clamp(1_000.0, 100_000_000.0)
+                })
+                .unwrap_or(1_000_000.0);
+            let tray = if planet_id == active_planet_id {
+                base.get_mut("tray")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| anyhow!("native active tray is missing"))?
+            } else {
+                let planet_trays = base
+                    .get_mut("planetTrays")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| anyhow!("native planet trays are missing"))?;
+                planet_trays
+                    .entry(planet_id.clone())
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("native planet tray is invalid"))?
+            };
+            let current = finite_number(tray.get(&item_id)).floor();
+            let moved = amount.min((limit - current).max(0.0));
+            if moved > 0.0 {
+                set_number(tray, &item_id, (current + moved + EPSILON).floor())?;
+            }
+            delivered += moved;
+            moved_by_item.push((item_id, moved));
+        }
+        let object = entity_object(&mut entities[entity_index])?;
+        for (item_id, moved) in moved_by_item {
+            if moved <= 0.0 {
+                continue;
+            }
+            let current = item_amount(object, "inputs", &item_id);
+            set_item_amount(object, "inputs", &item_id, (current - moved).max(0.0))?;
+        }
+        set_number(
+            object,
+            "utilization",
+            if delivered > 0.0 { 1.0 } else { 0.0 },
+        )?;
+        set_number(
+            object,
+            "productionRate",
+            if seconds > EPSILON {
+                rounded(delivered * 60.0 / seconds, 2)
+            } else {
+                0.0
+            },
+        )?;
+        set_number(object, "progress", if delivered > 0.0 { 1.0 } else { 0.0 })?;
+    }
+    Ok(())
+}
+
 fn prepare_inactive_time_warp(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -2019,6 +2161,20 @@ fn simulate_step(
     belts: &mut [Value],
     seconds: f64,
 ) -> anyhow::Result<()> {
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let mut profile_checkpoint = std::time::Instant::now();
+    macro_rules! profile_mark {
+        ($label:literal) => {
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\t{}\t{:.3}",
+                    $label,
+                    profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                );
+                profile_checkpoint = std::time::Instant::now();
+            }
+        };
+    }
     let elapsed_before_step = finite_number(base.get("elapsedSeconds"));
     let projected_elapsed = rounded(elapsed_before_step + seconds, 4);
     let first_quantum_boundary = (elapsed_before_step / 5.0).floor() as u64 + 1;
@@ -2047,8 +2203,11 @@ fn simulate_step(
     transfer_logistics_buffers(state, base, entities)?;
     crate::local_logistics::transfer_buffers(state, base, entities)?;
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
+    profile_mark!("prefix-and-logistics-buffers");
     crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
+    profile_mark!("belt-input-transfer");
     let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
+    profile_mark!("belt-reservation");
     crate::interstellar_logistics::run_orbital_collectors(
         state,
         base,
@@ -2056,7 +2215,9 @@ fn simulate_step(
         seconds,
         &belt_reservation.output_credits,
     )?;
+    drain_material_delivery_hubs(state, base, entities, seconds)?;
     let reception = crate::dyson::calculate_reception(state, base, entities)?;
+    profile_mark!("collectors-delivery-and-reception");
     let planet_ids = state
         .catalog
         .planets
@@ -2236,11 +2397,14 @@ fn simulate_step(
             _ => runtime.wind_generation_kw += output,
         }
     }
+    profile_mark!("power-source-index");
 
     let mut ready_stations = crate::local_logistics::ready_station_indices(state, base, entities)?;
+    profile_mark!("local-ready-stations");
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
         state, base, entities,
     )?);
+    profile_mark!("interstellar-ready-stations");
     ready_stations.extend(entities.iter().enumerate().filter_map(|(index, entity)| {
         let entity = entity.as_object()?;
         (string_at(entity, "kind") == Some("station")
@@ -2342,6 +2506,7 @@ fn simulate_step(
             }
         }
     }
+    profile_mark!("power-demand-index");
 
     for (entity_index, entity) in entities.iter().enumerate() {
         let object = entity
@@ -2353,7 +2518,10 @@ fn simulate_step(
         let building_id = string_at(object, "buildingId").unwrap_or_default();
         if matches!(
             building_id,
-            "construction_center" | "time_warp_device" | "ray_receiver"
+            "construction_center"
+                | "time_warp_device"
+                | "ray_receiver"
+                | "micro_black_hole_connector"
         ) {
             continue;
         }
@@ -2511,7 +2679,12 @@ fn simulate_step(
         }
         if matches!(
             string_at(object, "buildingId"),
-            Some("construction_center" | "time_warp_device" | "ray_receiver")
+            Some(
+                "construction_center"
+                    | "time_warp_device"
+                    | "ray_receiver"
+                    | "micro_black_hole_connector"
+            )
         ) {
             continue;
         }
@@ -2683,7 +2856,10 @@ fn simulate_step(
                 .to_owned();
             if matches!(
                 building_id.as_str(),
-                "construction_center" | "time_warp_device" | "ray_receiver"
+                "construction_center"
+                    | "time_warp_device"
+                    | "ray_receiver"
+                    | "micro_black_hole_connector"
             ) {
                 continue;
             }
@@ -3026,6 +3202,7 @@ fn simulate_step(
         &belt_reservation.output_credits,
         &reception,
     )?;
+    profile_mark!("power-production-construction");
 
     if !produced_by_item.is_empty() {
         let total = base
@@ -3067,6 +3244,7 @@ fn simulate_step(
     } else {
         None
     };
+    profile_mark!("quantum-download");
 
     crate::belts::transfer(
         state,
@@ -3078,6 +3256,8 @@ fn simulate_step(
         Some(&belt_reservation.allowance_by_belt),
         seconds,
     )?;
+    drain_material_delivery_hubs(state, base, entities, seconds)?;
+    profile_mark!("belt-output-transfer");
 
     let station_powers = entities
         .iter()
@@ -3103,20 +3283,29 @@ fn simulate_step(
         .collect::<HashMap<_, _>>();
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::dispatch(state, base, entities, &station_powers)?;
+    profile_mark!("local-dispatch");
     crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
+    profile_mark!("interstellar-dispatch");
     crate::local_logistics::advance_routes(state, base, entities, seconds, &station_powers)?;
+    profile_mark!("local-route-advance");
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
+    profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::update_congestion(entities)?;
+    profile_mark!("local-congestion");
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
+    profile_mark!("interstellar-congestion");
     crate::dyson::finalize(base)?;
-    let receiver_load_kw = reception
-        .allocation_by_entity
-        .values()
-        .copied()
-        .sum::<f64>();
+    profile_mark!("logistics-dispatch-and-routes");
     if let Some(swarm) = base.get_mut("dysonSwarm").and_then(Value::as_object_mut) {
-        set_number(swarm, "receiverLoadKw", rounded(receiver_load_kw, 2))?;
+        // Keep the entity-order accumulation performed by calculate_reception.
+        // Summing the HashMap here changed the IEEE-754 result by one ULP for
+        // very large factories and diverged from JavaScript's insertion order.
+        set_number(
+            swarm,
+            "receiverLoadKw",
+            rounded(reception.receiver_load_kw, 2),
+        )?;
     }
 
     let mut power_grid_metrics = Map::new();
@@ -3210,6 +3399,8 @@ fn simulate_step(
             set_number(endgame, "exportWindowStartedAt", elapsed)?;
         }
     }
+    profile_mark!("metrics-and-global-finalize");
+    let _ = profile_checkpoint.elapsed();
     Ok(())
 }
 

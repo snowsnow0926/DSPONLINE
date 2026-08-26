@@ -31,6 +31,7 @@ pub(crate) struct Reception {
     pub allocation_by_entity: HashMap<String, f64>,
     pub efficiency_by_entity: HashMap<String, f64>,
     pub ray_power_by_entity: HashMap<String, f64>,
+    pub receiver_load_kw: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -852,6 +853,7 @@ pub(crate) fn calculate_reception(
         }
         receiver_load += allocation;
     }
+    result.receiver_load_kw = receiver_load;
     base.get_mut("dysonSwarm")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("native Dyson swarm is missing"))?

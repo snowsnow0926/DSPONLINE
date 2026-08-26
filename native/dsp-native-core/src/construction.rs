@@ -202,6 +202,46 @@ fn quantum_buffer<'a>(
         .and_then(Value::as_object)
 }
 
+fn entity_grid_id(entity: &Map<String, Value>) -> &str {
+    string_at(entity, "powerGridId").unwrap_or("grid-a")
+}
+
+/// A construction center with no possible producer on its planet/grid is an
+/// exact dormant domain: both authorities only clear its runtime power and
+/// activity fields, without parsing, planning or consuming its saved job.
+/// Keep this proof deliberately conservative. A potential ray receiver or any
+/// power entity makes the domain active even when it currently lacks fuel.
+fn all_centers_provably_unpowered(state: &CoreState) -> anyhow::Result<bool> {
+    let entities = (0..state.entity_index.len())
+        .map(|index| state.parse_entity(index))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let center_grids = entities
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
+        .map(|entity| {
+            (
+                string_at(entity, "planetId").unwrap_or_default().to_owned(),
+                entity_grid_id(entity).to_owned(),
+            )
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if center_grids.is_empty() {
+        return Ok(false);
+    }
+    let has_possible_source = entities.iter().filter_map(Value::as_object).any(|entity| {
+        let key = (
+            string_at(entity, "planetId").unwrap_or_default().to_owned(),
+            entity_grid_id(entity).to_owned(),
+        );
+        center_grids.contains(&key)
+            && (string_at(entity, "kind") == Some("power")
+                || (string_at(entity, "buildingId") == Some("ray_receiver")
+                    && string_at(entity, "recipeId") == Some("ray_power")))
+    });
+    Ok(!has_possible_source)
+}
+
 fn current_stock(base: &Map<String, Value>, construction_id: &str) -> f64 {
     base.get("construction")
         .and_then(Value::as_object)
@@ -772,6 +812,15 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     }) {
         return Ok(Some("construction-quantum-buffer-unsupported"));
     }
+    if all_centers_provably_unpowered(state)? {
+        if jobs
+            .iter()
+            .any(|(entity_id, job)| !entity_ids.contains(entity_id) || job.as_object().is_none())
+        {
+            return Ok(Some("construction-job-invalid"));
+        }
+        return Ok(None);
+    }
     for (entity_id, job) in jobs {
         if !entity_ids.contains(entity_id) {
             return Ok(Some("construction-job-center-missing"));
@@ -791,6 +840,45 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             return Ok(Some("construction-job-invalid"));
         };
         let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+        let Some(current_step_value) = steps.get(step_index) else {
+            return Ok(Some("construction-job-invalid"));
+        };
+        let current_step = match parse_step(current_step_value) {
+            Ok(step) => step,
+            Err(_) => return Ok(Some("construction-step-invalid")),
+        };
+        let current_requirements = match requirements(state, &current_step) {
+            Ok(requirements) => requirements,
+            Err(_) => return Ok(Some("construction-step-invalid")),
+        };
+        let inventory = job
+            .get("inventory")
+            .and_then(Value::as_object)
+            .expect("validated construction inventory");
+        let empty = Map::new();
+        let buffer = buffers
+            .and_then(|buffers| buffers.get(entity_id))
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let planet_id = (0..state.entity_index.len())
+            .find_map(|index| {
+                let entity = state.parse_entity(index).ok()?;
+                let entity = entity.as_object()?;
+                (string_at(entity, "id") == Some(entity_id.as_str()))
+                    .then(|| string_at(entity, "planetId").unwrap_or_default().to_owned())
+            })
+            .unwrap_or_default();
+        let empty_tray = Map::new();
+        let planet_tray = tray(base, &planet_id).unwrap_or(&empty_tray);
+        // A persisted multi-step job that cannot start its current step is an
+        // exact dormant domain for this advance. Quantum direct delivery is
+        // settled after construction, so it can only make the *next* advance
+        // active; admission is re-evaluated then. This lets real blocked WIP
+        // remain native-owned without pretending the unported excess/planner
+        // branches are already authoritative.
+        if !requirements_available(inventory, planet_tray, buffer, &current_requirements) {
+            continue;
+        }
         if steps.len() != 1 || step_index != 0 {
             return Ok(Some("construction-step-unsupported"));
         }
@@ -815,10 +903,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 )
             })
             .collect::<HashMap<_, _>>();
-        let inventory = job
-            .get("inventory")
-            .and_then(Value::as_object)
-            .expect("validated construction inventory");
         if inventory.iter().any(|(item_id, amount)| {
             floor_amount(finite_number(Some(amount)))
                 > required_by_item
@@ -828,21 +912,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         }) {
             return Ok(Some("construction-job-excess-unsupported"));
         }
-        let empty = Map::new();
-        let buffer = buffers
-            .and_then(|buffers| buffers.get(entity_id))
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
-        let planet_id = (0..state.entity_index.len())
-            .find_map(|index| {
-                let entity = state.parse_entity(index).ok()?;
-                let entity = entity.as_object()?;
-                (string_at(entity, "id") == Some(entity_id.as_str()))
-                    .then(|| string_at(entity, "planetId").unwrap_or_default().to_owned())
-            })
-            .unwrap_or_default();
-        let empty_tray = Map::new();
-        let planet_tray = tray(base, &planet_id).unwrap_or(&empty_tray);
         if buffer.iter().any(|(item_id, amount)| {
             let required = required_by_item
                 .get(item_id.as_str())
@@ -855,18 +924,22 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             return Ok(Some("construction-quantum-excess-unsupported"));
         }
     }
-    if automation
-        .get("targetStock")
-        .and_then(Value::as_object)
-        .is_some_and(|targets| {
-            targets.iter().any(|(construction_id, target)| {
-                let target = floor_amount(finite_number(Some(target)));
-                !state.catalog.constructions.contains_key(construction_id)
-                    || target
-                        > current_stock(base, construction_id)
-                            + pending_stock(state, automation, construction_id)
+    let has_idle_center = entity_ids
+        .iter()
+        .any(|entity_id| !jobs.contains_key(entity_id));
+    if has_idle_center
+        && automation
+            .get("targetStock")
+            .and_then(Value::as_object)
+            .is_some_and(|targets| {
+                targets.iter().any(|(construction_id, target)| {
+                    let target = floor_amount(finite_number(Some(target)));
+                    !state.catalog.constructions.contains_key(construction_id)
+                        || target
+                            > current_stock(base, construction_id)
+                                + pending_stock(state, automation, construction_id)
+                })
             })
-        })
     {
         return Ok(Some("construction-planning-unsupported"));
     }

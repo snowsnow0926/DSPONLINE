@@ -187,7 +187,7 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
         }
         Err(error) => {
             let response =
-                ControlResponse::<Value>::failure("NATIVE_OPERATION_FAILED", error.to_string());
+                ControlResponse::<Value>::failure("NATIVE_OPERATION_FAILED", format!("{error:#}"));
             Ok((serde_json::to_vec(&response)?, false))
         }
     }

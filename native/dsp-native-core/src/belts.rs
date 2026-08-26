@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, anyhow, bail};
+use num_bigint::BigUint;
 use serde_json::{Map, Number, Value};
 
 use crate::state::CoreState;
@@ -21,6 +22,7 @@ struct Route {
     source_id: String,
     target_id: String,
     item_id: String,
+    target_port_index: Option<u8>,
     capacity: f64,
     priority: usize,
 }
@@ -38,6 +40,7 @@ struct Group {
     source_index: usize,
     item_id: String,
     available: f64,
+    source_had_output: bool,
     candidates: Vec<Candidate>,
     balanced_splitter: bool,
 }
@@ -140,6 +143,97 @@ fn add_input(entity: &mut Map<String, Value>, item_id: &str, amount: f64) -> any
     Ok(())
 }
 
+fn black_hole_active(target: &Map<String, Value>) -> bool {
+    string_at(target, "buildingId") == Some("micro_black_hole_connector")
+        && target.get("blackHolePaused").and_then(Value::as_bool) == Some(false)
+        && target
+            .get("blackHoleActivationConfirmed")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+fn material_delivery_slot_accepts(
+    target: &Map<String, Value>,
+    item_id: &str,
+    port_index: Option<u8>,
+) -> bool {
+    let Some(index) = port_index.filter(|index| *index <= 2).map(usize::from) else {
+        return false;
+    };
+    if let Some(slots) = target.get("deliverySlots").and_then(Value::as_array) {
+        let Some(slot) = slots.get(index).and_then(Value::as_object) else {
+            return false;
+        };
+        if string_at(slot, "mode") == Some("disabled") {
+            return false;
+        }
+        return string_at(slot, "itemId").is_none_or(|configured| configured == item_id);
+    }
+    target
+        .get("deliveryItemIds")
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(index))
+        .and_then(Value::as_str)
+        .is_some_and(|configured| configured == item_id)
+}
+
+fn black_hole_port_mut(
+    target: &mut Map<String, Value>,
+    port_index: Option<u8>,
+) -> Option<&mut Map<String, Value>> {
+    let index = u64::from(port_index?);
+    target
+        .get_mut("blackHolePorts")
+        .and_then(Value::as_array_mut)?
+        .iter_mut()
+        .filter_map(Value::as_object_mut)
+        .find(|port| port.get("index").and_then(Value::as_u64) == Some(index))
+}
+
+fn add_black_hole_destroyed(
+    target: &mut Map<String, Value>,
+    port_index: Option<u8>,
+    item_id: &str,
+    amount: f64,
+) -> anyhow::Result<bool> {
+    if !black_hole_active(target) {
+        return Ok(false);
+    }
+    let Some(port) = black_hole_port_mut(target, port_index) else {
+        return Ok(false);
+    };
+    let current = port
+        .get("totalDestroyed")
+        .and_then(Value::as_str)
+        .and_then(|value| BigUint::parse_bytes(value.as_bytes(), 10))
+        .unwrap_or_default();
+    let moved = amount.floor().max(0.0) as u64;
+    port.insert("currentItemId".to_owned(), Value::from(item_id));
+    port.insert(
+        "totalDestroyed".to_owned(),
+        Value::from((current + BigUint::from(moved)).to_string()),
+    );
+    Ok(true)
+}
+
+fn target_key(route: &Route, target: &Map<String, Value>) -> String {
+    if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
+        format!(
+            "black-hole:{}:{}",
+            route.target_id,
+            route.target_port_index.map_or(-1_i16, i16::from)
+        )
+    } else if string_at(target, "buildingId") == Some("material_delivery_hub") {
+        format!(
+            "tray:{}:{}",
+            string_at(target, "planetId").unwrap_or_default(),
+            route.item_id
+        )
+    } else {
+        format!("{}:{}", route.target_id, route.item_id)
+    }
+}
+
 fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str) -> bool {
     match string_at(source, "kind") {
         Some("vein") => string_at(source, "resourceId") == Some(item_id),
@@ -166,8 +260,34 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
 }
 
 fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str) -> bool {
+    if matches!(
+        string_at(target, "buildingId"),
+        Some("micro_black_hole_connector" | "material_delivery_hub")
+    ) {
+        return state.catalog.items.contains_key(item_id);
+    }
     match string_at(target, "kind") {
         Some("machine" | "power") => {
+            let accepts_proliferator = target
+                .get("sprayCoaterInstalled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && target
+                    .get("proliferatorTier")
+                    .and_then(Value::as_u64)
+                    .and_then(|tier| u8::try_from(tier).ok())
+                    .and_then(|tier| state.catalog.proliferators.get(&tier))
+                    .is_some_and(|definition| definition.item_id == item_id);
+            let accepts_research_matrix = string_at(target, "recipeId") == Some("matrix_research")
+                && matches!(
+                    item_id,
+                    "electromagnetic_matrix"
+                        | "energy_matrix"
+                        | "structure_matrix"
+                        | "information_matrix"
+                        | "gravity_matrix"
+                        | "universe_matrix"
+                );
             let accepts_fuel = string_at(target, "buildingId")
                 .and_then(|id| state.catalog.buildings.get(id))
                 .is_some_and(|building| {
@@ -176,6 +296,8 @@ fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str
                             .is_none_or(|selected| selected == item_id)
                 });
             accepts_fuel
+                || accepts_proliferator
+                || accepts_research_matrix
                 || string_at(target, "recipeId")
                     .and_then(|id| state.catalog.recipes.get(id))
                     .is_some_and(|recipe| {
@@ -219,9 +341,71 @@ fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str
 fn target_capacity(
     state: &CoreState,
     base: &Map<String, Value>,
+    entities: &[Value],
     target: &Map<String, Value>,
     item_id: &str,
+    target_port_index: Option<u8>,
 ) -> anyhow::Result<f64> {
+    if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
+        let port_exists = target
+            .get("blackHolePorts")
+            .and_then(Value::as_array)
+            .is_some_and(|ports| {
+                ports.iter().filter_map(Value::as_object).any(|port| {
+                    port.get("index").and_then(Value::as_u64) == target_port_index.map(u64::from)
+                })
+            });
+        return Ok(if black_hole_active(target) && port_exists {
+            9_007_199_254_740_991.0
+        } else {
+            0.0
+        });
+    }
+    if string_at(target, "buildingId") == Some("material_delivery_hub") {
+        if !material_delivery_slot_accepts(target, item_id, target_port_index) {
+            return Ok(0.0);
+        }
+        if matches!(item_id, "logistics_drone" | "logistics_vessel") {
+            return Ok(9_007_199_254_740_991.0);
+        }
+        let planet_id = string_at(target, "planetId").unwrap_or_default();
+        let active_planet_id = base
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let tray = if planet_id == active_planet_id {
+            base.get("tray").and_then(Value::as_object)
+        } else {
+            base.get("planetTrays")
+                .and_then(Value::as_object)
+                .and_then(|trays| trays.get(planet_id))
+                .and_then(Value::as_object)
+        };
+        let current = tray
+            .and_then(|tray| tray.get(item_id))
+            .map(|value| finite_number(Some(value)).floor())
+            .unwrap_or(0.0);
+        let limit = base
+            .get("planetTrayItemLimits")
+            .and_then(Value::as_object)
+            .and_then(|limits| limits.get(planet_id))
+            .map(|value| {
+                finite_number(Some(value))
+                    .floor()
+                    .clamp(1_000.0, 100_000_000.0)
+            })
+            .unwrap_or(1_000_000.0);
+        let pending = entities
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|entity| {
+                string_at(entity, "planetId") == Some(planet_id)
+                    && string_at(entity, "buildingId") == Some("material_delivery_hub")
+            })
+            .map(|entity| input_amount(entity, item_id).floor().max(0.0))
+            .sum::<f64>();
+        return Ok((limit - current - pending).max(0.0));
+    }
     if let Some(capacity) =
         crate::quantum_logistics::supply_free_capacity(state, base, target, item_id)?
     {
@@ -252,6 +436,28 @@ fn target_capacity(
         finite_number(target.get("machineCount")),
         limit,
     );
+    if target
+        .get("sprayCoaterInstalled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && target
+            .get("proliferatorTier")
+            .and_then(Value::as_u64)
+            .and_then(|tier| u8::try_from(tier).ok())
+            .and_then(|tier| state.catalog.proliferators.get(&tier))
+            .is_some_and(|definition| definition.item_id == item_id)
+    {
+        let proliferator_limit = base
+            .get("settings")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("proliferatorBufferLimit"))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .unwrap_or(600.0)
+            .floor()
+            .clamp(1.0, 100_000_000.0);
+        capacity = capacity.min(proliferator_limit);
+    }
     if string_at(target, "kind") == Some("station") {
         if let Some(max_stock) = target
             .get("stationSlots")
@@ -313,8 +519,16 @@ fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Res
                 .get(&tier)
                 .copied()
                 .ok_or_else(|| anyhow!("native belt tier is not in the catalog"))?;
-            let lanes = finite_number(belt.get("lanes")).floor();
+            let lanes = belt
+                .get("lanes")
+                .map(|value| finite_number(Some(value)))
+                .unwrap_or(1.0)
+                .floor();
             let stack_size = finite_number(belt.get("stackSize")).max(1.0).floor();
+            let target_port_index = belt
+                .get("targetPortIndex")
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok());
             Ok(Route {
                 belt_index,
                 source_index,
@@ -322,6 +536,7 @@ fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Res
                 source_id,
                 target_id,
                 item_id,
+                target_port_index,
                 capacity: speed * lanes * stack_size,
                 priority: belt
                     .get("priority")
@@ -358,11 +573,8 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             return Ok(Some("ordinary-belt-record-invalid"));
         };
         if belt
-            .get("targetPortIndex")
+            .get("elevatorOutputIndex")
             .is_some_and(|value| !value.is_null())
-            || belt
-                .get("elevatorOutputIndex")
-                .is_some_and(|value| !value.is_null())
         {
             return Ok(Some("ordinary-belt-special-port-unsupported"));
         }
@@ -389,6 +601,34 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         let target = entities[target_index]
             .as_object()
             .expect("validated entity");
+        let target_port_index = belt
+            .get("targetPortIndex")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok());
+        if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
+            let valid_port = target_port_index.is_some_and(|index| index <= 2)
+                && target
+                    .get("blackHolePorts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ports| {
+                        ports.iter().filter_map(Value::as_object).any(|port| {
+                            port.get("index").and_then(Value::as_u64)
+                                == target_port_index.map(u64::from)
+                        })
+                    });
+            if !valid_port {
+                return Ok(Some("black-hole-belt-port-invalid"));
+            }
+        } else if string_at(target, "buildingId") == Some("material_delivery_hub") {
+            if !material_delivery_slot_accepts(target, item_id, target_port_index) {
+                return Ok(Some("material-delivery-belt-port-invalid"));
+            }
+        } else if belt
+            .get("targetPortIndex")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(Some("ordinary-belt-special-port-unsupported"));
+        }
         let planet = string_at(belt, "planetId");
         if planet != string_at(source, "planetId") || planet != string_at(target, "planetId") {
             return Ok(Some("ordinary-belt-planet-invalid"));
@@ -400,7 +640,10 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             .get("tier")
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok());
-        let lanes = finite_number(belt.get("lanes"));
+        let lanes = belt
+            .get("lanes")
+            .map(|value| finite_number(Some(value)))
+            .unwrap_or(1.0);
         let stack_size = belt
             .get("stackSize")
             .map_or(1.0, |value| finite_number(Some(value)));
@@ -469,10 +712,15 @@ pub(crate) fn transfer(
             let source = entities[route.source_index]
                 .as_object()
                 .expect("validated source");
+            let source_had_output = source
+                .get("outputs")
+                .and_then(Value::as_object)
+                .is_some_and(|outputs| outputs.contains_key(&route.item_id));
             groups.push(Group {
                 source_index: route.source_index,
                 item_id: route.item_id.clone(),
                 available: (output_amount(source, &route.item_id) + EPSILON).floor(),
+                source_had_output,
                 candidates: Vec::new(),
                 balanced_splitter: string_at(source, "kind") == Some("splitter")
                     && string_at(source, "distributionMode") != Some("priority"),
@@ -485,16 +733,23 @@ pub(crate) fn transfer(
             }
             continue;
         }
-        let target_key = format!("{}:{}", route.target_id, route.item_id);
+        let target = entities[route.target_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+        let target_key = target_key(route, target);
         if !target_free.contains_key(&target_key) {
-            let target = entities[route.target_index]
-                .as_object()
-                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
             target_free.insert(
                 target_key.clone(),
-                target_capacity(state, base, target, &route.item_id)?
-                    .floor()
-                    .max(0.0),
+                target_capacity(
+                    state,
+                    base,
+                    entities,
+                    target,
+                    &route.item_id,
+                    route.target_port_index,
+                )?
+                .floor()
+                .max(0.0),
             );
         }
         if target_free.get(&target_key).copied().unwrap_or(0.0) < 1.0 {
@@ -574,20 +829,32 @@ pub(crate) fn transfer(
                     let target = entities[route.target_index]
                         .as_object_mut()
                         .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-                    let moved =
-                        if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
-                            crate::quantum_logistics::receive_supply_material(
-                                state,
-                                base,
-                                quantum_bandwidth,
-                                target,
-                                &route.item_id,
-                                requested,
-                            )?
-                        } else {
-                            add_input(target, &route.item_id, requested)?;
+                    let moved = if string_at(target, "buildingId")
+                        == Some("micro_black_hole_connector")
+                    {
+                        if add_black_hole_destroyed(
+                            target,
+                            route.target_port_index,
+                            &route.item_id,
+                            requested,
+                        )? {
                             requested
-                        };
+                        } else {
+                            0.0
+                        }
+                    } else if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
+                        crate::quantum_logistics::receive_supply_material(
+                            state,
+                            base,
+                            quantum_bandwidth,
+                            target,
+                            &route.item_id,
+                            requested,
+                        )?
+                    } else {
+                        add_input(target, &route.item_id, requested)?;
+                        requested
+                    };
                     if moved <= 0.0 {
                         continue;
                     }
@@ -657,20 +924,32 @@ pub(crate) fn transfer(
                     let target = entities[route.target_index]
                         .as_object_mut()
                         .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-                    let moved =
-                        if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
-                            crate::quantum_logistics::receive_supply_material(
-                                state,
-                                base,
-                                quantum_bandwidth,
-                                target,
-                                &route.item_id,
-                                requested,
-                            )?
-                        } else {
-                            add_input(target, &route.item_id, requested)?;
+                    let moved = if string_at(target, "buildingId")
+                        == Some("micro_black_hole_connector")
+                    {
+                        if add_black_hole_destroyed(
+                            target,
+                            route.target_port_index,
+                            &route.item_id,
+                            requested,
+                        )? {
                             requested
-                        };
+                        } else {
+                            0.0
+                        }
+                    } else if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
+                        crate::quantum_logistics::receive_supply_material(
+                            state,
+                            base,
+                            quantum_bandwidth,
+                            target,
+                            &route.item_id,
+                            requested,
+                        )?
+                    } else {
+                        add_input(target, &route.item_id, requested)?;
+                        requested
+                    };
                     if moved <= 0.0 {
                         continue;
                     }
@@ -699,13 +978,19 @@ pub(crate) fn transfer(
             }
         }
 
-        set_output(
-            entities[group.source_index]
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-            &group.item_id,
-            available,
-        )?;
+        // The JS active-route queue does not materialize a missing output key
+        // when a completely idle source has no cargo. Preserve that sparse
+        // object shape; once a key existed (including a positive source that
+        // was drained to zero), it must still be written back.
+        if group.source_had_output || group.available > 0.0 {
+            set_output(
+                entities[group.source_index]
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                &group.item_id,
+                available,
+            )?;
+        }
         for candidate in &group.candidates {
             let route = &routes[candidate.route_index];
             let free = target_free
@@ -793,16 +1078,23 @@ pub(crate) fn reserve(
         if allowance < 1.0 {
             continue;
         }
-        let key = format!("{}:{}", route.target_id, route.item_id);
+        let target = entities[route.target_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+        let key = target_key(route, target);
         if !target_free.contains_key(&key) {
-            let target = entities[route.target_index]
-                .as_object()
-                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
             target_free.insert(
                 key.clone(),
-                target_capacity(state, base, target, &route.item_id)?
-                    .floor()
-                    .max(0.0),
+                target_capacity(
+                    state,
+                    base,
+                    entities,
+                    target,
+                    &route.item_id,
+                    route.target_port_index,
+                )?
+                .floor()
+                .max(0.0),
             );
         }
         let free = target_free.get(&key).copied().unwrap_or(0.0);

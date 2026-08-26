@@ -30,8 +30,12 @@ pub struct ItemDefinition {
 pub struct PlanetDefinition {
     pub id: String,
     pub system_id: String,
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub orbit_index: u16,
+    #[serde(default)]
+    pub simulation_order: u16,
     #[serde(default)]
     pub orbital_yields: HashMap<String, f64>,
 }

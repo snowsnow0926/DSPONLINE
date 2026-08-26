@@ -1149,7 +1149,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 }) || station
                     .get("stationRoutes")
                     .and_then(Value::as_array)
-                    .is_none_or(|routes| !routes.is_empty())
+                    .is_some_and(|routes| !routes.is_empty())
                     || planet(state, station)
                         .is_none_or(|planet| !system_unlocked(base, &planet.system_id))
                 {

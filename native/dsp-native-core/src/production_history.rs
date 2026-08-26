@@ -53,12 +53,13 @@ fn clone_object(value: Option<&Value>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn metric_sum(base: &Map<String, Value>, key: &str) -> f64 {
+fn metric_sum(base: &Map<String, Value>, planet_ids: &[String], key: &str) -> f64 {
     base.get("planetMetrics")
         .and_then(Value::as_object)
         .map(|metrics| {
-            metrics
-                .values()
+            planet_ids
+                .iter()
+                .filter_map(|planet_id| metrics.get(planet_id))
                 .filter_map(Value::as_object)
                 .filter_map(|metric| finite_number(metric.get(key)))
                 .sum()
@@ -66,12 +67,13 @@ fn metric_sum(base: &Map<String, Value>, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn delivered_power(base: &Map<String, Value>) -> f64 {
+fn delivered_power(base: &Map<String, Value>, planet_ids: &[String]) -> f64 {
     base.get("planetMetrics")
         .and_then(Value::as_object)
         .map(|metrics| {
-            metrics
-                .values()
+            planet_ids
+                .iter()
+                .filter_map(|planet_id| metrics.get(planet_id))
                 .filter_map(Value::as_object)
                 .map(|metric| {
                     finite_number(metric.get("demandKw")).unwrap_or(0.0)
@@ -309,6 +311,16 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
 
 impl CoreState {
     pub(crate) fn record_production_history(&mut self) -> anyhow::Result<()> {
+        let mut ordered_planets = self.catalog.planets.iter().collect::<Vec<_>>();
+        ordered_planets.sort_by(|left, right| {
+            left.simulation_order
+                .cmp(&right.simulation_order)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let planet_ids = ordered_planets
+            .into_iter()
+            .map(|planet| planet.id.clone())
+            .collect::<Vec<_>>();
         let entities = (0..self.entity_index.len())
             .map(|index| self.parse_entity(index))
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -423,9 +435,9 @@ impl CoreState {
                 previous.and_then(|sample| sample.get("inventory")),
             ))
         };
-        let generation = metric_sum(base, "generationKw");
-        let demand = metric_sum(base, "demandKw");
-        let delivered = delivered_power(base);
+        let generation = metric_sum(base, &planet_ids, "generationKw");
+        let demand = metric_sum(base, &planet_ids, "demandKw");
+        let delivered = delivered_power(base, &planet_ids);
         let previous_number =
             |key: &str| previous.and_then(|sample| finite_number(sample.get(key)));
         let mut production = BTreeMap::<String, f64>::new();
@@ -552,7 +564,11 @@ impl CoreState {
         let power_source_grids = entities
             .iter()
             .filter_map(Value::as_object)
-            .filter(|entity| entity.get("kind").and_then(Value::as_str) == Some("power"))
+            .filter(|entity| {
+                entity.get("kind").and_then(Value::as_str) == Some("power")
+                    || entity.get("buildingId").and_then(Value::as_str) == Some("ray_receiver")
+                        && entity.get("recipeId").and_then(Value::as_str) == Some("ray_power")
+            })
             .map(|entity| {
                 format!(
                     "{}|{}",
@@ -572,6 +588,11 @@ impl CoreState {
             .filter(|entity| {
                 if entity.get("kind").and_then(Value::as_str) == Some("machine") {
                     if entity.get("buildingId").and_then(Value::as_str) == Some("time_warp_device")
+                    {
+                        return false;
+                    }
+                    if entity.get("buildingId").and_then(Value::as_str)
+                        == Some("micro_black_hole_connector")
                     {
                         return false;
                     }

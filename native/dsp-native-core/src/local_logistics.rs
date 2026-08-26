@@ -28,6 +28,8 @@ struct Ledger {
     reserved: HashMap<(usize, String), f64>,
     in_flight: HashMap<(usize, String), f64>,
     active_vehicle_load: HashMap<usize, f64>,
+    active_local_stations: HashSet<usize>,
+    active_local_progress: HashMap<usize, f64>,
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -158,6 +160,69 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
                 .and_then(|object| (string_at(object, "kind") == Some("station")).then_some(index))
         })
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct LocalPeerDirectory {
+    station_indices: Vec<usize>,
+    by_key: HashMap<(String, String, String), Vec<(usize, usize)>>,
+}
+
+fn build_peer_directory(entities: &[Value]) -> anyhow::Result<LocalPeerDirectory> {
+    let station_indices = station_indices(entities);
+    let mut by_key = HashMap::<(String, String, String), Vec<(usize, usize)>>::new();
+    for &station_index in &station_indices {
+        let station = entities[station_index].as_object().expect("station object");
+        if !matches!(
+            string_at(station, "buildingId"),
+            Some("planetary_logistics_station" | "interstellar_logistics_station")
+        ) {
+            continue;
+        }
+        let planet_id = string_at(station, "planetId").unwrap_or_default();
+        for (slot_index, slot) in slots(station)?.iter().enumerate() {
+            let Some(item_id) = slot.item_id.as_deref() else {
+                continue;
+            };
+            if slot.local_mode == "storage" {
+                continue;
+            }
+            by_key
+                .entry((
+                    planet_id.to_owned(),
+                    item_id.to_owned(),
+                    slot.local_mode.clone(),
+                ))
+                .or_default()
+                .push((station_index, slot_index));
+        }
+    }
+    for matches in by_key.values_mut() {
+        matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
+            let left = entities[*left_index].as_object().expect("station object");
+            let right = entities[*right_index].as_object().expect("station object");
+            let left_priority = slots(left)
+                .ok()
+                .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
+                .unwrap_or(1);
+            let right_priority = slots(right)
+                .ok()
+                .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
+                .unwrap_or(1);
+            right_priority
+                .cmp(&left_priority)
+                .then_with(|| {
+                    string_at(left, "id")
+                        .unwrap_or_default()
+                        .cmp(string_at(right, "id").unwrap_or_default())
+                })
+                .then_with(|| left_slot.cmp(right_slot))
+        });
+    }
+    Ok(LocalPeerDirectory {
+        station_indices,
+        by_key,
+    })
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -322,6 +387,15 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
             }
             for station_index in active_stations {
                 *ledger.active_vehicle_load.entry(station_index).or_default() += vehicles;
+                if scope == "local" {
+                    ledger.active_local_stations.insert(station_index);
+                    let progress = finite_number(route.get("progress"));
+                    let current = ledger
+                        .active_local_progress
+                        .entry(station_index)
+                        .or_default();
+                    *current = current.max(progress);
+                }
             }
         }
     }
@@ -329,6 +403,7 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
 }
 
 fn peer_matches(
+    directory: &LocalPeerDirectory,
     entities: &[Value],
     station_index: usize,
     slot_index: usize,
@@ -351,79 +426,19 @@ fn peer_matches(
     } else {
         "supply"
     };
-    let planet_id = string_at(station, "planetId");
-    let mut matches = Vec::new();
-    for peer_index in station_indices(entities) {
-        if peer_index == station_index {
-            continue;
-        }
-        let peer = entities[peer_index].as_object().expect("station object");
-        if !matches!(
-            string_at(peer, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) || string_at(peer, "planetId") != planet_id
-        {
-            continue;
-        }
-        for (peer_slot_index, peer_slot) in slots(peer)?.iter().enumerate() {
-            if peer_slot.item_id.as_deref() == Some(item_id) && peer_slot.local_mode == opposite {
-                matches.push((peer_index, peer_slot_index));
-            }
-        }
-    }
-    matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
-        let left = entities[*left_index].as_object().expect("station object");
-        let right = entities[*right_index].as_object().expect("station object");
-        let left_priority = slots(left)
-            .ok()
-            .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
-            .unwrap_or(1);
-        let right_priority = slots(right)
-            .ok()
-            .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
-            .unwrap_or(1);
-        right_priority
-            .cmp(&left_priority)
-            .then_with(|| {
-                string_at(left, "id")
-                    .unwrap_or_default()
-                    .cmp(string_at(right, "id").unwrap_or_default())
-            })
-            .then_with(|| left_slot.cmp(right_slot))
-    });
-    Ok(matches)
-}
-
-fn route_active_for_station(
-    entities: &[Value],
-    indexes: &HashMap<String, usize>,
-    station_index: usize,
-) -> bool {
-    entities.iter().enumerate().any(|(demand_index, value)| {
-        let Some(demand) = value.as_object() else {
-            return false;
-        };
-        demand
-            .get("stationRoutes")
-            .and_then(Value::as_array)
-            .is_some_and(|routes| {
-                routes.iter().filter_map(Value::as_object).any(|route| {
-                    if string_at(route, "scope") != Some("local") {
-                        return false;
-                    }
-                    let supply = string_at(route, "peerId")
-                        .and_then(|id| indexes.get(id))
-                        .copied();
-                    let owner = indexes
-                        .get(route_owner_id(demand, route))
-                        .copied()
-                        .unwrap_or(demand_index);
-                    demand_index == station_index
-                        || supply == Some(station_index)
-                        || owner == station_index
-                })
-            })
-    })
+    let planet_id = string_at(station, "planetId").unwrap_or_default();
+    Ok(directory
+        .by_key
+        .get(&(
+            planet_id.to_owned(),
+            item_id.to_owned(),
+            opposite.to_owned(),
+        ))
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|(peer_index, _)| *peer_index != station_index)
+        .collect())
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -541,10 +556,11 @@ pub(crate) fn ready_station_indices(
     base: &Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<HashSet<usize>> {
+    let directory = build_peer_directory(entities)?;
     let indexes = entity_index(entities);
     let ledger = build_ledger(entities, &indexes);
     let mut ready = HashSet::new();
-    for station_index in station_indices(entities) {
+    for &station_index in &directory.station_indices {
         let station = entities[station_index].as_object().expect("station object");
         if !matches!(
             string_at(station, "buildingId"),
@@ -552,7 +568,7 @@ pub(crate) fn ready_station_indices(
         ) {
             continue;
         }
-        if route_active_for_station(entities, &indexes, station_index) {
+        if ledger.active_local_stations.contains(&station_index) {
             ready.insert(station_index);
             continue;
         }
@@ -564,7 +580,8 @@ pub(crate) fn ready_station_indices(
             if slot.local_mode == "storage" {
                 continue;
             }
-            for (peer_index, peer_slot_index) in peer_matches(entities, station_index, slot_index)?
+            for (peer_index, peer_slot_index) in
+                peer_matches(&directory, entities, station_index, slot_index)?
             {
                 let peer = entities[peer_index].as_object().expect("station object");
                 let peer_slots = slots(peer)?;
@@ -641,9 +658,10 @@ pub(crate) fn dispatch(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
+    let directory = build_peer_directory(entities)?;
     let indexes = entity_index(entities);
     let mut ledger = build_ledger(entities, &indexes);
-    for demand_index in station_indices(entities) {
+    for &demand_index in &directory.station_indices {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local demand station is invalid"))?
@@ -683,7 +701,7 @@ pub(crate) fn dispatch(
                 .and_then(|values| values.get(&fairness_key))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let mut matches = peer_matches(entities, demand_index, *slot_index)?;
+            let mut matches = peer_matches(&directory, entities, demand_index, *slot_index)?;
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
@@ -826,11 +844,19 @@ pub(crate) fn dispatch(
                         "warpersPerVessel": 0,
                         "vehicleStationId": owner_id,
                     });
-                    entities[demand_index]
+                    let demand_routes = entities[demand_index]
                         .as_object_mut()
-                        .and_then(|entity| entity.get_mut("stationRoutes"))
+                        .ok_or_else(|| anyhow!("native local demand station is invalid"))?;
+                    if !demand_routes
+                        .get("stationRoutes")
+                        .is_some_and(Value::is_array)
+                    {
+                        demand_routes.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+                    }
+                    demand_routes
+                        .get_mut("stationRoutes")
                         .and_then(Value::as_array_mut)
-                        .ok_or_else(|| anyhow!("native local demand routes are missing"))?
+                        .expect("initialized local demand routes")
                         .push(route);
                     *ledger.busy.entry(owner_index).or_default() += dispatchable;
                     *ledger
@@ -894,12 +920,14 @@ pub(crate) fn advance_routes(
             .as_object()
             .ok_or_else(|| anyhow!("native local demand is invalid"))?
             .clone();
-        let routes = entities[demand_index]
+        let Some(routes) = entities[demand_index]
             .as_object_mut()
             .and_then(|demand| demand.get_mut("stationRoutes"))
             .and_then(Value::as_array_mut)
             .map(std::mem::take)
-            .ok_or_else(|| anyhow!("native local demand routes are missing"))?;
+        else {
+            continue;
+        };
         let mut remaining = Vec::new();
         let mut completed_cargo = 0.0;
         for mut route_value in routes {
@@ -1013,10 +1041,11 @@ pub(crate) fn advance_routes(
 }
 
 pub(crate) fn update_congestion(entities: &mut [Value]) -> anyhow::Result<()> {
+    let directory = build_peer_directory(entities)?;
     let indexes = entity_index(entities);
     let ledger = build_ledger(entities, &indexes);
     let snapshots = entities.to_vec();
-    for station_index in station_indices(&snapshots) {
+    for &station_index in &directory.station_indices {
         let station = snapshots[station_index]
             .as_object()
             .expect("station object");
@@ -1031,7 +1060,7 @@ pub(crate) fn update_congestion(entities: &mut [Value]) -> anyhow::Result<()> {
         for (slot_index, slot) in station_slots.iter().enumerate() {
             if slot.item_id.is_some()
                 && slot.local_mode == "demand"
-                && !peer_matches(&snapshots, station_index, slot_index)?.is_empty()
+                && !peer_matches(&directory, &snapshots, station_index, slot_index)?.is_empty()
             {
                 waiting += 1.0;
             }
@@ -1052,37 +1081,11 @@ pub(crate) fn update_congestion(entities: &mut [Value]) -> anyhow::Result<()> {
                 0.0
             })
             .clamp(0.0, 1.0);
-        let mut active_progress = 0.0_f64;
-        for (demand_index, demand) in snapshots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
-        {
-            for route in demand
-                .get("stationRoutes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                if string_at(route, "scope") != Some("local") {
-                    continue;
-                }
-                let supply = string_at(route, "peerId")
-                    .and_then(|id| indexes.get(id))
-                    .copied();
-                let owner = indexes
-                    .get(route_owner_id(demand, route))
-                    .copied()
-                    .unwrap_or(demand_index);
-                if demand_index == station_index
-                    || supply == Some(station_index)
-                    || owner == station_index
-                {
-                    active_progress = active_progress.max(finite_number(route.get("progress")));
-                }
-            }
-        }
+        let active_progress = ledger
+            .active_local_progress
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0);
         let target = entities[station_index]
             .as_object_mut()
             .expect("station object");

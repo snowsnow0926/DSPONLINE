@@ -966,6 +966,7 @@ mod tests {
                     system_id: "helios".into(),
                     kind: "terrestrial".into(),
                     orbit_index: 1,
+                    simulation_order: 0,
                     orbital_yields: HashMap::new(),
                 }],
                 items: vec![ItemDefinition {

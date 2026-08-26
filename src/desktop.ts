@@ -182,6 +182,8 @@ export interface DesktopNativeCorePlanetDefinition {
   systemId: string;
   kind: "terrestrial" | "gas-giant";
   orbitIndex: number;
+  /** Stable PLANET_LIST position used for JavaScript-equivalent float folds. */
+  simulationOrder: number;
   orbitalYields: Record<string, number>;
 }
 

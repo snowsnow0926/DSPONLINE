@@ -250,6 +250,30 @@ impl CoreState {
         let mut next = self.clone();
         if simple_factory_reason.is_none() {
             crate::simple_factory::advance(&mut next, simulation_seconds)?;
+            if wall_seconds > EPSILON {
+                let base = next.base_value_mut();
+                if let Some(activity) = base
+                    .get_mut("endgame")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|endgame| endgame.get_mut("constructionActivity"))
+                    .and_then(Value::as_object_mut)
+                {
+                    let activity_id = activity
+                        .get("activityId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if !activity_id.is_empty() {
+                        let clock = activity
+                            .get("activityClockMs")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0);
+                        activity.insert(
+                            "activityClockMs".to_owned(),
+                            Value::from((clock + wall_seconds * 1_000.0).floor().max(0.0)),
+                        );
+                    }
+                }
+            }
             next.record_production_history()?;
             next.revision += 1;
             let summary = next.summary()?;

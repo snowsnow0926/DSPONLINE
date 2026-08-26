@@ -42,6 +42,7 @@ export function createNativeCoreCatalog(
       powerDemandKw: building.powerDemandKw ?? 0,
       powerGenerationKw: building.powerGenerationKw ?? 0,
       ...(building.family ? { family: building.family } : {}),
+      ...(building.accepts ? { accepts: building.accepts } : {}),
     }))),
     recipes: byId(Object.values(RECIPES).map((recipe) => ({
       id: recipe.id,

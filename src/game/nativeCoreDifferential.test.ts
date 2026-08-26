@@ -183,13 +183,24 @@ function simpleMiningState(): GameState {
   assembler.recipeId = "gear";
   assembler.inputs.iron_ingot = 0;
   assembler.outputs.gear = 0;
-  state.construction.conveyor_belt_mk1 = 16;
+  state.construction.splitter_4way = 1;
+  state = placeBuilding(state, "splitter_4way", { x: 500, y: 160 }, 1);
+  const splitter = state.entities.find((entity) => entity.buildingId === "splitter_4way")!;
+  splitter.distributionMode = "balanced";
+  state.construction.storage_mk1 = 1;
+  state = placeBuilding(state, "storage_mk1", { x: 660, y: 180 }, 1);
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.construction.conveyor_belt_mk1 = 24;
   state = connectBeltWithResult(state, "vein_iron", smelters[0].id, "iron_ore", 1, undefined, 2).state;
   state = connectBeltWithResult(state, "vein_iron", smelters[1].id, "iron_ore", 1, undefined, 1).state;
-  state = connectBeltWithResult(state, smelters[0].id, assembler.id, "iron_ingot", 1, undefined, 2).state;
-  state = connectBeltWithResult(state, smelters[1].id, assembler.id, "iron_ingot", 1, undefined, 1).state;
+  state = connectBeltWithResult(state, smelters[0].id, splitter.id, "iron_ingot", 1, undefined, 2).state;
+  state = connectBeltWithResult(state, smelters[1].id, splitter.id, "iron_ingot", 1, undefined, 1).state;
+  state = connectBeltWithResult(state, splitter.id, assembler.id, "iron_ingot", 1, undefined, 2).state;
+  state = connectBeltWithResult(state, splitter.id, storage.id, "iron_ingot", 1, undefined, 1).state;
+  state = connectBeltWithResult(state, storage.id, assembler.id, "iron_ingot", 1, undefined, 1).state;
   state.belts[0].priority = 2;
   state.belts[1].priority = 1;
+  state.belts.at(-2)!.priority = 0;
   return state;
 }
 

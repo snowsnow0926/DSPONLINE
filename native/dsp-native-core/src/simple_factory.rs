@@ -402,6 +402,25 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                     return Ok(Some("simple-factory-proliferator-invalid"));
                 }
             }
+            Some("storage" | "splitter") => {
+                let building_id = string_at(object, "buildingId").unwrap_or_default();
+                let Some(building) = state.catalog.buildings.get(building_id) else {
+                    return Ok(Some("simple-factory-logistics-building-missing"));
+                };
+                if building.kind != string_at(object, "kind").unwrap_or_default()
+                    || object
+                        .get("storedItemId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !state.catalog.items.contains_key(id))
+                    || string_at(object, "kind") == Some("splitter")
+                        && !matches!(
+                            string_at(object, "distributionMode"),
+                            Some("balanced" | "priority")
+                        )
+                {
+                    return Ok(Some("simple-factory-logistics-entity-invalid"));
+                }
+            }
             _ => return Ok(Some("simple-factory-entity-kind-unsupported")),
         }
     }
@@ -1281,6 +1300,68 @@ fn entity_object(entity: &mut Value) -> anyhow::Result<&mut Map<String, Value>> 
         .ok_or_else(|| anyhow!("native simple factory entity is not an object"))
 }
 
+fn transfer_logistics_buffers(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    let limit = normalized_buffer_limit(
+        base.get("settings")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("logisticsBufferLimit")),
+    );
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if !matches!(string_at(entity, "kind"), Some("storage" | "splitter")) {
+            continue;
+        }
+        let Some(item_id) = string_at(entity, "storedItemId").map(str::to_owned) else {
+            continue;
+        };
+        let building = string_at(entity, "buildingId")
+            .and_then(|id| state.catalog.buildings.get(id))
+            .ok_or_else(|| anyhow!("native logistics building is missing"))?;
+        let capacity = stacked_capacity(
+            building.output_capacity,
+            finite_number(entity.get("machineCount")),
+            limit,
+        );
+        let incoming = entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .and_then(|inputs| inputs.get(&item_id))
+            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+            .unwrap_or(0.0);
+        let stored = entity
+            .get("outputs")
+            .and_then(Value::as_object)
+            .and_then(|outputs| outputs.get(&item_id))
+            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+            .unwrap_or(0.0);
+        let moved = incoming.min((capacity - stored).max(0.0));
+        entity
+            .get_mut("inputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native logistics inputs are missing"))?
+            .insert(
+                item_id.clone(),
+                Number::from_f64(incoming - moved)
+                    .map(Value::Number)
+                    .unwrap_or(Value::from(0)),
+            );
+        entity
+            .get_mut("outputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native logistics outputs are missing"))?
+            .insert(
+                item_id,
+                Number::from_f64(stored + moved)
+                    .map(Value::Number)
+                    .unwrap_or(Value::from(0)),
+            );
+    }
+    Ok(())
+}
+
 fn simulate_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1288,6 +1369,7 @@ fn simulate_step(
     belts: &mut [Value],
     seconds: f64,
 ) -> anyhow::Result<()> {
+    transfer_logistics_buffers(state, base, entities)?;
     crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
     let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
     let planet_ids = state
@@ -1824,6 +1906,9 @@ fn simulate_step(
                     2,
                 ),
             )?;
+            continue;
+        }
+        if matches!(kind.as_str(), "storage" | "splitter") {
             continue;
         }
         let miner_count = finite_number(object.get("minerCount"));

@@ -153,6 +153,7 @@ export interface DesktopNativeCoreBuildingDefinition {
   powerDemandKw: number;
   powerGenerationKw: number;
   family?: string;
+  accepts?: "solid" | "fluid" | "any";
 }
 
 export interface DesktopNativeCoreRecipeDefinition {
@@ -215,6 +216,7 @@ export interface DesktopNativeCoreDomainCoverage {
   proliferatedProduction: boolean;
   finiteResearch: boolean;
   ordinaryBelts: boolean;
+  storageAndSplitters: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

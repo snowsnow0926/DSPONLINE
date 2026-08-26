@@ -44,6 +44,8 @@ pub struct BuildingDefinition {
     pub power_generation_kw: f64,
     #[serde(default)]
     pub family: Option<String>,
+    #[serde(default)]
+    pub accepts: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +211,16 @@ impl RuntimeCatalog {
             {
                 bail!(
                     "native catalog building numeric field is invalid: {}",
+                    building.id
+                );
+            }
+            if building
+                .accepts
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "solid" | "fluid" | "any"))
+            {
+                bail!(
+                    "native catalog building acceptance is invalid: {}",
                     building.id
                 );
             }

@@ -39,6 +39,7 @@ struct Group {
     item_id: String,
     available: f64,
     candidates: Vec<Candidate>,
+    balanced_splitter: bool,
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -150,15 +151,39 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
                     .iter()
                     .any(|output| output.item_id == item_id)
             }),
+        Some("storage" | "splitter") => string_at(source, "storedItemId") == Some(item_id),
         _ => false,
     }
 }
 
 fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str) -> bool {
-    string_at(target, "kind") == Some("machine")
-        && string_at(target, "recipeId")
+    match string_at(target, "kind") {
+        Some("machine") => string_at(target, "recipeId")
             .and_then(|id| state.catalog.recipes.get(id))
-            .is_some_and(|recipe| recipe.inputs.iter().any(|input| input.item_id == item_id))
+            .is_some_and(|recipe| recipe.inputs.iter().any(|input| input.item_id == item_id)),
+        Some("storage" | "splitter") => {
+            if string_at(target, "storedItemId") != Some(item_id) {
+                return false;
+            }
+            let Some(building) =
+                string_at(target, "buildingId").and_then(|id| state.catalog.buildings.get(id))
+            else {
+                return false;
+            };
+            let item_kind = state
+                .catalog
+                .items
+                .get(item_id)
+                .map(|item| item.kind.as_str())
+                .unwrap_or_default();
+            match building.accepts.as_deref().unwrap_or("any") {
+                "any" => true,
+                "solid" => matches!(item_kind, "solid" | "matrix"),
+                accepted => accepted == item_kind,
+            }
+        }
+        _ => false,
+    }
 }
 
 fn target_capacity(
@@ -170,11 +195,16 @@ fn target_capacity(
     let building = string_at(target, "buildingId")
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native belt target building is missing"))?;
-    let limit = normalized_buffer_limit(
-        base.get("settings")
-            .and_then(Value::as_object)
-            .and_then(|settings| settings.get("productionBufferLimit")),
-    );
+    let logistics = matches!(string_at(target, "kind"), Some("storage" | "splitter"));
+    let limit = normalized_buffer_limit(base.get("settings").and_then(Value::as_object).and_then(
+        |settings| {
+            settings.get(if logistics {
+                "logisticsBufferLimit"
+            } else {
+                "productionBufferLimit"
+            })
+        },
+    ));
     Ok(stacked_capacity(
         building.input_capacity,
         finite_number(target.get("machineCount")),
@@ -386,6 +416,8 @@ pub(crate) fn transfer(
                 item_id: route.item_id.clone(),
                 available: (output_amount(source, &route.item_id) + EPSILON).floor(),
                 candidates: Vec::new(),
+                balanced_splitter: string_at(source, "kind") == Some("splitter")
+                    && string_at(source, "distributionMode") != Some("priority"),
             });
             index
         });
@@ -438,7 +470,7 @@ pub(crate) fn transfer(
             left_id.cmp(right_id)
         });
         let mut available = group.available;
-        let priorities: &[usize] = if group.candidates.len() == 1 {
+        let priorities: &[usize] = if group.candidates.len() == 1 || group.balanced_splitter {
             &[3]
         } else {
             &[2, 1, 0]

@@ -55,6 +55,7 @@ pub struct DomainCoverage {
     pub proliferated_production: bool,
     pub finite_research: bool,
     pub ordinary_belts: bool,
+    pub storage_and_splitters: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -84,6 +85,7 @@ impl DomainCoverage {
             proliferated_production: true,
             finite_research: true,
             ordinary_belts: true,
+            storage_and_splitters: true,
             mining: false,
             production: false,
             research: false,
@@ -936,6 +938,7 @@ mod tests {
                     power_demand_kw: 1.0,
                     power_generation_kw: 0.0,
                     family: None,
+                    accepts: None,
                 }],
                 recipes: vec![],
                 belts: vec![BeltDefinition {

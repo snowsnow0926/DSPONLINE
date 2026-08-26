@@ -906,6 +906,8 @@ export interface PureIdleConservativeContractOptions {
   rateFactor?: number;
   /** Include aggregate production counters only when resource accounting is safe. */
   includeProduction?: boolean;
+  /** Counters owned by a separately settled authoritative subsystem. */
+  excludedProductionItemIds?: ReadonlySet<ItemId>;
 }
 
 function appendConservativeCounterDelta(
@@ -974,13 +976,11 @@ export function createPureIdleConservativeContract(
   const deltas: AffineDelta[] = [];
 
   if (options.includeProduction !== false) {
-    appendConservativeMapDeltas(
-      deltas,
-      before.totalProduced as Record<string, unknown>,
-      after.totalProduced as Record<string, unknown>,
-      ["totalProduced"],
-      rateFactor,
-    );
+    const beforeProduction = Object.fromEntries(Object.entries(before.totalProduced)
+      .filter(([itemId]) => !options.excludedProductionItemIds?.has(itemId as ItemId)));
+    const afterProduction = Object.fromEntries(Object.entries(after.totalProduced)
+      .filter(([itemId]) => !options.excludedProductionItemIds?.has(itemId as ItemId)));
+    appendConservativeMapDeltas(deltas, beforeProduction, afterProduction, ["totalProduced"], rateFactor);
   }
 
   const scalarPaths: AffinePath[] = [

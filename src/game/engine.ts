@@ -6202,6 +6202,7 @@ function constructionQuantumPrefetchJobs(
   definition: ConstructionAutomationTargetDefinition | undefined,
   workSeconds: number,
   hasExistingJob: boolean,
+  horizonSeconds = QUANTUM_SETTLEMENT_SECONDS,
 ): number {
   const target = definition ? Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0)) : 0;
   const current = definition ? constructionAutomationCurrentStock(state, definition.id) : 0;
@@ -6210,7 +6211,13 @@ function constructionQuantumPrefetchJobs(
   const targetJobs = Math.max(0, Math.ceil(Math.max(0, target - current - pending) / outputAmount));
   const machineCount = Number.isFinite(center.machineCount) ? Math.max(1, Math.floor(center.machineCount)) : 1;
   const normalizedWorkSeconds = Number.isFinite(workSeconds) ? Math.max(EPSILON, workSeconds) : 1;
-  const workJobs = Math.max(1, Math.ceil(machineCount * QUANTUM_SETTLEMENT_SECONDS / normalizedWorkSeconds));
+  const normalizedHorizonSeconds = Number.isFinite(horizonSeconds)
+    ? Math.max(QUANTUM_SETTLEMENT_SECONDS, horizonSeconds)
+    : QUANTUM_SETTLEMENT_SECONDS;
+  const workJobs = Math.max(1, Math.ceil(Math.min(
+    Number.MAX_SAFE_INTEGER,
+    machineCount * normalizedHorizonSeconds / normalizedWorkSeconds,
+  )));
   const requestedJobs = Math.max(1, targetJobs + (hasExistingJob ? 1 : 0));
   const prefetchLimit = machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD
     ? CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS
@@ -6227,10 +6234,18 @@ function constructionQuantumMissingForBatch(
   jobInventory: Partial<Record<ItemId, number>>,
   quantumBuffer: Partial<Record<ItemId, number>>,
   hasExistingJob: boolean,
+  horizonSeconds = QUANTUM_SETTLEMENT_SECONDS,
 ): Array<{ itemId: ItemId; amount: number }> | null {
   const batch = analyzeRepeatableConstructionAutomationPlan(state, definition, plan);
   if (!batch) return null;
-  const jobs = constructionQuantumPrefetchJobs(state, center, definition, batch.workSeconds, hasExistingJob);
+  const jobs = constructionQuantumPrefetchJobs(
+    state,
+    center,
+    definition,
+    batch.workSeconds,
+    hasExistingJob,
+    horizonSeconds,
+  );
   const missing = new Map<ItemId, number>();
   for (const [itemId, rawAmount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
     if (isPortableFleetItem(itemId)) continue;
@@ -6254,6 +6269,7 @@ function constructionQuantumMissingForBatch(
 function constructionQuantumMissingMaterials(
   state: GameState,
   center: FactoryEntity,
+  horizonSeconds = QUANTUM_SETTLEMENT_SECONDS,
 ): Array<{ itemId: ItemId; amount: number }> {
   if (!state.constructionAutomation.enabled) return [];
   // Do not fill a stopped center's private cache while its previous power
@@ -6271,7 +6287,17 @@ function constructionQuantumMissingMaterials(
       recipeDecisions: job.recipeDecisions,
     };
     const batchMissing = definition
-      ? constructionQuantumMissingForBatch(state, center, definition, remainingPlan, tray, job.inventory, quantumBuffer, true)
+      ? constructionQuantumMissingForBatch(
+        state,
+        center,
+        definition,
+        remainingPlan,
+        tray,
+        job.inventory,
+        quantumBuffer,
+        true,
+        horizonSeconds,
+      )
       : null;
     if (batchMissing) return batchMissing;
     const requiredByItem = new Map<ItemId, number>();
@@ -6318,6 +6344,7 @@ function constructionQuantumMissingMaterials(
       {},
       quantumBuffer,
       false,
+      horizonSeconds,
     );
     if (batchMissing) return batchMissing;
   }
@@ -6344,10 +6371,11 @@ function constructionQuantumCenters(state: GameState, lookup?: SimulationLookupC
 function collectConstructionQuantumDemands(
   state: GameState,
   lookup?: SimulationLookupContext,
+  horizonSeconds = QUANTUM_SETTLEMENT_SECONDS,
 ): Map<string, ConstructionQuantumDemand> {
   const demands = new Map<string, ConstructionQuantumDemand>();
   for (const center of constructionQuantumCenters(state, lookup)) {
-    for (const missing of constructionQuantumMissingMaterials(state, center)) {
+    for (const missing of constructionQuantumMissingMaterials(state, center, horizonSeconds)) {
       if (missing.amount < 1) continue;
       // This is a direct receiver, not another warehouse slot.  Its capacity
       // is the center's outstanding requirement, so an over-capacity quantum
@@ -6388,6 +6416,15 @@ function applyConstructionQuantumDelivery(
 }
 
 /** Download before output belts so a demand tower can use reserved line space. */
+interface QuantumNetworkDownloadOptions {
+  /** Construction-only macro windows may request more than one five-second work horizon. */
+  constructionHorizonSeconds?: number;
+  /** Remaining shared budget when one macro window needs several target passes. */
+  globalDownloadCap?: number;
+  /** Other factory subsystems are frozen in the conservative macro tail. */
+  constructionOnly?: boolean;
+}
+
 function settleQuantumNetworkDownloads(
   state: GameState,
   credits: OutputCapacityCredits,
@@ -6395,14 +6432,23 @@ function settleQuantumNetworkDownloads(
   seconds = QUANTUM_SETTLEMENT_SECONDS,
   lookup?: SimulationLookupContext,
   profiler?: SimulationProfiler,
+  options: QuantumNetworkDownloadOptions = {},
 ): QuantumBoundaryFlow | null {
   if (!state.quantumLogisticsNetwork?.enabled) return null;
   const flow = createQuantumBoundaryFlow(state, boundarySecond, lookup);
-  const stations = lookup?.quantumStations ?? state.entities.filter(isQuantumStation);
+  const stations = options.constructionOnly
+    ? []
+    : lookup?.quantumStations ?? state.entities.filter(isQuantumStation);
   const stationById = lookup?.entityById ?? new Map(stations.map((station) => [station.id, station]));
   const requestByStationItem = new Map<string, QuantumSettlementOutput>();
-  const constructionDemands = collectConstructionQuantumDemands(state, lookup);
-  const downloadPlans = lookup?.quantumDownloadSlots ?? stations.flatMap((endpoint): IndexedQuantumSlotPlan[] => {
+  const constructionDemands = collectConstructionQuantumDemands(
+    state,
+    lookup,
+    options.constructionHorizonSeconds ?? QUANTUM_SETTLEMENT_SECONDS,
+  );
+  const downloadPlans = options.constructionOnly
+    ? []
+    : lookup?.quantumDownloadSlots ?? stations.flatMap((endpoint): IndexedQuantumSlotPlan[] => {
     const byKey = new Map<string, IndexedQuantumSlotPlan>();
     for (const slot of getStationSlots(endpoint)) {
       if (!slot.itemId || slot.remoteMode !== "demand") continue;
@@ -6456,7 +6502,7 @@ function settleQuantumNetworkDownloads(
   }
   const result = settleQuantumLogisticsNetwork(state.quantumLogisticsNetwork, [], outputs, {
     seconds,
-    globalDownloadCap: quantumBoundaryCapacity(flow.globalDownloadPerMinute, seconds),
+    globalDownloadCap: options.globalDownloadCap ?? quantumBoundaryCapacity(flow.globalDownloadPerMinute, seconds),
     mutateNormalizedState: true,
   });
   state.quantumLogisticsNetwork = result.state;
@@ -10375,6 +10421,19 @@ interface InternalConstructionQuickCraftPlan extends ConstructionQuickCraftPlan 
 const recursiveManufacturingRecipes = (): RecipeDefinition[] =>
   Object.values(RECIPES).filter((recipe) => isRecursiveManufacturingRecipe(recipe.id));
 
+/**
+ * Aggregate production counters touched by recursive construction jobs.
+ * Conservative pure-idle contracts exclude these paths because the
+ * authoritative construction macro records them from real material batches.
+ */
+export function getConstructionAutomationMaterialOutputItemIds(): ItemId[] {
+  const itemIds = new Set<ItemId>();
+  for (const recipe of recursiveManufacturingRecipes()) {
+    for (const output of recipe.outputs) itemIds.add(output.itemId);
+  }
+  return [...itemIds].sort();
+}
+
 function recursiveManufacturingInventory(state: GameState): Partial<Record<ItemId, number>> {
   return {
     ...state.tray,
@@ -11761,6 +11820,7 @@ function tryBuildStableConstructionAutomationCycle(
   first: RepeatableConstructionAutomationBatch,
   budget: ConstructionAutomationComputeBudget,
   profiler?: SimulationProfiler,
+  entityId?: string,
 ): RepeatableConstructionAutomationBatch | null {
   const maxProbeJobs = 8;
   if (first.jobsPerCycle !== 1 || budget.remainingPlanBuilds < 1) return null;
@@ -11772,10 +11832,15 @@ function tryBuildStableConstructionAutomationCycle(
   const cycleStateItems = new Set<ItemId>();
   for (let probe = 1; probe <= maxProbeJobs; probe += 1) {
     for (const itemId of Object.keys(current.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
-    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1);
+    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1, entityId);
     if (JSON.stringify(planning.constructionAutomation.destroyedByproducts) !== destroyedBefore) return null;
     if (budget.remainingPlanBuilds < 1) return null;
-    const nextPlan = buildConstructionAutomationPlan(planning, definition, planetId);
+    const nextPlan = buildConstructionAutomationPlan(
+      planning,
+      definition,
+      planetId,
+      entityId ? constructionAutomationQuantumBuffer(planning, entityId) : {},
+    );
     budget.remainingPlanBuilds -= 1;
     if (profiler) profiler.constructionPlanBuilds += 1;
     if (nextPlan.blocker) return null;
@@ -11992,6 +12057,7 @@ function runConstructionCenters(
   batchConstructionAutomation = true,
   profiler?: SimulationProfiler,
   lookup?: SimulationLookupContext,
+  workBudgetByEntity?: Map<string, number>,
 ): void {
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
@@ -12044,10 +12110,15 @@ function runConstructionCenters(
     };
     const powerFactor = powerFactorForEntity(power, entity);
     entity.powerFactor = power.factorByEntity.has(entity.id) ? round(powerFactor, 4) : undefined;
+    const configuredWorkBudget = workBudgetByEntity?.get(entity.id);
+    const initialWorkBudget = configuredWorkBudget === undefined
+      ? Math.max(0, seconds) * Math.max(1, entity.machineCount) * powerFactor
+      : Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, configuredWorkBudget));
     if (!state.constructionAutomation.enabled || powerFactor <= EPSILON) {
       entity.utilization = 0;
       entity.productionRate = 0;
       entity.progress = 0;
+      if (workBudgetByEntity) workBudgetByEntity.set(entity.id, initialWorkBudget);
       returnUnusedBudget();
       continue;
     }
@@ -12058,7 +12129,7 @@ function runConstructionCenters(
     // current second; rebuilding it for every buffered batch consumes the
     // guarded plan-build budget before the center can do useful work.
     const directResolvedByTarget = new Map<ConstructionAutomationTargetId, { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null }>();
-    let remainingWork = Math.max(0, seconds) * Math.max(1, entity.machineCount) * powerFactor;
+    let remainingWork = initialWorkBudget;
     let completed = 0;
     let worked = false;
     while (remainingWork > EPSILON) {
@@ -12098,9 +12169,23 @@ function runConstructionCenters(
             budget.remainingPlanBuilds -= 1;
             if (profiler) profiler.constructionPlanBuilds += 1;
             const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer);
+            const directBatch = directPlan.blocker
+              ? null
+              : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan);
             resolved = {
               plan: directPlan,
-              batch: directPlan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan),
+              batch: directBatch && entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD &&
+                !constructionAutomationBatchCanRepeat(state, entity.planetId, directBatch)
+                ? (tryBuildStableConstructionAutomationCycle(
+                  state,
+                  target.definition,
+                  entity.planetId,
+                  directBatch,
+                  budget,
+                  profiler,
+                  entity.id,
+                ) ?? directBatch)
+                : directBatch,
             };
             if (!directPlan.blocker) directResolvedByTarget.set(target.definition.id, resolved);
           }
@@ -12216,8 +12301,191 @@ function runConstructionCenters(
     }
     entity.utilization = worked || completed > 0 ? powerFactor : 0;
     entity.productionRate = seconds > EPSILON ? round(completed * 60 / seconds, 2) : 0;
+    if (workBudgetByEntity) workBudgetByEntity.set(entity.id, Math.max(0, remainingWork));
     returnUnusedBudget();
   }
+}
+
+export interface ConservativeConstructionAutomationMacroResult {
+  completed: number;
+  quantumDownloaded: number;
+  consumedWorkSeconds: number;
+  remainingWorkSeconds: number;
+  passes: number;
+}
+
+function constructionMacroPowerPlan(factorByEntity: Map<string, number>): PowerPlan {
+  return {
+    generationKw: 0,
+    demandKw: 0,
+    factor: 0,
+    windGenerationKw: 0,
+    solarGenerationKw: 0,
+    geothermalGenerationKw: 0,
+    thermalGenerationKw: 0,
+    fusionGenerationKw: 0,
+    artificialStarGenerationKw: 0,
+    rayGenerationKw: 0,
+    storageDischargeKw: 0,
+    storageChargeKw: 0,
+    powerOutputByEntity: new Map(),
+    powerInputByEntity: new Map(),
+    factorByEntity,
+    connectedEntities: factorByEntity.size,
+    disconnectedEntities: 0,
+    generatorCount: 0,
+  };
+}
+
+function constructionMacroWorkTotal(workBudgetByEntity: ReadonlyMap<string, number>): number {
+  let total = 0;
+  for (const amount of workBudgetByEntity.values()) {
+    total = Math.min(Number.MAX_SAFE_INTEGER, total + Math.max(0, amount));
+  }
+  return total;
+}
+
+/**
+ * Advance only construction automation for a conservative pure-idle tail.
+ *
+ * The large-save fallback intentionally freezes belts, factories and cyclic
+ * logistics caches. Construction is safe to keep running independently:
+ * this path uses the ordinary recursive planner, target caps, quantum
+ * allocator and material consumer, while carrying one finite work budget per
+ * center. It therefore cannot manufacture raw inputs or spend the same center
+ * work twice when several target passes are required.
+ */
+export function advanceConservativeConstructionAutomationInPlace(
+  state: GameState,
+  simulationSeconds: number,
+  rateFactor = 1,
+): ConservativeConstructionAutomationMacroResult {
+  const normalizedSeconds = Number.isFinite(simulationSeconds) ? Math.max(0, simulationSeconds) : 0;
+  const normalizedRateFactor = Number.isFinite(rateFactor) ? Math.min(1, Math.max(0, rateFactor)) : 0;
+  const centers = constructionQuantumCenters(state)
+    .filter((entity) => entity.machineCount > 0)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const emptyResult = (passes = 0): ConservativeConstructionAutomationMacroResult => ({
+    completed: 0,
+    quantumDownloaded: 0,
+    consumedWorkSeconds: 0,
+    remainingWorkSeconds: 0,
+    passes,
+  });
+  if (normalizedSeconds <= EPSILON || normalizedRateFactor <= EPSILON || centers.length === 0 ||
+    !state.constructionAutomation.enabled || !constructionAutomationHasDeficit(state)) return emptyResult();
+
+  const factorByEntity = new Map<string, number>();
+  const workBudgetByEntity = new Map<string, number>();
+  for (const center of centers) {
+    const measuredPowerFactor = typeof center.powerFactor === "number" && Number.isFinite(center.powerFactor)
+      ? Math.min(1, Math.max(0, center.powerFactor))
+      : 0;
+    const conservativePowerFactor = measuredPowerFactor * normalizedRateFactor;
+    if (conservativePowerFactor <= EPSILON) continue;
+    factorByEntity.set(center.id, conservativePowerFactor);
+    workBudgetByEntity.set(center.id, Math.min(
+      Number.MAX_SAFE_INTEGER,
+      normalizedSeconds * Math.max(1, Math.floor(center.machineCount)) * conservativePowerFactor,
+    ));
+  }
+  if (workBudgetByEntity.size === 0) return emptyResult();
+
+  const runtimeFlowBefore = state.quantumLogisticsNetwork?.runtimeFlow
+    ? {
+      ...state.quantumLogisticsNetwork.runtimeFlow,
+      uploaded: { ...state.quantumLogisticsNetwork.runtimeFlow.uploaded },
+      downloaded: { ...state.quantumLogisticsNetwork.runtimeFlow.downloaded },
+    }
+    : undefined;
+  const initialWorkSeconds = constructionMacroWorkTotal(workBudgetByEntity);
+  const power = constructionMacroPowerPlan(factorByEntity);
+  const centersByPlanet = new Map<PlanetId, FactoryEntity[]>();
+  for (const center of centers) {
+    if (!workBudgetByEntity.has(center.id)) continue;
+    const planetCenters = centersByPlanet.get(center.planetId);
+    if (planetCenters) planetCenters.push(center);
+    else centersByPlanet.set(center.planetId, [center]);
+  }
+
+  let remainingDownloadCapacity = 0;
+  if (state.constructionAutomation.quantumSourceEnabled && state.quantumLogisticsNetwork?.enabled) {
+    const bandwidth = quantumBoundaryBandwidth(state);
+    remainingDownloadCapacity = quantumBoundaryCapacity(bandwidth.globalDownloadPerMinute, normalizedSeconds);
+  }
+
+  const craftedBefore = Math.max(0, Math.floor(state.constructionAutomation.totalCrafted));
+  let quantumDownloaded = 0;
+  let passes = 0;
+  const maximumPasses = Math.min(1_024, Math.max(
+    16,
+    getConstructionAutomationTargets().length * (centers.length + 3),
+  ));
+  while (passes < maximumPasses && constructionAutomationHasDeficit(state)) {
+    const workBeforePass = constructionMacroWorkTotal(workBudgetByEntity);
+    if (workBeforePass <= EPSILON) break;
+    let downloadedThisPass = 0;
+    if (remainingDownloadCapacity > 0 && state.constructionAutomation.quantumSourceEnabled &&
+      state.quantumLogisticsNetwork?.enabled) {
+      const flow = settleQuantumNetworkDownloads(
+        state,
+        new Map(),
+        Math.max(0, Math.floor(state.elapsedSeconds + normalizedSeconds)),
+        normalizedSeconds,
+        undefined,
+        undefined,
+        {
+          constructionHorizonSeconds: normalizedSeconds * normalizedRateFactor,
+          globalDownloadCap: remainingDownloadCapacity,
+          constructionOnly: true,
+        },
+      );
+      for (const amount of Object.values(flow?.downloaded ?? {})) {
+        downloadedThisPass = Math.min(Number.MAX_SAFE_INTEGER, downloadedThisPass + Math.max(0, Number(amount)));
+      }
+      remainingDownloadCapacity = Math.max(0, remainingDownloadCapacity - downloadedThisPass);
+      quantumDownloaded = Math.min(Number.MAX_SAFE_INTEGER, quantumDownloaded + downloadedThisPass);
+    }
+
+    for (const [planetId, planetCenters] of [...centersByPlanet.entries()].sort(([left], [right]) =>
+      left.localeCompare(right))) {
+      runConstructionCenters(
+        state,
+        normalizedSeconds,
+        power,
+        planetId,
+        planetCenters,
+        true,
+        undefined,
+        undefined,
+        workBudgetByEntity,
+      );
+    }
+    passes += 1;
+    const workAfterPass = constructionMacroWorkTotal(workBudgetByEntity);
+    const consumedThisPass = Math.max(0, workBeforePass - workAfterPass);
+    if (consumedThisPass <= EPSILON && downloadedThisPass < 1) break;
+  }
+
+  const remainingWorkSeconds = constructionMacroWorkTotal(workBudgetByEntity);
+  // These are live-rate diagnostics, not cumulative resources. A macro call
+  // may contain the same work as several smaller calls, so leave them at a
+  // canonical idle checkpoint instead of persisting call-size-dependent data.
+  for (const center of centers) {
+    center.utilization = 0;
+    center.productionRate = 0;
+  }
+  if (state.quantumLogisticsNetwork) {
+    if (runtimeFlowBefore) state.quantumLogisticsNetwork.runtimeFlow = runtimeFlowBefore;
+    else delete state.quantumLogisticsNetwork.runtimeFlow;
+  }
+  return {
+    completed: Math.max(0, Math.floor(state.constructionAutomation.totalCrafted) - craftedBefore),
+    quantumDownloaded,
+    consumedWorkSeconds: Math.max(0, initialWorkSeconds - remainingWorkSeconds),
+    remainingWorkSeconds,
+    passes,
+  };
 }
 
 function sourceProduces(entity: FactoryEntity, itemId: ItemId): boolean {

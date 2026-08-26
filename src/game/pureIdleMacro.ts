@@ -1,4 +1,6 @@
 import {
+  advanceConservativeConstructionAutomationInPlace,
+  getConstructionAutomationMaterialOutputItemIds,
   getEffectiveSimulationMultiplier,
   refreshDysonGenerationSnapshot,
   refreshTimeWarpPowerSnapshotInPlace,
@@ -24,7 +26,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v3";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v4";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -493,6 +495,7 @@ export function createConservativePureIdleMacroSession(
   };
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
+  const constructionMacroConfigured = hasQuantumFedConstructionWork(state);
   try {
     // Keep the fallback transactional if the exact probe throws halfway
     // through a complex state. The Worker can discard this bounded clone.
@@ -518,6 +521,9 @@ export function createConservativePureIdleMacroSession(
         {
           includeProduction: productionSafe,
           rateFactor: PURE_IDLE_CONSERVATIVE_RATE_FACTOR,
+          ...(constructionMacroConfigured ? {
+            excludedProductionItemIds: new Set(getConstructionAutomationMaterialOutputItemIds()),
+          } : {}),
         },
       );
     }
@@ -543,8 +549,12 @@ export function createConservativePureIdleMacroSession(
   const degradedReason = prefixFailure
     ? `${reason}；短窗口精确结算未完成：${prefixFailure}`
     : conservativeContract
-      ? `${reason}；已精确校准 ${prefixSeconds} 秒，之后按 ${Math.round(PURE_IDLE_CONSERVATIVE_RATE_FACTOR * 100)}% 测得安全累计速率继续以高倍率结算；物流缓存等不确定瞬时字段保持检查点`
-      : `${reason}；已先精确结算 ${prefixSeconds} 秒；检测到有限资源或无可证明累计速率，尾段仅推进时间与科研`;
+      ? constructionMacroConfigured
+        ? `${reason}；已精确校准 ${prefixSeconds} 秒，之后按 ${Math.round(PURE_IDLE_CONSERVATIVE_RATE_FACTOR * 100)}% 测得安全累计速率继续以高倍率结算；建筑制造中心按真实工时、量子带宽和材料守恒独立结算，其他物流缓存等不确定瞬时字段保持检查点`
+        : `${reason}；已精确校准 ${prefixSeconds} 秒，之后按 ${Math.round(PURE_IDLE_CONSERVATIVE_RATE_FACTOR * 100)}% 测得安全累计速率继续以高倍率结算；物流缓存等不确定瞬时字段保持检查点`
+      : constructionMacroConfigured
+        ? `${reason}；已先精确结算 ${prefixSeconds} 秒；检测到有限资源或无可证明累计速率，尾段继续结算建筑制造中心、时间与科研`
+        : `${reason}；已先精确结算 ${prefixSeconds} 秒；检测到有限资源或无可证明累计速率，尾段仅推进时间与科研`;
   return {
     mode,
     phase: "conservative",
@@ -732,6 +742,8 @@ export function advancePureIdleMacroSession(
     session.actualMultiplier = multiplier;
     const macroSimulationSeconds = macroWallSeconds * multiplier;
     let exactQuantumConstructionTail = false;
+    const conservativeConstructionTail = session.conservativeOnly &&
+      hasQuantumFedConstructionWork(session.candidate);
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
       : !session.conservativeOnly && hasQuantumFedConstructionWork(session.candidate)
@@ -767,8 +779,21 @@ export function advancePureIdleMacroSession(
               integerRemainders: session.conservativeIntegerRemainders,
             },
           )
-          : { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "保守宏观尾段冻结" }
+          : conservativeConstructionTail
+            ? { ok: true as const, boundaryCorrections: 0 }
+            : { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "保守宏观尾段冻结" }
         : applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
+    throwIfMacroInterrupted(options);
+    if (conservativeConstructionTail && macroSimulationSeconds > 1e-9) {
+      const construction = advanceConservativeConstructionAutomationInPlace(
+        session.candidate,
+        macroSimulationSeconds,
+        PURE_IDLE_CONSERVATIVE_RATE_FACTOR,
+      );
+      if (construction.completed > 0) {
+        session.lastValidationReason = `保守宏观建筑制造已完成 ${construction.completed.toLocaleString("zh-CN")} 件；按真实量子库存、共享下载带宽与中心工时扣料`;
+      }
+    }
     throwIfMacroInterrupted(options);
     if (!applied.ok) {
       // The last complete candidate remains intact because affine application

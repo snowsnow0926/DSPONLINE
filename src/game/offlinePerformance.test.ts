@@ -12,6 +12,8 @@ import { exportGame, importGame, inspectSave, migrateGame } from "./storage";
 import { getNextOfflineCriticalEvent } from "./offlineCriticalEvents";
 import { advanceOfflineSimulationChunk } from "./offlineSimulation";
 import { hashGameState } from "./benchmark";
+import { advancePureIdleMacroSession, createConservativePureIdleMacroSession } from "./pureIdleMacro";
+import { normalizeQuantumLogisticsNetworkState } from "./quantumLogisticsNetwork";
 import type { GameState } from "./types";
 
 const environment = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
@@ -242,5 +244,69 @@ describe("offline exact scheduler benchmark", () => {
       })}`);
     },
     120_000,
+  );
+
+  it.skipIf(!environment?.DSP_CONSERVATIVE_CONSTRUCTION_PROFILE || !environment.DSP_REAL_FIXTURE)(
+    "keeps real-save construction progressing in the conservative pure-idle tail",
+    () => {
+      const raw = readFileSync(environment!.DSP_REAL_FIXTURE!, "utf8");
+      const parsed = JSON.parse(raw);
+      const state = migrateGame(parsed.state ?? parsed);
+      expect(state).not.toBeNull();
+      if (!state) return;
+      state.paused = false;
+      state.timeWarp.pendingSimulationSeconds = 0;
+      state.timeWarp.pendingWallSeconds = 0;
+      const controller = state.entities.find((entity) => entity.buildingId === "time_warp_device");
+      expect(controller).toBeDefined();
+      if (!controller) return;
+      state.timeWarp.controllerEntityId = controller.id;
+      state.timeWarp.enabled = true;
+      const targetDeficit = (candidate: GameState) => Object.entries(candidate.constructionAutomation.targetStock)
+        .reduce((sum, [targetId, target]) => {
+          const current = Object.prototype.hasOwnProperty.call(candidate.portableFleet, targetId)
+            ? candidate.portableFleet[targetId as keyof typeof candidate.portableFleet] ?? 0
+            : candidate.construction[targetId as keyof typeof candidate.construction] ?? 0;
+          return sum + Math.max(0, Math.floor(target ?? 0) - Math.max(0, Math.floor(current)));
+        }, 0);
+      const deficitBefore = targetDeficit(state);
+      const craftedBefore = state.constructionAutomation.totalCrafted;
+      const startedAt = performance.now();
+      console.log(`CONSERVATIVE_CONSTRUCTION_STAGE ${JSON.stringify({ stage: "prefix-start", deficitBefore })}`);
+      const session = createConservativePureIdleMacroSession(state, "stable", "real-save large-memory guard");
+      console.log(`CONSERVATIVE_CONSTRUCTION_STAGE ${JSON.stringify({
+        stage: "prefix-complete",
+        durationMs: performance.now() - startedAt,
+        prefixCrafted: session.candidate.constructionAutomation.totalCrafted - craftedBefore,
+      })}`);
+      advancePureIdleMacroSession(session, 30);
+      const durationMs = performance.now() - startedAt;
+      const deficitAfter = targetDeficit(session.candidate);
+      const crafted = session.candidate.constructionAutomation.totalCrafted - craftedBefore;
+      const exported = exportGame(session.candidate);
+      const reloaded = importGame(exported);
+
+      expect(crafted).toBeGreaterThan(0);
+      expect(deficitAfter).toBeLessThan(deficitBefore);
+      expect(session.candidate.elapsedSeconds).toBeGreaterThan(state.elapsedSeconds);
+      expect(inspectSave(exported).checksum).toBe("valid");
+      expect(reloaded).not.toBeNull();
+      expect(reloaded?.constructionAutomation.totalCrafted).toBe(session.candidate.constructionAutomation.totalCrafted);
+      expect(reloaded?.constructionAutomation.targetStock).toEqual(session.candidate.constructionAutomation.targetStock);
+      expect(reloaded?.quantumLogisticsNetwork.inventory).toEqual(
+        normalizeQuantumLogisticsNetworkState(session.candidate.quantumLogisticsNetwork).inventory,
+      );
+      console.log(`CONSERVATIVE_CONSTRUCTION_PROFILE ${JSON.stringify({
+        durationMs,
+        exportedBytes: Buffer.byteLength(exported),
+        actualMultiplier: session.actualMultiplier,
+        deficitBefore,
+        deficitAfter,
+        crafted,
+        remainingJobs: Object.keys(session.candidate.constructionAutomation.jobs).length,
+        remainingBuffers: Object.keys(session.candidate.constructionAutomation.quantumMaterialBuffer ?? {}).length,
+      })}`);
+    },
+    180_000,
   );
 });

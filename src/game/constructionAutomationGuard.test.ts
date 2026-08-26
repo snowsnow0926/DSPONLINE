@@ -163,6 +163,42 @@ describe("construction automation compute protection", () => {
     expectSafeIntegerInventories(first.state);
   });
 
+  it("batches stable byproduct cycles from a quantum-private raw buffer", () => {
+    let initial = createInitialState(20_260_808, false);
+    initial.research.completedTechIds = Object.keys(TECHNOLOGIES) as TechId[];
+    initial = placeStack(initial, "wind_turbine", 100_000_000, -120);
+    initial = placeStack(initial, "construction_center", 1, 0);
+    const center = initial.entities.find((entity) => entity.buildingId === "construction_center")!;
+    center.machineCount = 8_000_000;
+    initial.tray = {};
+    initial.planetTrays.home = initial.tray;
+    initial.construction.plane_smelter = 0;
+    initial.construction.quantum_chemical_plant = 0;
+    initial.constructionAutomation.enabled = true;
+    initial.constructionAutomation.quantumSourceEnabled = true;
+    initial.constructionAutomation.targetStock = {
+      plane_smelter: 100_000_000,
+      quantum_chemical_plant: 100_000_000,
+    };
+    initial.constructionAutomation.quantumMaterialBuffer = {
+      [center.id]: Object.fromEntries(RAW_ITEMS.map((itemId) => [itemId, 1_000_000_000])),
+    };
+
+    const profiler = createSimulationProfiler();
+    const runtime = createPersistentSimulationRuntime(structuredClone(initial));
+    const startedAt = performance.now();
+    advancePersistentSimulationRuntime(runtime, 1, 1, profiler);
+    const durationMs = performance.now() - startedAt;
+
+    expect(durationMs).toBeLessThan(500);
+    expect(profiler.constructionJobsBatched).toBeGreaterThan(1_000_000);
+    expect(runtime.state.constructionAutomation.totalCrafted).toBeGreaterThan(1_000_000);
+    expect((runtime.state.construction.plane_smelter ?? 0) +
+      (runtime.state.construction.quantum_chemical_plant ?? 0))
+      .toBe(runtime.state.constructionAutomation.totalCrafted);
+    expectSafeIntegerInventories(runtime.state);
+  });
+
   it("shares the guarded budget so a second high-stack center also makes progress", () => {
     const initial = createProtectedConstructionState();
     initial.construction.construction_center = 1;

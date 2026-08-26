@@ -84,6 +84,71 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
   });
 }
 
+function conservativeQuantumConstructionState(options: {
+  target?: number;
+  centerStack?: number;
+  towerStack?: number;
+  inventory?: Partial<Record<"iron_ore" | "copper_ore" | "stone", string>>;
+} = {}): GameState {
+  const state = pureIdleState();
+  state.settings.simulationSpeed = 4;
+  state.timeWarp.requestedMultiplier = 9;
+  state.research.completedTechIds.push("construction_automation", "construction_capacity_2");
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.quantumSourceEnabled = true;
+  state.constructionAutomation.targetStock.arc_smelter = options.target ?? 50_000;
+  state.construction.arc_smelter = 0;
+  state.tray = {};
+  state.planetTrays.home = state.tray;
+  state.quantumLogisticsNetwork.enabled = true;
+  state.quantumLogisticsNetwork.inventory = {
+    iron_ore: "1000000",
+    copper_ore: "1000000",
+    stone: "1000000",
+    ...options.inventory,
+  };
+  addWindGeneration(state, 50_000_000);
+  state.entities.push(
+    {
+      id: "conservative-construction-center",
+      kind: "machine",
+      planetId: "home",
+      position: { x: 100, y: 0 },
+      interactionLocked: false,
+      buildingId: "construction_center",
+      machineCount: options.centerStack ?? 10_000,
+      minerCount: 0,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      routingCursor: 0,
+      utilization: 0,
+      productionRate: 0,
+    },
+    {
+      id: "conservative-quantum-tower",
+      kind: "station",
+      planetId: "home",
+      position: { x: 200, y: 0 },
+      interactionLocked: false,
+      buildingId: "interstellar_logistics_station",
+      stationTier: 2,
+      quantumMode: "quantum",
+      stationSlots: [],
+      stationRoutes: [],
+      machineCount: options.towerStack ?? 100,
+      minerCount: 0,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      routingCursor: 0,
+      utilization: 0,
+      productionRate: 0,
+    },
+  );
+  return state;
+}
+
 describe("pure idle macro session", () => {
   it("binds stop settlement, completed research, and the original pause intent before serialization", () => {
     const baseline = pureIdleState();
@@ -456,6 +521,70 @@ describe("pure idle macro session", () => {
     expect(hashGameState(incremental.candidate)).toBe(hashGameState(single.candidate));
     expect(incremental.conservativeIntegerRemainders).toEqual(single.conservativeIntegerRemainders);
     expect(incremental.researchRemainder).toBe(single.researchRemainder);
+  });
+
+  it("keeps quantum-fed construction running through the conservative large-save tail", () => {
+    const source = conservativeQuantumConstructionState({
+      target: 100_000_000,
+      centerStack: 12_200_000,
+      towerStack: 1_000_000,
+      inventory: { iron_ore: "3000000000", copper_ore: "1000000000", stone: "1000000000" },
+    });
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "large-save memory guard",
+    );
+
+    expect(session.candidate.construction.arc_smelter).toBeLessThan(100_000_000);
+    advancePureIdleMacroSession(session, 30);
+
+    expect(session.candidate.construction.arc_smelter).toBe(100_000_000);
+    expect(session.candidate.constructionAutomation.totalCrafted).toBe(100_000_000);
+    expect(session.candidate.constructionAutomation.jobs).toEqual({});
+    expect(session.candidate.constructionAutomation.quantumMaterialBuffer).toBeUndefined();
+    expect(Object.keys(session.candidate.tray)).toHaveLength(0);
+    expect(Number(session.candidate.quantumLogisticsNetwork.inventory.iron_ore ?? "0")).toBeLessThan(3_000_000_000);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("never invents a missing quantum raw material in the conservative construction tail", () => {
+    const source = conservativeQuantumConstructionState({
+      target: 10_000,
+      inventory: { iron_ore: "1000000", copper_ore: "0", stone: "0" },
+    });
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "large-save memory guard",
+    );
+
+    advancePureIdleMacroSession(session, 24 * 60 * 60);
+
+    expect(session.candidate.construction.arc_smelter).toBe(0);
+    expect(session.candidate.constructionAutomation.totalCrafted).toBe(0);
+    expect(session.candidate.quantumLogisticsNetwork.inventory.copper_ore ?? "0").toBe("0");
+    expect(session.candidate.quantumLogisticsNetwork.inventory.stone ?? "0").toBe("0");
+    for (const inventory of Object.values(session.candidate.constructionAutomation.quantumMaterialBuffer ?? {})) {
+      expect(inventory.copper_ore ?? 0).toBe(0);
+      expect(inventory.stone ?? 0).toBe(0);
+    }
+    expect(session.candidate.tray.copper_ore ?? 0).toBe(0);
+    expect(session.candidate.tray.stone ?? 0).toBe(0);
+  });
+
+  it("settles conservative quantum construction deterministically across macro boundaries", () => {
+    const source = conservativeQuantumConstructionState();
+    const incremental = createConservativePureIdleMacroSession(structuredClone(source), "stable", "memory guard");
+    advancePureIdleMacroSession(incremental, 15);
+    advancePureIdleMacroSession(incremental, 30);
+
+    const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "memory guard");
+    advancePureIdleMacroSession(single, 30);
+
+    expect(hashGameState(incremental.candidate)).toBe(hashGameState(single.candidate));
+    expect(incremental.candidate.construction.arc_smelter).toBe(50_000);
   });
 
   it("honours cancellation before mutating a macro boundary", () => {

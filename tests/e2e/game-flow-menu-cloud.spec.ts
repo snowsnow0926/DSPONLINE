@@ -1604,7 +1604,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(8);
   await expect(releaseNotes).toContainText("工厂编辑不再深拷贝全部记录");
   await expect(releaseNotes).toContainText("撤销/重做改为有界差异日志");
   await expect(releaseNotes).toContainText("大型自动保存流式提交有界数据页");
@@ -1638,7 +1638,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(8);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-26-v119-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1685,7 +1685,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(8);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1697,7 +1697,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(8);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-26-v119-844x390.png", fullPage: true });

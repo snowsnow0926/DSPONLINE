@@ -2942,10 +2942,12 @@ fn simulate_step(
             ))
         })
         .collect::<HashMap<_, _>>();
+    crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::dispatch(state, base, entities, &station_powers)?;
     crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
     crate::local_logistics::advance_routes(entities, seconds, &station_powers)?;
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
+    crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::update_congestion(entities)?;
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
 
@@ -3052,6 +3054,17 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
         .map(|index| state.parse_belt(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut base = std::mem::take(state.base_value_mut());
+    if let (Some(active_planet), Some(tray)) = (
+        base.get("activePlanetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        base.get("tray").cloned(),
+    ) {
+        base.get_mut("planetTrays")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native active planet trays are missing"))?
+            .insert(active_planet, tray);
+    }
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     *state.base_value_mut() = base;
     let total = simulation_seconds;

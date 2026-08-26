@@ -12,6 +12,8 @@ const SLOT_COUNT: usize = 5;
 const VESSELS_PER_BUILDING: f64 = 10.0;
 const CARGO_PER_VESSEL: f64 = 100.0;
 const BASE_TRIP_SECONDS: f64 = 30.0;
+const WARPER_CAPACITY_PER_BUILDING: f64 = 50.0;
+const DEFAULT_WARPER_TARGET: f64 = WARPER_CAPACITY_PER_BUILDING;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -281,6 +283,149 @@ fn completed_tech(base: &Map<String, Value>, id: &str) -> bool {
         .and_then(|research| research.get("completedTechIds"))
         .and_then(Value::as_array)
         .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+}
+
+pub(crate) fn refill_station_warpers(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    if !completed_tech(base, "space_warp") {
+        return Ok(());
+    }
+
+    let mut reserved_outgoing = HashMap::<String, f64>::new();
+    for station in entities.iter().filter_map(Value::as_object) {
+        let Some(routes) = station.get("stationRoutes").and_then(Value::as_array) else {
+            continue;
+        };
+        for route in routes.iter().filter_map(Value::as_object) {
+            if string_at(route, "itemId") != Some("space_warper") {
+                continue;
+            }
+            let Some(source_id) = string_at(route, "peerId") else {
+                continue;
+            };
+            *reserved_outgoing.entry(source_id.to_owned()).or_default() +=
+                finite_number(route.get("cargo"));
+        }
+    }
+
+    for entity in entities.iter_mut() {
+        let Some(station) = entity.as_object_mut() else {
+            continue;
+        };
+        if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+            || !station
+                .get("stationWarperAutoRefill")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let station_id = string_at(station, "id").unwrap_or_default().to_owned();
+        let planet_id = string_at(station, "planetId")
+            .ok_or_else(|| anyhow!("native warper refill station planet is missing"))?
+            .to_owned();
+        let loaded = finite_number(station.get("stationWarpers"))
+            .floor()
+            .max(0.0);
+        let capacity = WARPER_CAPACITY_PER_BUILDING
+            * finite_number(station.get("machineCount")).floor().max(0.0);
+        if capacity < 1.0 {
+            continue;
+        }
+        let target = station
+            .get("stationWarperTarget")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map(f64::floor)
+            .unwrap_or(DEFAULT_WARPER_TARGET)
+            .max(1.0)
+            .min(capacity);
+        let input_available = item_amount(station, "inputs", "space_warper")
+            .floor()
+            .max(0.0);
+        let output_stored = item_amount(station, "outputs", "space_warper")
+            .floor()
+            .max(0.0);
+        let output_reserved = reserved_outgoing
+            .get(&station_id)
+            .copied()
+            .unwrap_or(0.0)
+            .floor()
+            .max(0.0)
+            .min(output_stored);
+        let output_available = (output_stored - output_reserved).max(0.0);
+        let active_planet = base.get("activePlanetId").and_then(Value::as_str);
+        let tray_available = (if active_planet == Some(planet_id.as_str()) {
+            base.get("tray")
+        } else {
+            base.get("planetTrays")
+                .and_then(Value::as_object)
+                .and_then(|trays| trays.get(&planet_id))
+        })
+        .and_then(Value::as_object)
+        .and_then(|tray| tray.get("space_warper"))
+        .map(|value| finite_number(Some(value)).floor().max(0.0))
+        .unwrap_or(0.0);
+
+        let mut needed = (target - loaded).max(0.0);
+        if needed < 1.0 {
+            continue;
+        }
+        let from_input = needed.min(input_available);
+        if from_input > 0.0 {
+            set_item_amount(
+                station,
+                "inputs",
+                "space_warper",
+                input_available - from_input,
+            )?;
+            set_number(station, "stationWarpers", loaded + from_input)?;
+            needed -= from_input;
+        }
+        let from_output = needed.min(output_available);
+        if from_output > 0.0 {
+            set_item_amount(
+                station,
+                "outputs",
+                "space_warper",
+                output_stored - from_output,
+            )?;
+            let current = finite_number(station.get("stationWarpers"))
+                .floor()
+                .max(0.0);
+            set_number(station, "stationWarpers", current + from_output)?;
+            needed -= from_output;
+        }
+        if needed < 1.0 {
+            continue;
+        }
+        let from_tray = needed.min(tray_available);
+        if from_tray > 0.0 {
+            let tray = if active_planet == Some(planet_id.as_str()) {
+                base.get_mut("tray").and_then(Value::as_object_mut)
+            } else {
+                base.get_mut("planetTrays")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|trays| trays.get_mut(&planet_id))
+                    .and_then(Value::as_object_mut)
+            }
+            .ok_or_else(|| anyhow!("native warper refill planet tray is missing"))?;
+            tray.insert(
+                "space_warper".to_owned(),
+                Number::from_f64(tray_available - from_tray)
+                    .map(Value::Number)
+                    .ok_or_else(|| anyhow!("native warper refill tray value is non-finite"))?,
+            );
+            let current = finite_number(station.get("stationWarpers"))
+                .floor()
+                .max(0.0);
+            set_number(station, "stationWarpers", current + from_tray)?;
+        }
+    }
+    Ok(())
 }
 
 fn cargo_capacity(base: &Map<String, Value>) -> f64 {
@@ -1015,10 +1160,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 .get("quantumTransition")
                 .is_some_and(|value| !value.is_null())
             || station.get("quantumTarget").and_then(Value::as_bool) == Some(true)
-            || station
-                .get("stationWarperAutoRefill")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
         {
             return Ok(Some("interstellar-station-mode-unsupported"));
         }

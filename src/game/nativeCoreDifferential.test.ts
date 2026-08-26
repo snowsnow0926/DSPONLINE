@@ -536,6 +536,25 @@ function warpedInterstellarLogisticsState(): GameState {
   return state;
 }
 
+function stationWarperAutoRefillState(): GameState {
+  const state = warpedInterstellarLogisticsState();
+  const supply = state.entities.find((entity) =>
+    entity.buildingId === "interstellar_logistics_station" && entity.planetId === "home")!;
+  const demand = state.entities.find((entity) =>
+    entity.buildingId === "interstellar_logistics_station" && entity.planetId === "frost")!;
+  supply.stationWarperAutoRefill = true;
+  supply.stationWarperTarget = 10;
+  supply.stationWarpers = 0;
+  supply.stationVessels = 1;
+  supply.inputs = { ...supply.inputs, space_warper: 2 };
+  supply.outputs = { ...supply.outputs, space_warper: 3 };
+  demand.stationVessels = 0;
+  demand.stationWarpers = 0;
+  state.tray.space_warper = 20;
+  state.planetTrays.home.space_warper = 20;
+  return state;
+}
+
 function relayInterstellarLogisticsState(): GameState {
   let state = simpleMiningState();
   state.research.completedTechIds.push("interstellar_logistics", "space_warp", "logistics_engine_1");
@@ -1015,9 +1034,51 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 
+  it("matches exact station warper auto-refill ordering before and after dispatch", async () => {
+    const initial = stationWarperAutoRefillState();
+    const checkpoint = await seed(initial, 199);
+    for (const seconds of [1, 8, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `warper-refill-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "planetTrays", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `warper-refill-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.planetTrays, `warper-refill-${seconds} 行星托盘`).toEqual(JSON.parse(JSON.stringify(expected.planetTrays)));
+      expect(projection.base.nextId, `warper-refill-${seconds} 路线 ID`).toBe(expected.nextId);
+      expect(advanced.summary.canonicalFields, `warper-refill-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `warper-refill-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `warper-refill-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "warper-refill-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "warper-refill-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
   it("matches exact relay-required paths, per-hop warpers, and hub power", async () => {
     const initial = relayInterstellarLogisticsState();
-    const checkpoint = await seed(initial, 199);
+    const checkpoint = await seed(initial, 200);
     for (const seconds of [1, 10, 30, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);

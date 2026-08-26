@@ -587,6 +587,11 @@ ipcMain.handle("desktop:native-core-advance", async (event, request) => {
   return nativeCoreSessions.advance(ownerId, request);
 });
 
+ipcMain.handle("desktop:native-core-commit-operation", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.commitOperation(ownerId, request);
+});
+
 ipcMain.handle("desktop:native-core-compare", async (event, request) => {
   const ownerId = requireTrustedNativeSender(event);
   return nativeCoreSessions.compare(ownerId, request);

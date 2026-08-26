@@ -140,7 +140,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
       registry: { fingerprint: "builtin:test" },
     },
   });
-  const opened = await client.request({
+  const coreOpenRequest = {
     operation: "coreOpen",
     slot: "normal-main",
     generation: commit.generation,
@@ -163,7 +163,8 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
       recipes: [],
       belts: [{ tier: 1, speed: 6 }],
     },
-  });
+  };
+  let opened = await client.request(coreOpenRequest);
   assert.equal(opened.authority, "shadow");
   assert.equal(opened.checkpointRevision, 1);
   assert.equal(opened.replayedWalEntries, 1);
@@ -193,18 +194,49 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     }),
     /unbounded collection/,
   );
-  const applied = await client.request({
-    operation: "coreApplyCommand",
+  const authorityRequest = {
+    operation: "coreCommitOperation",
     sessionId: opened.sessionId,
-    command: {
-      protocolVersion: 1,
+    request: {
+      commandId: "authority-unpause-3",
       baseRevision: 2,
-      topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
-      changedEntities: [], addedEntities: [], removedEntityIds: [], changedBelts: [], addedBelts: [], removedBeltIds: [],
+      command: {
+        protocolVersion: 1,
+        baseRevision: 2,
+        topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+        changedEntities: [], addedEntities: [], removedEntityIds: [], changedBelts: [], addedBelts: [], removedBeltIds: [],
+      },
+      simulationSeconds: 0,
+      wallSeconds: 0,
+      includeDiagnostics: false,
     },
-  });
-  assert.equal(applied.revision, 3);
+  };
+  const applied = await client.request(authorityRequest);
+  assert.deepEqual(
+    { revision: applied.revision, currentRevision: applied.currentRevision, duplicate: applied.duplicate },
+    { revision: 3, currentRevision: 3, duplicate: false },
+  );
+  const duplicate = await client.request(authorityRequest);
+  assert.deepEqual(
+    { revision: duplicate.revision, currentRevision: duplicate.currentRevision, duplicate: duplicate.duplicate },
+    { revision: 3, currentRevision: 3, duplicate: true },
+  );
+  await assert.rejects(
+    client.request({
+      ...authorityRequest,
+      request: { ...authorityRequest.request, simulationSeconds: 1 },
+    }),
+    /idempotency key conflicts/,
+  );
   assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).paused, false);
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+
+  // Reopening from the old generation replays both durable operations and
+  // lands on the exact accepted revision instead of an older checkpoint.
+  opened = await client.request(coreOpenRequest);
+  assert.equal(opened.replayedWalEntries, 2);
+  assert.equal(opened.replayedRevision, 3);
+  assert.equal(opened.summary.paused, false);
   const unsupportedAdvance = await client.request({
     operation: "coreAdvance",
     sessionId: opened.sessionId,

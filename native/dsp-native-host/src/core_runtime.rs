@@ -8,7 +8,7 @@ use dsp_native_core::{
     CoreStateSummary, SimulationCommandPatch,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::save_store::{SaveStore, WalEntry};
 
@@ -203,6 +203,36 @@ pub struct CoreCompareResult {
     pub summary: CoreStateSummary,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCommitOperationRequest {
+    pub command_id: String,
+    pub base_revision: u64,
+    #[serde(default)]
+    pub command: Option<SimulationCommandPatch>,
+    pub simulation_seconds: f64,
+    pub wall_seconds: f64,
+    #[serde(default)]
+    pub include_diagnostics: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCommitOperationResult {
+    pub command_id: String,
+    pub base_revision: u64,
+    /// Revision accepted by this idempotency key.
+    pub revision: u64,
+    /// Current session revision. It can be newer when an old lost response is
+    /// retried after later operations have already committed.
+    pub current_revision: u64,
+    pub entry_hash: String,
+    pub wal_bytes: u64,
+    pub duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<CoreStateSummary>,
+}
+
 pub struct CoreRegistry {
     next_session_id: u64,
     sessions: HashMap<String, CoreState>,
@@ -310,6 +340,149 @@ impl CoreRegistry {
         request: &CoreAdvanceRequest,
     ) -> anyhow::Result<CoreAdvanceResult> {
         self.session_mut(session_id)?.advance(request)
+    }
+
+    /// Durably accepts one authoritative operation. The exact command and
+    /// simulation budget are preflighted on a transactional state before the
+    /// hash-chained WAL is synced. Only then is the prepared state installed.
+    /// A repeated command ID is an idempotent receipt lookup, never a second
+    /// simulation step.
+    pub fn commit_operation(
+        &mut self,
+        store: &SaveStore,
+        session_id: &str,
+        request: CoreCommitOperationRequest,
+    ) -> anyhow::Result<CoreCommitOperationResult> {
+        validate_session_id(session_id)?;
+        if request.base_revision > MAX_SAFE_INTEGER
+            || !request.simulation_seconds.is_finite()
+            || request.simulation_seconds < 0.0
+            || !request.wall_seconds.is_finite()
+            || request.wall_seconds < 0.0
+        {
+            bail!("native authoritative operation bounds are invalid");
+        }
+        if let Some(command) = request.command.as_ref() {
+            if command.base_revision != request.base_revision {
+                bail!("native authoritative command base revision is invalid");
+            }
+        }
+
+        let (slot, fingerprint, current_revision) = {
+            let state = self.session(session_id)?;
+            (
+                state.identity.slot.clone(),
+                state.identity.registry_fingerprint.clone(),
+                state.revision,
+            )
+        };
+
+        if let Some(existing) = store.find_wal_command(&slot, &request.command_id)? {
+            let operation = decode_wal_operation(&existing)?;
+            let requested_command = serde_json::to_value(&request.command)?;
+            let accepted_command = serde_json::to_value(&operation.command)?;
+            if operation.base_revision != request.base_revision
+                || operation.registry_fingerprint != fingerprint
+                || operation.simulation_seconds.to_bits() != request.simulation_seconds.to_bits()
+                || operation.wall_seconds.to_bits() != request.wall_seconds.to_bits()
+                || requested_command != accepted_command
+            {
+                bail!("native authoritative idempotency key conflicts with another operation");
+            }
+            if current_revision < operation.result_revision {
+                if current_revision != operation.base_revision {
+                    bail!("native authoritative retry cannot prove revision continuity");
+                }
+                let state = self.session_mut(session_id)?;
+                state.replay_operation(
+                    operation.base_revision,
+                    operation.result_revision,
+                    operation.command.as_ref(),
+                    operation.simulation_seconds,
+                    operation.wall_seconds,
+                )?;
+            }
+            let state = self.session(session_id)?;
+            if state.revision < operation.result_revision {
+                bail!("native authoritative retry did not reach its durable revision");
+            }
+            let receipt = store.append_wal_idempotent(
+                &slot,
+                operation.base_revision,
+                operation.result_revision,
+                &request.command_id,
+                existing.payload,
+            )?;
+            return Ok(CoreCommitOperationResult {
+                command_id: request.command_id,
+                base_revision: operation.base_revision,
+                revision: operation.result_revision,
+                current_revision: state.revision,
+                entry_hash: receipt.entry_hash,
+                wal_bytes: receipt.wal_bytes,
+                duplicate: receipt.duplicate,
+                summary: request
+                    .include_diagnostics
+                    .then(|| state.summary())
+                    .transpose()?,
+            });
+        }
+
+        if current_revision != request.base_revision {
+            bail!("native authoritative operation base revision is not current");
+        }
+        let mut prepared = self.session(session_id)?.clone();
+        if let Some(command) = request.command.as_ref() {
+            prepared.apply_command(command)?;
+        }
+        let advanced = prepared.advance(&CoreAdvanceRequest {
+            base_revision: prepared.revision,
+            simulation_seconds: request.simulation_seconds,
+            wall_seconds: request.wall_seconds,
+            include_diagnostics: false,
+        })?;
+        if !advanced.supported {
+            bail!(
+                "native authoritative operation reached unsupported domain: {}",
+                advanced.reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        if prepared.revision <= request.base_revision {
+            bail!("native authoritative operation made no revision progress");
+        }
+        let result_revision = prepared.revision;
+        let payload = json!({
+            "kind": "stable-operation-v1",
+            "baseStateRevision": request.base_revision,
+            "resultStateRevision": result_revision,
+            "command": request.command,
+            "simulationSeconds": request.simulation_seconds,
+            "wallSeconds": request.wall_seconds,
+            "approximate": false,
+            "registry": { "fingerprint": fingerprint },
+        });
+        let receipt = store.append_wal_idempotent(
+            &slot,
+            request.base_revision,
+            result_revision,
+            &request.command_id,
+            payload,
+        )?;
+        let state = self.session_mut(session_id)?;
+        *state = prepared;
+        Ok(CoreCommitOperationResult {
+            command_id: request.command_id,
+            base_revision: request.base_revision,
+            revision: result_revision,
+            current_revision: result_revision,
+            entry_hash: receipt.entry_hash,
+            wal_bytes: receipt.wal_bytes,
+            duplicate: receipt.duplicate,
+            summary: request
+                .include_diagnostics
+                .then(|| state.summary())
+                .transpose()?,
+        })
     }
 
     pub fn compare(

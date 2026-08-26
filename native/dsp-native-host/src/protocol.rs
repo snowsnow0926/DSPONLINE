@@ -3,6 +3,8 @@ use serde_json::Value;
 
 use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 
+use crate::core_runtime::CoreCommitOperationRequest;
+
 #[derive(Debug, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -80,6 +82,10 @@ pub enum ControlRequest {
     CoreAdvance {
         session_id: String,
         request: CoreAdvanceRequest,
+    },
+    CoreCommitOperation {
+        session_id: String,
+        request: CoreCommitOperationRequest,
     },
     CoreCompare {
         session_id: String,

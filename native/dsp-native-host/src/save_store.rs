@@ -131,6 +131,7 @@ pub struct WalAppendResult {
     pub revision: u64,
     pub entry_hash: String,
     pub wal_bytes: u64,
+    pub duplicate: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +435,49 @@ impl SaveStore {
         command_id: &str,
         payload: Value,
     ) -> anyhow::Result<WalAppendResult> {
+        self.append_wal_internal(slot, base_revision, revision, command_id, payload, false)
+    }
+
+    /// Append an authority operation with an idempotency key. A renderer may
+    /// lose the response after `sync_all` even though the command is already
+    /// durable. Retrying the exact same operation returns the original receipt;
+    /// reusing the key for different bytes fails closed.
+    pub fn append_wal_idempotent(
+        &self,
+        slot: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<WalAppendResult> {
+        self.append_wal_internal(slot, base_revision, revision, command_id, payload, true)
+    }
+
+    pub fn find_wal_command(
+        &self,
+        slot: &str,
+        command_id: &str,
+    ) -> anyhow::Result<Option<WalEntry>> {
+        validate_slot(slot)?;
+        validate_command_id(command_id)?;
+        let wal_path = self.wal_path(slot)?;
+        if !wal_path.exists() {
+            return Ok(None);
+        }
+        Ok(decode_all_wal_bytes(&fs::read(wal_path)?)?
+            .into_iter()
+            .find(|entry| entry.command_id == command_id))
+    }
+
+    fn append_wal_internal(
+        &self,
+        slot: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+        payload: Value,
+        allow_identical_duplicate: bool,
+    ) -> anyhow::Result<WalAppendResult> {
         validate_slot(slot)?;
         validate_command_id(command_id)?;
         let checkpoint_revision = self
@@ -446,6 +490,26 @@ impl SaveStore {
         } else {
             Vec::new()
         };
+        if let Some(existing) = all_entries
+            .iter()
+            .find(|entry| entry.command_id == command_id)
+        {
+            if !allow_identical_duplicate {
+                bail!("native WAL command ID is duplicated");
+            }
+            if existing.base_revision != base_revision
+                || existing.revision != revision
+                || existing.payload != payload
+            {
+                bail!("native WAL idempotency key conflicts with another operation");
+            }
+            return Ok(WalAppendResult {
+                revision: existing.revision,
+                entry_hash: existing.entry_hash.clone(),
+                wal_bytes: fs::metadata(&wal_path)?.len(),
+                duplicate: true,
+            });
+        }
         let active_entries = all_entries
             .iter()
             .filter(|entry| entry.revision > checkpoint_revision)
@@ -456,12 +520,6 @@ impl SaveStore {
             .unwrap_or(checkpoint_revision);
         if base_revision != expected_base_revision || revision <= base_revision {
             bail!("native WAL revision range is not contiguous");
-        }
-        if all_entries
-            .iter()
-            .any(|entry| entry.command_id == command_id)
-        {
-            bail!("native WAL command ID is duplicated");
         }
         let previous_hash = all_entries
             .last()
@@ -501,6 +559,7 @@ impl SaveStore {
             revision,
             entry_hash,
             wal_bytes: file.metadata()?.len(),
+            duplicate: false,
         })
     }
 
@@ -1149,6 +1208,38 @@ mod tests {
             ),
             (Some(6), Some(8), 2)
         );
+    }
+
+    #[test]
+    fn authority_wal_retry_is_idempotent_but_key_reuse_conflicts() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let tx = begin(&mut store, 5);
+        store.put(&tx, "base", Some("state")).unwrap();
+        store.commit(&tx).unwrap();
+        let payload = serde_json::json!({"kind":"stable-operation-v1","seconds":1});
+        let first = store
+            .append_wal_idempotent("normal-main", 5, 6, "authority-6", payload.clone())
+            .unwrap();
+        let retry = store
+            .append_wal_idempotent("normal-main", 5, 6, "authority-6", payload)
+            .unwrap();
+        assert!(!first.duplicate);
+        assert!(retry.duplicate);
+        assert_eq!(retry.entry_hash, first.entry_hash);
+        assert_eq!(retry.wal_bytes, first.wal_bytes);
+        assert!(
+            store
+                .append_wal_idempotent(
+                    "normal-main",
+                    5,
+                    6,
+                    "authority-6",
+                    serde_json::json!({"kind":"stable-operation-v1","seconds":2}),
+                )
+                .is_err()
+        );
+        assert_eq!(store.read_wal("normal-main", 5).unwrap().len(), 1);
     }
 
     #[test]

@@ -327,6 +327,35 @@ function normalizeNativeCoreCommand(value) {
   return value;
 }
 
+function normalizeNativeCoreCommitOperation(value) {
+  if (!value || typeof value !== "object" || !validLogicalId(value.commandId, 128) ||
+    !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0 ||
+    !Number.isFinite(value.simulationSeconds) || value.simulationSeconds < 0 ||
+    !Number.isFinite(value.wallSeconds) || value.wallSeconds < 0 ||
+    value.includeDiagnostics !== undefined && typeof value.includeDiagnostics !== "boolean") {
+    throw new TypeError("native core authoritative operation is invalid");
+  }
+  const command = value.command == null ? null : normalizeNativeCoreCommand(value.command);
+  if (command && command.baseRevision !== value.baseRevision) {
+    throw new TypeError("native core authoritative command revision is invalid");
+  }
+  if (!command && value.simulationSeconds === 0 && value.wallSeconds === 0) {
+    throw new TypeError("native core authoritative operation is empty");
+  }
+  const request = {
+    commandId: value.commandId,
+    baseRevision: value.baseRevision,
+    command,
+    simulationSeconds: value.simulationSeconds,
+    wallSeconds: value.wallSeconds,
+    includeDiagnostics: value.includeDiagnostics ?? false,
+  };
+  if (Buffer.byteLength(JSON.stringify(request), "utf8") > MAX_FRAME_PAYLOAD_BYTES - 16_384) {
+    throw new RangeError("native core authoritative operation exceeds the bounded IPC limit");
+  }
+  return request;
+}
+
 class NativeCoreSessionRegistry {
   constructor(client) {
     this.client = client;
@@ -390,6 +419,15 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  commitOperation(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    return this.client.request({
+      operation: "coreCommitOperation",
+      sessionId: request.sessionId,
+      request: normalizeNativeCoreCommitOperation(request),
+    });
+  }
+
   compare(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.revision) || request.revision < 0 ||
@@ -442,6 +480,7 @@ module.exports = {
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
   normalizeNativeCoreCommand,
+  normalizeNativeCoreCommitOperation,
   normalizeNativeCoreOpen,
   parseFrames,
 };

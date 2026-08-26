@@ -108,9 +108,17 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   assert.throws(() => registry.status(8, "core-1"), /not owned/);
   await registry.status(7, "core-1");
   assert.throws(() => registry.advance(7, { sessionId: "core-1", baseRevision: 1, simulationSeconds: -1, wallSeconds: 1 }), /advance/);
+  assert.throws(() => registry.commitOperation(7, {
+    sessionId: "core-1", commandId: "authority-2", baseRevision: 1,
+    simulationSeconds: 0, wallSeconds: 0,
+  }), /empty/);
+  await registry.commitOperation(7, {
+    sessionId: "core-1", commandId: "authority-2", baseRevision: 1,
+    simulationSeconds: 1, wallSeconds: 1,
+  });
   await registry.close(7, "core-1");
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
-  assert.deepEqual(calls.map((call) => call.operation), ["coreOpen", "coreStatus", "coreClose"]);
+  assert.deepEqual(calls.map((call) => call.operation), ["coreOpen", "coreStatus", "coreCommitOperation", "coreClose"]);
 });
 
 test("mock child primitives remain compatible with client event expectations", () => {

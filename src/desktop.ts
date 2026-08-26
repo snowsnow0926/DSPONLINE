@@ -35,6 +35,7 @@ export interface DesktopBridge {
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
+  commitNativeCoreOperation: (request: DesktopNativeCoreCommitOperationRequest) => Promise<DesktopNativeCoreCommitOperationResult>;
   compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
   closeNativeCore: (request: DesktopNativeCoreSessionRequest) => Promise<{ closed: boolean }>;
   requestApi: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
@@ -137,6 +138,7 @@ export interface DesktopNativeWalAppendResult {
   revision: number;
   entryHash: string;
   walBytes: number;
+  duplicate?: boolean;
 }
 
 export interface DesktopNativeCoreItemDefinition {
@@ -346,6 +348,26 @@ export interface DesktopNativeCoreAdvanceResult {
   previousRevision: number;
   revision: number;
   reason?: string;
+  summary?: DesktopNativeCoreSummary;
+}
+
+export interface DesktopNativeCoreCommitOperationRequest extends DesktopNativeCoreSessionRequest {
+  commandId: string;
+  baseRevision: number;
+  command?: Record<string, unknown> | null;
+  simulationSeconds: number;
+  wallSeconds: number;
+  includeDiagnostics?: boolean;
+}
+
+export interface DesktopNativeCoreCommitOperationResult {
+  commandId: string;
+  baseRevision: number;
+  revision: number;
+  currentRevision: number;
+  entryHash: string;
+  walBytes: number;
+  duplicate: boolean;
   summary?: DesktopNativeCoreSummary;
 }
 

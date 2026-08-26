@@ -1,6 +1,7 @@
 import {
   getDesktopBridge,
   type DesktopNativeCoreCompareResult,
+  type DesktopNativeCoreCommitOperationResult,
   type DesktopNativeCoreOpenResult,
   type DesktopNativeCoreSummary,
   type DesktopNativeCoreProjectionResult,
@@ -18,6 +19,14 @@ export interface WindowsNativeCoreShadow {
   projection(request: { baseFields?: string[]; entityIds?: string[]; beltIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }>;
+  commitOperation(request: {
+    commandId: string;
+    baseRevision: number;
+    command?: SimulationCommandPatch | null;
+    simulationSeconds: number;
+    wallSeconds: number;
+    includeDiagnostics?: boolean;
+  }): Promise<DesktopNativeCoreCommitOperationResult>;
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult>;
   close(): Promise<void>;
 }
@@ -70,6 +79,24 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       includeDiagnostics: false,
     });
     return { supported: result.supported, revision: result.revision, ...(result.reason ? { reason: result.reason } : {}) };
+  }
+
+  async commitOperation(request: {
+    commandId: string;
+    baseRevision: number;
+    command?: SimulationCommandPatch | null;
+    simulationSeconds: number;
+    wallSeconds: number;
+    includeDiagnostics?: boolean;
+  }): Promise<DesktopNativeCoreCommitOperationResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    return desktop.commitNativeCoreOperation({
+      sessionId: this.sessionId,
+      ...request,
+      command: request.command as unknown as Record<string, unknown> | null | undefined,
+    });
   }
 
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult> {

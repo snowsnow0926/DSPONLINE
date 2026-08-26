@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use dsp_native_core::SimulationCommandPatch;
+use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -66,6 +66,10 @@ pub enum ControlRequest {
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
+    },
+    CoreAdvance {
+        session_id: String,
+        request: CoreAdvanceRequest,
     },
     CoreCompare {
         session_id: String,

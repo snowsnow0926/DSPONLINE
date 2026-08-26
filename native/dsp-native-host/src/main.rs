@@ -148,6 +148,10 @@ fn handle_request(
             session_id,
             command,
         } => to_value(cores.apply_command(&session_id, &command)?)?,
+        ControlRequest::CoreAdvance {
+            session_id,
+            request,
+        } => to_value(cores.advance(&session_id, &request)?)?,
         ControlRequest::CoreCompare {
             session_id,
             revision,

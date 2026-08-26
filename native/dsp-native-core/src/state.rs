@@ -563,6 +563,9 @@ impl CoreState {
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
         &mut self.base
     }
+    pub(crate) fn base_value(&self) -> &Map<String, Value> {
+        &self.base
+    }
     pub(crate) fn entity_raw_mut(&mut self) -> &mut Vec<Box<str>> {
         &mut self.entity_raw
     }

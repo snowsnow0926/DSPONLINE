@@ -352,6 +352,24 @@ class NativeCoreSessionRegistry {
     return this.client.request({ operation: "coreApplyCommand", sessionId, command: normalizeNativeCoreCommand(command) });
   }
 
+  advance(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
+      !Number.isFinite(request?.simulationSeconds) || request.simulationSeconds < 0 ||
+      !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0) {
+      throw new TypeError("native core advance request is invalid");
+    }
+    return this.client.request({
+      operation: "coreAdvance",
+      sessionId: request.sessionId,
+      request: {
+        baseRevision: request.baseRevision,
+        simulationSeconds: request.simulationSeconds,
+        wallSeconds: request.wallSeconds,
+      },
+    });
+  }
+
   compare(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.revision) || request.revision < 0 ||

@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{anyhow, bail};
 use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
-    CommandApplyResult, CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
+    CommandApplyResult, CoreAdvanceRequest, CoreAdvanceResult, CoreCheckpointIdentity, CoreState,
+    CoreStateSummary, SimulationCommandPatch,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -118,6 +119,14 @@ impl CoreRegistry {
         command: &SimulationCommandPatch,
     ) -> anyhow::Result<CommandApplyResult> {
         self.session_mut(session_id)?.apply_command(command)
+    }
+
+    pub fn advance(
+        &mut self,
+        session_id: &str,
+        request: &CoreAdvanceRequest,
+    ) -> anyhow::Result<CoreAdvanceResult> {
+        self.session_mut(session_id)?.advance(request)
     }
 
     pub fn compare(

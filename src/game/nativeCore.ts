@@ -15,6 +15,7 @@ export interface WindowsNativeCoreShadow {
   readonly checkpoint: DesktopNativeSaveCommitResult;
   status(): Promise<DesktopNativeCoreSummary>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
+  advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }>;
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult>;
   close(): Promise<void>;
 }
@@ -43,6 +44,14 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       command: command as unknown as Record<string, unknown>,
     });
     return { revision: result.revision, topologyDirty: result.topologyDirty };
+  }
+
+  async advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    const result = await desktop.advanceNativeCore({ sessionId: this.sessionId, ...request });
+    return { supported: result.supported, revision: result.revision, ...(result.reason ? { reason: result.reason } : {}) };
   }
 
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult> {
@@ -85,4 +94,3 @@ export async function openWindowsNativeCoreShadow(
   }
   return new DesktopNativeCoreShadow(opened.sessionId, checkpoint);
 }
-

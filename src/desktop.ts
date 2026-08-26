@@ -33,6 +33,7 @@ export interface DesktopBridge {
   openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
+  advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
   closeNativeCore: (request: DesktopNativeCoreSessionRequest) => Promise<{ closed: boolean }>;
   requestApi: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
@@ -238,6 +239,22 @@ export interface DesktopNativeCoreCommandResult {
   changedEntityIds: string[];
   changedBeltIds: string[];
   topologyDirty: boolean;
+}
+
+export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessionRequest {
+  baseRevision: number;
+  simulationSeconds: number;
+  wallSeconds: number;
+}
+
+export interface DesktopNativeCoreAdvanceResult {
+  supported: boolean;
+  exactScope: "no-change" | "clock-only" | "unsupported-domain";
+  changed: boolean;
+  previousRevision: number;
+  revision: number;
+  reason?: string;
+  summary: DesktopNativeCoreSummary;
 }
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {

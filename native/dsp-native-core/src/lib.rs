@@ -7,6 +7,7 @@
 pub mod canonical;
 pub mod catalog;
 pub mod command;
+pub mod simulation;
 pub mod state;
 
 pub use catalog::{
@@ -14,6 +15,7 @@ pub use catalog::{
     RecipeDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
+pub use simulation::{CoreAdvanceRequest, CoreAdvanceResult};
 pub use state::{
     CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage, RuntimeMemoryEstimate,
 };

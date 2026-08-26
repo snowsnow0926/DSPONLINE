@@ -107,6 +107,7 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   await registry.open(7, { slot: "normal-main", generation: 1, rootHash: "a".repeat(64), revision: 1, registryFingerprint: "builtin:test", catalog });
   assert.throws(() => registry.status(8, "core-1"), /not owned/);
   await registry.status(7, "core-1");
+  assert.throws(() => registry.advance(7, { sessionId: "core-1", baseRevision: 1, simulationSeconds: -1, wallSeconds: 1 }), /advance/);
   await registry.close(7, "core-1");
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), ["coreOpen", "coreStatus", "coreClose"]);

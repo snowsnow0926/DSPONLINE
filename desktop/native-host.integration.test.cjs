@@ -148,5 +148,13 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   });
   assert.equal(applied.revision, 2);
   assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).paused, true);
+  const pausedAdvance = await client.request({
+    operation: "coreAdvance",
+    sessionId: opened.sessionId,
+    request: { baseRevision: 2, simulationSeconds: 1, wallSeconds: 1 },
+  });
+  assert.equal(pausedAdvance.supported, true);
+  assert.equal(pausedAdvance.changed, false);
+  assert.equal(pausedAdvance.revision, 2);
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
 });

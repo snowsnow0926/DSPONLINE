@@ -61,4 +61,3 @@ export function collectGameStateEditLineage(
   }
   return { entityIds, beltIds, depth };
 }
-

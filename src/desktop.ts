@@ -265,6 +265,8 @@ export interface DesktopNativeCoreDomainCoverage {
   constructionArithmeticBatching: boolean;
   quantumAttachmentTransitions: boolean;
   inactiveTimeWarpController: boolean;
+  activeTimeWarpPower: boolean;
+  unifiedAdvanceBudgets: boolean;
   dysonSwarmAndSphere: boolean;
   dysonLaunchers: boolean;
   dysonRayReceivers: boolean;

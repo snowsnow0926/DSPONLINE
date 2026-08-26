@@ -88,6 +88,7 @@ struct GridRuntime {
     base_generation_kw: f64,
     demand_kw: f64,
     supplied_kw: f64,
+    regular_supplied_kw: f64,
     factor: f64,
     wind_generation_kw: f64,
     solar_generation_kw: f64,
@@ -122,6 +123,7 @@ impl Default for GridRuntime {
             base_generation_kw: 0.0,
             demand_kw: 0.0,
             supplied_kw: 0.0,
+            regular_supplied_kw: 0.0,
             factor: 1.0,
             wind_generation_kw: 0.0,
             solar_generation_kw: 0.0,
@@ -402,13 +404,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
         .is_some_and(|value| empty_array(Some(value)))
     {
         return Some("exploration-active");
-    }
-    let time_warp = base.get("timeWarp");
-    if bool_at(time_warp, &["enabled"])
-        || number_at(time_warp, &["pendingSimulationSeconds"]).abs() > EPSILON
-        || number_at(time_warp, &["pendingWallSeconds"]).abs() > EPSILON
-    {
-        return Some("time-warp-active");
     }
     let endgame = base.get("endgame");
     if endgame
@@ -2084,20 +2079,20 @@ fn drain_material_delivery_hubs(
     Ok(())
 }
 
-fn prepare_inactive_time_warp(
+fn prepare_time_warp(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<usize>> {
     let controller_id = base
         .get("timeWarp")
         .and_then(Value::as_object)
         .and_then(|time_warp| string_at(time_warp, "controllerEntityId"))
         .map(str::to_owned);
-    let controller_valid = controller_id
+    let controller_index = controller_id
         .as_deref()
         .and_then(|id| state.entity_index.get(id).copied())
-        .is_some_and(|index| state.factory_topology.time_warp_indices.contains(&index));
+        .filter(|index| state.factory_topology.time_warp_indices.contains(index));
     let simulation_speed = base
         .get("settings")
         .and_then(Value::as_object)
@@ -2108,7 +2103,7 @@ fn prepare_inactive_time_warp(
         .get_mut("timeWarp")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("native time-warp state is missing"))?;
-    if !controller_valid {
+    if controller_index.is_none() {
         time_warp.insert("controllerEntityId".to_owned(), Value::Null);
         time_warp.insert("enabled".to_owned(), Value::Bool(false));
     }
@@ -2124,7 +2119,35 @@ fn prepare_inactive_time_warp(
         set_number(entity, "utilization", 0.0)?;
         set_number(entity, "productionRate", 0.0)?;
     }
-    Ok(())
+    Ok(controller_index)
+}
+
+fn time_warp_required_power_kw(multiplier: f64) -> Option<f64> {
+    if !multiplier.is_finite()
+        || multiplier.fract().abs() > f64::EPSILON
+        || multiplier < 4.0
+        || multiplier + 1.0 > 308.0
+    {
+        return None;
+    }
+    let power = 10_f64.powf(multiplier + 1.0);
+    power.is_finite().then_some(power)
+}
+
+fn maximum_stable_time_warp_multiplier(
+    available_power_kw: f64,
+    requested_multiplier: f64,
+) -> Option<f64> {
+    if !available_power_kw.is_finite()
+        || available_power_kw < 100_000.0
+        || !requested_multiplier.is_finite()
+        || requested_multiplier.fract().abs() > f64::EPSILON
+        || requested_multiplier < 5.0
+    {
+        return None;
+    }
+    let supported = (available_power_kw.log10() - 1.0 + 1e-12).floor().max(4.0);
+    Some(requested_multiplier.min(supported))
 }
 
 fn simulate_step(
@@ -2170,7 +2193,7 @@ fn simulate_step(
         })
         .collect::<Vec<_>>();
     profile_mark!("static-step-indexes");
-    prepare_inactive_time_warp(state, base, entities)?;
+    let time_warp_controller = prepare_time_warp(state, base, entities)?;
     crate::dyson::advance_environment(base, seconds)?;
     profile_mark!("time-warp-and-dyson-environment");
     crate::local_logistics::reset_runtime_for_indices(
@@ -2580,7 +2603,29 @@ fn simulate_step(
     profile_mark!("machine-power-demand-index");
 
     let mut power_factors = HashMap::<usize, f64>::new();
-    for runtime in &mut grids {
+    let time_warp_enabled = base
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .and_then(|time_warp| time_warp.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let requested_time_warp = base
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .map(|time_warp| finite_number(time_warp.get("requestedMultiplier")))
+        .unwrap_or(0.0);
+    let simulation_speed = base
+        .get("settings")
+        .and_then(Value::as_object)
+        .map(|settings| finite_number(settings.get("simulationSpeed")))
+        .unwrap_or(1.0);
+    let time_warp_grid_slot = time_warp_controller.and_then(|entity_index| {
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        (planet != usize::MAX && grid != usize::MAX)
+            .then_some((grid_slot(planet, grid), entity_index))
+    });
+    for (runtime_index, runtime) in grids.iter_mut().enumerate() {
         let connected_demand = runtime
             .consumers
             .iter()
@@ -2593,8 +2638,63 @@ fn simulate_step(
             .map(|candidate| candidate.capacity)
             .sum::<f64>();
         runtime.generation_kw = runtime.base_generation_kw + dispatch_capacity;
-        runtime.supplied_kw = connected_demand.min(runtime.generation_kw);
+        runtime.regular_supplied_kw = connected_demand.min(runtime.generation_kw);
+        runtime.supplied_kw = runtime.regular_supplied_kw;
         runtime.demand_kw = connected_demand + runtime.disconnected_demand_kw;
+        if time_warp_enabled
+            && let Some((controller_slot, controller_index)) = time_warp_grid_slot
+            && controller_slot == runtime_index
+        {
+            let available = (runtime.generation_kw - runtime.regular_supplied_kw).max(0.0);
+            let stable = maximum_stable_time_warp_multiplier(available, requested_time_warp);
+            let effective = stable.unwrap_or(simulation_speed);
+            let demand = time_warp_required_power_kw(stable.unwrap_or(4.0)).unwrap_or(100_000.0);
+            let allocated = available.min(demand);
+            runtime.demand_kw += demand;
+            runtime.supplied_kw += allocated;
+            runtime
+                .power_input_by_entity
+                .insert(controller_index, allocated);
+            power_factors.insert(
+                controller_index,
+                if demand > EPSILON {
+                    (allocated / demand).min(1.0)
+                } else {
+                    0.0
+                },
+            );
+            if runtime.has_power_source {
+                runtime.connected_entities += 1;
+            } else {
+                runtime.disconnected_entities += 1;
+            }
+            let time_warp = base
+                .get_mut("timeWarp")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native time-warp state is missing"))?;
+            set_number(time_warp, "effectiveMultiplier", effective)?;
+            set_number(time_warp, "requiredPowerKw", demand)?;
+            set_number(time_warp, "allocatedPowerKw", allocated)?;
+            let controller = entities[controller_index]
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("native time-warp controller is invalid"))?;
+            set_number(controller, "powerInputKw", rounded(allocated, 2))?;
+            set_number(
+                controller,
+                "powerFactor",
+                if demand > EPSILON {
+                    rounded(allocated / demand, 4)
+                } else {
+                    0.0
+                },
+            )?;
+            set_number(
+                controller,
+                "utilization",
+                if stable.is_some() { 1.0 } else { 0.0 },
+            )?;
+            set_number(controller, "productionRate", 0.0)?;
+        }
         runtime.factor = if runtime.demand_kw <= EPSILON {
             1.0
         } else {
@@ -2638,7 +2738,7 @@ fn simulate_step(
             &mut runtime.power_input_by_entity,
         );
         runtime.storage_charge_kw += accumulator_charge;
-        let mut remaining = runtime.supplied_kw.max(0.0);
+        let mut remaining = runtime.regular_supplied_kw.max(0.0);
         for priority in [3_usize, 2, 1] {
             let demand = runtime.consumers[priority]
                 .iter()
@@ -3545,6 +3645,10 @@ pub(crate) fn prepare_advance(
     profile_mark!("belt-runtime-write-back");
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-after");
+    if let Some(time_warp) = base.get_mut("timeWarp").and_then(Value::as_object_mut) {
+        set_number(time_warp, "pendingSimulationSeconds", 0.0)?;
+        set_number(time_warp, "pendingWallSeconds", 0.0)?;
+    }
     let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
     if universe_matrix >= 1.0 {
         if let Some(station) = base

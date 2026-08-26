@@ -972,6 +972,23 @@ function orphanedQuantumConstructionBufferState(): GameState {
   return state;
 }
 
+function activeTimeWarpState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds = Object.keys(TECHNOLOGIES) as GameState["research"]["completedTechIds"];
+  state.construction.time_warp_device = 1;
+  state = placeBuilding(state, "time_warp_device", { x: 1_340, y: -120 }, 1);
+  const controller = state.entities.find((entity) => entity.buildingId === "time_warp_device")!;
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  wind.machineCount = 1_000_000;
+  state.timeWarp.controllerEntityId = controller.id;
+  state.timeWarp.enabled = true;
+  state.timeWarp.requestedMultiplier = 5;
+  state.timeWarp.effectiveMultiplier = 1;
+  state.timeWarp.pendingSimulationSeconds = 123;
+  state.timeWarp.pendingWallSeconds = 17;
+  return state;
+}
+
 function quantumAttachmentTransitionState(): GameState {
   const state = interstellarLogisticsState();
   state.research.completedTechIds.push("quantum_logistics_network");
@@ -2207,6 +2224,30 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.galacticHubNetwork, `system-hub-${seconds} 舰队`).toEqual(JSON.parse(JSON.stringify(expected.galacticHubNetwork)));
       expect(advanced.summary.canonicalFields, `system-hub-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `system-hub-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("matches active time-warp power allocation and clears committed pending budgets", async () => {
+    const initial = activeTimeWarpState();
+    const checkpoint = await seed(initial, 214);
+    for (const seconds of [1, 5, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `time-warp-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["timeWarp", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `time-warp-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.timeWarp, `time-warp-${seconds} 控制器`).toEqual(JSON.parse(JSON.stringify(expected.timeWarp)));
+      expect(advanced.summary.canonicalFields, `time-warp-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `time-warp-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 90_000);

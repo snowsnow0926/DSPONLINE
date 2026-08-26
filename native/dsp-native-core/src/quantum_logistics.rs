@@ -25,6 +25,13 @@ pub(crate) struct BoundaryFlow {
     quantum_collector_stacks: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeBandwidth {
+    per_minute: f64,
+    tower_stacks: f64,
+    collector_stacks: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct Network {
     enabled: bool,
@@ -119,6 +126,55 @@ fn is_quantum_collector(entity: &Map<String, Value>) -> bool {
     string_at(entity, "kind") == Some("station")
         && string_at(entity, "buildingId") == Some("orbital_collector")
         && string_at(entity, "quantumMode") == Some("quantum")
+}
+
+pub(crate) fn is_supply_endpoint(entity: &Map<String, Value>, item_id: &str) -> bool {
+    is_quantum_station(entity)
+        && entity
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .any(|slot| {
+                string_at(slot, "itemId") == Some(item_id)
+                    && string_at(slot, "remoteMode") == Some("supply")
+            })
+}
+
+pub(crate) fn supply_free_capacity(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    station: &Map<String, Value>,
+    item_id: &str,
+) -> anyhow::Result<Option<f64>> {
+    if !is_supply_endpoint(station, item_id) {
+        return Ok(None);
+    }
+    let network = parse_network(base)?;
+    if !network.enabled {
+        return Ok(Some(0.0));
+    }
+    let slot = slots(station)?
+        .into_iter()
+        .find(|slot| slot.item_id.as_deref() == Some(item_id) && slot.remote_mode == "supply")
+        .ok_or_else(|| anyhow!("native quantum supply slot disappeared"))?;
+    let current = network.inventory.get(item_id).cloned().unwrap_or_default();
+    let capacity = item_capacity(&network, item_id);
+    let network_free = if capacity > current {
+        (capacity - current)
+            .to_u64()
+            .unwrap_or(MAX_SAFE_INTEGER)
+            .min(MAX_SAFE_INTEGER) as f64
+    } else {
+        0.0
+    };
+    let local_free = (station_capacity(state, base, station, &slot)?.floor()
+        - item_amount(station, "inputs", item_id).floor().max(0.0))
+    .max(0.0);
+    Ok(Some(
+        (network_free + local_free).min(MAX_SAFE_INTEGER as f64),
+    ))
 }
 
 fn floor_u64(value: f64) -> u64 {
@@ -411,13 +467,20 @@ fn bandwidth(base: &Map<String, Value>, entities: &[Value]) -> (f64, f64, f64) {
     )
 }
 
-fn create_flow(
-    base: &Map<String, Value>,
-    entities: &[Value],
+pub(crate) fn runtime_bandwidth(base: &Map<String, Value>, entities: &[Value]) -> RuntimeBandwidth {
+    let (per_minute, tower_stacks, collector_stacks) = bandwidth(base, entities);
+    RuntimeBandwidth {
+        per_minute,
+        tower_stacks,
+        collector_stacks,
+    }
+}
+
+fn create_flow_with_bandwidth(
     network: &Network,
     boundary_second: f64,
+    bandwidth: RuntimeBandwidth,
 ) -> BoundaryFlow {
-    let (per_minute, tower_stacks, collector_stacks) = bandwidth(base, entities);
     BoundaryFlow {
         boundary_second,
         uploaded: network
@@ -427,11 +490,20 @@ fn create_flow(
             .map(|flow| flow.uploaded.clone())
             .unwrap_or_default(),
         downloaded: BTreeMap::new(),
-        global_upload_per_minute: per_minute,
-        global_download_per_minute: per_minute,
-        quantum_tower_stacks: tower_stacks,
-        quantum_collector_stacks: collector_stacks,
+        global_upload_per_minute: bandwidth.per_minute,
+        global_download_per_minute: bandwidth.per_minute,
+        quantum_tower_stacks: bandwidth.tower_stacks,
+        quantum_collector_stacks: bandwidth.collector_stacks,
     }
+}
+
+fn create_flow(
+    base: &Map<String, Value>,
+    entities: &[Value],
+    network: &Network,
+    boundary_second: f64,
+) -> BoundaryFlow {
+    create_flow_with_bandwidth(network, boundary_second, runtime_bandwidth(base, entities))
 }
 
 fn boundary_capacity(per_minute: f64, seconds: f64) -> BigUint {
@@ -702,7 +774,7 @@ fn deposit(network: &mut Network, item_id: &str, requested: &BigUint) -> BigUint
 
 fn record_immediate_upload(
     base: &Map<String, Value>,
-    entities: &[Value],
+    bandwidth: RuntimeBandwidth,
     network: &mut Network,
     item_id: &str,
     amount: &BigUint,
@@ -717,7 +789,7 @@ fn record_immediate_upload(
         .as_ref()
         .is_none_or(|flow| flow.boundary_second != boundary)
     {
-        network.runtime_flow = Some(create_flow(base, entities, network, boundary));
+        network.runtime_flow = Some(create_flow_with_bandwidth(network, boundary, bandwidth));
     }
     if let Some(flow) = &mut network.runtime_flow {
         add_flow(&mut flow.uploaded, item_id, amount);
@@ -734,6 +806,7 @@ pub(crate) fn flush_supply_buffers(
     }
     let reserved = reserved_outgoing(entities);
     let snapshots = entities.to_vec();
+    let runtime_bandwidth = runtime_bandwidth(base, &snapshots);
     let mut normalized_for_deposit = false;
     for entity_index in 0..entities.len() {
         let snapshot = snapshots[entity_index]
@@ -784,10 +857,63 @@ pub(crate) fn flush_supply_buffers(
             if remaining > 0.0 {
                 set_item_amount(station, "inputs", item_id, (input - remaining).max(0.0))?;
             }
-            record_immediate_upload(base, &snapshots, &mut network, item_id, &accepted);
+            record_immediate_upload(base, runtime_bandwidth, &mut network, item_id, &accepted);
         }
     }
     write_network(base, &network)
+}
+
+pub(crate) fn receive_supply_material(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    bandwidth: RuntimeBandwidth,
+    station: &mut Map<String, Value>,
+    item_id: &str,
+    amount: f64,
+) -> anyhow::Result<f64> {
+    if amount < 1.0 || !is_quantum_station(station) {
+        return Ok(0.0);
+    }
+    let Some(slot) = slots(station)?
+        .into_iter()
+        .find(|slot| slot.item_id.as_deref() == Some(item_id) && slot.remote_mode == "supply")
+    else {
+        return Ok(0.0);
+    };
+    let mut network = parse_network(base)?;
+    if !network.enabled {
+        return Ok(0.0);
+    }
+    let requested = floor_u64(amount) as f64;
+    let current_input = item_amount(station, "inputs", item_id).floor().max(0.0);
+    let current_output = item_amount(station, "outputs", item_id).floor().max(0.0);
+    let input_capacity = station_capacity(state, base, station, &slot)?
+        .floor()
+        .max(0.0);
+    let input_free = (input_capacity - current_input).max(0.0);
+    let local_reserve = (slot.min_stock - current_input - current_output).max(0.0);
+    let kept = requested.min(input_free).min(local_reserve);
+    if kept > 0.0 {
+        set_item_amount(station, "inputs", item_id, current_input + kept)?;
+    }
+    let mut remaining = requested - kept;
+    if remaining > 0.0 {
+        network.inventory.retain(|_, amount| !amount.is_zero());
+        let accepted = deposit(&mut network, item_id, &BigUint::from(floor_u64(remaining)));
+        let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
+        if accepted_number > 0.0 {
+            record_immediate_upload(base, bandwidth, &mut network, item_id, &accepted);
+        }
+        remaining -= accepted_number;
+    }
+    let local_remainder = remaining.min((input_free - kept).max(0.0));
+    if local_remainder > 0.0 {
+        let current = item_amount(station, "inputs", item_id).floor().max(0.0);
+        set_item_amount(station, "inputs", item_id, current + local_remainder)?;
+    }
+    let accepted_total = requested - remaining + local_remainder;
+    write_network(base, &network)?;
+    Ok(accepted_total)
 }
 
 pub(crate) fn settle_downloads(

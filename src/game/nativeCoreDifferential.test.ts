@@ -681,6 +681,98 @@ function quantumLogisticsState(): GameState {
   return state;
 }
 
+function quantumLocalDroneBridgeState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("interstellar_logistics", "quantum_logistics_network", "logistics_engine_1");
+  state.quantumLogisticsNetwork.enabled = true;
+  state.quantumLogisticsNetwork.inventory.copper_ore = "1000";
+  state.construction.planetary_logistics_station = 2;
+  state.construction.interstellar_logistics_station = 2;
+  state.activePlanetId = "home";
+  const placeStation = (buildingId: "planetary_logistics_station" | "interstellar_logistics_station", x: number) => {
+    state = placeBuilding(state, buildingId, { x, y: 300 }, 1);
+    return state.entities.filter((entity) => entity.buildingId === buildingId).at(-1)!.id;
+  };
+  const localSourceId = placeStation("planetary_logistics_station", 500);
+  const quantumUploadId = placeStation("interstellar_logistics_station", 700);
+  const quantumDownloadId = placeStation("interstellar_logistics_station", 900);
+  const localSinkId = placeStation("planetary_logistics_station", 1100);
+  for (const stationId of [localSourceId, quantumUploadId]) {
+    state = setStationSlotItem(state, stationId, 0, "iron_ore");
+  }
+  state = setStationSlotMode(state, localSourceId, 0, "local", "supply");
+  state = setStationSlotMode(state, quantumUploadId, 0, "local", "demand");
+  state = setStationSlotMode(state, quantumUploadId, 0, "remote", "supply");
+  for (const stationId of [quantumDownloadId, localSinkId]) {
+    state = setStationSlotItem(state, stationId, 0, "copper_ore");
+  }
+  state = setStationSlotMode(state, quantumDownloadId, 0, "local", "supply");
+  state = setStationSlotMode(state, quantumDownloadId, 0, "remote", "demand");
+  state = setStationSlotMode(state, localSinkId, 0, "local", "demand");
+  for (const stationId of [localSourceId, quantumUploadId, quantumDownloadId, localSinkId]) {
+    state = setStationSlotMinimumLoad(state, stationId, 0, 0.1);
+    const station = state.entities.find((entity) => entity.id === stationId)!;
+    station.stationDrones = 10;
+    station.inputs = {};
+    station.outputs = {};
+  }
+  const source = state.entities.find((entity) => entity.id === localSourceId)!;
+  source.outputs.iron_ore = 1000;
+  for (const stationId of [quantumUploadId, quantumDownloadId]) {
+    const station = state.entities.find((entity) => entity.id === stationId)!;
+    station.stationTier = 2;
+    station.quantumMode = "quantum";
+    station.stationVessels = 0;
+  }
+  return state;
+}
+
+function quantumBeltBridgeState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("interstellar_logistics", "quantum_logistics_network");
+  state.quantumLogisticsNetwork.enabled = true;
+  state.quantumLogisticsNetwork.inventory.copper_ore = "1000";
+  state.construction.interstellar_logistics_station = 2;
+  state.activePlanetId = "home";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 820, y: 420 }, 1);
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 1120, y: 420 }, 1);
+  const [supply, demand] = state.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station");
+  state = setStationSlotItem(state, supply.id, 0, "iron_ore");
+  state = setStationSlotMode(state, supply.id, 0, "remote", "supply");
+  state = setStationSlotItem(state, demand.id, 0, "copper_ore");
+  state = setStationSlotMode(state, demand.id, 0, "remote", "demand");
+  for (const stationId of [supply.id, demand.id]) {
+    const station = state.entities.find((entity) => entity.id === stationId)!;
+    station.stationTier = 2;
+    station.quantumMode = "quantum";
+    station.stationVessels = 0;
+    station.inputs = {};
+    station.outputs = {};
+  }
+  const storageTemplate = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storageTemplate,
+      id: "native_quantum_belt_feed",
+      position: { x: 650, y: 420 },
+      storedItemId: "iron_ore",
+      inputs: { iron_ore: 0 },
+      outputs: { iron_ore: 500 },
+    },
+    {
+      ...storageTemplate,
+      id: "native_quantum_belt_sink",
+      position: { x: 1300, y: 420 },
+      storedItemId: "copper_ore",
+      inputs: { copper_ore: 0 },
+      outputs: { copper_ore: 0 },
+    },
+  );
+  state = connectBeltWithResult(state, "native_quantum_belt_feed", supply.id, "iron_ore", 2).state;
+  state = connectBeltWithResult(state, demand.id, "native_quantum_belt_sink", "copper_ore", 2).state;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1241,6 +1333,89 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "quantum-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "quantum-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches exact local drone collection into and delivery out of quantum inventory", async () => {
+    const initial = quantumLocalDroneBridgeState();
+    const checkpoint = await seed(initial, 203);
+    for (const seconds of [1, 5, 10, 30, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `quantum-local-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "quantumLogisticsNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `quantum-local-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.quantumLogisticsNetwork, `quantum-local-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+      expect(advanced.summary.canonicalFields, `quantum-local-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `quantum-local-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `quantum-local-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "quantum-local-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "quantum-local-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches exact belt ingress and reserved same-step egress for quantum towers", async () => {
+    const initial = quantumBeltBridgeState();
+    const checkpoint = await seed(initial, 204);
+    for (const seconds of [1, 5, 10, 30, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `quantum-belt-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["quantumLogisticsNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `quantum-belt-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `quantum-belt-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+      expect(projection.base.quantumLogisticsNetwork, `quantum-belt-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+      expect(advanced.summary.canonicalFields, `quantum-belt-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `quantum-belt-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `quantum-belt-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "quantum-belt-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "quantum-belt-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

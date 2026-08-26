@@ -884,11 +884,14 @@ pub(crate) fn dispatch(
 }
 
 pub(crate) fn advance_routes(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
     let indexes = entity_index(entities);
+    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     for demand_index in station_indices(entities) {
         let demand_snapshot = entities[demand_index]
             .as_object()
@@ -935,19 +938,41 @@ pub(crate) fn advance_routes(
             let item_id = string_at(route, "itemId").unwrap_or_default().to_owned();
             let cargo = finite_number(route.get("cargo")).floor().max(0.0);
             let vehicles = finite_number(route.get("vehicleCount")).floor().max(0.0);
-            let demand_current = item_amount(
+            let quantum_supply = crate::quantum_logistics::is_supply_endpoint(
                 entities[demand_index].as_object().expect("station object"),
-                "outputs",
                 &item_id,
             );
-            set_item_amount(
-                entities[demand_index]
-                    .as_object_mut()
-                    .expect("station object"),
-                "outputs",
-                &item_id,
-                (demand_current + cargo).floor(),
-            )?;
+            let delivered_cargo = if quantum_supply {
+                crate::quantum_logistics::receive_supply_material(
+                    state,
+                    base,
+                    quantum_bandwidth,
+                    entities[demand_index]
+                        .as_object_mut()
+                        .expect("station object"),
+                    &item_id,
+                    cargo,
+                )?
+            } else {
+                let demand_current = item_amount(
+                    entities[demand_index].as_object().expect("station object"),
+                    "outputs",
+                    &item_id,
+                );
+                set_item_amount(
+                    entities[demand_index]
+                        .as_object_mut()
+                        .expect("station object"),
+                    "outputs",
+                    &item_id,
+                    (demand_current + cargo).floor(),
+                )?;
+                cargo
+            };
+            if delivered_cargo < cargo {
+                set_number(route, "cargo", cargo - delivered_cargo)?;
+                remaining.push(route_value.clone());
+            }
             let supply_current = item_amount(
                 entities[supply_index].as_object().expect("station object"),
                 "outputs",
@@ -959,15 +984,15 @@ pub(crate) fn advance_routes(
                     .expect("station object"),
                 "outputs",
                 &item_id,
-                (supply_current - cargo).max(0.0).floor(),
+                (supply_current - delivered_cargo).max(0.0).floor(),
             )?;
             for index in [demand_index, supply_index] {
                 let station = entities[index].as_object_mut().expect("station object");
                 let trips = finite_number(station.get("stationTrips"));
                 set_number(station, "stationTrips", (trips + vehicles).floor())?;
-                set_number(station, "stationLastTransfer", cargo)?;
+                set_number(station, "stationLastTransfer", delivered_cargo)?;
             }
-            completed_cargo += cargo;
+            completed_cargo += delivered_cargo;
         }
         let demand = entities[demand_index]
             .as_object_mut()

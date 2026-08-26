@@ -2976,7 +2976,7 @@ fn simulate_step(
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::dispatch(state, base, entities, &station_powers)?;
     crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
-    crate::local_logistics::advance_routes(entities, seconds, &station_powers)?;
+    crate::local_logistics::advance_routes(state, base, entities, seconds, &station_powers)?;
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::update_congestion(entities)?;

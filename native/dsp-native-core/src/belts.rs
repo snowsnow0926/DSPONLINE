@@ -222,6 +222,11 @@ fn target_capacity(
     target: &Map<String, Value>,
     item_id: &str,
 ) -> anyhow::Result<f64> {
+    if let Some(capacity) =
+        crate::quantum_logistics::supply_free_capacity(state, base, target, item_id)?
+    {
+        return Ok(capacity);
+    }
     let building = string_at(target, "buildingId")
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native belt target building is missing"))?;
@@ -416,7 +421,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 
 pub(crate) fn transfer(
     state: &CoreState,
-    base: &Map<String, Value>,
+    base: &mut Map<String, Value>,
     entities: &mut [Value],
     belts: &mut [Value],
     seconds: f64,
@@ -428,6 +433,7 @@ pub(crate) fn transfer(
         return Ok(());
     }
     let routes = routes(state, entities, belts)?;
+    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     let belt_limit = normalized_buffer_limit(
         base.get("settings")
             .and_then(Value::as_object)
@@ -558,20 +564,33 @@ pub(crate) fn transfer(
                     .get(&candidate.target_key)
                     .copied()
                     .unwrap_or(0.0);
-                let moved = available
+                let requested = available
                     .min(candidate.allowance)
                     .min(free)
                     .floor()
                     .max(0.0);
-                if moved > 0.0 {
+                if requested > 0.0 {
                     let route = &routes[candidate.route_index];
-                    add_input(
-                        entities[route.target_index]
-                            .as_object_mut()
-                            .ok_or_else(|| anyhow!("native belt target is not an object"))?,
-                        &route.item_id,
-                        moved,
-                    )?;
+                    let target = entities[route.target_index]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+                    let moved =
+                        if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
+                            crate::quantum_logistics::receive_supply_material(
+                                state,
+                                base,
+                                quantum_bandwidth,
+                                target,
+                                &route.item_id,
+                                requested,
+                            )?
+                        } else {
+                            add_input(target, &route.item_id, requested)?;
+                            requested
+                        };
+                    if moved <= 0.0 {
+                        continue;
+                    }
                     *target_free
                         .get_mut(&candidate.target_key)
                         .expect("target ledger") -= moved;
@@ -625,23 +644,36 @@ pub(crate) fn transfer(
                         .get(&candidate.target_key)
                         .copied()
                         .unwrap_or(0.0);
-                    let moved = available
+                    let requested = available
                         .min(fair_share)
                         .min(candidate.allowance)
                         .min(free)
                         .floor()
                         .max(0.0);
-                    if moved <= 0.0 {
+                    if requested <= 0.0 {
                         continue;
                     }
                     let route = &routes[candidate.route_index];
-                    add_input(
-                        entities[route.target_index]
-                            .as_object_mut()
-                            .ok_or_else(|| anyhow!("native belt target is not an object"))?,
-                        &route.item_id,
-                        moved,
-                    )?;
+                    let target = entities[route.target_index]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+                    let moved =
+                        if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
+                            crate::quantum_logistics::receive_supply_material(
+                                state,
+                                base,
+                                quantum_bandwidth,
+                                target,
+                                &route.item_id,
+                                requested,
+                            )?
+                        } else {
+                            add_input(target, &route.item_id, requested)?;
+                            requested
+                        };
+                    if moved <= 0.0 {
+                        continue;
+                    }
                     *target_free
                         .get_mut(&candidate.target_key)
                         .expect("target ledger") -= moved;

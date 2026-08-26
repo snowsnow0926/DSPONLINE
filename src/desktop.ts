@@ -236,6 +236,8 @@ export interface DesktopNativeCoreDomainCoverage {
   orbitalCollectors: boolean;
   stationWarperAutoRefill: boolean;
   quantumLogisticsNetwork: boolean;
+  quantumLocalDroneBridge: boolean;
+  quantumBeltBridge: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

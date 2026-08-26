@@ -336,7 +336,7 @@ try {
   const page = context.pages()[0] ?? await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.addInitScript(({ autoPause }) => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-26-v1.1.9");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.0");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.ui.large-save-autosave-throttle.v1", "false");
     if (autoPause !== null) localStorage.setItem("dsp-idle-network.ui.memory-auto-pause.v1", String(autoPause));

@@ -1,5 +1,7 @@
 # 系统架构
 
+> **1.2.0 Windows 原生性能边界（开发候选，未部署）**：Electron 主进程独占受限 Rust Host；renderer 只能调用逻辑槽位、命令、投影和状态接口，不能传文件路径、进程参数或任意帧。第二层私有存档使用内容寻址压缩区块、manifest-last、双 superblock 和连续 WAL；第三层原生核心从同 revision 检查点建立独立状态与索引，在邀请 Beta 中只做影子对照。JavaScript 仍是权威，`authorityEligible=false`；原生失败不会安装旧检查点。公开兼容仍为 GameState v47 / envelope v2，详见 [ADR-005](./architecture/ADR-005-WINDOWS-NATIVE-SAVE-FORMAT.md)、[ADR-006](./architecture/ADR-006-WINDOWS-NATIVE-CORE-PROTOCOL.md) 和 [开发实测报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。
+
 > **1.1.8 内存策略边界（发布候选，未部署）**：`memoryBudget.ts` 是无 React/存储依赖的内存闸门。模拟调度器和保存路径共用同一 `MemoryGuardPolicy`：默认在浏览器 JS 堆达到 90% 或可选固定水位、模拟积压达到安全线时暂停；关闭设备级开关后，堆水位和模拟积压不会触发回档或清空未提交时间，调度器也不因积压停止接纳切片。Worker/检查点协议失败与显式分配失败仍是数据完整性硬保护。固定水位只增加提前暂停，不降低浏览器上限保护。开关与阈值由 `uiPreferences.ts` 写入本机 localStorage，不进入 `GameState`、save envelope、云上传、确定性哈希或服务端 schema；浏览器不提供 `performance.memory` 时按未知处理。内存闸门拒绝保存必须走与异常相同的 `failed` persistence phase/transition，避免 UI 留在进行中。详见 [1.1.8 内存优化交接](./releases/1.1.8-memory-optimization-handoff.md)。
 
 > **1.1.8 建筑制造巨构优化（开发中，未部署）**：建筑制造中心的普通保护预算仍为每模拟秒最多 256 次调度迭代和 24 次计划构建；仅当同一行星存在多个未满足目标且至少一个中心堆叠达到 1,000,000 台时，才使用确定性的 512/512 扩展预算。多目标调度不再为单个目标预探测私有副产物循环，避免消耗公平轮转的计划预算；单目标仍保留已验证的循环批处理。百万级扩展路径把公平批次上限从 4,096 提高到有界的 1,000,000 个作业，因此在工作量足够时可释放整个机器工作秒，但仍受 512 次迭代、目标库存和材料可用性限制。该优化不改变配方、库存、WIP、存档字段或 GameState v47/envelope v2/cloud schema v8，所有预算仍是硬上限。

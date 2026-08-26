@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
@@ -12,6 +12,7 @@ const RELEASE_NOTES_1_1_6 = getReleaseNotes116("zh-CN");
 const RELEASE_NOTES_1_1_5 = getReleaseNotes115("zh-CN");
 const RELEASE_NOTES_1_1_7 = getReleaseNotes117("zh-CN");
 const RELEASE_NOTES_1_1_8 = getReleaseNotes118("zh-CN");
+const RELEASE_NOTES_1_1_9 = getReleaseNotes119("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
 const RELEASE_NOTES_1_0_42 = getReleaseNotes1042("zh-CN");
@@ -23,6 +24,7 @@ const RELEASE_NOTES_1_0_46 = getReleaseNotes1046("zh-CN");
 const RELEASE_NOTES_1_0_40 = {
   ...getCurrentReleaseNotes("zh-CN"),
   id: "2026-08-13-v1.0.40",
+  date: "2026年8月13日",
   version: "1.0.40",
   title: "云存档可靠性、排行榜与跨端体验更新",
   summary: "1.0.40 让银河排行榜显示当前账号的真实名次和统计窗口状态，统一 30 MiB 大存档的跨端传输，并为多标签页、本地/云持久化、账号会话、PWA 更新和关键弹窗增加可恢复保护。玩法平衡、GameState v46、存档 envelope v2、云 schema v7 与 SQLite layout v2 不变。",
@@ -72,6 +74,11 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "windows-native-incremental-save": Database,
+  "windows-native-shadow-core": Gauge,
+  "dyson-material-conservation": ShieldCheck,
+  "dyson-conservation-gates": Check,
+  "leaderboard-conservation-review": History,
   "memory-pause-no-rollback": ShieldCheck,
   "memory-auto-pause-policy": ShieldCheck,
   "chunked-incremental-save": Database,
@@ -160,6 +167,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_1_9,
   RELEASE_NOTES_1_1_8,
   RELEASE_NOTES_1_1_7,
   RELEASE_NOTES_1_1_6,

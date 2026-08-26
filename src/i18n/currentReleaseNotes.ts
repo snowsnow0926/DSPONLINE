@@ -8,62 +8,55 @@ import type { AppLocale } from "./locale";
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const english = locale === "en";
   return {
-    id: "2026-08-26-v1.1.9",
-    date: english ? "August 26, 2026" : "2026年8月26日",
-    version: "1.1.9",
-    title: english ? "Large-factory JavaScript Architecture Optimization" : "大型工厂 JavaScript 架构优化",
+    id: "2026-08-27-v1.2.0",
+    date: english ? "August 27, 2026" : "2026年8月27日",
+    version: "1.2.0",
+    title: english ? "Windows Native Performance Foundation and Dyson Conservation" : "Windows 原生性能底座与戴森守恒修复",
     summary: english
-      ? "Version 1.1.9 adds copy-on-write edits, bounded delta history, cumulative large-factory UI projections, and back-pressured single-owner saves. Existing v47 / envelope v2 saves remain compatible."
-      : "1.1.9 为大型工厂加入写时复制编辑、有界差异历史、累计 UI 投影和带回压的单所有权保存；旧版 v47 / envelope v2 存档继续兼容。",
+      ? "Version 1.2.0 adds a private incremental-save foundation and an opt-in Rust shadow core to the Windows app, while fixing conservative time-warp settlement so rockets, sails, and Dyson structures can never be copied without material. JavaScript remains authoritative during the invitation Beta, and existing v47 / envelope v2 saves remain compatible."
+      : "1.2.0 为 Windows 应用加入私有增量存档底座和可选的 Rust 影子核心，并修复保守时间扭曲结算，禁止火箭、太阳帆和戴森结构在没有物料来源时被复制。邀请测试期间 JavaScript 仍是权威；旧版 v47 / envelope v2 存档继续兼容。",
     items: [
       {
-        id: "copy-on-write-factory-edits",
-        title: english ? "Factory edits copy only changed records" : "工厂编辑只复制变化记录",
+        id: "windows-native-incremental-save",
+        title: english ? "Windows large saves gain a private incremental mirror" : "Windows 大型存档增加私有增量镜像",
         description: english
-          ? "Common building, removal, belt, and blueprint commands preserve unchanged entity and belt references instead of deep-cloning the full factory."
-          : "常见建造、回收、线路和蓝图命令保留未变化实体与线路的引用，不再深拷贝整个工厂。",
+          ? "The sandboxed desktop host writes immutable checked chunks, an append-only revision log, and atomic generation pointers under the app data directory while the portable v47 save remains the rollback boundary."
+          : "受限桌面 Host 在应用数据目录写入不可变校验区块、追加式 revision 日志和原子代际指针；可移植的 v47 存档继续作为回退边界。",
       },
       {
-        id: "bounded-delta-history",
-        title: english ? "Undo uses bounded inverse deltas" : "撤销使用有界逆向差异",
+        id: "windows-native-shadow-core",
+        title: english ? "Independent Rust simulation is available in shadow mode" : "独立 Rust 模拟核心开放影子校验",
         description: english
-          ? "Undo no longer retains full GameState snapshots or rewinds simulation time settled after an edit."
-          : "撤销不再保留完整 GameState 快照，也不会回退操作之后已经结算的模拟时间。",
+          ? "Invitation-Beta players can compare bounded native checkpoints and operations against the JavaScript authority. A mismatch fails closed and never replaces the visible factory or installs an older checkpoint."
+          : "邀请测试玩家可以让原生核心与 JavaScript 权威对照有界检查点和操作；一旦不一致会安全停止校验，不会替换当前工厂或安装旧检查点。",
       },
       {
-        id: "single-owner-chunk-save",
-        title: english ? "Large autosaves stream bounded pages" : "大型自动保存流式提交有界数据页",
+        id: "dyson-material-conservation",
+        title: english ? "Conservative time warp can no longer copy Dyson output" : "保守时间扭曲不再复制戴森产物",
         description: english
-          ? "The authority Worker projects bounded pages into the page-owned IndexedDB writer with ACK backpressure, without transferring a second complete checkpoint."
-          : "权威 Worker 以 ACK 回压把有界数据页交给页面持有的 IndexedDB writer，不再传输第二份完整检查点。",
+          ? "Only a bounded exact prefix is committed. Unproven tail production, launches, exports, contracts, and research freeze instead of multiplying a one-second probe that consumed cached material."
+          : "结算只提交有界精确前缀；无法证明守恒的尾段生产、发射、出口、合同和科研会冻结，不再放大已经消耗缓存物料的一秒探针。",
       },
       {
-        id: "cumulative-large-factory-projection",
-        title: english ? "Large-factory UI copies are coalesced" : "大型工厂界面复制合并处理",
+        id: "dyson-conservation-gates",
+        title: english ? "Rocket and sail flows are checked transactionally" : "火箭与太阳帆流量加入事务守恒门禁",
         description: english
-          ? "Exact simulation revisions continue normally while idle record projections are accumulated; commands and active editing still publish immediately."
-          : "精确模拟 revision 正常推进，空闲时的记录投影合并后发布；玩家命令和活动编辑仍立即刷新。",
+          ? "Client settlement validates inventory sources, global and per-system counters, and derived Dyson power before committing; failed candidates leave the source checkpoint unchanged."
+          : "客户端提交前会核对库存来源、全局与各恒星系统计数以及重新派生的戴森功率；候选失败时源检查点保持不变。",
       },
       {
-        id: "dirty-runtime-index",
-        title: english ? "Simulation commands use stable dirty indexes" : "模拟命令使用稳定脏索引",
+        id: "leaderboard-conservation-review",
+        title: english ? "Leaderboard anomalies enter manual review" : "排行榜异常只进入人工复核",
         description: english
-          ? "Runtime-only leaves apply in place; recipe and topology changes retain the deterministic full-rebuild fallback."
-          : "仅运行时字段在 Worker 内原地应用；配方和拓扑变化继续保留确定性的完整重建回退。",
-      },
-      {
-        id: "memory-pause-no-rollback",
-        title: english ? "Memory protection preserves visible progress" : "内存保护保留当前可见进度",
-        description: english
-          ? "A protection pause no longer installs an older checkpoint or drops queued simulation time."
-          : "保护暂停不再安装旧检查点，也不再清空已经积累的待结算时间。",
+          ? "Adjacent v46/v47 revisions are checked for impossible rocket or sail growth. Unverifiable or abnormal revisions preserve the previous valid score and never trigger an automatic ban or save deletion."
+          : "服务端会检查相邻 v46/v47 revision 是否出现不可能的火箭或太阳帆增长；无法验证或异常时保留上一份有效成绩，不会自动封禁或删除云档。",
       },
       {
         id: "version-compatibility",
         title: english ? "Existing saves and cloud protocols remain compatible" : "旧存档与云端协议保持兼容",
         description: english
-          ? "GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged."
-          : "GameState v47、存档 envelope v2、cloud schema v8 和 SQLite layout v3 保持不变。",
+          ? "GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged; historical Dyson values are not rewritten automatically."
+          : "GameState v47、存档 envelope v2、cloud schema v8 和 SQLite layout v3 保持不变；历史戴森数据不会被自动改写。",
       },
     ],
   } as const;

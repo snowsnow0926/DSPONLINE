@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段不改变下方 1.1.5 当前公开稳定版本事实。
+
 > 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
 > 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
 > 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。

@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **1.2.0 开发侧候选门禁（2026-08-27，未部署）**：候选同时覆盖 Windows 私有原生存档、独立 Rust 影子核心和保守时间扭曲戴森物料守恒 P0。最终 clean SHA 的新鲜完整计数、构建、原生差分、大档 benchmark、Web/API/Windows/Android 诊断制品和哈希以 `artifacts/release-gate/1.2.0-final-report.json` 为准；此前 P0 修复阶段已取得 Vitest 1,606/26、server 384/2 + station 4/4、Chromium 431/27、durable 7/7、native 33/33、Rust 20/20、ops 56/6，当前候选必须重新执行而不能复用这些数字。Windows 原生核心 `authorityEligible=false`，24 小时/多硬件、正式签名、物理设备和生产环境仍是 Release Agent 门禁。候选边界见 [1.2.0 候选记录](./releases/1.2.0-candidate.md)。
+
 > **1.1.8 发布候选门禁（2026-08-25，未部署）**：独立工作树 `D:\GameDev\DSPidle2-v118-memory-optimization` 的内存闸门新增设备级开关与固定 JS 堆阈值，默认自动 90%，不改变 GameState v47 / envelope v2 / cloud schema v8 / SQLite layout v3。关闭开关现在明确进入“不自动回档”模式：堆水位和模拟积压不会回退到旧检查点，Worker/检查点与分配失败完整性保护仍保留。旧 catalog 无 revision 的首次保存会走协调兼容路径，生命周期监听与自动保存计时器分离，v33 回归从权威持久化后端读取。完整 Vitest **180 文件通过 / 9 跳过；1484 项通过 / 22 跳过**；完整 Chromium **431 通过 / 26 跳过 / 0 失败（457 项）**；server **376/2** 加 station **4/4**、ops **56/6**、native **25/25**、许可证 **125 包**、TypeScript、生产构建和 startup budget 均通过（startup gzip 总计 **179,817 B**）。真实终局存档长时证据见 [1.1.8 长时报告](./releases/1.1.8-long-run-memory-test-2026-08-25.md)。本段只记录发布前开发门禁，不代表已部署线上。
 
 > **1.1.7 候选门禁（截至 2026-08-24，未发布）**：本轮在独立分支 `codex/1.1.7-contract-mod`（基于 1.1.6 `4f6d24f`）完成新增合同/Mod/稀疏 v47 兼容回归。当前已实测 typecheck、Vitest、server、ops、native、许可证检查、生产构建前置、聚焦与完整 Chromium；详细逐项计数、SHA 和未验证的签名/部署门禁见 [1.1.7 开发报告](./DEVELOPMENT_REPORT_1.1.7.md)。1.1.6 工作树、生产服务、下载页和玩家原文件均未修改。

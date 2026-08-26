@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-26-v1.1.9";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.0";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,16 +110,15 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Large-factory JavaScript Architecture Optimization" });
+  const dialog = page.getByRole("dialog", { name: "Windows Native Performance Foundation and Dyson Conservation" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.1.9");
-  await expect(dialog).toContainText("Factory edits no longer deep-clone every record");
-  await expect(dialog).toContainText("Undo/redo uses a bounded delta log");
-  await expect(dialog).toContainText("Large autosaves stream bounded pages");
-  await expect(dialog).toContainText("Large-factory UI copies are coalesced");
-  await expect(dialog).toContainText("Simulation commands use dirty indexes and stable runtime records");
-  await expect(dialog).toContainText("Memory protection no longer installs an older checkpoint");
-  await expect(dialog).toContainText("Save and cloud formats remain unchanged");
+  await expect(dialog).toContainText("1.2.0");
+  await expect(dialog).toContainText("Windows large saves gain a private incremental mirror");
+  await expect(dialog).toContainText("Independent Rust simulation is available in shadow mode");
+  await expect(dialog).toContainText("Conservative time warp can no longer copy Dyson output");
+  await expect(dialog).toContainText("Rocket and sail flows are checked transactionally");
+  await expect(dialog).toContainText("Leaderboard anomalies enter manual review");
+  await expect(dialog).toContainText("Existing saves and cloud protocols remain compatible");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-26-v1.1.9";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.0";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,13 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(7);
-  await expect(dialog).toContainText("工厂编辑不再深拷贝全部记录");
-  await expect(dialog).toContainText("大型自动保存流式提交有界数据页");
-  await expect(dialog).toContainText("大型工厂界面复制合并处理");
-  await expect(dialog).toContainText("内存保护暂停不再安装旧检查点");
+  await expect(dialog).toHaveAttribute("aria-label", "Windows 原生性能底座与戴森守恒修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.0");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(dialog).toContainText("Windows 大型存档增加私有增量镜像");
+  await expect(dialog).toContainText("独立 Rust 模拟核心开放影子校验");
+  await expect(dialog).toContainText("保守时间扭曲不再复制戴森产物");
+  await expect(dialog).toContainText("排行榜异常只进入人工复核");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

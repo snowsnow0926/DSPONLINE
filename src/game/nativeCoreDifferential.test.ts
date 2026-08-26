@@ -20,6 +20,7 @@ import {
 import { CAMPAIGN_TASKS } from "./campaign";
 import { getConstructionDefinition, TECHNOLOGIES } from "./content";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
+import { nativeCoreDomainSha256 } from "./nativeCoreProof";
 import { startSystemSpaceStationConstruction } from "./systemSpaceStation";
 import type { GameState } from "./types";
 
@@ -1309,6 +1310,9 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.supported, `${seconds} 秒 native support`).toBe(true);
       expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
+      expect(advanced.summary.domainSha256, `${seconds} 秒领域哈希`).toBe(
+        nativeCoreDomainSha256(expected, checkpoint.revision + 1),
+      );
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
     const sequences = [
@@ -1360,6 +1364,9 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.belts, `${seconds} 秒线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
+      expect(advanced.summary.domainSha256, `${seconds} 秒领域哈希`).toBe(
+        nativeCoreDomainSha256(expected, checkpoint.revision + 1),
+      );
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
     for (const sequence of [

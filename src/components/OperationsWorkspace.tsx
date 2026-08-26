@@ -117,6 +117,10 @@ interface OperationsWorkspaceProps {
   memoryAutoPauseThresholdMiB: MemoryAutoPauseThresholdMiB;
   onMemoryAutoPauseEnabledChange: (enabled: boolean) => void;
   onMemoryAutoPauseThresholdChange: (thresholdMiB: MemoryAutoPauseThresholdMiB) => void;
+  windowsNativeCoreAvailable: boolean;
+  windowsNativeCoreBetaEnabled: boolean;
+  windowsNativeCoreBetaStatus: "disabled" | "awaiting-checkpoint" | "hashing" | "shadow-active" | "native-ready" | "diverged" | "unavailable" | "failed";
+  onWindowsNativeCoreBetaEnabledChange: (enabled: boolean) => void;
   allowEditsDuringSave: boolean;
   onAllowEditsDuringSaveChange: (enabled: boolean) => void;
   blueprintAllowOverlap: boolean;
@@ -1235,6 +1239,51 @@ function SupportPanel({ game, report }: { game: GameState; report: AutomaticPerf
   );
 }
 
+function WindowsNativeCoreBetaSetting(props: Pick<OperationsWorkspaceProps,
+  "windowsNativeCoreBetaEnabled" | "windowsNativeCoreBetaStatus" | "onWindowsNativeCoreBetaEnabledChange">) {
+  const { locale } = useAppLocale();
+  const statusLabel = locale === "en" ? ({
+    disabled: "Off",
+    "awaiting-checkpoint": "Awaiting checkpoint",
+    hashing: "Validating",
+    "shadow-active": "Shadow active",
+    "native-ready": "Gate pending",
+    diverged: "Diverged",
+    unavailable: "Unavailable",
+    failed: "Failed",
+  } as const)[props.windowsNativeCoreBetaStatus] : ({
+    disabled: "关闭",
+    "awaiting-checkpoint": "等待检查点",
+    hashing: "正在校验",
+    "shadow-active": "影子运行",
+    "native-ready": "门禁待确认",
+    diverged: "发现分叉",
+    unavailable: "不可用",
+    failed: "检查失败",
+  } as const)[props.windowsNativeCoreBetaStatus];
+  return (
+    <div className="settings-panel settings-native-core-panel">
+      <section className="settings-group settings-toggle-list" data-settings-category="performance">
+        <header><Cpu size={14} /><span>{locale === "en" ? "Windows native core invitation Beta" : "Windows 原生核心邀请 Beta"}</span><small>{statusLabel}</small></header>
+        <ToggleSetting
+          checked={props.windowsNativeCoreBetaEnabled}
+          label={locale === "en" ? "Validate the native simulation core in shadow mode" : "以影子模式校验原生模拟核心"}
+          value={props.windowsNativeCoreBetaEnabled
+            ? locale === "en" ? "Device-only · JavaScript remains authoritative" : "仅本机 · JavaScript 仍是权威"
+            : locale === "en" ? "Off by default" : "默认关闭"}
+          icon={<Cpu size={16} />}
+          onChange={props.onWindowsNativeCoreBetaEnabledChange}
+        />
+        <p className={props.windowsNativeCoreBetaStatus === "diverged" || props.windowsNativeCoreBetaStatus === "failed" ? "settings-warning" : "settings-help"}>
+          {locale === "en"
+            ? "After the next full native checkpoint, the client streams an independent state proof and compares it with Rust. Shadow failures never replace the visible factory. Authority promotion remains locked until coverage and long-run gates pass."
+            : "下一次完整原生检查点后，客户端会流式计算独立状态证明并与 Rust 对照。影子失败不会替换当前工厂；领域覆盖和长跑门禁通过前，原生权威切换保持锁定。"}
+        </p>
+      </section>
+    </div>
+  );
+}
+
 export function OperationsWorkspace(props: OperationsWorkspaceProps) {
   if (!props.open) return null;
   const unlockedCount = props.game.achievements.unlockedIds.length;
@@ -1267,6 +1316,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "achievements" ? <AchievementsPanel game={props.game} /> : null}
         {props.tab === "logistics" ? <LogisticsManagementPanel game={props.game} {...props.logisticsActions} /> : null}
         {props.tab === "settings" ? <SettingsPanel game={props.game} report={props.performanceReport} productionRefreshPreference={props.productionRefreshPreference} productionRefreshIntervalMs={props.productionRefreshIntervalMs} endgameExtremeMode={props.endgameExtremeMode} connectExpandAll={props.connectExpandAll} fullRealtimeSimulation={props.fullRealtimeSimulation} factoryAlertsEnabled={props.factoryAlertsEnabled} largeSaveAutosaveProtection={props.largeSaveAutosaveProtection} largeSaveAutosavePolicy={props.largeSaveAutosavePolicy} memoryAutoPauseEnabled={props.memoryAutoPauseEnabled} memoryAutoPauseThresholdMiB={props.memoryAutoPauseThresholdMiB} blueprintAllowOverlap={props.blueprintAllowOverlap} canvasDetailPreference={props.canvasDetailPreference} canvasOverlapPreference={props.canvasOverlapPreference} canvasInteractionDetailPreference={props.canvasInteractionDetailPreference} canvasDetailStage={props.canvasDetailStage} canvasVisibleNodeCount={props.canvasVisibleNodeCount} canvasStackGroupCount={props.canvasStackGroupCount} canvasStackHiddenCount={props.canvasStackHiddenCount} canvasPerformanceFeatures={props.canvasPerformanceFeatures} onEndgameExtremeModeChange={props.onEndgameExtremeModeChange} onConnectExpandAllChange={props.onConnectExpandAllChange} onFullRealtimeSimulationChange={props.onFullRealtimeSimulationChange} onFactoryAlertsEnabledChange={props.onFactoryAlertsEnabledChange} onLargeSaveAutosaveProtectionChange={props.onLargeSaveAutosaveProtectionChange} onMemoryAutoPauseEnabledChange={props.onMemoryAutoPauseEnabledChange} onMemoryAutoPauseThresholdChange={props.onMemoryAutoPauseThresholdChange} allowEditsDuringSave={props.allowEditsDuringSave} onAllowEditsDuringSaveChange={props.onAllowEditsDuringSaveChange} onBlueprintAllowOverlapChange={props.onBlueprintAllowOverlapChange} onCanvasDetailPreferenceChange={props.onCanvasDetailPreferenceChange} onCanvasOverlapPreferenceChange={props.onCanvasOverlapPreferenceChange} onCanvasInteractionDetailPreferenceChange={props.onCanvasInteractionDetailPreferenceChange} onCanvasPerformanceFeatureChange={props.onCanvasPerformanceFeatureChange} lineFindMode={props.lineFindMode} onLineFindModeChange={props.onLineFindModeChange} connectionPointSize={props.connectionPointSize} onConnectionPointSizeChange={props.onConnectionPointSizeChange} connectionHitArea={props.connectionHitArea} onConnectionHitAreaChange={props.onConnectionHitAreaChange} defaultBeltLanes={props.defaultBeltLanes} onDefaultBeltLanesChange={props.onDefaultBeltLanesChange} showRunLog={props.showRunLog} onRunLogChange={props.onRunLogChange} showItemHover={props.showItemHover} onItemHoverChange={props.onItemHoverChange} onProductionRefreshPreferenceChange={props.onProductionRefreshPreferenceChange} onChange={props.onSettingsChange} onRunBenchmark={props.onRunBenchmark} onOpenReleaseNotes={props.onOpenReleaseNotes} onOpenTutorial={props.onOpenTutorial} /> : null}
+        {props.tab === "settings" && props.windowsNativeCoreAvailable ? <WindowsNativeCoreBetaSetting {...props} /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
         {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}

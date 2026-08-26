@@ -282,7 +282,7 @@ import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExch
 import { exportBinaryFile, exportTextFile } from "./game/fileExport";
 import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
-import { getDesktopBridge } from "./desktop";
+import { getDesktopBridge, type DesktopNativeSaveCommitResult } from "./desktop";
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
 import { createContentPackTemplate, parseContentPack, type ModValidationResult } from "./game/mods";
 import { importWithRecovery } from "./game/dynamicImportRecovery";
@@ -378,6 +378,9 @@ import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./
 import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type PersistChunkedSaveResult } from "./game/chunkedSaveJournal";
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
+import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
+import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
+import { readWindowsNativeCoreBetaEnabled, writeWindowsNativeCoreBetaEnabled } from "./game/nativeCoreBetaSettings";
 import type {
   AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveExpectedStateIdentity,
@@ -1528,6 +1531,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, [canvasRenderSnapshot.runtimeRevision, game.paused, nodes.length]);
   const [notice, setNotice] = useState<string | null>(null);
+  const windowsNativeCoreAvailable = Boolean(getDesktopBridge());
+  const [windowsNativeCoreBetaEnabled, setWindowsNativeCoreBetaEnabled] = useState(() =>
+    windowsNativeCoreAvailable && readWindowsNativeCoreBetaEnabled());
+  const [windowsNativeCoreBetaStatus, setWindowsNativeCoreBetaStatus] = useState<
+    "disabled" | "awaiting-checkpoint" | "hashing" | "shadow-active" | "native-ready" | "diverged" | "unavailable" | "failed"
+  >(() => windowsNativeCoreAvailable && readWindowsNativeCoreBetaEnabled() ? "awaiting-checkpoint" : "disabled");
   const [factoryAlertProjection, setFactoryAlertProjection] = useState<FactoryAlertProjection>(EMPTY_FACTORY_ALERT_PROJECTION);
   const factoryAlertsGenerationRef = useRef(0);
   const acceptFactoryAlertProjection = useCallback((projection: FactoryAlertProjection | undefined, generation: number | undefined) => {
@@ -1736,6 +1745,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const simulationWorkerDisabledRef = useRef(false);
   const durableSimulationRuntimeEnabled = isDurableSimulationRuntimeEnabled();
   const contentPackRuntimeSnapshotRef = useRef<ContentPackRuntimeSnapshot>(createContentPackRuntimeSnapshot(INITIAL_CONTENT_PACK_REGISTRY));
+  const windowsNativeCoreBetaEnabledRef = useRef(windowsNativeCoreBetaEnabled);
+  windowsNativeCoreBetaEnabledRef.current = windowsNativeCoreBetaEnabled;
+  const windowsNativeCoreBetaControllerRef = useRef<WindowsNativeCoreBetaController | null>(null);
+  if (windowsNativeCoreBetaControllerRef.current === null) {
+    windowsNativeCoreBetaControllerRef.current = new WindowsNativeCoreBetaController();
+  }
+  const windowsNativeCoreBetaGenerationRef = useRef(0);
+  const windowsNativeCoreBetaTimerRef = useRef<number | null>(null);
   const simulationWorkerRegistryFingerprintRef = useRef<string | null>(null);
   const simulationSubmissionRef = useRef<SimulationSubmission | null>(null);
   const durableRecoveryHeadRef = useRef<SimulationRuntimeDurableAppHead | null>(durableSimulationRuntimeEnabled && loaded.runtimeRecovery ? {
@@ -1927,6 +1944,93 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const eventSequenceRef = useRef(0);
   const burstSequenceRef = useRef(0);
   const getCurrentGame = useCallback(() => gameRef.current, []);
+  const scheduleWindowsNativeCoreShadow = useCallback((
+    state: GameState,
+    checkpoint: DesktopNativeSaveCommitResult,
+  ) => {
+    if (!windowsNativeCoreBetaEnabledRef.current || !getDesktopBridge()) return;
+    const controller = windowsNativeCoreBetaControllerRef.current;
+    if (!controller) return;
+    const generation = ++windowsNativeCoreBetaGenerationRef.current;
+    const registry = contentPackRuntimeSnapshotRef.current;
+    if (windowsNativeCoreBetaTimerRef.current !== null) {
+      window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+    }
+    setWindowsNativeCoreBetaStatus("hashing");
+    windowsNativeCoreBetaTimerRef.current = window.setTimeout(() => {
+      windowsNativeCoreBetaTimerRef.current = null;
+      if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) return;
+      const startedAt = performance.now();
+      void (async () => {
+        try {
+          // Both digests are streamed directly from the already committed JS
+          // checkpoint. No canonical 77 MB string or duplicate GameState is
+          // allocated merely to validate the native shadow.
+          const javascriptProof = createNativeCoreRevisionProof(
+            state,
+            checkpoint.revision,
+            checkpoint.rootHash,
+            registry.fingerprint,
+          );
+          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) return;
+          const snapshot = await controller.openShadow({ mode: state.mode, checkpoint, runtime: registry, javascriptProof });
+          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) {
+            await controller.notifyCoreExit("native-shadow-opt-out-during-open");
+            return;
+          }
+          const phase = snapshot.authority.phase;
+          setWindowsNativeCoreBetaStatus(
+            phase === "shadow-diverged" ? "diverged" :
+              phase === "native-ready" ? "native-ready" :
+                phase === "shadow" ? "shadow-active" : "unavailable",
+          );
+          if (phase === "shadow-diverged") {
+            setNotice("Windows 原生核心影子检查发现状态分叉；JavaScript 仍是权威，当前存档和进度未被替换");
+          }
+          recordRuntimeTransitionPhase("native-core-shadow-checkpoint", startedAt, performance.now() - startedAt, {
+            revision: checkpoint.revision,
+            entities: state.entities.length,
+            belts: state.belts.length,
+            phase,
+          });
+        } catch (error) {
+          if (generation !== windowsNativeCoreBetaGenerationRef.current) return;
+          setWindowsNativeCoreBetaStatus("failed");
+          setNotice(`Windows 原生核心影子检查失败，已继续使用 JavaScript：${error instanceof Error ? error.message : "未知错误"}`);
+        }
+      })();
+    }, 0);
+  }, []);
+  const updateWindowsNativeCoreBetaEnabled = useCallback((enabled: boolean) => {
+    if (enabled && !getDesktopBridge()) {
+      setNotice("Windows 原生核心 Beta 仅在 Windows 客户端中可用");
+      return;
+    }
+    writeWindowsNativeCoreBetaEnabled(enabled);
+    windowsNativeCoreBetaEnabledRef.current = enabled;
+    setWindowsNativeCoreBetaEnabled(enabled);
+    windowsNativeCoreBetaGenerationRef.current += 1;
+    if (windowsNativeCoreBetaTimerRef.current !== null) {
+      window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+      windowsNativeCoreBetaTimerRef.current = null;
+    }
+    if (enabled) {
+      setWindowsNativeCoreBetaStatus("awaiting-checkpoint");
+      setNotice("Windows 原生核心影子 Beta 已开启；将在下一次完整自动保存后校验，不会接管当前工厂");
+    } else {
+      setWindowsNativeCoreBetaStatus("disabled");
+      void windowsNativeCoreBetaControllerRef.current?.notifyCoreExit("native-shadow-device-opt-out");
+      setNotice("Windows 原生核心影子 Beta 已关闭；当前工厂继续由 JavaScript 运行");
+    }
+  }, []);
+  useEffect(() => () => {
+    windowsNativeCoreBetaGenerationRef.current += 1;
+    if (windowsNativeCoreBetaTimerRef.current !== null) {
+      window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+      windowsNativeCoreBetaTimerRef.current = null;
+    }
+    void windowsNativeCoreBetaControllerRef.current?.notifyCoreExit("renderer-unmount");
+  }, []);
   const performanceMonitor = usePerformanceMonitor(getCurrentGame, game.paused);
   const publishTimeWarpComputeState = useCallback((next: TimeWarpComputeGovernorState) => {
     timeWarpComputeStateRef.current = next;
@@ -5486,6 +5590,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                   nativeChangedBytes: nativeCommit.changedBytes,
                 } : {}),
               });
+              if (nativeCommit) scheduleWindowsNativeCoreShadow(saveState, nativeCommit);
               checkpointRequest.resolve(saveState);
               return;
             }
@@ -13282,6 +13387,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             largeSaveAutosavePolicy={largeSaveAutosavePolicy}
             memoryAutoPauseEnabled={memoryAutoPauseEnabled}
             memoryAutoPauseThresholdMiB={memoryAutoPauseThresholdMiB}
+            windowsNativeCoreAvailable={windowsNativeCoreAvailable}
+            windowsNativeCoreBetaEnabled={windowsNativeCoreBetaEnabled}
+            windowsNativeCoreBetaStatus={windowsNativeCoreBetaStatus}
             allowEditsDuringSave={allowEditsDuringSave}
             onAllowEditsDuringSaveChange={setAllowEditsDuringSavePreference}
             blueprintAllowOverlap={blueprintAllowOverlap}
@@ -13306,6 +13414,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onLargeSaveAutosaveProtectionChange={updateLargeSaveAutosaveProtection}
             onMemoryAutoPauseEnabledChange={updateMemoryAutoPauseEnabled}
             onMemoryAutoPauseThresholdChange={updateMemoryAutoPauseThreshold}
+            onWindowsNativeCoreBetaEnabledChange={updateWindowsNativeCoreBetaEnabled}
             onBlueprintAllowOverlapChange={setBlueprintAllowOverlap}
             onCanvasDetailPreferenceChange={setCanvasDetailPreference}
             onCanvasOverlapPreferenceChange={setCanvasOverlapPreference}

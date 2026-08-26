@@ -1972,6 +1972,13 @@ fn simulate_step(
     crate::local_logistics::transfer_buffers(state, base, entities)?;
     crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
     let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
+    crate::interstellar_logistics::run_orbital_collectors(
+        state,
+        base,
+        entities,
+        seconds,
+        &belt_reservation.output_credits,
+    )?;
     let planet_ids = state
         .catalog
         .planets
@@ -2920,6 +2927,9 @@ fn simulate_step(
             let object = entity.as_object()?;
             if string_at(object, "kind") != Some("station") {
                 return None;
+            }
+            if string_at(object, "buildingId") == Some("orbital_collector") {
+                return Some((entity_index, 1.0));
             }
             let planet = *planet_index.get(string_at(object, "planetId").unwrap_or_default())?;
             let grid = grid_index(object)?;

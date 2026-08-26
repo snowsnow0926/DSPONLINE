@@ -593,6 +593,31 @@ function relayInterstellarLogisticsState(): GameState {
   return state;
 }
 
+function orbitalCollectorLogisticsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("interstellar_logistics", "orbital_collection", "logistics_engine_1");
+  state.construction.orbital_collector = 1;
+  state.construction.interstellar_logistics_station = 1;
+  state.activePlanetId = "giant";
+  state = placeBuilding(state, "orbital_collector", { x: 0, y: 0 }, 1);
+  const collector = state.entities.find((entity) => entity.buildingId === "orbital_collector")!;
+  collector.storedItemId = "hydrogen";
+  collector.inputs = {};
+  collector.outputs = { hydrogen: 150 };
+  collector.progress = 0.25;
+  state.activePlanetId = "home";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 820, y: 80 }, 1);
+  const demandId = state.entities.find((entity) => entity.buildingId === "interstellar_logistics_station")!.id;
+  state = setStationSlotItem(state, demandId, 0, "hydrogen");
+  state = setStationSlotMode(state, demandId, 0, "remote", "demand");
+  state = setStationSlotMinimumLoad(state, demandId, 0, 0.5);
+  const demand = state.entities.find((entity) => entity.id === demandId)!;
+  demand.outputs = { hydrogen: 0 };
+  demand.inputs = { hydrogen: 0 };
+  demand.stationVessels = 2;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1028,6 +1053,47 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "relay-interstellar-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "relay-interstellar-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches orbital collection and demand-owned vessel pickup", async () => {
+    const initial = orbitalCollectorLogisticsState();
+    const checkpoint = await seed(initial, 201);
+    for (const seconds of [1, 10, 30, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `orbital-collector-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "totalProduced", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `orbital-collector-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.totalProduced, `orbital-collector-${seconds} 产量`).toEqual(JSON.parse(JSON.stringify(expected.totalProduced)));
+      expect(advanced.summary.canonicalFields, `orbital-collector-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `orbital-collector-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `orbital-collector-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "orbital-collector-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "orbital-collector-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

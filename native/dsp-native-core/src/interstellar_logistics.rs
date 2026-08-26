@@ -646,6 +646,117 @@ fn route_owner_id<'a>(demand: &'a Map<String, Value>, route: &'a Map<String, Val
         .unwrap_or_else(|| string_at(demand, "id").unwrap_or_default())
 }
 
+fn orbital_slot(entity: &Map<String, Value>) -> Slot {
+    Slot {
+        item_id: string_at(entity, "storedItemId").map(str::to_owned),
+        remote_mode: "supply".to_owned(),
+        minimum_load: 1.0,
+        min_stock: 0.0,
+        max_stock: 0.0,
+        priority: 1,
+        route_policy: "relay-preferred".to_owned(),
+        warper_budget: 2,
+    }
+}
+
+fn orbital_yield(base: &Map<String, Value>, planet_id: &str, item_id: &str) -> f64 {
+    base.get("galaxy")
+        .and_then(Value::as_object)
+        .and_then(|galaxy| galaxy.get("profiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| profiles.get(planet_id))
+        .and_then(Value::as_object)
+        .and_then(|profile| profile.get("orbitalYields"))
+        .and_then(Value::as_object)
+        .and_then(|yields| yields.get(item_id))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(0.0)
+}
+
+pub(crate) fn run_orbital_collectors(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+    output_credits: &HashMap<String, f64>,
+) -> anyhow::Result<()> {
+    let infinite_multiplier = 1.0
+        + base
+            .get("endgame")
+            .and_then(Value::as_object)
+            .and_then(|endgame| endgame.get("infiniteResearch"))
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("vein_utilization"))
+            .and_then(Value::as_object)
+            .and_then(|progress| progress.get("level"))
+            .map(|value| finite_number(Some(value)).floor().clamp(0.0, 1_000.0))
+            .unwrap_or(0.0)
+            * 0.1;
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if string_at(entity, "buildingId") != Some("orbital_collector") {
+            continue;
+        }
+        let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
+        let item_id = string_at(entity, "storedItemId")
+            .ok_or_else(|| anyhow!("native orbital collector item is missing"))?
+            .to_owned();
+        if orbital_yield(base, &planet_id, &item_id) <= 0.0 {
+            bail!("native orbital collector item has no configured yield");
+        }
+        entity.insert("storedItemId".to_owned(), Value::from(item_id.clone()));
+        entity.insert("stationMode".to_owned(), Value::from("supply"));
+        let capacity = station_capacity(state, base, entity, &orbital_slot(entity))?;
+        let incoming = (item_amount(entity, "inputs", &item_id) + EPSILON).floor();
+        let stored = (item_amount(entity, "outputs", &item_id) + EPSILON).floor();
+        let buffered = incoming.min((capacity - stored).max(0.0));
+        set_item_amount(entity, "inputs", &item_id, incoming - buffered)?;
+        let current = stored + buffered;
+        set_item_amount(entity, "outputs", &item_id, current)?;
+        let entity_id = string_at(entity, "id").unwrap_or_default();
+        let credit = crate::belts::output_credit(output_credits, entity_id, &item_id);
+        let free = (capacity - current).max(0.0) + credit;
+        if free < 1.0 {
+            set_number(entity, "progress", 0.0)?;
+            continue;
+        }
+        let profile_multiplier = base
+            .get("galaxy")
+            .and_then(Value::as_object)
+            .and_then(|galaxy| galaxy.get("profiles"))
+            .and_then(Value::as_object)
+            .and_then(|profiles| profiles.get(&planet_id))
+            .and_then(Value::as_object)
+            .and_then(|profile| profile.get("orbitalYieldMultiplier"))
+            .map(|value| finite_number(Some(value)))
+            .unwrap_or(1.0);
+        let rate = orbital_yield(base, &planet_id, &item_id)
+            * finite_number(entity.get("machineCount"))
+            * profile_multiplier
+            * infinite_multiplier;
+        let progress = rounded(finite_number(entity.get("progress")) + rate * seconds, 6);
+        let produced = free.min((progress + EPSILON).floor());
+        set_item_amount(entity, "outputs", &item_id, current + produced)?;
+        set_number(
+            entity,
+            "progress",
+            if produced >= free {
+                0.0
+            } else {
+                rounded(progress - produced, 6)
+            },
+        )?;
+        set_number(entity, "utilization", 1.0)?;
+        set_number(entity, "productionRate", rounded(rate * 60.0, 2))?;
+        let total_produced = base
+            .get_mut("totalProduced")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native total-produced record is missing"))?;
+        let total = finite_number(total_produced.get(&item_id));
+        set_number(total_produced, &item_id, (total + produced).floor())?;
+    }
+    Ok(())
+}
+
 fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger {
     let mut ledger = Ledger::default();
     for (demand_index, demand) in entities
@@ -738,10 +849,30 @@ fn peer_matches(
             continue;
         }
         let peer = entities[peer_index].as_object().expect("station object");
-        if string_at(peer, "buildingId") != Some("interstellar_logistics_station")
-            || string_at(peer, "planetId") == planet_id
+        if string_at(peer, "planetId") == planet_id
             || planet(state, peer).is_none_or(|planet| !system_unlocked(base, &planet.system_id))
         {
+            continue;
+        }
+        if string_at(peer, "buildingId") == Some("orbital_collector") {
+            if opposite == "supply" && string_at(peer, "storedItemId") == Some(item_id) {
+                let (supply_index, demand_index, demand_slot) = (peer_index, station_index, slot);
+                if route_economics(
+                    state,
+                    base,
+                    entities,
+                    supply_index,
+                    demand_index,
+                    demand_slot,
+                )?
+                .is_some()
+                {
+                    matches.push((peer_index, 0));
+                }
+            }
+            continue;
+        }
+        if string_at(peer, "buildingId") != Some("interstellar_logistics_station") {
             continue;
         }
         for (peer_slot_index, peer_slot) in slots(peer)?.iter().enumerate() {
@@ -769,14 +900,22 @@ fn peer_matches(
     matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
         let left = entities[*left_index].as_object().expect("station object");
         let right = entities[*right_index].as_object().expect("station object");
-        let left_priority = slots(left)
-            .ok()
-            .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
-            .unwrap_or(1);
-        let right_priority = slots(right)
-            .ok()
-            .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
-            .unwrap_or(1);
+        let left_priority = if string_at(left, "buildingId") == Some("orbital_collector") {
+            1
+        } else {
+            slots(left)
+                .ok()
+                .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
+                .unwrap_or(1)
+        };
+        let right_priority = if string_at(right, "buildingId") == Some("orbital_collector") {
+            1
+        } else {
+            slots(right)
+                .ok()
+                .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
+                .unwrap_or(1)
+        };
         right_priority
             .cmp(&left_priority)
             .then_with(|| {
@@ -841,6 +980,28 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         match string_at(station, "buildingId") {
             Some("planetary_logistics_station") => continue,
             Some("interstellar_logistics_station") => {}
+            Some("orbital_collector") => {
+                let item_id = string_at(station, "storedItemId");
+                let planet_id = string_at(station, "planetId").unwrap_or_default();
+                if !matches!(string_at(station, "quantumMode"), None | Some("legacy"))
+                    || station
+                        .get("quantumTransition")
+                        .is_some_and(|value| !value.is_null())
+                    || item_id.is_none_or(|id| {
+                        !state.catalog.items.contains_key(id)
+                            || orbital_yield(base, planet_id, id) <= 0.0
+                    })
+                    || station
+                        .get("stationRoutes")
+                        .and_then(Value::as_array)
+                        .is_none_or(|routes| !routes.is_empty())
+                    || planet(state, station)
+                        .is_none_or(|planet| !system_unlocked(base, &planet.system_id))
+                {
+                    return Ok(Some("orbital-collector-invalid"));
+                }
+                continue;
+            }
             _ => return Ok(Some("interstellar-station-type-unsupported")),
         }
         if !matches!(
@@ -958,7 +1119,11 @@ pub(crate) fn ready_station_indices(
                 peer_matches(state, base, entities, station_index, slot_index)?
             {
                 let peer = entities[peer_index].as_object().expect("station object");
-                let peer_slots = slots(peer)?;
+                let peer_slots = if string_at(peer, "buildingId") == Some("orbital_collector") {
+                    vec![orbital_slot(peer)]
+                } else {
+                    slots(peer)?
+                };
                 let (demand_index, demand_slot, supply_index, supply_slot) =
                     if slot.remote_mode == "demand" {
                         (
@@ -1082,14 +1247,23 @@ pub(crate) fn dispatch(
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
-                let left_priority = slots(left)
-                    .ok()
-                    .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
-                    .unwrap_or(1);
-                let right_priority = slots(right)
-                    .ok()
-                    .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
-                    .unwrap_or(1);
+                let left_priority = if string_at(left, "buildingId") == Some("orbital_collector") {
+                    1
+                } else {
+                    slots(left)
+                        .ok()
+                        .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
+                        .unwrap_or(1)
+                };
+                let right_priority = if string_at(right, "buildingId") == Some("orbital_collector")
+                {
+                    1
+                } else {
+                    slots(right)
+                        .ok()
+                        .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
+                        .unwrap_or(1)
+                };
                 right_priority
                     .cmp(&left_priority)
                     .then_with(|| {
@@ -1144,7 +1318,13 @@ pub(crate) fn dispatch(
                     .as_object()
                     .expect("station object")
                     .clone();
-                let supply_slot = slots(&supply_snapshot)?[peer_slot_index].clone();
+                let supply_is_orbital =
+                    string_at(&supply_snapshot, "buildingId") == Some("orbital_collector");
+                let supply_slot = if supply_is_orbital {
+                    orbital_slot(&supply_snapshot)
+                } else {
+                    slots(&supply_snapshot)?[peer_slot_index].clone()
+                };
                 let Some(economics) =
                     route_economics(state, base, entities, supply_index, demand_index, slot)?
                 else {
@@ -1153,7 +1333,11 @@ pub(crate) fn dispatch(
                 if economics.requires_warp && !completed_tech(base, "space_warp") {
                     continue;
                 }
-                let source_power = powers.get(&supply_index).copied().unwrap_or(0.0);
+                let source_power = if supply_is_orbital {
+                    1.0
+                } else {
+                    powers.get(&supply_index).copied().unwrap_or(0.0)
+                };
                 let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
                 let hub_power = economics
                     .waypoint_station_ids
@@ -1163,10 +1347,11 @@ pub(crate) fn dispatch(
                         factor.min(powers.get(index).copied().unwrap_or(0.0))
                     });
                 let power_factor = source_power.min(target_power).min(hub_power);
-                for (owner_index, owner_slot) in [
-                    (demand_index, slot.clone()),
-                    (supply_index, supply_slot.clone()),
-                ] {
+                let mut vehicle_owners = vec![(demand_index, slot.clone())];
+                if !supply_is_orbital {
+                    vehicle_owners.push((supply_index, supply_slot.clone()));
+                }
+                for (owner_index, owner_slot) in vehicle_owners {
                     let owner = entities[owner_index].as_object().expect("station object");
                     let free_vehicles = (installed_vessels(owner)
                         - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
@@ -1385,7 +1570,14 @@ pub(crate) fn advance_routes(
                 .filter_map(Value::as_str)
                 .filter_map(|id| indexes.get(id).copied())
                 .collect::<Vec<_>>();
-            let source_power = powers.get(&supply_index).copied().unwrap_or(0.0);
+            let source_power = if entities[supply_index]
+                .as_object()
+                .is_some_and(|entity| string_at(entity, "buildingId") == Some("orbital_collector"))
+            {
+                1.0
+            } else {
+                powers.get(&supply_index).copied().unwrap_or(0.0)
+            };
             let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
             let hub_power = waypoint_indices.iter().fold(1.0_f64, |factor, index| {
                 factor.min(powers.get(index).copied().unwrap_or(0.0))

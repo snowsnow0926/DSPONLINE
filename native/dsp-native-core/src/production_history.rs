@@ -410,6 +410,17 @@ impl CoreState {
                     resource,
                     rate,
                 );
+            } else if entity.get("buildingId").and_then(Value::as_str) == Some("orbital_collector")
+            {
+                let Some(item_id) = entity.get("storedItemId").and_then(Value::as_str) else {
+                    continue;
+                };
+                add_rate(&mut production, item_id, rate);
+                add_rate(
+                    planet_production.entry(planet.to_owned()).or_default(),
+                    item_id,
+                    rate,
+                );
             } else if entity.get("kind").and_then(Value::as_str) == Some("machine") {
                 let Some(recipe) = entity
                     .get("recipeId")

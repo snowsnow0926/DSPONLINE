@@ -1132,6 +1132,19 @@ function orbitalCargoContractState(): GameState {
   return state;
 }
 
+function orbitalCargoContractRefreshState(expireAccepted: boolean): GameState {
+  const state = orbitalCargoContractState();
+  const board = state.orbitalStation.contractBoard;
+  board.offers = [];
+  if (expireAccepted) {
+    const currentTaskDay = board.taskDay;
+    board.taskDay = Math.max(0, currentTaskDay - 3);
+    board.accepted[0].taskDay = board.taskDay;
+    board.accepted[0].expiresAtTaskDay = currentTaskDay;
+  }
+  return state;
+}
+
 function systemSpaceStationConstructionState(): GameState {
   let state = simpleMiningState();
   state.research.completedTechIds.push("system_space_station_engineering");
@@ -2178,9 +2191,35 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
   }, 90_000);
 
+  it("matches deterministic station offer generation and expired-contract settlement", async () => {
+    for (const [index, expireAccepted] of [false, true].entries()) {
+      const initial = orbitalCargoContractRefreshState(expireAccepted);
+      const checkpoint = await seed(initial, 212 + index);
+      const expected = advanceSimulationBudget(initial, 1, 1);
+      const opened = await open(checkpoint);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      const label = expireAccepted ? "station-contract-expiry" : "station-contract-generation";
+      expect(advanced.supported, `${label}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `${label} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.orbitalStation, `${label} 合同板`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
+      expect(advanced.summary.canonicalFields, `${label} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `${label} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 30_000);
+
   it("matches powered construction-launcher settlement across system-station phases", async () => {
     const initial = systemSpaceStationConstructionState();
-    const checkpoint = await seed(initial, 212);
+    const checkpoint = await seed(initial, 214);
     for (const seconds of [1, 5, 10, 60]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -2204,7 +2243,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches elevator belts, local hub settlement, cross-system fleet dispatch, and returns", async () => {
     const initial = systemHubElevatorState();
-    const checkpoint = await seed(initial, 213);
+    const checkpoint = await seed(initial, 215);
     for (const seconds of [1, 5, 10, 30, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -2230,7 +2269,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches active time-warp power allocation and clears committed pending budgets", async () => {
     const initial = activeTimeWarpState();
-    const checkpoint = await seed(initial, 214);
+    const checkpoint = await seed(initial, 216);
     for (const seconds of [1, 5, 60]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);

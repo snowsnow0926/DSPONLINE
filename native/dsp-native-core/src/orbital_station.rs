@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use serde_json::{Map, Number, Value};
@@ -297,32 +297,8 @@ pub(crate) fn terminal_accepts(
     })
 }
 
-fn contract_sync_is_noop(base: &Map<String, Value>) -> bool {
-    if !matches!(station_status(base), "showcase-building" | "operational") {
-        return true;
-    }
-    let Some(board) = station_object(base)
-        .and_then(|station| station.get("contractBoard"))
-        .and_then(Value::as_object)
-    else {
-        return false;
-    };
-    let offers_present = board
-        .get("offers")
-        .and_then(Value::as_array)
-        .is_some_and(|offers| !offers.is_empty());
-    let task_day = finite_number(board.get("taskDay")).floor().max(0.0);
-    let last_confirmed = finite_number(board.get("lastConfirmedWallClockMs"))
-        .floor()
-        .max(0.0);
-    let local_day =
-        ((last_confirmed + 8.0 * 60.0 * 60.0 * 1_000.0) / (24.0 * 60.0 * 60.0 * 1_000.0)).floor();
-    offers_present && task_day >= local_day
-}
-
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
-    let sync_noop = contract_sync_is_noop(base);
     for &index in &state.factory_topology.orbital_cargo_terminal_indices {
         let terminal = state.parse_entity(index)?;
         let terminal = terminal
@@ -337,14 +313,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         let binding = terminal.get("orbitalCargoBinding");
         if !binding_is_valid(base, binding) || binding.is_none_or(Value::is_null) {
             continue;
-        }
-        let construction_may_unlock_contracts =
-            station_status(base) == "dock-building" && binding.is_some_and(binding_is_construction);
-        if !sync_noop
-            && (matches!(station_status(base), "showcase-building" | "operational")
-                || construction_may_unlock_contracts)
-        {
-            return Ok(Some("orbital-contract-refresh-requires-domain-core"));
         }
     }
     Ok(None)
@@ -643,11 +611,6 @@ pub(crate) fn settle(
     if terminal_indices.is_empty() {
         return Ok(());
     }
-    if !contract_sync_is_noop(base)
-        && matches!(station_status(base), "showcase-building" | "operational")
-    {
-        bail!("native orbital contract refresh escaped static admission");
-    }
     for entity_index in terminal_indices {
         let (binding, planet_id, ports, power_factor, progress, routing_cursor, buffered) = {
             let entity = entities[entity_index]
@@ -826,6 +789,7 @@ pub(crate) fn settle(
         )?;
         set_number(entity, "productionRate", uploaded_number * 60.0 / seconds)?;
     }
+    crate::station_contracts::synchronize(state, base)?;
     for &index in &state.factory_topology.orbital_cargo_terminal_indices {
         let entity = entities[index]
             .as_object_mut()

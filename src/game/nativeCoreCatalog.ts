@@ -31,6 +31,7 @@ export function createNativeCoreCatalog(
     registryFingerprint: runtime.fingerprint,
     planets: byId(PLANET_LIST.map((planet, simulationOrder) => ({
       id: planet.id,
+      name: planet.name,
       systemId: planet.systemId,
       kind: planet.kind,
       orbitIndex: planet.orbitIndex,

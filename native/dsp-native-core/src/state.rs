@@ -127,6 +127,7 @@ pub struct DomainCoverage {
     pub dyson_launchers: bool,
     pub dyson_ray_receivers: bool,
     pub orbital_cargo_terminals: bool,
+    pub station_contract_refresh: bool,
     pub system_space_station_construction: bool,
     pub system_hub_logistics: bool,
     pub elevator_belts: bool,
@@ -188,6 +189,7 @@ impl DomainCoverage {
             dyson_launchers: true,
             dyson_ray_receivers: true,
             orbital_cargo_terminals: true,
+            station_contract_refresh: true,
             system_space_station_construction: true,
             system_hub_logistics: true,
             elevator_belts: true,
@@ -1479,6 +1481,7 @@ mod tests {
                 registry_fingerprint: "core".into(),
                 planets: vec![PlanetDefinition {
                     id: "home".into(),
+                    name: "家园".into(),
                     system_id: "helios".into(),
                     kind: "terrestrial".into(),
                     orbit_index: 1,

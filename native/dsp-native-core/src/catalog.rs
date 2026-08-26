@@ -31,6 +31,8 @@ pub struct ItemDefinition {
 #[serde(rename_all = "camelCase")]
 pub struct PlanetDefinition {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub system_id: String,
     #[serde(default)]
     pub kind: String,

@@ -21,6 +21,7 @@ pub mod replay;
 mod simple_factory;
 pub mod simulation;
 pub mod state;
+mod station_contracts;
 mod system_space_station;
 
 pub use catalog::{

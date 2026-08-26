@@ -187,6 +187,7 @@ export interface DesktopNativeCoreConstructionDefinition {
 
 export interface DesktopNativeCorePlanetDefinition {
   id: string;
+  name: string;
   systemId: string;
   kind: "terrestrial" | "gas-giant";
   orbitIndex: number;
@@ -271,6 +272,7 @@ export interface DesktopNativeCoreDomainCoverage {
   dysonLaunchers: boolean;
   dysonRayReceivers: boolean;
   orbitalCargoTerminals: boolean;
+  stationContractRefresh: boolean;
   systemSpaceStationConstruction: boolean;
   systemHubLogistics: boolean;
   elevatorBelts: boolean;

@@ -345,6 +345,7 @@ pub(crate) struct FactoryTopology {
     pub logistics_buffer_indices: Vec<usize>,
     pub material_delivery_hub_indices: Vec<usize>,
     pub orbital_cargo_terminal_indices: Vec<usize>,
+    pub galactic_material_exporter_indices: Vec<usize>,
     pub space_station_launcher_indices: Vec<usize>,
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
@@ -365,6 +366,7 @@ impl FactoryTopology {
             + self.logistics_buffer_indices.capacity()
             + self.material_delivery_hub_indices.capacity()
             + self.orbital_cargo_terminal_indices.capacity()
+            + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
@@ -951,6 +953,11 @@ impl CoreState {
             if building == "orbital_cargo_terminal" {
                 factory_topology.orbital_cargo_terminal_indices.push(index);
             }
+            if building == "galactic_material_exporter" {
+                factory_topology
+                    .galactic_material_exporter_indices
+                    .push(index);
+            }
             if building == "space_station_construction_launcher" {
                 factory_topology.space_station_launcher_indices.push(index);
             }
@@ -968,6 +975,7 @@ impl CoreState {
                     "construction_center"
                         | "time_warp_device"
                         | "ray_receiver"
+                        | "galactic_material_exporter"
                         | "micro_black_hole_connector"
                 )
             {

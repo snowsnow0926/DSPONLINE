@@ -289,33 +289,10 @@ impl CoreState {
         }
 
         if simple_factory_reason.is_none() {
-            let mut prepared = crate::simple_factory::prepare_advance(self, simulation_seconds)?;
+            let mut prepared =
+                crate::simple_factory::prepare_advance(self, simulation_seconds, wall_seconds)?;
             self.install_prepared_belt_routes(prepared.belt_routes.clone());
             profile_mark!("simulate");
-            if wall_seconds > EPSILON {
-                if let Some(activity) = prepared
-                    .base
-                    .get_mut("endgame")
-                    .and_then(Value::as_object_mut)
-                    .and_then(|endgame| endgame.get_mut("constructionActivity"))
-                    .and_then(Value::as_object_mut)
-                {
-                    let activity_id = activity
-                        .get("activityId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if !activity_id.is_empty() {
-                        let clock = activity
-                            .get("activityClockMs")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0);
-                        activity.insert(
-                            "activityClockMs".to_owned(),
-                            Value::from((clock + wall_seconds * 1_000.0).floor().max(0.0)),
-                        );
-                    }
-                }
-            }
             self.record_production_history_with_records(
                 &mut prepared.base,
                 &prepared.entities,
@@ -330,6 +307,8 @@ impl CoreState {
             )?;
             crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
             profile_mark!("campaign");
+            crate::speedrun::evaluate(self, &mut prepared.base)?;
+            profile_mark!("speedrun");
             self.commit_simulated_state(prepared.base, prepared.entities, prepared.belts)?;
             self.revision += 1;
             profile_mark!("commit-state");

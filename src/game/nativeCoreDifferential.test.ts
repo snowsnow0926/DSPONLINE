@@ -21,6 +21,7 @@ import { CAMPAIGN_TASKS } from "./campaign";
 import { getConstructionDefinition, TECHNOLOGIES } from "./content";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { nativeCoreDomainSha256 } from "./nativeCoreProof";
+import { createSpeedrunState } from "./speedrun";
 import { startSystemSpaceStationConstruction } from "./systemSpaceStation";
 import type { GameState } from "./types";
 
@@ -356,6 +357,92 @@ function partialCampaignResearchState(): GameState {
   };
   state.productionHistory = [];
   state.historyRecordedAt = 0;
+  return state;
+}
+
+function queuedGlobalProgressState(): GameState {
+  const state = simpleMiningState();
+  state.tray.iron_ingot = 20;
+  state.planetTrays[state.activePlanetId] = { ...state.tray };
+  state.handcraftQueue = [{
+    id: "native_handcraft_gear",
+    recipeId: "gear",
+    planetId: state.activePlanetId,
+    batchesTotal: 4,
+    batchesRemaining: 4,
+    progress: 0,
+    queuedAt: state.elapsedSeconds,
+  }];
+  state.exploration.unlockedSystemIds = state.exploration.unlockedSystemIds.filter((id) => id !== "borealis");
+  state.exploration.colonizedPlanetIds = state.exploration.colonizedPlanetIds.filter((id) => id !== "frost");
+  state.exploration.missions = [{ systemId: "borealis", elapsedSeconds: 1.25, durationSeconds: 3 }];
+  state.exploration.surveyProgressBySystem.borealis = 0.4167;
+  return state;
+}
+
+function legacyGalacticExportState(): GameState {
+  const state = simpleMiningState();
+  if (!state.research.completedTechIds.includes("universe_matrix")) state.research.completedTechIds.push("universe_matrix");
+  state.endgame.exportInputMode = "legacy-network";
+  state.endgame.autoDispatch = true;
+  state.endgame.dispatchThrottle = 0.5;
+  state.endgame.infiniteResearch.galactic_logistics.level = 2;
+  state.endgame.exportProjects.universe_archive = {
+    ...state.endgame.exportProjects.universe_archive,
+    enabled: true,
+    priority: 3,
+    dispatchProgress: 0.4,
+  };
+  state.endgame.exportProjects.solar_sail_array = {
+    ...state.endgame.exportProjects.solar_sail_array,
+    enabled: true,
+    priority: 2,
+    dispatchProgress: 0.8,
+  };
+  state.endgame.exportProjects.carrier_rocket_fleet = {
+    ...state.endgame.exportProjects.carrier_rocket_fleet,
+    enabled: true,
+    priority: 1,
+    dispatchProgress: 0.2,
+  };
+  state.tray.universe_matrix = 4_000;
+  state.planetTrays[state.activePlanetId] = { ...state.tray };
+  state.planetTrays.ashen.small_carrier_rocket = 500;
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  storage.outputs.solar_sail = 2_000;
+  return state;
+}
+
+function physicalGalacticExportState(): GameState {
+  let state = simpleMiningState();
+  if (!state.research.completedTechIds.includes("universe_matrix")) state.research.completedTechIds.push("universe_matrix");
+  state.construction.galactic_material_exporter = 1;
+  state = placeBuilding(state, "galactic_material_exporter", { x: 900, y: -240 }, 1);
+  const exporter = state.entities.find((entity) => entity.buildingId === "galactic_material_exporter")!;
+  exporter.galacticExporterPaused = false;
+  exporter.inputs = {
+    universe_matrix: 7,
+    solar_sail: 11,
+    small_carrier_rocket: 5,
+    antimatter_fuel_rod: 3,
+  };
+  state.endgame.exportInputMode = "building";
+  state.endgame.exportProjects.universe_archive.priority = 3;
+  state.endgame.exportProjects.antimatter_exchange.priority = 2;
+  state.endgame.constructionActivity.activityId = "native_activity";
+  state.endgame.constructionActivity.participantId = "native_player";
+  state.endgame.constructionActivity.startsAtMs = 1_000;
+  state.endgame.constructionActivity.endsAtMs = 3_500;
+  state.endgame.constructionActivity.activityClockMs = 500;
+  return state;
+}
+
+function speedrunFactoryState(): GameState {
+  const state = simpleMiningState();
+  state.mode = "speedrun";
+  state.speedrun = createSpeedrunState(state, 1_700_000_000_000, "native_speedrun_factory_01");
+  state.dysonSphere.totalRocketsLaunched = state.speedrun.baseline.rocketsLaunched + 10_000;
+  state.totalProduced.universe_matrix = state.speedrun.baseline.whiteMatrixProduced + 1_000_000;
   return state;
 }
 
@@ -1280,7 +1367,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  async function seed(state: GameState, revision = 1): Promise<{ generation: number; rootHash: string; revision: number }> {
+  async function seed(state: GameState, revision = 1): Promise<{ slot: string; generation: number; rootHash: string; revision: number }> {
     const journal = buildChunkedSaveJournal(state, {
       mode: state.mode,
       basePrimaryChecksum: "01234567",
@@ -1292,19 +1379,20 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       ...[...journal.chunks.entries()].map(([id, value]) => ({ key: `${prefix}chunk.${encodeURIComponent(id)}`, value })),
       { key: `${prefix}manifest`, value: JSON.stringify(journal.manifest) },
     ];
+    const slot = state.mode === "speedrun" ? "speedrun-main" : "normal-main";
     const transaction = await saves.begin(1, {
-      slot: "normal-main", mode: state.mode, stateVersion: 47, baseChecksum: "01234567",
+      slot, mode: state.mode, stateVersion: 47, baseChecksum: "01234567",
       registryFingerprint: runtime.fingerprint, revision, savedAtMs: 1,
     });
     for (let index = 0; index < records.length; index += 8) {
       await saves.write(1, transaction.transactionId, records.slice(index, index + 8));
     }
-    return saves.commit(1, transaction.transactionId);
+    return { slot, ...await saves.commit(1, transaction.transactionId) };
   }
 
-  async function open(checkpoint: { generation: number; rootHash: string; revision: number }): Promise<any> {
+  async function open(checkpoint: { slot: string; generation: number; rootHash: string; revision: number }): Promise<any> {
     return client.request({
-      operation: "coreOpen", slot: "normal-main", generation: checkpoint.generation,
+      operation: "coreOpen", slot: checkpoint.slot, generation: checkpoint.generation,
       rootHash: checkpoint.rootHash, revision: checkpoint.revision, registryFingerprint: runtime.fingerprint,
       catalog: createNativeCoreCatalog(runtime),
     });
@@ -1583,6 +1671,115 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.productionHistory, `partial-campaign-${seconds} 阻塞统计`).toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
       expect(advanced.summary.canonicalFields, `partial-campaign-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `partial-campaign-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches queued handcraft and exploration completion at partial and complete boundaries", async () => {
+    const initial = queuedGlobalProgressState();
+    const checkpoint = await seed(initial, 182);
+    for (const seconds of [0.5, 1, 2, 5, 10]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `global-progress-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["handcraftQueue", "exploration", "tray", "planetTrays", "portableFleet", "totalProduced"],
+      });
+      for (const field of ["handcraftQueue", "exploration", "tray", "planetTrays", "portableFleet", "totalProduced"] as const) {
+        expect(projection.base[field], `global-progress-${seconds} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
+      }
+      expect(advanced.summary.canonicalFields, `global-progress-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `global-progress-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches legacy network exports, reserves, project levels, and inventory withdrawal order", async () => {
+    const initial = legacyGalacticExportState();
+    const checkpoint = await seed(initial, 183);
+    for (const seconds of [1, 5, 10, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `legacy-export-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["endgame", "tray", "planetTrays", "campaign", "productionHistory"],
+      });
+      expect(projection.entities, `legacy-export-${seconds} 实体库存`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      for (const field of ["endgame", "tray", "planetTrays", "campaign", "productionHistory"] as const) {
+        expect(projection.base[field], `legacy-export-${seconds} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
+      }
+      expect(advanced.summary.canonicalFields, `legacy-export-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `legacy-export-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches powered exporter activity windows and pending delivery batches", async () => {
+    const initial = physicalGalacticExportState();
+    const checkpoint = await seed(initial, 184);
+    for (const seconds of [0.25, 0.5, 1, 3, 5]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `physical-export-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["endgame", "campaign", "productionHistory", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `physical-export-${seconds} 出口建筑`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      for (const field of ["endgame", "campaign", "productionHistory", "planetMetrics", "powerGridMetrics"] as const) {
+        expect(projection.base[field], `physical-export-${seconds} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
+      }
+      expect(advanced.summary.canonicalFields, `physical-export-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `physical-export-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches speedrun wall-clock advancement and milestone timestamps", async () => {
+    const initial = speedrunFactoryState();
+    const checkpoint = await seed(initial, 186);
+    for (const budget of [
+      { simulationSeconds: 1, wallSeconds: 0.25 },
+      { simulationSeconds: 5, wallSeconds: 2.5 },
+      { simulationSeconds: 0, wallSeconds: 3 },
+      { simulationSeconds: 5, wallSeconds: 0 },
+    ]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, budget.simulationSeconds, budget.wallSeconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, ...budget },
+      });
+      const label = `${budget.simulationSeconds}s-${budget.wallSeconds}w`;
+      expect(advanced.supported, `speedrun-${label}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["speedrun", "campaign", "productionHistory", "orbitalStation"],
+      });
+      expect(projection.entities, `speedrun-${label} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      for (const field of ["speedrun", "campaign", "productionHistory", "orbitalStation"] as const) {
+        expect(projection.base[field], `speedrun-${label} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
+      }
+      expect(advanced.summary.canonicalFields, `speedrun-${label} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `speedrun-${label} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 60_000);

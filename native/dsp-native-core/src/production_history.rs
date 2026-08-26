@@ -557,6 +557,11 @@ impl CoreState {
                             .and_then(Value::as_str)
                             .is_some_and(|id| blocked_construction_centers.contains(id));
                     }
+                    if entity.get("buildingId").and_then(Value::as_str)
+                        == Some("galactic_material_exporter")
+                    {
+                        return crate::galactic_exports::operating_blocked(entity);
+                    }
                     let Some(recipe) = entity
                         .get("recipeId")
                         .and_then(Value::as_str)

@@ -153,10 +153,6 @@ fn number_at(value: Option<&Value>, path: &[&str]) -> f64 {
     finite_number(current)
 }
 
-fn empty_array(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_array).is_some_and(Vec::is_empty)
-}
-
 fn grid_index(entity: &Map<String, Value>) -> Option<usize> {
     let id = string_at(entity, "powerGridId").unwrap_or("grid-a");
     GRID_IDS.iter().position(|candidate| *candidate == id)
@@ -319,44 +315,18 @@ fn allocate_power_by_priority(
     allocated
 }
 
-fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
-    let base = state.base_value();
-    if base.get("mode").and_then(Value::as_str) != Some("normal") {
-        return Some("speedrun-factory-requires-domain-core");
-    }
-    if !empty_array(base.get("handcraftQueue")) {
-        return Some("handcraft-queue-active");
-    }
-    if !base
-        .get("exploration")
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("missions"))
-        .is_some_and(|value| empty_array(Some(value)))
-    {
-        return Some("exploration-active");
-    }
-    let endgame = base.get("endgame");
-    if endgame
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("exportProjects"))
-        .and_then(Value::as_object)
-        .is_some_and(|projects| {
-            projects
-                .values()
-                .any(|project| bool_at(Some(project), &["enabled"]))
-        })
-    {
-        return Some("endgame-activity-active");
-    }
-    None
-}
-
 pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
-    if let Some(reason) = inactive_global_reason(state) {
-        return Ok(Some(reason));
-    }
     if crate::campaign::validate_state(state.base_value()).is_err() {
         return Ok(Some("campaign-state-invalid"));
+    }
+    if let Some(reason) = crate::global_progress::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::galactic_exports::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::speedrun::admission_reason(state)? {
+        return Ok(Some(reason));
     }
     if state.entity_index.is_empty() {
         return Ok(Some("simple-factory-is-empty"));
@@ -451,7 +421,10 @@ pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Optio
                 };
                 if matches!(
                     building_id,
-                    "construction_center" | "time_warp_device" | "micro_black_hole_connector"
+                    "construction_center"
+                        | "time_warp_device"
+                        | "micro_black_hole_connector"
+                        | "galactic_material_exporter"
                 ) {
                     if building.kind != "machine" {
                         return Ok(Some("simple-factory-machine-feature-unsupported"));
@@ -468,7 +441,6 @@ pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Optio
                         | ("vertical_launching_silo", "carrier_rocket_launch")
                 );
                 if building.kind != "machine"
-                    || matches!(building_id, "galactic_material_exporter")
                     || matches!(
                         building_id,
                         "ray_receiver" | "em_rail_ejector" | "vertical_launching_silo"
@@ -2166,6 +2138,8 @@ fn simulate_step(
         .collect::<Vec<_>>();
     profile_mark!("static-step-indexes");
     let time_warp_controller = prepare_time_warp(state, base, entities)?;
+    crate::global_progress::advance_exploration(state, base, seconds)?;
+    crate::global_progress::advance_handcraft(state, base, seconds)?;
     crate::dyson::advance_environment(base, seconds)?;
     profile_mark!("time-warp-and-dyson-environment");
     crate::local_logistics::reset_runtime_for_indices(
@@ -2424,6 +2398,9 @@ fn simulate_step(
                 .copied(),
         );
     }
+    ready_stations.extend(crate::galactic_exports::ready_exporter_indices(
+        state, entities,
+    ));
     ready_stations.extend(crate::system_space_station::active_power_consumers(
         state, base, entities,
     ));
@@ -2801,24 +2778,6 @@ fn simulate_step(
     let research_entity_indexes = &state.factory_topology.research_entity_indices;
     let mut reset_research_progress_before_next_entity = false;
 
-    // Preserve the JS engine's per-entity sparse-shape normalization without
-    // sending station rows through the complete production branch below.
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
-        if !entity.contains_key("stationLastSupplyPeerBySlot") {
-            entity.insert(
-                "stationLastSupplyPeerBySlot".to_owned(),
-                Value::Object(Map::new()),
-            );
-        }
-        if !entity.contains_key("proliferatorBonusProgress") {
-            entity.insert(
-                "proliferatorBonusProgress".to_owned(),
-                Value::Object(Map::new()),
-            );
-        }
-    }
-    profile_mark!("runtime-shape-normalization");
-
     for &entity_index in &state.factory_topology.non_station_indices {
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
@@ -2930,6 +2889,7 @@ fn simulate_step(
                 "construction_center"
                     | "time_warp_device"
                     | "ray_receiver"
+                    | "galactic_material_exporter"
                     | "micro_black_hole_connector"
             ) {
                 continue;
@@ -3428,6 +3388,34 @@ fn simulate_step(
     profile_mark!("local-congestion");
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
     profile_mark!("interstellar-congestion");
+    let exporter_powers = state
+        .factory_topology
+        .galactic_material_exporter_indices
+        .iter()
+        .copied()
+        .filter_map(|entity_index| {
+            let planet = state.factory_topology.entity_planet_indices[entity_index];
+            let grid = state.factory_topology.entity_grid_indices[entity_index];
+            (planet != usize::MAX && grid != usize::MAX).then(|| {
+                (
+                    entity_index,
+                    power_factors
+                        .get(&entity_index)
+                        .copied()
+                        .unwrap_or(grids[grid_slot(planet, grid)].factor),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    crate::galactic_exports::run(
+        state,
+        base,
+        entities,
+        &exporter_powers,
+        &power_factors,
+        seconds,
+    )?;
+    profile_mark!("galactic-exports");
     crate::dyson::finalize(base)?;
     profile_mark!("logistics-dispatch-and-routes");
     if let Some(swarm) = base.get_mut("dysonSwarm").and_then(Value::as_object_mut) {
@@ -3555,6 +3543,7 @@ pub(crate) struct PreparedFactoryAdvance {
 pub(crate) fn prepare_advance(
     state: &CoreState,
     simulation_seconds: f64,
+    wall_seconds: f64,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
     let mut profile_checkpoint = std::time::Instant::now();
@@ -3572,6 +3561,23 @@ pub(crate) fn prepare_advance(
     }
     let mut entities = state.parse_entities_parallel()?;
     let mut belts = state.parse_belts_parallel()?;
+    // JS copyState() materializes both sparse runtime maps before either a
+    // simulation step or a wall-clock-only speedrun advance. Mirror that
+    // shape here so a zero-simulation budget remains canonically exact.
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if !entity.contains_key("stationLastSupplyPeerBySlot") {
+            entity.insert(
+                "stationLastSupplyPeerBySlot".to_owned(),
+                Value::Object(Map::new()),
+            );
+        }
+        if !entity.contains_key("proliferatorBonusProgress") {
+            entity.insert(
+                "proliferatorBonusProgress".to_owned(),
+                Value::Object(Map::new()),
+            );
+        }
+    }
     profile_mark!("parse-records");
     let belt_routes = if let Some(routes) = state.prepared_belt_routes() {
         routes
@@ -3622,8 +3628,49 @@ pub(crate) fn prepare_advance(
         step_size = step_size.min(crate::system_space_station::boundary_seconds());
     }
     let mut remaining = total;
+    let mut remaining_wall = wall_seconds.max(0.0);
+    let wall_per_simulation_second = if total > EPSILON {
+        remaining_wall / total
+    } else {
+        0.0
+    };
+    let initial_activity_clock_ms = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("constructionActivity"))
+        .and_then(Value::as_object)
+        .map(|activity| finite_number(activity.get("activityClockMs")))
+        .unwrap_or(0.0);
+    let mut advanced_wall = 0.0;
     while remaining > EPSILON {
-        let step = remaining.min(step_size);
+        let mut step = remaining.min(step_size);
+        if wall_per_simulation_second > EPSILON {
+            if let Some(activity) = base
+                .get("endgame")
+                .and_then(Value::as_object)
+                .and_then(|endgame| endgame.get("constructionActivity"))
+                .and_then(Value::as_object)
+                .filter(|activity| {
+                    activity
+                        .get("activityId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                })
+            {
+                let clock = finite_number(activity.get("activityClockMs"));
+                for boundary_key in ["startsAtMs", "endsAtMs"] {
+                    let until_boundary_wall =
+                        (finite_number(activity.get(boundary_key)) - clock) / 1_000.0;
+                    let until_boundary_simulation =
+                        until_boundary_wall / wall_per_simulation_second;
+                    if until_boundary_simulation > EPSILON
+                        && until_boundary_simulation < step - EPSILON
+                    {
+                        step = until_boundary_simulation;
+                    }
+                }
+            }
+        }
         simulate_step(
             state,
             &mut base,
@@ -3633,7 +3680,56 @@ pub(crate) fn prepare_advance(
             step,
         )
         .context("advance native simple factory step")?;
+        let wall_step = remaining_wall.min(step * wall_per_simulation_second);
+        if wall_step > 0.0 {
+            advanced_wall += wall_step;
+            if let Some(activity) = base
+                .get_mut("endgame")
+                .and_then(Value::as_object_mut)
+                .and_then(|endgame| endgame.get_mut("constructionActivity"))
+                .and_then(Value::as_object_mut)
+                .filter(|activity| {
+                    activity
+                        .get("activityId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                })
+            {
+                set_number(
+                    activity,
+                    "activityClockMs",
+                    (initial_activity_clock_ms + advanced_wall * 1_000.0)
+                        .floor()
+                        .max(0.0),
+                )?;
+            }
+            crate::speedrun::advance_clock(state, &mut base, wall_step)?;
+        }
         remaining = (remaining - step).max(0.0);
+        remaining_wall = (remaining_wall - wall_step).max(0.0);
+    }
+    if total <= EPSILON && remaining_wall > EPSILON {
+        if let Some(activity) = base
+            .get_mut("endgame")
+            .and_then(Value::as_object_mut)
+            .and_then(|endgame| endgame.get_mut("constructionActivity"))
+            .and_then(Value::as_object_mut)
+            .filter(|activity| {
+                activity
+                    .get("activityId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+            })
+        {
+            set_number(
+                activity,
+                "activityClockMs",
+                (initial_activity_clock_ms + remaining_wall * 1_000.0)
+                    .floor()
+                    .max(0.0),
+            )?;
+        }
+        crate::speedrun::advance_clock(state, &mut base, remaining_wall)?;
     }
     profile_mark!("simulate-steps");
     belt_runtime.write_back(&mut belts)?;
@@ -3645,7 +3741,7 @@ pub(crate) fn prepare_advance(
         set_number(time_warp, "pendingWallSeconds", 0.0)?;
     }
     let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
-    if universe_matrix >= 1.0 {
+    if base.get("mode").and_then(Value::as_str) == Some("normal") && universe_matrix >= 1.0 {
         if let Some(station) = base
             .get_mut("orbitalStation")
             .and_then(Value::as_object_mut)

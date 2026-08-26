@@ -31,8 +31,8 @@ const release119Copy = {
   date: { "zh-CN": "2026年8月26日", en: "August 26, 2026" },
   title: { "zh-CN": "大型工厂 JavaScript 架构优化", en: "Large-factory JavaScript Architecture Optimization" },
   summary: {
-    "zh-CN": "1.1.9 完成 Windows 高性能架构第一层：常见建造、拆除、线路和蓝图命令改用写时复制，撤销历史保存有界差异而不是完整工厂；大型 UI 投影合并发布，分块自动保存从权威 Worker 流式提交。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
-    en: "Version 1.1.9 delivers the first Windows performance layer: common factory commands use copy-on-write, bounded deltas replace full-factory undo snapshots, large UI projections are coalesced, and chunked autosaves stream from the authority Worker. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+    "zh-CN": "1.1.9 完成 Windows 高性能架构第一层：常见建造、拆除、线路和蓝图命令改用写时复制，撤销历史保存有界差异而不是完整工厂；大型 UI 投影合并发布，分块自动保存从权威 Worker 流式提交。建筑制造中心的递归材料步骤现在即时结算，只有最终建筑成品保留制造周期。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.1.9 delivers the first Windows performance layer: common factory commands use copy-on-write, bounded deltas replace full-factory undo snapshots, large UI projections are coalesced, and chunked autosaves stream from the authority Worker. Recursive construction-center materials now settle instantly, leaving only the final building cycle timed. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
   },
   editTitle: { "zh-CN": "工厂编辑不再深拷贝全部记录", en: "Factory edits no longer deep-clone every record" },
   editDescription: {
@@ -63,6 +63,11 @@ const release119Copy = {
   pauseDescription: {
     "zh-CN": "达到内存或积压保护线时暂停当前可见进度并保留未结算时间；关闭保护时继续运行，两种模式都不会由内存闸门主动回档。",
     en: "At a memory/backlog watermark the current visible progress and unsettled time are preserved. With protection disabled the game keeps running; neither mode lets the memory governor actively rewind state.",
+  },
+  constructionTitle: { "zh-CN": "建筑制造中心只为最终成品计时", en: "Construction centers time only the final building" },
+  constructionDescription: {
+    "zh-CN": "从原矿递归加工全部中间材料改为 0 秒即时结算；材料和供电充足时，建筑吞吐只受最终 5/2.5/1 秒成品周期限制，旧任务的 WIP、缺料等待和副产物守恒保持不变。",
+    en: "All recursive processing from raw resources now settles instantly. With materials and power available, building throughput is limited only by the final 5/2.5/1-second cycle while existing WIP, shortage waits, and byproduct conservation remain intact.",
   },
   compatibilityTitle: { "zh-CN": "存档与云端格式不升级", en: "Save and cloud formats remain unchanged" },
   compatibilityDescription: {
@@ -635,6 +640,7 @@ export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteR
       { id: "cumulative-large-factory-projection", title: release119Message(locale, "projectionTitle"), description: release119Message(locale, "projectionDescription") },
       { id: "dirty-runtime-index", title: release119Message(locale, "runtimeTitle"), description: release119Message(locale, "runtimeDescription") },
       { id: "memory-pause-no-rollback", title: release119Message(locale, "pauseTitle"), description: release119Message(locale, "pauseDescription") },
+      { id: "instant-construction-materials", title: release119Message(locale, "constructionTitle"), description: release119Message(locale, "constructionDescription") },
       { id: "version-compatibility", title: release119Message(locale, "compatibilityTitle"), description: release119Message(locale, "compatibilityDescription") },
     ],
   };

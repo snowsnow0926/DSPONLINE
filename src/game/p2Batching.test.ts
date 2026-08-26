@@ -298,6 +298,23 @@ describe("P2 deterministic batch settlement", () => {
     expect(batched.profiler.constructionPlanBuilds).toBeLessThan(10);
   });
 
+  it("reaches the final-building rate from raw materials because recursive material steps are instant", () => {
+    const initial = createConstructionState({
+      targetId: "arc_smelter",
+      target: 100,
+      centerMachines: 100,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: recursiveRawTray(),
+    });
+    const legacy = runSimulation(initial, 1, { batchConstructionAutomation: false });
+    const batched = runSimulation(initial, 1, { batchConstructionAutomation: true });
+
+    expect(batched.state).toEqual(legacy.state);
+    expect(batched.state.construction.arc_smelter).toBe(100);
+    expect(batched.profiler.constructionJobsBatched).toBe(100);
+    expect(batched.state.totalProduced.iron_ingot).toBeGreaterThan(0);
+  });
+
   it("settles ten thousand recursive byproduct jobs without a per-step task loop", () => {
     const initial = createConstructionState({
       targetId: "conveyor_belt_mk3",

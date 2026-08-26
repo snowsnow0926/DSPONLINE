@@ -66,6 +66,7 @@ import {
   getConstructionQueueDeficits,
   getConstructionQueueDetails,
   getConstructionCraftNavigation,
+  getConstructionAutomationCycleSeconds,
   getConstructionAutomationMaterialSeconds,
   getConstructionAutomationStatus,
   getConstructionCenterTraceSample,
@@ -79,6 +80,7 @@ import {
   getEntityInputCapacity,
   getEntityItemInputCapacity,
   getEntityOutputCapacity,
+  getEntityRecipeCycleCapacityPerSimulationSecond,
   getEntityProliferatorPowerMultiplier,
   getEntityProliferatorSpeedMultiplier,
   getDysonSailAbsorptionMultiplier,
@@ -4866,7 +4868,13 @@ describe("factory simulation", () => {
       inventory: { stone: 1_000_000 },
     };
 
-    expect(getConstructionAutomationStatus(state, center.id)).toMatchObject({ stage: "加工 铁块", blockerReason: undefined });
+    expect(getConstructionAutomationStatus(state, center.id)).toMatchObject({
+      stage: "加工 铁块",
+      blockerReason: undefined,
+      progress: 0,
+      etaSeconds: 5,
+    });
+    expect(getEntityRecipeCycleCapacityPerSimulationSecond(state, center)).toBe(0);
     const advanced = advanceSimulation(state, 1);
     expect(advanced.tray.iron_ore).toBe(0);
     expect(advanced.tray.stone).toBe(1_000_000);
@@ -4890,6 +4898,7 @@ describe("factory simulation", () => {
     const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
     state.tray = {
       iron_ore: 1_080_000,
+      steel: getPlanetTrayItemLimit(state, "home"),
       stone_brick: 12,
       circuit_board: 6,
       plasma_exciter: 4,
@@ -4910,17 +4919,20 @@ describe("factory simulation", () => {
 
     state = advanceSimulation(state, 1);
     expect(state.constructionAutomation.jobs[center.id]).toMatchObject({
-      stepIndex: 1,
+      stepIndex: 2,
       elapsedSeconds: 1,
-      inventory: { iron_ingot: 1_080_000 },
+      inventory: { steel: 12 },
     });
     expect(state.tray.iron_ore).toBe(0);
     expect(getConstructionAutomationStatus(state, center.id)).toMatchObject({
-      stage: "加工 钢材",
+      stage: "制造 原油萃取站",
       blockerReason: undefined,
-      wipCount: 1_080_000,
-      wipItems: [{ itemId: "iron_ingot", amount: 1_080_000 }],
+      progress: 0.2,
+      etaSeconds: 4,
+      wipCount: 12,
+      wipItems: [{ itemId: "steel", amount: 12 }],
     });
+    expect(state.constructionAutomation.destroyedByproducts.steel).toBe(359_988);
 
     state.constructionAutomation.enabled = false;
     const pausedJob = structuredClone(state.constructionAutomation.jobs[center.id]);
@@ -4941,12 +4953,10 @@ describe("factory simulation", () => {
     expect(state.constructionAutomation.jobs[center.id]).toEqual(unpoweredJob);
     expect(getConstructionAutomationStatus(state, center.id)).toMatchObject({ stage: "等待供电", blockerReason: "no-power" });
     state.entities.push(...generators);
-    state.tray.steel = getPlanetTrayItemLimit(state, "home");
-    state.constructionAutomation.jobs[center.id].elapsedSeconds = 36_000;
     const completionInput = structuredClone(state);
     let chunked = structuredClone(state);
-    state = advanceSimulation(completionInput, 10);
-    for (let second = 0; second < 10; second += 1) chunked = advanceSimulation(chunked, 1);
+    state = advanceSimulation(completionInput, 4);
+    for (let second = 0; second < 4; second += 1) chunked = advanceSimulation(chunked, 1);
 
     expect(state.construction.oil_extractor).toBe(1);
     expect(state.constructionAutomation.jobs[center.id]).toBeUndefined();
@@ -4969,13 +4979,16 @@ describe("factory simulation", () => {
     expect(settled.constructionAutomation.destroyedByproducts.steel).toBe(359_988);
   });
 
-  it("applies construction-center speed upgrades to material and final stages", () => {
+  it("keeps recursive material processing instant while upgrades accelerate only the final building stage", () => {
     const base = createInitialState();
-    expect(getConstructionAutomationMaterialSeconds(base)).toBeCloseTo(0.1, 6);
+    expect(getConstructionAutomationMaterialSeconds(base)).toBe(0);
+    expect(getConstructionAutomationCycleSeconds(base)).toBe(5);
     base.research.completedTechIds.push("construction_capacity_1");
-    expect(getConstructionAutomationMaterialSeconds(base)).toBeCloseTo(0.05, 6);
+    expect(getConstructionAutomationMaterialSeconds(base)).toBe(0);
+    expect(getConstructionAutomationCycleSeconds(base)).toBe(2.5);
     base.research.completedTechIds.push("construction_capacity_2");
-    expect(getConstructionAutomationMaterialSeconds(base)).toBeCloseTo(0.02, 6);
+    expect(getConstructionAutomationMaterialSeconds(base)).toBe(0);
+    expect(getConstructionAutomationCycleSeconds(base)).toBe(1);
   });
 
   it("keeps per-planet tray limits independent and preserves stock when a limit is lowered", () => {

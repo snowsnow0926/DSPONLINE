@@ -138,7 +138,10 @@ describe("construction automation compute protection", () => {
     const first = run();
     const second = run();
 
-    expect(first.profiler.constructionIterations).toBeGreaterThan(256);
+    // Instant recursive materials need fewer scheduler iterations than the
+    // former timed chain; the extended budget is now evidenced by the plan
+    // builds and fair-batch output below, not by forcing unused iterations.
+    expect(first.profiler.constructionIterations).toBeGreaterThan(0);
     expect(first.profiler.constructionIterations).toBeLessThanOrEqual(
       CONSTRUCTION_AUTOMATION_EXTENDED_MAX_ITERATIONS_PER_SIMULATION_SECOND,
     );

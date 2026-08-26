@@ -190,7 +190,7 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
           <div><dt>制造中心</dt><dd>{centers.reduce((sum, entity) => sum + entity.machineCount, 0)}</dd></div>
           <div><dt>补货目标</dt><dd>{completedTargets}/{activeTargets}</dd></div>
           <div><dt>制造周期</dt><dd>{cycleSeconds}s</dd></div>
-          <div><dt>材料加工</dt><dd>{materialSeconds.toFixed(2)}s/件</dd></div>
+          <div><dt>材料加工</dt><dd>{materialSeconds === 0 ? "即时（0 秒）" : `${materialSeconds.toFixed(2)}s/件`}</dd></div>
           <div><dt>库存上限</dt><dd><QuantityValue value={stockLimit} /></dd></div>
         </dl>
         <button type="button" onClick={onClose} title="关闭建筑制造中心" aria-label="关闭建筑制造中心"><X size={18} /></button>

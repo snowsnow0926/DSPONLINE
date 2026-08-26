@@ -45,13 +45,14 @@ describe("release notes history", () => {
     const english = getCurrentReleaseNotes("en");
     expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.9" });
     expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.1.9" });
-    expect(chinese.items).toHaveLength(7);
+    expect(chinese.items).toHaveLength(8);
     expect(chinese.items.map((item) => item.id)).toEqual(expect.arrayContaining([
       "copy-on-write-factory-edits",
       "bounded-delta-history",
       "single-owner-chunk-save",
       "cumulative-large-factory-projection",
       "memory-pause-no-rollback",
+      "instant-construction-materials",
     ]));
     expect(english.items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));
     expect(getEagerCurrentReleaseNotes("zh-CN").items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));

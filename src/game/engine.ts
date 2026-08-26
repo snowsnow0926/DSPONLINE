@@ -10944,7 +10944,11 @@ function constructionAutomationHasDeficit(state: GameState): boolean {
 }
 
 export function getConstructionAutomationMaterialSeconds(state: GameState): number {
-  return 0.1 * getConstructionAutomationCycleSeconds(state) / 5;
+  // Recursive ingredients are an atomic material-resolution phase. Only the
+  // final building step consumes construction-center work; keeping this
+  // public value explicit also lets the workspace communicate that contract.
+  void state;
+  return 0;
 }
 
 export interface ConstructionAutomationStatus {
@@ -11013,7 +11017,7 @@ export interface ConstructionCenterTraceSample {
 function constructionAutomationStepDuration(state: GameState, step: ConstructionAutomationStep): number {
   if (step.kind === "building") return getConstructionAutomationCycleSeconds(state);
   if (step.kind === "fleet") return 0.01;
-  return Math.max(0.01, getConstructionAutomationMaterialSeconds(state) * step.outputAmount);
+  return getConstructionAutomationMaterialSeconds(state) * step.outputAmount;
 }
 
 export function getEntityRecipeCycleCapacityPerSimulationSecond(
@@ -11026,7 +11030,10 @@ export function getEntityRecipeCycleCapacityPerSimulationSecond(
   if (entity.buildingId === "construction_center") {
     const job = state.constructionAutomation.jobs[entity.id];
     const step = job?.steps[job.stepIndex];
-    return step ? Math.max(0, entity.machineCount * getEntityPowerFactor(state, entity, lookup) / constructionAutomationStepDuration(state, step)) : 0;
+    const duration = step ? constructionAutomationStepDuration(state, step) : 0;
+    return duration > EPSILON
+      ? Math.max(0, entity.machineCount * getEntityPowerFactor(state, entity, lookup) / duration)
+      : 0;
   }
   const recipe = getRecipe(entity.recipeId);
   if (!entity.buildingId || !recipe) return 0;
@@ -11089,8 +11096,9 @@ export function getConstructionAutomationStatus(state: GameState, entityId: stri
         : step.kind === "fleet" ? `入库 ${ITEMS[step.itemId].name}` : `加工 ${ITEMS[step.outputItemId].name}`;
     return {
       ...constructionAutomationProtectedStage(entity, stage),
-      progress: Math.max(0, Math.min(1, job.elapsedSeconds / duration)),
-      etaSeconds: Math.max(0, (duration - job.elapsedSeconds) + job.steps.slice(job.stepIndex + 1).reduce((sum, pending) => sum + constructionAutomationStepDuration(state, pending), 0)) /
+      progress: duration > EPSILON ? Math.max(0, Math.min(1, job.elapsedSeconds / duration)) : 0,
+      etaSeconds: (Math.max(0, duration - job.elapsedSeconds) + job.steps.slice(job.stepIndex + 1)
+        .reduce((sum, pending) => sum + constructionAutomationStepDuration(state, pending), 0)) /
         Math.max(1, entity.machineCount),
       missingItemId: blockedByMaterials ? missing?.itemId : undefined,
       missingAmount: blockedByMaterials && missing ? Math.max(0, missing.amount - Math.floor(tray[missing.itemId] ?? 0) - Math.floor(job.inventory[missing.itemId] ?? 0) - Math.floor(quantumBuffer[missing.itemId] ?? 0)) : undefined,
@@ -12189,7 +12197,7 @@ function runConstructionCenters(
       job.elapsedSeconds = round(job.elapsedSeconds + used, 6);
       remainingWork -= used;
       worked ||= used > EPSILON;
-      entity.progress = round(Math.min(1, job.elapsedSeconds / duration), 6);
+      entity.progress = duration > EPSILON ? round(Math.min(1, job.elapsedSeconds / duration), 6) : 0;
       if (job.elapsedSeconds + EPSILON < duration) break;
       if (!finishConstructionAutomationStep(state, entity.planetId, job, step, entity.id)) break;
       if (step.kind === "building") completed += getConstructionDefinition(step.constructionId)?.outputAmount ?? 0;

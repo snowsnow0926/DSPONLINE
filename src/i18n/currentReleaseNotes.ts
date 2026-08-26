@@ -13,8 +13,8 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
     version: "1.1.9",
     title: english ? "Large-factory JavaScript Architecture Optimization" : "大型工厂 JavaScript 架构优化",
     summary: english
-      ? "Version 1.1.9 adds copy-on-write edits, bounded delta history, cumulative large-factory UI projections, and back-pressured single-owner saves. Existing v47 / envelope v2 saves remain compatible."
-      : "1.1.9 为大型工厂加入写时复制编辑、有界差异历史、累计 UI 投影和带回压的单所有权保存；旧版 v47 / envelope v2 存档继续兼容。",
+      ? "Version 1.1.9 adds copy-on-write edits, bounded delta history, cumulative large-factory UI projections, back-pressured single-owner saves, and instant recursive construction materials. Existing v47 / envelope v2 saves remain compatible."
+      : "1.1.9 为大型工厂加入写时复制编辑、有界差异历史、累计 UI 投影、带回压的单所有权保存，并让建筑制造中心的递归材料即时结算；旧版 v47 / envelope v2 存档继续兼容。",
     items: [
       {
         id: "copy-on-write-factory-edits",
@@ -57,6 +57,13 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
         description: english
           ? "A protection pause no longer installs an older checkpoint or drops queued simulation time."
           : "保护暂停不再安装旧检查点，也不再清空已经积累的待结算时间。",
+      },
+      {
+        id: "instant-construction-materials",
+        title: english ? "Construction centers time only the final building" : "建筑制造中心只为最终成品计时",
+        description: english
+          ? "Recursive processing from raw resources settles instantly; with supply and power available, throughput is limited only by the final 5/2.5/1-second building cycle."
+          : "从原矿递归加工全部中间材料改为即时结算；材料和供电充足时，吞吐只受最终 5/2.5/1 秒建筑成品周期限制。",
       },
       {
         id: "version-compatibility",

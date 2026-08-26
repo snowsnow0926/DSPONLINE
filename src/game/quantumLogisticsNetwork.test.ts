@@ -603,12 +603,16 @@ describe("quantum logistics network", () => {
     expect(Number(afterWork.quantumLogisticsNetwork.inventory.iron_ore ?? "0") + (afterWork.tray.iron_ore ?? 0)).toBeLessThan(1000000000);
   });
 
-  it("高堆叠中心按量子带宽预取批量材料，不会每五秒只制造一件", () => {
+  it("高堆叠中心从量子原矿直供后只按最终建筑周期计时", () => {
     let state = createQuantumConstructionState(true, 1_000_000, 1_000_000);
     state.constructionAutomation.targetStock.arc_smelter = 100_000_000;
     const before = state.constructionAutomation.totalCrafted;
     for (let second = 0; second < 10; second += 1) state = advanceSimulation(state, 1);
-    expect(state.constructionAutomation.totalCrafted - before).toBeGreaterThan(100_000);
+    // The first five seconds fund the private quantum buffer. With a base
+    // five-second final cycle, the following five seconds must settle exactly
+    // one job per center machine; recursive material work consumes no time.
+    expect(state.constructionAutomation.totalCrafted - before).toBe(1_000_000);
+    expect(state.construction.arc_smelter).toBe(1_000_000);
     expect(Object.values(state.tray).every((amount) => amount === 0)).toBe(true);
   });
 

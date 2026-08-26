@@ -310,6 +310,16 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
                 *ledger.reserved.entry((supply, item)).or_default() += cargo;
                 active_stations.insert(supply);
             }
+            for waypoint in route
+                .get("waypointStationIds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|id| indexes.get(id))
+            {
+                active_stations.insert(*waypoint);
+            }
             for station_index in active_stations {
                 *ledger.active_vehicle_load.entry(station_index).or_default() += vehicles;
             }

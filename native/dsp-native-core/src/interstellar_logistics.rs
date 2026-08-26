@@ -22,14 +22,25 @@ struct Slot {
     max_stock: f64,
     priority: usize,
     route_policy: String,
+    warper_budget: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RouteEconomics {
     requires_warp: bool,
     duration: f64,
     distance_ly: f64,
     warpers_per_vessel: f64,
+    waypoint_station_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedPath {
+    station_indices: Vec<usize>,
+    distance_ly: f64,
+    duration: f64,
+    max_leg_distance_ly: f64,
+    score: f64,
 }
 
 #[derive(Debug, Default)]
@@ -126,6 +137,9 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             ) {
                 bail!("native interstellar route policy is invalid");
             }
+            let warper_budget = finite_number(slot.get("warperBudget"))
+                .floor()
+                .clamp(1.0, 4.0) as usize;
             Ok(Slot {
                 item_id: string_at(slot, "itemId").map(str::to_owned),
                 remote_mode: remote_mode.to_owned(),
@@ -138,6 +152,7 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
                     .unwrap_or(1)
                     .min(2) as usize,
                 route_policy: route_policy.to_owned(),
+                warper_budget,
             })
         })
         .collect()
@@ -344,13 +359,233 @@ fn system_distance_ly(base: &Map<String, Value>, source_system: &str, target_sys
     rounded(dx.hypot(dy).max(0.1), 4)
 }
 
+fn interstellar_leg(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    source_index: usize,
+    target_index: usize,
+) -> anyhow::Result<(f64, f64)> {
+    let source = entities[source_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native interstellar leg source is invalid"))?;
+    let target = entities[target_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native interstellar leg target is invalid"))?;
+    let source_planet = planet(state, source)
+        .ok_or_else(|| anyhow!("native interstellar leg source planet is missing"))?;
+    let target_planet = planet(state, target)
+        .ok_or_else(|| anyhow!("native interstellar leg target planet is missing"))?;
+    let distance = system_distance_ly(base, &source_planet.system_id, &target_planet.system_id);
+    let environment = (travel_multiplier(base, &source_planet.id)
+        + travel_multiplier(base, &target_planet.id))
+        / 2.0;
+    let distance_factor = 0.75 + distance / 24.0;
+    let long_leg_penalty = if distance > 12.0 {
+        1.0 + (distance - 12.0) / 14.0
+    } else {
+        1.0
+    };
+    Ok((
+        distance,
+        12.0 / logistics_speed(base) * environment * distance_factor * long_leg_penalty,
+    ))
+}
+
+fn collect_path_candidate(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    station_indices: Vec<usize>,
+) -> anyhow::Result<PlannedPath> {
+    let mut distance = 0.0;
+    let mut duration = 0.0;
+    let mut max_leg_distance = 0.0_f64;
+    for leg in station_indices.windows(2) {
+        let (leg_distance, leg_duration) = interstellar_leg(state, base, entities, leg[0], leg[1])?;
+        distance += leg_distance;
+        duration += leg_duration;
+        max_leg_distance = max_leg_distance.max(leg_distance);
+    }
+    let priority_bonus = station_indices[1..station_indices.len() - 1]
+        .iter()
+        .map(|index| {
+            entities[*index]
+                .as_object()
+                .map(|station| finite_number(station.get("stationHubPriority")))
+                .unwrap_or(1.0)
+                * 0.025
+        })
+        .sum::<f64>();
+    Ok(PlannedPath {
+        station_indices,
+        distance_ly: distance,
+        duration,
+        max_leg_distance_ly: max_leg_distance,
+        score: duration * (1.0 - priority_bonus).max(0.85),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_paths(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    target_index: usize,
+    route_policy: &str,
+    maximum_hops: usize,
+    stations: &mut Vec<usize>,
+    remaining_hubs: &[usize],
+    candidates: &mut Vec<PlannedPath>,
+) -> anyhow::Result<()> {
+    let hops_used = stations.len() - 1;
+    if hops_used >= maximum_hops {
+        return Ok(());
+    }
+    let mut direct = stations.clone();
+    direct.push(target_index);
+    if route_policy != "relay-required" || direct.len() > 2 {
+        candidates.push(collect_path_candidate(state, base, entities, direct)?);
+    }
+    if route_policy == "direct" || hops_used + 1 >= maximum_hops {
+        return Ok(());
+    }
+    let current = *stations.last().expect("path source");
+    for hub_index in remaining_hubs {
+        let (distance, _) = interstellar_leg(state, base, entities, current, *hub_index)?;
+        if distance > 18.0 {
+            continue;
+        }
+        stations.push(*hub_index);
+        let next_hubs = remaining_hubs
+            .iter()
+            .copied()
+            .filter(|candidate| candidate != hub_index)
+            .collect::<Vec<_>>();
+        visit_paths(
+            state,
+            base,
+            entities,
+            target_index,
+            route_policy,
+            maximum_hops,
+            stations,
+            &next_hubs,
+            candidates,
+        )?;
+        stations.pop();
+    }
+    Ok(())
+}
+
+fn plan_path(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    supply_index: usize,
+    demand_index: usize,
+    demand_slot: &Slot,
+) -> anyhow::Result<Option<PlannedPath>> {
+    let supply = entities[supply_index].as_object().expect("station object");
+    let demand = entities[demand_index].as_object().expect("station object");
+    let supply_system = &planet(state, supply)
+        .ok_or_else(|| anyhow!("native interstellar supply planet is missing"))?
+        .system_id;
+    let demand_system = &planet(state, demand)
+        .ok_or_else(|| anyhow!("native interstellar demand planet is missing"))?
+        .system_id;
+    let mut hub_by_system = HashMap::<String, usize>::new();
+    for index in station_indices(entities) {
+        if index == supply_index || index == demand_index {
+            continue;
+        }
+        let station = entities[index].as_object().expect("station object");
+        if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+            || !station
+                .get("stationHubEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(system_id) = planet(state, station).map(|planet| planet.system_id.as_str()) else {
+            continue;
+        };
+        if system_id == supply_system
+            || system_id == demand_system
+            || !system_unlocked(base, system_id)
+        {
+            continue;
+        }
+        let replace = hub_by_system.get(system_id).is_none_or(|previous_index| {
+            let previous = entities[*previous_index]
+                .as_object()
+                .expect("station object");
+            let priority = finite_number(station.get("stationHubPriority"));
+            let previous_priority = finite_number(previous.get("stationHubPriority"));
+            priority > previous_priority
+                || (priority == previous_priority
+                    && string_at(station, "id").unwrap_or_default()
+                        < string_at(previous, "id").unwrap_or_default())
+        });
+        if replace {
+            hub_by_system.insert(system_id.to_owned(), index);
+        }
+    }
+    let mut hubs = hub_by_system.into_values().collect::<Vec<_>>();
+    hubs.sort_by(|left, right| {
+        let left = entities[*left].as_object().expect("station object");
+        let right = entities[*right].as_object().expect("station object");
+        string_at(left, "id")
+            .unwrap_or_default()
+            .cmp(string_at(right, "id").unwrap_or_default())
+    });
+    let mut candidates = Vec::new();
+    visit_paths(
+        state,
+        base,
+        entities,
+        demand_index,
+        &demand_slot.route_policy,
+        demand_slot.warper_budget,
+        &mut vec![supply_index],
+        &hubs,
+        &mut candidates,
+    )?;
+    candidates.sort_by(|left, right| {
+        left.score
+            .partial_cmp(&right.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.station_indices.len().cmp(&right.station_indices.len()))
+            .then_with(|| {
+                let ids = |path: &PlannedPath| {
+                    path.station_indices
+                        .iter()
+                        .map(|index| {
+                            entities[*index]
+                                .as_object()
+                                .and_then(|station| string_at(station, "id"))
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(":")
+                };
+                ids(left).cmp(&ids(right))
+            })
+    });
+    Ok(candidates.into_iter().next())
+}
+
 fn route_economics(
     state: &CoreState,
     base: &Map<String, Value>,
-    supply: &Map<String, Value>,
-    demand: &Map<String, Value>,
+    entities: &[Value],
+    supply_index: usize,
+    demand_index: usize,
     demand_slot: &Slot,
 ) -> anyhow::Result<Option<RouteEconomics>> {
+    let supply = entities[supply_index].as_object().expect("station object");
+    let demand = entities[demand_index].as_object().expect("station object");
     let supply_planet = planet(state, supply)
         .ok_or_else(|| anyhow!("native interstellar supply planet is missing"))?;
     let demand_planet = planet(state, demand)
@@ -371,26 +606,38 @@ fn route_economics(
             ),
             distance_ly: 0.0,
             warpers_per_vessel: 0.0,
+            waypoint_station_ids: Vec::new(),
         }));
     }
-    if demand_slot.route_policy == "relay-required" {
+    let Some(path) = plan_path(
+        state,
+        base,
+        entities,
+        supply_index,
+        demand_index,
+        demand_slot,
+    )?
+    else {
         return Ok(None);
-    }
-    let distance = system_distance_ly(base, &supply_planet.system_id, &demand_planet.system_id);
-    let distance_factor = 0.75 + distance / 24.0;
-    let long_leg_penalty = if distance > 12.0 {
-        1.0 + (distance - 12.0) / 14.0
-    } else {
-        1.0
     };
+    let waypoint_station_ids = path.station_indices[1..path.station_indices.len() - 1]
+        .iter()
+        .map(|index| {
+            entities[*index]
+                .as_object()
+                .and_then(|station| string_at(station, "id"))
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let hop_count = path.station_indices.len() - 1;
+    let _ = path.max_leg_distance_ly;
     Ok(Some(RouteEconomics {
         requires_warp: true,
-        duration: rounded(
-            12.0 / logistics_speed(base) * environment * distance_factor * long_leg_penalty,
-            2,
-        ),
-        distance_ly: rounded(distance, 2),
-        warpers_per_vessel: 1.0,
+        duration: rounded(path.duration, 2),
+        distance_ly: rounded(path.distance_ly, 2),
+        warpers_per_vessel: hop_count as f64,
+        waypoint_station_ids,
     }))
 }
 
@@ -437,6 +684,16 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
             if let Some(supply) = supply {
                 *ledger.reserved.entry((supply, item)).or_default() += cargo;
                 active_stations.insert(supply);
+            }
+            for waypoint in route
+                .get("waypointStationIds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|id| indexes.get(id))
+            {
+                active_stations.insert(*waypoint);
             }
             for station_index in active_stations {
                 *ledger.active_vehicle_load.entry(station_index).or_default() += vehicles;
@@ -489,12 +746,21 @@ fn peer_matches(
         }
         for (peer_slot_index, peer_slot) in slots(peer)?.iter().enumerate() {
             if peer_slot.item_id.as_deref() == Some(item_id) && peer_slot.remote_mode == opposite {
-                let (supply, demand, demand_slot) = if slot.remote_mode == "demand" {
-                    (peer, station, slot)
+                let (supply_index, demand_index, demand_slot) = if slot.remote_mode == "demand" {
+                    (peer_index, station_index, slot)
                 } else {
-                    (station, peer, peer_slot)
+                    (station_index, peer_index, peer_slot)
                 };
-                if route_economics(state, base, supply, demand, demand_slot)?.is_some() {
+                if route_economics(
+                    state,
+                    base,
+                    entities,
+                    supply_index,
+                    demand_index,
+                    demand_slot,
+                )?
+                .is_some()
+                {
                     matches.push((peer_index, peer_slot_index));
                 }
             }
@@ -547,9 +813,18 @@ fn route_active_for_station(
                         .get(route_owner_id(demand, route))
                         .copied()
                         .unwrap_or(demand_index);
+                    let waypoint = route
+                        .get("waypointStationIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .any(|id| indexes.get(id).copied() == Some(station_index))
+                        });
                     demand_index == station_index
                         || supply == Some(station_index)
                         || owner == station_index
+                        || waypoint
                 })
             })
     })
@@ -579,10 +854,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 .get("quantumTransition")
                 .is_some_and(|value| !value.is_null())
             || station.get("quantumTarget").and_then(Value::as_bool) == Some(true)
-            || station
-                .get("stationHubEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
             || station
                 .get("stationWarperAutoRefill")
                 .and_then(Value::as_bool)
@@ -621,23 +892,31 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                     .map(|peer| same_system(state, station, peer))
             });
             let expected_warp = same_system_route.map(|same| !same);
+            let waypoints = route.get("waypointStationIds").and_then(Value::as_array);
+            let waypoints_valid = waypoints.is_some_and(|ids| {
+                ids.iter().all(|value| {
+                    value
+                        .as_str()
+                        .and_then(|id| indexes.get(id))
+                        .and_then(|index| entities[*index].as_object())
+                        .is_some_and(|entity| {
+                            string_at(entity, "buildingId")
+                                == Some("interstellar_logistics_station")
+                        })
+                })
+            });
+            let expected_warpers = if expected_warp == Some(true) {
+                waypoints.map(Vec::len).unwrap_or(0) as f64 + 1.0
+            } else {
+                0.0
+            };
             if string_at(route, "scope") != Some("remote")
                 || expected_warp.is_none()
                 || !owner_valid
                 || string_at(route, "itemId").is_none_or(|id| !state.catalog.items.contains_key(id))
                 || route.get("requiresWarp").and_then(Value::as_bool) != expected_warp
-                || route
-                    .get("waypointStationIds")
-                    .and_then(Value::as_array)
-                    .is_none_or(|ids| !ids.is_empty())
-                || (finite_number(route.get("warpersPerVessel"))
-                    - if expected_warp == Some(true) {
-                        1.0
-                    } else {
-                        0.0
-                    })
-                .abs()
-                    > EPSILON
+                || !waypoints_valid
+                || (finite_number(route.get("warpersPerVessel")) - expected_warpers).abs() > EPSILON
             {
                 return Ok(Some("interstellar-route-invalid"));
             }
@@ -698,7 +977,14 @@ pub(crate) fn ready_station_indices(
                     };
                 let demand = entities[demand_index].as_object().expect("station object");
                 let supply = entities[supply_index].as_object().expect("station object");
-                let Some(economics) = route_economics(state, base, supply, demand, demand_slot)?
+                let Some(economics) = route_economics(
+                    state,
+                    base,
+                    entities,
+                    supply_index,
+                    demand_index,
+                    demand_slot,
+                )?
                 else {
                     continue;
                 };
@@ -860,7 +1146,7 @@ pub(crate) fn dispatch(
                     .clone();
                 let supply_slot = slots(&supply_snapshot)?[peer_slot_index].clone();
                 let Some(economics) =
-                    route_economics(state, base, &supply_snapshot, &demand_snapshot, slot)?
+                    route_economics(state, base, entities, supply_index, demand_index, slot)?
                 else {
                     continue;
                 };
@@ -869,7 +1155,14 @@ pub(crate) fn dispatch(
                 }
                 let source_power = powers.get(&supply_index).copied().unwrap_or(0.0);
                 let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
-                let power_factor = source_power.min(target_power);
+                let hub_power = economics
+                    .waypoint_station_ids
+                    .iter()
+                    .filter_map(|id| indexes.get(id))
+                    .fold(1.0_f64, |factor, index| {
+                        factor.min(powers.get(index).copied().unwrap_or(0.0))
+                    });
+                let power_factor = source_power.min(target_power).min(hub_power);
                 for (owner_index, owner_slot) in [
                     (demand_index, slot.clone()),
                     (supply_index, supply_slot.clone()),
@@ -953,7 +1246,7 @@ pub(crate) fn dispatch(
                         "progress": initial_progress,
                         "duration": economics.duration,
                         "requiresWarp": economics.requires_warp,
-                        "waypointStationIds": [],
+                        "waypointStationIds": economics.waypoint_station_ids.clone(),
                         "distanceLy": economics.distance_ly,
                         "warpersPerVessel": economics.warpers_per_vessel,
                         "vehicleStationId": owner_id,
@@ -975,6 +1268,11 @@ pub(crate) fn dispatch(
                         .or_default() += cargo;
                     for index in HashSet::from([demand_index, supply_index, owner_index]) {
                         *ledger.active_vehicle_load.entry(index).or_default() += dispatchable;
+                    }
+                    for waypoint in &economics.waypoint_station_ids {
+                        if let Some(index) = indexes.get(waypoint) {
+                            *ledger.active_vehicle_load.entry(*index).or_default() += dispatchable;
+                        }
                     }
                     remaining_free = (remaining_free - cargo).max(0.0);
                     set_number(base, "nextId", next_id + 1.0)?;
@@ -1079,9 +1377,20 @@ pub(crate) fn advance_routes(
                 .and_then(|id| indexes.get(id))
                 .copied()
                 .ok_or_else(|| anyhow!("native interstellar route peer is missing"))?;
+            let waypoint_indices = route
+                .get("waypointStationIds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|id| indexes.get(id).copied())
+                .collect::<Vec<_>>();
             let source_power = powers.get(&supply_index).copied().unwrap_or(0.0);
             let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
-            let power = source_power.min(target_power);
+            let hub_power = waypoint_indices.iter().fold(1.0_f64, |factor, index| {
+                factor.min(powers.get(index).copied().unwrap_or(0.0))
+            });
+            let power = source_power.min(target_power).min(hub_power);
             let duration = finite_number(route.get("duration")).max(1.0);
             let progress = rounded(
                 finite_number(route.get("progress")) + seconds * power / duration,
@@ -1090,6 +1399,9 @@ pub(crate) fn advance_routes(
             set_number(route, "progress", progress)?;
             add_max_field(entities, demand_index, "utilization", power)?;
             add_max_field(entities, supply_index, "utilization", power)?;
+            for waypoint_index in waypoint_indices {
+                add_max_field(entities, waypoint_index, "utilization", power)?;
+            }
             if progress + EPSILON < 1.0 {
                 remaining.push(route_value);
                 continue;
@@ -1287,9 +1599,18 @@ pub(crate) fn update_congestion(
                     .get(route_owner_id(demand, route))
                     .copied()
                     .unwrap_or(demand_index);
+                let waypoint = route
+                    .get("waypointStationIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .any(|id| indexes.get(id).copied() == Some(station_index))
+                    });
                 if demand_index == station_index
                     || supply == Some(station_index)
                     || owner == station_index
+                    || waypoint
                 {
                     active_progress = active_progress.max(finite_number(route.get("progress")));
                 }

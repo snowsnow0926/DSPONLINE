@@ -536,6 +536,63 @@ function warpedInterstellarLogisticsState(): GameState {
   return state;
 }
 
+function relayInterstellarLogisticsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("interstellar_logistics", "space_warp", "logistics_engine_1");
+  state.exploration.unlockedSystemIds.push("borealis", "aurora");
+  state.construction.interstellar_logistics_station = 3;
+  const placeStation = (planetId: GameState["activePlanetId"], position: { x: number; y: number }) => {
+    state.activePlanetId = planetId;
+    state = placeBuilding(state, "interstellar_logistics_station", position, 1);
+    return state.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station").at(-1)!.id;
+  };
+  const supplyId = placeStation("home", { x: 820, y: 80 });
+  const hubId = placeStation("frost", { x: 200, y: 80 });
+  const demandId = placeStation("verdant", { x: 200, y: 80 });
+  state.activePlanetId = "home";
+  for (const stationId of [supplyId, demandId]) {
+    state = setStationSlotItem(state, stationId, 0, "processor");
+  }
+  state = setStationSlotMode(state, demandId, 0, "remote", "demand");
+  const supply = state.entities.find((entity) => entity.id === supplyId)!;
+  const hub = state.entities.find((entity) => entity.id === hubId)!;
+  const demand = state.entities.find((entity) => entity.id === demandId)!;
+  supply.outputs = { processor: 200 };
+  supply.inputs = { processor: 0 };
+  supply.stationVessels = 1;
+  supply.stationWarpers = 2;
+  hub.stationHubEnabled = true;
+  hub.stationHubPriority = 2;
+  demand.outputs = { processor: 0 };
+  demand.inputs = { processor: 0 };
+  demand.stationVessels = 1;
+  demand.stationWarpers = 2;
+  demand.stationSlots![0].routePolicy = "relay-required";
+  demand.stationSlots![0].warperBudget = 2;
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  state.entities.push(
+    {
+      ...wind,
+      id: "native_relay_frost_power",
+      planetId: "frost",
+      position: { x: 0, y: -180 },
+      machineCount: 10,
+      inputs: {},
+      outputs: {},
+    },
+    {
+      ...wind,
+      id: "native_relay_verdant_power",
+      planetId: "verdant",
+      position: { x: 0, y: -180 },
+      machineCount: 10,
+      inputs: {},
+      outputs: {},
+    },
+  );
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -930,6 +987,47 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "warped-interstellar-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "warped-interstellar-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches exact relay-required paths, per-hop warpers, and hub power", async () => {
+    const initial = relayInterstellarLogisticsState();
+    const checkpoint = await seed(initial, 199);
+    for (const seconds of [1, 10, 30, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `relay-interstellar-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `relay-interstellar-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.nextId, `relay-interstellar-${seconds} 路线 ID`).toBe(expected.nextId);
+      expect(advanced.summary.canonicalFields, `relay-interstellar-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `relay-interstellar-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `relay-interstellar-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "relay-interstellar-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "relay-interstellar-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

@@ -232,6 +232,7 @@ export interface DesktopNativeCoreDomainCoverage {
   planetaryLogistics: boolean;
   sameSystemInterstellarLogistics: boolean;
   directWarpLogistics: boolean;
+  relayLogistics: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

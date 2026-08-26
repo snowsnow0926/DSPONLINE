@@ -144,6 +144,7 @@ export interface DesktopNativeWalAppendResult {
 
 export interface DesktopNativeCoreItemDefinition {
   id: string;
+  name: string;
   kind: "solid" | "fluid" | "matrix";
   fuelEnergyMj: number;
 }
@@ -166,9 +167,12 @@ export interface DesktopNativeCoreBuildingDefinition {
 
 export interface DesktopNativeCoreRecipeDefinition {
   id: string;
+  name: string;
   buildingId: string;
   duration: number;
   requiredTechId?: string;
+  recursivePriority: number;
+  recursiveManufacturing: boolean;
   inputs: Array<{ itemId: string; amount: number }>;
   outputs: Array<{ itemId: string; amount: number }>;
 }
@@ -176,6 +180,7 @@ export interface DesktopNativeCoreRecipeDefinition {
 export interface DesktopNativeCoreConstructionDefinition {
   id: string;
   outputAmount: number;
+  automationOrder: number;
   requiredTechId?: string;
   costs: Array<{ itemId: string; amount: number }>;
 }
@@ -210,6 +215,7 @@ export interface DesktopNativeCoreCatalog {
   }>;
   technologies: Array<{
     id: string;
+    name: string;
     costs: Array<{ itemId: string; amount: number }>;
     prerequisites: string[];
     constructionRewards: string[];
@@ -253,6 +259,10 @@ export interface DesktopNativeCoreDomainCoverage {
   quantumBeltBridge: boolean;
   persistedConstructionJobs: boolean;
   constructionQuantumPrefetch: boolean;
+  recursiveConstructionPlanning: boolean;
+  portableFleetConstruction: boolean;
+  constructionByproductSettlement: boolean;
+  constructionArithmeticBatching: boolean;
   quantumAttachmentTransitions: boolean;
   inactiveTimeWarpController: boolean;
   dysonSwarmAndSphere: boolean;

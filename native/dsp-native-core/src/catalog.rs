@@ -20,6 +20,8 @@ pub struct ItemAmount {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDefinition {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub kind: String,
     #[serde(default)]
     pub fuel_energy_mj: f64,
@@ -74,10 +76,16 @@ fn default_fuel_efficiency() -> f64 {
 #[serde(rename_all = "camelCase")]
 pub struct RecipeDefinition {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub building_id: String,
     pub duration: f64,
     #[serde(default)]
     pub required_tech_id: Option<String>,
+    #[serde(default)]
+    pub recursive_priority: f64,
+    #[serde(default)]
+    pub recursive_manufacturing: bool,
     pub inputs: Vec<ItemAmount>,
     pub outputs: Vec<ItemAmount>,
 }
@@ -87,6 +95,8 @@ pub struct RecipeDefinition {
 pub struct ConstructionDefinition {
     pub id: String,
     pub output_amount: f64,
+    #[serde(default)]
+    pub automation_order: u32,
     #[serde(default)]
     pub required_tech_id: Option<String>,
     pub costs: Vec<ItemAmount>,
@@ -115,6 +125,8 @@ pub struct ProliferatorDefinition {
 #[serde(rename_all = "camelCase")]
 pub struct TechnologyDefinition {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub costs: Vec<ItemAmount>,
     #[serde(default)]
     pub prerequisites: Vec<String>,
@@ -305,6 +317,7 @@ impl RuntimeCatalog {
             if !building_ids.contains(recipe.building_id.as_str())
                 || !recipe.duration.is_finite()
                 || recipe.duration <= 0.0
+                || !recipe.recursive_priority.is_finite()
             {
                 bail!(
                     "native catalog recipe building/duration is invalid: {}",

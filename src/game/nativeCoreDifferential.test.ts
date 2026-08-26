@@ -18,7 +18,7 @@ import {
   setStationSlotPriority,
 } from "./engine";
 import { CAMPAIGN_TASKS } from "./campaign";
-import { getConstructionDefinition } from "./content";
+import { getConstructionDefinition, TECHNOLOGIES } from "./content";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { startSystemSpaceStationConstruction } from "./systemSpaceStation";
 import type { GameState } from "./types";
@@ -910,6 +910,65 @@ function quantumConstructionState(): GameState {
   };
   const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
   wind.machineCount = 1000;
+  return state;
+}
+
+function dynamicConstructionAutomationState(): GameState {
+  let state = simpleMiningState();
+  state.entities = state.entities.filter((entity) => entity.kind === "power");
+  state.belts = [];
+  state.research.completedTechIds = Object.keys(TECHNOLOGIES) as GameState["research"]["completedTechIds"];
+  state.construction.construction_center = 1;
+  state = placeBuilding(state, "construction_center", { x: 920, y: 320 }, 1);
+  const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
+  center.machineCount = 4;
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  wind.machineCount = 10_000;
+  state.tray = {
+    iron_ore: 20_000,
+    stone: 20_000,
+    steel: 100,
+    processor: 100,
+    electromagnetic_turbine: 100,
+    super_magnetic_ring: 100,
+    fire_ice: 100,
+  };
+  state.planetTrays.home = { ...state.tray };
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.quantumSourceEnabled = false;
+  state.constructionAutomation.jobs = {};
+  state.constructionAutomation.targetStock = {
+    storage_mk1: 3,
+    conveyor_belt_mk3: 3,
+    logistics_drone: 3,
+  };
+  state.constructionAutomation.cursor = 0;
+  state.constructionAutomation.totalCrafted = 0;
+  state.constructionAutomation.lastCraftedId = null;
+  state.constructionAutomation.destroyedByproducts = {};
+  delete state.constructionAutomation.quantumMaterialBuffer;
+  return state;
+}
+
+function millionStackConstructionState(): GameState {
+  const state = dynamicConstructionAutomationState();
+  const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
+  center.machineCount = 1_000_000;
+  state.tray = { iron_ingot: 5_000_000, stone_brick: 5_000_000 };
+  state.planetTrays.home = { ...state.tray };
+  state.constructionAutomation.targetStock = { storage_mk1: 1_000_000 };
+  state.constructionAutomation.cursor = 0;
+  return state;
+}
+
+function orphanedQuantumConstructionBufferState(): GameState {
+  const state = quantumConstructionState();
+  const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
+  state.constructionAutomation.jobs = {};
+  state.constructionAutomation.targetStock = {};
+  state.constructionAutomation.quantumMaterialBuffer = {
+    [center.id]: { iron_ingot: 7, stone_brick: 9 },
+  };
   return state;
 }
 
@@ -1927,9 +1986,89 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 
+  it("matches recursive construction planning, byproduct settlement, and portable-fleet targets", async () => {
+    const initial = dynamicConstructionAutomationState();
+    const checkpoint = await seed(initial, 206);
+    for (const seconds of [1, 5, 10, 30, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `dynamic-construction-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: [
+          "constructionAutomation", "construction", "portableFleet", "tray", "planetTrays",
+          "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
+        ],
+      });
+      expect(projection.entities, `dynamic-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.constructionAutomation, `dynamic-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
+      expect(projection.base.construction, `dynamic-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
+      expect(projection.base.portableFleet, `dynamic-construction-${seconds} 便携舰队`).toEqual(JSON.parse(JSON.stringify(expected.portableFleet)));
+      expect(projection.base.tray, `dynamic-construction-${seconds} 托盘`).toEqual(JSON.parse(JSON.stringify(expected.tray)));
+      expect(advanced.summary.canonicalFields, `dynamic-construction-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `dynamic-construction-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("matches million-stack construction work with bounded arithmetic batching", async () => {
+    const initial = millionStackConstructionState();
+    const checkpoint = await seed(initial, 207);
+    for (const seconds of [1, 5, 10]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `million-construction-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: [],
+        baseFields: ["constructionAutomation", "construction", "tray", "planetTrays", "totalProduced"],
+      });
+      expect(projection.entities, `million-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.constructionAutomation, `million-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
+      expect(projection.base.construction, `million-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
+      expect(projection.base.tray, `million-construction-${seconds} 托盘`).toEqual(JSON.parse(JSON.stringify(expected.tray)));
+      expect(advanced.summary.canonicalFields, `million-construction-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `million-construction-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("returns orphaned direct-construction reservations without losing material", async () => {
+    const initial = orphanedQuantumConstructionBufferState();
+    const checkpoint = await seed(initial, 208);
+    const opened = await open(checkpoint);
+    const expected = advanceSimulationBudget(initial, 1, 1);
+    const advanced = await client.request({
+      operation: "coreAdvance", sessionId: opened.sessionId,
+      request: { baseRevision: checkpoint.revision, simulationSeconds: 1, wallSeconds: 1 },
+    });
+    expect(advanced.supported, advanced.reason ?? "orphaned quantum construction buffer").toBe(true);
+    const projection = await client.request({
+      operation: "coreProjection", sessionId: opened.sessionId,
+      entityIds: expected.entities.map((entity) => entity.id), beltIds: [],
+      baseFields: ["constructionAutomation", "quantumLogisticsNetwork", "tray", "planetTrays"],
+    });
+    expect(projection.base.constructionAutomation).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
+    expect(projection.base.quantumLogisticsNetwork).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+    expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  });
+
   it("matches a planned quantum attachment while legacy vessel tails drain", async () => {
     const initial = quantumAttachmentTransitionState();
-    const checkpoint = await seed(initial, 206);
+    const checkpoint = await seed(initial, 209);
     for (const seconds of [1, 4, 5, 6, 10, 20, 30, 35, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -1973,7 +2112,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches orbital cargo ports, fair upload budgets, and station construction delivery", async () => {
     const initial = orbitalCargoConstructionState();
-    const checkpoint = await seed(initial, 207);
+    const checkpoint = await seed(initial, 210);
     for (const seconds of [1, 5, 10, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -1999,7 +2138,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches orbital cargo contract restrictions, totals, and claimable transition", async () => {
     const initial = orbitalCargoContractState();
-    const checkpoint = await seed(initial, 208);
+    const checkpoint = await seed(initial, 211);
     for (const seconds of [1, 5, 10, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -2024,7 +2163,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches powered construction-launcher settlement across system-station phases", async () => {
     const initial = systemSpaceStationConstructionState();
-    const checkpoint = await seed(initial, 209);
+    const checkpoint = await seed(initial, 212);
     for (const seconds of [1, 5, 10, 60]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -2048,7 +2187,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches elevator belts, local hub settlement, cross-system fleet dispatch, and returns", async () => {
     const initial = systemHubElevatorState();
-    const checkpoint = await seed(initial, 210);
+    const checkpoint = await seed(initial, 213);
     for (const seconds of [1, 5, 10, 30, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);

@@ -12,6 +12,7 @@ import {
   getFuelEfficiency,
   getFuelItemIdsForBuilding,
 } from "./content";
+import { isRecursiveManufacturingRecipe } from "./engine";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import type { DesktopNativeCoreCatalog } from "../desktop";
 
@@ -38,6 +39,7 @@ export function createNativeCoreCatalog(
     }))),
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,
+      name: item.name,
       kind: item.kind,
       fuelEnergyMj: FUEL_ENERGY_MJ[item.id] ?? 0,
     }))),
@@ -58,15 +60,19 @@ export function createNativeCoreCatalog(
     }))),
     recipes: byId(Object.values(RECIPES).map((recipe) => ({
       id: recipe.id,
+      name: recipe.name,
       buildingId: recipe.buildingId,
       duration: recipe.duration,
       ...(recipe.requiredTechId ? { requiredTechId: recipe.requiredTechId } : {}),
+      recursivePriority: recipe.recursivePriority ?? 0,
+      recursiveManufacturing: isRecursiveManufacturingRecipe(recipe.id),
       inputs: recipe.inputs.map((input) => ({ ...input })),
       outputs: recipe.outputs.map((output) => ({ ...output })),
     }))),
-    constructions: byId(CONSTRUCTION.map((definition) => ({
+    constructions: byId(CONSTRUCTION.map((definition, automationOrder) => ({
       id: definition.buildingId,
       outputAmount: definition.outputAmount,
+      automationOrder,
       ...(definition.requiredTechId ? { requiredTechId: definition.requiredTechId } : {}),
       costs: definition.costs.map((cost) => ({ ...cost })),
     }))),
@@ -74,6 +80,7 @@ export function createNativeCoreCatalog(
     proliferators: Object.values(PROLIFERATORS).map((definition) => ({ ...definition })),
     technologies: byId(Object.values(TECHNOLOGIES).map((technology) => ({
       id: technology.id,
+      name: technology.name,
       costs: technology.costs.map((cost) => ({ ...cost })),
       prerequisites: [...technology.prerequisites],
       constructionRewards: CONSTRUCTION

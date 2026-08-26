@@ -832,6 +832,23 @@ fn deposit(network: &mut Network, item_id: &str, requested: &BigUint) -> BigUint
     accepted
 }
 
+pub(crate) fn deposit_construction_refund(
+    base: &mut Map<String, Value>,
+    item_id: &str,
+    requested: u64,
+) -> anyhow::Result<u64> {
+    if requested == 0 {
+        return Ok(0);
+    }
+    let mut network = parse_network(base)?;
+    let accepted = deposit(&mut network, item_id, &BigUint::from(requested));
+    let accepted = accepted.to_u64().unwrap_or(requested);
+    if accepted > 0 {
+        write_network(base, &network)?;
+    }
+    Ok(accepted)
+}
+
 fn record_immediate_upload(
     base: &Map<String, Value>,
     bandwidth: RuntimeBandwidth,

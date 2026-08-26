@@ -520,13 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "内存安全暂停与分块增量存档");
+  await expect(dialog).toHaveAttribute("aria-label", "大型工厂 JavaScript 架构优化");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.1.9");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("内存超限自动暂停可配置");
-  await expect(dialog).toContainText("大型存档改为分块增量检查点");
-  await expect(dialog).toContainText("真实终局存档长时回归");
-  await expect(dialog).toContainText("旧存档与云端协议保持兼容");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(dialog).toContainText("工厂编辑不再深拷贝全部记录");
+  await expect(dialog).toContainText("大型自动保存流式提交有界数据页");
+  await expect(dialog).toContainText("大型工厂界面复制合并处理");
+  await expect(dialog).toContainText("内存保护暂停不再安装旧检查点");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -1553,6 +1553,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [interactionBursts, setInteractionBursts] = useState<InteractionBurst[]>([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const gameRef = useRef(game);
+  // React bails out when setGame receives the already committed object. Keep
+  // that identity explicit so the one-in-flight publisher does not wait for
+  // an effect that a no-op state update can never trigger.
+  const committedRuntimeGameRef = useRef(game);
   // P0 memory governor state is kept outside React renders so a large factory
   // cannot create another object tree merely to display a pressure sample.
   const memorySlowWorkerCountRef = useRef(0);
@@ -1585,6 +1589,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // mirrors collapse into this latest publication.
       const publication = pendingRuntimeGamePublicationRef.current ?? gameRef.current;
       pendingRuntimeGamePublicationRef.current = null;
+      if (publication === committedRuntimeGameRef.current) {
+        runtimeGamePublicationInFlightRef.current = null;
+        scheduleRuntimeGamePublicationRef.current();
+        return;
+      }
       runtimeGamePublicationInFlightRef.current = publication;
       if (isLargeRuntimeState(publication)) setGame(publication);
       else startTransition(() => setGame(publication));
@@ -1607,6 +1616,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       pendingRuntimeGamePublicationTimerRef.current = null;
     }
     pendingRuntimeGamePublicationRef.current = null;
+    if (next === committedRuntimeGameRef.current) {
+      runtimeGamePublicationInFlightRef.current = null;
+      scheduleRuntimeGamePublicationRef.current();
+      return;
+    }
     runtimeGamePublicationInFlightRef.current = next;
     setGame(next);
   }, []);
@@ -2329,6 +2343,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [canvasRenderSnapshot, publishCanvasSnapshot]);
 
   useEffect(() => {
+    committedRuntimeGameRef.current = game;
     // A committed React state releases the single publication slot. If the
     // Worker advanced again while this render was in progress, never write the
     // older committed mirror back over the imperative authority; enqueue only

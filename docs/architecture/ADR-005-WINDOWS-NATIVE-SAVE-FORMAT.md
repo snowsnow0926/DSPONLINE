@@ -9,7 +9,12 @@
 Windows desktop builds may maintain a private native save beside the existing
 public save. It uses immutable content-addressed chunks, a manifest committed
 after its chunks, two alternating checksummed superblocks, and an append-only
-WAL with monotonic revisions and command IDs.
+WAL with monotonic revision ranges and command IDs. Every entry records both
+`baseRevision` and `resultRevision`; its hash covers that range, the command ID,
+payload and previous hash. Adjacent active entries are continuous when the next
+base equals the previous result. A single accepted operation may advance by two
+revisions when it contains both a command and a changed simulation slice, so
+continuity must not be implemented as an assumed `result + 1` rule.
 
 The native store lives only under Electron `userData`. Renderer requests name a
 validated logical slot; no renderer-controlled path crosses IPC. A native save
@@ -51,4 +56,3 @@ administrator deliberately replacing every generation and its checksums.
 - A public export still performs an explicit v47 materialization.
 - Disk use temporarily includes two generations and WAL; compaction is needed.
 - The internal format cannot be treated as a cloud or mod API.
-

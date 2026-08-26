@@ -44,6 +44,7 @@ pub enum ControlRequest {
     },
     WalAppend {
         slot: String,
+        base_revision: u64,
         revision: u64,
         command_id: String,
         payload: Value,

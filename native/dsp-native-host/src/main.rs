@@ -117,10 +117,11 @@ fn handle_request(
         }
         ControlRequest::WalAppend {
             slot,
+            base_revision,
             revision,
             command_id,
             payload,
-        } => to_value(store.append_wal(&slot, revision, &command_id, payload)?)?,
+        } => to_value(store.append_wal(&slot, base_revision, revision, &command_id, payload)?)?,
         ControlRequest::Compact {
             slot,
             retain_generations,

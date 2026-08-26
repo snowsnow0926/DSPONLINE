@@ -126,6 +126,7 @@ export interface DesktopNativeSaveReadResult extends DesktopNativeSaveReadReques
 }
 
 export interface DesktopNativeWalAppendRequest extends DesktopNativeSaveSlotRequest {
+  baseRevision: number;
   revision: number;
   commandId: string;
   payload: Record<string, unknown>;
@@ -222,6 +223,9 @@ export interface DesktopNativeCoreSummary {
 export interface DesktopNativeCoreOpenResult {
   sessionId: string;
   authority: "shadow";
+  checkpointRevision: number;
+  replayedWalEntries: number;
+  replayedRevision: number;
   summary: DesktopNativeCoreSummary;
 }
 

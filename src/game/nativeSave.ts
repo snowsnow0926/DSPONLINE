@@ -59,6 +59,7 @@ export function markWindowsNativeSaveSeeded(mode: SaveMode): void {
 
 export async function appendWindowsNativeWal(
   mode: SaveMode,
+  baseRevision: number,
   revision: number,
   commandId: string,
   payload: Record<string, unknown>,
@@ -71,7 +72,7 @@ export async function appendWindowsNativeWal(
     if (!recovery) return "not-seeded";
     seededSlots.add(slot);
   }
-  await desktop.appendNativeWal({ slot, revision, commandId, payload });
+  await desktop.appendNativeWal({ slot, baseRevision, revision, commandId, payload });
   return "appended";
 }
 

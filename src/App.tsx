@@ -5782,6 +5782,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           if (result.proof.stateRevision > submission.durableIntent!.baseStateRevision) {
             await appendWindowsNativeWal(
               submission.state.mode,
+              submission.durableIntent!.baseStateRevision,
               result.proof.stateRevision,
               `intent-${submission.durableIntent!.intentSha256}`,
               {
@@ -6094,6 +6095,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           try {
             await appendWindowsNativeWal(
               submission.state.mode,
+              submission.baseStateRevision,
               confirmedRevision,
               `stable-${submission.baseStateRevision}-${confirmedRevision}-${submission.id}`,
               {

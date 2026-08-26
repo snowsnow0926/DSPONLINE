@@ -117,6 +117,7 @@ pub struct SaveRecoveryResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WalEntry {
+    pub base_revision: u64,
     pub revision: u64,
     pub command_id: String,
     pub payload: Value,
@@ -428,6 +429,7 @@ impl SaveStore {
     pub fn append_wal(
         &self,
         slot: &str,
+        base_revision: u64,
         revision: u64,
         command_id: &str,
         payload: Value,
@@ -448,12 +450,12 @@ impl SaveStore {
             .iter()
             .filter(|entry| entry.revision > checkpoint_revision)
             .collect::<Vec<_>>();
-        let expected_revision = active_entries
+        let expected_base_revision = active_entries
             .last()
-            .map(|entry| entry.revision + 1)
-            .unwrap_or(checkpoint_revision + 1);
-        if revision != expected_revision {
-            bail!("native WAL revision is not contiguous");
+            .map(|entry| entry.revision)
+            .unwrap_or(checkpoint_revision);
+        if base_revision != expected_base_revision || revision <= base_revision {
+            bail!("native WAL revision range is not contiguous");
         }
         if all_entries
             .iter()
@@ -465,8 +467,15 @@ impl SaveStore {
             .last()
             .map(|entry| entry.entry_hash.clone())
             .unwrap_or_else(|| "0".repeat(64));
-        let entry_hash = wal_entry_hash(revision, command_id, &payload, &previous_hash)?;
+        let entry_hash = wal_entry_hash(
+            base_revision,
+            revision,
+            command_id,
+            &payload,
+            &previous_hash,
+        )?;
         let entry = WalEntry {
+            base_revision,
             revision,
             command_id: command_id.to_owned(),
             payload,
@@ -758,14 +767,16 @@ fn decode_all_wal_bytes(bytes: &[u8]) -> anyhow::Result<Vec<WalEntry>> {
             bail!("native WAL checksum is invalid");
         }
         let entry: WalEntry = serde_json::from_slice(encoded)?;
-        if let Some(previous_revision) = previous_revision
-            && entry.revision <= previous_revision
+        if entry.revision <= entry.base_revision
+            || previous_revision
+                .is_some_and(|previous_revision| entry.revision <= previous_revision)
         {
-            bail!("native WAL revisions do not increase monotonically");
+            bail!("native WAL revision range is invalid");
         }
         if entry.previous_hash != previous_hash
             || entry.entry_hash
                 != wal_entry_hash(
+                    entry.base_revision,
                     entry.revision,
                     &entry.command_id,
                     &entry.payload,
@@ -794,13 +805,13 @@ fn decode_wal_bytes(bytes: &[u8], checkpoint_revision: u64) -> anyhow::Result<Ve
         .filter(|entry| entry.revision > checkpoint_revision)
         .collect::<Vec<_>>();
     if let Some(first) = entries.first()
-        && first.revision != checkpoint_revision + 1
+        && first.base_revision != checkpoint_revision
     {
         bail!("native WAL does not continue the checkpoint revision");
     }
     if entries
         .windows(2)
-        .any(|window| window[1].revision != window[0].revision + 1)
+        .any(|window| window[1].base_revision != window[0].revision)
     {
         bail!("native WAL is not contiguous after the checkpoint");
     }
@@ -891,12 +902,14 @@ fn manifest_root_hash(manifest: &SaveManifest) -> anyhow::Result<String> {
 }
 
 fn wal_entry_hash(
+    base_revision: u64,
     revision: u64,
     command_id: &str,
     payload: &Value,
     previous_hash: &str,
 ) -> anyhow::Result<String> {
     Ok(sha256_hex(&serde_json::to_vec(&(
+        base_revision,
         revision,
         command_id,
         payload,
@@ -1107,6 +1120,7 @@ mod tests {
         store
             .append_wal(
                 "normal-main",
+                5,
                 6,
                 "command-6",
                 serde_json::json!({"seconds": 1}),
@@ -1115,14 +1129,15 @@ mod tests {
         store
             .append_wal(
                 "normal-main",
-                7,
-                "command-7",
+                6,
+                8,
+                "command-and-advance-8",
                 serde_json::json!({"seconds": 1}),
             )
             .unwrap();
         assert!(
             store
-                .append_wal("normal-main", 9, "command-9", serde_json::json!({}))
+                .append_wal("normal-main", 9, 10, "command-10", serde_json::json!({}))
                 .is_err()
         );
         let recovered = store.recover("normal-main").unwrap().unwrap();
@@ -1132,7 +1147,7 @@ mod tests {
                 recovered.wal_last_revision,
                 recovered.wal_entry_count
             ),
-            (Some(6), Some(7), 2)
+            (Some(6), Some(8), 2)
         );
     }
 
@@ -1175,6 +1190,7 @@ mod tests {
         store
             .append_wal(
                 "normal-main",
+                1,
                 2,
                 "command-2",
                 serde_json::json!({ "simulationSeconds": 1 }),
@@ -1183,6 +1199,7 @@ mod tests {
         store
             .append_wal(
                 "normal-main",
+                2,
                 3,
                 "command-3",
                 serde_json::json!({ "simulationSeconds": 1 }),

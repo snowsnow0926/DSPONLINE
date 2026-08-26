@@ -7,6 +7,7 @@
 pub mod canonical;
 pub mod catalog;
 pub mod command;
+pub mod replay;
 pub mod simulation;
 pub mod state;
 

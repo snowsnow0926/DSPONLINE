@@ -58,6 +58,7 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
   const wal = await client.request({
     operation: "walAppend",
     slot: "normal-main",
+    baseRevision: 2,
     revision: 3,
     commandId: "command-3",
     payload: { simulationSeconds: 1 },
@@ -115,6 +116,29 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     { key: `${prefix}chunk.belts%3A00000000`, value: belts },
   ]);
   const commit = await sessions.commit(1, started.transactionId);
+  const pauseCommand = {
+    protocolVersion: 1,
+    baseRevision: 1,
+    topLevelChanges: [{ path: ["paused"], operation: "set", value: true }],
+    changedEntities: [], addedEntities: [], removedEntityIds: [], changedBelts: [], addedBelts: [], removedBeltIds: [],
+  };
+  await client.request({
+    operation: "walAppend",
+    slot: "normal-main",
+    baseRevision: 1,
+    revision: 2,
+    commandId: "pause-and-advance-2",
+    payload: {
+      kind: "stable-operation-v1",
+      baseStateRevision: 1,
+      resultStateRevision: 2,
+      command: pauseCommand,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+      approximate: false,
+      registry: { fingerprint: "builtin:test" },
+    },
+  });
   const opened = await client.request({
     operation: "coreOpen",
     slot: "normal-main",
@@ -132,29 +156,46 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     },
   });
   assert.equal(opened.authority, "shadow");
-  assert.equal(opened.summary.revision, 1);
+  assert.equal(opened.checkpointRevision, 1);
+  assert.equal(opened.replayedWalEntries, 1);
+  assert.equal(opened.replayedRevision, 2);
+  assert.equal(opened.summary.revision, 2);
   assert.equal(opened.summary.entityCount, 1);
   assert.equal(opened.summary.beltCount, 1);
+  assert.equal(opened.summary.paused, true);
   assert.equal(opened.summary.coverage.authorityEligible, false);
   const applied = await client.request({
     operation: "coreApplyCommand",
     sessionId: opened.sessionId,
     command: {
       protocolVersion: 1,
-      baseRevision: 1,
-      topLevelChanges: [{ path: ["paused"], operation: "set", value: true }],
+      baseRevision: 2,
+      topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
       changedEntities: [], addedEntities: [], removedEntityIds: [], changedBelts: [], addedBelts: [], removedBeltIds: [],
     },
   });
-  assert.equal(applied.revision, 2);
-  assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).paused, true);
+  assert.equal(applied.revision, 3);
+  assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).paused, false);
+  const unsupportedAdvance = await client.request({
+    operation: "coreAdvance",
+    sessionId: opened.sessionId,
+    request: { baseRevision: 3, simulationSeconds: 1, wallSeconds: 1 },
+  });
+  assert.equal(unsupportedAdvance.supported, false);
+  assert.equal(unsupportedAdvance.revision, 3);
+  const repaused = await client.request({
+    operation: "coreApplyCommand",
+    sessionId: opened.sessionId,
+    command: { ...pauseCommand, baseRevision: 3 },
+  });
+  assert.equal(repaused.revision, 4);
   const pausedAdvance = await client.request({
     operation: "coreAdvance",
     sessionId: opened.sessionId,
-    request: { baseRevision: 2, simulationSeconds: 1, wallSeconds: 1 },
+    request: { baseRevision: 4, simulationSeconds: 1, wallSeconds: 1 },
   });
   assert.equal(pausedAdvance.supported, true);
   assert.equal(pausedAdvance.changed, false);
-  assert.equal(pausedAdvance.revision, 2);
+  assert.equal(pausedAdvance.revision, 4);
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
 });

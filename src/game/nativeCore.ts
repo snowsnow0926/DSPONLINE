@@ -87,7 +87,8 @@ export async function openWindowsNativeCoreShadow(
     registryFingerprint: runtime.fingerprint,
     catalog: createNativeCoreCatalog(runtime),
   });
-  if (opened.authority !== "shadow" || opened.summary.revision !== checkpoint.revision ||
+  if (opened.authority !== "shadow" || opened.checkpointRevision !== checkpoint.revision ||
+    opened.replayedRevision !== opened.summary.revision || opened.replayedWalEntries < 0 ||
     opened.summary.registryFingerprint !== runtime.fingerprint || opened.summary.coverage.authorityEligible) {
     await desktop.closeNativeCore({ sessionId: opened.sessionId }).catch(() => undefined);
     throw new Error("Windows 原生核心影子检查点身份无效");

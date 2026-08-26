@@ -1,24 +1,195 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail};
+use dsp_native_core::canonical::canonical_sha256;
 use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
     CommandApplyResult, CoreAdvanceRequest, CoreAdvanceResult, CoreCheckpointIdentity, CoreState,
     CoreStateSummary, SimulationCommandPatch,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::save_store::SaveStore;
+use crate::save_store::{SaveStore, WalEntry};
 
 const MAX_CORE_SESSIONS: usize = 4;
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreOpenResult {
     pub session_id: String,
     pub authority: &'static str,
+    pub checkpoint_revision: u64,
+    pub replayed_wal_entries: usize,
+    pub replayed_revision: u64,
     pub summary: CoreStateSummary,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WalRegistryIdentity {
+    fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DurableWalIntent {
+    schema_version: u16,
+    session_id: String,
+    generation: u64,
+    sequence: u64,
+    intent_sha256: String,
+    base_state_revision: u64,
+    command: Option<SimulationCommandPatch>,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    #[allow(dead_code)]
+    #[serde(default)]
+    approximate: bool,
+    registry: WalRegistryIdentity,
+    committed_at_ms: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum AcceptedWalPayload {
+    #[serde(rename = "stable-operation-v1", rename_all = "camelCase")]
+    Stable {
+        base_state_revision: u64,
+        result_state_revision: u64,
+        command: Option<SimulationCommandPatch>,
+        simulation_seconds: f64,
+        wall_seconds: f64,
+        registry: WalRegistryIdentity,
+    },
+    #[serde(rename = "durable-operation-v1", rename_all = "camelCase")]
+    Durable {
+        intent: DurableWalIntent,
+        result_state_revision: u64,
+    },
+}
+
+struct ReplayOperation {
+    base_revision: u64,
+    result_revision: u64,
+    command: Option<SimulationCommandPatch>,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    registry_fingerprint: String,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn validate_operation_numbers(operation: &ReplayOperation) -> anyhow::Result<()> {
+    if operation.base_revision > MAX_SAFE_INTEGER
+        || operation.result_revision > MAX_SAFE_INTEGER
+        || operation.result_revision <= operation.base_revision
+        || !operation.simulation_seconds.is_finite()
+        || operation.simulation_seconds < 0.0
+        || !operation.wall_seconds.is_finite()
+        || operation.wall_seconds < 0.0
+    {
+        bail!("native core WAL operation bounds are invalid");
+    }
+    Ok(())
+}
+
+fn verify_durable_intent_digest(payload: &Value, expected: &str) -> anyhow::Result<()> {
+    if !valid_sha256(expected) {
+        bail!("native core durable intent digest is invalid");
+    }
+    let mut unsigned = payload
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("native core durable intent is not an object"))?;
+    unsigned.remove("intentSha256");
+    if canonical_sha256(&Value::Object(unsigned)) != expected {
+        bail!("native core durable intent digest does not match");
+    }
+    Ok(())
+}
+
+fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
+    let decoded = serde_json::from_value::<AcceptedWalPayload>(entry.payload.clone())
+        .map_err(|error| anyhow!("decode native core WAL operation: {error}"))?;
+    let operation = match decoded {
+        AcceptedWalPayload::Stable {
+            base_state_revision,
+            result_state_revision,
+            command,
+            simulation_seconds,
+            wall_seconds,
+            registry,
+        } => ReplayOperation {
+            base_revision: base_state_revision,
+            result_revision: result_state_revision,
+            command,
+            simulation_seconds,
+            wall_seconds,
+            registry_fingerprint: registry.fingerprint,
+        },
+        AcceptedWalPayload::Durable {
+            intent,
+            result_state_revision,
+        } => {
+            let intent_value = entry
+                .payload
+                .get("intent")
+                .ok_or_else(|| anyhow!("native core durable WAL intent is missing"))?;
+            verify_durable_intent_digest(intent_value, &intent.intent_sha256)?;
+            if intent.schema_version != 1
+                || !valid_session_id(&intent.session_id)
+                || intent.generation == 0
+                || intent.generation > MAX_SAFE_INTEGER
+                || intent.sequence == 0
+                || intent.sequence > MAX_SAFE_INTEGER
+                || !intent.committed_at_ms.is_finite()
+                || intent.committed_at_ms < 0.0
+            {
+                bail!("native core durable WAL intent metadata is invalid");
+            }
+            ReplayOperation {
+                base_revision: intent.base_state_revision,
+                result_revision: result_state_revision,
+                command: intent.command,
+                simulation_seconds: intent.simulation_seconds,
+                wall_seconds: intent.wall_seconds,
+                registry_fingerprint: intent.registry.fingerprint,
+            }
+        }
+    };
+    validate_operation_numbers(&operation)?;
+    if operation.base_revision != entry.base_revision || operation.result_revision != entry.revision
+    {
+        bail!("native core WAL payload revision range does not match its envelope");
+    }
+    Ok(operation)
+}
+
+fn replay_wal_entry(state: &mut CoreState, entry: &WalEntry) -> anyhow::Result<()> {
+    let operation = decode_wal_operation(entry)?;
+    if operation.registry_fingerprint != state.identity.registry_fingerprint {
+        bail!("native core WAL registry fingerprint changed");
+    }
+    state.replay_operation(
+        operation.base_revision,
+        operation.result_revision,
+        operation.command.as_ref(),
+        operation.simulation_seconds,
+        operation.wall_seconds,
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -71,12 +242,6 @@ impl CoreRegistry {
         {
             bail!("native core checkpoint identity changed before open");
         }
-        if recovery.wal_entry_count > 0 {
-            // Opening behind an accepted WAL tail would create an apparently
-            // healthy but stale shadow. CORE replay is enabled in a later
-            // authority package; until then this must fail closed.
-            bail!("native core checkpoint has an unapplied WAL tail");
-        }
         let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
         let mut records = BTreeMap::new();
         for key in &recovery.record_keys {
@@ -85,7 +250,7 @@ impl CoreRegistry {
                 .ok_or_else(|| anyhow!("native core checkpoint record disappeared"))?;
             records.insert(key.clone(), value);
         }
-        let state = CoreState::from_internal_records(
+        let mut state = CoreState::from_internal_records(
             CoreCheckpointIdentity {
                 slot: slot.to_owned(),
                 generation,
@@ -98,6 +263,10 @@ impl CoreRegistry {
             &records,
             catalog,
         )?;
+        let wal = store.read_wal(slot, revision)?;
+        for entry in &wal {
+            replay_wal_entry(&mut state, entry)?;
+        }
         let summary = state.summary()?;
         let session_id = format!("core-{}", self.next_session_id);
         self.next_session_id = self.next_session_id.saturating_add(1);
@@ -105,6 +274,9 @@ impl CoreRegistry {
         Ok(CoreOpenResult {
             session_id,
             authority: "shadow",
+            checkpoint_revision: revision,
+            replayed_wal_entries: wal.len(),
+            replayed_revision: summary.revision,
             summary,
         })
     }

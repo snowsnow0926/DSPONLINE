@@ -538,12 +538,15 @@ ipcMain.handle("desktop:native-save-read", async (event, request) => {
 ipcMain.handle("desktop:native-wal-append", async (event, request) => {
   requireTrustedNativeSender(event);
   if (!validNativeLogicalId(request?.slot, 64) || !validNativeLogicalId(request?.commandId, 128) ||
-    !Number.isSafeInteger(request?.revision) || request.revision < 1 || !request.payload || typeof request.payload !== "object") {
+    !Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
+    !Number.isSafeInteger(request?.revision) || request.revision <= request.baseRevision ||
+    !request.payload || typeof request.payload !== "object") {
     throw new Error("原生 WAL 请求无效");
   }
   return nativeHostClient.request({
     operation: "walAppend",
     slot: request.slot,
+    baseRevision: request.baseRevision,
     revision: request.revision,
     commandId: request.commandId,
     payload: request.payload,

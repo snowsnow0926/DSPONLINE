@@ -100,7 +100,7 @@ class NativeHostClient {
     this.exited = false;
   }
 
-  async start(clientVersion = "1.2.0") {
+  async start(clientVersion = "1.2.1") {
     if (this.child && !this.exited) return this.hello;
     if (this.startPromise) return this.startPromise;
     this.startPromise = (async () => {

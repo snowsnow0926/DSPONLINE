@@ -396,6 +396,10 @@ impl SaveStore {
         let Some(metadata) = manifest.records.get(key) else {
             return Ok(None);
         };
+        Ok(Some(self.read_verified_chunk(slot, metadata)?))
+    }
+
+    fn read_verified_chunk(&self, slot: &str, metadata: &ChunkMetadata) -> anyhow::Result<Vec<u8>> {
         let compressed = fs::read(self.chunk_path(slot, &metadata.hash)?)?;
         if compressed.len() as u64 != metadata.compressed_bytes
             || sha256_hex(&compressed) != metadata.compressed_hash
@@ -408,7 +412,7 @@ impl SaveStore {
         {
             bail!("native save chunk hash is invalid");
         }
-        Ok(Some(decoded))
+        Ok(decoded)
     }
 
     pub fn read_record_at(
@@ -418,13 +422,51 @@ impl SaveStore {
         generation: u64,
         root_hash: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let recovery = self
-            .recover(slot)?
+        let manifest = self
+            .recover_manifest(slot)?
             .ok_or_else(|| anyhow!("native save slot is missing"))?;
-        if recovery.generation != generation || recovery.root_hash != root_hash {
+        if manifest.generation != generation || manifest.root_hash != root_hash {
             bail!("native save generation changed during readback");
         }
-        self.read_record(slot, key)
+        validate_key(key)?;
+        manifest
+            .records
+            .get(key)
+            .map(|metadata| self.read_verified_chunk(slot, metadata))
+            .transpose()
+    }
+
+    /// Reads one immutable generation after a single identity check. Native
+    /// core startup previously called `recover()` for every logical record,
+    /// repeatedly reopening and decoding the same WAL while loading a large
+    /// checkpoint. The host is single-threaded and generations are immutable,
+    /// so this bounded per-record loop preserves the exact verification model.
+    pub fn read_records_at(
+        &self,
+        slot: &str,
+        keys: &[String],
+        generation: u64,
+        root_hash: &str,
+    ) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native save slot is missing"))?;
+        if manifest.generation != generation || manifest.root_hash != root_hash {
+            bail!("native save generation changed during readback");
+        }
+        let mut records = BTreeMap::new();
+        for key in keys {
+            validate_key(key)?;
+            if records.contains_key(key) {
+                bail!("native save record read repeats a key");
+            }
+            let metadata = manifest
+                .records
+                .get(key)
+                .ok_or_else(|| anyhow!("native save record disappeared during readback"))?;
+            records.insert(key.clone(), self.read_verified_chunk(slot, metadata)?);
+        }
+        Ok(records)
     }
 
     pub fn append_wal(
@@ -665,6 +707,10 @@ impl SaveStore {
         if !slot_dir.exists() {
             return Ok(None);
         }
+        // Superblock/manifest identities are cheap to validate. Rank those
+        // first, then verify chunk payloads newest-to-oldest and stop at the
+        // first valid generation. The previous implementation decompressed
+        // both retained generations even when the newest one was healthy.
         let mut candidates = Vec::new();
         for name in ["superblock-a.json", "superblock-b.json"] {
             let path = slot_dir.join(name);
@@ -681,17 +727,23 @@ impl SaveStore {
             let Ok(manifest_bytes) = fs::read(manifest_path) else {
                 continue;
             };
-            let manifest =
-                verify_generation_artifacts(slot, &superblock, &manifest_bytes, |hash| {
-                    fs::read(self.chunk_path(slot, hash)?).map_err(Into::into)
-                });
+            let manifest = verify_generation_identity(slot, &superblock, &manifest_bytes);
             let Ok(manifest) = manifest else {
                 continue;
             };
             candidates.push(manifest);
         }
         candidates.sort_by_key(|manifest| (manifest.revision, manifest.generation));
-        let recovered = candidates.pop();
+        let mut recovered = None;
+        while let Some(manifest) = candidates.pop() {
+            let verified = verify_manifest_chunks(&manifest, |hash| {
+                fs::read(self.chunk_path(slot, hash)?).map_err(Into::into)
+            });
+            if verified.is_ok() {
+                recovered = Some(manifest);
+                break;
+            }
+        }
         if let Some(manifest) = recovered.as_ref() {
             self.verified_manifests
                 .borrow_mut()
@@ -756,11 +808,22 @@ fn decode_superblock(slot: &str, bytes: &[u8]) -> anyhow::Result<SuperblockPaylo
     Ok(superblock.payload)
 }
 
+#[cfg(test)]
 fn verify_generation_artifacts(
     slot: &str,
     superblock: &SuperblockPayload,
     manifest_bytes: &[u8],
-    mut read_chunk: impl FnMut(&str) -> anyhow::Result<Vec<u8>>,
+    read_chunk: impl FnMut(&str) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<SaveManifest> {
+    let manifest = verify_generation_identity(slot, superblock, manifest_bytes)?;
+    verify_manifest_chunks(&manifest, read_chunk)?;
+    Ok(manifest)
+}
+
+fn verify_generation_identity(
+    slot: &str,
+    superblock: &SuperblockPayload,
+    manifest_bytes: &[u8],
 ) -> anyhow::Result<SaveManifest> {
     if sha256_hex(manifest_bytes) != superblock.manifest_hash {
         bail!("native manifest digest mismatch");
@@ -774,6 +837,13 @@ fn verify_generation_artifacts(
     {
         bail!("native manifest identity is invalid");
     }
+    Ok(manifest)
+}
+
+fn verify_manifest_chunks(
+    manifest: &SaveManifest,
+    mut read_chunk: impl FnMut(&str) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<()> {
     for metadata in manifest.records.values() {
         validate_hex_identity(&metadata.hash, "chunk hash")?;
         let compressed = read_chunk(&metadata.hash)?;
@@ -789,7 +859,7 @@ fn verify_generation_artifacts(
             bail!("native chunk digest mismatch");
         }
     }
-    Ok(manifest)
+    Ok(())
 }
 
 fn decode_all_wal_bytes(bytes: &[u8]) -> anyhow::Result<Vec<WalEntry>> {
@@ -1122,6 +1192,26 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             b"[{\"id\":\"a\"}]"
+        );
+        let records = store
+            .read_records_at(
+                "normal-main",
+                &["base".to_owned(), "entities:00000000".to_owned()],
+                second.generation,
+                &second.root_hash,
+            )
+            .unwrap();
+        assert_eq!(records["base"], b"{\"version\":47}");
+        assert_eq!(records["entities:00000000"], b"[{\"id\":\"a\"}]");
+        assert!(
+            store
+                .read_records_at(
+                    "normal-main",
+                    &["base".to_owned()],
+                    first.generation,
+                    &first.root_hash,
+                )
+                .is_err()
         );
     }
 

@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "dsp-native-core"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "dsp-native-host"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "crc32fast",

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::state::CoreState;
 
@@ -186,7 +187,7 @@ impl CoreState {
                 .ok_or_else(|| anyhow!("native command entity is missing"))?;
             let mut value = next.parse_entity(index)?;
             apply_record_changes(&mut value, &record.changes)?;
-            next.entity_raw_mut()[index] = serde_json::to_string(&value)?.into_boxed_str();
+            next.entity_raw_mut()[index] = Arc::<str>::from(serde_json::to_string(&value)?);
             changed_entity_ids.push(record.id.clone());
         }
         let mut topology_dirty = false;
@@ -234,7 +235,7 @@ impl CoreState {
                 }
                 next.entity_raw_mut().insert(
                     addition.index,
-                    serde_json::to_string(&addition.value)?.into_boxed_str(),
+                    Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );
                 changed_entity_ids.push(id.to_owned());
             }
@@ -249,7 +250,7 @@ impl CoreState {
                 .ok_or_else(|| anyhow!("native command belt is missing"))?;
             let mut value = next.parse_belt(index)?;
             apply_record_changes(&mut value, &record.changes)?;
-            next.belt_raw_mut()[index] = serde_json::to_string(&value)?.into_boxed_str();
+            next.belt_raw_mut()[index] = Arc::<str>::from(serde_json::to_string(&value)?);
             changed_belt_ids.push(record.id.clone());
         }
         if !command.removed_belt_ids.is_empty() {
@@ -293,14 +294,13 @@ impl CoreState {
                 }
                 next.belt_raw_mut().insert(
                     addition.index,
-                    serde_json::to_string(&addition.value)?.into_boxed_str(),
+                    Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );
                 changed_belt_ids.push(id.to_owned());
             }
             topology_dirty = true;
         }
         next.revision += 1;
-        next.rebuild_indexes()?;
         let only_pause_changed = command.changed_entities.is_empty()
             && command.added_entities.is_empty()
             && command.removed_entity_ids.is_empty()
@@ -313,6 +313,18 @@ impl CoreState {
                     Some(PathSegment::Key(key)) if key == "paused"
                 )
             });
+        // Top-level commands never change record IDs or topology. Rebuilding
+        // all 80k entity and 155k belt indexes for a pause/resume toggle made
+        // a tiny Windows command pay the full save-open parsing cost.
+        let records_changed = !command.changed_entities.is_empty()
+            || !command.added_entities.is_empty()
+            || !command.removed_entity_ids.is_empty()
+            || !command.changed_belts.is_empty()
+            || !command.added_belts.is_empty()
+            || !command.removed_belt_ids.is_empty();
+        if records_changed {
+            next.rebuild_indexes()?;
+        }
         if !only_pause_changed {
             next.invalidate_factory_static_admission();
         }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use anyhow::{anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
@@ -291,13 +291,7 @@ impl CoreRegistry {
             bail!("native core checkpoint identity changed before open");
         }
         let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
-        let mut records = BTreeMap::new();
-        for key in &recovery.record_keys {
-            let value = store
-                .read_record_at(slot, key, generation, root_hash)?
-                .ok_or_else(|| anyhow!("native core checkpoint record disappeared"))?;
-            records.insert(key.clone(), value);
-        }
+        let records = store.read_records_at(slot, &recovery.record_keys, generation, root_hash)?;
         let mut state = CoreState::from_internal_records(
             CoreCheckpointIdentity {
                 slot: slot.to_owned(),

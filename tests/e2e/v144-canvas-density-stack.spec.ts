@@ -89,7 +89,7 @@ async function seedCanvas(page: Page, options: { count: number; exactStack?: num
   });
   await page.addInitScript(({ save, detail, canvasOverlap, interactionDetail, detailKey, canvasOverlapKey, interactionDetailKey, blueprintOverlapKey }) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.0");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.1");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.ui.show-run-log.v1", "true");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));

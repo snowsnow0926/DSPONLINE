@@ -1,5 +1,7 @@
 # 系统架构
 
+> **1.2.1 Windows 原生热路径优化（开发候选，未部署）**：第二层恢复接口以一次已验证 generation 读取所需记录，健康最新代际优先验证并在成功后停止；第三层首次加载保留原始 JSON 记录的共享不可变表示，解析结果复用于索引与线路路由。规范根哈希、组件/字段哈希和领域摘要共享一次实体/线路扫描，并以 revision 缓存小型摘要。事务候选通过共享记录避免整厂字符串复制，顶层命令跳过不必要的索引重建。Worker 分块保存只在权威 revision、数量、清单元数据和物理区块全部一致时复用集合页，任何证明缺失都会回退到完整投影/哈希路径。JavaScript 权威、原生影子失败关闭、公开 v47 存档和所有云端 schema 边界不变；详见 [1.2.1 开发报告](./releases/1.2.1-windows-performance-development-report-2026-08-27.md)。
+
 > **1.2.0 Windows 原生性能边界（开发候选，未部署）**：Electron 主进程独占受限 Rust Host；renderer 只能调用逻辑槽位、命令、投影和状态接口，不能传文件路径、进程参数或任意帧。第二层私有存档使用内容寻址压缩区块、manifest-last、双 superblock 和连续 WAL；第三层原生核心从同 revision 检查点建立独立状态与索引，在邀请 Beta 中只做影子对照。JavaScript 仍是权威，`authorityEligible=false`；原生失败不会安装旧检查点。公开兼容仍为 GameState v47 / envelope v2，详见 [ADR-005](./architecture/ADR-005-WINDOWS-NATIVE-SAVE-FORMAT.md)、[ADR-006](./architecture/ADR-006-WINDOWS-NATIVE-CORE-PROTOCOL.md) 和 [开发实测报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。
 
 > **1.1.8 内存策略边界（发布候选，未部署）**：`memoryBudget.ts` 是无 React/存储依赖的内存闸门。模拟调度器和保存路径共用同一 `MemoryGuardPolicy`：默认在浏览器 JS 堆达到 90% 或可选固定水位、模拟积压达到安全线时暂停；关闭设备级开关后，堆水位和模拟积压不会触发回档或清空未提交时间，调度器也不因积压停止接纳切片。Worker/检查点协议失败与显式分配失败仍是数据完整性硬保护。固定水位只增加提前暂停，不降低浏览器上限保护。开关与阈值由 `uiPreferences.ts` 写入本机 localStorage，不进入 `GameState`、save envelope、云上传、确定性哈希或服务端 schema；浏览器不提供 `performance.memory` 时按未知处理。内存闸门拒绝保存必须走与异常相同的 `failed` persistence phase/transition，避免 UI 留在进行中。详见 [1.1.8 内存优化交接](./releases/1.1.8-memory-optimization-handoff.md)。

@@ -193,6 +193,41 @@ describe("v1 chunked save journal", () => {
     await clearChunkedSaveJournal("normal");
   });
 
+  it("reuses verified collection pages when the authority revision is unchanged", async () => {
+    const registry = createContentPackRegistry();
+    const state = createInitialState();
+    const projected = projectPersistentSaveState(state, registry);
+    const baseChecksum = computeSaveStateChecksum(2, projected);
+    const first = await streamChunkedSaveJournalFromRuntimeState(
+      state,
+      registry,
+      { mode: "normal", basePrimaryChecksum: baseChecksum, savedAt: 50 },
+      await prepareChunkedSaveJournalContext("normal", baseChecksum),
+      async (records) => commitLocalSaveInternalRecords(records),
+    );
+    const secondWrites: string[] = [];
+    const second = await streamChunkedSaveJournalFromRuntimeState(
+      state,
+      registry,
+      { mode: "normal", basePrimaryChecksum: baseChecksum, savedAt: 51 },
+      await prepareChunkedSaveJournalContext("normal", baseChecksum),
+      async (records) => {
+        secondWrites.push(...records.map((record) => record.key));
+        await commitLocalSaveInternalRecords(records);
+      },
+      {
+        entityCount: first.manifest.entityCount,
+        beltCount: first.manifest.beltCount,
+        chunks: first.manifest.chunks.filter((chunk) => chunk.kind !== "base"),
+      },
+    );
+    expect(second.changedChunks).toBe(0);
+    expect(second.manifest.chunkRootChecksum).toBe(first.manifest.chunkRootChecksum);
+    expect(secondWrites).toHaveLength(1);
+    expect(secondWrites[0]).toContain("manifest");
+    await clearChunkedSaveJournal("normal");
+  });
+
   it("rejects a tampered chunk instead of shadowing the compatible v47 primary", async () => {
     const registry = createContentPackRegistry();
     const state = createInitialState();

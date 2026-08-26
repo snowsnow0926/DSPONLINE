@@ -207,6 +207,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     }, null, 2));
     expect(opened.summary.canonicalComponents).toEqual(sourceComponents);
     expect(opened.summary.canonicalSha256).toBe(sourceSha256);
+    const commandPrivateBytesBefore = privateBytes(client.child?.pid);
+    const commandStartedAt = performance.now();
     const resumed = await client.request({
       operation: "coreApplyCommand",
       sessionId: opened.sessionId,
@@ -218,6 +220,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         changedBelts: [], addedBelts: [], removedBeltIds: [],
       },
     });
+    const commandDurationMs = performance.now() - commandStartedAt;
+    const commandPrivateBytesAfter = privateBytes(client.child?.pid);
     const coreAdvanceStartedAt = performance.now();
     const admission = await client.request({
       operation: "coreAdvance",
@@ -236,11 +240,22 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       sessionId: opened.sessionId,
     });
     const diagnosticsDurationMs = performance.now() - diagnosticsStartedAt;
+    const cachedDiagnosticsStartedAt = performance.now();
+    const cachedAdvancedSummary = await client.request({
+      operation: "coreStatus",
+      sessionId: opened.sessionId,
+    });
+    const cachedDiagnosticsDurationMs = performance.now() - cachedDiagnosticsStartedAt;
+    expect(cachedAdvancedSummary).toEqual(advancedSummary);
     console.log(JSON.stringify({
       nativeCoreAdmission: {
         supported: admission.supported,
         exactScope: admission.exactScope,
         reason: admission.reason ?? null,
+        commandDurationMs: Number(commandDurationMs.toFixed(2)),
+        commandPrivateBytesDelta: commandPrivateBytesBefore !== null && commandPrivateBytesAfter !== null
+          ? commandPrivateBytesAfter - commandPrivateBytesBefore
+          : null,
       },
     }, null, 2));
     if (admission.supported) {
@@ -292,9 +307,10 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
-          nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
-          deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
-        },
+        nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
+        deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
+        cachedDiagnosticsDurationMs: Number(cachedDiagnosticsDurationMs.toFixed(2)),
+      },
       }, null, 2));
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);

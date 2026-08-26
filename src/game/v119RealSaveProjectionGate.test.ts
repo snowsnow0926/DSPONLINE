@@ -23,6 +23,18 @@ realSaveDescribe("1.1.9 real-save persistent projection gate", () => {
     const state = structuredClone(migrated!);
     state.paused = false;
     const runtime = createPersistentSimulationRuntime(state);
+    const sourceById = new Map(runtime.state.entities.map((entity) => [entity.id, entity]));
+    const beltSignals = runtime.state.belts.reduce((counts, belt) => {
+      const sourceOutput = sourceById.get(belt.source)?.outputs[belt.itemId] ?? 0;
+      if (sourceOutput > 1e-9) counts.sourceOutput += 1;
+      if (Math.abs(belt.progress ?? 0) > 1e-9) counts.progress += 1;
+      if (Math.abs(belt.lastFlow ?? 0) > 1e-9) counts.lastFlow += 1;
+      if (Math.abs(belt.congestion ?? 0) > 1e-9) counts.congestion += 1;
+      if (Math.abs(belt.progress ?? 0) <= 1e-9 && sourceOutput <= 1e-9 &&
+        (Math.abs(belt.lastFlow ?? 0) > 1e-9 || Math.abs(belt.congestion ?? 0) > 1e-9)) counts.metricsOnly += 1;
+      return counts;
+    }, { sourceOutput: 0, progress: 0, lastFlow: 0, congestion: 0, metricsOnly: 0 });
+    console.info("v119-real-save-belt-signals", JSON.stringify(beltSignals));
     let baseline = captureSimulationProjectionBaseline(runtime.state);
     const metrics: Array<Record<string, number>> = [];
 
@@ -53,7 +65,15 @@ realSaveDescribe("1.1.9 real-save persistent projection gate", () => {
         constructionMs: Math.round(profiler.constructionMs),
         historyMs: Math.round(profiler.historyMs),
         beltRouteChecks: profiler.beltRouteChecks,
+        beltTargetChecks: profiler.beltTargetChecks,
+        beltInvalidRouteChecks: profiler.beltInvalidRouteChecks,
+        beltSourceEmptyChecks: profiler.beltSourceEmptyChecks,
+        beltTargetFullChecks: profiler.beltTargetFullChecks,
         beltStableRoutesSkipped: profiler.beltStableRoutesSkipped,
+        beltRouteGroups: runtime.lookup?.beltRuntime.routeGroups.length ?? 0,
+        beltActiveGroups: runtime.lookup?.beltRuntime.activeGroupKeys.size ?? 0,
+        beltInitiallyDormantRoutes: runtime.lookup?.beltRuntime.initiallyDormantRouteCount ?? 0,
+        beltActiveQueueEnabled: runtime.lookup?.beltRuntime.activeQueueEnabled ? 1 : 0,
       });
     }
     console.info("v119-real-save-projection-metrics", JSON.stringify(metrics));

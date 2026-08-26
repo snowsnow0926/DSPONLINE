@@ -8,7 +8,7 @@ import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjectio
 import { createSimulationStateDelta, shouldUseSimulationDelta, type SimulationStateDelta } from "./simulationDelta";
 import { runTimeWarpApproximateSettlement, type TimeWarpApproximationReport } from "./offlineApproximation";
 import { createFactoryAlertProjection } from "./alerts";
-import { streamChunkedSaveJournalFromRuntimeState, type ChunkedSaveJournalContext, type PersistChunkedSaveOptions, type PersistChunkedSaveResult } from "./chunkedSaveJournal";
+import { streamChunkedSaveJournalFromRuntimeState, type ChunkedSaveCollectionReuse, type ChunkedSaveJournalContext, type PersistChunkedSaveOptions, type PersistChunkedSaveResult } from "./chunkedSaveJournal";
 import type { LocalSaveInternalWrite } from "./localSaveStore";
 import type { AuthoritativeSaveCheckpointOverlay } from "./authoritativeSaveSerializationProtocol";
 import { applyAuthoritativeSaveCheckpointOverlay } from "./saveCheckpointOverlay";
@@ -157,6 +157,7 @@ export interface SimulationChunkedSaveWriteAck {
 let runtime: PersistentSimulationRuntime | null = null;
 let activeRegistryFingerprint: string | null = null;
 let runtimeRevision = 0;
+let chunkedSaveCollectionCache: (ChunkedSaveCollectionReuse & { runtimeRevision: number }) | null = null;
 let multicoreExecutor: BrowserMulticoreExecutor | null = null;
 let multicoreExecutorWorkerCount = 0;
 let activeRegistrySnapshot: ContentPackRuntimeSnapshot | undefined;
@@ -398,6 +399,7 @@ async function processDurableReplayRequest(
     else runtime = createPersistentSimulationRuntime(state);
     uiProjectionBaseline = null;
     runtimeRevision = durableReplay.checkpointStateRevision;
+    chunkedSaveCollectionCache = null;
     runtimeInvalidated = false;
 
     const executeStep = async (
@@ -533,6 +535,7 @@ async function processDurableReplayRequest(
     // bootstrap transfer may make this Worker authoritative again.
     runtime = null;
     runtimeRevision = 0;
+    chunkedSaveCollectionCache = null;
     runtimeInvalidated = true;
     activeRegistryFingerprint = null;
     activeRegistrySnapshot = undefined;
@@ -600,6 +603,7 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
     else runtime = createPersistentSimulationRuntime(state, profiler);
     uiProjectionBaseline = null;
     runtimeRevision = Math.max(runtimeRevision + 1, stateRevision ?? 0);
+    chunkedSaveCollectionCache = null;
     runtimeInvalidated = false;
   }
   if (!runtime) {
@@ -686,7 +690,16 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
             event.data.chunkedSave.options,
             event.data.chunkedSave.context,
             writeBatch,
+            chunkedSaveCollectionCache?.runtimeRevision === runtimeRevision
+              ? chunkedSaveCollectionCache
+              : undefined,
           );
+          chunkedSaveCollectionCache = {
+            runtimeRevision,
+            entityCount: chunkedSaveResult.manifest.entityCount,
+            beltCount: chunkedSaveResult.manifest.beltCount,
+            chunks: chunkedSaveResult.manifest.chunks.filter((chunk) => chunk.kind !== "base"),
+          };
           writePort.close();
           self.postMessage({
             id,

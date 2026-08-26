@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -5,10 +6,11 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::canonical::{fnv1a_utf8, update_canonical};
+use crate::canonical::{fnv1a_utf8, update_canonical, update_canonical_object};
 use crate::catalog::RuntimeCatalog;
 
 const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
@@ -245,6 +247,13 @@ pub struct CoreStateSummary {
     pub coverage: DomainCoverage,
 }
 
+struct CanonicalDigestBundle {
+    canonical_sha256: String,
+    canonical_components: BTreeMap<String, String>,
+    canonical_fields: BTreeMap<String, String>,
+    domain_sha256: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChunkMetadata {
@@ -324,6 +333,8 @@ pub(crate) struct ItemQuantity {
     pub amount: f64,
 }
 
+pub(crate) type RawRecord = Arc<str>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntityColumns {
     pub ids: Vec<Box<str>>,
@@ -399,8 +410,8 @@ pub struct CoreState {
     pub revision: u64,
     pub catalog: RuntimeCatalog,
     base: Map<String, Value>,
-    entity_raw: Vec<Box<str>>,
-    belt_raw: Vec<Box<str>>,
+    entity_raw: Vec<RawRecord>,
+    belt_raw: Vec<RawRecord>,
     pub(crate) entity_index: HashMap<String, usize>,
     pub(crate) belt_index: HashMap<String, usize>,
     pub(crate) symbols: Symbols,
@@ -411,6 +422,11 @@ pub struct CoreState {
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
     prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
+    /// Canonical diagnostics are intentionally expensive on very large saves.
+    /// A revision is immutable from the protocol's point of view, so repeated
+    /// status/compare/checkpoint calls can safely reuse the small digest result
+    /// instead of reparsing every entity and belt again.
+    summary_cache: RefCell<Option<(u64, CoreStateSummary)>>,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -454,7 +470,10 @@ fn parallel_worker_count(record_count: usize) -> usize {
         .min(record_count)
 }
 
-fn parse_records_parallel(records: &[Box<str>], label: &'static str) -> anyhow::Result<Vec<Value>> {
+fn parse_records_parallel(
+    records: &[RawRecord],
+    label: &'static str,
+) -> anyhow::Result<Vec<Value>> {
     let workers = parallel_worker_count(records.len());
     if workers == 1 {
         return records
@@ -495,7 +514,7 @@ fn parse_records_parallel(records: &[Box<str>], label: &'static str) -> anyhow::
 fn encode_records_parallel(
     records: &[Value],
     label: &'static str,
-) -> anyhow::Result<Vec<Box<str>>> {
+) -> anyhow::Result<Vec<RawRecord>> {
     let workers = parallel_worker_count(records.len());
     if workers == 1 {
         return records
@@ -503,23 +522,23 @@ fn encode_records_parallel(
             .map(|value| {
                 serde_json::to_string(value)
                     .with_context(|| format!("encode {label}"))
-                    .map(String::into_boxed_str)
+                    .map(RawRecord::from)
             })
             .collect();
     }
     let chunk_size = records.len().div_ceil(workers);
-    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<Box<str>>)>> {
+    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<RawRecord>)>> {
         let handles = records
             .chunks(chunk_size)
             .enumerate()
             .map(|(part_index, chunk)| {
-                scope.spawn(move || -> anyhow::Result<(usize, Vec<Box<str>>)> {
+                scope.spawn(move || -> anyhow::Result<(usize, Vec<RawRecord>)> {
                     let values = chunk
                         .iter()
                         .map(|value| {
                             serde_json::to_string(value)
                                 .with_context(|| format!("encode {label}"))
-                                .map(String::into_boxed_str)
+                                .map(RawRecord::from)
                         })
                         .collect::<anyhow::Result<Vec<_>>>()?;
                     Ok((part_index, values))
@@ -666,6 +685,9 @@ impl CoreState {
             .as_object()
             .cloned()
             .ok_or_else(|| anyhow!("native core base chunk is not an object"))?;
+        if base.contains_key("entities") || base.contains_key("belts") {
+            bail!("native core base chunk contains an unbounded collection");
+        }
 
         let mut entity_raw = vec![None; manifest.entity_count];
         let mut belt_raw = vec![None; manifest.belt_count];
@@ -687,17 +709,20 @@ impl CoreState {
             }
             let bytes = chunk_record(records, &manifest_key, &metadata.id)?;
             verify_chunk(metadata, bytes)?;
-            let values = serde_json::from_slice::<Vec<Value>>(bytes)
+            // Preserve each already-valid JSON record as raw text. Decoding
+            // the page into a full `Value` graph and immediately serializing
+            // every record again doubled startup parsing and allocation; the
+            // index rebuild below performs the required object validation.
+            let values = serde_json::from_slice::<Vec<Box<RawValue>>>(bytes)
                 .context("decode native core record chunk")?;
             if values.len() != metadata.count {
                 bail!("native core checkpoint chunk count is invalid");
             }
             for (index, value) in values.into_iter().enumerate() {
-                if !value.is_object() || target[metadata.offset + index].is_some() {
+                if target[metadata.offset + index].is_some() {
                     bail!("native core checkpoint record topology is invalid");
                 }
-                target[metadata.offset + index] =
-                    Some(serde_json::to_string(&value)?.into_boxed_str());
+                target[metadata.offset + index] = Some(RawRecord::from(value.get()));
             }
         }
         if entity_raw.iter().any(Option::is_none) || belt_raw.iter().any(Option::is_none) {
@@ -720,11 +745,21 @@ impl CoreState {
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
+            summary_cache: RefCell::new(None),
         };
-        state.rebuild_indexes()?;
+        // Startup needs parsed records both for indexes and prepared belt
+        // routes. Keep one bounded parse graph alive through both consumers
+        // instead of decoding all records twice back-to-back.
+        let parsed_entities = state.parse_entities_parallel()?;
+        let parsed_belts = state.parse_belts_parallel()?;
+        state.rebuild_indexes_from_parsed(&parsed_entities, &parsed_belts)?;
         state.refresh_factory_static_admission()?;
         if state.factory_static_admission_reason.is_none() {
-            state.refresh_prepared_belt_routes()?;
+            state.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes(
+                &state,
+                &parsed_entities,
+                &parsed_belts,
+            )?));
         }
         Ok(state)
     }
@@ -777,7 +812,7 @@ impl CoreState {
             serde_json::to_string(&Value::Object(self.base.clone()))?,
         )?;
         let emit_raw_ranges =
-            |values: &[Box<str>],
+            |values: &[RawRecord],
              kind: &str,
              chunk_size: usize,
              emit: &mut dyn FnMut(String, &str, usize, usize, String) -> anyhow::Result<()>|
@@ -878,16 +913,21 @@ impl CoreState {
         self.prepared_belt_routes = Some(routes);
     }
 
-    fn refresh_prepared_belt_routes(&mut self) -> anyhow::Result<()> {
+    pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
         let entities = self.parse_entities_parallel()?;
         let belts = self.parse_belts_parallel()?;
-        self.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes(
-            self, &entities, &belts,
-        )?));
-        Ok(())
+        self.rebuild_indexes_from_parsed(&entities, &belts)
     }
 
-    pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
+    fn rebuild_indexes_from_parsed(
+        &mut self,
+        entity_values: &[Value],
+        belt_values: &[Value],
+    ) -> anyhow::Result<()> {
+        if entity_values.len() != self.entity_raw.len() || belt_values.len() != self.belt_raw.len()
+        {
+            bail!("native core parsed record count is inconsistent");
+        }
         self.symbols = Symbols::default();
         self.entities = EntityColumns::default();
         self.belts = BeltColumns::default();
@@ -901,9 +941,7 @@ impl CoreState {
             .map(|(index, planet)| (planet.id.as_str(), index))
             .collect::<HashMap<_, _>>();
         let mut factory_topology = FactoryTopology::default();
-        for (index, raw) in self.entity_raw.iter().enumerate() {
-            let value =
-                serde_json::from_str::<Value>(raw).context("decode native core entity record")?;
+        for (index, value) in entity_values.iter().enumerate() {
             let object = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native core entity is not an object"))?;
@@ -1014,9 +1052,7 @@ impl CoreState {
                 },
             );
         }
-        for (index, raw) in self.belt_raw.iter().enumerate() {
-            let value =
-                serde_json::from_str::<Value>(raw).context("decode native core belt record")?;
+        for (index, value) in belt_values.iter().enumerate() {
             let object = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native core belt is not an object"))?;
@@ -1078,15 +1114,18 @@ impl CoreState {
     }
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
+        self.summary_cache.get_mut().take();
         &mut self.base
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
     }
-    pub(crate) fn entity_raw_mut(&mut self) -> &mut Vec<Box<str>> {
+    pub(crate) fn entity_raw_mut(&mut self) -> &mut Vec<RawRecord> {
+        self.summary_cache.get_mut().take();
         &mut self.entity_raw
     }
-    pub(crate) fn belt_raw_mut(&mut self) -> &mut Vec<Box<str>> {
+    pub(crate) fn belt_raw_mut(&mut self) -> &mut Vec<RawRecord> {
+        self.summary_cache.get_mut().take();
         &mut self.belt_raw
     }
 
@@ -1096,6 +1135,7 @@ impl CoreState {
         entities: Vec<Value>,
         belts: Vec<Value>,
     ) -> anyhow::Result<()> {
+        self.summary_cache.get_mut().take();
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -1277,7 +1317,7 @@ impl CoreState {
     }
 
     pub fn canonical_components(&self) -> anyhow::Result<BTreeMap<String, String>> {
-        let hash_records = |records: &[Box<str>]| -> anyhow::Result<String> {
+        let hash_records = |records: &[RawRecord]| -> anyhow::Result<String> {
             let mut hasher = Sha256::new();
             hasher.update(b"[");
             for (index, raw) in records.iter().enumerate() {
@@ -1321,6 +1361,172 @@ impl CoreState {
                 .ok_or_else(|| anyhow!("native core belt component hash is missing"))?,
         );
         Ok(fields)
+    }
+
+    /// Computes the full-state hash and both collection component hashes in
+    /// one parse pass. Previously `summary()` parsed every entity/belt once
+    /// for the full hash, twice more through components/fields, and once for
+    /// the domain hash. Large 1.1.x saves therefore spent several seconds on
+    /// duplicate JSON decoding for every diagnostics request.
+    fn canonical_digest_bundle(&self) -> anyhow::Result<CanonicalDigestBundle> {
+        let mut canonical = Sha256::new();
+        let mut entities = Sha256::new();
+        let mut belts = Sha256::new();
+        let mut domain = self.start_domain_hasher();
+        let mut domain_symbols = self.symbols.clone();
+        let mut belt_domain_metrics = Vec::<[f64; 3]>::with_capacity(self.belt_raw.len());
+        canonical.update(b"{");
+        entities.update(b"[");
+        belts.update(b"[");
+
+        let mut keys = self.base.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.push("entities");
+        keys.push("belts");
+        keys.sort_unstable();
+        for (position, key) in keys.iter().enumerate() {
+            if position > 0 {
+                canonical.update(b",");
+            }
+            canonical.update(serde_json::to_string(key)?.as_bytes());
+            canonical.update(b":");
+            match *key {
+                "entities" => {
+                    canonical.update(b"[");
+                    for (index, raw) in self.entity_raw.iter().enumerate() {
+                        if index > 0 {
+                            canonical.update(b",");
+                            entities.update(b",");
+                        }
+                        let value =
+                            serde_json::from_str(raw).context("decode native canonical entity")?;
+                        update_canonical(&mut canonical, &value);
+                        update_canonical(&mut entities, &value);
+                        self.update_domain_entity(&mut domain, &mut domain_symbols, index, &value)?;
+                    }
+                    canonical.update(b"]");
+                }
+                "belts" => {
+                    canonical.update(b"[");
+                    for (index, raw) in self.belt_raw.iter().enumerate() {
+                        if index > 0 {
+                            canonical.update(b",");
+                            belts.update(b",");
+                        }
+                        let value =
+                            serde_json::from_str(raw).context("decode native canonical belt")?;
+                        update_canonical(&mut canonical, &value);
+                        update_canonical(&mut belts, &value);
+                        let belt = value
+                            .as_object()
+                            .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
+                        belt_domain_metrics.push([
+                            object_number(belt, "progress"),
+                            object_number(belt, "totalTransferred"),
+                            object_number(belt, "lastFlow"),
+                        ]);
+                    }
+                    canonical.update(b"]");
+                }
+                key => update_canonical(&mut canonical, &self.base[key]),
+            }
+        }
+        canonical.update(b"}");
+        entities.update(b"]");
+        belts.update(b"]");
+        if belt_domain_metrics.len() != self.belts.ids.len() {
+            bail!("native domain belt metric count is inconsistent");
+        }
+        for (index, metrics) in belt_domain_metrics.into_iter().enumerate() {
+            self.update_domain_belt_metrics(&mut domain, index, metrics);
+        }
+
+        let mut base = Sha256::new();
+        update_canonical_object(&mut base, &self.base);
+        let entity_sha256 = hex::encode(entities.finalize());
+        let belt_sha256 = hex::encode(belts.finalize());
+        let canonical_components = BTreeMap::from([
+            ("base".to_owned(), hex::encode(base.finalize())),
+            ("entities".to_owned(), entity_sha256.clone()),
+            ("belts".to_owned(), belt_sha256.clone()),
+        ]);
+        let mut canonical_fields = self
+            .base
+            .iter()
+            .map(|(key, value)| (key.clone(), crate::canonical::canonical_sha256(value)))
+            .collect::<BTreeMap<_, _>>();
+        canonical_fields.insert("entities".to_owned(), entity_sha256);
+        canonical_fields.insert("belts".to_owned(), belt_sha256);
+        Ok(CanonicalDigestBundle {
+            canonical_sha256: hex::encode(canonical.finalize()),
+            canonical_components,
+            canonical_fields,
+            domain_sha256: hex::encode(domain.finalize()),
+        })
+    }
+
+    fn start_domain_hasher(&self) -> Sha256 {
+        let mut hasher = Sha256::new();
+        hasher.update(b"dsp-native-domain-v1\0");
+        hasher.update(self.revision.to_le_bytes());
+        for key in [
+            "version",
+            "mode",
+            "activePlanetId",
+            "elapsedSeconds",
+            "paused",
+        ] {
+            if let Some(value) = self.base.get(key) {
+                update_canonical(&mut hasher, value);
+            }
+            hasher.update(b"\0");
+        }
+        hasher
+    }
+
+    fn update_domain_entity(
+        &self,
+        hasher: &mut Sha256,
+        symbols: &mut Symbols,
+        index: usize,
+        value: &Value,
+    ) -> anyhow::Result<()> {
+        let entity = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native domain entity is not an object"))?;
+        hasher.update(self.entities.ids[index].as_bytes());
+        hasher.update(b"\0");
+        for entry in parse_inventory(entity.get("inputs"), symbols) {
+            if let Some(item) = self.symbols.resolve(entry.item) {
+                hasher.update(item.as_bytes());
+            } else if let Some(item) = symbols.resolve(entry.item) {
+                hasher.update(item.as_bytes());
+            }
+            hasher.update(entry.amount.to_bits().to_le_bytes());
+        }
+        hasher.update(b"|");
+        for entry in parse_inventory(entity.get("outputs"), symbols) {
+            if let Some(item) = self.symbols.resolve(entry.item) {
+                hasher.update(item.as_bytes());
+            } else if let Some(item) = symbols.resolve(entry.item) {
+                hasher.update(item.as_bytes());
+            }
+            hasher.update(entry.amount.to_bits().to_le_bytes());
+        }
+        hasher.update(object_number(entity, "progress").to_bits().to_le_bytes());
+        hasher.update(object_number(entity, "utilization").to_bits().to_le_bytes());
+        hasher.update(
+            object_number(entity, "productionRate")
+                .to_bits()
+                .to_le_bytes(),
+        );
+        Ok(())
+    }
+
+    fn update_domain_belt_metrics(&self, hasher: &mut Sha256, index: usize, metrics: [f64; 3]) {
+        hasher.update(self.belts.ids[index].as_bytes());
+        for value in metrics {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
     }
 
     pub fn domain_sha256(&self) -> anyhow::Result<String> {
@@ -1441,10 +1647,17 @@ impl CoreState {
     }
 
     pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
-        let canonical_sha256 = self.canonical_sha256()?;
-        let canonical_components = self.canonical_components()?;
-        let canonical_fields = self.canonical_fields()?;
-        Ok(CoreStateSummary {
+        if let Some(summary) = self
+            .summary_cache
+            .borrow()
+            .as_ref()
+            .filter(|(revision, _)| *revision == self.revision)
+            .map(|(_, summary)| summary.clone())
+        {
+            return Ok(summary);
+        }
+        let canonical = self.canonical_digest_bundle()?;
+        let summary = CoreStateSummary {
             revision: self.revision,
             state_version: self
                 .base
@@ -1475,15 +1688,18 @@ impl CoreState {
                 .unwrap_or(false),
             entity_count: self.entity_raw.len(),
             belt_count: self.belt_raw.len(),
-            canonical_sha256,
-            canonical_components,
-            canonical_fields,
-            domain_sha256: self.domain_sha256()?,
+            canonical_sha256: canonical.canonical_sha256,
+            canonical_components: canonical.canonical_components,
+            canonical_fields: canonical.canonical_fields,
+            domain_sha256: canonical.domain_sha256,
             catalog_sha256: self.catalog.fingerprint.clone(),
             registry_fingerprint: self.identity.registry_fingerprint.clone(),
             memory: self.memory_estimate(),
             coverage: self.coverage.clone(),
-        })
+        };
+        self.summary_cache
+            .replace(Some((self.revision, summary.clone())));
+        Ok(summary)
     }
 }
 
@@ -1581,7 +1797,7 @@ mod tests {
 
     #[test]
     fn loads_exact_chunked_v47_state_into_indexed_columns() {
-        let state = CoreState::from_internal_records(
+        let mut state = CoreState::from_internal_records(
             CoreCheckpointIdentity {
                 slot: "normal-main".into(),
                 generation: 1,
@@ -1603,6 +1819,33 @@ mod tests {
         assert!(summary.coverage.state_container);
         assert!(!summary.coverage.authority_eligible);
         assert_eq!(state.materialize().unwrap()["entities"][0]["id"], "vein");
+        let transactional_clone = state.clone();
+        assert!(Arc::ptr_eq(
+            &state.entity_raw[0],
+            &transactional_clone.entity_raw[0]
+        ));
+        assert!(Arc::ptr_eq(
+            &state.belt_raw[0],
+            &transactional_clone.belt_raw[0]
+        ));
+
+        // The fused pass is byte-identical to the independent public oracles,
+        // and the cache may only survive while the protocol revision does.
+        assert_eq!(summary.canonical_sha256, state.canonical_sha256().unwrap());
+        assert_eq!(
+            summary.canonical_components,
+            state.canonical_components().unwrap()
+        );
+        assert_eq!(summary.canonical_fields, state.canonical_fields().unwrap());
+        assert_eq!(summary.domain_sha256, state.domain_sha256().unwrap());
+        assert!(state.summary_cache.borrow().is_some());
+        state
+            .base
+            .insert("elapsedSeconds".to_owned(), Value::from(1));
+        state.revision += 1;
+        let advanced = state.summary().unwrap();
+        assert_eq!(advanced.elapsed_seconds, 1.0);
+        assert_ne!(advanced.canonical_sha256, summary.canonical_sha256);
     }
 
     #[test]

@@ -3,6 +3,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
 const { validatePackagedTransferContract } = require("./package-contract.cjs");
+const { verifyDesktopPackageHygiene } = require("./package-hygiene.cjs");
 const { extractFile } = require("@electron/asar");
 
 const expectedTransferContract = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "cloud-transfer-contract.json"), "utf8"));
@@ -37,10 +38,10 @@ function runBuilder(args) {
   });
 }
 
-function verifyPackagedMetadata(outputDirectory) {
-  if (mode !== "dist") return;
+function verifyPackagedOutput(outputDirectory) {
   const asarPath = path.join(outputDirectory, "win-unpacked", "resources", "app.asar");
-  if (!fs.existsSync(asarPath)) throw new Error(`桌面包缺少 ${asarPath}`);
+  verifyDesktopPackageHygiene(asarPath);
+  if (mode !== "dist") return;
   const metadata = JSON.parse(extractFile(asarPath, "package.json").toString("utf8"));
   if (metadata.cloudApiBaseUrl !== cloudApiBaseUrl || metadata.updateBaseUrl !== updateBaseUrl) {
     throw new Error("桌面安装包元数据中的云 API 或更新地址与发布配置不一致");
@@ -63,15 +64,14 @@ async function main() {
   ];
   const standardResult = await runBuilder(builderArgs);
   if (standardResult === 0) {
-    verifyPackagedMetadata(outputDirectory);
+    verifyPackagedOutput(outputDirectory);
     return;
   }
 
   // Some Windows security scanners briefly hold the freshly extracted Electron
   // directory, making electron-builder's final rename fail with EPERM. Reuse
   // that complete temporary distribution instead of downloading it again.
-  const outputDir = path.resolve("release");
-  const temporaryDist = path.join(outputDir, "win-unpacked.tmp");
+  const temporaryDist = path.join(outputDirectory, "win-unpacked.tmp");
   if (!fs.existsSync(temporaryDist)) process.exit(standardResult);
 
   const fallbackOutput = path.resolve(`${outputDirectory}-fallback`);
@@ -84,7 +84,7 @@ async function main() {
     `--config.directories.output=${fallbackOutput}`,
     `--config.electronDist=${temporaryDist}`,
   ]);
-  if (fallbackResult === 0) verifyPackagedMetadata(fallbackOutput);
+  if (fallbackResult === 0) verifyPackagedOutput(fallbackOutput);
   process.exit(fallbackResult);
 }
 

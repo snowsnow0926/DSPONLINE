@@ -90,14 +90,21 @@ test.afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("reports the 1.2.0 candidate version and a unique build id", async ({ page }) => {
+test("reports the 1.2.1 candidate version and a unique build id", async ({ page }) => {
   await page.goto("/?menu=1");
-  const application = await page.evaluate(async () => {
-    const { collectClientDiagnostics } = await import("/src/game/diagnostics.ts");
-    return collectClientDiagnostics().application as { version: string; build: string };
-  });
-  expect(application.version).toBe("1.2.0");
-  expect(application.build).toMatch(/^1\.2\.0\+[0-9a-f]{12}(?:\.dirty)?$/);
+  const application = process.env.DSP_E2E_USE_PREVIEW === "1"
+    ? await page.evaluate(async () => {
+        const response = await fetch("/version.json", { cache: "no-store" });
+        if (!response.ok) throw new Error(`version.json returned ${response.status}`);
+        const payload = await response.json() as { version: string; buildId: string };
+        return { version: payload.version, build: payload.buildId };
+      })
+    : await page.evaluate(async () => {
+        const { collectClientDiagnostics } = await import("/src/game/diagnostics.ts");
+        return collectClientDiagnostics().application as { version: string; build: string };
+      });
+  expect(application.version).toBe("1.2.1");
+  expect(application.build).toMatch(/^1\.2\.1\+[0-9a-f]{12}(?:\.dirty)?$/);
 });
 
 test("browser protocol uploads sparse v46 normal and speedrun saves without rewriting them", async ({ page }) => {

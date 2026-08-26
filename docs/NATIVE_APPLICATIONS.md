@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> 1.2.1 开发候选优化 Windows 76.9 MB 大型存档的原生冷启动、摘要诊断、事务内存和同 revision 重复保存，并为 Electron 包增加 Android Gradle 残留的排除与生成后硬校验。`authorityEligible=false` 和 JavaScript 权威保持不变；本版不是原生核心默认接管，也没有完成 24 小时/多硬件 Gate C。开发实测与残余边界见 [1.2.1 Windows 性能报告](./releases/1.2.1-windows-performance-development-report-2026-08-27.md)。
+
 > 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段不改变下方 1.1.5 当前公开稳定版本事实。
 
 > 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`

@@ -27,6 +27,45 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release121Copy = {
+  date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
+  title: { "zh-CN": "Windows 大型存档性能优化", en: "Windows Large-save Performance Optimization" },
+  summary: {
+    "zh-CN": "1.2.1 优化 Windows 原生核心的大型存档冷启动、状态摘要与事务内存，并让同一权威 revision 的重复增量保存直接复用已验证区块。Windows 打包会拒绝混入 Android 构建残留；JavaScript 仍是权威，GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.1 improves large-save cold start, state summaries, and transactional memory in the Windows native core, and lets repeated incremental saves of the same authoritative revision reuse verified chunks. Windows packaging rejects Android build residue. JavaScript remains authoritative; GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  openTitle: { "zh-CN": "大型存档原生冷启动减少重复解析", en: "Native large-save cold start avoids repeated parsing" },
+  openDescription: {
+    "zh-CN": "原生存档恢复按最新有效代际优先读取，并批量校验区块；实体、线路解析结果直接复用于索引和路由准备，减少启动 CPU 与峰值内存。",
+    en: "Native recovery checks the newest valid generation first and validates chunks in batches. Parsed entity and belt records are reused for indexes and route preparation, reducing startup CPU and peak memory.",
+  },
+  summaryTitle: { "zh-CN": "原生状态摘要合并为单次扫描", en: "Native state summaries use one fused scan" },
+  summaryDescription: {
+    "zh-CN": "规范哈希、组件哈希、字段计数与诊断摘要共享一次实体/线路遍历，并按 revision 缓存结果；重复诊断不再反复扫描整个工厂。",
+    en: "Canonical hashes, component hashes, field counts, and diagnostics share one entity/belt pass and are cached by revision, so repeated diagnostics no longer rescan the whole factory.",
+  },
+  memoryTitle: { "zh-CN": "事务命令共享未变化的原生记录", en: "Transactional commands share unchanged native records" },
+  memoryDescription: {
+    "zh-CN": "原生候选状态使用不可变共享记录，只有实际变化的条目才分配新内存；仅修改顶层状态的暂停等命令不再重建全部索引。",
+    en: "Native candidate states share immutable records and allocate only changed entries. Top-level-only commands such as pause no longer rebuild every index.",
+  },
+  saveTitle: { "zh-CN": "未变化 revision 的保存复用已验证区块", en: "Unchanged revisions reuse verified save chunks" },
+  saveDescription: {
+    "zh-CN": "当 Worker 权威 revision、记录数量与已提交清单完全一致时，重复检查点只提交顶层清单；活跃模拟产生的新 revision 仍走完整的确定性分块保存。",
+    en: "When the authoritative Worker revision, record counts, and committed manifest match exactly, a repeated checkpoint writes only the top-level manifest. New active-simulation revisions still use the full deterministic chunked-save path.",
+  },
+  packageTitle: { "zh-CN": "Windows 包拒绝 Android 构建残留", en: "Windows packages reject Android build residue" },
+  packageDescription: {
+    "zh-CN": "桌面打包显式排除 Capacitor Android 的 Gradle 输出，并在生成后检查 asar 与解包目录，避免跨平台构建顺序让 Windows 安装包无故膨胀。",
+    en: "Desktop packaging explicitly excludes Capacitor Android Gradle output and validates both asar and unpacked content, preventing cross-platform build order from inflating Windows packages.",
+  },
+  compatibilityTitle: { "zh-CN": "原生接管仍保持关闭", en: "Native authority cutover remains disabled" },
+  compatibilityDescription: {
+    "zh-CN": "本版继续以 JavaScript 为唯一权威，原生核心只做影子校验；没有改写旧存档，也没有宣称完成多硬件 24 小时 Gate C。",
+    en: "JavaScript remains the sole authority and the native core stays in shadow validation. Existing saves are not rewritten, and the multi-hardware 24-hour Gate C is not claimed complete.",
+  },
+} as const;
+
 const release120Copy = {
   date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
   title: { "zh-CN": "Windows 原生性能底座与戴森守恒修复", en: "Windows Native Performance Foundation and Dyson Conservation" },
@@ -631,6 +670,10 @@ function release120Message(locale: AppLocale, key: keyof typeof release120Copy):
   return release120Copy[key][locale];
 }
 
+function release121Message(locale: AppLocale, key: keyof typeof release121Copy): string {
+  return release121Copy[key][locale];
+}
+
 function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
@@ -665,6 +708,24 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-27-v1.2.1",
+    date: release121Message(locale, "date"),
+    version: "1.2.1",
+    title: release121Message(locale, "title"),
+    summary: release121Message(locale, "summary"),
+    items: [
+      { id: "native-large-save-open", title: release121Message(locale, "openTitle"), description: release121Message(locale, "openDescription") },
+      { id: "native-summary-cache", title: release121Message(locale, "summaryTitle"), description: release121Message(locale, "summaryDescription") },
+      { id: "native-transaction-memory", title: release121Message(locale, "memoryTitle"), description: release121Message(locale, "memoryDescription") },
+      { id: "unchanged-save-reuse", title: release121Message(locale, "saveTitle"), description: release121Message(locale, "saveDescription") },
+      { id: "windows-package-hygiene", title: release121Message(locale, "packageTitle"), description: release121Message(locale, "packageDescription") },
+      { id: "native-authority-boundary", title: release121Message(locale, "compatibilityTitle"), description: release121Message(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes120(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-27-v1.2.0",
     date: release120Message(locale, "date"),

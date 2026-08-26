@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.0");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.1");
     }
   });
 }
@@ -1602,15 +1602,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生性能底座与戴森守恒修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.0");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 大型存档性能优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.1");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(releaseNotes).toContainText("Windows 大型存档增加私有增量镜像");
-  await expect(releaseNotes).toContainText("独立 Rust 模拟核心开放影子校验");
-  await expect(releaseNotes).toContainText("保守时间扭曲不再复制戴森产物");
-  await expect(releaseNotes).toContainText("火箭与太阳帆流量加入事务守恒门禁");
-  await expect(releaseNotes).toContainText("排行榜异常只进入人工复核");
-  await expect(releaseNotes).toContainText("旧存档与云端协议保持兼容");
+  await expect(releaseNotes).toContainText("大型存档原生冷启动减少重复解析");
+  await expect(releaseNotes).toContainText("原生状态摘要合并为单次扫描");
+  await expect(releaseNotes).toContainText("事务命令共享未变化的原生记录");
+  await expect(releaseNotes).toContainText("未变化 revision 的保存复用已验证区块");
+  await expect(releaseNotes).toContainText("Windows 包拒绝 Android 构建残留");
+  await expect(releaseNotes).toContainText("原生接管仍保持关闭");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1635,15 +1635,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生性能底座与戴森守恒修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.0");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 大型存档性能优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.1");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v120-1440.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v121-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v120-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v121-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1666,7 +1666,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v120-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v121-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1675,15 +1675,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-27-v1.2.0");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-27-v1.2.1");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
   await page.getByRole("button", { name: "查看2026年8月27日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生性能底座与戴森守恒修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.0");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 大型存档性能优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.1");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1694,12 +1694,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生性能底座与戴森守恒修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.0");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 大型存档性能优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.1");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v120-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v121-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });

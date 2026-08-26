@@ -89,6 +89,12 @@ export interface RestoredChunkedSave {
   manifest: ChunkedSaveManifest;
 }
 
+export interface ChunkedSaveCollectionReuse {
+  entityCount: number;
+  beltCount: number;
+  chunks: readonly ChunkedSaveChunkMetadata[];
+}
+
 function journalPrefix(mode: SaveMode): string {
   return `${LOCAL_SAVE_INTERNAL_PREFIX}chunked.v1.${mode}.`;
 }
@@ -467,6 +473,7 @@ export async function streamChunkedSaveJournalFromRuntimeState(
   options: PersistChunkedSaveOptions,
   context: ChunkedSaveJournalContext,
   writeBatch: (records: LocalSaveInternalWrite[]) => Promise<void>,
+  collectionReuse?: ChunkedSaveCollectionReuse,
 ): Promise<PersistChunkedSaveResult> {
   if (context.mode !== options.mode || context.basePrimaryChecksum !== options.basePrimaryChecksum) {
     throw new Error("流式分块保存上下文与主存档身份不一致");
@@ -507,8 +514,37 @@ export async function streamChunkedSaveJournalFromRuntimeState(
       await consume(makeChunk(`${kind}:${String(offset).padStart(8, "0")}`, kind, offset, project(offset, size)));
     }
   };
-  await consumeRanges(projection.entityCount, "entities", CHUNKED_ENTITY_SIZE, projection.projectEntityRange);
-  await consumeRanges(projection.beltCount, "belts", CHUNKED_BELT_SIZE, projection.projectBeltRange);
+  const reusableChunks = collectionReuse?.entityCount === projection.entityCount &&
+    collectionReuse.beltCount === projection.beltCount
+    ? [...collectionReuse.chunks]
+    : [];
+  const reusableByKind = (kind: "entities" | "belts", total: number, size: number) => {
+    const chunks = reusableChunks.filter((chunk) => chunk.kind === kind)
+      .sort((left, right) => left.offset - right.offset);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const expectedCount = total === 0 ? 0 : Math.min(size, total - offset);
+      const previous = previousById.get(chunk.id);
+      if (chunk.offset !== offset || chunk.count !== expectedCount ||
+        chunk.id !== `${kind}:${String(offset).padStart(8, "0")}` ||
+        !previousChunkIds.has(chunk.id) || !previous ||
+        previous.kind !== chunk.kind || previous.offset !== chunk.offset || previous.count !== chunk.count ||
+        previous.checksum !== chunk.checksum || previous.bytes !== chunk.bytes) return null;
+      offset += chunk.count;
+    }
+    return chunks.length > 0 && offset === total ? chunks : null;
+  };
+  const reusableEntities = reusableByKind("entities", projection.entityCount, CHUNKED_ENTITY_SIZE);
+  const reusableBelts = reusableByKind("belts", projection.beltCount, CHUNKED_BELT_SIZE);
+  if (reusableEntities && reusableBelts && reusableEntities.length + reusableBelts.length === reusableChunks.length) {
+    // The Worker revision has not changed and the durable previous manifest
+    // proves every collection page still exists. Reuse only metadata; no
+    // entity/belt projection, JSON allocation, hashing, or IPC is required.
+    metadata.push(...reusableEntities, ...reusableBelts);
+  } else {
+    await consumeRanges(projection.entityCount, "entities", CHUNKED_ENTITY_SIZE, projection.projectEntityRange);
+    await consumeRanges(projection.beltCount, "belts", CHUNKED_BELT_SIZE, projection.projectBeltRange);
+  }
   await flush();
   const manifest: ChunkedSaveManifest = {
     formatVersion: CHUNKED_SAVE_FORMAT_VERSION,

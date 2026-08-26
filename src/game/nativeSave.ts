@@ -77,7 +77,7 @@ export async function appendWindowsNativeWal(
 }
 
 /**
- * Windows desktop requires the private native save during the 1.2.0 beta.
+ * Windows desktop requires the private native save during the 1.2.x beta.
  * Web and Android return null and continue to use the compatible v47 path.
  */
 export async function beginWindowsNativeSave(

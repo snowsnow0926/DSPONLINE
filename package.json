@@ -1,7 +1,7 @@
 {
   "name": "dsp-idle-network",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "releaseChannel": "beta",
   "updateBaseUrl": "",
   "cloudApiBaseUrl": "",
@@ -28,7 +28,7 @@
     "test:e2e:durable": "cross-env VITE_DURABLE_RUNTIME_RECOVERY=true playwright test tests/e2e/v144-runtime-wal-integration.spec.ts",
     "test:e2e:nightly": "playwright test --config=playwright.nightly.config.ts",
     "test:server": "npm --prefix server test && npm --prefix server run test:station",
-    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs android/security-boundary.test.mjs",
+    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs desktop/package-hygiene.test.cjs android/security-boundary.test.mjs",
     "test:native-core": "cargo test --manifest-path native/Cargo.toml --locked",
     "test:backup": "node --test deploy/backup-tools.test.mjs",
     "test:ops": "node --test --test-concurrency=2 deploy/backup-tools.test.mjs deploy/nginx-config.test.mjs deploy/probe-node-health.test.mjs deploy/probe-api-readiness.test.mjs deploy/active-api-environment.test.mjs deploy/direct-invocation-symlink.test.mjs deploy/linux-release-control.test.mjs deploy/api-package-layout.test.mjs",
@@ -110,6 +110,8 @@
     "files": [
       "dist/**",
       "desktop/**",
+      "!node_modules/@capacitor/*/android/build/**",
+      "!**/node_modules/@capacitor/*/android/build/**",
       "cloud-transfer-contract.json",
       "build/icon.png",
       "LICENSE",

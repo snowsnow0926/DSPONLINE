@@ -1810,6 +1810,9 @@ export interface SimulationProfiler {
   beltRouteChecks: number;
   beltTargetChecks: number;
   beltStableRoutesSkipped: number;
+  beltInvalidRouteChecks: number;
+  beltSourceEmptyChecks: number;
+  beltTargetFullChecks: number;
 }
 
 /**
@@ -4670,6 +4673,7 @@ function transferBelts(
     const source = route.source;
     const target = route.target;
     if (!route.compatible || !source || !target) {
+      if (profiler) profiler.beltInvalidRouteChecks += 1;
       belt.progress = 0;
       planetRuntime?.blockedBelts.add(belt.id);
       continue;
@@ -4694,6 +4698,7 @@ function transferBelts(
     }
     const available = sourceAvailability.available;
     if (available < 1) {
+      if (profiler) profiler.beltSourceEmptyChecks += 1;
       if (!deferSourceDepletionReset) belt.progress = 0;
       planetRuntime?.inputStarvedBelts.add(belt.id);
       if (beltSourceMayProduceDuringStep(source, belt.itemId) && (source.powerFactor ?? 1) <= EPSILON) planetRuntime?.powerLimitedBelts.add(belt.id);
@@ -4701,6 +4706,7 @@ function transferBelts(
     }
     const remainingTarget = targetCapacity(route, target, belt.itemId, belt.targetPortIndex);
     if (remainingTarget.free < 1) {
+      if (profiler) profiler.beltTargetFullChecks += 1;
       belt.progress = 0;
       planetRuntime?.blockedBelts.add(belt.id);
       planetRuntime?.outputFullBelts.add(belt.id);
@@ -5180,6 +5186,11 @@ function runMachines(
   });
   let industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
   let matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
+  // Technology membership is read for every machine. Large factories can
+  // contain tens of thousands of entities while the completed list is also
+  // long; a per-planet Set keeps the hot loop O(1). Research completed inside
+  // this same pass is inserted immediately to preserve legacy unlock timing.
+  const completedTechIds = new Set(state.research.completedTechIds);
   const refreshRecipeSpeeds = () => {
     industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
     matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
@@ -5187,20 +5198,21 @@ function runMachines(
   for (const runtime of runtimes) {
     const { entity, recipe, baseSpeedProduct, planetSpeed, recipeDuration } = runtime;
     if (skippedEntityIds?.has(entity.id)) continue;
-    entity.powerFactor = power.factorByEntity.has(entity.id)
-      ? round(power.factorByEntity.get(entity.id)!, 4)
-      : undefined;
+    const allocatedPowerFactor = power.factorByEntity.get(entity.id);
+    entity.powerFactor = allocatedPowerFactor === undefined
+      ? undefined
+      : round(allocatedPowerFactor, 4);
     if (recipe.id === "matrix_research" && !hasActiveResearch(state)) {
       entity.progress = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
       continue;
     }
-    const powerFactor = powerFactorForEntity(power, entity);
+    const powerFactor = allocatedPowerFactor ?? 1;
     const effectiveCyclesPerSecond = baseSpeedProduct *
       (runtime.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed) * planetSpeed / recipeDuration;
     const launchFactor = dysonLaunchFactor(state, recipe.id);
-    if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) {
+    if (recipe.requiredTechId && !completedTechIds.has(recipe.requiredTechId)) {
       entity.progress = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
@@ -5273,6 +5285,7 @@ function runMachines(
         const completed = technology.costs.every((cost) => (progress[cost.itemId] ?? 0) >= cost.amount);
         if (completed) {
           completeTechnology(state, techId);
+          completedTechIds.add(techId);
           activateNextQueuedTechnology(state);
           for (const researchEntity of state.entities) {
             if (researchEntity.recipeId === "matrix_research") researchEntity.progress = 0;
@@ -7440,6 +7453,9 @@ export function createSimulationProfiler(): SimulationProfiler {
     beltRouteChecks: 0,
     beltTargetChecks: 0,
     beltStableRoutesSkipped: 0,
+    beltInvalidRouteChecks: 0,
+    beltSourceEmptyChecks: 0,
+    beltTargetFullChecks: 0,
   };
 }
 

@@ -69,6 +69,7 @@ import type {
   EnergyMode,
   EntityOperatingStatus,
   FactoryEntity,
+  GalacticExportPriority,
   GameState,
   ItemId,
   InterstellarRoutePolicy,
@@ -14307,7 +14308,7 @@ export function setGalacticExportEnabled(state: GameState, projectId: GalacticEx
   };
 }
 
-export function setGalacticExportPriority(state: GameState, projectId: GalacticExportProjectId, priority: LogisticsPriority): GameState {
+export function setGalacticExportPriority(state: GameState, projectId: GalacticExportProjectId, priority: GalacticExportPriority): GameState {
   if (!state.endgame.exportProjects[projectId] || ![1, 2, 3].includes(priority)) return state;
   return {
     ...state,

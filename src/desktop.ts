@@ -277,6 +277,13 @@ export interface DesktopNativeCoreDomainCoverage {
   systemHubLogistics: boolean;
   elevatorBelts: boolean;
   stationModeTransitions: boolean;
+  campaignProgress: boolean;
+  handcraftQueue: boolean;
+  explorationMissions: boolean;
+  galacticExports: boolean;
+  speedrunClockAndMilestones: boolean;
+  exactSegmentedOffline: boolean;
+  pureIdleMacro: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

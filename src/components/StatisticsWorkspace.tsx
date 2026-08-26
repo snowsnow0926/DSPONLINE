@@ -11,7 +11,7 @@ import { getInfiniteResearchCostString, isInfiniteResearchComplete } from "../ga
 import type { GalacticActivityPublicStatus } from "../game/galacticActivity";
 import { getPlanetDisplayName, getPlanetIndustrialProfile } from "../game/galaxy";
 import { listBeltNetworks, type BeltHealth } from "../game/network";
-import type { BeltRouteMode, CanvasBookmark, GalacticDispatchThrottle, GalacticExportProjectId, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlanetId, RecipeId, StationSlotTemplate } from "../game/types";
+import type { BeltRouteMode, CanvasBookmark, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameState, InfiniteResearchId, ItemId, PlanetId, RecipeId, StationSlotTemplate } from "../game/types";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ProductionManagement } from "./ProductionManagement";
 import { GalacticActivityPanel } from "./GalacticActivityPanel";
@@ -56,7 +56,7 @@ interface StatisticsWorkspaceProps {
   onGalacticDispatchThrottle: (throttle: GalacticDispatchThrottle) => void;
   onGalacticExporterPausedChange: (entityId: string, paused: boolean) => void;
   onGalacticExportEnabled: (projectId: GalacticExportProjectId, enabled: boolean) => void;
-  onGalacticExportPriority: (projectId: GalacticExportProjectId, priority: LogisticsPriority) => void;
+  onGalacticExportPriority: (projectId: GalacticExportProjectId, priority: GalacticExportPriority) => void;
   onDispatchGalacticExport: (projectId: GalacticExportProjectId) => void;
   onFocusEntity: (entityId: string, planetId: PlanetId) => void;
   onFocusBeltNetwork: (beltId: string, planetId: PlanetId) => void;
@@ -800,7 +800,7 @@ export function StatisticsWorkspace({ open, game, onClose, onCreatePlan, onUpdat
                       return <article className={game.endgame.exportInputMode === "building" || project.enabled ? "active" : ""} key={definition.id}>
                         <header><ItemMark itemId={definition.itemId} /><span><strong>{definition.name}</strong><small>Lv.{project.level} · {definition.summary}</small></span>{game.endgame.exportInputMode === "legacy-network" ? <button type="button" onClick={() => onGalacticExportEnabled(definition.id, !project.enabled)} title={project.enabled ? "暂停出口项目" : "启用出口项目"} aria-label={`${project.enabled ? "暂停" : "启用"}${definition.name}`}>{project.enabled ? <Pause size={13} /> : <Play size={13} />}</button> : <em>专用端口</em>}</header>
                         <div className="export-project-progress"><i><b style={{ width: `${progress * 100}%` }} /></i><span><QuantityValue value={project.delivered} /> / <QuantityValue value={target} /></span><strong>累计 <QuantityValue value={project.totalDelivered} /></strong></div>
-                        <footer><div role="group" aria-label={`${definition.name}优先级`}>{([1, 2, 3] as LogisticsPriority[]).map((priority) => <button type="button" className={project.priority === priority ? "active" : ""} key={priority} onClick={() => onGalacticExportPriority(definition.id, priority)}>P{priority}</button>)}</div>{game.endgame.exportInputMode === "legacy-network" ? <button type="button" onClick={() => onDispatchGalacticExport(definition.id)} title="立即装运一批物资"><Send size={12} />立即装运</button> : <span>由实体建筑交付</span>}</footer>
+                        <footer><div role="group" aria-label={`${definition.name}优先级`}>{([1, 2, 3] as GalacticExportPriority[]).map((priority) => <button type="button" className={project.priority === priority ? "active" : ""} key={priority} onClick={() => onGalacticExportPriority(definition.id, priority)}>P{priority}</button>)}</div>{game.endgame.exportInputMode === "legacy-network" ? <button type="button" onClick={() => onDispatchGalacticExport(definition.id)} title="立即装运一批物资"><Send size={12} />立即装运</button> : <span>由实体建筑交付</span>}</footer>
                       </article>;
                     })}
                   </div>

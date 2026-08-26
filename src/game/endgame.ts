@@ -1,11 +1,11 @@
 import type {
   ActivityMaterialId,
   EndgameState,
+  GalacticExportPriority,
   GalacticExportProjectId,
   InfiniteResearchId,
   InfiniteResearchProgress,
   ItemAmount,
-  LogisticsPriority,
   GameState,
 } from "./types";
 import {
@@ -192,7 +192,7 @@ export function createEndgameState(): EndgameState {
     {
       id: definition.id,
       enabled: false,
-      priority: 1 as LogisticsPriority,
+      priority: 1 as GalacticExportPriority,
       level: 0,
       delivered: 0,
       totalDelivered: 0,

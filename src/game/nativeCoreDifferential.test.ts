@@ -6,7 +6,13 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
-import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
+import {
+  applyContentPackRuntimeSnapshot,
+  createContentPackRegistry,
+  createContentPackRuntimeSnapshot,
+  registerContentPack,
+  type ContentPackRuntimeSnapshot,
+} from "./contentPacks";
 import {
   advanceSimulationBudget,
   connectBeltWithResult,
@@ -23,6 +29,7 @@ import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { nativeCoreDomainSha256 } from "./nativeCoreProof";
 import { createSpeedrunState } from "./speedrun";
 import { startSystemSpaceStationConstruction } from "./systemSpaceStation";
+import { validateContentPack } from "./mods";
 import type { GameState } from "./types";
 
 const require = createRequire(import.meta.url);
@@ -1352,7 +1359,11 @@ function systemHubElevatorState(): GameState {
 
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
-  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
+  const client = new NativeHostClient({
+    binaryPath,
+    rootPath: root,
+    requestTimeoutMs: process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL === "1" ? 180_000 : 30_000,
+  });
   const runtime = createContentPackRuntimeSnapshot(createContentPackRegistry());
   let saves: InstanceType<typeof NativeSaveSessionRegistry>;
 
@@ -1367,7 +1378,12 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  async function seed(state: GameState, revision = 1): Promise<{ slot: string; generation: number; rootHash: string; revision: number }> {
+  async function seed(
+    state: GameState,
+    revision = 1,
+    activeRuntime: ContentPackRuntimeSnapshot = runtime,
+    slotOverride?: string,
+  ): Promise<{ slot: string; generation: number; rootHash: string; revision: number }> {
     const journal = buildChunkedSaveJournal(state, {
       mode: state.mode,
       basePrimaryChecksum: "01234567",
@@ -1379,10 +1395,10 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       ...[...journal.chunks.entries()].map(([id, value]) => ({ key: `${prefix}chunk.${encodeURIComponent(id)}`, value })),
       { key: `${prefix}manifest`, value: JSON.stringify(journal.manifest) },
     ];
-    const slot = state.mode === "speedrun" ? "speedrun-main" : "normal-main";
+    const slot = slotOverride ?? (state.mode === "speedrun" ? "speedrun-main" : "normal-main");
     const transaction = await saves.begin(1, {
       slot, mode: state.mode, stateVersion: 47, baseChecksum: "01234567",
-      registryFingerprint: runtime.fingerprint, revision, savedAtMs: 1,
+      registryFingerprint: activeRuntime.fingerprint, revision, savedAtMs: 1,
     });
     for (let index = 0; index < records.length; index += 8) {
       await saves.write(1, transaction.transactionId, records.slice(index, index + 8));
@@ -1390,11 +1406,14 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     return { slot, ...await saves.commit(1, transaction.transactionId) };
   }
 
-  async function open(checkpoint: { slot: string; generation: number; rootHash: string; revision: number }): Promise<any> {
+  async function open(
+    checkpoint: { slot: string; generation: number; rootHash: string; revision: number },
+    activeRuntime: ContentPackRuntimeSnapshot = runtime,
+  ): Promise<any> {
     return client.request({
       operation: "coreOpen", slot: checkpoint.slot, generation: checkpoint.generation,
-      rootHash: checkpoint.rootHash, revision: checkpoint.revision, registryFingerprint: runtime.fingerprint,
-      catalog: createNativeCoreCatalog(runtime),
+      rootHash: checkpoint.rootHash, revision: checkpoint.revision, registryFingerprint: activeRuntime.fingerprint,
+      catalog: createNativeCoreCatalog(activeRuntime),
     });
   }
 
@@ -1781,6 +1800,101 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.summary.canonicalFields, `speedrun-${label} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `speedrun-${label} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches enabled content-pack machines, recipes, items, and custom belt tiers", async () => {
+    const validation = validateContentPack({
+      formatVersion: 2,
+      id: "native_core_content_pack",
+      name: "Native Core Content Pack",
+      version: "1.0.0",
+      items: [{ id: "native_core_alloy", name: "原生合金", kind: "solid" }],
+      buildings: [{
+        id: "native_core_fabricator",
+        name: "原生合金制造机",
+        kind: "machine",
+        speed: 2,
+        inputCapacity: 20_000,
+        outputCapacity: 20_000,
+        powerDemandKw: 720,
+        costs: [{ itemId: "iron_ingot", amount: 2 }],
+      }],
+      recipes: [{
+        id: "native_core_alloy_recipe",
+        name: "原生合金",
+        buildingId: "native_core_fabricator",
+        duration: 2,
+        inputs: [{ itemId: "iron_ingot", amount: 2 }],
+        outputs: [{ itemId: "native_core_alloy", amount: 3 }],
+      }],
+      belts: [{
+        id: "native_core_belt_mk4",
+        name: "原生传送带 Mk.4",
+        tier: 4,
+        speed: 60,
+        costs: [{ itemId: "iron_ingot", amount: 1 }],
+        outputAmount: 5,
+      }],
+    });
+    expect(validation.valid).toBe(true);
+    const customRuntime = createContentPackRuntimeSnapshot(
+      registerContentPack(createContentPackRegistry(), validation).registry,
+    );
+    applyContentPackRuntimeSnapshot(customRuntime);
+    try {
+      let initial = simpleMiningState();
+      const construction = initial.construction as Record<string, number>;
+      construction.native_core_fabricator = 1;
+      construction.native_core_belt_mk4 = 64;
+      initial = placeBuilding(initial, "native_core_fabricator" as never, { x: 900, y: 120 }, 1);
+      const fabricator = initial.entities.find((entity) =>
+        (entity.buildingId as string | undefined) === "native_core_fabricator")!;
+      fabricator.recipeId = "native_core_alloy_recipe" as never;
+      fabricator.inputs = { iron_ingot: 0 };
+      fabricator.outputs = { native_core_alloy: 0 } as never;
+      const storage = initial.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+      storage.outputs.iron_ingot = 1_000;
+      initial = connectBeltWithResult(
+        initial,
+        storage.id,
+        fabricator.id,
+        "iron_ingot",
+        4 as never,
+        undefined,
+        8,
+      ).state;
+      const checkpoint = await seed(initial, 187, customRuntime, "normal-content-pack");
+      for (const seconds of [1, 5, 20]) {
+        applyContentPackRuntimeSnapshot(customRuntime);
+        const expected = advanceSimulationBudget(initial, seconds, seconds);
+        const opened = await open(checkpoint, customRuntime);
+        const advanced = await client.request({
+          operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+        });
+        expect(advanced.supported, `content-pack-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+        const projection = await client.request({
+          operation: "coreProjection", sessionId: opened.sessionId,
+          entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+          baseFields: ["totalProduced", "planetMetrics", "powerGridMetrics"],
+        });
+        expect(projection.entities, `content-pack-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+        expect(projection.belts, `content-pack-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+        expect(advanced.summary.catalogSha256, `content-pack-${seconds} 目录哈希`).toBe(opened.summary.catalogSha256);
+        expect(advanced.summary.catalogSha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(advanced.summary.coverage).toMatchObject({
+          contentPacks: true,
+          exactSegmentedOffline: true,
+          pureIdleMacro: false,
+          authorityEligible: false,
+        });
+        expect(advanced.summary.canonicalFields, `content-pack-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+        expect(advanced.summary.canonicalSha256, `content-pack-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      }
+    } finally {
+      applyContentPackRuntimeSnapshot(runtime);
     }
   }, 60_000);
 
@@ -2606,6 +2720,6 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });
       }
     },
-    240_000,
+    10 * 60_000,
   );
 });

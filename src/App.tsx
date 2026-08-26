@@ -306,7 +306,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -13281,7 +13281,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onGalacticDispatchThrottle={(throttle: GalacticDispatchThrottle) => commitGame((current) => setGalacticDispatchThrottle(current, throttle))}
           onGalacticExporterPausedChange={(entityId, paused) => commitGame((current) => setGalacticMaterialExporterPaused(current, entityId, paused))}
           onGalacticExportEnabled={(projectId: GalacticExportProjectId, enabled) => commitGame((current) => setGalacticExportEnabled(current, projectId, enabled))}
-          onGalacticExportPriority={(projectId: GalacticExportProjectId, priority: LogisticsPriority) => commitGame((current) => setGalacticExportPriority(current, projectId, priority))}
+          onGalacticExportPriority={(projectId: GalacticExportProjectId, priority: GalacticExportPriority) => commitGame((current) => setGalacticExportPriority(current, projectId, priority))}
           onDispatchGalacticExport={(projectId: GalacticExportProjectId) => commitGame((current) => dispatchGalacticExport(current, projectId))}
           onFocusEntity={(entityId) => {
             setStatisticsOpen(false);

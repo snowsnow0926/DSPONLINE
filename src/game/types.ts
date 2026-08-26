@@ -400,6 +400,7 @@ export type GalacticExportProjectId =
   | "antimatter_exchange";
 
 export type GalacticDispatchThrottle = 0.25 | 0.5 | 1;
+export type GalacticExportPriority = 1 | 2 | 3;
 export type DecimalIntegerString = string;
 export type GalacticExportInputMode = "legacy-network" | "building";
 export type ActivityMaterialId = "universe_matrix" | "solar_sail" | "small_carrier_rocket" | "antimatter_fuel_rod";
@@ -696,7 +697,7 @@ export interface GalacticConstructionActivityState {
 export interface GalacticExportProjectState {
   id: GalacticExportProjectId;
   enabled: boolean;
-  priority: LogisticsPriority;
+  priority: GalacticExportPriority;
   level: number;
   /** Items delivered toward the current project level. */
   delivered: number;

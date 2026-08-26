@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { partitionNativeAdvanceBudget } from "./nativeCore";
+import { advanceNativeCoreSegmented, partitionNativeAdvanceBudget } from "./nativeCore";
 
 describe("Windows native core segmented advance", () => {
   it("preserves exact simulation and wall totals across cancellable boundaries", () => {
@@ -20,5 +20,51 @@ describe("Windows native core segmented advance", () => {
     ]);
     expect(() => partitionNativeAdvanceBudget(Number.NaN, 1)).toThrow(/预算无效/);
     expect(() => partitionNativeAdvanceBudget(1, 1, 0)).toThrow(/预算无效/);
+  });
+
+  it("cancels only after an acknowledged segment and reports the exact committed prefix", async () => {
+    const controller = new AbortController();
+    const requests: Array<{ baseRevision: number; simulationSeconds: number; wallSeconds: number }> = [];
+    const result = await advanceNativeCoreSegmented(async (request) => {
+      requests.push(request);
+      return { supported: true, revision: request.baseRevision + 1 };
+    }, {
+      baseRevision: 7,
+      simulationSeconds: 1_201,
+      wallSeconds: 301,
+      maxSegmentSeconds: 600,
+      signal: controller.signal,
+      onProgress: () => controller.abort(),
+    });
+    expect(requests).toHaveLength(1);
+    expect(result).toEqual({
+      supported: true,
+      revision: 8,
+      cancelled: true,
+      advancedSimulationSeconds: 600,
+      advancedWallSeconds: 301 * 600 / 1_201,
+    });
+  });
+
+  it("stops at an unsupported boundary and rejects a non-advancing revision", async () => {
+    let calls = 0;
+    const unsupported = await advanceNativeCoreSegmented(async (request) => {
+      calls += 1;
+      return calls === 1
+        ? { supported: true, revision: request.baseRevision + 1 }
+        : { supported: false, revision: request.baseRevision, reason: "unsupported-test-domain" };
+    }, { baseRevision: 3, simulationSeconds: 1_201, wallSeconds: 1_201, maxSegmentSeconds: 600 });
+    expect(unsupported).toEqual({
+      supported: false,
+      revision: 4,
+      cancelled: false,
+      advancedSimulationSeconds: 600,
+      advancedWallSeconds: 600,
+      reason: "unsupported-test-domain",
+    });
+    await expect(advanceNativeCoreSegmented(async (request) => ({
+      supported: true,
+      revision: request.baseRevision,
+    }), { baseRevision: 9, simulationSeconds: 1, wallSeconds: 1 })).rejects.toThrow(/不连续 revision/);
   });
 });

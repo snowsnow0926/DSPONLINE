@@ -63,6 +63,12 @@ export interface NativeCoreSegmentedAdvanceResult {
   reason?: string;
 }
 
+export type NativeCoreAdvanceSegmentExecutor = (request: {
+  baseRevision: number;
+  simulationSeconds: number;
+  wallSeconds: number;
+}) => Promise<{ supported: boolean; revision: number; reason?: string }>;
+
 export function partitionNativeAdvanceBudget(
   simulationSeconds: number,
   wallSeconds: number,
@@ -98,6 +104,56 @@ export function partitionNativeAdvanceBudget(
     }
   }
   return segments;
+}
+
+/**
+ * Execute a long native budget as individually acknowledged revisions. The
+ * caller can stop only between committed segments: cancellation never claims
+ * that an in-flight native operation was rolled back, and the returned totals
+ * describe the exact durable prefix that can be checkpointed or discarded.
+ */
+export async function advanceNativeCoreSegmented(
+  advance: NativeCoreAdvanceSegmentExecutor,
+  request: NativeCoreSegmentedAdvanceRequest,
+): Promise<NativeCoreSegmentedAdvanceResult> {
+  let revision = request.baseRevision;
+  let advancedSimulationSeconds = 0;
+  let advancedWallSeconds = 0;
+  const segments = partitionNativeAdvanceBudget(
+    request.simulationSeconds,
+    request.wallSeconds,
+    request.maxSegmentSeconds,
+  );
+  for (const segment of segments) {
+    if (request.signal?.aborted) {
+      return { supported: true, revision, cancelled: true, advancedSimulationSeconds, advancedWallSeconds };
+    }
+    const result = await advance({ baseRevision: revision, ...segment });
+    if (!result.supported) {
+      return {
+        supported: false,
+        revision,
+        cancelled: false,
+        advancedSimulationSeconds,
+        advancedWallSeconds,
+        ...(result.reason ? { reason: result.reason } : {}),
+      };
+    }
+    if (!Number.isSafeInteger(result.revision) || result.revision <= revision) {
+      throw new Error("原生分段推进返回了不连续 revision");
+    }
+    revision = result.revision;
+    advancedSimulationSeconds += segment.simulationSeconds;
+    advancedWallSeconds += segment.wallSeconds;
+    request.onProgress?.({
+      revision,
+      advancedSimulationSeconds,
+      advancedWallSeconds,
+      totalSimulationSeconds: Math.min(request.simulationSeconds, 30 * 24 * 60 * 60),
+      totalWallSeconds: Math.min(request.wallSeconds, 30 * 24 * 60 * 60),
+    });
+  }
+  return { supported: true, revision, cancelled: false, advancedSimulationSeconds, advancedWallSeconds };
 }
 
 class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
@@ -151,41 +207,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
   }
 
   async advanceSegmented(request: NativeCoreSegmentedAdvanceRequest): Promise<NativeCoreSegmentedAdvanceResult> {
-    let revision = request.baseRevision;
-    let advancedSimulationSeconds = 0;
-    let advancedWallSeconds = 0;
-    const segments = partitionNativeAdvanceBudget(
-      request.simulationSeconds,
-      request.wallSeconds,
-      request.maxSegmentSeconds,
-    );
-    for (const segment of segments) {
-      if (request.signal?.aborted) {
-        return { supported: true, revision, cancelled: true, advancedSimulationSeconds, advancedWallSeconds };
-      }
-      const result = await this.advance({ baseRevision: revision, ...segment });
-      if (!result.supported) {
-        return {
-          supported: false,
-          revision,
-          cancelled: false,
-          advancedSimulationSeconds,
-          advancedWallSeconds,
-          ...(result.reason ? { reason: result.reason } : {}),
-        };
-      }
-      revision = result.revision;
-      advancedSimulationSeconds += segment.simulationSeconds;
-      advancedWallSeconds += segment.wallSeconds;
-      request.onProgress?.({
-        revision,
-        advancedSimulationSeconds,
-        advancedWallSeconds,
-        totalSimulationSeconds: Math.min(request.simulationSeconds, 30 * 24 * 60 * 60),
-        totalWallSeconds: Math.min(request.wallSeconds, 30 * 24 * 60 * 60),
-      });
-    }
-    return { supported: true, revision, cancelled: false, advancedSimulationSeconds, advancedWallSeconds };
+    return advanceNativeCoreSegmented((segment) => this.advance(segment), request);
   }
 
   async commitOperation(request: {

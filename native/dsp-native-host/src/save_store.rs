@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -145,6 +146,7 @@ pub struct SaveStore {
     root: PathBuf,
     next_transaction_id: u64,
     transactions: HashMap<String, SaveTransaction>,
+    verified_manifests: RefCell<HashMap<String, SaveManifest>>,
 }
 
 impl SaveStore {
@@ -158,6 +160,7 @@ impl SaveStore {
             root,
             next_transaction_id: 1,
             transactions: HashMap::new(),
+            verified_manifests: RefCell::new(HashMap::new()),
         })
     }
 
@@ -336,8 +339,14 @@ impl SaveStore {
         atomic_replace(&superblock_target, &superblock_bytes)?;
         sync_directory(&self.slot_dir(&transaction.slot)?)?;
         if fault == CommitFaultPoint::AfterSuperblockPublish {
+            self.verified_manifests
+                .borrow_mut()
+                .remove(&transaction.slot);
             bail!("injected failure after superblock publish");
         }
+        self.verified_manifests
+            .borrow_mut()
+            .insert(transaction.slot.clone(), manifest.clone());
         let total_uncompressed_bytes = manifest
             .records
             .values()
@@ -581,6 +590,9 @@ impl SaveStore {
 
     fn recover_manifest(&self, slot: &str) -> anyhow::Result<Option<SaveManifest>> {
         validate_slot(slot)?;
+        if let Some(manifest) = self.verified_manifests.borrow().get(slot) {
+            return Ok(Some(manifest.clone()));
+        }
         let slot_dir = self.slot_dir(slot)?;
         if !slot_dir.exists() {
             return Ok(None);
@@ -611,7 +623,13 @@ impl SaveStore {
             candidates.push(manifest);
         }
         candidates.sort_by_key(|manifest| (manifest.revision, manifest.generation));
-        Ok(candidates.pop())
+        let recovered = candidates.pop();
+        if let Some(manifest) = recovered.as_ref() {
+            self.verified_manifests
+                .borrow_mut()
+                .insert(slot.to_owned(), manifest.clone());
+        }
+        Ok(recovered)
     }
 
     fn write_chunk(&self, slot: &str, bytes: &[u8]) -> anyhow::Result<ChunkMetadata> {

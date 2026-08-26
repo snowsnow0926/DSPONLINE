@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const { NativeHostClient, NativeSaveSessionRegistry } = require("../desktop/native-host.cjs");
@@ -121,6 +122,75 @@ function mutateRuntimeFields(state) {
   }
 }
 
+function canonicalStateSha256(value) {
+  const hash = createHash("sha256");
+  const visit = (current) => {
+    if (current === null || typeof current !== "object") {
+      hash.update(JSON.stringify(current));
+      return;
+    }
+    if (Array.isArray(current)) {
+      hash.update("[");
+      for (let index = 0; index < current.length; index += 1) {
+        if (index > 0) hash.update(",");
+        visit(current[index]);
+      }
+      hash.update("]");
+      return;
+    }
+    hash.update("{");
+    const keys = Object.keys(current).sort();
+    for (let index = 0; index < keys.length; index += 1) {
+      if (index > 0) hash.update(",");
+      hash.update(JSON.stringify(keys[index]));
+      hash.update(":");
+      visit(current[keys[index]]);
+    }
+    hash.update("}");
+  };
+  visit(value);
+  return hash.digest("hex");
+}
+
+async function verifyNativeRoundTrip(client, sourceState) {
+  const recovery = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  const records = new Map();
+  for (const key of recovery.recordKeys) {
+    const read = await client.request({
+      operation: "saveRead",
+      slot: "normal-main",
+      key,
+      generation: recovery.generation,
+      rootHash: recovery.rootHash,
+    });
+    records.set(key, read.value);
+  }
+  const manifest = JSON.parse(records.get(`${INTERNAL_PREFIX}manifest`));
+  const values = new Map(manifest.chunks.map((chunk) => [
+    chunk.id,
+    records.get(`${INTERNAL_PREFIX}chunk.${encodeURIComponent(chunk.id)}`),
+  ]));
+  const base = JSON.parse(values.get("base"));
+  const entities = new Array(manifest.entityCount);
+  const belts = new Array(manifest.beltCount);
+  for (const chunk of manifest.chunks) {
+    if (chunk.kind === "base") continue;
+    const target = chunk.kind === "entities" ? entities : belts;
+    const parsed = JSON.parse(values.get(chunk.id));
+    for (let index = 0; index < parsed.length; index += 1) target[chunk.offset + index] = parsed[index];
+  }
+  const roundTrip = { ...base, entities, belts };
+  const sourceSha256 = canonicalStateSha256(sourceState);
+  const roundTripSha256 = canonicalStateSha256(roundTrip);
+  return {
+    sourceSha256,
+    roundTripSha256,
+    matches: sourceSha256 === roundTripSha256,
+    generation: recovery.generation,
+    recordCount: recovery.recordKeys.length,
+  };
+}
+
 async function main() {
   const fixture = path.resolve(process.argv[2] || "");
   if (!process.argv[2] || !fs.existsSync(fixture)) throw new Error("Usage: node scripts/benchmark-native-save.mjs <v47-envelope.json>");
@@ -138,12 +208,15 @@ async function main() {
     const sessions = new NativeSaveSessionRegistry(client);
     const first = await writeSnapshot(sessions, 1, envelope.state, envelope.checksum, 1, 1_000);
     const unchanged = await writeSnapshot(sessions, 1, envelope.state, envelope.checksum, 2, 2_000);
+    const roundTrip = await verifyNativeRoundTrip(client, envelope.state);
+    if (!roundTrip.matches) throw new Error("native v47 round-trip canonical SHA-256 mismatch");
     mutateRuntimeFields(envelope.state);
     const runtimeChurn = await writeSnapshot(sessions, 1, envelope.state, envelope.checksum, 3, 3_000);
     const report = {
       fixture: { path: fixture, sourceBytes, entityCount: envelope.state.entities.length, beltCount: envelope.state.belts.length },
       first,
       unchanged,
+      roundTrip,
       runtimeChurn,
       reductions: {
         firstWriteVsSourcePercent: Number(((1 - first.changedBytes / sourceBytes) * 100).toFixed(2)),
@@ -159,4 +232,3 @@ async function main() {
 }
 
 await main();
-

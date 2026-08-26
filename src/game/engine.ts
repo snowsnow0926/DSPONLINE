@@ -11497,14 +11497,23 @@ function constructionAutomationPlanInputsAvailable(
   state: GameState,
   planetId: PlanetId,
   plan: ConstructionAutomationPlan,
+  initialInventory: Partial<Record<ItemId, number>> = {},
+  initialQuantumBuffer: Partial<Record<ItemId, number>> = {},
 ): boolean {
-  let inventory: Partial<Record<ItemId, number>> = {};
+  let inventory: Partial<Record<ItemId, number>> = { ...initialInventory };
   let tray = { ...trayForPlanet(state, planetId) };
+  let quantumBuffer: Partial<Record<ItemId, number>> = { ...initialQuantumBuffer };
   for (const step of plan.steps) {
-    const consumed = planConstructionAutomationConsumption(inventory, tray, constructionAutomationRequirements(step));
+    const consumed = planConstructionAutomationConsumptionWithQuantum(
+      inventory,
+      tray,
+      quantumBuffer,
+      constructionAutomationRequirements(step),
+    );
     if (!consumed) return false;
     inventory = consumed.inventory;
     tray = consumed.tray;
+    quantumBuffer = consumed.quantumBuffer;
     if (step.kind !== "material") continue;
     const recipe = getRecipe(step.recipeId);
     if (!recipe) return false;
@@ -11513,6 +11522,55 @@ function constructionAutomationPlanInputsAvailable(
     }
   }
   return true;
+}
+
+function mergeConstructionAutomationInventories(
+  ...inventories: Array<Partial<Record<ItemId, number>>>
+): Partial<Record<ItemId, number>> {
+  const merged: Partial<Record<ItemId, number>> = {};
+  for (const inventory of inventories) {
+    for (const [itemId, amount] of Object.entries(inventory) as Array<[ItemId, number]>) {
+      const next = constructionQuantumSafeAdd(merged[itemId] ?? 0, amount ?? 0);
+      if (next > 0) merged[itemId] = next;
+    }
+  }
+  return merged;
+}
+
+function rebuildBlockedConstructionAutomationJob(
+  state: GameState,
+  entity: FactoryEntity,
+  job: ConstructionAutomationJob,
+): { job: ConstructionAutomationJob; recoveredWorkSeconds: number } | null {
+  const definition = getConstructionAutomationTargetDefinition(job.constructionId);
+  if (!definition) return null;
+  const quantumBuffer = constructionAutomationQuantumBuffer(state, entity.id);
+  const plan = buildConstructionAutomationPlan(
+    state,
+    definition,
+    entity.planetId,
+    mergeConstructionAutomationInventories(job.inventory, quantumBuffer),
+  );
+  if (plan.blocker || plan.steps.length < 1 || !constructionAutomationPlanInputsAvailable(
+    state,
+    entity.planetId,
+    plan,
+    job.inventory,
+    quantumBuffer,
+  )) return null;
+  return {
+    job: {
+      constructionId: job.constructionId,
+      steps: plan.steps,
+      stepIndex: 0,
+      elapsedSeconds: 0,
+      inventory: job.inventory,
+      recipeDecisions: plan.recipeDecisions,
+    },
+    // Inputs are committed only when a step finishes, so elapsed work can be
+    // transferred to the repaired plan without duplicating any material.
+    recoveredWorkSeconds: Math.max(0, job.elapsedSeconds),
+  };
 }
 
 function constructionAutomationBatchInputsAvailable(
@@ -12073,6 +12131,20 @@ function runConstructionCenters(
           if (profiler) profiler.constructionJobsBatched += batched.jobs;
           continue;
         }
+        // A direct plan can consume the last copy of an intermediate during
+        // a large batch while other items remain in the center buffer. Never
+        // persist that now-invalid topology as an atomic job: invalidate it
+        // and let the recursive planner include an available upstream chain.
+        if (Object.keys(quantumBuffer).length > 0 && !constructionAutomationPlanInputsAvailable(
+          state,
+          entity.planetId,
+          plan,
+          {},
+          quantumBuffer,
+        )) {
+          directResolvedByTarget.delete(target.definition.id);
+          continue;
+        }
         job = {
           constructionId: target.definition.id,
           steps: plan.steps,
@@ -12091,7 +12163,27 @@ function runConstructionCenters(
         continue;
       }
       const duration = constructionAutomationStepDuration(state, step);
-      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) break;
+      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) {
+        // Older saves and a pre-fix direct-cache boundary can contain a job
+        // whose frozen plan expects an intermediate that has since run out,
+        // even though its upstream raw chain is now available. Rebuild the
+        // complete remaining target transaction from preserved WIP + tray +
+        // direct buffer. A real raw shortage still returns null and waits.
+        if (budget.remainingPlanBuilds < 1) {
+          if (profiler) profiler.constructionGuardHits += 1;
+          break;
+        }
+        budget.remainingPlanBuilds -= 1;
+        if (profiler) profiler.constructionPlanBuilds += 1;
+        const rebuilt = rebuildBlockedConstructionAutomationJob(state, entity, job);
+        if (!rebuilt) break;
+        directResolvedByTarget.delete(job.constructionId);
+        remainingWork = Math.min(Number.MAX_SAFE_INTEGER, remainingWork + rebuilt.recoveredWorkSeconds);
+        job = rebuilt.job;
+        state.constructionAutomation.jobs[entity.id] = job;
+        entity.progress = 0;
+        continue;
+      }
       const needed = Math.max(0, duration - job.elapsedSeconds);
       const used = Math.min(remainingWork, needed);
       job.elapsedSeconds = round(job.elapsedSeconds + used, 6);

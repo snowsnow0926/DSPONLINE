@@ -612,6 +612,75 @@ describe("quantum logistics network", () => {
     expect(Object.values(state.tray).every((amount) => amount === 0)).toBe(true);
   });
 
+  it("直供中间料在批处理中耗尽后会从原矿重建计划，不会留下永久缺料任务", () => {
+    const state = createQuantumConstructionState(true, 100);
+    const center = state.entities.find((entity) => entity.id === "quantum-construction-center")!;
+    state.constructionAutomation.targetStock.arc_smelter = 2;
+    state.tray = { iron_ore: 4 };
+    state.planetTrays.home = state.tray;
+    state.constructionAutomation.quantumMaterialBuffer = {
+      [center.id]: {
+        // The first direct plan deliberately sees one finished job's iron
+        // ingots but enough of every other input for two jobs. Once batching
+        // consumes the ingots, the planner must invalidate that topology and
+        // recursively make the second job's ingots from tray ore.
+        iron_ingot: 4,
+        stone_brick: 4,
+        circuit_board: 8,
+        magnetic_coil: 4,
+      },
+    };
+
+    const advanced = advanceSimulation(state, 1);
+
+    expect(advanced.construction.arc_smelter).toBe(2);
+    expect(advanced.constructionAutomation.totalCrafted).toBe(2);
+    expect(advanced.constructionAutomation.jobs).toEqual({});
+    expect(advanced.tray.iron_ore ?? 0).toBe(0);
+    expect(advanced.totalProduced.iron_ingot).toBe(4);
+  });
+
+  it("旧存档中的失效直供任务会保留 WIP 与已投入工作并自动重规划", () => {
+    const initial = createQuantumConstructionState(true, 1);
+    const center = initial.entities.find((entity) => entity.id === "quantum-construction-center")!;
+    initial.entities.find((entity) => entity.id === "quantum-construction-power")!.machineCount = 1_000_000;
+    initial.constructionAutomation.targetStock.arc_smelter = 1;
+    initial.tray = { iron_ore: 4 };
+    initial.planetTrays.home = initial.tray;
+    initial.constructionAutomation.quantumMaterialBuffer = {
+      [center.id]: { circuit_board: 4, magnetic_coil: 2 },
+    };
+    initial.constructionAutomation.jobs[center.id] = {
+      constructionId: "arc_smelter",
+      // This mirrors the player save: the persisted job assumes a finished
+      // intermediate that no longer exists and therefore omits its recipe.
+      steps: [{ kind: "building", constructionId: "arc_smelter" }],
+      stepIndex: 0,
+      elapsedSeconds: 4.9,
+      inventory: { stone_brick: 2 },
+    };
+
+    const genuinelyBlocked = structuredClone(initial);
+    genuinelyBlocked.tray = {};
+    genuinelyBlocked.planetTrays.home = genuinelyBlocked.tray;
+    const stillWaiting = advanceSimulation(genuinelyBlocked, 0.6);
+    expect(stillWaiting.construction.arc_smelter).toBe(0);
+    expect(stillWaiting.constructionAutomation.jobs[center.id]).toEqual(initial.constructionAutomation.jobs[center.id]);
+
+    const run = () => advanceSimulation(structuredClone(initial), 0.6);
+    const first = run();
+    const second = run();
+
+    expect(first.construction.arc_smelter).toBe(1);
+    expect(first.constructionAutomation.totalCrafted).toBe(1);
+    expect(first.constructionAutomation.jobs).toEqual({});
+    expect(first.tray.iron_ore ?? 0).toBe(0);
+    expect(first.totalProduced.iron_ingot).toBe(4);
+    expect(second.constructionAutomation).toEqual(first.constructionAutomation);
+    expect(second.tray).toEqual(first.tray);
+    expect(second.totalProduced).toEqual(first.totalProduced);
+  });
+
   it("直供缓存不占用行星托盘，取消目标时把未消费物料退回量子仓库", () => {
     const state = createPlayerInitialState();
     state.quantumLogisticsNetwork.enabled = true;

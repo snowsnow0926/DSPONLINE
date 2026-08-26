@@ -19,7 +19,9 @@ import {
   recordNativeCoreAuthorityProgress,
   recordNativeCoreGateEvidence,
   recordNativeCoreShadowComparison,
+  recordNativeCoreUnverifiedShadowProgress,
   recoverNativeCoreAuthority,
+  reseedNativeCoreShadow,
   type NativeCoreAuthorityState,
   type NativeCoreGateEvidence,
   type NativeCoreRevisionProof,
@@ -168,21 +170,39 @@ export class WindowsNativeCoreBetaController {
     if (this.authorityState.authority !== "javascript") {
       throw new Error("原生权威暂停或运行期间不能重建 JavaScript 影子");
     }
+    const previousState = this.authorityState;
+    const preserveShadowHistory = ["shadow", "native-ready"].includes(previousState.phase) &&
+      previousState.sessionId !== null;
     await this.closeSession();
-    this.authorityState = createNativeCoreAuthorityState();
+    if (!preserveShadowHistory) this.authorityState = createNativeCoreAuthorityState();
     this.lastSummary = null;
     this.recoveryRootHash = null;
-    const session = await this.opener(input.mode, input.checkpoint, input.runtime);
-    if (!session) return this.snapshot();
+    let session: WindowsNativeCoreShadow | null;
+    try {
+      session = await this.opener(input.mode, input.checkpoint, input.runtime);
+    } catch (error) {
+      if (preserveShadowHistory) this.authorityState = handleNativeCoreExit(previousState, "native-shadow-reseed-open-failed");
+      throw error;
+    }
+    if (!session) {
+      if (preserveShadowHistory) this.authorityState = handleNativeCoreExit(previousState, "native-shadow-reseed-unavailable");
+      return this.snapshot();
+    }
     try {
       const summary = await session.status();
       const nativeProof = proofFromSummary(summary, input.checkpoint.rootHash);
-      const state = beginNativeCoreShadow(this.authorityState, {
-        sessionId: session.sessionId,
-        javascriptProof: input.javascriptProof,
-        nativeProof,
-        startedAtMs: this.now(),
-      });
+      const state = preserveShadowHistory
+        ? reseedNativeCoreShadow(previousState, {
+          sessionId: session.sessionId,
+          javascriptProof: input.javascriptProof,
+          nativeProof,
+        })
+        : beginNativeCoreShadow(this.authorityState, {
+          sessionId: session.sessionId,
+          javascriptProof: input.javascriptProof,
+          nativeProof,
+          startedAtMs: this.now(),
+        });
       this.lastSummary = summary;
       this.recoveryRootHash = input.checkpoint.rootHash;
       this.authorityState = state;
@@ -195,6 +215,80 @@ export class WindowsNativeCoreBetaController {
     } catch (error) {
       await session.close().catch(() => undefined);
       throw error;
+    }
+  }
+
+  /**
+   * Replays one already-durable JavaScript operation between proof boundaries.
+   * It deliberately does not claim equality until verifyJavaScriptState runs.
+   */
+  async mirrorJavaScriptOperationUnverified(input: {
+    commandId: string;
+    baseRevision: number;
+    resultRevision: number;
+    command?: SimulationCommandPatch | null;
+    simulationSeconds: number;
+    wallSeconds: number;
+  }): Promise<NativeCoreMirroredOperationResult> {
+    validateCommandId(input.commandId);
+    if (this.authorityState.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(this.authorityState.phase) || !this.session) {
+      return { mirrored: false, reason: "native-shadow-not-running", state: cloneAuthorityState(this.authorityState) };
+    }
+    if (!Number.isSafeInteger(input.resultRevision) || input.resultRevision <= input.baseRevision) {
+      throw new RangeError("原生影子结果 revision 无效");
+    }
+    try {
+      if (this.authorityState.shadowRevision !== input.baseRevision) {
+        throw new Error("原生影子操作 base revision 不连续");
+      }
+      const commit = await this.commitWithIdempotentRetry({ ...input, includeDiagnostics: false });
+      if (commit.commandId !== input.commandId || commit.baseRevision !== input.baseRevision ||
+        commit.revision !== input.resultRevision || commit.currentRevision !== input.resultRevision) {
+        throw new Error("原生影子未校验操作回执 revision 不连续");
+      }
+      this.authorityState = recordNativeCoreUnverifiedShadowProgress(this.authorityState, commit.revision);
+      return { mirrored: true, state: cloneAuthorityState(this.authorityState) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "原生影子操作失败";
+      this.authorityState = handleNativeCoreExit(this.authorityState, `shadow-operation-failed:${reason}`);
+      await this.closeSession();
+      return { mirrored: false, reason, state: cloneAuthorityState(this.authorityState) };
+    }
+  }
+
+  async verifyJavaScriptState(input: {
+    javascriptProof: NativeCoreRevisionProof;
+    compatibleFallback?: NativeCoreRevisionProof;
+  }): Promise<NativeCoreMirroredOperationResult> {
+    if (this.authorityState.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(this.authorityState.phase) || !this.session ||
+      !this.recoveryRootHash || input.javascriptProof.rootHash !== this.recoveryRootHash) {
+      return { mirrored: false, reason: "native-shadow-not-running", state: cloneAuthorityState(this.authorityState) };
+    }
+    try {
+      const comparison = await this.session.compare({
+        revision: input.javascriptProof.revision,
+        canonicalSha256: input.javascriptProof.canonicalSha256,
+        domainSha256: input.javascriptProof.domainSha256,
+      });
+      const nativeProof = proofFromSummary(comparison.summary, input.javascriptProof.rootHash);
+      this.authorityState = recordNativeCoreShadowComparison(this.authorityState, {
+        javascriptProof: input.javascriptProof,
+        nativeProof,
+        ...(input.compatibleFallback ? { compatibleFallback: input.compatibleFallback } : {}),
+      });
+      this.lastSummary = comparison.summary;
+      if (!comparison.matches || this.authorityState.phase === "shadow-diverged") {
+        await this.closeSession();
+        return { mirrored: false, reason: "native-shadow-diverged", state: cloneAuthorityState(this.authorityState) };
+      }
+      return { mirrored: true, state: cloneAuthorityState(this.authorityState) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "原生影子状态校验失败";
+      this.authorityState = handleNativeCoreExit(this.authorityState, `shadow-compare-failed:${reason}`);
+      await this.closeSession();
+      return { mirrored: false, reason, state: cloneAuthorityState(this.authorityState) };
     }
   }
 

@@ -11,7 +11,9 @@ import {
   recordNativeCoreAuthorityCheckpoint,
   recordNativeCoreGateEvidence,
   recordNativeCoreShadowComparison,
+  recordNativeCoreUnverifiedShadowProgress,
   recoverNativeCoreAuthority,
+  reseedNativeCoreShadow,
   type NativeCoreGateEvidence,
   type NativeCoreRevisionProof,
 } from "./nativeCoreAuthority";
@@ -80,6 +82,29 @@ describe("native core authority state machine", () => {
       javascriptProof: proof(3, "d"), nativeProof: proof(3, "d"), compatibleFallback: proof(3, "d"),
     });
     expect(state).toMatchObject({ phase: "native-ready", comparisonCount: 3, latestVerifiedProof: proof(3, "d") });
+  });
+
+  it("cannot promote unverified replay and preserves shadow history after a verified reseed", () => {
+    let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
+      sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
+    });
+    state = recordNativeCoreUnverifiedShadowProgress(state, 2);
+    expect(state).toMatchObject({ phase: "shadow", shadowRevision: 2, comparisonCount: 1 });
+    expect(() => recordNativeCoreGateEvidence(state, gate({ comparisonCount: 1 }))).toThrow(/尚未比较/);
+    state = recordNativeCoreShadowComparison(state, {
+      javascriptProof: proof(2), nativeProof: proof(2), compatibleFallback: proof(2),
+    });
+    state = reseedNativeCoreShadow(state, {
+      sessionId: "core-2", javascriptProof: proof(2, "d"), nativeProof: proof(2, "d"),
+    });
+    expect(state).toMatchObject({
+      phase: "shadow",
+      sessionId: "core-2",
+      shadowStartedAtMs: 1_000,
+      shadowRevision: 2,
+      comparisonCount: 3,
+      exactCompatibleFallback: proof(2, "d"),
+    });
   });
 
   it("pauses after a native crash and rejects an older silent JavaScript rollback", () => {

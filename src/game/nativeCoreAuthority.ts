@@ -32,6 +32,8 @@ export interface NativeCoreAuthorityState {
   authority: NativeCoreAuthorityOwner;
   sessionId: string | null;
   shadowStartedAtMs: number | null;
+  /** Current in-memory shadow/native revision, including not-yet-compared replay. */
+  shadowRevision: number | null;
   comparisonCount: number;
   latestVerifiedProof: NativeCoreRevisionProof | null;
   exactCompatibleFallback: NativeCoreRevisionProof | null;
@@ -66,6 +68,7 @@ export function createNativeCoreAuthorityState(): NativeCoreAuthorityState {
     authority: "javascript",
     sessionId: null,
     shadowStartedAtMs: null,
+    shadowRevision: null,
     comparisonCount: 0,
     latestVerifiedProof: null,
     exactCompatibleFallback: null,
@@ -95,6 +98,7 @@ export function beginNativeCoreShadow(
       ...createNativeCoreAuthorityState(),
       phase: "shadow-diverged",
       reason: "shadow-open-proof-mismatch",
+      shadowRevision: null,
       latestVerifiedProof: input.javascriptProof,
       exactCompatibleFallback: input.javascriptProof,
     };
@@ -104,6 +108,7 @@ export function beginNativeCoreShadow(
     authority: "javascript",
     sessionId: input.sessionId,
     shadowStartedAtMs: input.startedAtMs,
+    shadowRevision: input.javascriptProof.revision,
     comparisonCount: 1,
     latestVerifiedProof: input.javascriptProof,
     exactCompatibleFallback: input.javascriptProof,
@@ -124,7 +129,8 @@ export function recordNativeCoreShadowComparison(
     throw new Error("当前没有可比较的原生影子");
   }
   if (!validProof(input.javascriptProof) || !validProof(input.nativeProof) ||
-    input.javascriptProof.revision < (current.latestVerifiedProof?.revision ?? 0)) {
+    input.javascriptProof.revision < (current.latestVerifiedProof?.revision ?? 0) ||
+    input.javascriptProof.revision < (current.shadowRevision ?? 0)) {
     throw new Error("原生影子比较 revision 无效");
   }
   if (!sameNativeCoreRevisionProof(input.javascriptProof, input.nativeProof)) {
@@ -143,8 +149,66 @@ export function recordNativeCoreShadowComparison(
   return {
     ...current,
     comparisonCount: current.comparisonCount + 1,
+    shadowRevision: input.javascriptProof.revision,
     latestVerifiedProof: input.javascriptProof,
     exactCompatibleFallback: fallback ?? current.exactCompatibleFallback,
+    reason: null,
+  };
+}
+
+/** Marks a durably replayed shadow revision without claiming a state match. */
+export function recordNativeCoreUnverifiedShadowProgress(
+  current: NativeCoreAuthorityState,
+  revision: number,
+): NativeCoreAuthorityState {
+  if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" ||
+    !current.sessionId || !Number.isSafeInteger(revision) || revision <= (current.shadowRevision ?? -1)) {
+    throw new Error("原生影子未校验 revision 不连续");
+  }
+  return {
+    ...current,
+    phase: "shadow",
+    shadowRevision: revision,
+    gateEvidence: null,
+    reason: "shadow-comparison-pending",
+  };
+}
+
+/** Replaces the physical checkpoint/session while preserving 24h shadow history. */
+export function reseedNativeCoreShadow(
+  current: NativeCoreAuthorityState,
+  input: {
+    sessionId: string;
+    javascriptProof: NativeCoreRevisionProof;
+    nativeProof: NativeCoreRevisionProof;
+  },
+): NativeCoreAuthorityState {
+  if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" ||
+    !current.sessionId || current.shadowStartedAtMs === null || !SESSION_ID_PATTERN.test(input.sessionId) ||
+    !validProof(input.javascriptProof) || !validProof(input.nativeProof) ||
+    current.shadowRevision !== current.latestVerifiedProof?.revision ||
+    input.javascriptProof.revision < (current.latestVerifiedProof?.revision ?? 0)) {
+    throw new Error("原生影子重建身份无效");
+  }
+  if (!sameNativeCoreRevisionProof(input.javascriptProof, input.nativeProof)) {
+    return {
+      ...current,
+      phase: "shadow-diverged",
+      sessionId: null,
+      shadowRevision: null,
+      gateEvidence: null,
+      reason: "shadow-reseed-proof-mismatch",
+    };
+  }
+  return {
+    ...current,
+    phase: "shadow",
+    sessionId: input.sessionId,
+    shadowRevision: input.javascriptProof.revision,
+    comparisonCount: current.comparisonCount + 1,
+    latestVerifiedProof: input.javascriptProof,
+    exactCompatibleFallback: input.javascriptProof,
+    gateEvidence: null,
     reason: null,
   };
 }
@@ -168,6 +232,9 @@ export function recordNativeCoreGateEvidence(
   if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" || current.shadowStartedAtMs === null) {
     throw new Error("原生 Gate 只能绑定正在运行的影子");
   }
+  if (!current.latestVerifiedProof || current.shadowRevision !== current.latestVerifiedProof.revision) {
+    throw new Error("原生影子仍有尚未比较的 revision");
+  }
   if (evidence.shadowStartedAtMs !== current.shadowStartedAtMs || evidence.comparisonCount > current.comparisonCount) {
     throw new Error("原生 Gate 证据不属于当前影子会话");
   }
@@ -185,7 +252,8 @@ export function promoteNativeCoreAuthority(
   exactCompatibleCheckpoint: NativeCoreRevisionProof,
 ): NativeCoreAuthorityState {
   if (current.phase !== "native-ready" || current.authority !== "javascript" || !current.sessionId ||
-    !current.gateEvidence || nativeCoreGateIssues(current.gateEvidence).length > 0 || !current.latestVerifiedProof) {
+    !current.gateEvidence || nativeCoreGateIssues(current.gateEvidence).length > 0 || !current.latestVerifiedProof ||
+    current.shadowRevision !== current.latestVerifiedProof.revision) {
     throw new Error("原生核心尚未满足权威切换门槛");
   }
   if (!validProof(exactCompatibleCheckpoint) ||
@@ -214,7 +282,7 @@ export function recordNativeCoreAuthorityCheckpoint(
     nativeProof.revision < (current.latestVerifiedProof?.revision ?? 0)) {
     throw new Error("原生权威检查点证明无效");
   }
-  return { ...current, latestVerifiedProof: nativeProof, exactCompatibleFallback: exactCompatibleCheckpoint };
+  return { ...current, shadowRevision: nativeProof.revision, latestVerifiedProof: nativeProof, exactCompatibleFallback: exactCompatibleCheckpoint };
 }
 
 /**
@@ -236,7 +304,7 @@ export function recordNativeCoreAuthorityProgress(
     !sameNativeCoreRevisionProof(nativeProof, current.latestVerifiedProof)) {
     throw new Error("原生权威同 revision 出现不同证明");
   }
-  return { ...current, latestVerifiedProof: nativeProof, reason: null };
+  return { ...current, shadowRevision: nativeProof.revision, latestVerifiedProof: nativeProof, reason: null };
 }
 
 export function handleNativeCoreExit(
@@ -271,7 +339,7 @@ export function recoverNativeCoreAuthority(
     !validProof(recoveredProof) || !sameNativeCoreRevisionProof(current.latestVerifiedProof, recoveredProof)) {
     return { ...current, phase: "paused-recovery-required", authority: "none", reason: "native-recovery-proof-mismatch" };
   }
-  return { ...current, phase: "native-authoritative", authority: "native", sessionId, reason: null };
+  return { ...current, phase: "native-authoritative", authority: "native", sessionId, shadowRevision: recoveredProof.revision, reason: null };
 }
 
 export function fallbackNativeCoreToJavaScript(

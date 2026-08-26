@@ -79,9 +79,9 @@ function proof(revision: number, rootHash = ROOT): NativeCoreRevisionProof {
 }
 
 class FakeNativeSession implements WindowsNativeCoreShadow {
-  readonly sessionId = "native-test-session";
-  readonly checkpoint = checkpoint;
-  current = summary(1);
+  readonly sessionId: string;
+  readonly checkpoint: DesktopNativeSaveCommitResult;
+  current: DesktopNativeCoreSummary;
   canonicalAfterCommit = CANONICAL;
   eligible = false;
   uncertainOnce = false;
@@ -89,6 +89,12 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   closed = false;
   projectionCalls = 0;
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
+
+  constructor(sessionId = "native-test-session", sourceCheckpoint: DesktopNativeSaveCommitResult = checkpoint) {
+    this.sessionId = sessionId;
+    this.checkpoint = structuredClone(sourceCheckpoint);
+    this.current = summary(sourceCheckpoint.revision);
+  }
 
   async status(): Promise<DesktopNativeCoreSummary> {
     return { ...this.current, coverage: coverage(this.eligible) };
@@ -214,6 +220,44 @@ describe("Windows native core invitation-Beta controller", () => {
       compatibleFallback: proof(2),
     });
     expect(mirrored).toMatchObject({ mirrored: true, state: { phase: "shadow", authority: "javascript", comparisonCount: 2 } });
+  });
+
+  it("replays without claiming equality, then verifies and reseeds without resetting the 24h window", async () => {
+    const first = new FakeNativeSession("native-session-1");
+    const nextCheckpoint = { ...checkpoint, generation: 2, revision: 2, rootHash: "f".repeat(64) };
+    const second = new FakeNativeSession("native-session-2", nextCheckpoint);
+    let opens = 0;
+    const controller = new WindowsNativeCoreBetaController(async () => opens++ === 0 ? first : second, () => 1_000);
+    await controller.openShadow({ mode: "normal", checkpoint, runtime, javascriptProof: proof(1) });
+    const replayed = await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "shadow-unverified-1",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    expect(replayed).toMatchObject({ mirrored: true, state: { shadowRevision: 2, comparisonCount: 1 } });
+    expect(() => controller.recordGateMeasurement({
+      observedAtMs: 1_000 + 24 * 60 * 60 * 1_000,
+      netThroughputRatio: 2,
+      ipcFrameShare: 0.1,
+      processTreeMemoryImprovementRatio: 0.5,
+    })).toThrow(/尚未比较/);
+    const verified = await controller.verifyJavaScriptState({ javascriptProof: proof(2) });
+    expect(verified).toMatchObject({ mirrored: true, state: { comparisonCount: 2, shadowRevision: 2 } });
+    const reseeded = await controller.openShadow({
+      mode: "normal",
+      checkpoint: nextCheckpoint,
+      runtime,
+      javascriptProof: proof(2, nextCheckpoint.rootHash),
+    });
+    expect(reseeded.authority).toMatchObject({
+      phase: "shadow",
+      sessionId: "native-session-2",
+      shadowStartedAtMs: 1_000,
+      shadowRevision: 2,
+      comparisonCount: 3,
+    });
   });
 
   it("derives the coverage Gate from the native summary instead of trusting a caller", async () => {

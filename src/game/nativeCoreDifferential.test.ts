@@ -1341,6 +1341,38 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
   }, 30_000);
 
+  it("durably commits and idempotently retries one exact shadow operation", async () => {
+    const initial = simpleMiningState();
+    const checkpoint = await seed(initial, 90);
+    const opened = await open(checkpoint);
+    const request = {
+      commandId: "native-differential-shadow-90",
+      baseRevision: checkpoint.revision,
+      command: null,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+      includeDiagnostics: true,
+    };
+    const committed = await client.request({
+      operation: "coreCommitOperation", sessionId: opened.sessionId, request,
+    });
+    const expected = advanceSimulationBudget(initial, 1, 1);
+    expect(committed).toMatchObject({
+      commandId: request.commandId,
+      baseRevision: 90,
+      revision: 91,
+      currentRevision: 91,
+      duplicate: false,
+    });
+    expect(committed.summary.canonicalSha256).toBe(canonicalSha256(expected));
+    expect(committed.summary.domainSha256).toBe(nativeCoreDomainSha256(expected, 91));
+    const retried = await client.request({
+      operation: "coreCommitOperation", sessionId: opened.sessionId, request,
+    });
+    expect(retried).toMatchObject({ revision: 91, currentRevision: 91, duplicate: true });
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  });
+
   it("matches infinite mining, ordinary production, and renewable allocation at an exact boundary", async () => {
     const initial = simpleMiningState();
     const checkpoint = await seed(initial, 100);

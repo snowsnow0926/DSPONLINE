@@ -1752,7 +1752,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     windowsNativeCoreBetaControllerRef.current = new WindowsNativeCoreBetaController();
   }
   const windowsNativeCoreBetaGenerationRef = useRef(0);
+  const windowsNativeCoreBetaCheckpointTokenRef = useRef(0);
   const windowsNativeCoreBetaTimerRef = useRef<number | null>(null);
+  const windowsNativeCoreBetaQueueRef = useRef<Promise<void>>(Promise.resolve());
   const simulationWorkerRegistryFingerprintRef = useRef<string | null>(null);
   const simulationSubmissionRef = useRef<SimulationSubmission | null>(null);
   const durableRecoveryHeadRef = useRef<SimulationRuntimeDurableAppHead | null>(durableSimulationRuntimeEnabled && loaded.runtimeRecovery ? {
@@ -1944,6 +1946,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const eventSequenceRef = useRef(0);
   const burstSequenceRef = useRef(0);
   const getCurrentGame = useCallback(() => gameRef.current, []);
+  const enqueueWindowsNativeCoreShadowOperation = useCallback((input: {
+    commandId: string;
+    baseRevision: number;
+    resultRevision: number;
+    command?: SimulationCommandPatch | null;
+    simulationSeconds: number;
+    wallSeconds: number;
+  }) => {
+    if (!windowsNativeCoreBetaEnabledRef.current) return;
+    const generation = windowsNativeCoreBetaGenerationRef.current;
+    windowsNativeCoreBetaQueueRef.current = windowsNativeCoreBetaQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) return;
+        const result = await windowsNativeCoreBetaControllerRef.current?.mirrorJavaScriptOperationUnverified(input);
+        if (!result || result.mirrored || result.reason === "native-shadow-not-running") return;
+        const diverged = result.state.phase === "shadow-diverged";
+        setWindowsNativeCoreBetaStatus(diverged ? "diverged" : "failed");
+        setNotice(diverged
+          ? "Windows 原生核心影子运行出现状态分叉；JavaScript 进度保持不变，影子已停止"
+          : `Windows 原生核心影子重放失败，已继续使用 JavaScript：${result.reason ?? "未知错误"}`);
+      });
+  }, []);
   const scheduleWindowsNativeCoreShadow = useCallback((
     state: GameState,
     checkpoint: DesktopNativeSaveCommitResult,
@@ -1951,7 +1976,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!windowsNativeCoreBetaEnabledRef.current || !getDesktopBridge()) return;
     const controller = windowsNativeCoreBetaControllerRef.current;
     if (!controller) return;
-    const generation = ++windowsNativeCoreBetaGenerationRef.current;
+    const generation = windowsNativeCoreBetaGenerationRef.current;
+    const checkpointToken = ++windowsNativeCoreBetaCheckpointTokenRef.current;
     const registry = contentPackRuntimeSnapshotRef.current;
     if (windowsNativeCoreBetaTimerRef.current !== null) {
       window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
@@ -1959,9 +1985,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setWindowsNativeCoreBetaStatus("hashing");
     windowsNativeCoreBetaTimerRef.current = window.setTimeout(() => {
       windowsNativeCoreBetaTimerRef.current = null;
-      if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) return;
+      if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current ||
+        checkpointToken !== windowsNativeCoreBetaCheckpointTokenRef.current) return;
       const startedAt = performance.now();
-      void (async () => {
+      windowsNativeCoreBetaQueueRef.current = windowsNativeCoreBetaQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
         try {
           // Both digests are streamed directly from the already committed JS
           // checkpoint. No canonical 77 MB string or duplicate GameState is
@@ -1972,9 +2001,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             checkpoint.rootHash,
             registry.fingerprint,
           );
-          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) return;
+          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current ||
+            checkpointToken !== windowsNativeCoreBetaCheckpointTokenRef.current) return;
+          const previous = controller.snapshot();
+          if (["shadow", "native-ready"].includes(previous.authority.phase) && previous.recoveryRootHash) {
+            if ((previous.authority.shadowRevision ?? -1) > checkpoint.revision) {
+              // Experimental edit-during-save can commit a checkpoint behind
+              // the already mirrored live head. Never compare or reseed the
+              // shadow backwards; a later checkpoint will catch up.
+              setWindowsNativeCoreBetaStatus("shadow-active");
+              return;
+            }
+            const verified = await controller.verifyJavaScriptState({
+              javascriptProof: { ...javascriptProof, rootHash: previous.recoveryRootHash },
+            });
+            if (!verified.mirrored) {
+              const diverged = verified.state.phase === "shadow-diverged";
+              setWindowsNativeCoreBetaStatus(diverged ? "diverged" : "failed");
+              setNotice(diverged
+                ? "Windows 原生核心影子检查发现状态分叉；JavaScript 仍是权威，当前存档和进度未被替换"
+                : `Windows 原生核心影子检查失败，已继续使用 JavaScript：${verified.reason ?? "未知错误"}`);
+              return;
+            }
+          }
           const snapshot = await controller.openShadow({ mode: state.mode, checkpoint, runtime: registry, javascriptProof });
-          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current) {
+          if (!windowsNativeCoreBetaEnabledRef.current || generation !== windowsNativeCoreBetaGenerationRef.current ||
+            checkpointToken !== windowsNativeCoreBetaCheckpointTokenRef.current) {
             await controller.notifyCoreExit("native-shadow-opt-out-during-open");
             return;
           }
@@ -1994,11 +2046,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             phase,
           });
         } catch (error) {
-          if (generation !== windowsNativeCoreBetaGenerationRef.current) return;
+          if (generation !== windowsNativeCoreBetaGenerationRef.current ||
+            checkpointToken !== windowsNativeCoreBetaCheckpointTokenRef.current) return;
           setWindowsNativeCoreBetaStatus("failed");
           setNotice(`Windows 原生核心影子检查失败，已继续使用 JavaScript：${error instanceof Error ? error.message : "未知错误"}`);
         }
-      })();
+      });
     }, 0);
   }, []);
   const updateWindowsNativeCoreBetaEnabled = useCallback((enabled: boolean) => {
@@ -2010,6 +2063,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     windowsNativeCoreBetaEnabledRef.current = enabled;
     setWindowsNativeCoreBetaEnabled(enabled);
     windowsNativeCoreBetaGenerationRef.current += 1;
+    windowsNativeCoreBetaCheckpointTokenRef.current += 1;
     if (windowsNativeCoreBetaTimerRef.current !== null) {
       window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
       windowsNativeCoreBetaTimerRef.current = null;
@@ -2025,6 +2079,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
   useEffect(() => () => {
     windowsNativeCoreBetaGenerationRef.current += 1;
+    windowsNativeCoreBetaCheckpointTokenRef.current += 1;
     if (windowsNativeCoreBetaTimerRef.current !== null) {
       window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
       windowsNativeCoreBetaTimerRef.current = null;
@@ -5885,17 +5940,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ).then(async (result) => {
           if (!result.ok) throw new Error(result.message);
           if (result.proof.stateRevision > submission.durableIntent!.baseStateRevision) {
-            await appendWindowsNativeWal(
+            const commandId = `intent-${submission.durableIntent!.intentSha256}`;
+            const nativeWalResult = await appendWindowsNativeWal(
               submission.state.mode,
               submission.durableIntent!.baseStateRevision,
               result.proof.stateRevision,
-              `intent-${submission.durableIntent!.intentSha256}`,
+              commandId,
               {
                 kind: "durable-operation-v1",
                 intent: submission.durableIntent!,
                 resultStateRevision: result.proof.stateRevision,
               },
             );
+            if (nativeWalResult === "appended") enqueueWindowsNativeCoreShadowOperation({
+              commandId,
+              baseRevision: submission.durableIntent!.baseStateRevision,
+              resultRevision: result.proof.stateRevision,
+              command: submission.durableIntent!.command,
+              simulationSeconds: submission.durableIntent!.simulationSeconds,
+              wallSeconds: submission.durableIntent!.wallSeconds,
+            });
           }
           durableRecoveryHeadRef.current = advanceSimulationRuntimeDurableAppHead(
             durableRecoveryHeadRef.current!, submission.durableIntent!, result.proof,
@@ -6198,11 +6262,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         if (!durableSimulationRuntimeEnabled && submission.kind === "advance" &&
           submission.baseStateRevision !== null && confirmedRevision > submission.baseStateRevision) {
           try {
-            await appendWindowsNativeWal(
+            const commandId = `stable-${submission.baseStateRevision}-${confirmedRevision}-${submission.id}`;
+            const nativeWalResult = await appendWindowsNativeWal(
               submission.state.mode,
               submission.baseStateRevision,
               confirmedRevision,
-              `stable-${submission.baseStateRevision}-${confirmedRevision}-${submission.id}`,
+              commandId,
               {
                 kind: "stable-operation-v1",
                 baseStateRevision: submission.baseStateRevision,
@@ -6215,6 +6280,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 registry: submission.registry,
               },
             );
+            if (nativeWalResult === "appended") enqueueWindowsNativeCoreShadowOperation({
+              commandId,
+              baseRevision: submission.baseStateRevision,
+              resultRevision: confirmedRevision,
+              command: submission.command,
+              simulationSeconds: submission.simulationSeconds,
+              wallSeconds: submission.wallSeconds,
+            });
           } catch (error) {
             // The JS authority and compatible v47 save remain exact. Native
             // authority promotion is blocked until the next full native

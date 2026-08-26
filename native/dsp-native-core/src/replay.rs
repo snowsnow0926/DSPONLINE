@@ -1,6 +1,6 @@
 use anyhow::{Context, bail};
 
-use crate::{CoreAdvanceRequest, CoreState, CoreStateSummary, SimulationCommandPatch};
+use crate::{CoreAdvanceRequest, CoreState, SimulationCommandPatch};
 
 impl CoreState {
     /// Replays one accepted JavaScript authority operation transactionally.
@@ -14,7 +14,7 @@ impl CoreState {
         command: Option<&SimulationCommandPatch>,
         simulation_seconds: f64,
         wall_seconds: f64,
-    ) -> anyhow::Result<CoreStateSummary> {
+    ) -> anyhow::Result<()> {
         if self.revision != base_revision || result_revision <= base_revision {
             bail!("native core replay revision range is invalid");
         }
@@ -43,8 +43,7 @@ impl CoreState {
         if next.revision != result_revision {
             bail!("native core replay result revision is invalid");
         }
-        let summary = next.summary()?;
         *self = next;
-        Ok(summary)
+        Ok(())
     }
 }

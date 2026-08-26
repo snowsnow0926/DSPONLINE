@@ -21,6 +21,8 @@ pub struct ItemAmount {
 pub struct ItemDefinition {
     pub id: String,
     pub kind: String,
+    #[serde(default)]
+    pub fuel_energy_mj: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,9 +45,21 @@ pub struct BuildingDefinition {
     #[serde(default)]
     pub power_generation_kw: f64,
     #[serde(default)]
+    pub power_charge_kw: f64,
+    #[serde(default)]
+    pub energy_capacity_mj: f64,
+    #[serde(default)]
+    pub fuel_item_ids: Vec<String>,
+    #[serde(default = "default_fuel_efficiency")]
+    pub fuel_efficiency: f64,
+    #[serde(default)]
     pub family: Option<String>,
     #[serde(default)]
     pub accepts: Option<String>,
+}
+
+fn default_fuel_efficiency() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +210,9 @@ impl RuntimeCatalog {
             if !matches!(item.kind.as_str(), "solid" | "fluid" | "matrix") {
                 bail!("native catalog item kind is invalid: {}", item.id);
             }
+            if !item.fuel_energy_mj.is_finite() || item.fuel_energy_mj < 0.0 {
+                bail!("native catalog item fuel energy is invalid: {}", item.id);
+            }
         }
         for building in &snapshot.buildings {
             if !building.speed.is_finite()
@@ -208,6 +225,16 @@ impl RuntimeCatalog {
                 || building.power_demand_kw < 0.0
                 || !building.power_generation_kw.is_finite()
                 || building.power_generation_kw < 0.0
+                || !building.power_charge_kw.is_finite()
+                || building.power_charge_kw < 0.0
+                || !building.energy_capacity_mj.is_finite()
+                || building.energy_capacity_mj < 0.0
+                || !building.fuel_efficiency.is_finite()
+                || building.fuel_efficiency <= 0.0
+                || building
+                    .fuel_item_ids
+                    .iter()
+                    .any(|id| !item_ids.contains(id.as_str()))
             {
                 bail!(
                     "native catalog building numeric field is invalid: {}",

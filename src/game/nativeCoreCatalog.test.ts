@@ -14,6 +14,18 @@ describe("Windows native core catalog", () => {
     expect(catalog.belts.map((belt) => belt.tier)).toEqual([1, 2, 3]);
     expect(catalog.items.map((item) => item.id)).toEqual([...catalog.items.map((item) => item.id)].sort());
     expect(catalog.recipes.find((recipe) => recipe.id === "iron_ingot")?.outputs).toEqual([{ itemId: "iron_ingot", amount: 1 }]);
+    expect(catalog.items.find((item) => item.id === "coal")?.fuelEnergyMj).toBe(2.7);
+    expect(catalog.buildings.find((building) => building.id === "thermal_power_plant")).toMatchObject({
+      powerGenerationKw: 2160,
+      powerChargeKw: 0,
+      energyCapacityMj: 0,
+      fuelEfficiency: 0.8,
+    });
+    expect(catalog.buildings.find((building) => building.id === "energy_exchanger")).toMatchObject({
+      powerGenerationKw: 45000,
+      powerChargeKw: 45000,
+      energyCapacityMj: 90,
+      fuelItemIds: [],
+    });
   });
 });
-

@@ -64,39 +64,86 @@ struct Consumer {
     demand_kw: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchKind {
+    Thermal,
+    Fusion,
+    ArtificialStar,
+    Accumulator,
+    Exchanger,
+}
+
+#[derive(Debug, Clone)]
+struct PowerCandidate {
+    entity_index: usize,
+    capacity: f64,
+    priority: usize,
+    kind: DispatchKind,
+}
+
 #[derive(Debug, Clone)]
 struct GridRuntime {
     generation_kw: f64,
+    base_generation_kw: f64,
     demand_kw: f64,
     supplied_kw: f64,
     factor: f64,
     wind_generation_kw: f64,
     solar_generation_kw: f64,
     geothermal_generation_kw: f64,
+    thermal_generation_kw: f64,
+    fusion_generation_kw: f64,
+    artificial_star_generation_kw: f64,
+    storage_discharge_kw: f64,
+    storage_charge_kw: f64,
+    stored_energy_mj: f64,
+    storage_capacity_mj: f64,
+    fuel_electric_energy_mj: f64,
+    rated_fuel_generator_kw: f64,
     connected_entities: u64,
     disconnected_entities: u64,
     generator_count: f64,
     has_power_source: bool,
     consumers: [Vec<Consumer>; 4],
     disconnected_demand_kw: f64,
+    dispatch_candidates: Vec<PowerCandidate>,
+    accumulator_charge_candidates: Vec<PowerCandidate>,
+    exchanger_charge_candidates: Vec<PowerCandidate>,
+    power_output_by_entity: HashMap<usize, f64>,
+    power_input_by_entity: HashMap<usize, f64>,
 }
 
 impl Default for GridRuntime {
     fn default() -> Self {
         Self {
             generation_kw: 0.0,
+            base_generation_kw: 0.0,
             demand_kw: 0.0,
             supplied_kw: 0.0,
             factor: 1.0,
             wind_generation_kw: 0.0,
             solar_generation_kw: 0.0,
             geothermal_generation_kw: 0.0,
+            thermal_generation_kw: 0.0,
+            fusion_generation_kw: 0.0,
+            artificial_star_generation_kw: 0.0,
+            storage_discharge_kw: 0.0,
+            storage_charge_kw: 0.0,
+            stored_energy_mj: 0.0,
+            storage_capacity_mj: 0.0,
+            fuel_electric_energy_mj: 0.0,
+            rated_fuel_generator_kw: 0.0,
             connected_entities: 0,
             disconnected_entities: 0,
             generator_count: 0.0,
             has_power_source: false,
             consumers: std::array::from_fn(|_| Vec::new()),
             disconnected_demand_kw: 0.0,
+            dispatch_candidates: Vec::new(),
+            accumulator_charge_candidates: Vec::new(),
+            exchanger_charge_candidates: Vec::new(),
+            power_output_by_entity: HashMap::new(),
+            power_input_by_entity: HashMap::new(),
         }
     }
 }
@@ -169,6 +216,142 @@ fn stacked_capacity(base_capacity: f64, count: f64, limit: f64) -> f64 {
     } else {
         (base * count).min(limit)
     }
+}
+
+fn item_amount(entity: &Map<String, Value>, record: &str, item_id: &str) -> f64 {
+    entity
+        .get(record)
+        .and_then(Value::as_object)
+        .and_then(|values| values.get(item_id))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(0.0)
+}
+
+fn is_fuel_generator(building_id: &str) -> bool {
+    matches!(
+        building_id,
+        "thermal_power_plant" | "mini_fusion_power_plant" | "artificial_star"
+    )
+}
+
+fn fuel_energy_available(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    building: &BuildingDefinition,
+) -> f64 {
+    let Some(fuel_item_id) = string_at(entity, "fuelItemId") else {
+        return 0.0;
+    };
+    if !building.fuel_item_ids.iter().any(|id| id == fuel_item_id) {
+        return 0.0;
+    }
+    let energy_per_item = state
+        .catalog
+        .items
+        .get(fuel_item_id)
+        .map(|item| item.fuel_energy_mj)
+        .unwrap_or(0.0);
+    finite_number(entity.get("fuelRemainingMj")).max(0.0)
+        + (item_amount(entity, "inputs", fuel_item_id) + EPSILON).floor() * energy_per_item
+}
+
+fn energy_capacity(entity: &Map<String, Value>, building: &BuildingDefinition) -> f64 {
+    building.energy_capacity_mj * finite_number(entity.get("machineCount"))
+}
+
+fn stored_energy(entity: &Map<String, Value>, building: &BuildingDefinition) -> f64 {
+    finite_number(entity.get("storedEnergyMj"))
+        .max(0.0)
+        .min(energy_capacity(entity, building))
+}
+
+fn item_output_free(
+    entity: &Map<String, Value>,
+    building: &BuildingDefinition,
+    item_id: &str,
+    buffer_limit: f64,
+) -> f64 {
+    let capacity = stacked_capacity(
+        building.output_capacity,
+        finite_number(entity.get("machineCount")),
+        buffer_limit,
+    );
+    ((capacity - item_amount(entity, "outputs", item_id)).max(0.0) + EPSILON).floor()
+}
+
+fn accumulator_energy_mj(state: &CoreState) -> anyhow::Result<f64> {
+    let energy = state
+        .catalog
+        .buildings
+        .get("accumulator")
+        .map(|building| building.energy_capacity_mj)
+        .unwrap_or(0.0);
+    if !energy.is_finite() || energy <= EPSILON {
+        return Err(anyhow!("native accumulator energy catalog is invalid"));
+    }
+    Ok(energy)
+}
+
+fn default_generation_priority(building_id: &str) -> usize {
+    match building_id {
+        "energy_exchanger" => 2,
+        "accumulator" | "thermal_power_plant" | "mini_fusion_power_plant" | "artificial_star" => 1,
+        _ => 3,
+    }
+}
+
+fn generation_priority(entity: &Map<String, Value>, building_id: &str) -> usize {
+    entity
+        .get("generationPriority")
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(1, 3) as usize)
+        .unwrap_or_else(|| default_generation_priority(building_id))
+}
+
+fn allocate_power(
+    candidates: &[PowerCandidate],
+    requested_kw: f64,
+    outputs: &mut HashMap<usize, f64>,
+) -> f64 {
+    let capacity = candidates
+        .iter()
+        .map(|candidate| candidate.capacity)
+        .sum::<f64>();
+    let allocated = requested_kw.max(0.0).min(capacity);
+    for candidate in candidates {
+        outputs.insert(
+            candidate.entity_index,
+            if capacity > EPSILON {
+                allocated * candidate.capacity / capacity
+            } else {
+                0.0
+            },
+        );
+    }
+    allocated
+}
+
+fn allocate_power_by_priority(
+    candidates: &[PowerCandidate],
+    requested_kw: f64,
+    outputs: &mut HashMap<usize, f64>,
+) -> f64 {
+    let mut remaining = requested_kw.max(0.0);
+    let mut allocated = 0.0;
+    for priority in [3_usize, 2, 1] {
+        let group = candidates
+            .iter()
+            .filter(|candidate| candidate.priority == priority)
+            .cloned()
+            .collect::<Vec<_>>();
+        let supplied = allocate_power(&group, remaining, outputs);
+        allocated += supplied;
+        remaining -= supplied;
+        if remaining <= EPSILON {
+            break;
+        }
+    }
+    allocated
 }
 
 fn exact_campaign_complete(base: &Map<String, Value>) -> bool {
@@ -358,10 +541,38 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let building = string_at(object, "buildingId").unwrap_or_default();
                 if !matches!(
                     building,
-                    "wind_turbine" | "solar_panel" | "geothermal_power_station"
+                    "wind_turbine"
+                        | "solar_panel"
+                        | "geothermal_power_station"
+                        | "thermal_power_plant"
+                        | "mini_fusion_power_plant"
+                        | "artificial_star"
+                        | "accumulator"
+                        | "energy_exchanger"
                 ) || !state.catalog.buildings.contains_key(building)
                 {
                     return Ok(Some("simple-factory-power-source-unsupported"));
+                }
+                if is_fuel_generator(building)
+                    && string_at(object, "fuelItemId").is_some_and(|fuel| {
+                        state
+                            .catalog
+                            .buildings
+                            .get(building)
+                            .is_none_or(|definition| {
+                                !definition.fuel_item_ids.iter().any(|id| id == fuel)
+                            })
+                    })
+                {
+                    return Ok(Some("simple-factory-fuel-invalid"));
+                }
+                if building == "energy_exchanger"
+                    && !matches!(
+                        string_at(object, "energyMode"),
+                        Some("charge" | "discharge")
+                    )
+                {
+                    return Ok(Some("simple-factory-energy-mode-invalid"));
                 }
             }
             Some("machine") => {
@@ -1254,6 +1465,14 @@ fn machine_can_run(
 }
 
 fn metric_value(grid_id: Option<&str>, grid: &GridRuntime, total_items_per_minute: f64) -> Value {
+    let fuel_reserve_seconds = if grid.rated_fuel_generator_kw > EPSILON {
+        rounded(
+            grid.fuel_electric_energy_mj * 1_000.0 / grid.rated_fuel_generator_kw,
+            1,
+        )
+    } else {
+        0.0
+    };
     let mut metric = json!({
         "generationKw": rounded(grid.generation_kw, 2),
         "demandKw": rounded(grid.demand_kw, 2),
@@ -1261,15 +1480,15 @@ fn metric_value(grid_id: Option<&str>, grid: &GridRuntime, total_items_per_minut
         "windGenerationKw": rounded(grid.wind_generation_kw, 2),
         "solarGenerationKw": rounded(grid.solar_generation_kw, 2),
         "geothermalGenerationKw": rounded(grid.geothermal_generation_kw, 2),
-        "thermalGenerationKw": 0,
-        "fusionGenerationKw": 0,
-        "artificialStarGenerationKw": 0,
+        "thermalGenerationKw": rounded(grid.thermal_generation_kw, 2),
+        "fusionGenerationKw": rounded(grid.fusion_generation_kw, 2),
+        "artificialStarGenerationKw": rounded(grid.artificial_star_generation_kw, 2),
         "rayGenerationKw": 0,
-        "storageDischargeKw": 0,
-        "storageChargeKw": 0,
-        "storedEnergyMj": 0,
-        "storageCapacityMj": 0,
-        "fuelReserveSeconds": 0,
+        "storageDischargeKw": rounded(grid.storage_discharge_kw, 2),
+        "storageChargeKw": rounded(grid.storage_charge_kw, 2),
+        "storedEnergyMj": rounded(grid.stored_energy_mj, 3),
+        "storageCapacityMj": rounded(grid.storage_capacity_mj, 3),
+        "fuelReserveSeconds": fuel_reserve_seconds,
         "totalItemsPerMinute": rounded(total_items_per_minute, 2),
     });
     if let Some(grid_id) = grid_id {
@@ -1298,6 +1517,270 @@ fn entity_object(entity: &mut Value) -> anyhow::Result<&mut Map<String, Value>> 
     entity
         .as_object_mut()
         .ok_or_else(|| anyhow!("native simple factory entity is not an object"))
+}
+
+fn set_item_amount(
+    entity: &mut Map<String, Value>,
+    record: &str,
+    item_id: &str,
+    amount: f64,
+) -> anyhow::Result<()> {
+    entity
+        .get_mut(record)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native power inventory record is missing"))?
+        .insert(
+            item_id.to_owned(),
+            Number::from_f64(amount)
+                .map(Value::Number)
+                .ok_or_else(|| anyhow!("native power inventory amount is non-finite"))?,
+        );
+    Ok(())
+}
+
+fn add_total_produced(
+    base: &mut Map<String, Value>,
+    item_id: &str,
+    amount: f64,
+) -> anyhow::Result<()> {
+    if amount <= 0.0 {
+        return Ok(());
+    }
+    let total = base
+        .get_mut("totalProduced")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native power total production record is missing"))?;
+    let current = total
+        .get(item_id)
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(0.0);
+    total.insert(
+        item_id.to_owned(),
+        Number::from_f64((current + amount).floor())
+            .map(Value::Number)
+            .ok_or_else(|| anyhow!("native power total production is non-finite"))?,
+    );
+    Ok(())
+}
+
+fn burn_fuel(
+    state: &CoreState,
+    entity: &mut Map<String, Value>,
+    building: &BuildingDefinition,
+    output_kw: f64,
+    seconds: f64,
+) -> anyhow::Result<()> {
+    let Some(fuel_item_id) = string_at(entity, "fuelItemId").map(str::to_owned) else {
+        return Ok(());
+    };
+    if output_kw <= EPSILON {
+        return Ok(());
+    }
+    let energy_per_item = state
+        .catalog
+        .items
+        .get(&fuel_item_id)
+        .map(|item| item.fuel_energy_mj)
+        .unwrap_or(0.0);
+    let required_heat_mj = (output_kw * seconds / (1_000.0 * building.fuel_efficiency)).max(0.0);
+    let initial_heat_mj = finite_number(entity.get("fuelRemainingMj")).max(0.0);
+    let queued_fuel = (item_amount(entity, "inputs", &fuel_item_id) + EPSILON).floor();
+    if energy_per_item <= EPSILON {
+        set_number(
+            entity,
+            "fuelRemainingMj",
+            rounded(
+                (initial_heat_mj - required_heat_mj.min(initial_heat_mj)).max(0.0),
+                6,
+            ),
+        )?;
+        return Ok(());
+    }
+    let heat_needed_after_current = (required_heat_mj - initial_heat_mj).max(0.0);
+    let requested_items = if heat_needed_after_current > EPSILON {
+        ((heat_needed_after_current - EPSILON).max(0.0) / energy_per_item).ceil()
+    } else {
+        0.0
+    };
+    let loaded = queued_fuel.min(requested_items);
+    let available_heat_mj = initial_heat_mj + loaded * energy_per_item;
+    let burned_heat_mj = required_heat_mj.min(available_heat_mj);
+    if loaded > 0.0 {
+        set_item_amount(entity, "inputs", &fuel_item_id, queued_fuel - loaded)?;
+    }
+    set_number(
+        entity,
+        "fuelRemainingMj",
+        rounded((available_heat_mj - burned_heat_mj).max(0.0), 6),
+    )?;
+    Ok(())
+}
+
+fn charge_exchanger(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entity: &mut Map<String, Value>,
+    building: &BuildingDefinition,
+    energy_mj: f64,
+    buffer_limit: f64,
+) -> anyhow::Result<f64> {
+    if energy_mj <= EPSILON {
+        return Ok(0.0);
+    }
+    let cell_energy_mj = accumulator_energy_mj(state)?;
+    let stored = stored_energy(entity, building).min(cell_energy_mj);
+    let active_cells = if stored > EPSILON { 1.0 } else { 0.0 };
+    let queued_cells = (item_amount(entity, "inputs", "accumulator") + EPSILON).floor();
+    let usable_cells = (active_cells + queued_cells).min(item_output_free(
+        entity,
+        building,
+        "charged_accumulator",
+        buffer_limit,
+    ));
+    if usable_cells < 1.0 {
+        return Ok(0.0);
+    }
+    let applied_energy_mj = energy_mj
+        .max(0.0)
+        .min((usable_cells * cell_energy_mj - stored).max(0.0));
+    if applied_energy_mj <= EPSILON {
+        return Ok(0.0);
+    }
+    let total_energy_mj = stored + applied_energy_mj;
+    let completed = usable_cells.min(((total_energy_mj + EPSILON) / cell_energy_mj).floor());
+    let remaining_energy_mj = (total_energy_mj - completed * cell_energy_mj).max(0.0);
+    let residual = if remaining_energy_mj > EPSILON {
+        remaining_energy_mj
+    } else {
+        0.0
+    };
+    let touched_cells = completed + if residual > EPSILON { 1.0 } else { 0.0 };
+    let consumed_cells = queued_cells.min((touched_cells - active_cells).max(0.0));
+    if consumed_cells > 0.0 {
+        set_item_amount(
+            entity,
+            "inputs",
+            "accumulator",
+            queued_cells - consumed_cells,
+        )?;
+    }
+    let previous = item_amount(entity, "outputs", "charged_accumulator");
+    set_item_amount(
+        entity,
+        "outputs",
+        "charged_accumulator",
+        (previous + completed).floor(),
+    )?;
+    add_total_produced(base, "charged_accumulator", completed)?;
+    set_number(entity, "storedEnergyMj", rounded(residual, 6))?;
+    set_number(entity, "progress", residual / cell_energy_mj)?;
+    Ok(completed)
+}
+
+fn discharge_exchanger(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entity: &mut Map<String, Value>,
+    building: &BuildingDefinition,
+    energy_mj: f64,
+    buffer_limit: f64,
+) -> anyhow::Result<f64> {
+    if energy_mj <= EPSILON {
+        return Ok(0.0);
+    }
+    let cell_energy_mj = accumulator_energy_mj(state)?;
+    let stored = stored_energy(entity, building).min(cell_energy_mj);
+    let active_cells = if stored > EPSILON { 1.0 } else { 0.0 };
+    let queued_cells = (item_amount(entity, "inputs", "charged_accumulator") + EPSILON).floor();
+    let usable_cells = (active_cells + queued_cells).min(item_output_free(
+        entity,
+        building,
+        "accumulator",
+        buffer_limit,
+    ));
+    if usable_cells < 1.0 {
+        return Ok(0.0);
+    }
+    let available_energy_mj = stored + (usable_cells - active_cells).max(0.0) * cell_energy_mj;
+    let applied_energy_mj = energy_mj.max(0.0).min(available_energy_mj);
+    if applied_energy_mj <= EPSILON {
+        return Ok(0.0);
+    }
+    let energy_needed_after_current = (applied_energy_mj - stored).max(0.0);
+    let loaded_cells = queued_cells.min(if energy_needed_after_current > EPSILON {
+        ((energy_needed_after_current - EPSILON).max(0.0) / cell_energy_mj).ceil()
+    } else {
+        0.0
+    });
+    let remaining_energy_mj = (stored + loaded_cells * cell_energy_mj - applied_energy_mj).max(0.0);
+    let residual = if remaining_energy_mj > EPSILON {
+        remaining_energy_mj
+    } else {
+        0.0
+    };
+    let completed =
+        (active_cells + loaded_cells - if residual > EPSILON { 1.0 } else { 0.0 }).max(0.0);
+    if loaded_cells > 0.0 {
+        set_item_amount(
+            entity,
+            "inputs",
+            "charged_accumulator",
+            queued_cells - loaded_cells,
+        )?;
+    }
+    let previous = item_amount(entity, "outputs", "accumulator");
+    set_item_amount(
+        entity,
+        "outputs",
+        "accumulator",
+        (previous + completed).floor(),
+    )?;
+    add_total_produced(base, "accumulator", completed)?;
+    set_number(entity, "storedEnergyMj", rounded(residual, 6))?;
+    set_number(
+        entity,
+        "progress",
+        if residual > EPSILON {
+            1.0 - residual / cell_energy_mj
+        } else {
+            0.0
+        },
+    )?;
+    Ok(completed)
+}
+
+fn power_reserves(
+    state: &CoreState,
+    entities: &[Value],
+    planet_id: &str,
+) -> anyhow::Result<(f64, f64, f64, f64)> {
+    let mut stored_mj = 0.0;
+    let mut capacity_mj = 0.0;
+    let mut fuel_electric_mj = 0.0;
+    let mut rated_fuel_kw = 0.0;
+    for entity in entities.iter().filter_map(Value::as_object) {
+        if string_at(entity, "planetId") != Some(planet_id) {
+            continue;
+        }
+        let Some(building_id) = string_at(entity, "buildingId") else {
+            continue;
+        };
+        let building = state
+            .catalog
+            .buildings
+            .get(building_id)
+            .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
+        if matches!(building_id, "accumulator" | "energy_exchanger") {
+            stored_mj += stored_energy(entity, building);
+            capacity_mj += energy_capacity(entity, building);
+        } else if is_fuel_generator(building_id) {
+            fuel_electric_mj +=
+                fuel_energy_available(state, entity, building) * building.fuel_efficiency;
+            rated_fuel_kw +=
+                building.power_generation_kw * finite_number(entity.get("machineCount"));
+        }
+    }
+    Ok((stored_mj, capacity_mj, fuel_electric_mj, rated_fuel_kw))
 }
 
 fn transfer_logistics_buffers(
@@ -1424,21 +1907,125 @@ fn simulate_step(
             .get(building_id)
             .ok_or_else(|| anyhow!("native simple factory renewable catalog is missing"))?;
         let machine_count = finite_number(object.get("machineCount"));
+        runtime.has_power_source = true;
+        runtime.generator_count += machine_count;
+        if is_fuel_generator(building_id) {
+            let available = fuel_energy_available(state, object, building);
+            let rated = building.power_generation_kw * machine_count;
+            let capacity = rated.min(available * building.fuel_efficiency * 1_000.0 / seconds);
+            runtime.fuel_electric_energy_mj += available * building.fuel_efficiency;
+            runtime.rated_fuel_generator_kw += rated;
+            if capacity > EPSILON {
+                runtime.dispatch_candidates.push(PowerCandidate {
+                    entity_index,
+                    capacity,
+                    priority: generation_priority(object, building_id),
+                    kind: match building_id {
+                        "thermal_power_plant" => DispatchKind::Thermal,
+                        "mini_fusion_power_plant" => DispatchKind::Fusion,
+                        _ => DispatchKind::ArtificialStar,
+                    },
+                });
+            }
+            continue;
+        }
+        if building_id == "accumulator" {
+            let stored = stored_energy(object, building);
+            let capacity_mj = energy_capacity(object, building);
+            runtime.stored_energy_mj += stored;
+            runtime.storage_capacity_mj += capacity_mj;
+            let discharge =
+                (building.power_generation_kw * machine_count).min(stored * 1_000.0 / seconds);
+            let charge = (building.power_charge_kw * machine_count)
+                .min((capacity_mj - stored).max(0.0) * 1_000.0 / seconds);
+            if discharge > EPSILON {
+                runtime.dispatch_candidates.push(PowerCandidate {
+                    entity_index,
+                    capacity: discharge,
+                    priority: generation_priority(object, building_id),
+                    kind: DispatchKind::Accumulator,
+                });
+            }
+            if charge > EPSILON {
+                runtime.accumulator_charge_candidates.push(PowerCandidate {
+                    entity_index,
+                    capacity: charge,
+                    priority: 1,
+                    kind: DispatchKind::Accumulator,
+                });
+            }
+            continue;
+        }
+        if building_id == "energy_exchanger" {
+            let cell_energy_mj = accumulator_energy_mj(state)?;
+            let stored = stored_energy(object, building);
+            runtime.stored_energy_mj += stored;
+            runtime.storage_capacity_mj += energy_capacity(object, building);
+            let active_cells = if stored > EPSILON { 1.0 } else { 0.0 };
+            let mode = string_at(object, "energyMode").unwrap_or("charge");
+            if mode == "discharge" {
+                let queued =
+                    (item_amount(object, "inputs", "charged_accumulator") + EPSILON).floor();
+                let usable = (active_cells + queued).min(item_output_free(
+                    object,
+                    building,
+                    "accumulator",
+                    production_buffer_limit,
+                ));
+                let available = if usable > 0.0 {
+                    stored + (usable - active_cells).max(0.0) * cell_energy_mj
+                } else {
+                    0.0
+                };
+                let discharge = (building.power_generation_kw * machine_count)
+                    .min(available * 1_000.0 / seconds);
+                if discharge > EPSILON {
+                    runtime.dispatch_candidates.push(PowerCandidate {
+                        entity_index,
+                        capacity: discharge,
+                        priority: generation_priority(object, building_id),
+                        kind: DispatchKind::Exchanger,
+                    });
+                }
+            } else {
+                let queued = (item_amount(object, "inputs", "accumulator") + EPSILON).floor();
+                let usable = (active_cells + queued).min(item_output_free(
+                    object,
+                    building,
+                    "charged_accumulator",
+                    production_buffer_limit,
+                ));
+                let available = if usable > 0.0 {
+                    usable * cell_energy_mj - stored
+                } else {
+                    0.0
+                };
+                let charge = (building.power_charge_kw * machine_count)
+                    .min(available.max(0.0) * 1_000.0 / seconds);
+                if charge > EPSILON {
+                    runtime.exchanger_charge_candidates.push(PowerCandidate {
+                        entity_index,
+                        capacity: charge,
+                        priority: 2,
+                        kind: DispatchKind::Exchanger,
+                    });
+                }
+            }
+            continue;
+        }
         let multiplier = match building_id {
             "solar_panel" => profiles[planet].solar_power_multiplier,
             "geothermal_power_station" => profiles[planet].geothermal_multiplier,
             _ => profiles[planet].wind_multiplier,
         };
         let output = building.power_generation_kw * machine_count * multiplier;
-        runtime.has_power_source = true;
-        runtime.generation_kw += output;
+        runtime.base_generation_kw += output;
+        runtime.power_output_by_entity.insert(entity_index, output);
         match building_id {
             "solar_panel" => runtime.solar_generation_kw += output,
             "geothermal_power_station" => runtime.geothermal_generation_kw += output,
             _ => runtime.wind_generation_kw += output,
         }
-        runtime.generator_count += machine_count;
-        let _ = entity_index;
     }
 
     for (entity_index, entity) in entities.iter().enumerate() {
@@ -1577,6 +2164,12 @@ fn simulate_step(
             .flat_map(|group| group.iter())
             .map(|consumer| consumer.demand_kw)
             .sum::<f64>();
+        let dispatch_capacity = runtime
+            .dispatch_candidates
+            .iter()
+            .map(|candidate| candidate.capacity)
+            .sum::<f64>();
+        runtime.generation_kw = runtime.base_generation_kw + dispatch_capacity;
         runtime.supplied_kw = connected_demand.min(runtime.generation_kw);
         runtime.demand_kw = connected_demand + runtime.disconnected_demand_kw;
         runtime.factor = if runtime.demand_kw <= EPSILON {
@@ -1584,7 +2177,45 @@ fn simulate_step(
         } else {
             (runtime.supplied_kw / runtime.demand_kw).min(1.0)
         };
-        let mut remaining = runtime.generation_kw.max(0.0);
+        let missing_kw = (runtime.supplied_kw - runtime.base_generation_kw).max(0.0);
+        let dispatch_candidates = runtime.dispatch_candidates.clone();
+        allocate_power_by_priority(
+            &dispatch_candidates,
+            missing_kw,
+            &mut runtime.power_output_by_entity,
+        );
+        for candidate in &dispatch_candidates {
+            let output = runtime
+                .power_output_by_entity
+                .get(&candidate.entity_index)
+                .copied()
+                .unwrap_or(0.0);
+            match candidate.kind {
+                DispatchKind::Thermal => runtime.thermal_generation_kw += output,
+                DispatchKind::Fusion => runtime.fusion_generation_kw += output,
+                DispatchKind::ArtificialStar => runtime.artificial_star_generation_kw += output,
+                DispatchKind::Accumulator | DispatchKind::Exchanger => {
+                    runtime.storage_discharge_kw += output;
+                }
+            }
+        }
+        let mut surplus_kw = (runtime.base_generation_kw - runtime.demand_kw).max(0.0);
+        let exchanger_charge_candidates = runtime.exchanger_charge_candidates.clone();
+        let exchanger_charge = allocate_power(
+            &exchanger_charge_candidates,
+            surplus_kw,
+            &mut runtime.power_input_by_entity,
+        );
+        runtime.storage_charge_kw += exchanger_charge;
+        surplus_kw -= exchanger_charge;
+        let accumulator_charge_candidates = runtime.accumulator_charge_candidates.clone();
+        let accumulator_charge = allocate_power(
+            &accumulator_charge_candidates,
+            surplus_kw,
+            &mut runtime.power_input_by_entity,
+        );
+        runtime.storage_charge_kw += accumulator_charge;
+        let mut remaining = runtime.supplied_kw.max(0.0);
         for priority in [3_usize, 2, 1] {
             let demand = runtime.consumers[priority]
                 .iter()
@@ -1686,32 +2317,88 @@ fn simulate_step(
         let grid = grid_index(object)
             .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
         if kind == "power" {
-            let building_id = string_at(object, "buildingId").unwrap_or_default();
+            let building_id = string_at(object, "buildingId")
+                .unwrap_or_default()
+                .to_owned();
             let building = state
                 .catalog
                 .buildings
-                .get(building_id)
-                .ok_or_else(|| anyhow!("native simple factory renewable catalog is missing"))?;
+                .get(&building_id)
+                .ok_or_else(|| anyhow!("native simple factory power catalog is missing"))?;
             let machine_count = finite_number(object.get("machineCount"));
-            let multiplier = match building_id {
-                "solar_panel" => profiles[planet].solar_power_multiplier,
-                "geothermal_power_station" => profiles[planet].geothermal_multiplier,
-                _ => profiles[planet].wind_multiplier,
-            };
-            let output = building.power_generation_kw * machine_count * multiplier;
+            let runtime = &grids[grid_slot(planet, grid)];
+            let output = runtime
+                .power_output_by_entity
+                .get(&entity_index)
+                .copied()
+                .unwrap_or(0.0);
+            let input = runtime
+                .power_input_by_entity
+                .get(&entity_index)
+                .copied()
+                .unwrap_or(0.0);
             let rated = building.power_generation_kw * machine_count;
             set_number(object, "powerOutputKw", rounded(output, 2))?;
-            set_number(object, "powerInputKw", 0.0)?;
+            set_number(object, "powerInputKw", rounded(input, 2))?;
             set_number(
                 object,
                 "utilization",
                 if rated > EPSILON {
-                    rounded(output / rated, 4)
+                    rounded(output.max(input) / rated, 4)
                 } else {
                     0.0
                 },
             )?;
             set_number(object, "productionRate", 0.0)?;
+            if is_fuel_generator(&building_id) {
+                burn_fuel(state, object, building, output, seconds)?;
+            } else if building_id == "accumulator" {
+                let capacity = energy_capacity(object, building);
+                let next = (stored_energy(object, building) + input * seconds / 1_000.0
+                    - output * seconds / 1_000.0)
+                    .max(0.0)
+                    .min(capacity);
+                let rounded_next = rounded(next, 6);
+                set_number(object, "storedEnergyMj", rounded_next)?;
+                set_number(
+                    object,
+                    "progress",
+                    if capacity > EPSILON {
+                        rounded_next / capacity
+                    } else {
+                        0.0
+                    },
+                )?;
+            } else if building_id == "energy_exchanger" {
+                let completed = if string_at(object, "energyMode") == Some("discharge") {
+                    discharge_exchanger(
+                        state,
+                        base,
+                        object,
+                        building,
+                        output * seconds / 1_000.0,
+                        production_buffer_limit,
+                    )?
+                } else {
+                    charge_exchanger(
+                        state,
+                        base,
+                        object,
+                        building,
+                        input * seconds / 1_000.0,
+                        production_buffer_limit,
+                    )?
+                };
+                set_number(
+                    object,
+                    "productionRate",
+                    if seconds > EPSILON {
+                        rounded(completed * 60.0 / seconds, 2)
+                    } else {
+                        0.0
+                    },
+                )?;
+            }
             continue;
         }
         if kind == "machine" {
@@ -2082,18 +2769,29 @@ fn simulate_step(
             combined.wind_generation_kw += runtime.wind_generation_kw;
             combined.solar_generation_kw += runtime.solar_generation_kw;
             combined.geothermal_generation_kw += runtime.geothermal_generation_kw;
+            combined.thermal_generation_kw += runtime.thermal_generation_kw;
+            combined.fusion_generation_kw += runtime.fusion_generation_kw;
+            combined.artificial_star_generation_kw += runtime.artificial_star_generation_kw;
+            combined.storage_discharge_kw += runtime.storage_discharge_kw;
+            combined.storage_charge_kw += runtime.storage_charge_kw;
         }
         combined.factor = if combined.demand_kw <= EPSILON {
             1.0
         } else {
             combined.supplied_kw / combined.demand_kw
         };
+        let (stored_mj, capacity_mj, fuel_electric_mj, rated_fuel_kw) =
+            power_reserves(state, entities, planet_id)?;
+        combined.stored_energy_mj = stored_mj;
+        combined.storage_capacity_mj = capacity_mj;
+        combined.fuel_electric_energy_mj = fuel_electric_mj;
+        combined.rated_fuel_generator_kw = rated_fuel_kw;
         let total_items = entities
             .iter()
             .filter_map(Value::as_object)
             .filter(|entity| string_at(entity, "planetId") == Some(planet_id))
             .map(|entity| finite_number(entity.get("productionRate")))
-            .sum::<f64>();
+            .fold(0.0_f64, |sum, value| sum + value);
         power_grid_metrics.insert(planet_id.clone(), Value::Object(per_grid));
         planet_metrics.insert(
             planet_id.clone(),

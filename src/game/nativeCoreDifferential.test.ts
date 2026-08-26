@@ -239,6 +239,114 @@ function finiteResearchState(): GameState {
   return state;
 }
 
+function dispatchablePowerState(): GameState {
+  let state = simpleMiningState();
+  const template = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  const solar = state.entities.find((entity) => entity.id === "native_solar_fixture")!;
+  solar.powerGridId = "grid-b";
+  const powerEntity = (
+    id: string,
+    buildingId: "thermal_power_plant" | "mini_fusion_power_plant" | "artificial_star" | "accumulator" | "energy_exchanger",
+    powerGridId: "grid-a" | "grid-b",
+  ) => ({
+    ...template,
+    id,
+    buildingId,
+    powerGridId,
+    machineCount: 1,
+    position: { x: template.position.x + state.entities.length * 20, y: template.position.y - 120 },
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    utilization: 0,
+    productionRate: 0,
+    powerOutputKw: 0,
+    powerInputKw: 0,
+  });
+  state.entities.push(
+    {
+      ...powerEntity("native_thermal_fixture", "thermal_power_plant", "grid-a"),
+      fuelItemId: "coal",
+      fuelRemainingMj: 0.25,
+      inputs: { coal: 4 },
+      generationPriority: 1,
+    },
+    {
+      ...powerEntity("native_fusion_fixture", "mini_fusion_power_plant", "grid-a"),
+      fuelItemId: "deuteron_fuel_rod",
+      fuelRemainingMj: 0.5,
+      inputs: { deuteron_fuel_rod: 0 },
+      generationPriority: 3,
+    },
+    {
+      ...powerEntity("native_star_fixture", "artificial_star", "grid-a"),
+      fuelItemId: "antimatter_fuel_rod",
+      fuelRemainingMj: 0.5,
+      inputs: { antimatter_fuel_rod: 0 },
+      generationPriority: 3,
+    },
+    {
+      ...powerEntity("native_accumulator_discharge", "accumulator", "grid-a"),
+      storedEnergyMj: 45,
+      energyMode: "auto",
+      generationPriority: 2,
+    },
+    {
+      ...powerEntity("native_exchanger_discharge", "energy_exchanger", "grid-a"),
+      storedEnergyMj: 0.5,
+      energyMode: "discharge",
+      inputs: { charged_accumulator: 2 },
+      outputs: { accumulator: 0 },
+      generationPriority: 2,
+      recipeId: "accumulator_discharge",
+    },
+    {
+      ...powerEntity("native_exchanger_charge", "energy_exchanger", "grid-b"),
+      storedEnergyMj: 89,
+      energyMode: "charge",
+      inputs: { accumulator: 1 },
+      outputs: { charged_accumulator: 0 },
+      recipeId: "accumulator_charge",
+    },
+    {
+      ...powerEntity("native_accumulator_charge", "accumulator", "grid-b"),
+      storedEnergyMj: 0,
+      energyMode: "auto",
+    },
+  );
+  const storageTemplate = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storageTemplate,
+      id: "native_coal_storage",
+      storedItemId: "coal",
+      position: { x: 920, y: 220 },
+      inputs: { coal: 0 },
+      outputs: { coal: 20 },
+    },
+    {
+      ...storageTemplate,
+      id: "native_empty_cell_storage",
+      storedItemId: "accumulator",
+      position: { x: 1040, y: 220 },
+      inputs: { accumulator: 0 },
+      outputs: { accumulator: 4 },
+    },
+    {
+      ...storageTemplate,
+      id: "native_discharged_cell_storage",
+      storedItemId: "accumulator",
+      position: { x: 1160, y: 220 },
+      inputs: { accumulator: 0 },
+      outputs: { accumulator: 0 },
+    },
+  );
+  state = connectBeltWithResult(state, "native_coal_storage", "native_thermal_fixture", "coal", 1).state;
+  state = connectBeltWithResult(state, "native_empty_cell_storage", "native_exchanger_charge", "accumulator", 1).state;
+  state = connectBeltWithResult(state, "native_exchanger_discharge", "native_discharged_cell_storage", "accumulator", 1).state;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -420,6 +528,55 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.construction, `research-${seconds} 科研奖励`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
       expect(advanced.summary.canonicalFields, `research-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches fuel dispatch, generation priorities, accumulators, and energy exchangers", async () => {
+    const initial = dispatchablePowerState();
+    const checkpoint = await seed(initial, 190);
+    for (const seconds of [1, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `power-${seconds} native support: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["metrics", "planetMetrics", "powerGridMetrics", "totalProduced"],
+      });
+      expect(projection.entities, `power-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.metrics, `power-${seconds} 活跃星球指标`).toEqual(JSON.parse(JSON.stringify(expected.metrics)));
+      expect(projection.base.planetMetrics, `power-${seconds} 星球指标`).toEqual(JSON.parse(JSON.stringify(expected.planetMetrics)));
+      expect(projection.base.powerGridMetrics, `power-${seconds} 电网指标`).toEqual(JSON.parse(JSON.stringify(expected.powerGridMetrics)));
+      expect(projection.base.totalProduced, `power-${seconds} 储能单元产量`).toEqual(JSON.parse(JSON.stringify(expected.totalProduced)));
+      expect(advanced.summary.canonicalFields, `power-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `power-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    for (const sequence of [
+      { label: "power-60x1s", steps: Array.from({ length: 60 }, () => 1) },
+      { label: "power-10x60s", steps: Array.from({ length: 10 }, () => 60) },
+    ]) {
+      const opened = await open(checkpoint);
+      let expected = initial;
+      let revision = checkpoint.revision;
+      let advanced: any = null;
+      for (const seconds of sequence.steps) {
+        expected = advanceSimulationBudget(expected, seconds, seconds);
+        advanced = await client.request({
+          operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: revision, simulationSeconds: seconds, wallSeconds: seconds },
+        });
+        expect(advanced.supported, `${sequence.label} native support: ${advanced.reason ?? ""}`).toBe(true);
+        revision += 1;
+      }
+      expect(advanced.summary.canonicalFields, `${sequence.label} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `${sequence.label} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 60_000);

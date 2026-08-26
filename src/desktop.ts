@@ -142,6 +142,7 @@ export interface DesktopNativeWalAppendResult {
 export interface DesktopNativeCoreItemDefinition {
   id: string;
   kind: "solid" | "fluid" | "matrix";
+  fuelEnergyMj: number;
 }
 
 export interface DesktopNativeCoreBuildingDefinition {
@@ -152,6 +153,10 @@ export interface DesktopNativeCoreBuildingDefinition {
   outputCapacity: number;
   powerDemandKw: number;
   powerGenerationKw: number;
+  powerChargeKw: number;
+  energyCapacityMj: number;
+  fuelItemIds: string[];
+  fuelEfficiency: number;
   family?: string;
   accepts?: "solid" | "fluid" | "any";
 }
@@ -212,6 +217,9 @@ export interface DesktopNativeCoreDomainCoverage {
   fluidMining: boolean;
   windPower: boolean;
   renewablePower: boolean;
+  fuelPower: boolean;
+  energyStorage: boolean;
+  powerPriorities: boolean;
   ordinaryProduction: boolean;
   proliferatedProduction: boolean;
   finiteResearch: boolean;

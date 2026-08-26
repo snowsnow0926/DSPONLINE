@@ -1,6 +1,7 @@
 import {
   BUILDINGS,
   CONSTRUCTION,
+  FUEL_ENERGY_MJ,
   ITEMS,
   PLANET_LIST,
   PROLIFERATORS,
@@ -8,6 +9,8 @@ import {
   TECHNOLOGIES,
   getBeltSpeed,
   getBeltTiers,
+  getFuelEfficiency,
+  getFuelItemIdsForBuilding,
 } from "./content";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import type { DesktopNativeCoreCatalog } from "../desktop";
@@ -32,6 +35,7 @@ export function createNativeCoreCatalog(
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,
       kind: item.kind,
+      fuelEnergyMj: FUEL_ENERGY_MJ[item.id] ?? 0,
     }))),
     buildings: byId(Object.values(BUILDINGS).map((building) => ({
       id: building.id,
@@ -41,6 +45,10 @@ export function createNativeCoreCatalog(
       outputCapacity: building.outputCapacity,
       powerDemandKw: building.powerDemandKw ?? 0,
       powerGenerationKw: building.powerGenerationKw ?? 0,
+      powerChargeKw: building.powerChargeKw ?? 0,
+      energyCapacityMj: building.energyCapacityMj ?? 0,
+      fuelItemIds: getFuelItemIdsForBuilding(building.id),
+      fuelEfficiency: getFuelEfficiency(building.id),
       ...(building.family ? { family: building.family } : {}),
       ...(building.accepts ? { accepts: building.accepts } : {}),
     }))),

@@ -143,7 +143,7 @@ fn add_input(entity: &mut Map<String, Value>, item_id: &str, amount: f64) -> any
 fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str) -> bool {
     match string_at(source, "kind") {
         Some("vein") => string_at(source, "resourceId") == Some(item_id),
-        Some("machine") => string_at(source, "recipeId")
+        Some("machine" | "power") => string_at(source, "recipeId")
             .and_then(|id| state.catalog.recipes.get(id))
             .is_some_and(|recipe| {
                 recipe
@@ -158,9 +158,21 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
 
 fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str) -> bool {
     match string_at(target, "kind") {
-        Some("machine") => string_at(target, "recipeId")
-            .and_then(|id| state.catalog.recipes.get(id))
-            .is_some_and(|recipe| recipe.inputs.iter().any(|input| input.item_id == item_id)),
+        Some("machine" | "power") => {
+            let accepts_fuel = string_at(target, "buildingId")
+                .and_then(|id| state.catalog.buildings.get(id))
+                .is_some_and(|building| {
+                    building.fuel_item_ids.iter().any(|id| id == item_id)
+                        && string_at(target, "fuelItemId")
+                            .is_none_or(|selected| selected == item_id)
+                });
+            accepts_fuel
+                || string_at(target, "recipeId")
+                    .and_then(|id| state.catalog.recipes.get(id))
+                    .is_some_and(|recipe| {
+                        recipe.inputs.iter().any(|input| input.item_id == item_id)
+                    })
+        }
         Some("storage" | "splitter") => {
             if string_at(target, "storedItemId") != Some(item_id) {
                 return false;

@@ -11,9 +11,11 @@ describe("Windows native core catalog", () => {
     expect(catalog.items.length).toBeGreaterThan(50);
     expect(catalog.buildings.length).toBeGreaterThan(20);
     expect(catalog.recipes.length).toBeGreaterThan(50);
+    expect(catalog.constructions.length).toBeGreaterThan(20);
     expect(catalog.belts.map((belt) => belt.tier)).toEqual([1, 2, 3]);
     expect(catalog.items.map((item) => item.id)).toEqual([...catalog.items.map((item) => item.id)].sort());
     expect(catalog.recipes.find((recipe) => recipe.id === "iron_ingot")?.outputs).toEqual([{ itemId: "iron_ingot", amount: 1 }]);
+    expect(catalog.constructions.find((definition) => definition.id === "construction_center")?.costs.length).toBeGreaterThan(0);
     expect(catalog.items.find((item) => item.id === "coal")?.fuelEnergyMj).toBe(2.7);
     expect(catalog.buildings.find((building) => building.id === "thermal_power_plant")).toMatchObject({
       powerGenerationKw: 2160,

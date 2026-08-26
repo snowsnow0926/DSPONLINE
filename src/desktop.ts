@@ -170,6 +170,13 @@ export interface DesktopNativeCoreRecipeDefinition {
   outputs: Array<{ itemId: string; amount: number }>;
 }
 
+export interface DesktopNativeCoreConstructionDefinition {
+  id: string;
+  outputAmount: number;
+  requiredTechId?: string;
+  costs: Array<{ itemId: string; amount: number }>;
+}
+
 export interface DesktopNativeCorePlanetDefinition {
   id: string;
   systemId: string;
@@ -185,6 +192,7 @@ export interface DesktopNativeCoreCatalog {
   items: DesktopNativeCoreItemDefinition[];
   buildings: DesktopNativeCoreBuildingDefinition[];
   recipes: DesktopNativeCoreRecipeDefinition[];
+  constructions: DesktopNativeCoreConstructionDefinition[];
   belts: Array<{ tier: number; speed: number }>;
   proliferators: Array<{
     tier: number;
@@ -238,6 +246,8 @@ export interface DesktopNativeCoreDomainCoverage {
   quantumLogisticsNetwork: boolean;
   quantumLocalDroneBridge: boolean;
   quantumBeltBridge: boolean;
+  persistedConstructionJobs: boolean;
+  constructionQuantumPrefetch: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

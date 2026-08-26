@@ -988,6 +988,19 @@ pub(crate) fn settle_downloads(
             priority: slot.priority,
         });
     }
+    let construction_demands = crate::construction::quantum_demands(state, base, entities)?
+        .into_iter()
+        .map(|demand| (demand.key.clone(), demand))
+        .collect::<BTreeMap<_, _>>();
+    for demand in construction_demands.values() {
+        requests.push(Request {
+            key: demand.key.clone(),
+            entity_index: usize::MAX,
+            item_id: demand.item_id.clone(),
+            amount: BigUint::from(demand.amount),
+            priority: 1,
+        });
+    }
     sorted_requests(&mut requests);
     let delivered = settle_outputs(
         &mut network,
@@ -998,6 +1011,21 @@ pub(crate) fn settle_downloads(
         let amount = delivered.get(&request.key).cloned().unwrap_or_default();
         let amount_number = amount.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if amount_number < 1.0 {
+            continue;
+        }
+        if let Some(demand) = construction_demands.get(&request.key) {
+            let applied = crate::construction::apply_quantum_delivery(
+                base,
+                demand,
+                amount.to_u64().unwrap_or(MAX_SAFE_INTEGER),
+            )?;
+            if applied > 0 {
+                add_flow(
+                    &mut flow.downloaded,
+                    &request.item_id,
+                    &BigUint::from(applied),
+                );
+            }
             continue;
         }
         let station = entities[request.entity_index]
@@ -1163,20 +1191,6 @@ pub(crate) fn settle_uploads(
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     let network = parse_network(base)?;
-    let automation = base
-        .get("constructionAutomation")
-        .and_then(Value::as_object);
-    if automation
-        .and_then(|value| value.get("quantumSourceEnabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || automation
-            .and_then(|value| value.get("quantumMaterialBuffer"))
-            .and_then(Value::as_object)
-            .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(Some("quantum-construction-source-unsupported"));
-    }
     for index in 0..state.entity_index.len() {
         let entity = state.parse_entity(index)?;
         let entity = entity

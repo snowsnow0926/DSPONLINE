@@ -80,6 +80,16 @@ pub struct RecipeDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConstructionDefinition {
+    pub id: String,
+    pub output_amount: f64,
+    #[serde(default)]
+    pub required_tech_id: Option<String>,
+    pub costs: Vec<ItemAmount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BeltDefinition {
     pub tier: u8,
     pub speed: f64,
@@ -117,6 +127,8 @@ pub struct CatalogSnapshot {
     pub items: Vec<ItemDefinition>,
     pub buildings: Vec<BuildingDefinition>,
     pub recipes: Vec<RecipeDefinition>,
+    #[serde(default)]
+    pub constructions: Vec<ConstructionDefinition>,
     pub belts: Vec<BeltDefinition>,
     #[serde(default)]
     pub proliferators: Vec<ProliferatorDefinition>,
@@ -132,6 +144,7 @@ pub struct RuntimeCatalog {
     pub items: HashMap<String, ItemDefinition>,
     pub buildings: HashMap<String, BuildingDefinition>,
     pub recipes: HashMap<String, RecipeDefinition>,
+    pub constructions: HashMap<String, ConstructionDefinition>,
     pub belt_speeds: HashMap<u8, f64>,
     pub proliferators: HashMap<u8, ProliferatorDefinition>,
     pub technologies: HashMap<String, TechnologyDefinition>,
@@ -175,6 +188,7 @@ impl RuntimeCatalog {
         let total = snapshot.items.len()
             + snapshot.buildings.len()
             + snapshot.recipes.len()
+            + snapshot.constructions.len()
             + snapshot.belts.len()
             + snapshot.proliferators.len()
             + snapshot.technologies.len()
@@ -186,6 +200,7 @@ impl RuntimeCatalog {
         unique_ids(snapshot.items.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.buildings.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.recipes.iter().map(|value| value.id.as_str()))?;
+        unique_ids(snapshot.constructions.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.technologies.iter().map(|value| value.id.as_str()))?;
         let item_ids = snapshot
             .items
@@ -216,6 +231,26 @@ impl RuntimeCatalog {
             .iter()
             .map(|value| value.id.as_str())
             .collect::<HashSet<_>>();
+        for construction in &snapshot.constructions {
+            if !construction.output_amount.is_finite()
+                || construction.output_amount <= 0.0
+                || construction.costs.is_empty()
+                || construction.costs.iter().any(|amount| {
+                    !item_ids.contains(amount.item_id.as_str())
+                        || !amount.amount.is_finite()
+                        || amount.amount <= 0.0
+                })
+                || construction
+                    .required_tech_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_id(id))
+            {
+                bail!(
+                    "native catalog construction definition is invalid: {}",
+                    construction.id
+                );
+            }
+        }
         for item in &snapshot.items {
             if !matches!(item.kind.as_str(), "solid" | "fluid" | "matrix") {
                 bail!("native catalog item kind is invalid: {}", item.id);
@@ -359,6 +394,12 @@ impl RuntimeCatalog {
             .cloned()
             .map(|value| (value.id.clone(), value))
             .collect();
+        let constructions = snapshot
+            .constructions
+            .iter()
+            .cloned()
+            .map(|value| (value.id.clone(), value))
+            .collect();
         let belt_speeds = snapshot
             .belts
             .iter()
@@ -388,6 +429,7 @@ impl RuntimeCatalog {
             items,
             buildings,
             recipes,
+            constructions,
             belt_speeds,
             proliferators,
             technologies,

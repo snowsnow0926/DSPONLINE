@@ -8,6 +8,7 @@ mod belts;
 pub mod canonical;
 pub mod catalog;
 pub mod command;
+mod construction;
 mod infinite_research;
 mod interstellar_logistics;
 mod local_logistics;
@@ -19,8 +20,9 @@ pub mod simulation;
 pub mod state;
 
 pub use catalog::{
-    BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
-    PlanetDefinition, ProliferatorDefinition, RecipeDefinition, TechnologyDefinition,
+    BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
+    ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition,
+    TechnologyDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
 pub use simulation::{CoreAdvanceRequest, CoreAdvanceResult};

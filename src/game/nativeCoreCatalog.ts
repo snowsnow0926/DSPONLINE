@@ -63,6 +63,12 @@ export function createNativeCoreCatalog(
       inputs: recipe.inputs.map((input) => ({ ...input })),
       outputs: recipe.outputs.map((output) => ({ ...output })),
     }))),
+    constructions: byId(CONSTRUCTION.map((definition) => ({
+      id: definition.buildingId,
+      outputAmount: definition.outputAmount,
+      ...(definition.requiredTechId ? { requiredTechId: definition.requiredTechId } : {}),
+      costs: definition.costs.map((cost) => ({ ...cost })),
+    }))),
     belts: getBeltTiers().map((tier) => ({ tier, speed: getBeltSpeed(tier) })),
     proliferators: Object.values(PROLIFERATORS).map((definition) => ({ ...definition })),
     technologies: byId(Object.values(TECHNOLOGIES).map((technology) => ({

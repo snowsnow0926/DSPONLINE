@@ -357,6 +357,44 @@ impl CoreState {
                     .map(|building| (id.to_owned(), building))
             })
             .collect::<HashMap<_, _>>();
+        let mut machine_output_bonuses = HashMap::new();
+        for entity in entities.iter().filter_map(Value::as_object) {
+            let Some(entity_id) = entity.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(recipe) = entity
+                .get("recipeId")
+                .and_then(Value::as_str)
+                .and_then(|id| self.catalog.recipes.get(id))
+            else {
+                continue;
+            };
+            for output in &recipe.outputs {
+                machine_output_bonuses.insert(
+                    (entity_id.to_owned(), output.item_id.clone()),
+                    crate::simple_factory::next_proliferated_output_bonus(
+                        self,
+                        entity,
+                        recipe,
+                        &output.item_id,
+                        output.amount,
+                    ),
+                );
+            }
+        }
+        let blocked_construction_centers = entities
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|entity| {
+                entity.get("buildingId").and_then(Value::as_str) == Some("construction_center")
+            })
+            .filter_map(|entity| {
+                crate::construction::is_operating_blocked(self, entity)
+                    .ok()
+                    .filter(|blocked| *blocked)
+                    .and_then(|_| entity.get("id").and_then(Value::as_str).map(str::to_owned))
+            })
+            .collect::<HashSet<_>>();
         let base = self.base_value_mut();
         let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
         let recorded = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
@@ -533,6 +571,14 @@ impl CoreState {
             .iter()
             .filter(|entity| {
                 if entity.get("kind").and_then(Value::as_str) == Some("machine") {
+                    if entity.get("buildingId").and_then(Value::as_str)
+                        == Some("construction_center")
+                    {
+                        return entity
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| blocked_construction_centers.contains(id));
+                    }
                     let Some(recipe) = entity
                         .get("recipeId")
                         .and_then(Value::as_str)
@@ -558,6 +604,15 @@ impl CoreState {
                     let capacity =
                         stacked_capacity(building.output_capacity, count, production_buffer_limit);
                     let output_blocked = recipe.outputs.iter().any(|output| {
+                        let bonus = entity
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|entity_id| {
+                                machine_output_bonuses
+                                    .get(&(entity_id.to_owned(), output.item_id.clone()))
+                            })
+                            .copied()
+                            .unwrap_or(0.0);
                         capacity
                             - entity
                                 .get("outputs")
@@ -566,7 +621,7 @@ impl CoreState {
                                 .and_then(Value::as_f64)
                                 .unwrap_or(0.0)
                             + EPSILON
-                            < output.amount
+                            < output.amount + bonus
                     });
                     if output_blocked {
                         return true;

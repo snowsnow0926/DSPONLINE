@@ -18,6 +18,7 @@ import {
   setStationSlotPriority,
 } from "./engine";
 import { CAMPAIGN_TASKS } from "./campaign";
+import { getConstructionDefinition } from "./content";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import type { GameState } from "./types";
 
@@ -773,6 +774,49 @@ function quantumBeltBridgeState(): GameState {
   return state;
 }
 
+function quantumConstructionState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push(
+    "basic_logistics",
+    "construction_automation",
+    "interstellar_logistics",
+    "quantum_logistics_network",
+  );
+  state.quantumLogisticsNetwork.enabled = true;
+  state.quantumLogisticsNetwork.inventory.iron_ingot = "100";
+  state.quantumLogisticsNetwork.inventory.stone_brick = "100";
+  state.construction.interstellar_logistics_station = 1;
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 900, y: 500 }, 1);
+  const tower = state.entities.find((entity) => entity.buildingId === "interstellar_logistics_station")!;
+  tower.stationTier = 2;
+  tower.quantumMode = "quantum";
+  tower.stationVessels = 0;
+  tower.inputs = {};
+  tower.outputs = {};
+
+  state.construction.construction_center = 1;
+  state = placeBuilding(state, "construction_center", { x: 1120, y: 500 }, 1);
+  const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
+  const definition = getConstructionDefinition("storage_mk1")!;
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.quantumSourceEnabled = true;
+  state.constructionAutomation.targetStock = {
+    storage_mk1: (state.construction.storage_mk1 ?? 0) + definition.outputAmount,
+  };
+  state.constructionAutomation.jobs = {
+    [center.id]: {
+      constructionId: "storage_mk1",
+      steps: [{ kind: "building", constructionId: "storage_mk1" }],
+      stepIndex: 0,
+      elapsedSeconds: 0,
+      inventory: {},
+    },
+  };
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  wind.machineCount = 1000;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1419,11 +1463,58 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 
+  it("matches persisted construction work and direct quantum material prefetch", async () => {
+    const initial = quantumConstructionState();
+    const checkpoint = await seed(initial, 205);
+    for (const seconds of [1, 5, 6, 9, 10, 15, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `quantum-construction-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: [
+          "constructionAutomation", "construction", "quantumLogisticsNetwork",
+          "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
+        ],
+      });
+      expect(projection.entities, `quantum-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.constructionAutomation, `quantum-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
+      expect(projection.base.construction, `quantum-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
+      expect(projection.base.quantumLogisticsNetwork, `quantum-construction-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+      expect(projection.base.productionHistory, `quantum-construction-${seconds} 生产历史`).toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
+      expect(advanced.summary.canonicalFields, `quantum-construction-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `quantum-construction-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `quantum-construction-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "quantum-construction-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "quantum-construction-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
   it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(
     "matches long mining boundaries and segmented offline settlement",
     async () => {
       const initial = simpleMiningState();
-      const checkpoint = await seed(initial, 200);
+      const checkpoint = await seed(initial, 300);
       for (const seconds of [60, 600, 8 * 60 * 60, 30 * 24 * 60 * 60]) {
         const opened = await open(checkpoint);
         const expected = advanceSimulationBudget(initial, seconds, seconds);

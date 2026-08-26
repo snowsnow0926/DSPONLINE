@@ -396,21 +396,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     if !empty_array(base.get("handcraftQueue")) || !empty_array(base.get("constructionQueue")) {
         return Some("craft-or-construction-queue-active");
     }
-    let automation = base.get("constructionAutomation");
-    if bool_at(automation, &["enabled"])
-        || !empty_object(
-            automation
-                .and_then(Value::as_object)
-                .and_then(|value| value.get("jobs")),
-        )
-        || !empty_object(
-            automation
-                .and_then(Value::as_object)
-                .and_then(|value| value.get("targetStock")),
-        )
-    {
-        return Some("construction-automation-active");
-    }
     if !base
         .get("exploration")
         .and_then(Value::as_object)
@@ -567,6 +552,12 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let Some(building) = state.catalog.buildings.get(building_id) else {
                     return Ok(Some("simple-factory-machine-building-missing"));
                 };
+                if building_id == "construction_center" {
+                    if building.kind != "machine" {
+                        return Ok(Some("simple-factory-machine-feature-unsupported"));
+                    }
+                    continue;
+                }
                 let Some(recipe) = state.catalog.recipes.get(recipe_id) else {
                     return Ok(Some("simple-factory-machine-recipe-missing"));
                 };
@@ -576,7 +567,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                         "ray_receiver"
                             | "em_rail_ejector"
                             | "vertical_launching_silo"
-                            | "construction_center"
                             | "galactic_material_exporter"
                     )
                     || matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch")
@@ -664,6 +654,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::local_logistics::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::construction::admission_reason(state)? {
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
@@ -942,6 +935,27 @@ fn proliferator_extra_bonus(
         .and_then(|tier| state.catalog.proliferators.get(&tier))
         .map(|definition| definition.extra_product_bonus)
         .unwrap_or(0.0)
+}
+
+pub(crate) fn next_proliferated_output_bonus(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+    item_id: &str,
+    output_amount: f64,
+) -> f64 {
+    if available_full_proliferator_cycles(state, entity, recipe) < 1.0 {
+        return 0.0;
+    }
+    let progress = entity
+        .get("proliferatorBonusProgress")
+        .and_then(Value::as_object)
+        .and_then(|values| values.get(item_id))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(0.0);
+    (progress + output_amount * proliferator_extra_bonus(state, entity, recipe) + EPSILON)
+        .floor()
+        .max(0.0)
 }
 
 fn proliferator_speed_multiplier(
@@ -2162,6 +2176,14 @@ fn simulate_step(
             && string_at(entity, "quantumMode") == Some("quantum"))
         .then_some(index)
     }));
+    if crate::construction::has_deficit(state, base) {
+        ready_stations.extend(entities.iter().enumerate().filter_map(|(index, entity)| {
+            let entity = entity.as_object()?;
+            (string_at(entity, "kind") == Some("machine")
+                && string_at(entity, "buildingId") == Some("construction_center"))
+            .then_some(index)
+        }));
+    }
     let mut disconnected_ready_stations = Vec::new();
     for &entity_index in &ready_stations {
         let object = entities[entity_index]
@@ -2257,6 +2279,9 @@ fn simulate_step(
             continue;
         }
         let building_id = string_at(object, "buildingId").unwrap_or_default();
+        if building_id == "construction_center" {
+            continue;
+        }
         let recipe_id = string_at(object, "recipeId").unwrap_or_default();
         let building = state
             .catalog
@@ -2407,6 +2432,9 @@ fn simulate_step(
             continue;
         };
         if string_at(object, "kind") != Some("machine") {
+            continue;
+        }
+        if string_at(object, "buildingId") == Some("construction_center") {
             continue;
         }
         let Some(&planet) = planet_index.get(string_at(object, "planetId").unwrap_or_default())
@@ -2575,6 +2603,9 @@ fn simulate_step(
             let building_id = string_at(object, "buildingId")
                 .unwrap_or_default()
                 .to_owned();
+            if building_id == "construction_center" {
+                continue;
+            }
             let recipe_id = string_at(object, "recipeId").unwrap_or_default().to_owned();
             let building = state
                 .catalog
@@ -2898,6 +2929,8 @@ fn simulate_step(
     if reset_research_progress_before_next_entity {
         reset_research_machine_progress(entities)?;
     }
+
+    crate::construction::run_centers(state, base, entities, seconds, &power_factors)?;
 
     if !produced_by_item.is_empty() {
         let total = base

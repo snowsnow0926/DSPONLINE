@@ -177,6 +177,21 @@ export interface DesktopNativeCoreCatalog {
   buildings: DesktopNativeCoreBuildingDefinition[];
   recipes: DesktopNativeCoreRecipeDefinition[];
   belts: Array<{ tier: number; speed: number }>;
+  proliferators: Array<{
+    tier: number;
+    itemId: string;
+    sprayPoints: number;
+    extraProductBonus: number;
+    speedBonus: number;
+    powerMultiplier: number;
+    requiredTechId: string;
+  }>;
+  technologies: Array<{
+    id: string;
+    costs: Array<{ itemId: string; amount: number }>;
+    prerequisites: string[];
+    constructionRewards: string[];
+  }>;
 }
 
 export interface DesktopNativeCoreOpenRequest extends DesktopNativeSaveSlotRequest {
@@ -197,6 +212,8 @@ export interface DesktopNativeCoreDomainCoverage {
   windPower: boolean;
   renewablePower: boolean;
   ordinaryProduction: boolean;
+  proliferatedProduction: boolean;
+  finiteResearch: boolean;
   ordinaryBelts: boolean;
   mining: boolean;
   production: boolean;

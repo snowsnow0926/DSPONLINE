@@ -1,8 +1,11 @@
 import {
   BUILDINGS,
+  CONSTRUCTION,
   ITEMS,
   PLANET_LIST,
+  PROLIFERATORS,
   RECIPES,
+  TECHNOLOGIES,
   getBeltSpeed,
   getBeltTiers,
 } from "./content";
@@ -49,5 +52,16 @@ export function createNativeCoreCatalog(
       outputs: recipe.outputs.map((output) => ({ ...output })),
     }))),
     belts: getBeltTiers().map((tier) => ({ tier, speed: getBeltSpeed(tier) })),
+    proliferators: Object.values(PROLIFERATORS).map((definition) => ({ ...definition })),
+    technologies: byId(Object.values(TECHNOLOGIES).map((technology) => ({
+      id: technology.id,
+      costs: technology.costs.map((cost) => ({ ...cost })),
+      prerequisites: [...technology.prerequisites],
+      constructionRewards: CONSTRUCTION
+        .filter((definition) => definition.requiredTechId === technology.id)
+        .filter((definition) => !(definition.buildingId in BUILDINGS) ||
+          !BUILDINGS[definition.buildingId as keyof typeof BUILDINGS].megastructure)
+        .map((definition) => definition.buildingId),
+    }))),
   };
 }

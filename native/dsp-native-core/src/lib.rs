@@ -16,7 +16,7 @@ pub mod state;
 
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
-    PlanetDefinition, RecipeDefinition,
+    PlanetDefinition, ProliferatorDefinition, RecipeDefinition, TechnologyDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
 pub use simulation::{CoreAdvanceRequest, CoreAdvanceResult};

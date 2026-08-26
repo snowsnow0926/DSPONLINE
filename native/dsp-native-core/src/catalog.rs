@@ -67,6 +67,29 @@ pub struct BeltDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProliferatorDefinition {
+    pub tier: u8,
+    pub item_id: String,
+    pub spray_points: f64,
+    pub extra_product_bonus: f64,
+    pub speed_bonus: f64,
+    pub power_multiplier: f64,
+    pub required_tech_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TechnologyDefinition {
+    pub id: String,
+    pub costs: Vec<ItemAmount>,
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+    #[serde(default)]
+    pub construction_rewards: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogSnapshot {
     pub protocol_version: u16,
     pub registry_fingerprint: String,
@@ -75,6 +98,10 @@ pub struct CatalogSnapshot {
     pub buildings: Vec<BuildingDefinition>,
     pub recipes: Vec<RecipeDefinition>,
     pub belts: Vec<BeltDefinition>,
+    #[serde(default)]
+    pub proliferators: Vec<ProliferatorDefinition>,
+    #[serde(default)]
+    pub technologies: Vec<TechnologyDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +113,8 @@ pub struct RuntimeCatalog {
     pub buildings: HashMap<String, BuildingDefinition>,
     pub recipes: HashMap<String, RecipeDefinition>,
     pub belt_speeds: HashMap<u8, f64>,
+    pub proliferators: HashMap<u8, ProliferatorDefinition>,
+    pub technologies: HashMap<String, TechnologyDefinition>,
 }
 
 fn valid_id(value: &str) -> bool {
@@ -127,6 +156,8 @@ impl RuntimeCatalog {
             + snapshot.buildings.len()
             + snapshot.recipes.len()
             + snapshot.belts.len()
+            + snapshot.proliferators.len()
+            + snapshot.technologies.len()
             + snapshot.planets.len();
         if total == 0 || total > MAX_CATALOG_ENTRIES {
             bail!("native catalog entry count is invalid");
@@ -135,6 +166,7 @@ impl RuntimeCatalog {
         unique_ids(snapshot.items.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.buildings.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.recipes.iter().map(|value| value.id.as_str()))?;
+        unique_ids(snapshot.technologies.iter().map(|value| value.id.as_str()))?;
         let item_ids = snapshot
             .items
             .iter()
@@ -211,6 +243,52 @@ impl RuntimeCatalog {
                 bail!("native catalog belt definition is invalid");
             }
         }
+        let mut proliferator_tiers = HashSet::new();
+        for proliferator in &snapshot.proliferators {
+            if proliferator.tier == 0
+                || proliferator.tier > 32
+                || !proliferator_tiers.insert(proliferator.tier)
+                || !item_ids.contains(proliferator.item_id.as_str())
+                || !valid_id(&proliferator.required_tech_id)
+                || !proliferator.spray_points.is_finite()
+                || proliferator.spray_points <= 0.0
+                || !proliferator.extra_product_bonus.is_finite()
+                || proliferator.extra_product_bonus < 0.0
+                || !proliferator.speed_bonus.is_finite()
+                || proliferator.speed_bonus < 0.0
+                || !proliferator.power_multiplier.is_finite()
+                || proliferator.power_multiplier < 1.0
+            {
+                bail!("native catalog proliferator definition is invalid");
+            }
+        }
+        let technology_ids = snapshot
+            .technologies
+            .iter()
+            .map(|value| value.id.as_str())
+            .collect::<HashSet<_>>();
+        for technology in &snapshot.technologies {
+            if technology.costs.is_empty()
+                || technology.costs.iter().any(|amount| {
+                    !item_ids.contains(amount.item_id.as_str())
+                        || !amount.amount.is_finite()
+                        || amount.amount <= 0.0
+                })
+                || technology
+                    .prerequisites
+                    .iter()
+                    .any(|id| !technology_ids.contains(id.as_str()))
+                || technology
+                    .construction_rewards
+                    .iter()
+                    .any(|id| !valid_id(id))
+            {
+                bail!(
+                    "native catalog technology definition is invalid: {}",
+                    technology.id
+                );
+            }
+        }
         let material = serde_json::to_value(&snapshot).context("serialize native catalog")?;
         let fingerprint = canonical_sha256(&material);
         let planets = snapshot.planets.clone();
@@ -237,6 +315,18 @@ impl RuntimeCatalog {
             .iter()
             .map(|value| (value.tier, value.speed))
             .collect();
+        let proliferators = snapshot
+            .proliferators
+            .iter()
+            .cloned()
+            .map(|value| (value.tier, value))
+            .collect();
+        let technologies = snapshot
+            .technologies
+            .iter()
+            .cloned()
+            .map(|value| (value.id.clone(), value))
+            .collect();
         // Keep this assertion close to validation: a future catalog extension
         // must not accidentally allow a recipe to shadow another definition.
         if recipe_ids.len() != snapshot.recipes.len() {
@@ -250,6 +340,8 @@ impl RuntimeCatalog {
             buildings,
             recipes,
             belt_speeds,
+            proliferators,
+            technologies,
         })
     }
 

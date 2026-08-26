@@ -207,14 +207,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     if base.get("mode").and_then(Value::as_str) != Some("normal") {
         return Some("speedrun-factory-requires-domain-core");
     }
-    if base
-        .get("research")
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("selectedTechId"))
-        .is_some_and(|value| !value.is_null())
-    {
-        return Some("research-boundary-requires-domain-core");
-    }
     if !exact_campaign_complete(base) {
         return Some("campaign-completion-requires-domain-core");
     }
@@ -390,21 +382,48 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                             | "construction_center"
                             | "galactic_material_exporter"
                     )
-                    || matches!(
-                        recipe_id,
-                        "matrix_research" | "solar_sail_launch" | "carrier_rocket_launch"
-                    )
-                    || recipe.inputs.is_empty()
-                    || recipe.outputs.is_empty()
-                    || bool_at(Some(&entity), &["sprayCoaterInstalled"])
+                    || matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch")
+                    || recipe_id != "matrix_research"
+                        && (recipe.inputs.is_empty() || recipe.outputs.is_empty())
                 {
                     return Ok(Some("simple-factory-machine-feature-unsupported"));
+                }
+                if bool_at(Some(&entity), &["sprayCoaterInstalled"])
+                    && (object
+                        .get("proliferatorTier")
+                        .and_then(Value::as_u64)
+                        .and_then(|tier| u8::try_from(tier).ok())
+                        .is_none_or(|tier| !state.catalog.proliferators.contains_key(&tier))
+                        || !matches!(
+                            string_at(object, "proliferatorMode"),
+                            Some("normal" | "extra" | "speed")
+                        ))
+                {
+                    return Ok(Some("simple-factory-proliferator-invalid"));
                 }
             }
             _ => return Ok(Some("simple-factory-entity-kind-unsupported")),
         }
     }
     let base = state.base_value();
+    if let Some(research) = base.get("research").and_then(Value::as_object) {
+        let selected_invalid = research
+            .get("selectedTechId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !state.catalog.technologies.contains_key(id));
+        let queue_invalid = research
+            .get("queuedTechIds")
+            .and_then(Value::as_array)
+            .is_none_or(|ids| {
+                ids.iter().any(|id| {
+                    id.as_str()
+                        .is_none_or(|id| !state.catalog.technologies.contains_key(id))
+                })
+            });
+        if selected_invalid || queue_invalid {
+            return Ok(Some("simple-factory-research-catalog-invalid"));
+        }
+    }
     let profiles = base
         .get("galaxy")
         .and_then(Value::as_object)
@@ -589,6 +608,32 @@ fn industrial_speed_multiplier(base: &Map<String, Value>) -> f64 {
     (1.0 + level * 0.04) * difficulty
 }
 
+fn research_speed_multiplier(base: &Map<String, Value>) -> f64 {
+    let finite_bonus = ["research_speed_1", "research_speed_2", "research_speed_3"]
+        .iter()
+        .filter(|id| completed_tech(base, id))
+        .count() as f64
+        * 0.25;
+    let compression = number_at(
+        base.get("endgame"),
+        &["infiniteResearch", "matrix_compression", "level"],
+    )
+    .floor()
+    .clamp(0.0, 1_000.0);
+    let difficulty = match base
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("difficulty"))
+        .and_then(Value::as_str)
+        .unwrap_or("standard")
+    {
+        "relaxed" => 1.15,
+        "hard" => 0.85,
+        _ => 1.0,
+    };
+    (1.0 + finite_bonus) * (1.0 + compression * 0.1) * difficulty
+}
+
 fn recipe_technology_available(base: &Map<String, Value>, recipe: &RecipeDefinition) -> bool {
     recipe
         .required_tech_id
@@ -596,8 +641,486 @@ fn recipe_technology_available(base: &Map<String, Value>, recipe: &RecipeDefinit
         .is_none_or(|id| completed_tech(base, id))
 }
 
-fn machine_input_cycles(entity: &Map<String, Value>, recipe: &RecipeDefinition) -> f64 {
+fn proliferator_tier(entity: &Map<String, Value>) -> Option<u8> {
+    entity
+        .get("proliferatorTier")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+}
+
+fn proliferator_applies(entity: &Map<String, Value>, recipe: &RecipeDefinition) -> bool {
+    entity.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true)
+        && proliferator_tier(entity).is_some()
+        && matches!(
+            string_at(entity, "proliferatorMode"),
+            Some("extra" | "speed")
+        )
+        && (if recipe.id == "matrix_research" {
+            string_at(entity, "proliferatorMode") == Some("speed")
+        } else {
+            !recipe.inputs.is_empty() && !recipe.outputs.is_empty()
+        })
+}
+
+fn proliferator_spray_cost(recipe: &RecipeDefinition) -> f64 {
+    recipe
+        .inputs
+        .iter()
+        .map(|input| input.amount)
+        .sum::<f64>()
+        .max(1.0)
+}
+
+fn available_full_proliferator_cycles(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+) -> f64 {
+    if !proliferator_applies(entity, recipe) {
+        return 0.0;
+    }
+    let Some(definition) =
+        proliferator_tier(entity).and_then(|tier| state.catalog.proliferators.get(&tier))
+    else {
+        return 0.0;
+    };
+    let points = finite_number(entity.get("proliferatorPoints")).max(0.0)
+        + entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .and_then(|inputs| inputs.get(&definition.item_id))
+            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+            .unwrap_or(0.0)
+            * definition.spray_points;
+    (points / proliferator_spray_cost(recipe) + EPSILON)
+        .floor()
+        .max(0.0)
+}
+
+fn proliferator_extra_bonus(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+) -> f64 {
+    if !proliferator_applies(entity, recipe)
+        || string_at(entity, "proliferatorMode") != Some("extra")
+    {
+        return 0.0;
+    }
+    proliferator_tier(entity)
+        .and_then(|tier| state.catalog.proliferators.get(&tier))
+        .map(|definition| definition.extra_product_bonus)
+        .unwrap_or(0.0)
+}
+
+fn proliferator_speed_multiplier(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+) -> f64 {
+    if !proliferator_applies(entity, recipe)
+        || string_at(entity, "proliferatorMode") != Some("speed")
+    {
+        return 1.0;
+    }
+    proliferator_tier(entity)
+        .and_then(|tier| state.catalog.proliferators.get(&tier))
+        .map(|definition| 1.0 + definition.speed_bonus)
+        .unwrap_or(1.0)
+}
+
+fn proliferator_power_multiplier_for_step(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    building: &BuildingDefinition,
+    recipe: &RecipeDefinition,
+    planet_speed: f64,
+    recipe_speed: f64,
+    seconds: f64,
+) -> f64 {
+    if !proliferator_applies(entity, recipe) {
+        return 1.0;
+    }
+    let sprayed_cycles = available_full_proliferator_cycles(state, entity, recipe);
+    if sprayed_cycles < 1.0 {
+        return 1.0;
+    }
+    let base_cycles_per_second =
+        building.speed * finite_number(entity.get("machineCount")) * recipe_speed * planet_speed
+            / recipe.duration;
+    if base_cycles_per_second <= EPSILON || seconds <= EPSILON {
+        return 1.0;
+    }
+    let speed_multiplier = proliferator_speed_multiplier(state, entity, recipe);
+    let accelerated_work = (sprayed_cycles - finite_number(entity.get("progress"))).max(0.0);
+    let sprayed_seconds =
+        accelerated_work / (base_cycles_per_second * speed_multiplier).max(EPSILON);
+    let sprayed_fraction = (sprayed_seconds / seconds).min(1.0);
+    let power_multiplier = proliferator_tier(entity)
+        .and_then(|tier| state.catalog.proliferators.get(&tier))
+        .map(|definition| definition.power_multiplier)
+        .unwrap_or(1.0);
+    1.0 + (power_multiplier - 1.0) * sprayed_fraction
+}
+
+fn consume_proliferator_points(
+    state: &CoreState,
+    entity: &mut Map<String, Value>,
+    recipe: &RecipeDefinition,
+    cycles: f64,
+) -> anyhow::Result<()> {
+    if !proliferator_applies(entity, recipe) || cycles < 1.0 {
+        return Ok(());
+    }
+    let definition = proliferator_tier(entity)
+        .and_then(|tier| state.catalog.proliferators.get(&tier))
+        .ok_or_else(|| anyhow!("native proliferator definition is missing"))?;
+    let required_points = proliferator_spray_cost(recipe) * cycles;
+    let mut points = finite_number(entity.get("proliferatorPoints")).max(0.0);
+    if points < required_points {
+        let required_items = ((required_points - points) / definition.spray_points).ceil();
+        let inputs = entity
+            .get_mut("inputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native proliferator inputs are missing"))?;
+        let available = inputs
+            .get(&definition.item_id)
+            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+            .unwrap_or(0.0);
+        let consumed = required_items.min(available);
+        inputs.insert(
+            definition.item_id.clone(),
+            Number::from_f64(available - consumed)
+                .map(Value::Number)
+                .unwrap_or(Value::from(0)),
+        );
+        points += consumed * definition.spray_points;
+    }
+    set_number(
+        entity,
+        "proliferatorPoints",
+        (points - required_points).max(0.0),
+    )
+}
+
+fn selected_technology_id(base: &Map<String, Value>) -> Option<&str> {
+    base.get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("selectedTechId"))
+        .and_then(Value::as_str)
+}
+
+fn remaining_research_costs(state: &CoreState, base: &Map<String, Value>) -> Vec<(String, f64)> {
+    let Some(technology_id) = selected_technology_id(base) else {
+        return Vec::new();
+    };
+    let Some(technology) = state.catalog.technologies.get(technology_id) else {
+        return Vec::new();
+    };
+    let progress = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("progressByTech"))
+        .and_then(Value::as_object)
+        .and_then(|progress| progress.get(technology_id))
+        .and_then(Value::as_object);
+    technology
+        .costs
+        .iter()
+        .filter_map(|cost| {
+            let completed = progress
+                .and_then(|values| values.get(&cost.item_id))
+                .map(|value| finite_number(Some(value)))
+                .unwrap_or(0.0);
+            let remaining = (cost.amount - completed).max(0.0);
+            (remaining > 0.0).then(|| (cost.item_id.clone(), remaining))
+        })
+        .collect()
+}
+
+fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()> {
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if string_at(entity, "recipeId") == Some("matrix_research") {
+            set_number(entity, "progress", 0.0)?;
+        }
+    }
+    Ok(())
+}
+
+fn activate_next_queued_technology(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+) -> anyhow::Result<()> {
+    let completed = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect::<HashSet<_>>())
+        .unwrap_or_default();
+    let queue = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("queuedTechIds"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let next_index = queue.iter().position(|id| {
+        id.as_str()
+            .and_then(|id| state.catalog.technologies.get(id))
+            .is_some_and(|technology| {
+                technology
+                    .prerequisites
+                    .iter()
+                    .all(|id| completed.contains(id.as_str()))
+            })
+    });
+    let research = base
+        .get_mut("research")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native research state is missing"))?;
+    let queued = research
+        .get_mut("queuedTechIds")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native research queue is missing"))?;
+    if let Some(index) = next_index {
+        let next = queued.remove(index);
+        research.insert("selectedTechId".to_owned(), next);
+    } else {
+        research.insert("selectedTechId".to_owned(), Value::Null);
+    }
+    Ok(())
+}
+
+fn complete_technology(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    has_galactic_material_exporter: bool,
+    technology_id: &str,
+) -> anyhow::Result<()> {
+    let technology = state
+        .catalog
+        .technologies
+        .get(technology_id)
+        .ok_or_else(|| anyhow!("native technology catalog entry is missing"))?;
+    let already_completed = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(technology_id)));
+    if already_completed {
+        return Ok(());
+    }
+    base.get_mut("research")
+        .and_then(Value::as_object_mut)
+        .and_then(|research| research.get_mut("completedTechIds"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native completed technology list is missing"))?
+        .push(Value::from(technology_id));
+    let construction = base
+        .get_mut("construction")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native construction inventory is missing"))?;
+    for reward in &technology.construction_rewards {
+        let current = finite_number(construction.get(reward));
+        construction.insert(
+            reward.clone(),
+            Number::from_f64((current + 2.0).floor())
+                .map(Value::Number)
+                .unwrap_or(Value::from(0)),
+        );
+    }
+    if technology_id == "universe_matrix"
+        && !has_galactic_material_exporter
+        && finite_number(construction.get("galactic_material_exporter")).floor() < 1.0
+    {
+        construction.insert("galactic_material_exporter".to_owned(), Value::from(1));
+    }
+    if technology_id == "interstellar_logistics" {
+        let colonized = base
+            .get_mut("exploration")
+            .and_then(Value::as_object_mut)
+            .and_then(|exploration| exploration.get_mut("colonizedPlanetIds"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("native colonized planet list is missing"))?;
+        for planet in ["ashen", "giant"] {
+            if !colonized.iter().any(|value| value.as_str() == Some(planet)) {
+                colonized.push(Value::from(planet));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn settle_completed_research_boundaries(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    let queue_len = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("queuedTechIds"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let limit = state.catalog.recipes.len() + queue_len + 8;
+    for _ in 0..limit {
+        let Some(technology_id) = selected_technology_id(base).map(str::to_owned) else {
+            break;
+        };
+        let Some(technology) = state.catalog.technologies.get(&technology_id).cloned() else {
+            activate_next_queued_technology(state, base)?;
+            continue;
+        };
+        if completed_tech(base, &technology_id) {
+            activate_next_queued_technology(state, base)?;
+            continue;
+        }
+        let complete = technology.costs.iter().all(|cost| {
+            base.get("research")
+                .and_then(Value::as_object)
+                .and_then(|research| research.get("progressByTech"))
+                .and_then(Value::as_object)
+                .and_then(|progress| progress.get(&technology_id))
+                .and_then(Value::as_object)
+                .and_then(|progress| progress.get(&cost.item_id))
+                .map(|value| finite_number(Some(value)).floor() >= cost.amount)
+                .unwrap_or(false)
+        });
+        if !complete {
+            break;
+        }
+        let progress = base
+            .get_mut("research")
+            .and_then(Value::as_object_mut)
+            .and_then(|research| research.get_mut("progressByTech"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native research progress directory is missing"))?
+            .entry(technology_id.clone())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native research progress entry is invalid"))?;
+        for cost in &technology.costs {
+            progress.insert(
+                cost.item_id.clone(),
+                Number::from_f64(cost.amount)
+                    .map(Value::Number)
+                    .unwrap_or(Value::from(0)),
+            );
+        }
+        let has_exporter = entities
+            .iter()
+            .filter_map(Value::as_object)
+            .any(|entity| string_at(entity, "buildingId") == Some("galactic_material_exporter"));
+        complete_technology(state, base, has_exporter, &technology_id)?;
+        activate_next_queued_technology(state, base)?;
+        reset_research_machine_progress(entities)?;
+    }
+    Ok(())
+}
+
+fn invest_finite_research(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entity: &mut Map<String, Value>,
+    requested_cycles: f64,
+    has_galactic_material_exporter: bool,
+) -> anyhow::Result<(f64, bool)> {
+    if requested_cycles < 1.0 {
+        return Ok((0.0, false));
+    }
+    let Some(technology_id) = selected_technology_id(base).map(str::to_owned) else {
+        return Ok((0.0, false));
+    };
+    let Some(technology) = state.catalog.technologies.get(&technology_id).cloned() else {
+        return Ok((0.0, false));
+    };
+    let current_progress = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("progressByTech"))
+        .and_then(Value::as_object)
+        .and_then(|progress| progress.get(&technology_id))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut progress = current_progress;
+    let mut remaining_cycles = requested_cycles.floor().max(0.0);
+    let mut consumed = 0.0;
+    for cost in &technology.costs {
+        if remaining_cycles < 1.0 {
+            break;
+        }
+        let completed = finite_number(progress.get(&cost.item_id));
+        let remaining_cost = (cost.amount - completed).max(0.0);
+        let available = entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .and_then(|inputs| inputs.get(&cost.item_id))
+            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+            .unwrap_or(0.0);
+        let amount = remaining_cycles.min(remaining_cost).min(available).floor();
+        if amount < 1.0 {
+            continue;
+        }
+        entity
+            .get_mut("inputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native research machine inputs are missing"))?
+            .insert(
+                cost.item_id.clone(),
+                Number::from_f64(available - amount)
+                    .map(Value::Number)
+                    .unwrap_or(Value::from(0)),
+            );
+        progress.insert(
+            cost.item_id.clone(),
+            Number::from_f64((completed + amount).floor())
+                .map(Value::Number)
+                .unwrap_or(Value::from(0)),
+        );
+        remaining_cycles -= amount;
+        consumed += amount;
+    }
+    base.get_mut("research")
+        .and_then(Value::as_object_mut)
+        .and_then(|research| research.get_mut("progressByTech"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native research progress directory is missing"))?
+        .insert(technology_id.clone(), Value::Object(progress.clone()));
+    let completed = technology
+        .costs
+        .iter()
+        .all(|cost| finite_number(progress.get(&cost.item_id)).floor() >= cost.amount);
+    if completed {
+        complete_technology(state, base, has_galactic_material_exporter, &technology_id)?;
+        activate_next_queued_technology(state, base)?;
+    }
+    Ok((consumed, completed))
+}
+
+fn machine_input_cycles(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entity: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+) -> f64 {
     let inputs = entity.get("inputs").and_then(Value::as_object);
+    if recipe.id == "matrix_research" {
+        return remaining_research_costs(state, base)
+            .iter()
+            .map(|(item_id, remaining)| {
+                remaining.min(
+                    inputs
+                        .and_then(|values| values.get(item_id))
+                        .map(|value| (finite_number(Some(value)) + EPSILON).floor())
+                        .unwrap_or(0.0),
+                )
+            })
+            .sum();
+    }
     recipe
         .inputs
         .iter()
@@ -613,6 +1136,7 @@ fn machine_input_cycles(entity: &Map<String, Value>, recipe: &RecipeDefinition) 
 }
 
 fn machine_output_cycles(
+    state: &CoreState,
     entity: &Map<String, Value>,
     recipe: &RecipeDefinition,
     capacity: f64,
@@ -621,6 +1145,8 @@ fn machine_output_cycles(
 ) -> f64 {
     let entity_id = string_at(entity, "id").unwrap_or_default();
     let outputs = entity.get("outputs").and_then(Value::as_object);
+    let extra_bonus = proliferator_extra_bonus(state, entity, recipe);
+    let sprayed_cycle_limit = available_full_proliferator_cycles(state, entity, recipe);
     recipe
         .outputs
         .iter()
@@ -635,11 +1161,50 @@ fn machine_output_cycles(
                     .unwrap_or(0.0)
                 + EPSILON)
                 .floor();
-            available.min((free / output.amount).floor().min(maximum.floor().max(0.0)))
+            let mut low = 0.0;
+            let mut high = (free / output.amount).floor().min(maximum.floor().max(0.0));
+            let bonus_progress = entity
+                .get("proliferatorBonusProgress")
+                .and_then(Value::as_object)
+                .and_then(|values| values.get(&output.item_id))
+                .map(|value| finite_number(Some(value)))
+                .unwrap_or(0.0);
+            if extra_bonus <= EPSILON || sprayed_cycle_limit < 1.0 {
+                let static_bonus = (bonus_progress + EPSILON).floor();
+                return available.min(
+                    high.min(((free - static_bonus) / output.amount).floor())
+                        .max(0.0),
+                );
+            }
+            if high > sprayed_cycle_limit {
+                let bonus_at_limit =
+                    (bonus_progress + output.amount * sprayed_cycle_limit * extra_bonus + EPSILON)
+                        .floor();
+                let beyond_spray = high
+                    .min(((free - bonus_at_limit) / output.amount).floor())
+                    .max(0.0);
+                if beyond_spray >= sprayed_cycle_limit {
+                    return available.min(beyond_spray);
+                }
+                high = high.min(sprayed_cycle_limit);
+            }
+            while low < high {
+                let candidate = ((low + high) / 2.0).ceil();
+                let sprayed = candidate.min(sprayed_cycle_limit);
+                let bonus =
+                    (bonus_progress + output.amount * sprayed * extra_bonus + EPSILON).floor();
+                if output.amount * candidate + bonus <= free {
+                    low = candidate;
+                } else {
+                    high = candidate - 1.0;
+                }
+            }
+            available.min(low)
         })
 }
 
 fn machine_can_run(
+    state: &CoreState,
     base: &Map<String, Value>,
     entity: &Map<String, Value>,
     building: &BuildingDefinition,
@@ -649,13 +1214,24 @@ fn machine_can_run(
     if !recipe_technology_available(base, recipe) {
         return false;
     }
+    if proliferator_applies(entity, recipe)
+        && proliferator_tier(entity)
+            .and_then(|tier| state.catalog.proliferators.get(&tier))
+            .is_none_or(|definition| !completed_tech(base, &definition.required_tech_id))
+    {
+        return false;
+    }
     let capacity = stacked_capacity(
         building.output_capacity,
         finite_number(entity.get("machineCount")),
         buffer_limit,
     );
-    (machine_input_cycles(entity, recipe) + EPSILON).floor() >= 1.0
-        && (machine_output_cycles(entity, recipe, capacity, 1.0, None) + EPSILON).floor() >= 1.0
+    if recipe.id == "matrix_research" && selected_technology_id(base).is_none() {
+        return false;
+    }
+    (machine_input_cycles(state, base, entity, recipe) + EPSILON).floor() >= 1.0
+        && (machine_output_cycles(state, entity, recipe, capacity, 1.0, None) + EPSILON).floor()
+            >= 1.0
 }
 
 fn metric_value(grid_id: Option<&str>, grid: &GridRuntime, total_items_per_minute: f64) -> Value {
@@ -856,7 +1432,14 @@ fn simulate_step(
             .recipes
             .get(recipe_id)
             .ok_or_else(|| anyhow!("native simple factory machine recipe is missing"))?;
-        if !machine_can_run(base, object, building, recipe, production_buffer_limit) {
+        if !machine_can_run(
+            state,
+            base,
+            object,
+            building,
+            recipe,
+            production_buffer_limit,
+        ) {
             continue;
         }
         let planet = *planet_index
@@ -865,8 +1448,26 @@ fn simulate_step(
         let grid = grid_index(object)
             .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
         let runtime = &mut grids[grid_slot(planet, grid)];
+        let planet_speed = if specialization_applies(profiles[planet], building) {
+            profiles[planet].production_speed_multiplier
+        } else {
+            1.0
+        };
         let demand = building.power_demand_kw
             * finite_number(object.get("machineCount"))
+            * proliferator_power_multiplier_for_step(
+                state,
+                object,
+                building,
+                recipe,
+                planet_speed,
+                if recipe.id == "matrix_research" {
+                    research_speed_multiplier(base)
+                } else {
+                    industrial_speed_multiplier(base)
+                },
+                seconds,
+            )
             * power_demand_multiplier;
         let priority = finite_number(object.get("powerPriority"))
             .floor()
@@ -945,7 +1546,14 @@ fn simulate_step(
         else {
             continue;
         };
-        if machine_can_run(base, object, building, recipe, production_buffer_limit) {
+        if machine_can_run(
+            state,
+            base,
+            object,
+            building,
+            recipe,
+            production_buffer_limit,
+        ) {
             power_factors.insert(entity_index, 0.0);
         }
     }
@@ -970,11 +1578,19 @@ fn simulate_step(
         .and_then(|settings| settings.get("resourceMode"))
         .and_then(Value::as_str)
         == Some("infinite");
-    let industrial_speed = industrial_speed_multiplier(base);
     let mut produced_by_item = HashMap::<String, f64>::new();
+    let has_galactic_material_exporter = entities
+        .iter()
+        .filter_map(Value::as_object)
+        .any(|entity| string_at(entity, "buildingId") == Some("galactic_material_exporter"));
+    let mut reset_research_progress_before_next_entity = false;
 
-    for (entity_index, entity) in entities.iter_mut().enumerate() {
-        let object = entity_object(entity)?;
+    for entity_index in 0..entities.len() {
+        if reset_research_progress_before_next_entity {
+            reset_research_machine_progress(entities)?;
+            reset_research_progress_before_next_entity = false;
+        }
+        let object = entity_object(&mut entities[entity_index])?;
         object
             .entry("stationLastSupplyPeerBySlot".to_owned())
             .or_insert_with(|| Value::Object(Map::new()));
@@ -1048,8 +1664,10 @@ fn simulate_step(
                 machine_count,
                 production_buffer_limit,
             );
-            let input_cycles = (machine_input_cycles(object, recipe) + EPSILON).floor();
+            let input_cycles =
+                (machine_input_cycles(state, base, object, recipe) + EPSILON).floor();
             let output_cycles = (machine_output_cycles(
+                state,
                 object,
                 recipe,
                 capacity,
@@ -1058,6 +1676,8 @@ fn simulate_step(
             ) + EPSILON)
                 .floor();
             let maximum_cycles = input_cycles.min(output_cycles);
+            let sprayed_cycle_limit = available_full_proliferator_cycles(state, object, recipe);
+            let extra_product_bonus = proliferator_extra_bonus(state, object, recipe);
             let progress_at_start = finite_number(object.get("progress"));
             let power_factor = power_factors.get(&entity_index).copied().unwrap_or(1.0);
             let planet_speed = if specialization_applies(profiles[planet], building) {
@@ -1065,51 +1685,107 @@ fn simulate_step(
             } else {
                 1.0
             };
+            let recipe_speed = if recipe.id == "matrix_research" {
+                research_speed_multiplier(base)
+            } else {
+                industrial_speed_multiplier(base)
+            };
             let effective_cycles_per_second =
-                building.speed * machine_count * industrial_speed * planet_speed / recipe.duration;
-            let potential_cycles = effective_cycles_per_second * power_factor * seconds;
+                building.speed * machine_count * recipe_speed * planet_speed / recipe.duration;
+            let base_rate = effective_cycles_per_second * power_factor;
+            let mut potential_cycles = base_rate * seconds;
+            let mut sprayed_work = 0.0;
+            if string_at(object, "proliferatorMode") == Some("speed")
+                && sprayed_cycle_limit > 0.0
+                && base_rate > EPSILON
+            {
+                let accelerated_rate =
+                    base_rate * proliferator_speed_multiplier(state, object, recipe);
+                let accelerated_capacity =
+                    (maximum_cycles.min(sprayed_cycle_limit) - progress_at_start).max(0.0);
+                let accelerated_seconds =
+                    seconds.min(accelerated_capacity / accelerated_rate.max(EPSILON));
+                sprayed_work = accelerated_capacity.min(accelerated_rate * accelerated_seconds);
+                potential_cycles =
+                    sprayed_work + base_rate * (seconds - accelerated_seconds).max(0.0);
+            }
             if maximum_cycles < 1.0 || potential_cycles <= EPSILON {
                 set_number(object, "utilization", 0.0)?;
                 set_number(object, "productionRate", 0.0)?;
                 continue;
             }
             let work = potential_cycles.min((maximum_cycles - progress_at_start).max(0.0));
+            if string_at(object, "proliferatorMode") != Some("speed") {
+                sprayed_work = work.min((sprayed_cycle_limit - progress_at_start).max(0.0));
+            }
             let progressed = rounded(progress_at_start + work, 6);
             let cycles = maximum_cycles.min((progressed + EPSILON).floor());
-            let inputs = object
-                .get_mut("inputs")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| anyhow!("native simple factory machine inputs are missing"))?;
-            for input in &recipe.inputs {
-                let current = finite_number(inputs.get(&input.item_id));
-                inputs.insert(
-                    input.item_id.clone(),
-                    Number::from_f64((current - input.amount * cycles).max(0.0).floor())
-                        .map(Value::Number)
-                        .unwrap_or(Value::from(0)),
-                );
-            }
-            let outputs = object
-                .get_mut("outputs")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| anyhow!("native simple factory machine outputs are missing"))?;
-            for output in &recipe.outputs {
-                let produced = output.amount * cycles;
-                let current = finite_number(outputs.get(&output.item_id));
-                outputs.insert(
-                    output.item_id.clone(),
-                    Number::from_f64((current + produced).floor())
-                        .map(Value::Number)
-                        .unwrap_or(Value::from(0)),
-                );
-                *produced_by_item.entry(output.item_id.clone()).or_default() += produced;
-            }
-            let bonus = object
-                .get_mut("proliferatorBonusProgress")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| anyhow!("native simple factory bonus record is missing"))?;
-            for output in &recipe.outputs {
-                bonus.insert(output.item_id.clone(), Value::from(0));
+            let sprayed_cycles = cycles.min(sprayed_cycle_limit);
+            if recipe.id == "matrix_research" {
+                let (consumed, completed) = invest_finite_research(
+                    state,
+                    base,
+                    object,
+                    cycles,
+                    has_galactic_material_exporter,
+                )?;
+                consume_proliferator_points(state, object, recipe, sprayed_cycles.min(consumed))?;
+                reset_research_progress_before_next_entity |= completed;
+            } else {
+                let inputs = object
+                    .get_mut("inputs")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| anyhow!("native simple factory machine inputs are missing"))?;
+                for input in &recipe.inputs {
+                    let current = finite_number(inputs.get(&input.item_id));
+                    inputs.insert(
+                        input.item_id.clone(),
+                        Number::from_f64((current - input.amount * cycles).max(0.0).floor())
+                            .map(Value::Number)
+                            .unwrap_or(Value::from(0)),
+                    );
+                }
+                consume_proliferator_points(state, object, recipe, sprayed_cycles)?;
+                for output in &recipe.outputs {
+                    let accumulated_bonus = object
+                        .get("proliferatorBonusProgress")
+                        .and_then(Value::as_object)
+                        .and_then(|values| values.get(&output.item_id))
+                        .map(|value| finite_number(Some(value)))
+                        .unwrap_or(0.0)
+                        + output.amount * sprayed_cycles * extra_product_bonus;
+                    let bonus_produced = (accumulated_bonus + EPSILON).floor();
+                    let produced = output.amount * cycles + bonus_produced;
+                    let current = object
+                        .get("outputs")
+                        .and_then(Value::as_object)
+                        .and_then(|outputs| outputs.get(&output.item_id))
+                        .map(|value| finite_number(Some(value)))
+                        .unwrap_or(0.0);
+                    object
+                        .get_mut("outputs")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| {
+                            anyhow!("native simple factory machine outputs are missing")
+                        })?
+                        .insert(
+                            output.item_id.clone(),
+                            Number::from_f64((current + produced).floor())
+                                .map(Value::Number)
+                                .unwrap_or(Value::from(0)),
+                        );
+                    object
+                        .get_mut("proliferatorBonusProgress")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| anyhow!("native simple factory bonus record is missing"))?
+                        .insert(
+                            output.item_id.clone(),
+                            Number::from_f64((accumulated_bonus - bonus_produced).max(0.0))
+                                .map(Value::Number)
+                                .unwrap_or(Value::from(0)),
+                        );
+                    *produced_by_item.entry(output.item_id.clone()).or_default() += produced;
+                }
             }
             set_number(
                 object,
@@ -1126,15 +1802,27 @@ fn simulate_step(
                 "utilization",
                 rounded(power_factor * activity_factor, 4),
             )?;
-            let base_units_per_cycle = recipe
-                .outputs
-                .iter()
-                .map(|output| output.amount)
-                .sum::<f64>();
+            let base_units_per_cycle = if recipe.id == "matrix_research" {
+                1.0
+            } else {
+                recipe
+                    .outputs
+                    .iter()
+                    .map(|output| output.amount)
+                    .sum::<f64>()
+            };
+            let bonus_units_per_cycle = if work > EPSILON {
+                base_units_per_cycle * extra_product_bonus * sprayed_work / work
+            } else {
+                0.0
+            };
             set_number(
                 object,
                 "productionRate",
-                rounded(work / seconds * base_units_per_cycle * 60.0, 2),
+                rounded(
+                    work / seconds * (base_units_per_cycle + bonus_units_per_cycle) * 60.0,
+                    2,
+                ),
             )?;
             continue;
         }
@@ -1261,6 +1949,10 @@ fn simulate_step(
         *produced_by_item.entry(resource).or_default() += produced;
     }
 
+    if reset_research_progress_before_next_entity {
+        reset_research_machine_progress(entities)?;
+    }
+
     if !produced_by_item.is_empty() {
         let total = base
             .get_mut("totalProduced")
@@ -1379,6 +2071,9 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
     let mut belts = (0..state.belt_index.len())
         .map(|index| state.parse_belt(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut base = std::mem::take(state.base_value_mut());
+    settle_completed_research_boundaries(state, &mut base, &mut entities)?;
+    *state.base_value_mut() = base;
     let total = simulation_seconds;
     let step_size = if total >= 24.0 * 60.0 * 60.0 {
         30.0
@@ -1396,6 +2091,9 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
         *state.base_value_mut() = base;
         remaining = (remaining - step).max(0.0);
     }
+    let mut base = std::mem::take(state.base_value_mut());
+    settle_completed_research_boundaries(state, &mut base, &mut entities)?;
+    *state.base_value_mut() = base;
     for (raw, entity) in state.entity_raw_mut().iter_mut().zip(entities) {
         *raw = serde_json::to_string(&entity)
             .context("encode native simple factory entity")?

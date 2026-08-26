@@ -125,7 +125,7 @@ function simpleMiningState(): GameState {
   state.endgame.infiniteResearch.vein_utilization.level = 3;
   state.endgame.constructionActivity.activityId = null;
   for (const project of Object.values(state.endgame.exportProjects)) project.enabled = false;
-  state.research.completedTechIds = ["mining_speed_2"];
+  state.research.completedTechIds = ["mining_speed_2", "proliferator_3"];
   const completedCampaign = CAMPAIGN_TASKS.map((task) => task.id);
   state.campaign = {
     activeChapterId: "galactic_endgame",
@@ -166,6 +166,17 @@ function simpleMiningState(): GameState {
     smelter.inputs.iron_ore = 0;
     smelter.outputs.iron_ingot = 0;
   }
+  smelters[0].sprayCoaterInstalled = true;
+  smelters[0].proliferatorTier = 3;
+  smelters[0].proliferatorMode = "extra";
+  smelters[0].proliferatorPoints = 7;
+  smelters[0].inputs.proliferator_mk3 = 20;
+  smelters[0].proliferatorBonusProgress = { iron_ingot: 0.375 };
+  smelters[1].sprayCoaterInstalled = true;
+  smelters[1].proliferatorTier = 3;
+  smelters[1].proliferatorMode = "speed";
+  smelters[1].proliferatorPoints = 5;
+  smelters[1].inputs.proliferator_mk3 = 20;
   state.construction.assembling_machine_mk1 = 1;
   state = placeBuilding(state, "assembling_machine_mk1", { x: 620, y: -80 }, 1);
   const assembler = state.entities.find((entity) => entity.buildingId === "assembling_machine_mk1")!;
@@ -192,6 +203,28 @@ function finiteMiningState(): GameState {
     vein.resourceDepletionRemainder = 0;
     vein.outputs[vein.resourceId!] = 0;
   }
+  return state;
+}
+
+function finiteResearchState(): GameState {
+  let state = simpleMiningState();
+  state.construction.matrix_lab = 2;
+  state = placeBuilding(state, "matrix_lab", { x: 820, y: -180 }, 1);
+  state = placeBuilding(state, "matrix_lab", { x: 820, y: 20 }, 1);
+  const labs = state.entities.filter((entity) => entity.buildingId === "matrix_lab");
+  for (const lab of labs) {
+    lab.recipeId = "matrix_research";
+    lab.inputs.electromagnetic_matrix = 100;
+    lab.progress = 0;
+  }
+  labs[0].sprayCoaterInstalled = true;
+  labs[0].proliferatorTier = 3;
+  labs[0].proliferatorMode = "speed";
+  labs[0].proliferatorPoints = 2;
+  labs[0].inputs.proliferator_mk3 = 10;
+  state.research.selectedTechId = "electromagnetic_matrix";
+  state.research.queuedTechIds = ["electromagnetism", "solar_energy"];
+  state.research.progressByTech = {};
   return state;
 }
 
@@ -353,6 +386,32 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 30_000);
+
+  it("matches finite research completion, queue activation, rewards, and sprayed labs", async () => {
+    const initial = finiteResearchState();
+    const checkpoint = await seed(initial, 175);
+    for (const seconds of [1, 3, 10, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `research-${seconds} native support: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id), baseFields: ["research", "construction"],
+      });
+      expect(projection.entities, `research-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `research-${seconds} 线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+      expect(projection.base.research, `research-${seconds} 科研状态`).toEqual(JSON.parse(JSON.stringify(expected.research)));
+      expect(projection.base.construction, `research-${seconds} 科研奖励`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
+      expect(advanced.summary.canonicalFields, `research-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
 
   it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(
     "matches long mining boundaries and segmented offline settlement",

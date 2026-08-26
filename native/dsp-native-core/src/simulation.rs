@@ -43,6 +43,14 @@ fn object_is_empty(value: Option<&Value>) -> bool {
     value.and_then(Value::as_object).is_some_and(Map::is_empty)
 }
 
+fn object_has_positive_number(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_object).is_some_and(|object| {
+        object
+            .values()
+            .any(|value| value.as_f64().is_some_and(|value| value >= 1.0))
+    })
+}
+
 fn number_at(value: Option<&Value>, keys: &[&str]) -> f64 {
     let mut current = value;
     for key in keys {
@@ -71,8 +79,53 @@ fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
     if base.get("mode").and_then(Value::as_str) != Some("normal") {
         return Some("speedrun-clock-requires-domain-core");
     }
+    if base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("selectedTechId"))
+        .is_some_and(|value| !value.is_null())
+    {
+        return Some("research-boundary-requires-domain-core");
+    }
+    let campaign = base.get("campaign").and_then(Value::as_object);
+    if number_at(base.get("manualMined"), &[]) >= 1.0
+        || object_has_positive_number(base.get("totalProduced"))
+        || !array_is_empty(base, "blueprints")
+        || campaign
+            .and_then(|value| value.get("completedTaskIds"))
+            .and_then(Value::as_array)
+            .is_none_or(|value| !value.is_empty())
+        || campaign
+            .and_then(|value| value.get("rewardedTaskIds"))
+            .and_then(Value::as_array)
+            .is_none_or(|value| !value.is_empty())
+        || campaign
+            .and_then(|value| value.get("activeTaskId"))
+            .and_then(Value::as_str)
+            != Some("mine_first_ore")
+        || campaign
+            .and_then(|value| value.get("activeChapterId"))
+            .and_then(Value::as_str)
+            != Some("foundation")
+    {
+        return Some("campaign-completion-requires-domain-core");
+    }
     if !array_is_empty(base, "handcraftQueue") || !array_is_empty(base, "constructionQueue") {
         return Some("craft-or-construction-queue-active");
+    }
+    let construction_automation = base.get("constructionAutomation");
+    if !object_is_empty(
+        construction_automation
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("jobs")),
+    ) || bool_at(construction_automation, &["enabled"])
+        && !object_is_empty(
+            construction_automation
+                .and_then(Value::as_object)
+                .and_then(|value| value.get("targetStock")),
+        )
+    {
+        return Some("construction-automation-active");
     }
     if !base
         .get("exploration")
@@ -245,6 +298,7 @@ impl CoreState {
         // Normal-mode quiescent state has no speedrun wall clock. The budget
         // is accepted solely to prove segmentation equivalence.
         let _ = wall_seconds;
+        next.record_quiescent_production_history()?;
         next.revision += 1;
         let summary = next.summary()?;
         *self = next;

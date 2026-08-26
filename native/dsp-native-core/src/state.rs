@@ -41,6 +41,7 @@ pub struct RuntimeMemoryEstimate {
 pub struct DomainCoverage {
     pub state_container: bool,
     pub command_patches: bool,
+    pub quiescent_clock: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -60,6 +61,7 @@ impl DomainCoverage {
         Self {
             state_container: true,
             command_patches: true,
+            quiescent_clock: true,
             mining: false,
             production: false,
             research: false,
@@ -89,6 +91,7 @@ pub struct CoreStateSummary {
     pub belt_count: usize,
     pub canonical_sha256: String,
     pub canonical_components: BTreeMap<String, String>,
+    pub canonical_fields: BTreeMap<String, String>,
     pub domain_sha256: String,
     pub catalog_sha256: String,
     pub registry_fingerprint: String,
@@ -660,6 +663,30 @@ impl CoreState {
         ]))
     }
 
+    pub fn canonical_fields(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        let mut fields = self
+            .base
+            .iter()
+            .map(|(key, value)| (key.clone(), crate::canonical::canonical_sha256(value)))
+            .collect::<BTreeMap<_, _>>();
+        let components = self.canonical_components()?;
+        fields.insert(
+            "entities".to_owned(),
+            components
+                .get("entities")
+                .cloned()
+                .ok_or_else(|| anyhow!("native core entity component hash is missing"))?,
+        );
+        fields.insert(
+            "belts".to_owned(),
+            components
+                .get("belts")
+                .cloned()
+                .ok_or_else(|| anyhow!("native core belt component hash is missing"))?,
+        );
+        Ok(fields)
+    }
+
     pub fn domain_sha256(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"dsp-native-domain-v1\0");
@@ -754,6 +781,7 @@ impl CoreState {
     pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
         let canonical_sha256 = self.canonical_sha256()?;
         let canonical_components = self.canonical_components()?;
+        let canonical_fields = self.canonical_fields()?;
         Ok(CoreStateSummary {
             revision: self.revision,
             state_version: self
@@ -787,6 +815,7 @@ impl CoreState {
             belt_count: self.belt_raw.len(),
             canonical_sha256,
             canonical_components,
+            canonical_fields,
             domain_sha256: self.domain_sha256(),
             catalog_sha256: self.catalog.fingerprint.clone(),
             registry_fingerprint: self.identity.registry_fingerprint.clone(),

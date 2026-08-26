@@ -183,6 +183,7 @@ export interface DesktopNativeCoreOpenRequest extends DesktopNativeSaveSlotReque
 export interface DesktopNativeCoreDomainCoverage {
   stateContainer: boolean;
   commandPatches: boolean;
+  quiescentClock: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;
@@ -208,6 +209,7 @@ export interface DesktopNativeCoreSummary {
   beltCount: number;
   canonicalSha256: string;
   canonicalComponents: Record<"base" | "entities" | "belts", string>;
+  canonicalFields: Record<string, string>;
   domainSha256: string;
   catalogSha256: string;
   registryFingerprint: string;

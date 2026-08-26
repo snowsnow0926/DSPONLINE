@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod catalog;
 pub mod command;
 mod construction;
+mod dyson;
 mod infinite_research;
 mod interstellar_logistics;
 mod local_logistics;

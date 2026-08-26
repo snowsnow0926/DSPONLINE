@@ -214,6 +214,101 @@ function simpleMiningState(): GameState {
   return state;
 }
 
+function inactiveTimeWarpControllerState(): GameState {
+  const state = simpleMiningState();
+  const template = state.entities.find((entity) => entity.kind === "machine")!;
+  state.entities.push({
+    ...template,
+    id: "native_time_warp_controller",
+    buildingId: "time_warp_device",
+    recipeId: undefined,
+    position: { x: -420, y: 260 },
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    powerFactor: 1,
+    powerInputKw: 10 ** 16,
+    utilization: 1,
+    productionRate: 0,
+  });
+  state.timeWarp = {
+    ...state.timeWarp,
+    controllerEntityId: "native_time_warp_controller",
+    enabled: false,
+    requestedMultiplier: 15,
+    effectiveMultiplier: 15,
+    requiredPowerKw: 10 ** 16,
+    allocatedPowerKw: 10 ** 16,
+  };
+  return state;
+}
+
+function dysonOperationsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push(
+    "dyson_swarm",
+    "ray_receiver",
+    "dyson_sphere_program",
+    "vertical_launching_silo",
+    "dyson_shell",
+  );
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  wind.machineCount = 2_000;
+
+  state.construction.em_rail_ejector = 2;
+  state = placeBuilding(state, "em_rail_ejector", { x: 880, y: -180 }, 2);
+  const ejector = state.entities.find((entity) => entity.buildingId === "em_rail_ejector")!;
+  ejector.recipeId = "solar_sail_launch";
+  ejector.inputs.solar_sail = 200;
+  ejector.targetDysonOrbitId = state.dysonEngineering.activeOrbitBySystem.helios!;
+
+  state.construction.vertical_launching_silo = 2;
+  state = placeBuilding(state, "vertical_launching_silo", { x: 1080, y: -180 }, 2);
+  const silo = state.entities.find((entity) => entity.buildingId === "vertical_launching_silo")!;
+  silo.recipeId = "carrier_rocket_launch";
+  silo.inputs.small_carrier_rocket = 200;
+
+  state.construction.ray_receiver = 2;
+  state = placeBuilding(state, "ray_receiver", { x: 1280, y: -180 });
+  state = placeBuilding(state, "ray_receiver", { x: 1480, y: -180 });
+  const receivers = state.entities.filter((entity) => entity.buildingId === "ray_receiver");
+  receivers[0].machineCount = 2;
+  receivers[0].recipeId = "ray_power";
+  receivers[1].recipeId = "critical_photon";
+  receivers[1].outputs.critical_photon = 0;
+
+  const orbit = state.dysonEngineering.orbitsBySystem.helios[0];
+  orbit.sailsInOrbit = 240;
+  orbit.totalLaunched = 260;
+  orbit.totalExpired = 20;
+  orbit.decayProgress = 0.35;
+  orbit.generationKw = orbit.sailsInOrbit * 88;
+  state.dysonSwarm = {
+    sailsInOrbit: orbit.sailsInOrbit,
+    totalLaunched: orbit.totalLaunched,
+    totalExpired: orbit.totalExpired,
+    decayProgress: orbit.decayProgress,
+    generationKw: orbit.generationKw,
+    receiverLoadKw: 0,
+  };
+  state.dysonPlans.helios.structurePoints = 25;
+  state.dysonPlans.helios.shellSails = 100;
+  state.dysonSphere = {
+    structurePoints: 25,
+    totalRocketsLaunched: 25,
+    shellSails: 100,
+    totalSailsAbsorbed: 100,
+    absorptionProgress: 0.2,
+    generationKw: 25 * 960 + 100 * 88,
+  };
+  state.dysonEngineering.absorptionProgressBySystem.helios = 0.2;
+  state.dysonEngineering.launchEnabled = true;
+  state.dysonEngineering.launchMode = "balanced";
+  state.dysonEngineering.launchThrottle = 0.5;
+  state.dysonEngineering.launchEnergySpentMj = 123.456;
+  return state;
+}
+
 function finiteMiningState(): GameState {
   const state = simpleMiningState();
   state.settings.resourceMode = "finite";
@@ -929,7 +1024,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       const advanced = await client.request({
         operation: "coreAdvance", sessionId: opened.sessionId,
         request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
-      });
+  });
+
       expect(advanced.supported, `${seconds} 秒 native support: ${advanced.reason ?? ""}`).toBe(true);
       const projection = await client.request({
         operation: "coreProjection",
@@ -966,6 +1062,79 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 120_000);
+
+  it("matches an installed but disabled time-warp controller without clearing its selection", async () => {
+    const initial = inactiveTimeWarpControllerState();
+    const checkpoint = await seed(initial, 101);
+    for (const seconds of [1, 10, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `inactive-time-warp-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: [],
+        baseFields: ["productionHistory", "timeWarp"],
+      });
+      expect(projection.entities, `inactive-time-warp-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.productionHistory, `inactive-time-warp-${seconds} 生产历史`).toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
+      expect(projection.base.timeWarp, `inactive-time-warp-${seconds} 状态`).toEqual(JSON.parse(JSON.stringify(expected.timeWarp)));
+      expect(advanced.summary.canonicalFields, `inactive-time-warp-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `inactive-time-warp-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  });
+
+  it("matches Dyson absorption, decay, throttled launch, ray power, and critical photons", async () => {
+    const initial = dysonOperationsState();
+    const checkpoint = await seed(initial, 125);
+    for (const seconds of [1, 5, 10, 60, 120]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `dyson-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: [
+          "dysonSwarm", "dysonSphere", "dysonEngineering", "dysonPlans",
+          "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
+        ],
+      });
+      expect(projection.entities, `dyson-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.dysonSwarm, `dyson-${seconds} 戴森云`).toEqual(JSON.parse(JSON.stringify(expected.dysonSwarm)));
+      expect(projection.base.dysonSphere, `dyson-${seconds} 戴森球`).toEqual(JSON.parse(JSON.stringify(expected.dysonSphere)));
+      expect(projection.base.dysonEngineering, `dyson-${seconds} 工程`).toEqual(JSON.parse(JSON.stringify(expected.dysonEngineering)));
+      expect(projection.base.dysonPlans, `dyson-${seconds} 计划`).toEqual(JSON.parse(JSON.stringify(expected.dysonPlans)));
+      expect(advanced.summary.canonicalFields, `dyson-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `dyson-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `dyson-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "dyson-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "dyson-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
 
   it("matches finite reserve depletion and the exhausted boundary", async () => {
     const initial = finiteMiningState();

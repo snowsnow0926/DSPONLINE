@@ -571,6 +571,10 @@ impl CoreState {
             .iter()
             .filter(|entity| {
                 if entity.get("kind").and_then(Value::as_str) == Some("machine") {
+                    if entity.get("buildingId").and_then(Value::as_str) == Some("time_warp_device")
+                    {
+                        return false;
+                    }
                     if entity.get("buildingId").and_then(Value::as_str)
                         == Some("construction_center")
                     {

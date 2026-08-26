@@ -163,6 +163,29 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     }, null, 2));
     expect(opened.summary.canonicalComponents).toEqual(sourceComponents);
     expect(opened.summary.canonicalSha256).toBe(sourceSha256);
+    const resumed = await client.request({
+      operation: "coreApplyCommand",
+      sessionId: opened.sessionId,
+      command: {
+        protocolVersion: 1,
+        baseRevision: commit.revision,
+        topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+        changedEntities: [], addedEntities: [], removedEntityIds: [],
+        changedBelts: [], addedBelts: [], removedBeltIds: [],
+      },
+    });
+    const admission = await client.request({
+      operation: "coreAdvance",
+      sessionId: opened.sessionId,
+      request: { baseRevision: resumed.revision, simulationSeconds: 1, wallSeconds: 1 },
+    });
+    console.log(JSON.stringify({
+      nativeCoreAdmission: {
+        supported: admission.supported,
+        exactScope: admission.exactScope,
+        reason: admission.reason ?? null,
+      },
+    }, null, 2));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   });
 });

@@ -249,6 +249,10 @@ export interface DesktopNativeCoreDomainCoverage {
   persistedConstructionJobs: boolean;
   constructionQuantumPrefetch: boolean;
   quantumAttachmentTransitions: boolean;
+  inactiveTimeWarpController: boolean;
+  dysonSwarmAndSphere: boolean;
+  dysonLaunchers: boolean;
+  dysonRayReceivers: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

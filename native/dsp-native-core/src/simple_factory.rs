@@ -94,6 +94,7 @@ struct GridRuntime {
     thermal_generation_kw: f64,
     fusion_generation_kw: f64,
     artificial_star_generation_kw: f64,
+    ray_generation_kw: f64,
     storage_discharge_kw: f64,
     storage_charge_kw: f64,
     stored_energy_mj: f64,
@@ -127,6 +128,7 @@ impl Default for GridRuntime {
             thermal_generation_kw: 0.0,
             fusion_generation_kw: 0.0,
             artificial_star_generation_kw: 0.0,
+            ray_generation_kw: 0.0,
             storage_discharge_kw: 0.0,
             storage_charge_kw: 0.0,
             stored_energy_mj: 0.0,
@@ -406,22 +408,10 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     }
     let time_warp = base.get("timeWarp");
     if bool_at(time_warp, &["enabled"])
-        || time_warp
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("controllerEntityId"))
-            .is_some_and(|value| !value.is_null())
         || number_at(time_warp, &["pendingSimulationSeconds"]).abs() > EPSILON
         || number_at(time_warp, &["pendingWallSeconds"]).abs() > EPSILON
     {
         return Some("time-warp-active");
-    }
-    if number_at(base.get("dysonSwarm"), &["sailsInOrbit"]) > 0.0
-        || number_at(base.get("dysonSwarm"), &["totalLaunched"]) > 0.0
-        || number_at(base.get("dysonSphere"), &["structurePoints"]) > 0.0
-        || number_at(base.get("dysonSphere"), &["totalRocketsLaunched"]) > 0.0
-        || number_at(base.get("dysonSphere"), &["shellSails"]) > 0.0
-    {
-        return Some("dyson-active");
     }
     if !empty_object(base.get("systemSpaceStations")) {
         return Some("system-space-station-active");
@@ -552,7 +542,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let Some(building) = state.catalog.buildings.get(building_id) else {
                     return Ok(Some("simple-factory-machine-building-missing"));
                 };
-                if building_id == "construction_center" {
+                if matches!(building_id, "construction_center" | "time_warp_device") {
                     if building.kind != "machine" {
                         return Ok(Some("simple-factory-machine-feature-unsupported"));
                     }
@@ -561,16 +551,20 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 let Some(recipe) = state.catalog.recipes.get(recipe_id) else {
                     return Ok(Some("simple-factory-machine-recipe-missing"));
                 };
+                let supported_dyson_machine = matches!(
+                    (building_id, recipe_id),
+                    ("ray_receiver", "ray_power" | "critical_photon")
+                        | ("em_rail_ejector", "solar_sail_launch")
+                        | ("vertical_launching_silo", "carrier_rocket_launch")
+                );
                 if building.kind != "machine"
+                    || matches!(building_id, "galactic_material_exporter")
                     || matches!(
                         building_id,
-                        "ray_receiver"
-                            | "em_rail_ejector"
-                            | "vertical_launching_silo"
-                            | "galactic_material_exporter"
-                    )
-                    || matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch")
+                        "ray_receiver" | "em_rail_ejector" | "vertical_launching_silo"
+                    ) && !supported_dyson_machine
                     || recipe_id != "matrix_research"
+                        && !supported_dyson_machine
                         && (recipe.inputs.is_empty() || recipe.outputs.is_empty())
                 {
                     return Ok(Some("simple-factory-machine-feature-unsupported"));
@@ -651,6 +645,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         return Ok(Some("simple-factory-planet-directory-incomplete"));
     }
     if let Some(reason) = crate::belts::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::dyson::admission_reason(state)? {
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::local_logistics::admission_reason(state)? {
@@ -1581,6 +1578,10 @@ fn machine_can_run(
     if recipe.id == "matrix_research" && !has_active_research(base) {
         return false;
     }
+    if recipe.id == "solar_sail_launch" && !crate::dyson::valid_ejector_target(state, base, entity)
+    {
+        return false;
+    }
     (machine_input_cycles(state, base, entity, recipe) + EPSILON).floor() >= 1.0
         && (machine_output_cycles(state, entity, recipe, capacity, 1.0, None) + EPSILON).floor()
             >= 1.0
@@ -1605,7 +1606,7 @@ fn metric_value(grid_id: Option<&str>, grid: &GridRuntime, total_items_per_minut
         "thermalGenerationKw": rounded(grid.thermal_generation_kw, 2),
         "fusionGenerationKw": rounded(grid.fusion_generation_kw, 2),
         "artificialStarGenerationKw": rounded(grid.artificial_star_generation_kw, 2),
-        "rayGenerationKw": 0,
+        "rayGenerationKw": rounded(grid.ray_generation_kw, 2),
         "storageDischargeKw": rounded(grid.storage_discharge_kw, 2),
         "storageChargeKw": rounded(grid.storage_charge_kw, 2),
         "storedEnergyMj": rounded(grid.stored_energy_mj, 3),
@@ -1967,6 +1968,50 @@ fn transfer_logistics_buffers(
     Ok(())
 }
 
+fn prepare_inactive_time_warp(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    let controller_id = base
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .and_then(|time_warp| string_at(time_warp, "controllerEntityId"))
+        .map(str::to_owned);
+    let controller_valid = controller_id.as_deref().is_some_and(|id| {
+        entities.iter().filter_map(Value::as_object).any(|entity| {
+            string_at(entity, "id") == Some(id)
+                && string_at(entity, "buildingId") == Some("time_warp_device")
+        })
+    });
+    let simulation_speed = base
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("simulationSpeed"))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(1.0);
+    let time_warp = base
+        .get_mut("timeWarp")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native time-warp state is missing"))?;
+    if !controller_valid {
+        time_warp.insert("controllerEntityId".to_owned(), Value::Null);
+        time_warp.insert("enabled".to_owned(), Value::Bool(false));
+    }
+    set_number(time_warp, "effectiveMultiplier", simulation_speed)?;
+    set_number(time_warp, "requiredPowerKw", 0.0)?;
+    set_number(time_warp, "allocatedPowerKw", 0.0)?;
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if string_at(entity, "buildingId") != Some("time_warp_device") {
+            continue;
+        }
+        set_number(entity, "powerInputKw", 0.0)?;
+        set_number(entity, "powerFactor", 0.0)?;
+        set_number(entity, "utilization", 0.0)?;
+        set_number(entity, "productionRate", 0.0)?;
+    }
+    Ok(())
+}
+
 fn simulate_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1996,6 +2041,8 @@ fn simulate_step(
         })
         .filter_map(|entity| string_at(entity, "id").map(str::to_owned))
         .collect::<HashSet<_>>();
+    prepare_inactive_time_warp(base, entities)?;
+    crate::dyson::advance_environment(base, seconds)?;
     crate::local_logistics::reset_runtime(entities)?;
     transfer_logistics_buffers(state, base, entities)?;
     crate::local_logistics::transfer_buffers(state, base, entities)?;
@@ -2009,6 +2056,7 @@ fn simulate_step(
         seconds,
         &belt_reservation.output_credits,
     )?;
+    let reception = crate::dyson::calculate_reception(state, base, entities)?;
     let planet_ids = state
         .catalog
         .planets
@@ -2032,12 +2080,6 @@ fn simulate_step(
             .and_then(Value::as_object)
             .and_then(|value| value.get("productionBufferLimit")),
     );
-    let simulation_speed = base
-        .get("settings")
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("simulationSpeed"))
-        .cloned()
-        .unwrap_or(Value::from(1));
     let mut grids = vec![GridRuntime::default(); planet_ids.len() * GRID_IDS.len()];
     let grid_slot = |planet: usize, grid: usize| planet * GRID_IDS.len() + grid;
 
@@ -2045,7 +2087,10 @@ fn simulate_step(
         let object = entity
             .as_object()
             .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
-        if string_at(object, "kind") != Some("power") {
+        let is_ray_power = string_at(object, "kind") == Some("machine")
+            && string_at(object, "buildingId") == Some("ray_receiver")
+            && string_at(object, "recipeId") == Some("ray_power");
+        if string_at(object, "kind") != Some("power") && !is_ray_power {
             continue;
         }
         let planet = *planet_index
@@ -2063,6 +2108,16 @@ fn simulate_step(
         let machine_count = finite_number(object.get("machineCount"));
         runtime.has_power_source = true;
         runtime.generator_count += machine_count;
+        if is_ray_power {
+            let output = string_at(object, "id")
+                .and_then(|entity_id| reception.ray_power_by_entity.get(entity_id))
+                .copied()
+                .unwrap_or(0.0);
+            runtime.base_generation_kw += output;
+            runtime.ray_generation_kw += output;
+            runtime.power_output_by_entity.insert(entity_index, output);
+            continue;
+        }
         if is_fuel_generator(building_id) {
             let available = fuel_energy_available(state, object, building);
             let rated = building.power_generation_kw * machine_count;
@@ -2296,7 +2351,10 @@ fn simulate_step(
             continue;
         }
         let building_id = string_at(object, "buildingId").unwrap_or_default();
-        if building_id == "construction_center" {
+        if matches!(
+            building_id,
+            "construction_center" | "time_warp_device" | "ray_receiver"
+        ) {
             continue;
         }
         let recipe_id = string_at(object, "recipeId").unwrap_or_default();
@@ -2451,7 +2509,10 @@ fn simulate_step(
         if string_at(object, "kind") != Some("machine") {
             continue;
         }
-        if string_at(object, "buildingId") == Some("construction_center") {
+        if matches!(
+            string_at(object, "buildingId"),
+            Some("construction_center" | "time_warp_device" | "ray_receiver")
+        ) {
             continue;
         }
         let Some(&planet) = planet_index.get(string_at(object, "planetId").unwrap_or_default())
@@ -2620,7 +2681,10 @@ fn simulate_step(
             let building_id = string_at(object, "buildingId")
                 .unwrap_or_default()
                 .to_owned();
-            if building_id == "construction_center" {
+            if matches!(
+                building_id.as_str(),
+                "construction_center" | "time_warp_device" | "ray_receiver"
+            ) {
                 continue;
             }
             let recipe_id = string_at(object, "recipeId").unwrap_or_default().to_owned();
@@ -2679,7 +2743,8 @@ fn simulate_step(
             };
             let effective_cycles_per_second =
                 building.speed * machine_count * recipe_speed * planet_speed / recipe.duration;
-            let base_rate = effective_cycles_per_second * power_factor;
+            let launch_factor = crate::dyson::launch_factor(base, &recipe.id);
+            let base_rate = effective_cycles_per_second * power_factor * launch_factor;
             let mut potential_cycles = base_rate * seconds;
             let mut sprayed_work = 0.0;
             if string_at(object, "proliferatorMode") == Some("speed")
@@ -2737,6 +2802,7 @@ fn simulate_step(
                     );
                 }
                 consume_proliferator_points(state, object, recipe, sprayed_cycles)?;
+                crate::dyson::launch(state, base, object, &recipe.id, cycles)?;
                 for output in &recipe.outputs {
                     let accumulated_bonus = object
                         .get("proliferatorBonusProgress")
@@ -2791,9 +2857,12 @@ fn simulate_step(
             set_number(
                 object,
                 "utilization",
-                rounded(power_factor * activity_factor, 4),
+                rounded(power_factor * launch_factor * activity_factor, 4),
             )?;
-            let base_units_per_cycle = if recipe.id == "matrix_research" {
+            let base_units_per_cycle = if matches!(
+                recipe.id.as_str(),
+                "matrix_research" | "solar_sail_launch" | "carrier_rocket_launch"
+            ) {
                 1.0
             } else {
                 recipe
@@ -2949,6 +3018,15 @@ fn simulate_step(
 
     crate::construction::run_centers(state, base, entities, seconds, &power_factors)?;
 
+    crate::dyson::run_ray_receivers(
+        state,
+        base,
+        entities,
+        seconds,
+        &belt_reservation.output_credits,
+        &reception,
+    )?;
+
     if !produced_by_item.is_empty() {
         let total = base
             .get_mut("totalProduced")
@@ -3031,6 +3109,15 @@ fn simulate_step(
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::update_congestion(entities)?;
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
+    crate::dyson::finalize(base)?;
+    let receiver_load_kw = reception
+        .allocation_by_entity
+        .values()
+        .copied()
+        .sum::<f64>();
+    if let Some(swarm) = base.get_mut("dysonSwarm").and_then(Value::as_object_mut) {
+        set_number(swarm, "receiverLoadKw", rounded(receiver_load_kw, 2))?;
+    }
 
     let mut power_grid_metrics = Map::new();
     let mut planet_metrics = Map::new();
@@ -3052,6 +3139,7 @@ fn simulate_step(
             combined.thermal_generation_kw += runtime.thermal_generation_kw;
             combined.fusion_generation_kw += runtime.fusion_generation_kw;
             combined.artificial_star_generation_kw += runtime.artificial_star_generation_kw;
+            combined.ray_generation_kw += runtime.ray_generation_kw;
             combined.storage_discharge_kw += runtime.storage_discharge_kw;
             combined.storage_charge_kw += runtime.storage_charge_kw;
         }
@@ -3090,16 +3178,6 @@ fn simulate_step(
         .ok_or_else(|| anyhow!("native simple factory active planet metrics are missing"))?;
     base.insert("metrics".to_owned(), active_metrics);
 
-    if let Some(time_warp) = base.get_mut("timeWarp").and_then(Value::as_object_mut) {
-        time_warp.insert("controllerEntityId".to_owned(), Value::Null);
-        time_warp.insert("enabled".to_owned(), Value::Bool(false));
-        time_warp.insert("effectiveMultiplier".to_owned(), simulation_speed);
-        time_warp.insert("requiredPowerKw".to_owned(), Value::from(0));
-        time_warp.insert("allocatedPowerKw".to_owned(), Value::from(0));
-    }
-    if let Some(swarm) = base.get_mut("dysonSwarm").and_then(Value::as_object_mut) {
-        swarm.insert("receiverLoadKw".to_owned(), Value::from(0));
-    }
     let elapsed = projected_elapsed;
     set_number(base, "elapsedSeconds", elapsed)?;
     if crossed_quantum_boundary {

@@ -152,6 +152,15 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
                     .any(|output| output.item_id == item_id)
             }),
         Some("storage" | "splitter") => string_at(source, "storedItemId") == Some(item_id),
+        Some("station") => source
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .is_some_and(|slots| {
+                slots
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|slot| string_at(slot, "itemId") == Some(item_id))
+            }),
         _ => false,
     }
 }
@@ -194,6 +203,15 @@ fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str
                 accepted => accepted == item_kind,
             }
         }
+        Some("station") => target
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .is_some_and(|slots| {
+                slots
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|slot| string_at(slot, "itemId") == Some(item_id))
+            }),
         _ => false,
     }
 }
@@ -207,7 +225,10 @@ fn target_capacity(
     let building = string_at(target, "buildingId")
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native belt target building is missing"))?;
-    let logistics = matches!(string_at(target, "kind"), Some("storage" | "splitter"));
+    let logistics = matches!(
+        string_at(target, "kind"),
+        Some("storage" | "splitter" | "station")
+    );
     let limit = normalized_buffer_limit(base.get("settings").and_then(Value::as_object).and_then(
         |settings| {
             settings.get(if logistics {
@@ -217,11 +238,30 @@ fn target_capacity(
             })
         },
     ));
-    Ok(stacked_capacity(
-        building.input_capacity,
+    let mut capacity = stacked_capacity(
+        if string_at(target, "kind") == Some("station") {
+            building.output_capacity
+        } else {
+            building.input_capacity
+        },
         finite_number(target.get("machineCount")),
         limit,
-    ) - input_amount(target, item_id))
+    );
+    if string_at(target, "kind") == Some("station") {
+        if let Some(max_stock) = target
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .find(|slot| string_at(slot, "itemId") == Some(item_id))
+            .map(|slot| finite_number(slot.get("maxStock")).floor().max(0.0))
+            .filter(|value| *value > 0.0)
+        {
+            capacity = capacity.min(max_stock);
+        }
+    }
+    Ok(capacity - input_amount(target, item_id))
 }
 
 fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Result<Vec<Route>> {

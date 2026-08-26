@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod catalog;
 pub mod command;
 mod infinite_research;
+mod local_logistics;
 pub mod production_history;
 pub mod replay;
 mod simple_factory;

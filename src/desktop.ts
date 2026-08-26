@@ -226,6 +226,7 @@ export interface DesktopNativeCoreDomainCoverage {
   infiniteResearch: boolean;
   ordinaryBelts: boolean;
   storageAndSplitters: boolean;
+  planetaryLogistics: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

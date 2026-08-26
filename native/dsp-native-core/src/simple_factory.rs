@@ -628,6 +628,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                     return Ok(Some("simple-factory-logistics-entity-invalid"));
                 }
             }
+            Some("station") => {}
             _ => return Ok(Some("simple-factory-entity-kind-unsupported")),
         }
     }
@@ -670,6 +671,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         return Ok(Some("simple-factory-planet-directory-incomplete"));
     }
     if let Some(reason) = crate::belts::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::local_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
     Ok(None)
@@ -1960,7 +1964,9 @@ fn simulate_step(
     belts: &mut [Value],
     seconds: f64,
 ) -> anyhow::Result<()> {
+    crate::local_logistics::reset_runtime(entities)?;
     transfer_logistics_buffers(state, base, entities)?;
+    crate::local_logistics::transfer_buffers(state, base, entities)?;
     crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
     let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
     let planet_ids = state
@@ -2133,6 +2139,40 @@ fn simulate_step(
             "solar_panel" => runtime.solar_generation_kw += output,
             "geothermal_power_station" => runtime.geothermal_generation_kw += output,
             _ => runtime.wind_generation_kw += output,
+        }
+    }
+
+    let ready_stations = crate::local_logistics::ready_station_indices(state, base, entities)?;
+    let mut disconnected_ready_stations = Vec::new();
+    for &entity_index in &ready_stations {
+        let object = entities[entity_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native local station is not an object"))?;
+        let planet = *planet_index
+            .get(string_at(object, "planetId").unwrap_or_default())
+            .ok_or_else(|| anyhow!("native local station planet is unknown"))?;
+        let grid =
+            grid_index(object).ok_or_else(|| anyhow!("native local station grid is unknown"))?;
+        let runtime = &mut grids[grid_slot(planet, grid)];
+        let building = string_at(object, "buildingId")
+            .and_then(|id| state.catalog.buildings.get(id))
+            .ok_or_else(|| anyhow!("native local station building is missing"))?;
+        let demand = building.power_demand_kw
+            * finite_number(object.get("machineCount"))
+            * power_demand_multiplier;
+        let priority = finite_number(object.get("powerPriority"))
+            .floor()
+            .clamp(1.0, 3.0) as usize;
+        if runtime.has_power_source {
+            runtime.connected_entities += 1;
+            runtime.consumers[priority].push(Consumer {
+                entity_index,
+                demand_kw: demand,
+            });
+        } else {
+            runtime.disconnected_entities += 1;
+            runtime.disconnected_demand_kw += demand;
+            disconnected_ready_stations.push(entity_index);
         }
     }
 
@@ -2339,6 +2379,9 @@ fn simulate_step(
             }
             remaining = (remaining - demand * factor).max(0.0);
         }
+    }
+    for entity_index in disconnected_ready_stations {
+        power_factors.insert(entity_index, 0.0);
     }
     for (entity_index, entity) in entities.iter().enumerate() {
         let Some(object) = entity.as_object() else {
@@ -2863,6 +2906,27 @@ fn simulate_step(
         Some(&belt_reservation.allowance_by_belt),
         seconds,
     )?;
+
+    let station_powers = entities
+        .iter()
+        .enumerate()
+        .filter_map(|(entity_index, entity)| {
+            let object = entity.as_object()?;
+            if string_at(object, "kind") != Some("station") {
+                return None;
+            }
+            let planet = *planet_index.get(string_at(object, "planetId").unwrap_or_default())?;
+            let grid = grid_index(object)?;
+            Some((
+                entity_index,
+                power_factors
+                    .get(&entity_index)
+                    .copied()
+                    .unwrap_or(grids[grid_slot(planet, grid)].factor),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    crate::local_logistics::settle(state, base, entities, seconds, &station_powers)?;
 
     let mut power_grid_metrics = Map::new();
     let mut planet_metrics = Map::new();

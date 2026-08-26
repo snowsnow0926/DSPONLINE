@@ -7,7 +7,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
-import { advanceSimulationBudget, connectBeltWithResult, createInitialState, placeBuilding } from "./engine";
+import {
+  advanceSimulationBudget,
+  connectBeltWithResult,
+  createInitialState,
+  placeBuilding,
+  setStationSlotItem,
+  setStationSlotMinimumLoad,
+  setStationSlotMode,
+  setStationSlotPriority,
+} from "./engine";
 import { CAMPAIGN_TASKS } from "./campaign";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import type { GameState } from "./types";
@@ -371,6 +380,76 @@ function dispatchablePowerState(): GameState {
   return state;
 }
 
+function localLogisticsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("logistics_engine_1", "logistics_capacity_1");
+  state.endgame.infiniteResearch.galactic_logistics.level = 2;
+  state.construction.planetary_logistics_station = 3;
+  state = placeBuilding(state, "planetary_logistics_station", { x: 820, y: 80 }, 1);
+  state = placeBuilding(state, "planetary_logistics_station", { x: 1020, y: 80 }, 1);
+  state = placeBuilding(state, "planetary_logistics_station", { x: 1220, y: 80 }, 1);
+  const [supplyA, supplyB, demand] = state.entities.filter((entity) =>
+    entity.buildingId === "planetary_logistics_station");
+  const solar = state.entities.find((entity) => entity.id === "native_solar_fixture")!;
+  solar.powerGridId = "grid-b";
+  for (const station of [supplyA, supplyB, demand]) station.powerGridId = "grid-b";
+
+  for (const station of [supplyA, supplyB, demand]) {
+    state = setStationSlotItem(state, station.id, 0, "iron_ingot");
+  }
+  state = setStationSlotMode(state, demand.id, 0, "local", "demand");
+  state = setStationSlotMinimumLoad(state, demand.id, 0, 0.5);
+  state = setStationSlotMinimumLoad(state, supplyA.id, 0, 0.25);
+  state = setStationSlotMinimumLoad(state, supplyB.id, 0, 1);
+  state = setStationSlotPriority(state, supplyB.id, 0, 2);
+
+  for (const station of [supplyA, demand]) {
+    state = setStationSlotItem(state, station.id, 1, "copper_ingot");
+  }
+  state = setStationSlotMode(state, demand.id, 1, "local", "demand");
+  state = setStationSlotMinimumLoad(state, demand.id, 1, 1);
+  state = setStationSlotPriority(state, demand.id, 1, 2);
+
+  const currentSupplyA = state.entities.find((entity) => entity.id === supplyA.id)!;
+  const currentSupplyB = state.entities.find((entity) => entity.id === supplyB.id)!;
+  const currentDemand = state.entities.find((entity) => entity.id === demand.id)!;
+  currentSupplyA.stationSlots![0].minStock = 5;
+  currentSupplyA.outputs = { iron_ingot: 83, copper_ingot: 0 };
+  currentSupplyA.inputs = { iron_ingot: 0, copper_ingot: 0 };
+  currentSupplyA.stationDrones = 1;
+  currentSupplyB.outputs = { iron_ingot: 61 };
+  currentSupplyB.inputs = { iron_ingot: 0 };
+  currentSupplyB.stationDrones = 1;
+  currentDemand.stationSlots![0].maxStock = 90;
+  currentDemand.stationSlots![1].maxStock = 130;
+  currentDemand.outputs = { iron_ingot: 0, copper_ingot: 0 };
+  currentDemand.inputs = { iron_ingot: 0, copper_ingot: 0 };
+  currentDemand.stationDrones = 2;
+
+  const storageTemplate = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storageTemplate,
+      id: "native_station_copper_feed",
+      position: { x: 800, y: 260 },
+      storedItemId: "copper_ingot",
+      inputs: { copper_ingot: 0 },
+      outputs: { copper_ingot: 180 },
+    },
+    {
+      ...storageTemplate,
+      id: "native_station_copper_sink",
+      position: { x: 1240, y: 260 },
+      storedItemId: "copper_ingot",
+      inputs: { copper_ingot: 0 },
+      outputs: { copper_ingot: 0 },
+    },
+  );
+  state = connectBeltWithResult(state, "native_station_copper_feed", supplyA.id, "copper_ingot", 1, undefined, 2).state;
+  state = connectBeltWithResult(state, demand.id, "native_station_copper_sink", "copper_ingot", 1, undefined, 1).state;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -643,6 +722,48 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 60_000);
+
+  it("matches exact multi-slot planetary logistics, both drone fleets, and station belts", async () => {
+    const initial = localLogisticsState();
+    const checkpoint = await seed(initial, 195);
+    for (const seconds of [1, 8, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `local-logistics-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `local-logistics-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `local-logistics-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+      expect(projection.base.nextId, `local-logistics-${seconds} 路线 ID`).toBe(expected.nextId);
+      expect(advanced.summary.canonicalFields, `local-logistics-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `local-logistics-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `local-logistics-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "local-logistics-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "local-logistics-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
 
   it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(
     "matches long mining boundaries and segmented offline settlement",

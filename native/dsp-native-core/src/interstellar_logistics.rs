@@ -70,12 +70,14 @@ fn rounded(value: f64, digits: i32) -> f64 {
 }
 
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| anyhow!("native interstellar logistics produced a non-finite number"))?,
-    );
+    let value = Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native interstellar logistics produced a non-finite number"))?;
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -831,7 +833,7 @@ pub(crate) fn run_orbital_collectors(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
-    output_credits: &HashMap<String, f64>,
+    output_credits: &crate::belts::OutputCredits,
 ) -> anyhow::Result<()> {
     let infinite_multiplier = 1.0
         + base
@@ -866,7 +868,7 @@ pub(crate) fn run_orbital_collectors(
         let current = stored + buffered;
         set_item_amount(entity, "outputs", &item_id, current)?;
         let entity_id = string_at(entity, "id").unwrap_or_default();
-        let credit = crate::belts::output_credit(output_credits, entity_id, &item_id);
+        let credit = crate::belts::output_credit(state, output_credits, entity_id, &item_id);
         let free = (capacity - current).max(0.0) + credit;
         if free < 1.0 {
             set_number(entity, "progress", 0.0)?;
@@ -1245,6 +1247,12 @@ pub(crate) fn ready_station_indices(
     base: &Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<HashSet<usize>> {
+    if !entities.iter().filter_map(Value::as_object).any(|station| {
+        string_at(station, "buildingId") == Some("interstellar_logistics_station")
+            && !traditional_remote_disabled(station)
+    }) {
+        return Ok(HashSet::new());
+    }
     let indexes = entity_index(entities);
     let ledger = build_ledger(entities, &indexes);
     let mut ready = HashSet::new();
@@ -1357,6 +1365,12 @@ pub(crate) fn dispatch(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
+    if !entities.iter().filter_map(Value::as_object).any(|station| {
+        string_at(station, "buildingId") == Some("interstellar_logistics_station")
+            && !traditional_remote_disabled(station)
+    }) {
+        return Ok(());
+    }
     let indexes = entity_index(entities);
     let mut ledger = build_ledger(entities, &indexes);
     for demand_index in station_indices(entities) {
@@ -1680,6 +1694,19 @@ pub(crate) fn advance_routes(
     seconds: f64,
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
+    if !entities.iter().filter_map(Value::as_object).any(|entity| {
+        entity
+            .get("stationRoutes")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                routes
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|route| string_at(route, "scope") == Some("remote"))
+            })
+    }) {
+        return Ok(());
+    }
     let indexes = entity_index(entities);
     for demand_index in station_indices(entities) {
         let demand_snapshot = entities[demand_index]
@@ -1865,13 +1892,17 @@ pub(crate) fn update_congestion(
     base: &Map<String, Value>,
     entities: &mut [Value],
 ) -> anyhow::Result<()> {
+    if !entities.iter().filter_map(Value::as_object).any(|station| {
+        string_at(station, "buildingId") == Some("interstellar_logistics_station")
+            && !traditional_remote_disabled(station)
+    }) {
+        return Ok(());
+    }
     let indexes = entity_index(entities);
     let ledger = build_ledger(entities, &indexes);
-    let snapshots = entities.to_vec();
-    for station_index in station_indices(&snapshots) {
-        let station = snapshots[station_index]
-            .as_object()
-            .expect("station object");
+    let mut updates = Vec::new();
+    for station_index in station_indices(entities) {
+        let station = entities[station_index].as_object().expect("station object");
         if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
             continue;
         }
@@ -1885,15 +1916,15 @@ pub(crate) fn update_congestion(
                 continue;
             }
             let remote_waiting = slot.remote_mode == "demand"
-                && !peer_matches(state, base, &snapshots, station_index, slot_index)?.is_empty();
-            if remote_waiting || local_peer_exists(&snapshots, station_index, slot_index)? {
+                && !peer_matches(state, base, entities, station_index, slot_index)?.is_empty();
+            if remote_waiting || local_peer_exists(entities, station_index, slot_index)? {
                 waiting += 1.0;
             }
         }
         let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
             + vessel_capacity(station);
         let mut local_busy = 0.0;
-        for (demand_index, demand) in snapshots
+        for (demand_index, demand) in entities
             .iter()
             .enumerate()
             .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
@@ -1931,7 +1962,7 @@ pub(crate) fn update_congestion(
             })
             .clamp(0.0, 1.0);
         let mut active_progress = 0.0_f64;
-        for (demand_index, demand) in snapshots
+        for (demand_index, demand) in entities
             .iter()
             .enumerate()
             .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
@@ -1967,10 +1998,13 @@ pub(crate) fn update_congestion(
                 }
             }
         }
+        updates.push((station_index, rounded(congestion, 3), active_progress));
+    }
+    for (station_index, congestion, active_progress) in updates {
         let target = entities[station_index]
             .as_object_mut()
             .expect("station object");
-        set_number(target, "stationCongestion", rounded(congestion, 3))?;
+        set_number(target, "stationCongestion", congestion)?;
         set_number(target, "stationProgress", active_progress)?;
     }
     Ok(())

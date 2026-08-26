@@ -41,12 +41,14 @@ fn string_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 }
 
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| anyhow!("native construction produced a non-finite number"))?,
-    );
+    let value = Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native construction produced a non-finite number"))?;
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -212,10 +214,18 @@ fn entity_grid_id(entity: &Map<String, Value>) -> &str {
 /// Keep this proof deliberately conservative. A potential ray receiver or any
 /// power entity makes the domain active even when it currently lacks fuel.
 fn all_centers_provably_unpowered(state: &CoreState) -> anyhow::Result<bool> {
-    let entities = (0..state.entity_index.len())
+    let relevant = (0..state.entity_index.len())
+        .filter(|&index| {
+            let building = state.symbols.resolve(state.entities.buildings[index]);
+            let kind = state.symbols.resolve(state.entities.kinds[index]);
+            let recipe = state.symbols.resolve(state.entities.recipes[index]);
+            building == Some("construction_center")
+                || kind == Some("power")
+                || building == Some("ray_receiver") && recipe == Some("ray_power")
+        })
         .map(|index| state.parse_entity(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let center_grids = entities
+    let center_grids = relevant
         .iter()
         .filter_map(Value::as_object)
         .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
@@ -229,7 +239,7 @@ fn all_centers_provably_unpowered(state: &CoreState) -> anyhow::Result<bool> {
     if center_grids.is_empty() {
         return Ok(false);
     }
-    let has_possible_source = entities.iter().filter_map(Value::as_object).any(|entity| {
+    let has_possible_source = relevant.iter().filter_map(Value::as_object).any(|entity| {
         let key = (
             string_at(entity, "planetId").unwrap_or_default().to_owned(),
             entity_grid_id(entity).to_owned(),
@@ -444,6 +454,7 @@ pub(crate) fn run_centers(
     entities: &mut [Value],
     seconds: f64,
     power_factors: &HashMap<usize, f64>,
+    center_indices: &[usize],
 ) -> anyhow::Result<()> {
     let mut automation = base
         .remove("constructionAutomation")
@@ -458,13 +469,16 @@ pub(crate) fn run_centers(
         .remove("quantumMaterialBuffer")
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    for entity_index in 0..entities.len() {
+    for &entity_index in center_indices {
+        if entity_index >= entities.len() {
+            bail!("native construction center index is outside the entity table");
+        }
         let snapshot = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native construction entity is invalid"))?
             .clone();
         if string_at(&snapshot, "buildingId") != Some("construction_center") {
-            continue;
+            bail!("native construction center index is stale");
         }
         let entity_id = string_at(&snapshot, "id").unwrap_or_default().to_owned();
         let planet_id = string_at(&snapshot, "planetId")
@@ -733,9 +747,9 @@ pub(crate) fn apply_quantum_delivery(
 
 pub(crate) fn is_operating_blocked(
     state: &CoreState,
+    base: &Map<String, Value>,
     entity: &Map<String, Value>,
 ) -> anyhow::Result<bool> {
-    let base = state.base_value();
     let automation = automation(base)?;
     if automation.get("enabled").and_then(Value::as_bool) != Some(true) || !has_deficit(state, base)
     {
@@ -787,13 +801,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
     let entity_ids = (0..state.entity_index.len())
-        .map(|index| state.parse_entity(index))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .filter_map(|entity| {
-            let entity = entity.as_object()?.clone();
-            (string_at(&entity, "buildingId") == Some("construction_center"))
-                .then(|| string_at(&entity, "id").unwrap_or_default().to_owned())
+        .filter_map(|index| {
+            (state.symbols.resolve(state.entities.buildings[index]) == Some("construction_center"))
+                .then(|| state.entities.ids[index].to_string())
         })
         .collect::<std::collections::HashSet<_>>();
     let buffers = automation
@@ -860,12 +870,15 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             .and_then(|buffers| buffers.get(entity_id))
             .and_then(Value::as_object)
             .unwrap_or(&empty);
-        let planet_id = (0..state.entity_index.len())
-            .find_map(|index| {
-                let entity = state.parse_entity(index).ok()?;
-                let entity = entity.as_object()?;
-                (string_at(entity, "id") == Some(entity_id.as_str()))
-                    .then(|| string_at(entity, "planetId").unwrap_or_default().to_owned())
+        let planet_id = state
+            .entity_index
+            .get(entity_id)
+            .and_then(|&index| state.parse_entity(index).ok())
+            .and_then(|entity| {
+                entity
+                    .get("planetId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
             })
             .unwrap_or_default();
         let empty_tray = Map::new();

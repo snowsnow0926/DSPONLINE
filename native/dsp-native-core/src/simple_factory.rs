@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::{BuildingDefinition, RecipeDefinition};
@@ -11,6 +11,7 @@ const MIN_BUILDING_BUFFER_LIMIT: f64 = 1_000.0;
 const DEFAULT_BUILDING_BUFFER_LIMIT: f64 = 1_000_000.0;
 const MAX_BUILDING_BUFFER_LIMIT: f64 = 100_000_000.0;
 const GRID_IDS: [&str; 3] = ["grid-a", "grid-b", "grid-c"];
+
 const CAMPAIGN_TASK_IDS: [&str; 31] = [
     "mine_first_ore",
     "smelt_iron",
@@ -448,7 +449,7 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     None
 }
 
-pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
+pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     if let Some(reason) = inactive_global_reason(state) {
         return Ok(Some(reason));
     }
@@ -657,9 +658,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     if let Some(reason) = crate::local_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::construction::admission_reason(state)? {
-        return Ok(Some(reason));
-    }
     if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
@@ -669,14 +667,26 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     Ok(None)
 }
 
+pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
+    let Some(static_reason) = state.factory_static_admission_reason() else {
+        bail!("native factory static admission was not prepared");
+    };
+    if static_reason.is_some() {
+        return Ok(static_reason);
+    }
+    crate::construction::admission_reason(state)
+}
+
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Value::Number(
-            Number::from_f64(value)
-                .ok_or_else(|| anyhow!("native simple factory produced a non-finite number"))?,
-        ),
+    let value = Value::Number(
+        Number::from_f64(value)
+            .ok_or_else(|| anyhow!("native simple factory produced a non-finite number"))?,
     );
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -1109,6 +1119,20 @@ fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()>
     Ok(())
 }
 
+fn reset_indexed_research_machine_progress(
+    entities: &mut [Value],
+    research_entity_indexes: &[usize],
+) -> anyhow::Result<()> {
+    for &entity_index in research_entity_indexes {
+        let entity = entities
+            .get_mut(entity_index)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native indexed research entity is invalid"))?;
+        set_number(entity, "progress", 0.0)?;
+    }
+    Ok(())
+}
+
 fn activate_next_queued_technology(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1494,7 +1518,7 @@ fn machine_output_cycles(
     recipe: &RecipeDefinition,
     capacity: f64,
     maximum: f64,
-    credits: Option<&HashMap<String, f64>>,
+    credits: Option<&crate::belts::OutputCredits>,
 ) -> f64 {
     let entity_id = string_at(entity, "id").unwrap_or_default();
     let outputs = entity.get("outputs").and_then(Value::as_object);
@@ -1510,7 +1534,9 @@ fn machine_output_cycles(
                 .unwrap_or(0.0);
             let free = ((capacity - current).max(0.0)
                 + credits
-                    .map(|credits| crate::belts::output_credit(credits, entity_id, &output.item_id))
+                    .map(|credits| {
+                        crate::belts::output_credit(state, credits, entity_id, &output.item_id)
+                    })
                     .unwrap_or(0.0)
                 + EPSILON)
                 .floor();
@@ -1876,54 +1902,21 @@ fn discharge_exchanger(
     Ok(completed)
 }
 
-fn power_reserves(
-    state: &CoreState,
-    entities: &[Value],
-    planet_id: &str,
-) -> anyhow::Result<(f64, f64, f64, f64)> {
-    let mut stored_mj = 0.0;
-    let mut capacity_mj = 0.0;
-    let mut fuel_electric_mj = 0.0;
-    let mut rated_fuel_kw = 0.0;
-    for entity in entities.iter().filter_map(Value::as_object) {
-        if string_at(entity, "planetId") != Some(planet_id) {
-            continue;
-        }
-        let Some(building_id) = string_at(entity, "buildingId") else {
-            continue;
-        };
-        let building = state
-            .catalog
-            .buildings
-            .get(building_id)
-            .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
-        if matches!(building_id, "accumulator" | "energy_exchanger") {
-            stored_mj += stored_energy(entity, building);
-            capacity_mj += energy_capacity(entity, building);
-        } else if is_fuel_generator(building_id) {
-            fuel_electric_mj +=
-                fuel_energy_available(state, entity, building) * building.fuel_efficiency;
-            rated_fuel_kw +=
-                building.power_generation_kw * finite_number(entity.get("machineCount"));
-        }
-    }
-    Ok((stored_mj, capacity_mj, fuel_electric_mj, rated_fuel_kw))
-}
-
 fn transfer_logistics_buffers(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
+    entity_indices: &[usize],
 ) -> anyhow::Result<()> {
     let limit = normalized_buffer_limit(
         base.get("settings")
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("logisticsBufferLimit")),
     );
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
-        if !matches!(string_at(entity, "kind"), Some("storage" | "splitter")) {
-            continue;
-        }
+    for &entity_index in entity_indices {
+        let entity = entities[entity_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native logistics buffer is invalid"))?;
         let Some(item_id) = string_at(entity, "storedItemId").map(str::to_owned) else {
             continue;
         };
@@ -2005,6 +1998,7 @@ fn drain_material_delivery_hubs(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
+    entity_indices: &[usize],
     seconds: f64,
 ) -> anyhow::Result<()> {
     let active_planet_id = base
@@ -2012,13 +2006,10 @@ fn drain_material_delivery_hubs(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    for entity_index in 0..entities.len() {
+    for &entity_index in entity_indices {
         let Some(entity) = entities[entity_index].as_object() else {
             continue;
         };
-        if string_at(entity, "buildingId") != Some("material_delivery_hub") {
-            continue;
-        }
         let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
         let items = material_delivery_items(state, entity);
         let amounts = items
@@ -2111,6 +2102,7 @@ fn drain_material_delivery_hubs(
 }
 
 fn prepare_inactive_time_warp(
+    state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
 ) -> anyhow::Result<()> {
@@ -2119,12 +2111,10 @@ fn prepare_inactive_time_warp(
         .and_then(Value::as_object)
         .and_then(|time_warp| string_at(time_warp, "controllerEntityId"))
         .map(str::to_owned);
-    let controller_valid = controller_id.as_deref().is_some_and(|id| {
-        entities.iter().filter_map(Value::as_object).any(|entity| {
-            string_at(entity, "id") == Some(id)
-                && string_at(entity, "buildingId") == Some("time_warp_device")
-        })
-    });
+    let controller_valid = controller_id
+        .as_deref()
+        .and_then(|id| state.entity_index.get(id).copied())
+        .is_some_and(|index| state.factory_topology.time_warp_indices.contains(&index));
     let simulation_speed = base
         .get("settings")
         .and_then(Value::as_object)
@@ -2142,10 +2132,10 @@ fn prepare_inactive_time_warp(
     set_number(time_warp, "effectiveMultiplier", simulation_speed)?;
     set_number(time_warp, "requiredPowerKw", 0.0)?;
     set_number(time_warp, "allocatedPowerKw", 0.0)?;
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
-        if string_at(entity, "buildingId") != Some("time_warp_device") {
-            continue;
-        }
+    for &entity_index in &state.factory_topology.time_warp_indices {
+        let entity = entities[entity_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native time-warp controller is invalid"))?;
         set_number(entity, "powerInputKw", 0.0)?;
         set_number(entity, "powerFactor", 0.0)?;
         set_number(entity, "utilization", 0.0)?;
@@ -2158,7 +2148,8 @@ fn simulate_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    belts: &mut [Value],
+    belt_runtime: &mut crate::belts::BeltRuntime,
+    belt_routes: &crate::belts::PreparedRoutes,
     seconds: f64,
 ) -> anyhow::Result<()> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
@@ -2184,29 +2175,51 @@ fn simulate_step(
     // simulation call. A tower that completes attachment at a boundary is
     // intentionally absent from uploads until the next call refreshes that
     // lookup, even when this call crosses more than one boundary.
-    let indexed_quantum_endpoint_ids = entities
+    let indexed_quantum_endpoint_indices = state
+        .factory_topology
+        .quantum_endpoint_indices
         .iter()
-        .filter_map(Value::as_object)
-        .filter(|entity| {
-            string_at(entity, "kind") == Some("station")
-                && string_at(entity, "quantumMode") == Some("quantum")
-                && matches!(
-                    string_at(entity, "buildingId"),
-                    Some("interstellar_logistics_station" | "orbital_collector")
-                )
+        .copied()
+        .filter(|&index| {
+            entities[index]
+                .as_object()
+                .is_some_and(|entity| string_at(entity, "quantumMode") == Some("quantum"))
         })
-        .filter_map(|entity| string_at(entity, "id").map(str::to_owned))
-        .collect::<HashSet<_>>();
-    prepare_inactive_time_warp(base, entities)?;
+        .collect::<Vec<_>>();
+    profile_mark!("static-step-indexes");
+    prepare_inactive_time_warp(state, base, entities)?;
     crate::dyson::advance_environment(base, seconds)?;
-    crate::local_logistics::reset_runtime(entities)?;
-    transfer_logistics_buffers(state, base, entities)?;
+    profile_mark!("time-warp-and-dyson-environment");
+    crate::local_logistics::reset_runtime_for_indices(
+        entities,
+        &state.factory_topology.station_indices,
+    )?;
+    profile_mark!("local-runtime-reset");
+    transfer_logistics_buffers(
+        state,
+        base,
+        entities,
+        &state.factory_topology.logistics_buffer_indices,
+    )?;
+    profile_mark!("ordinary-logistics-buffers");
     crate::local_logistics::transfer_buffers(state, base, entities)?;
+    profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
-    profile_mark!("prefix-and-logistics-buffers");
-    crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
+    profile_mark!("quantum-supply-buffers");
+    profile_mark!("belt-route-index");
+    crate::belts::transfer(
+        state,
+        base,
+        entities,
+        belt_runtime,
+        belt_routes,
+        seconds,
+        true,
+        None,
+        seconds,
+    )?;
     profile_mark!("belt-input-transfer");
-    let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
+    let belt_reservation = crate::belts::reserve(state, base, entities, belt_runtime, belt_routes)?;
     profile_mark!("belt-reservation");
     crate::interstellar_logistics::run_orbital_collectors(
         state,
@@ -2215,7 +2228,13 @@ fn simulate_step(
         seconds,
         &belt_reservation.output_credits,
     )?;
-    drain_material_delivery_hubs(state, base, entities, seconds)?;
+    drain_material_delivery_hubs(
+        state,
+        base,
+        entities,
+        &state.factory_topology.material_delivery_hub_indices,
+        seconds,
+    )?;
     let reception = crate::dyson::calculate_reception(state, base, entities)?;
     profile_mark!("collectors-delivery-and-reception");
     let planet_ids = state
@@ -2224,11 +2243,6 @@ fn simulate_step(
         .iter()
         .map(|planet| planet.id.clone())
         .collect::<Vec<_>>();
-    let planet_index = planet_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.clone(), index))
-        .collect::<HashMap<_, _>>();
     let profiles = state
         .catalog
         .planets
@@ -2244,8 +2258,8 @@ fn simulate_step(
     let mut grids = vec![GridRuntime::default(); planet_ids.len() * GRID_IDS.len()];
     let grid_slot = |planet: usize, grid: usize| planet * GRID_IDS.len() + grid;
 
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let object = entity
+    for &entity_index in &state.factory_topology.power_source_indices {
+        let object = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
         let is_ray_power = string_at(object, "kind") == Some("machine")
@@ -2254,11 +2268,11 @@ fn simulate_step(
         if string_at(object, "kind") != Some("power") && !is_ray_power {
             continue;
         }
-        let planet = *planet_index
-            .get(string_at(object, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native simple factory entity planet is unknown"))?;
-        let grid = grid_index(object)
-            .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native simple factory entity power topology is unknown");
+        }
         let runtime = &mut grids[grid_slot(planet, grid)];
         let building_id = string_at(object, "buildingId").unwrap_or_default();
         let building = state
@@ -2405,31 +2419,33 @@ fn simulate_step(
         state, base, entities,
     )?);
     profile_mark!("interstellar-ready-stations");
-    ready_stations.extend(entities.iter().enumerate().filter_map(|(index, entity)| {
-        let entity = entity.as_object()?;
-        (string_at(entity, "kind") == Some("station")
-            && string_at(entity, "buildingId") == Some("interstellar_logistics_station")
-            && string_at(entity, "quantumMode") == Some("quantum"))
-        .then_some(index)
-    }));
+    ready_stations.extend(indexed_quantum_endpoint_indices.iter().copied().filter(
+        |&entity_index| {
+            state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                == Some("interstellar_logistics_station")
+        },
+    ));
     if crate::construction::has_deficit(state, base) {
-        ready_stations.extend(entities.iter().enumerate().filter_map(|(index, entity)| {
-            let entity = entity.as_object()?;
-            (string_at(entity, "kind") == Some("machine")
-                && string_at(entity, "buildingId") == Some("construction_center"))
-            .then_some(index)
-        }));
+        ready_stations.extend(
+            state
+                .factory_topology
+                .construction_center_indices
+                .iter()
+                .copied(),
+        );
     }
     let mut disconnected_ready_stations = Vec::new();
     for &entity_index in &ready_stations {
         let object = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local station is not an object"))?;
-        let planet = *planet_index
-            .get(string_at(object, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native local station planet is unknown"))?;
-        let grid =
-            grid_index(object).ok_or_else(|| anyhow!("native local station grid is unknown"))?;
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native local station power topology is unknown");
+        }
         let runtime = &mut grids[grid_slot(planet, grid)];
         let building = string_at(object, "buildingId")
             .and_then(|id| state.catalog.buildings.get(id))
@@ -2453,22 +2469,19 @@ fn simulate_step(
         }
     }
 
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let object = entity
+    for &entity_index in &state.factory_topology.vein_indices {
+        let object = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
-        if string_at(object, "kind") != Some("vein") {
-            continue;
-        }
         let miner_count = finite_number(object.get("minerCount"));
         if miner_count <= 0.0 {
             continue;
         }
-        let planet = *planet_index
-            .get(string_at(object, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native simple factory entity planet is unknown"))?;
-        let grid = grid_index(object)
-            .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native simple factory vein power topology is unknown");
+        }
         let runtime = &mut grids[grid_slot(planet, grid)];
         let resource = string_at(object, "resourceId").unwrap_or_default();
         let extractor = state
@@ -2508,23 +2521,11 @@ fn simulate_step(
     }
     profile_mark!("power-demand-index");
 
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let object = entity
+    for &entity_index in &state.factory_topology.ordinary_machine_indices {
+        let object = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
-        if string_at(object, "kind") != Some("machine") {
-            continue;
-        }
         let building_id = string_at(object, "buildingId").unwrap_or_default();
-        if matches!(
-            building_id,
-            "construction_center"
-                | "time_warp_device"
-                | "ray_receiver"
-                | "micro_black_hole_connector"
-        ) {
-            continue;
-        }
         let recipe_id = string_at(object, "recipeId").unwrap_or_default();
         let building = state
             .catalog
@@ -2546,11 +2547,11 @@ fn simulate_step(
         ) {
             continue;
         }
-        let planet = *planet_index
-            .get(string_at(object, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native simple factory entity planet is unknown"))?;
-        let grid = grid_index(object)
-            .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native simple factory machine power topology is unknown");
+        }
         let runtime = &mut grids[grid_slot(planet, grid)];
         let planet_speed = if specialization_applies(profiles[planet], building) {
             profiles[planet].production_speed_multiplier
@@ -2590,6 +2591,7 @@ fn simulate_step(
             // Inserted after allocation below to avoid a second side table.
         }
     }
+    profile_mark!("machine-power-demand-index");
 
     let mut power_factors = HashMap::<usize, f64>::new();
     for runtime in &mut grids {
@@ -2667,34 +2669,19 @@ fn simulate_step(
             remaining = (remaining - demand * factor).max(0.0);
         }
     }
+    profile_mark!("power-allocation");
     for entity_index in disconnected_ready_stations {
         power_factors.insert(entity_index, 0.0);
     }
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let Some(object) = entity.as_object() else {
+    for &entity_index in &state.factory_topology.ordinary_machine_indices {
+        let Some(object) = entities[entity_index].as_object() else {
             continue;
         };
-        if string_at(object, "kind") != Some("machine") {
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
             continue;
         }
-        if matches!(
-            string_at(object, "buildingId"),
-            Some(
-                "construction_center"
-                    | "time_warp_device"
-                    | "ray_receiver"
-                    | "micro_black_hole_connector"
-            )
-        ) {
-            continue;
-        }
-        let Some(&planet) = planet_index.get(string_at(object, "planetId").unwrap_or_default())
-        else {
-            continue;
-        };
-        let Some(grid) = grid_index(object) else {
-            continue;
-        };
         if grids[grid_slot(planet, grid)].has_power_source {
             continue;
         }
@@ -2719,6 +2706,7 @@ fn simulate_step(
             power_factors.insert(entity_index, 0.0);
         }
     }
+    profile_mark!("disconnected-power-factors");
 
     let (difficulty_mining_multiplier, _) = difficulty_multipliers(base);
     let research_base = if completed_tech(base, "mining_speed_3") {
@@ -2741,38 +2729,52 @@ fn simulate_step(
         .and_then(Value::as_str)
         == Some("infinite");
     let mut produced_by_item = HashMap::<String, f64>::new();
-    let has_galactic_material_exporter = entities
-        .iter()
-        .filter_map(Value::as_object)
-        .any(|entity| string_at(entity, "buildingId") == Some("galactic_material_exporter"));
+    let has_galactic_material_exporter = state.factory_topology.has_galactic_material_exporter;
+    let research_entity_indexes = &state.factory_topology.research_entity_indices;
     let mut reset_research_progress_before_next_entity = false;
 
-    for entity_index in 0..entities.len() {
+    // Preserve the JS engine's per-entity sparse-shape normalization without
+    // sending station rows through the complete production branch below.
+    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+        if !entity.contains_key("stationLastSupplyPeerBySlot") {
+            entity.insert(
+                "stationLastSupplyPeerBySlot".to_owned(),
+                Value::Object(Map::new()),
+            );
+        }
+        if !entity.contains_key("proliferatorBonusProgress") {
+            entity.insert(
+                "proliferatorBonusProgress".to_owned(),
+                Value::Object(Map::new()),
+            );
+        }
+    }
+    profile_mark!("runtime-shape-normalization");
+
+    for &entity_index in &state.factory_topology.non_station_indices {
         if reset_research_progress_before_next_entity {
-            reset_research_machine_progress(entities)?;
+            reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
             reset_research_progress_before_next_entity = false;
         }
         let object = entity_object(&mut entities[entity_index])?;
-        object
-            .entry("stationLastSupplyPeerBySlot".to_owned())
-            .or_insert_with(|| Value::Object(Map::new()));
-        object
-            .entry("proliferatorBonusProgress".to_owned())
-            .or_insert_with(|| Value::Object(Map::new()));
-        let kind = string_at(object, "kind").unwrap_or_default().to_owned();
-        let planet = *planet_index
-            .get(string_at(object, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native simple factory entity planet is unknown"))?;
-        let grid = grid_index(object)
-            .ok_or_else(|| anyhow!("native simple factory entity grid is unknown"))?;
+        let kind = state
+            .symbols
+            .resolve(state.entities.kinds[entity_index])
+            .unwrap_or_default();
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native simple factory entity topology is unknown");
+        }
         if kind == "power" {
-            let building_id = string_at(object, "buildingId")
-                .unwrap_or_default()
-                .to_owned();
+            let building_id = state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                .unwrap_or_default();
             let building = state
                 .catalog
                 .buildings
-                .get(&building_id)
+                .get(building_id)
                 .ok_or_else(|| anyhow!("native simple factory power catalog is missing"))?;
             let machine_count = finite_number(object.get("machineCount"));
             let runtime = &grids[grid_slot(planet, grid)];
@@ -2799,7 +2801,7 @@ fn simulate_step(
                 },
             )?;
             set_number(object, "productionRate", 0.0)?;
-            if is_fuel_generator(&building_id) {
+            if is_fuel_generator(building_id) {
                 burn_fuel(state, object, building, output, seconds)?;
             } else if building_id == "accumulator" {
                 let capacity = energy_capacity(object, building);
@@ -2851,11 +2853,12 @@ fn simulate_step(
             continue;
         }
         if kind == "machine" {
-            let building_id = string_at(object, "buildingId")
-                .unwrap_or_default()
-                .to_owned();
+            let building_id = state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                .unwrap_or_default();
             if matches!(
-                building_id.as_str(),
+                building_id,
                 "construction_center"
                     | "time_warp_device"
                     | "ray_receiver"
@@ -2863,16 +2866,19 @@ fn simulate_step(
             ) {
                 continue;
             }
-            let recipe_id = string_at(object, "recipeId").unwrap_or_default().to_owned();
+            let recipe_id = state
+                .symbols
+                .resolve(state.entities.recipes[entity_index])
+                .unwrap_or_default();
             let building = state
                 .catalog
                 .buildings
-                .get(&building_id)
+                .get(building_id)
                 .ok_or_else(|| anyhow!("native simple factory machine building is missing"))?;
             let recipe = state
                 .catalog
                 .recipes
-                .get(&recipe_id)
+                .get(recipe_id)
                 .ok_or_else(|| anyhow!("native simple factory machine recipe is missing"))?;
             if let Some(factor) = power_factors.get(&entity_index).copied() {
                 set_number(object, "powerFactor", rounded(factor, 4))?;
@@ -3062,7 +3068,7 @@ fn simulate_step(
             )?;
             continue;
         }
-        if matches!(kind.as_str(), "storage" | "splitter") {
+        if matches!(kind, "storage" | "splitter") {
             continue;
         }
         let miner_count = finite_number(object.get("minerCount"));
@@ -3104,7 +3110,12 @@ fn simulate_step(
         );
         let entity_id = string_at(object, "id").unwrap_or_default();
         let free = (capacity - current).max(0.0)
-            + crate::belts::output_credit(&belt_reservation.output_credits, entity_id, &resource);
+            + crate::belts::output_credit(
+                state,
+                &belt_reservation.output_credits,
+                entity_id,
+                &resource,
+            );
         let remaining_resource = finite_number(object.get("resourceRemaining"))
             .floor()
             .max(0.0);
@@ -3187,12 +3198,22 @@ fn simulate_step(
         )?;
         *produced_by_item.entry(resource).or_default() += produced;
     }
+    profile_mark!("power-facilities-machines-miners");
 
     if reset_research_progress_before_next_entity {
-        reset_research_machine_progress(entities)?;
+        reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
     }
+    profile_mark!("research-reset");
 
-    crate::construction::run_centers(state, base, entities, seconds, &power_factors)?;
+    crate::construction::run_centers(
+        state,
+        base,
+        entities,
+        seconds,
+        &power_factors,
+        &state.factory_topology.construction_center_indices,
+    )?;
+    profile_mark!("construction");
 
     crate::dyson::run_ray_receivers(
         state,
@@ -3202,7 +3223,7 @@ fn simulate_step(
         &belt_reservation.output_credits,
         &reception,
     )?;
-    profile_mark!("power-production-construction");
+    profile_mark!("ray-receivers");
 
     if !produced_by_item.is_empty() {
         let total = base
@@ -3220,17 +3241,36 @@ fn simulate_step(
         }
     }
 
-    let total_items_before_global = planet_ids
-        .iter()
-        .map(|planet_id| {
-            entities
-                .iter()
-                .filter_map(Value::as_object)
-                .filter(|entity| string_at(entity, "planetId") == Some(planet_id))
-                .map(|entity| finite_number(entity.get("productionRate")))
-                .fold(0.0_f64, |sum, value| sum + value)
-        })
-        .collect::<Vec<_>>();
+    // Preserve the per-planet entity accumulation order while avoiding one
+    // complete entity scan per planet for production and reserve metrics.
+    let mut total_items_before_global = vec![0.0; planet_ids.len()];
+    let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_ids.len()];
+    for (entity_index, entity) in entities.iter().enumerate() {
+        let Some(entity) = entity.as_object() else {
+            continue;
+        };
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        if planet == usize::MAX {
+            continue;
+        }
+        total_items_before_global[planet] += finite_number(entity.get("productionRate"));
+        let Some(building_id) = string_at(entity, "buildingId") else {
+            continue;
+        };
+        let building = state
+            .catalog
+            .buildings
+            .get(building_id)
+            .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
+        let reserves = &mut power_reserves_by_planet[planet];
+        if matches!(building_id, "accumulator" | "energy_exchanger") {
+            reserves.0 += stored_energy(entity, building);
+            reserves.1 += energy_capacity(entity, building);
+        } else if is_fuel_generator(building_id) {
+            reserves.2 += fuel_energy_available(state, entity, building) * building.fuel_efficiency;
+            reserves.3 += building.power_generation_kw * finite_number(entity.get("machineCount"));
+        }
+    }
 
     let quantum_flow = if crossed_quantum_boundary {
         crate::quantum_logistics::settle_downloads(
@@ -3250,28 +3290,37 @@ fn simulate_step(
         state,
         base,
         entities,
-        belts,
+        belt_runtime,
+        belt_routes,
         0.0,
         false,
         Some(&belt_reservation.allowance_by_belt),
         seconds,
     )?;
-    drain_material_delivery_hubs(state, base, entities, seconds)?;
+    drain_material_delivery_hubs(
+        state,
+        base,
+        entities,
+        &state.factory_topology.material_delivery_hub_indices,
+        seconds,
+    )?;
     profile_mark!("belt-output-transfer");
 
-    let station_powers = entities
+    let station_powers = state
+        .factory_topology
+        .station_indices
         .iter()
-        .enumerate()
-        .filter_map(|(entity_index, entity)| {
-            let object = entity.as_object()?;
-            if string_at(object, "kind") != Some("station") {
-                return None;
-            }
+        .copied()
+        .filter_map(|entity_index| {
+            let object = entities[entity_index].as_object()?;
             if string_at(object, "buildingId") == Some("orbital_collector") {
                 return Some((entity_index, 1.0));
             }
-            let planet = *planet_index.get(string_at(object, "planetId").unwrap_or_default())?;
-            let grid = grid_index(object)?;
+            let planet = state.factory_topology.entity_planet_indices[entity_index];
+            let grid = state.factory_topology.entity_grid_indices[entity_index];
+            if planet == usize::MAX || grid == usize::MAX {
+                return None;
+            }
             Some((
                 entity_index,
                 power_factors
@@ -3291,7 +3340,7 @@ fn simulate_step(
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
     profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::update_congestion(entities)?;
+    crate::local_logistics::update_congestion(state, entities)?;
     profile_mark!("local-congestion");
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
     profile_mark!("interstellar-congestion");
@@ -3338,7 +3387,7 @@ fn simulate_step(
             combined.supplied_kw / combined.demand_kw
         };
         let (stored_mj, capacity_mj, fuel_electric_mj, rated_fuel_kw) =
-            power_reserves(state, entities, planet_id)?;
+            power_reserves_by_planet[planet];
         combined.stored_energy_mj = stored_mj;
         combined.storage_capacity_mj = capacity_mj;
         combined.fuel_electric_energy_mj = fuel_electric_mj;
@@ -3378,7 +3427,7 @@ fn simulate_step(
                 boundary as f64 * 5.0,
                 quantum_flow.clone(),
                 5.0,
-                &indexed_quantum_endpoint_ids,
+                &indexed_quantum_endpoint_indices,
             )?;
         }
     }
@@ -3404,14 +3453,41 @@ fn simulate_step(
     Ok(())
 }
 
-pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow::Result<()> {
-    let mut entities = (0..state.entity_index.len())
-        .map(|index| state.parse_entity(index))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut belts = (0..state.belt_index.len())
-        .map(|index| state.parse_belt(index))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut base = std::mem::take(state.base_value_mut());
+pub(crate) struct PreparedFactoryAdvance {
+    pub base: Map<String, Value>,
+    pub entities: Vec<Value>,
+    pub belts: Vec<Value>,
+    pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
+}
+
+pub(crate) fn prepare_advance(
+    state: &CoreState,
+    simulation_seconds: f64,
+) -> anyhow::Result<PreparedFactoryAdvance> {
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let mut profile_checkpoint = std::time::Instant::now();
+    macro_rules! profile_mark {
+        ($label:literal) => {
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tstate-{}\t{:.3}",
+                    $label,
+                    profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                );
+                profile_checkpoint = std::time::Instant::now();
+            }
+        };
+    }
+    let mut entities = state.parse_entities_parallel()?;
+    let mut belts = state.parse_belts_parallel()?;
+    profile_mark!("parse-records");
+    let belt_routes = if let Some(routes) = state.prepared_belt_routes() {
+        routes
+    } else {
+        std::sync::Arc::new(crate::belts::prepare_routes(state, &entities, &belts)?)
+    };
+    let mut belt_runtime = crate::belts::BeltRuntime::from_values(&belts)?;
+    let mut base = state.base_value().clone();
     if let (Some(active_planet), Some(tray)) = (
         base.get("activePlanetId")
             .and_then(Value::as_str)
@@ -3424,7 +3500,7 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
             .insert(active_planet, tray);
     }
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
-    *state.base_value_mut() = base;
+    profile_mark!("research-boundaries-before");
     let total = simulation_seconds;
     let step_size = if total >= 24.0 * 60.0 * 60.0 {
         30.0
@@ -3436,32 +3512,25 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
     let mut remaining = total;
     while remaining > EPSILON {
         let step = remaining.min(step_size);
-        let mut base = std::mem::take(state.base_value_mut());
-        simulate_step(state, &mut base, &mut entities, &mut belts, step)
-            .context("advance native simple factory step")?;
-        *state.base_value_mut() = base;
+        simulate_step(
+            state,
+            &mut base,
+            &mut entities,
+            &mut belt_runtime,
+            &belt_routes,
+            step,
+        )
+        .context("advance native simple factory step")?;
         remaining = (remaining - step).max(0.0);
     }
-    let mut base = std::mem::take(state.base_value_mut());
+    profile_mark!("simulate-steps");
+    belt_runtime.write_back(&mut belts)?;
+    profile_mark!("belt-runtime-write-back");
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
-    *state.base_value_mut() = base;
-    for (raw, entity) in state.entity_raw_mut().iter_mut().zip(entities) {
-        *raw = serde_json::to_string(&entity)
-            .context("encode native simple factory entity")?
-            .into_boxed_str();
-    }
-    for (raw, belt) in state.belt_raw_mut().iter_mut().zip(belts) {
-        *raw = serde_json::to_string(&belt)
-            .context("encode native simple factory belt")?
-            .into_boxed_str();
-    }
-    let universe_matrix = number_at(
-        state.base_value().get("totalProduced"),
-        &["universe_matrix"],
-    );
+    profile_mark!("research-boundaries-after");
+    let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
     if universe_matrix >= 1.0 {
-        if let Some(station) = state
-            .base_value_mut()
+        if let Some(station) = base
             .get_mut("orbitalStation")
             .and_then(Value::as_object_mut)
         {
@@ -3470,6 +3539,11 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
             }
         }
     }
-    state.rebuild_indexes()?;
-    Ok(())
+    let _ = profile_checkpoint.elapsed();
+    Ok(PreparedFactoryAdvance {
+        base,
+        entities,
+        belts,
+        belt_routes,
+    })
 }

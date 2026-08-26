@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
@@ -82,46 +82,6 @@ fn delivered_power(base: &Map<String, Value>, planet_ids: &[String]) -> f64 {
                 .sum()
         })
         .unwrap_or(0.0)
-}
-
-fn inventory_from_planet_trays(base: &Map<String, Value>) -> Value {
-    let mut inventory = BTreeMap::new();
-    if let Some(trays) = base.get("planetTrays").and_then(Value::as_object) {
-        for tray in trays.values().filter_map(Value::as_object) {
-            for (item, amount) in tray {
-                if let Some(amount) = finite_number(Some(amount)) {
-                    add_rate(&mut inventory, item, amount.floor());
-                }
-            }
-        }
-    }
-    rates_to_value(inventory)
-}
-
-fn inventory_from_state(base: &Map<String, Value>, entities: &[Value]) -> Value {
-    let mut inventory = BTreeMap::new();
-    for entity in entities.iter().filter_map(Value::as_object) {
-        for record in [entity.get("inputs"), entity.get("outputs")] {
-            let Some(record) = record.and_then(Value::as_object) else {
-                continue;
-            };
-            for (item, amount) in record {
-                if let Some(amount) = finite_number(Some(amount)) {
-                    add_rate(&mut inventory, item, amount.floor());
-                }
-            }
-        }
-    }
-    if let Some(trays) = base.get("planetTrays").and_then(Value::as_object) {
-        for tray in trays.values().filter_map(Value::as_object) {
-            for (item, amount) in tray {
-                if let Some(amount) = finite_number(Some(amount)) {
-                    add_rate(&mut inventory, item, amount.floor());
-                }
-            }
-        }
-    }
-    rates_to_value(inventory)
 }
 
 fn planet_rates_to_value(values: BTreeMap<String, BTreeMap<String, f64>>) -> Value {
@@ -311,6 +271,53 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
 
 impl CoreState {
     pub(crate) fn record_production_history(&mut self) -> anyhow::Result<()> {
+        let entities = self.parse_entities_parallel()?;
+        let belts = self.parse_belts_parallel()?;
+        let mut base = std::mem::take(self.base_value_mut());
+        let result = self.record_production_history_with_records(&mut base, &entities, &belts);
+        *self.base_value_mut() = base;
+        result
+    }
+
+    pub(crate) fn record_production_history_with_records(
+        &self,
+        base: &mut Map<String, Value>,
+        entities: &[Value],
+        belts: &[Value],
+    ) -> anyhow::Result<()> {
+        let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+        let mut profile_checkpoint = std::time::Instant::now();
+        macro_rules! profile_mark {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                    profile_checkpoint = std::time::Instant::now();
+                }
+            };
+        }
+        macro_rules! profile_last {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                }
+            };
+        }
+        // Production history is sampled, not recomputed every simulation
+        // second. Check the sample clock before building any whole-factory
+        // aggregates so the common no-sample path is O(1).
+        let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
+        let recorded = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
+        if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
+            return Ok(());
+        }
         let mut ordered_planets = self.catalog.planets.iter().collect::<Vec<_>>();
         ordered_planets.sort_by(|left, right| {
             left.simulation_order
@@ -321,79 +328,8 @@ impl CoreState {
             .into_iter()
             .map(|planet| planet.id.clone())
             .collect::<Vec<_>>();
-        let entities = (0..self.entity_index.len())
-            .map(|index| self.parse_entity(index))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let belts = (0..self.belt_index.len())
-            .map(|index| self.parse_belt(index))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let (belt_capacity, belt_flow) = crate::belts::aggregate_flow(self, &belts)?;
-        let extractor_output_capacities = ["mining_machine", "oil_extractor", "water_pump"]
-            .into_iter()
-            .filter_map(|id| {
-                self.catalog
-                    .buildings
-                    .get(id)
-                    .map(|building| (id.to_owned(), building.output_capacity))
-            })
-            .collect::<HashMap<_, _>>();
-        let item_kinds = self
-            .catalog
-            .items
-            .iter()
-            .map(|(id, item)| (id.clone(), item.kind.clone()))
-            .collect::<HashMap<_, _>>();
-        let machine_recipes = entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| entity.get("kind").and_then(Value::as_str) == Some("machine"))
-            .filter_map(|entity| entity.get("recipeId").and_then(Value::as_str))
-            .filter_map(|id| {
-                self.catalog
-                    .recipes
-                    .get(id)
-                    .cloned()
-                    .map(|recipe| (id.to_owned(), recipe))
-            })
-            .collect::<HashMap<_, _>>();
-        let machine_buildings = entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| entity.get("kind").and_then(Value::as_str) == Some("machine"))
-            .filter_map(|entity| entity.get("buildingId").and_then(Value::as_str))
-            .filter_map(|id| {
-                self.catalog
-                    .buildings
-                    .get(id)
-                    .cloned()
-                    .map(|building| (id.to_owned(), building))
-            })
-            .collect::<HashMap<_, _>>();
-        let mut machine_output_bonuses = HashMap::new();
-        for entity in entities.iter().filter_map(Value::as_object) {
-            let Some(entity_id) = entity.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(recipe) = entity
-                .get("recipeId")
-                .and_then(Value::as_str)
-                .and_then(|id| self.catalog.recipes.get(id))
-            else {
-                continue;
-            };
-            for output in &recipe.outputs {
-                machine_output_bonuses.insert(
-                    (entity_id.to_owned(), output.item_id.clone()),
-                    crate::simple_factory::next_proliferated_output_bonus(
-                        self,
-                        entity,
-                        recipe,
-                        &output.item_id,
-                        output.amount,
-                    ),
-                );
-            }
-        }
+        let (belt_capacity, belt_flow) = crate::belts::aggregate_flow(self, belts)?;
+        profile_mark!("belt-flow");
         let blocked_construction_centers = entities
             .iter()
             .filter_map(Value::as_object)
@@ -401,18 +337,13 @@ impl CoreState {
                 entity.get("buildingId").and_then(Value::as_str) == Some("construction_center")
             })
             .filter_map(|entity| {
-                crate::construction::is_operating_blocked(self, entity)
+                crate::construction::is_operating_blocked(self, base, entity)
                     .ok()
                     .filter(|blocked| *blocked)
                     .and_then(|_| entity.get("id").and_then(Value::as_str).map(str::to_owned))
             })
             .collect::<HashSet<_>>();
-        let base = self.base_value_mut();
-        let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
-        let recorded = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
-        if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
-            return Ok(());
-        }
+        profile_mark!("construction-centers");
         let duration = SAMPLE_SECONDS.max(elapsed - recorded);
         let history = base
             .get("productionHistory")
@@ -424,17 +355,7 @@ impl CoreState {
         let current_boundary = (elapsed.max(0.0) / 10.0).floor();
         let refresh =
             previous.is_none() || duration >= 10.0 || previous_boundary != current_boundary;
-        let inventory = if refresh {
-            if entities.is_empty() {
-                inventory_from_planet_trays(base)
-            } else {
-                inventory_from_state(base, &entities)
-            }
-        } else {
-            Value::Object(clone_object(
-                previous.and_then(|sample| sample.get("inventory")),
-            ))
-        };
+        let mut inventory_values = refresh.then(BTreeMap::<String, f64>::new);
         let generation = metric_sum(base, &planet_ids, "generationKw");
         let demand = metric_sum(base, &planet_ids, "demandKw");
         let delivered = delivered_power(base, &planet_ids);
@@ -444,7 +365,42 @@ impl CoreState {
         let mut consumption = BTreeMap::<String, f64>::new();
         let mut planet_production = BTreeMap::<String, BTreeMap<String, f64>>::new();
         let mut planet_consumption = BTreeMap::<String, BTreeMap<String, f64>>::new();
+        let units = |entity: &Map<String, Value>| {
+            if entity.get("kind").and_then(Value::as_str) == Some("vein") {
+                finite_number(entity.get("minerCount")).unwrap_or(0.0)
+            } else {
+                finite_number(entity.get("machineCount")).unwrap_or(0.0)
+            }
+        };
+        let mut productive_units = 0.0;
+        let mut utilized_units = 0.0;
+        let mut active = 0.0;
         for entity in entities.iter().filter_map(Value::as_object) {
+            if let Some(inventory) = &mut inventory_values {
+                for record in [entity.get("inputs"), entity.get("outputs")] {
+                    let Some(record) = record.and_then(Value::as_object) else {
+                        continue;
+                    };
+                    for (item, amount) in record {
+                        if let Some(amount) = finite_number(Some(amount)) {
+                            add_rate(inventory, item, amount.floor());
+                        }
+                    }
+                }
+            }
+            if refresh
+                && (entity.get("kind").and_then(Value::as_str) == Some("machine")
+                    || entity.get("kind").and_then(Value::as_str) == Some("vein")
+                        && finite_number(entity.get("minerCount")).unwrap_or(0.0) > 0.0)
+            {
+                let count = units(entity);
+                let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
+                productive_units += count;
+                utilized_units += count * utilization;
+                if utilization > EPSILON {
+                    active += count;
+                }
+            }
             let planet = entity
                 .get("planetId")
                 .and_then(Value::as_str)
@@ -475,7 +431,7 @@ impl CoreState {
                 let Some(recipe) = entity
                     .get("recipeId")
                     .and_then(Value::as_str)
-                    .and_then(|id| machine_recipes.get(id))
+                    .and_then(|id| self.catalog.recipes.get(id))
                 else {
                     continue;
                 };
@@ -499,6 +455,23 @@ impl CoreState {
                 }
             }
         }
+        let inventory = if let Some(mut inventory) = inventory_values {
+            if let Some(trays) = base.get("planetTrays").and_then(Value::as_object) {
+                for tray in trays.values().filter_map(Value::as_object) {
+                    for (item, amount) in tray {
+                        if let Some(amount) = finite_number(Some(amount)) {
+                            add_rate(&mut inventory, item, amount.floor());
+                        }
+                    }
+                }
+            }
+            rates_to_value(inventory)
+        } else {
+            Value::Object(clone_object(
+                previous.and_then(|sample| sample.get("inventory")),
+            ))
+        };
+        profile_mark!("inventory-and-rates");
         let production_buffer_limit = normalized_buffer_limit(
             base.get("settings")
                 .and_then(Value::as_object)
@@ -523,32 +496,6 @@ impl CoreState {
             .and_then(|settings| settings.get("resourceMode"))
             .and_then(Value::as_str)
             == Some("infinite");
-        let productive = entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| {
-                entity.get("kind").and_then(Value::as_str) == Some("machine")
-                    || entity.get("kind").and_then(Value::as_str) == Some("vein")
-                        && finite_number(entity.get("minerCount")).unwrap_or(0.0) > 0.0
-            })
-            .collect::<Vec<_>>();
-        let units = |entity: &&Map<String, Value>| {
-            if entity.get("kind").and_then(Value::as_str) == Some("vein") {
-                finite_number(entity.get("minerCount")).unwrap_or(0.0)
-            } else {
-                finite_number(entity.get("machineCount")).unwrap_or(0.0)
-            }
-        };
-        let productive_units = productive.iter().map(units).sum::<f64>();
-        let utilized_units = productive
-            .iter()
-            .map(|entity| units(entity) * finite_number(entity.get("utilization")).unwrap_or(0.0))
-            .sum::<f64>();
-        let active = productive
-            .iter()
-            .filter(|entity| finite_number(entity.get("utilization")).unwrap_or(0.0) > EPSILON)
-            .map(units)
-            .sum::<f64>();
         let completed_tech = base
             .get("research")
             .and_then(Value::as_object)
@@ -583,8 +530,14 @@ impl CoreState {
                 )
             })
             .collect::<HashSet<_>>();
-        let blocked = productive
+        let blocked = entities
             .iter()
+            .filter_map(Value::as_object)
+            .filter(|entity| {
+                entity.get("kind").and_then(Value::as_str) == Some("machine")
+                    || entity.get("kind").and_then(Value::as_str) == Some("vein")
+                        && finite_number(entity.get("minerCount")).unwrap_or(0.0) > 0.0
+            })
             .filter(|entity| {
                 if entity.get("kind").and_then(Value::as_str) == Some("machine") {
                     if entity.get("buildingId").and_then(Value::as_str) == Some("time_warp_device")
@@ -607,14 +560,14 @@ impl CoreState {
                     let Some(recipe) = entity
                         .get("recipeId")
                         .and_then(Value::as_str)
-                        .and_then(|id| machine_recipes.get(id))
+                        .and_then(|id| self.catalog.recipes.get(id))
                     else {
                         return true;
                     };
                     let Some(building) = entity
                         .get("buildingId")
                         .and_then(Value::as_str)
-                        .and_then(|id| machine_buildings.get(id))
+                        .and_then(|id| self.catalog.buildings.get(id))
                     else {
                         return true;
                     };
@@ -629,15 +582,13 @@ impl CoreState {
                     let capacity =
                         stacked_capacity(building.output_capacity, count, production_buffer_limit);
                     let output_blocked = recipe.outputs.iter().any(|output| {
-                        let bonus = entity
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .and_then(|entity_id| {
-                                machine_output_bonuses
-                                    .get(&(entity_id.to_owned(), output.item_id.clone()))
-                            })
-                            .copied()
-                            .unwrap_or(0.0);
+                        let bonus = crate::simple_factory::next_proliferated_output_bonus(
+                            self,
+                            entity,
+                            recipe,
+                            &output.item_id,
+                            output.amount,
+                        );
                         capacity
                             - entity
                                 .get("outputs")
@@ -707,9 +658,11 @@ impl CoreState {
                     .get("resourceId")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let item_kind = item_kinds
+                let item_kind = self
+                    .catalog
+                    .items
                     .get(resource)
-                    .map(String::as_str)
+                    .map(|item| item.kind.as_str())
                     .unwrap_or("solid");
                 let extractor_id = match resource {
                     "crude_oil" => "oil_extractor",
@@ -757,9 +710,10 @@ impl CoreState {
                 }
                 let count = finite_number(entity.get("minerCount")).unwrap_or(0.0);
                 let capacity = stacked_capacity(
-                    extractor_output_capacities
+                    self.catalog
+                        .buildings
                         .get(extractor_id)
-                        .copied()
+                        .map(|building| building.output_capacity)
                         .unwrap_or(0.0),
                     count,
                     production_buffer_limit,
@@ -777,6 +731,7 @@ impl CoreState {
             })
             .map(units)
             .sum::<f64>();
+        profile_mark!("efficiency");
         let sample = serde_json::json!({
             "elapsedSeconds": elapsed,
             "sampleDurationSeconds": duration,
@@ -798,6 +753,7 @@ impl CoreState {
         compact_history(&mut next)?;
         base.insert("productionHistory".to_owned(), Value::Array(next));
         base.insert("historyRecordedAt".to_owned(), Value::from(elapsed));
+        profile_last!("compact");
         Ok(())
     }
 }

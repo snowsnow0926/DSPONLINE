@@ -13,6 +13,12 @@ pub struct CoreAdvanceRequest {
     pub base_revision: u64,
     pub simulation_seconds: f64,
     pub wall_seconds: f64,
+    #[serde(default = "default_include_diagnostics")]
+    pub include_diagnostics: bool,
+}
+
+fn default_include_diagnostics() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,7 +31,8 @@ pub struct CoreAdvanceResult {
     pub revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    pub summary: CoreStateSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<CoreStateSummary>,
 }
 
 fn rounded(value: f64, digits: i32) -> f64 {
@@ -188,8 +195,36 @@ fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
 
 impl CoreState {
     pub fn advance(&mut self, request: &CoreAdvanceRequest) -> anyhow::Result<CoreAdvanceResult> {
+        let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+        let mut profile_checkpoint = std::time::Instant::now();
+        macro_rules! profile_mark {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\tadvance-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                    profile_checkpoint = std::time::Instant::now();
+                }
+            };
+        }
+        macro_rules! profile_last {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\tadvance-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                }
+            };
+        }
         if request.base_revision != self.revision {
             bail!("native core advance base revision is not current");
+        }
+        if self.factory_static_admission_reason().is_none() {
+            self.refresh_factory_static_admission()?;
         }
         if !request.simulation_seconds.is_finite()
             || !request.wall_seconds.is_finite()
@@ -222,7 +257,10 @@ impl CoreState {
                 previous_revision,
                 revision: self.revision,
                 reason: None,
-                summary: self.summary()?,
+                summary: request
+                    .include_diagnostics
+                    .then(|| self.summary())
+                    .transpose()?,
             });
         }
         let clock_reason = clock_only_reason(self);
@@ -243,16 +281,20 @@ impl CoreState {
                 } else {
                     clock_reason.to_owned()
                 }),
-                summary: self.summary()?,
+                summary: request
+                    .include_diagnostics
+                    .then(|| self.summary())
+                    .transpose()?,
             });
         }
 
-        let mut next = self.clone();
         if simple_factory_reason.is_none() {
-            crate::simple_factory::advance(&mut next, simulation_seconds)?;
+            let mut prepared = crate::simple_factory::prepare_advance(self, simulation_seconds)?;
+            self.install_prepared_belt_routes(prepared.belt_routes.clone());
+            profile_mark!("simulate");
             if wall_seconds > EPSILON {
-                let base = next.base_value_mut();
-                if let Some(activity) = base
+                if let Some(activity) = prepared
+                    .base
                     .get_mut("endgame")
                     .and_then(Value::as_object_mut)
                     .and_then(|endgame| endgame.get_mut("constructionActivity"))
@@ -274,10 +316,22 @@ impl CoreState {
                     }
                 }
             }
-            next.record_production_history()?;
-            next.revision += 1;
-            let summary = next.summary()?;
-            *self = next;
+            self.record_production_history_with_records(
+                &mut prepared.base,
+                &prepared.entities,
+                &prepared.belts,
+            )?;
+            profile_mark!("production-history");
+            self.commit_simulated_state(prepared.base, prepared.entities, prepared.belts)?;
+            self.revision += 1;
+            profile_mark!("commit-state");
+            let summary = request
+                .include_diagnostics
+                .then(|| self.summary())
+                .transpose()?;
+            if request.include_diagnostics {
+                profile_last!("summary");
+            }
             return Ok(CoreAdvanceResult {
                 supported: true,
                 exact_scope: "simple-factory-v1",
@@ -288,6 +342,9 @@ impl CoreState {
                 summary,
             });
         }
+
+        let mut next = self.clone();
+        profile_last!("clone-state");
 
         // The predicate above is deliberately stricter than the JS fast path.
         // Once admitted, only global clock/diagnostic fields can change and
@@ -351,7 +408,10 @@ impl CoreState {
         let _ = wall_seconds;
         next.record_production_history()?;
         next.revision += 1;
-        let summary = next.summary()?;
+        let summary = request
+            .include_diagnostics
+            .then(|| next.summary())
+            .transpose()?;
         *self = next;
         Ok(CoreAdvanceResult {
             supported: true,

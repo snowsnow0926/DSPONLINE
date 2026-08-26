@@ -59,12 +59,14 @@ fn rounded(value: f64, digits: i32) -> f64 {
 }
 
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| anyhow!("native Dyson simulation produced a non-finite number"))?,
-    );
+    let value = Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native Dyson simulation produced a non-finite number"))?;
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -982,7 +984,7 @@ pub(crate) fn run_ray_receivers(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
-    credits: &HashMap<String, f64>,
+    credits: &crate::belts::OutputCredits,
     reception: &Reception,
 ) -> anyhow::Result<()> {
     let mut produced = 0.0;
@@ -1042,7 +1044,7 @@ pub(crate) fn run_ray_receivers(
             .map(|value| finite(Some(value)))
             .unwrap_or(0.0);
         let maximum = ((output_capacity(state, base, entity) - current).max(0.0)
-            + crate::belts::output_credit(credits, &entity_id, "critical_photon")
+            + crate::belts::output_credit(state, credits, &entity_id, "critical_photon")
             + EPSILON)
             .floor();
         if maximum < 1.0 || potential <= EPSILON {

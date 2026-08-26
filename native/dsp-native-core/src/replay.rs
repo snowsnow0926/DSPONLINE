@@ -31,6 +31,7 @@ impl CoreState {
                 base_revision: next.revision,
                 simulation_seconds,
                 wall_seconds,
+                include_diagnostics: false,
             })
             .context("advance native core replay operation")?;
         if !advanced.supported {

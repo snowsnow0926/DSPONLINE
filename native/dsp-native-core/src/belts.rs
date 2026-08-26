@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem::size_of;
 
 use anyhow::{Context, anyhow, bail};
 use num_bigint::BigUint;
@@ -8,10 +9,68 @@ use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
 
+pub(crate) type OutputCredits = HashMap<(usize, u32), f64>;
+
 #[derive(Debug, Default)]
 pub(crate) struct BeltStepReservation {
-    pub allowance_by_belt: HashMap<String, f64>,
-    pub output_credits: HashMap<String, f64>,
+    // Indexed by the immutable belt row. NaN means that the JS reservation
+    // pass did not cap this belt; using IDs here allocated and hashed more than
+    // 150,000 strings every simulated second on the player stress save.
+    pub allowance_by_belt: Vec<f64>,
+    pub output_credits: OutputCredits,
+}
+
+#[derive(Debug)]
+pub(crate) struct BeltRuntime {
+    progress: Vec<f64>,
+    total_transferred: Vec<f64>,
+    congestion: Vec<f64>,
+    last_flow: Vec<f64>,
+    total_dirty: Vec<bool>,
+}
+
+impl BeltRuntime {
+    pub(crate) fn from_values(belts: &[Value]) -> anyhow::Result<Self> {
+        let mut runtime = Self {
+            progress: Vec::with_capacity(belts.len()),
+            total_transferred: Vec::with_capacity(belts.len()),
+            congestion: Vec::with_capacity(belts.len()),
+            last_flow: Vec::with_capacity(belts.len()),
+            total_dirty: vec![false; belts.len()],
+        };
+        for belt in belts {
+            let belt = belt
+                .as_object()
+                .ok_or_else(|| anyhow!("native belt record is not an object"))?;
+            runtime.progress.push(finite_number(belt.get("progress")));
+            runtime
+                .total_transferred
+                .push(finite_number(belt.get("totalTransferred")));
+            runtime
+                .congestion
+                .push(finite_number(belt.get("congestion")));
+            runtime.last_flow.push(finite_number(belt.get("lastFlow")));
+        }
+        Ok(runtime)
+    }
+
+    pub(crate) fn write_back(self, belts: &mut [Value]) -> anyhow::Result<()> {
+        if belts.len() != self.progress.len() {
+            bail!("native belt runtime topology changed");
+        }
+        for (index, belt) in belts.iter_mut().enumerate() {
+            let belt = belt
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("native belt record is not an object"))?;
+            set_number(belt, "progress", self.progress[index])?;
+            set_number(belt, "lastFlow", self.last_flow[index])?;
+            set_number(belt, "congestion", self.congestion[index])?;
+            if self.total_dirty[index] {
+                set_number(belt, "totalTransferred", self.total_transferred[index])?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -19,30 +78,156 @@ struct Route {
     belt_index: usize,
     source_index: usize,
     target_index: usize,
-    source_id: String,
-    target_id: String,
-    item_id: String,
+    source_group: usize,
+    target_slot: usize,
+    belt_sort_rank: usize,
     target_port_index: Option<u8>,
     capacity: f64,
     priority: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedRoutes {
+    routes: Vec<Route>,
+    groups: Vec<PreparedGroup>,
+    target_slot_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedGroup {
+    source_index: usize,
+    item_symbol: u32,
+    balanced_splitter: bool,
+    route_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TargetSlotKey {
+    Entity { target_index: usize, item: u32 },
+    BlackHole { target_index: usize, port: i16 },
+    Tray { planet: u32, item: u32 },
+}
+
+impl PreparedRoutes {
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        (self.routes.capacity() * size_of::<Route>()
+            + self.groups.capacity() * size_of::<PreparedGroup>()
+            + self
+                .groups
+                .iter()
+                .map(|group| group.route_indices.capacity() * size_of::<usize>())
+                .sum::<usize>()) as u64
+    }
+}
+
 #[derive(Debug)]
 struct Candidate {
     route_index: usize,
-    target_key: String,
     allowance: f64,
     moved: f64,
 }
 
 #[derive(Debug)]
 struct Group {
-    source_index: usize,
-    item_id: String,
     available: f64,
     source_had_output: bool,
+    first_candidate: Option<Candidate>,
     candidates: Vec<Candidate>,
-    balanced_splitter: bool,
+    first_inactive_route: Option<usize>,
+    inactive_routes: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum BeltPostAction {
+    #[default]
+    None,
+    ResetProgress,
+    Flow {
+        available: f64,
+        free: f64,
+        moved: f64,
+    },
+}
+
+fn advance_belt_clocks(
+    runtime: &mut BeltRuntime,
+    routes: &[Route],
+    seconds: f64,
+    belt_limit: f64,
+) -> anyhow::Result<()> {
+    if seconds <= 0.0 || runtime.progress.is_empty() {
+        return Ok(());
+    }
+    let flow_decay = 0.8_f64.powf(seconds);
+    let congestion_decay = 0.85_f64.powf(seconds);
+    for (index, route) in routes.iter().enumerate() {
+        runtime.last_flow[index] = rounded(runtime.last_flow[index] * flow_decay, 3);
+        runtime.congestion[index] = rounded(runtime.congestion[index] * congestion_decay, 3);
+        let current = runtime.progress[index].max(0.0);
+        let progress = if current > belt_limit {
+            current
+        } else {
+            (current + route.capacity * seconds).min(belt_limit)
+        };
+        runtime.progress[index] = rounded(progress, 4);
+    }
+    Ok(())
+}
+
+fn apply_belt_post_actions(
+    runtime: &mut BeltRuntime,
+    routes: &[Route],
+    actions: &[BeltPostAction],
+    seconds: f64,
+    defer_source_depletion_reset: bool,
+    flow_window_seconds: f64,
+) -> anyhow::Result<()> {
+    for (index, (route, action)) in routes.iter().zip(actions).enumerate() {
+        match *action {
+            BeltPostAction::None => {}
+            BeltPostAction::ResetProgress => runtime.progress[index] = 0.0,
+            BeltPostAction::Flow {
+                available,
+                free,
+                moved,
+            } => {
+                runtime.progress[index] =
+                    if !defer_source_depletion_reset && available <= 0.0 || free <= 0.0 {
+                        0.0
+                    } else {
+                        rounded((runtime.progress[index] - moved).max(0.0), 4)
+                    };
+                if moved > 0.0 {
+                    if flow_window_seconds > 0.0 {
+                        let prior = if seconds > 0.0 {
+                            0.0
+                        } else {
+                            runtime.last_flow[index]
+                        };
+                        runtime.last_flow[index] =
+                            rounded(route.capacity.min(prior + moved / flow_window_seconds), 3);
+                    }
+                    runtime.total_transferred[index] =
+                        (runtime.total_transferred[index] + moved).floor();
+                    runtime.total_dirty[index] = true;
+                }
+                let load = if route.capacity > EPSILON {
+                    runtime.last_flow[index] / route.capacity
+                } else {
+                    0.0
+                };
+                runtime.congestion[index] = rounded(
+                    1.0_f64.min(load.max(if available > 0.0 && free <= 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    })),
+                    3,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -62,13 +247,15 @@ fn rounded(value: f64, digits: i32) -> f64 {
 }
 
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Value::Number(
-            Number::from_f64(value)
-                .ok_or_else(|| anyhow!("native belt simulation produced a non-finite number"))?,
-        ),
+    let value = Value::Number(
+        Number::from_f64(value)
+            .ok_or_else(|| anyhow!("native belt simulation produced a non-finite number"))?,
     );
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -216,22 +403,41 @@ fn add_black_hole_destroyed(
     Ok(true)
 }
 
-fn target_key(route: &Route, target: &Map<String, Value>) -> String {
+fn move_to_target(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
+    route: &Route,
+    item_id: &str,
+    requested: f64,
+) -> anyhow::Result<f64> {
+    let target = entities[route.target_index]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
     if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
-        format!(
-            "black-hole:{}:{}",
-            route.target_id,
-            route.target_port_index.map_or(-1_i16, i16::from)
-        )
-    } else if string_at(target, "buildingId") == Some("material_delivery_hub") {
-        format!(
-            "tray:{}:{}",
-            string_at(target, "planetId").unwrap_or_default(),
-            route.item_id
-        )
-    } else {
-        format!("{}:{}", route.target_id, route.item_id)
+        return Ok(
+            if add_black_hole_destroyed(target, route.target_port_index, item_id, requested)? {
+                requested
+            } else {
+                0.0
+            },
+        );
     }
+    if crate::quantum_logistics::is_supply_endpoint(target, item_id) {
+        return crate::quantum_logistics::receive_supply_material_in_session(
+            state,
+            base,
+            quantum_bandwidth,
+            quantum_session,
+            target,
+            item_id,
+            requested,
+        );
+    }
+    add_input(target, item_id, requested)?;
+    Ok(requested)
 }
 
 fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str) -> bool {
@@ -341,6 +547,7 @@ fn target_consumes(state: &CoreState, target: &Map<String, Value>, item_id: &str
 fn target_capacity(
     state: &CoreState,
     base: &Map<String, Value>,
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
     entities: &[Value],
     target: &Map<String, Value>,
     item_id: &str,
@@ -395,20 +602,23 @@ fn target_capacity(
                     .clamp(1_000.0, 100_000_000.0)
             })
             .unwrap_or(1_000_000.0);
-        let pending = entities
+        let pending = state
+            .factory_topology
+            .material_delivery_hub_indices
             .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| {
-                string_at(entity, "planetId") == Some(planet_id)
-                    && string_at(entity, "buildingId") == Some("material_delivery_hub")
-            })
+            .filter_map(|&index| entities[index].as_object())
+            .filter(|entity| string_at(entity, "planetId") == Some(planet_id))
             .map(|entity| input_amount(entity, item_id).floor().max(0.0))
             .sum::<f64>();
         return Ok((limit - current - pending).max(0.0));
     }
-    if let Some(capacity) =
-        crate::quantum_logistics::supply_free_capacity(state, base, target, item_id)?
-    {
+    if let Some(capacity) = crate::quantum_logistics::supply_free_capacity_in_session(
+        state,
+        base,
+        quantum_session,
+        target,
+        item_id,
+    )? {
         return Ok(capacity);
     }
     let building = string_at(target, "buildingId")
@@ -476,16 +686,6 @@ fn target_capacity(
 }
 
 fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Result<Vec<Route>> {
-    let entity_index = entities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entity)| {
-            entity
-                .as_object()
-                .and_then(|object| string_at(object, "id"))
-                .map(|id| (id.to_owned(), index))
-        })
-        .collect::<HashMap<_, _>>();
     belts
         .iter()
         .enumerate()
@@ -494,20 +694,20 @@ fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Res
                 .as_object()
                 .ok_or_else(|| anyhow!("native belt record is not an object"))?;
             let source_id = string_at(belt, "source")
-                .ok_or_else(|| anyhow!("native belt source is missing"))?
-                .to_owned();
+                .ok_or_else(|| anyhow!("native belt source is missing"))?;
             let target_id = string_at(belt, "target")
-                .ok_or_else(|| anyhow!("native belt target is missing"))?
-                .to_owned();
-            let item_id = string_at(belt, "itemId")
-                .ok_or_else(|| anyhow!("native belt item is missing"))?
-                .to_owned();
-            let source_index = *entity_index
-                .get(&source_id)
+                .ok_or_else(|| anyhow!("native belt target is missing"))?;
+            let source_index = *state
+                .entity_index
+                .get(source_id)
                 .ok_or_else(|| anyhow!("native belt source does not exist"))?;
-            let target_index = *entity_index
-                .get(&target_id)
+            let target_index = *state
+                .entity_index
+                .get(target_id)
                 .ok_or_else(|| anyhow!("native belt target does not exist"))?;
+            if source_index >= entities.len() || target_index >= entities.len() {
+                bail!("native belt route index is outside the entity table");
+            }
             let tier = belt
                 .get("tier")
                 .and_then(Value::as_u64)
@@ -529,13 +729,14 @@ fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Res
                 .get("targetPortIndex")
                 .and_then(Value::as_u64)
                 .and_then(|value| u8::try_from(value).ok());
+            let _ = string_at(belt, "id").ok_or_else(|| anyhow!("native belt ID is missing"))?;
             Ok(Route {
                 belt_index,
                 source_index,
                 target_index,
-                source_id,
-                target_id,
-                item_id,
+                source_group: 0,
+                target_slot: 0,
+                belt_sort_rank: 0,
                 target_port_index,
                 capacity: speed * lanes * stack_size,
                 priority: belt
@@ -546,6 +747,75 @@ fn routes(state: &CoreState, entities: &[Value], belts: &[Value]) -> anyhow::Res
             })
         })
         .collect()
+}
+
+pub(crate) fn prepare_routes(
+    state: &CoreState,
+    entities: &[Value],
+    belts: &[Value],
+) -> anyhow::Result<PreparedRoutes> {
+    let mut routes = routes(state, entities, belts)?;
+    let mut group_by_key = HashMap::<(usize, u32), usize>::new();
+    let mut target_slot_by_key = HashMap::<TargetSlotKey, usize>::new();
+    let mut groups = Vec::<PreparedGroup>::new();
+    for (route_index, route) in routes.iter_mut().enumerate() {
+        let item_symbol = state.belts.items[route.belt_index];
+        let source_group = *group_by_key
+            .entry((route.source_index, item_symbol))
+            .or_insert_with(|| {
+                let source = entities[route.source_index]
+                    .as_object()
+                    .expect("validated belt source");
+                let index = groups.len();
+                groups.push(PreparedGroup {
+                    source_index: route.source_index,
+                    item_symbol,
+                    balanced_splitter: string_at(source, "kind") == Some("splitter")
+                        && string_at(source, "distributionMode") != Some("priority"),
+                    route_indices: Vec::new(),
+                });
+                index
+            });
+        route.source_group = source_group;
+        groups[source_group].route_indices.push(route_index);
+        let target = entities[route.target_index]
+            .as_object()
+            .expect("validated belt target");
+        let target_key = if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
+            TargetSlotKey::BlackHole {
+                target_index: route.target_index,
+                port: route.target_port_index.map_or(-1_i16, i16::from),
+            }
+        } else if string_at(target, "buildingId") == Some("material_delivery_hub") {
+            TargetSlotKey::Tray {
+                planet: state.entities.planets[route.target_index],
+                item: item_symbol,
+            }
+        } else {
+            TargetSlotKey::Entity {
+                target_index: route.target_index,
+                item: item_symbol,
+            }
+        };
+        let next_target_slot = target_slot_by_key.len();
+        route.target_slot = *target_slot_by_key
+            .entry(target_key)
+            .or_insert(next_target_slot);
+    }
+    for group in &mut groups {
+        group.route_indices.sort_by(|left, right| {
+            state.belts.ids[routes[*left].belt_index]
+                .cmp(&state.belts.ids[routes[*right].belt_index])
+        });
+        for (rank, route_index) in group.route_indices.iter().copied().enumerate() {
+            routes[route_index].belt_sort_rank = rank;
+        }
+    }
+    Ok(PreparedRoutes {
+        routes,
+        groups,
+        target_slot_count: target_slot_by_key.len(),
+    })
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -666,128 +936,216 @@ pub(crate) fn transfer(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    belts: &mut [Value],
+    belt_runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
     seconds: f64,
     defer_source_depletion_reset: bool,
-    allowance_caps: Option<&HashMap<String, f64>>,
+    allowance_caps: Option<&[f64]>,
     flow_window_seconds: f64,
 ) -> anyhow::Result<()> {
-    if belts.is_empty() {
+    if belt_runtime.progress.is_empty() {
         return Ok(());
     }
-    let routes = routes(state, entities, belts)?;
+    let routes = &prepared_routes.routes;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
+    let mut quantum_session = None;
     let belt_limit = normalized_buffer_limit(
         base.get("settings")
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    let flow_decay = 0.8_f64.powf(seconds.max(0.0));
-    let congestion_decay = 0.85_f64.powf(seconds.max(0.0));
-    let mut target_free = HashMap::<String, f64>::new();
-    let mut groups = Vec::<Group>::new();
-    let mut group_index = HashMap::<String, usize>::new();
-
-    for (route_index, route) in routes.iter().enumerate() {
-        let belt = belts[route.belt_index]
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("native belt record is not an object"))?;
-        let last_flow = rounded(finite_number(belt.get("lastFlow")) * flow_decay, 3);
-        let congestion = rounded(finite_number(belt.get("congestion")) * congestion_decay, 3);
-        set_number(belt, "lastFlow", last_flow)?;
-        set_number(belt, "congestion", congestion)?;
-        if seconds > 0.0 {
-            let current = finite_number(belt.get("progress")).max(0.0);
-            let progress = if current > belt_limit {
-                current
-            } else {
-                (current + route.capacity * seconds).min(belt_limit)
-            };
-            set_number(belt, "progress", rounded(progress, 4))?;
-        }
-
-        let key = format!("{}:{}", route.source_id, route.item_id);
-        let index = *group_index.entry(key).or_insert_with(|| {
-            let index = groups.len();
-            let source = entities[route.source_index]
+    advance_belt_clocks(belt_runtime, routes, seconds, belt_limit)?;
+    let mut post_actions = vec![BeltPostAction::None; belt_runtime.progress.len()];
+    let mut target_free = vec![f64::NAN; prepared_routes.target_slot_count];
+    let mut groups = prepared_routes
+        .groups
+        .iter()
+        .map(|group| -> anyhow::Result<Group> {
+            let item_id = state
+                .symbols
+                .resolve(group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let source = entities[group.source_index]
                 .as_object()
                 .expect("validated source");
-            let source_had_output = source
-                .get("outputs")
-                .and_then(Value::as_object)
-                .is_some_and(|outputs| outputs.contains_key(&route.item_id));
-            groups.push(Group {
-                source_index: route.source_index,
-                item_id: route.item_id.clone(),
-                available: (output_amount(source, &route.item_id) + EPSILON).floor(),
-                source_had_output,
+            Ok(Group {
+                available: (output_amount(source, item_id) + EPSILON).floor(),
+                source_had_output: source
+                    .get("outputs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|outputs| outputs.contains_key(item_id)),
+                first_candidate: None,
                 candidates: Vec::new(),
-                balanced_splitter: string_at(source, "kind") == Some("splitter")
-                    && string_at(source, "distributionMode") != Some("priority"),
-            });
-            index
-        });
+                first_inactive_route: None,
+                inactive_routes: Vec::new(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for (route_index, route) in routes.iter().enumerate() {
+        let index = route.source_group;
         if groups[index].available < 1.0 {
             if !defer_source_depletion_reset {
-                set_number(belt, "progress", 0.0)?;
+                post_actions[route.belt_index] = BeltPostAction::ResetProgress;
             }
             continue;
         }
         let target = entities[route.target_index]
             .as_object()
             .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-        let target_key = target_key(route, target);
-        if !target_free.contains_key(&target_key) {
-            target_free.insert(
-                target_key.clone(),
-                target_capacity(
-                    state,
-                    base,
-                    entities,
-                    target,
-                    &route.item_id,
-                    route.target_port_index,
-                )?
-                .floor()
-                .max(0.0),
-            );
+        let item_id = state
+            .symbols
+            .resolve(prepared_routes.groups[route.source_group].item_symbol)
+            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+        if target_free[route.target_slot].is_nan() {
+            target_free[route.target_slot] = target_capacity(
+                state,
+                base,
+                &mut quantum_session,
+                entities,
+                target,
+                item_id,
+                route.target_port_index,
+            )?
+            .floor()
+            .max(0.0);
         }
-        if target_free.get(&target_key).copied().unwrap_or(0.0) < 1.0 {
-            set_number(belt, "progress", 0.0)?;
+        if target_free[route.target_slot] < 1.0 {
+            post_actions[route.belt_index] = BeltPostAction::ResetProgress;
             continue;
         }
         let cap = allowance_caps
-            .and_then(|caps| string_at(belt, "id").and_then(|id| caps.get(id).copied()))
+            .and_then(|caps| caps.get(route.belt_index).copied())
+            .filter(|value| value.is_finite())
             .unwrap_or(9_007_199_254_740_991.0);
-        let allowance = (finite_number(belt.get("progress")) + EPSILON)
+        let allowance = (belt_runtime.progress[route.belt_index] + EPSILON)
             .floor()
             .min(cap);
-        groups[index].candidates.push(Candidate {
+        if allowance < 1.0 {
+            if groups[index].first_inactive_route.is_none() {
+                groups[index].first_inactive_route = Some(route_index);
+            } else {
+                groups[index].inactive_routes.push(route_index);
+            }
+            continue;
+        }
+        let candidate = Candidate {
             route_index,
-            target_key,
             allowance,
             moved: 0.0,
-        });
+        };
+        if groups[index].first_candidate.is_none() {
+            groups[index].first_candidate = Some(candidate);
+        } else {
+            groups[index].candidates.push(candidate);
+        }
     }
 
-    for group in &mut groups {
-        group.candidates.sort_by(|left, right| {
-            let left_id = belts[routes[left.route_index].belt_index]
-                .as_object()
-                .and_then(|belt| string_at(belt, "id"))
-                .unwrap_or_default();
-            let right_id = belts[routes[right.route_index].belt_index]
-                .as_object()
-                .and_then(|belt| string_at(belt, "id"))
-                .unwrap_or_default();
-            left_id.cmp(right_id)
-        });
-        let mut available = group.available;
-        let priorities: &[usize] = if group.candidates.len() == 1 || group.balanced_splitter {
-            &[3]
-        } else {
-            &[2, 1, 0]
+    for (group_index, group) in groups.iter_mut().enumerate() {
+        let prepared_group = &prepared_routes.groups[group_index];
+        let item_id = state
+            .symbols
+            .resolve(prepared_group.item_symbol)
+            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+        let Some(first_candidate) = group.first_candidate.take() else {
+            if group.source_had_output || group.available > 0.0 {
+                set_output(
+                    entities[prepared_group.source_index]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                    item_id,
+                    group.available,
+                )?;
+            }
+            for route_index in group
+                .first_inactive_route
+                .iter()
+                .copied()
+                .chain(group.inactive_routes.iter().copied())
+            {
+                let route = &routes[route_index];
+                post_actions[route.belt_index] = BeltPostAction::Flow {
+                    available: group.available,
+                    free: target_free[route.target_slot],
+                    moved: 0.0,
+                };
+            }
+            continue;
         };
+        if group.candidates.is_empty() {
+            let route = &routes[first_candidate.route_index];
+            let free = target_free[route.target_slot];
+            let requested = group
+                .available
+                .min(first_candidate.allowance)
+                .min(free)
+                .floor()
+                .max(0.0);
+            let moved = if requested > 0.0 {
+                move_to_target(
+                    state,
+                    base,
+                    entities,
+                    quantum_bandwidth,
+                    &mut quantum_session,
+                    route,
+                    item_id,
+                    requested,
+                )?
+            } else {
+                0.0
+            };
+            let available = (group.available - moved).max(0.0);
+            if moved > 0.0 {
+                target_free[route.target_slot] -= moved;
+                set_number(
+                    entities[prepared_group.source_index]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                    "routingCursor",
+                    0.0,
+                )?;
+            }
+            if group.source_had_output || group.available > 0.0 {
+                set_output(
+                    entities[prepared_group.source_index]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                    item_id,
+                    available,
+                )?;
+            }
+            post_actions[route.belt_index] = BeltPostAction::Flow {
+                available,
+                free: target_free[route.target_slot],
+                moved,
+            };
+            for route_index in group
+                .first_inactive_route
+                .iter()
+                .copied()
+                .chain(group.inactive_routes.iter().copied())
+            {
+                let inactive_route = &routes[route_index];
+                post_actions[inactive_route.belt_index] = BeltPostAction::Flow {
+                    available,
+                    free: target_free[inactive_route.target_slot],
+                    moved: 0.0,
+                };
+            }
+            continue;
+        }
+        group.candidates.push(first_candidate);
+        group
+            .candidates
+            .sort_by_key(|candidate| routes[candidate.route_index].belt_sort_rank);
+        let mut available = group.available;
+        let priorities: &[usize] =
+            if group.candidates.len() == 1 || prepared_group.balanced_splitter {
+                &[3]
+            } else {
+                &[2, 1, 0]
+            };
         for &priority in priorities {
             let candidate_indexes = group
                 .candidates
@@ -801,12 +1159,8 @@ pub(crate) fn transfer(
             let usable = candidate_indexes
                 .into_iter()
                 .filter(|&index| {
-                    group.candidates[index].allowance > 0.0
-                        && target_free
-                            .get(&group.candidates[index].target_key)
-                            .copied()
-                            .unwrap_or(0.0)
-                            > 0.0
+                    let route = &routes[group.candidates[index].route_index];
+                    group.candidates[index].allowance > 0.0 && target_free[route.target_slot] > 0.0
                 })
                 .collect::<Vec<_>>();
             if usable.is_empty() || available <= 0.0 {
@@ -815,57 +1169,33 @@ pub(crate) fn transfer(
             if usable.len() == 1 {
                 let index = usable[0];
                 let candidate = &mut group.candidates[index];
-                let free = target_free
-                    .get(&candidate.target_key)
-                    .copied()
-                    .unwrap_or(0.0);
+                let route = &routes[candidate.route_index];
+                let free = target_free[route.target_slot];
                 let requested = available
                     .min(candidate.allowance)
                     .min(free)
                     .floor()
                     .max(0.0);
                 if requested > 0.0 {
-                    let route = &routes[candidate.route_index];
-                    let target = entities[route.target_index]
-                        .as_object_mut()
-                        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-                    let moved = if string_at(target, "buildingId")
-                        == Some("micro_black_hole_connector")
-                    {
-                        if add_black_hole_destroyed(
-                            target,
-                            route.target_port_index,
-                            &route.item_id,
-                            requested,
-                        )? {
-                            requested
-                        } else {
-                            0.0
-                        }
-                    } else if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
-                        crate::quantum_logistics::receive_supply_material(
-                            state,
-                            base,
-                            quantum_bandwidth,
-                            target,
-                            &route.item_id,
-                            requested,
-                        )?
-                    } else {
-                        add_input(target, &route.item_id, requested)?;
-                        requested
-                    };
+                    let moved = move_to_target(
+                        state,
+                        base,
+                        entities,
+                        quantum_bandwidth,
+                        &mut quantum_session,
+                        route,
+                        item_id,
+                        requested,
+                    )?;
                     if moved <= 0.0 {
                         continue;
                     }
-                    *target_free
-                        .get_mut(&candidate.target_key)
-                        .expect("target ledger") -= moved;
+                    target_free[route.target_slot] -= moved;
                     candidate.allowance -= moved;
                     candidate.moved += moved;
                     available -= moved;
                     set_number(
-                        entities[group.source_index]
+                        entities[prepared_group.source_index]
                             .as_object_mut()
                             .ok_or_else(|| anyhow!("native belt source is not an object"))?,
                         "routingCursor",
@@ -875,7 +1205,7 @@ pub(crate) fn transfer(
                 continue;
             }
             let source_cursor = finite_number(
-                entities[group.source_index]
+                entities[prepared_group.source_index]
                     .as_object()
                     .and_then(|source| source.get("routingCursor")),
             )
@@ -887,12 +1217,9 @@ pub(crate) fn transfer(
                     .iter()
                     .copied()
                     .filter(|&index| {
+                        let route = &routes[group.candidates[index].route_index];
                         group.candidates[index].allowance > 0.0
-                            && target_free
-                                .get(&group.candidates[index].target_key)
-                                .copied()
-                                .unwrap_or(0.0)
-                                > 0.0
+                            && target_free[route.target_slot] > 0.0
                     })
                     .collect::<Vec<_>>();
                 if active.is_empty() {
@@ -907,10 +1234,8 @@ pub(crate) fn transfer(
                     }
                     let index = active[(start + offset) % active.len()];
                     let candidate = &mut group.candidates[index];
-                    let free = target_free
-                        .get(&candidate.target_key)
-                        .copied()
-                        .unwrap_or(0.0);
+                    let route = &routes[candidate.route_index];
+                    let free = target_free[route.target_slot];
                     let requested = available
                         .min(fair_share)
                         .min(candidate.allowance)
@@ -920,42 +1245,20 @@ pub(crate) fn transfer(
                     if requested <= 0.0 {
                         continue;
                     }
-                    let route = &routes[candidate.route_index];
-                    let target = entities[route.target_index]
-                        .as_object_mut()
-                        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-                    let moved = if string_at(target, "buildingId")
-                        == Some("micro_black_hole_connector")
-                    {
-                        if add_black_hole_destroyed(
-                            target,
-                            route.target_port_index,
-                            &route.item_id,
-                            requested,
-                        )? {
-                            requested
-                        } else {
-                            0.0
-                        }
-                    } else if crate::quantum_logistics::is_supply_endpoint(target, &route.item_id) {
-                        crate::quantum_logistics::receive_supply_material(
-                            state,
-                            base,
-                            quantum_bandwidth,
-                            target,
-                            &route.item_id,
-                            requested,
-                        )?
-                    } else {
-                        add_input(target, &route.item_id, requested)?;
-                        requested
-                    };
+                    let moved = move_to_target(
+                        state,
+                        base,
+                        entities,
+                        quantum_bandwidth,
+                        &mut quantum_session,
+                        route,
+                        item_id,
+                        requested,
+                    )?;
                     if moved <= 0.0 {
                         continue;
                     }
-                    *target_free
-                        .get_mut(&candidate.target_key)
-                        .expect("target ledger") -= moved;
+                    target_free[route.target_slot] -= moved;
                     candidate.allowance -= moved;
                     candidate.moved += moved;
                     available -= moved;
@@ -967,7 +1270,7 @@ pub(crate) fn transfer(
                 }
             }
             set_number(
-                entities[group.source_index]
+                entities[prepared_group.source_index]
                     .as_object_mut()
                     .ok_or_else(|| anyhow!("native belt source is not an object"))?,
                 "routingCursor",
@@ -984,95 +1287,69 @@ pub(crate) fn transfer(
         // was drained to zero), it must still be written back.
         if group.source_had_output || group.available > 0.0 {
             set_output(
-                entities[group.source_index]
+                entities[prepared_group.source_index]
                     .as_object_mut()
                     .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                &group.item_id,
+                item_id,
                 available,
             )?;
         }
         for candidate in &group.candidates {
             let route = &routes[candidate.route_index];
-            let free = target_free
-                .get(&candidate.target_key)
-                .copied()
-                .unwrap_or(0.0);
-            let belt = belts[route.belt_index]
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("native belt record is not an object"))?;
-            let progress = if !defer_source_depletion_reset && available <= 0.0 || free <= 0.0 {
-                0.0
-            } else {
-                rounded(
-                    (finite_number(belt.get("progress")) - candidate.moved).max(0.0),
-                    4,
-                )
+            let free = target_free[route.target_slot];
+            post_actions[route.belt_index] = BeltPostAction::Flow {
+                available,
+                free,
+                moved: candidate.moved,
             };
-            set_number(belt, "progress", progress)?;
-            if candidate.moved > 0.0 {
-                if flow_window_seconds > 0.0 {
-                    let prior = if seconds > 0.0 {
-                        0.0
-                    } else {
-                        finite_number(belt.get("lastFlow"))
-                    };
-                    set_number(
-                        belt,
-                        "lastFlow",
-                        rounded(
-                            route
-                                .capacity
-                                .min(prior + candidate.moved / flow_window_seconds),
-                            3,
-                        ),
-                    )?;
-                }
-                let total = (finite_number(belt.get("totalTransferred")) + candidate.moved).floor();
-                set_number(belt, "totalTransferred", total)?;
-            }
-            let source_waiting = available > 0.0;
-            let target_blocked = free <= 0.0;
-            let load = if route.capacity > EPSILON {
-                finite_number(belt.get("lastFlow")) / route.capacity
-            } else {
-                0.0
+        }
+        for route_index in group
+            .first_inactive_route
+            .iter()
+            .copied()
+            .chain(group.inactive_routes.iter().copied())
+        {
+            let route = &routes[route_index];
+            let free = target_free[route.target_slot];
+            post_actions[route.belt_index] = BeltPostAction::Flow {
+                available,
+                free,
+                moved: 0.0,
             };
-            set_number(
-                belt,
-                "congestion",
-                rounded(
-                    1.0_f64.min(load.max(if source_waiting && target_blocked {
-                        1.0
-                    } else {
-                        0.0
-                    })),
-                    3,
-                ),
-            )?;
         }
     }
-    Ok(())
+    apply_belt_post_actions(
+        belt_runtime,
+        routes,
+        &post_actions,
+        seconds,
+        defer_source_depletion_reset,
+        flow_window_seconds,
+    )?;
+    crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)
 }
 
 pub(crate) fn reserve(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    belts: &[Value],
+    belt_runtime: &BeltRuntime,
+    prepared_routes: &PreparedRoutes,
 ) -> anyhow::Result<BeltStepReservation> {
-    let routes = routes(state, entities, belts)?;
+    let routes = &prepared_routes.routes;
     let belt_limit = normalized_buffer_limit(
         base.get("settings")
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    let mut result = BeltStepReservation::default();
-    let mut target_free = HashMap::<String, f64>::new();
-    for route in &routes {
-        let belt = belts[route.belt_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native belt record is not an object"))?;
-        let allowance = (finite_number(belt.get("progress")) + EPSILON)
+    let mut result = BeltStepReservation {
+        allowance_by_belt: vec![f64::NAN; belt_runtime.progress.len()],
+        output_credits: HashMap::new(),
+    };
+    let mut quantum_session = None;
+    let mut target_free = vec![f64::NAN; prepared_routes.target_slot_count];
+    for route in routes {
+        let allowance = (belt_runtime.progress[route.belt_index] + EPSILON)
             .floor()
             .max(0.0);
         if allowance < 1.0 {
@@ -1081,58 +1358,69 @@ pub(crate) fn reserve(
         let target = entities[route.target_index]
             .as_object()
             .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-        let key = target_key(route, target);
-        if !target_free.contains_key(&key) {
-            target_free.insert(
-                key.clone(),
-                target_capacity(
-                    state,
-                    base,
-                    entities,
-                    target,
-                    &route.item_id,
-                    route.target_port_index,
-                )?
-                .floor()
-                .max(0.0),
-            );
+        let prepared_group = &prepared_routes.groups[route.source_group];
+        let item_id = state
+            .symbols
+            .resolve(prepared_group.item_symbol)
+            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+        if target_free[route.target_slot].is_nan() {
+            target_free[route.target_slot] = target_capacity(
+                state,
+                base,
+                &mut quantum_session,
+                entities,
+                target,
+                item_id,
+                route.target_port_index,
+            )?
+            .floor()
+            .max(0.0);
         }
-        let free = target_free.get(&key).copied().unwrap_or(0.0);
+        let free = target_free[route.target_slot];
         let reserved = allowance.min(free.floor().max(0.0));
         if reserved < 1.0 {
             continue;
         }
-        let belt_id = string_at(belt, "id")
-            .ok_or_else(|| anyhow!("native belt ID is missing"))?
-            .to_owned();
-        result.allowance_by_belt.insert(belt_id, reserved);
-        *target_free.get_mut(&key).expect("target ledger") -= reserved;
-        let source_key = format!("{}:{}", route.source_id, route.item_id);
-        let credit = result.output_credits.entry(source_key).or_default();
+        result.allowance_by_belt[route.belt_index] = reserved;
+        target_free[route.target_slot] -= reserved;
+        let credit = result
+            .output_credits
+            .entry((prepared_group.source_index, prepared_group.item_symbol))
+            .or_default();
         *credit = (*credit + reserved).min(belt_limit);
     }
     Ok(result)
 }
 
-pub(crate) fn output_credit(credits: &HashMap<String, f64>, entity_id: &str, item_id: &str) -> f64 {
+pub(crate) fn output_credit(
+    state: &CoreState,
+    credits: &OutputCredits,
+    entity_id: &str,
+    item_id: &str,
+) -> f64 {
+    let Some(entity_index) = state.entity_index.get(entity_id).copied() else {
+        return 0.0;
+    };
+    let Some(item_symbol) = state.symbols.lookup(item_id) else {
+        return 0.0;
+    };
     credits
-        .get(&format!("{entity_id}:{item_id}"))
+        .get(&(entity_index, item_symbol))
         .copied()
         .unwrap_or(0.0)
 }
 
 pub(crate) fn aggregate_flow(state: &CoreState, belts: &[Value]) -> anyhow::Result<(f64, f64)> {
+    if belts.len() != state.belts.ids.len() {
+        bail!("native belt aggregate topology changed");
+    }
     let mut capacity = 0.0;
     let mut flow = 0.0;
-    for belt in belts {
+    for (index, belt) in belts.iter().enumerate() {
         let belt = belt
             .as_object()
             .ok_or_else(|| anyhow!("native belt record is not an object"))?;
-        let tier = belt
-            .get("tier")
-            .and_then(Value::as_u64)
-            .and_then(|value| u8::try_from(value).ok())
-            .ok_or_else(|| anyhow!("native belt tier is invalid"))?;
+        let tier = state.belts.tiers[index];
         let speed = state
             .catalog
             .belt_speeds
@@ -1140,8 +1428,8 @@ pub(crate) fn aggregate_flow(state: &CoreState, belts: &[Value]) -> anyhow::Resu
             .copied()
             .with_context(|| format!("native belt tier {tier} is missing"))?;
         capacity += speed
-            * finite_number(belt.get("lanes")).floor()
-            * finite_number(belt.get("stackSize")).max(1.0).floor();
+            * state.belts.lanes[index].floor()
+            * state.belts.stack_sizes[index].max(1.0).floor();
         flow += finite_number(belt.get("lastFlow")).max(0.0);
     }
     if !capacity.is_finite() || !flow.is_finite() {

@@ -218,11 +218,24 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         changedBelts: [], addedBelts: [], removedBeltIds: [],
       },
     });
+    const coreAdvanceStartedAt = performance.now();
     const admission = await client.request({
       operation: "coreAdvance",
       sessionId: opened.sessionId,
-      request: { baseRevision: resumed.revision, simulationSeconds: 1, wallSeconds: 1 },
+      request: {
+        baseRevision: resumed.revision,
+        simulationSeconds: 1,
+        wallSeconds: 1,
+        includeDiagnostics: false,
+      },
     });
+    const coreAdvanceDurationMs = performance.now() - coreAdvanceStartedAt;
+    const diagnosticsStartedAt = performance.now();
+    const advancedSummary = await client.request({
+      operation: "coreStatus",
+      sessionId: opened.sessionId,
+    });
+    const diagnosticsDurationMs = performance.now() - diagnosticsStartedAt;
     console.log(JSON.stringify({
       nativeCoreAdmission: {
         supported: admission.supported,
@@ -233,19 +246,26 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     if (admission.supported) {
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
+      const jsAdvanceStartedAt = performance.now();
       const expected = advanceSimulationBudget(expectedInitial, 1, 1);
+      const jsAdvanceDurationMs = performance.now() - jsAdvanceStartedAt;
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
-        admission.summary.canonicalFields?.[key] !== expectedFields[key]);
+        advancedSummary.canonicalFields?.[key] !== expectedFields[key]);
       console.log(JSON.stringify({
         nativeCoreExactRealSaveAdvance: {
-          exactState: admission.summary.canonicalSha256 === stableCanonicalSha256(expected),
+          exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
           fieldMismatches,
+          nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
+          jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
+          nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
+          deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
         },
       }, null, 2));
-      expect(admission.summary.canonicalFields).toEqual(expectedFields);
-      expect(admission.summary.canonicalSha256).toBe(stableCanonicalSha256(expected));
+      if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
+      expect(advancedSummary.canonicalFields).toEqual(expectedFields);
+      expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
     }
     if (!admission.supported && String(admission.reason ?? "").startsWith("construction-")) {
       const constructionMasked = await client.request({

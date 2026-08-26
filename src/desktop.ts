@@ -288,6 +288,7 @@ export interface DesktopNativeCoreSummary {
     rawRecordBytes: number;
     indexedStringBytes: number;
     inventoryEntryCount: number;
+    topologyIndexBytes: number;
     estimatedRuntimeBytes: number;
   };
   coverage: DesktopNativeCoreDomainCoverage;
@@ -335,6 +336,7 @@ export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessio
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
+  includeDiagnostics?: boolean;
 }
 
 export interface DesktopNativeCoreAdvanceResult {
@@ -344,7 +346,7 @@ export interface DesktopNativeCoreAdvanceResult {
   previousRevision: number;
   revision: number;
   reason?: string;
-  summary: DesktopNativeCoreSummary;
+  summary?: DesktopNativeCoreSummary;
 }
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {

@@ -301,6 +301,21 @@ impl CoreState {
         }
         next.revision += 1;
         next.rebuild_indexes()?;
+        let only_pause_changed = command.changed_entities.is_empty()
+            && command.added_entities.is_empty()
+            && command.removed_entity_ids.is_empty()
+            && command.changed_belts.is_empty()
+            && command.added_belts.is_empty()
+            && command.removed_belt_ids.is_empty()
+            && command.top_level_changes.iter().all(|change| {
+                matches!(
+                    change.path.first(),
+                    Some(PathSegment::Key(key)) if key == "paused"
+                )
+            });
+        if !only_pause_changed {
+            next.invalidate_factory_static_admission();
+        }
         let previous_revision = self.revision;
         *self = next;
         Ok(CommandApplyResult {

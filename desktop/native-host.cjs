@@ -374,7 +374,8 @@ class NativeCoreSessionRegistry {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
       !Number.isFinite(request?.simulationSeconds) || request.simulationSeconds < 0 ||
-      !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0) {
+      !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0 ||
+      request?.includeDiagnostics !== undefined && typeof request.includeDiagnostics !== "boolean") {
       throw new TypeError("native core advance request is invalid");
     }
     return this.client.request({
@@ -384,6 +385,7 @@ class NativeCoreSessionRegistry {
         baseRevision: request.baseRevision,
         simulationSeconds: request.simulationSeconds,
         wallSeconds: request.wallSeconds,
+        includeDiagnostics: request.includeDiagnostics ?? true,
       },
     });
   }

@@ -42,6 +42,12 @@ struct Network {
     runtime_flow: Option<BoundaryFlow>,
 }
 
+#[derive(Debug)]
+pub(crate) struct SupplyDepositSession {
+    network: Network,
+    write_required: bool,
+}
+
 #[derive(Debug, Clone)]
 struct Slot {
     item_id: Option<String>,
@@ -90,12 +96,14 @@ fn string_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 }
 
 fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow::Result<()> {
-    object.insert(
-        key.to_owned(),
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| anyhow!("native quantum logistics produced a non-finite number"))?,
-    );
+    let value = Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native quantum logistics produced a non-finite number"))?;
+    if let Some(target) = object.get_mut(key) {
+        *target = value;
+    } else {
+        object.insert(key.to_owned(), value);
+    }
     Ok(())
 }
 
@@ -153,16 +161,32 @@ pub(crate) fn is_supply_endpoint(entity: &Map<String, Value>, item_id: &str) -> 
             })
 }
 
-pub(crate) fn supply_free_capacity(
+fn supply_deposit_session<'a>(
+    base: &Map<String, Value>,
+    session: &'a mut Option<SupplyDepositSession>,
+) -> anyhow::Result<&'a mut SupplyDepositSession> {
+    if session.is_none() {
+        *session = Some(SupplyDepositSession {
+            network: parse_network(base)?,
+            write_required: false,
+        });
+    }
+    session
+        .as_mut()
+        .ok_or_else(|| anyhow!("native quantum supply session is missing"))
+}
+
+pub(crate) fn supply_free_capacity_in_session(
     state: &CoreState,
     base: &Map<String, Value>,
+    session: &mut Option<SupplyDepositSession>,
     station: &Map<String, Value>,
     item_id: &str,
 ) -> anyhow::Result<Option<f64>> {
     if !is_supply_endpoint(station, item_id) {
         return Ok(None);
     }
-    let network = parse_network(base)?;
+    let network = &supply_deposit_session(base, session)?.network;
     if !network.enabled {
         return Ok(Some(0.0));
     }
@@ -186,6 +210,16 @@ pub(crate) fn supply_free_capacity(
     Ok(Some(
         (network_free + local_free).min(MAX_SAFE_INTEGER as f64),
     ))
+}
+
+pub(crate) fn finish_supply_deposit_session(
+    base: &mut Map<String, Value>,
+    session: Option<SupplyDepositSession>,
+) -> anyhow::Result<()> {
+    if let Some(session) = session.filter(|session| session.write_required) {
+        write_network(base, &session.network)?;
+    }
+    Ok(())
 }
 
 fn floor_u64(value: f64) -> u64 {
@@ -459,31 +493,31 @@ fn logistics_level(base: &Map<String, Value>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn endpoint_was_indexed(
-    entity: &Map<String, Value>,
-    indexed_endpoint_ids: Option<&HashSet<String>>,
-) -> bool {
-    indexed_endpoint_ids
-        .is_none_or(|ids| string_at(entity, "id").is_some_and(|entity_id| ids.contains(entity_id)))
-}
-
 fn bandwidth_for_index(
     base: &Map<String, Value>,
     entities: &[Value],
-    indexed_endpoint_ids: Option<&HashSet<String>>,
+    indexed_endpoint_indices: Option<&[usize]>,
 ) -> (f64, f64, f64) {
     let level = logistics_level(base);
     let multiplier = (1.0 + 0.05 * level).powi(2);
     let mut tower_stacks = 0.0;
     let mut collector_stacks = 0.0;
-    for entity in entities.iter().filter_map(Value::as_object) {
-        if !endpoint_was_indexed(entity, indexed_endpoint_ids) {
-            continue;
-        }
+    let mut add_endpoint = |entity: &Map<String, Value>| {
         if is_quantum_station(entity) {
             tower_stacks += finite_number(entity.get("machineCount")).floor().max(0.0);
         } else if is_quantum_collector(entity) {
             collector_stacks += finite_number(entity.get("machineCount")).floor().max(0.0);
+        }
+    };
+    if let Some(indices) = indexed_endpoint_indices {
+        for &index in indices {
+            if let Some(entity) = entities.get(index).and_then(Value::as_object) {
+                add_endpoint(entity);
+            }
+        }
+    } else {
+        for entity in entities.iter().filter_map(Value::as_object) {
+            add_endpoint(entity);
         }
     }
     (
@@ -832,31 +866,41 @@ pub(crate) fn flush_supply_buffers(
 fn flush_supply_buffers_for_index(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    indexed_endpoint_ids: Option<&HashSet<String>>,
+    indexed_endpoint_indices: Option<&[usize]>,
 ) -> anyhow::Result<()> {
     let mut network = parse_network(base)?;
     if !network.enabled {
         return Ok(());
     }
     let reserved = reserved_outgoing(entities);
-    let snapshots = entities.to_vec();
     let (per_minute, tower_stacks, collector_stacks) =
-        bandwidth_for_index(base, &snapshots, indexed_endpoint_ids);
+        bandwidth_for_index(base, entities, indexed_endpoint_indices);
     let runtime_bandwidth = RuntimeBandwidth {
         per_minute,
         tower_stacks,
         collector_stacks,
     };
     let mut normalized_for_deposit = false;
-    for entity_index in 0..entities.len() {
-        let snapshot = snapshots[entity_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !endpoint_was_indexed(snapshot, indexed_endpoint_ids) || !is_quantum_station(snapshot) {
+    let endpoint_indices = indexed_endpoint_indices
+        .map(|indices| indices.to_vec())
+        .unwrap_or_else(|| (0..entities.len()).collect());
+    for entity_index in endpoint_indices {
+        let Some((station_id, station_slots)) = (|| -> anyhow::Result<Option<_>> {
+            let snapshot = entities[entity_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+            if !is_quantum_station(snapshot) {
+                return Ok(None);
+            }
+            Ok(Some((
+                string_at(snapshot, "id").unwrap_or_default().to_owned(),
+                slots(snapshot)?,
+            )))
+        })()?
+        else {
             continue;
-        }
-        let station_id = string_at(snapshot, "id").unwrap_or_default();
-        for slot in slots(snapshot)? {
+        };
+        for slot in station_slots {
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
@@ -869,7 +913,7 @@ fn flush_supply_buffers_for_index(
             let input = item_amount(station, "inputs", item_id).floor().max(0.0);
             let output = item_amount(station, "outputs", item_id).floor().max(0.0);
             let outgoing = reserved
-                .get(&(station_id.to_owned(), item_id.to_owned()))
+                .get(&(station_id.clone(), item_id.to_owned()))
                 .copied()
                 .unwrap_or(0.0)
                 .floor()
@@ -911,6 +955,29 @@ pub(crate) fn receive_supply_material(
     item_id: &str,
     amount: f64,
 ) -> anyhow::Result<f64> {
+    let mut session = None;
+    let accepted = receive_supply_material_in_session(
+        state,
+        base,
+        bandwidth,
+        &mut session,
+        station,
+        item_id,
+        amount,
+    )?;
+    finish_supply_deposit_session(base, session)?;
+    Ok(accepted)
+}
+
+pub(crate) fn receive_supply_material_in_session(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    bandwidth: RuntimeBandwidth,
+    session: &mut Option<SupplyDepositSession>,
+    station: &mut Map<String, Value>,
+    item_id: &str,
+    amount: f64,
+) -> anyhow::Result<f64> {
     if amount < 1.0 || !is_quantum_station(station) {
         return Ok(0.0);
     }
@@ -920,10 +987,14 @@ pub(crate) fn receive_supply_material(
     else {
         return Ok(0.0);
     };
-    let mut network = parse_network(base)?;
-    if !network.enabled {
+    let session = supply_deposit_session(base, session)?;
+    if !session.network.enabled {
         return Ok(0.0);
     }
+    // JavaScript normalizes the network for every accepted supply call, even
+    // when all cargo stays in the station reserve. The shared session preserves
+    // that final shape while paying the parse/write cost only once per batch.
+    session.write_required = true;
     let requested = floor_u64(amount) as f64;
     let current_input = item_amount(station, "inputs", item_id).floor().max(0.0);
     let current_output = item_amount(station, "outputs", item_id).floor().max(0.0);
@@ -938,11 +1009,18 @@ pub(crate) fn receive_supply_material(
     }
     let mut remaining = requested - kept;
     if remaining > 0.0 {
-        network.inventory.retain(|_, amount| !amount.is_zero());
-        let accepted = deposit(&mut network, item_id, &BigUint::from(floor_u64(remaining)));
+        session
+            .network
+            .inventory
+            .retain(|_, amount| !amount.is_zero());
+        let accepted = deposit(
+            &mut session.network,
+            item_id,
+            &BigUint::from(floor_u64(remaining)),
+        );
         let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if accepted_number > 0.0 {
-            record_immediate_upload(base, bandwidth, &mut network, item_id, &accepted);
+            record_immediate_upload(base, bandwidth, &mut session.network, item_id, &accepted);
         }
         remaining -= accepted_number;
     }
@@ -952,7 +1030,6 @@ pub(crate) fn receive_supply_material(
         set_item_amount(station, "inputs", item_id, current + local_remainder)?;
     }
     let accepted_total = requested - remaining + local_remainder;
-    write_network(base, &network)?;
     Ok(accepted_total)
 }
 
@@ -960,7 +1037,7 @@ pub(crate) fn settle_downloads(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    credits: &HashMap<String, f64>,
+    credits: &crate::belts::OutputCredits,
     boundary_second: f64,
     seconds: f64,
 ) -> anyhow::Result<Option<BoundaryFlow>> {
@@ -1012,7 +1089,7 @@ pub(crate) fn settle_downloads(
             .unwrap_or(0.0);
         let local_free = (local_capacity - current - incoming).max(0.0);
         let direct_through = if current <= local_capacity {
-            crate::belts::output_credit(credits, station_id, item_id)
+            crate::belts::output_credit(state, credits, station_id, item_id)
         } else {
             0.0
         };
@@ -1101,7 +1178,7 @@ pub(crate) fn settle_uploads(
     boundary_second: f64,
     previous_flow: Option<BoundaryFlow>,
     seconds: f64,
-    indexed_endpoint_ids: &HashSet<String>,
+    indexed_endpoint_indices: &[usize],
 ) -> anyhow::Result<()> {
     let mut network = parse_network(base)?;
     if !network.enabled {
@@ -1119,7 +1196,7 @@ pub(crate) fn settle_uploads(
         }
     }
     let (per_minute, tower_stacks, collector_stacks) =
-        bandwidth_for_index(base, entities, Some(indexed_endpoint_ids));
+        bandwidth_for_index(base, entities, Some(indexed_endpoint_indices));
     flow.global_upload_per_minute = per_minute;
     flow.global_download_per_minute = per_minute;
     flow.quantum_tower_stacks = tower_stacks;
@@ -1127,18 +1204,15 @@ pub(crate) fn settle_uploads(
     network.runtime_flow = Some(flow.clone());
     write_network(base, &network)?;
 
-    flush_supply_buffers_for_index(base, entities, Some(indexed_endpoint_ids))?;
+    flush_supply_buffers_for_index(base, entities, Some(indexed_endpoint_indices))?;
     network = parse_network(base)?;
 
     let reserved = reserved_outgoing(entities);
     let mut by_key = BTreeMap::<String, Request>::new();
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let endpoint = entity
+    for &entity_index in indexed_endpoint_indices {
+        let endpoint = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !endpoint_was_indexed(endpoint, Some(indexed_endpoint_ids)) {
-            continue;
-        }
         if is_quantum_collector(endpoint) {
             let Some(item_id) = string_at(endpoint, "storedItemId") else {
                 continue;

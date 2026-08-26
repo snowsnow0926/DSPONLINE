@@ -64,7 +64,11 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
     if (!desktop) throw new Error("Windows 原生核心桥接已断开");
-    const result = await desktop.advanceNativeCore({ sessionId: this.sessionId, ...request });
+    const result = await desktop.advanceNativeCore({
+      sessionId: this.sessionId,
+      ...request,
+      includeDiagnostics: false,
+    });
     return { supported: result.supported, revision: result.revision, ...(result.reason ? { reason: result.reason } : {}) };
   }
 

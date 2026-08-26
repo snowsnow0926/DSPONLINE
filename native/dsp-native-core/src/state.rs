@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,42 @@ const MAX_PROJECTION_BASE_FIELDS: usize = 64;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const NONE_SYMBOL: u32 = u32::MAX;
 
+struct DeferredRecordDrop {
+    entities: Vec<Value>,
+    belts: Vec<Value>,
+}
+
+fn deferred_record_drop_sender() -> &'static SyncSender<DeferredRecordDrop> {
+    static SENDER: OnceLock<SyncSender<DeferredRecordDrop>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        // A zero-capacity channel permits one batch being destroyed while the
+        // next simulation runs, but never allows retired full states to queue
+        // and turn latency optimization into unbounded memory growth.
+        let (sender, receiver) = sync_channel::<DeferredRecordDrop>(0);
+        if std::thread::Builder::new()
+            .name("dsp-native-record-reclaimer".to_owned())
+            .spawn(move || {
+                while let Ok(batch) = receiver.recv() {
+                    let DeferredRecordDrop { entities, belts } = batch;
+                    drop(entities);
+                    drop(belts);
+                }
+            })
+            .is_err()
+        {
+            // Disconnecting the receiver makes send return ownership to the
+            // caller, which then falls back to a synchronous drop safely.
+        }
+        sender
+    })
+}
+
+fn defer_record_drop(entities: Vec<Value>, belts: Vec<Value>) {
+    if let Err(error) = deferred_record_drop_sender().send(DeferredRecordDrop { entities, belts }) {
+        drop(error.0);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointIdentity {
@@ -37,6 +75,7 @@ pub struct RuntimeMemoryEstimate {
     pub raw_record_bytes: u64,
     pub indexed_string_bytes: u64,
     pub inventory_entry_count: u64,
+    pub topology_index_bytes: u64,
     pub estimated_runtime_bytes: u64,
 }
 
@@ -208,12 +247,16 @@ impl Symbols {
         index
     }
 
-    fn resolve(&self, value: u32) -> Option<&str> {
+    pub(crate) fn resolve(&self, value: u32) -> Option<&str> {
         if value == NONE_SYMBOL {
             None
         } else {
             self.values.get(value as usize).map(AsRef::as_ref)
         }
+    }
+
+    pub(crate) fn lookup(&self, value: &str) -> Option<u32> {
+        self.by_value.get(value).copied()
     }
 
     fn estimated_bytes(&self) -> u64 {
@@ -249,13 +292,6 @@ pub(crate) struct EntityColumns {
     pub stored_items: Vec<u32>,
     pub machine_counts: Vec<f64>,
     pub miner_counts: Vec<f64>,
-    pub progress: Vec<f64>,
-    pub utilization: Vec<f64>,
-    pub production_rate: Vec<f64>,
-    pub power_factor: Vec<Option<f64>>,
-    pub routing_cursor: Vec<f64>,
-    pub inputs: Vec<Vec<ItemQuantity>>,
-    pub outputs: Vec<Vec<ItemQuantity>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -268,11 +304,44 @@ pub(crate) struct BeltColumns {
     pub lanes: Vec<f64>,
     pub tiers: Vec<u8>,
     pub stack_sizes: Vec<f64>,
-    pub progress: Vec<f64>,
     pub priorities: Vec<u8>,
-    pub total_transferred: Vec<f64>,
-    pub congestion: Vec<f64>,
-    pub last_flow: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FactoryTopology {
+    pub station_indices: Vec<usize>,
+    pub quantum_endpoint_indices: Vec<usize>,
+    pub construction_center_indices: Vec<usize>,
+    pub time_warp_indices: Vec<usize>,
+    pub logistics_buffer_indices: Vec<usize>,
+    pub material_delivery_hub_indices: Vec<usize>,
+    pub power_source_indices: Vec<usize>,
+    pub vein_indices: Vec<usize>,
+    pub ordinary_machine_indices: Vec<usize>,
+    pub non_station_indices: Vec<usize>,
+    pub research_entity_indices: Vec<usize>,
+    pub entity_planet_indices: Vec<usize>,
+    pub entity_grid_indices: Vec<usize>,
+    pub has_galactic_material_exporter: bool,
+}
+
+impl FactoryTopology {
+    fn estimated_bytes(&self) -> u64 {
+        let index_capacity = self.station_indices.capacity()
+            + self.quantum_endpoint_indices.capacity()
+            + self.construction_center_indices.capacity()
+            + self.time_warp_indices.capacity()
+            + self.logistics_buffer_indices.capacity()
+            + self.material_delivery_hub_indices.capacity()
+            + self.power_source_indices.capacity()
+            + self.vein_indices.capacity()
+            + self.ordinary_machine_indices.capacity()
+            + self.non_station_indices.capacity()
+            + self.research_entity_indices.capacity()
+            + self.entity_planet_indices.capacity()
+            + self.entity_grid_indices.capacity();
+        (index_capacity * size_of::<usize>()) as u64
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -288,7 +357,11 @@ pub struct CoreState {
     pub(crate) symbols: Symbols,
     pub(crate) entities: EntityColumns,
     pub(crate) belts: BeltColumns,
+    pub(crate) factory_topology: Arc<FactoryTopology>,
     coverage: DomainCoverage,
+    factory_static_admission_checked: bool,
+    factory_static_admission_reason: Option<&'static str>,
+    prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -319,6 +392,102 @@ fn parse_inventory(value: Option<&Value>, symbols: &mut Symbols) -> Vec<ItemQuan
         .collect::<Vec<_>>();
     values.sort_by_key(|entry| entry.item);
     values
+}
+
+fn parallel_worker_count(record_count: usize) -> usize {
+    if record_count < 4_096 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(record_count)
+}
+
+fn parse_records_parallel(records: &[Box<str>], label: &'static str) -> anyhow::Result<Vec<Value>> {
+    let workers = parallel_worker_count(records.len());
+    if workers == 1 {
+        return records
+            .iter()
+            .map(|raw| serde_json::from_str(raw).with_context(|| format!("decode {label}")))
+            .collect();
+    }
+    let chunk_size = records.len().div_ceil(workers);
+    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<Value>)>> {
+        let handles = records
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(part_index, chunk)| {
+                scope.spawn(move || -> anyhow::Result<(usize, Vec<Value>)> {
+                    let values = chunk
+                        .iter()
+                        .map(|raw| {
+                            serde_json::from_str(raw).with_context(|| format!("decode {label}"))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok((part_index, values))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("native {label} parser thread panicked"))?
+            })
+            .collect()
+    })?;
+    parts.sort_by_key(|(part_index, _)| *part_index);
+    Ok(parts.into_iter().flat_map(|(_, values)| values).collect())
+}
+
+fn encode_records_parallel(
+    records: &[Value],
+    label: &'static str,
+) -> anyhow::Result<Vec<Box<str>>> {
+    let workers = parallel_worker_count(records.len());
+    if workers == 1 {
+        return records
+            .iter()
+            .map(|value| {
+                serde_json::to_string(value)
+                    .with_context(|| format!("encode {label}"))
+                    .map(String::into_boxed_str)
+            })
+            .collect();
+    }
+    let chunk_size = records.len().div_ceil(workers);
+    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<Box<str>>)>> {
+        let handles = records
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(part_index, chunk)| {
+                scope.spawn(move || -> anyhow::Result<(usize, Vec<Box<str>>)> {
+                    let values = chunk
+                        .iter()
+                        .map(|value| {
+                            serde_json::to_string(value)
+                                .with_context(|| format!("encode {label}"))
+                                .map(String::into_boxed_str)
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok((part_index, values))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("native {label} encoder thread panicked"))?
+            })
+            .collect()
+    })?;
+    parts.sort_by_key(|(part_index, _)| *part_index);
+    Ok(parts.into_iter().flat_map(|(_, values)| values).collect())
 }
 
 fn encoded_chunk_id(id: &str) -> String {
@@ -492,10 +661,56 @@ impl CoreState {
             symbols: Symbols::default(),
             entities: EntityColumns::default(),
             belts: BeltColumns::default(),
+            factory_topology: Arc::new(FactoryTopology::default()),
             coverage: DomainCoverage::state_container_only(),
+            factory_static_admission_checked: false,
+            factory_static_admission_reason: None,
+            prepared_belt_routes: None,
         };
         state.rebuild_indexes()?;
+        state.refresh_factory_static_admission()?;
+        if state.factory_static_admission_reason.is_none() {
+            state.refresh_prepared_belt_routes()?;
+        }
         Ok(state)
+    }
+
+    pub(crate) fn refresh_factory_static_admission(&mut self) -> anyhow::Result<()> {
+        self.factory_static_admission_reason =
+            crate::simple_factory::static_admission_reason(self)?;
+        self.factory_static_admission_checked = true;
+        Ok(())
+    }
+
+    pub(crate) fn factory_static_admission_reason(&self) -> Option<Option<&'static str>> {
+        self.factory_static_admission_checked
+            .then_some(self.factory_static_admission_reason)
+    }
+
+    pub(crate) fn invalidate_factory_static_admission(&mut self) {
+        self.factory_static_admission_checked = false;
+        self.factory_static_admission_reason = None;
+        self.prepared_belt_routes = None;
+    }
+
+    pub(crate) fn prepared_belt_routes(&self) -> Option<Arc<crate::belts::PreparedRoutes>> {
+        self.prepared_belt_routes.clone()
+    }
+
+    pub(crate) fn install_prepared_belt_routes(
+        &mut self,
+        routes: Arc<crate::belts::PreparedRoutes>,
+    ) {
+        self.prepared_belt_routes = Some(routes);
+    }
+
+    fn refresh_prepared_belt_routes(&mut self) -> anyhow::Result<()> {
+        let entities = self.parse_entities_parallel()?;
+        let belts = self.parse_belts_parallel()?;
+        self.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes(
+            self, &entities, &belts,
+        )?));
+        Ok(())
     }
 
     pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
@@ -504,6 +719,14 @@ impl CoreState {
         self.belts = BeltColumns::default();
         self.entity_index.clear();
         self.belt_index.clear();
+        let planet_indices = self
+            .catalog
+            .planets
+            .iter()
+            .enumerate()
+            .map(|(index, planet)| (planet.id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut factory_topology = FactoryTopology::default();
         for (index, raw) in self.entity_raw.iter().enumerate() {
             let value =
                 serde_json::from_str::<Value>(raw).context("decode native core entity record")?;
@@ -540,30 +763,70 @@ impl CoreState {
             self.entities
                 .miner_counts
                 .push(object_number(object, "minerCount"));
-            self.entities
-                .progress
-                .push(object_number(object, "progress"));
-            self.entities
-                .utilization
-                .push(object_number(object, "utilization"));
-            self.entities
-                .production_rate
-                .push(object_number(object, "productionRate"));
-            self.entities.power_factor.push(
-                object
-                    .get("powerFactor")
-                    .and_then(Value::as_f64)
-                    .filter(|value| value.is_finite()),
+
+            let kind = object_string(object, "kind").unwrap_or_default();
+            let building = object_string(object, "buildingId").unwrap_or_default();
+            let recipe = object_string(object, "recipeId").unwrap_or_default();
+            if kind == "station" {
+                factory_topology.station_indices.push(index);
+                if matches!(
+                    building,
+                    "interstellar_logistics_station" | "orbital_collector"
+                ) {
+                    factory_topology.quantum_endpoint_indices.push(index);
+                }
+            } else {
+                factory_topology.non_station_indices.push(index);
+            }
+            if kind == "machine" && building == "construction_center" {
+                factory_topology.construction_center_indices.push(index);
+            }
+            if building == "time_warp_device" {
+                factory_topology.time_warp_indices.push(index);
+            }
+            if matches!(kind, "storage" | "splitter") {
+                factory_topology.logistics_buffer_indices.push(index);
+            }
+            if building == "material_delivery_hub" {
+                factory_topology.material_delivery_hub_indices.push(index);
+            }
+            if kind == "power"
+                || (kind == "machine" && building == "ray_receiver" && recipe == "ray_power")
+            {
+                factory_topology.power_source_indices.push(index);
+            }
+            if kind == "vein" {
+                factory_topology.vein_indices.push(index);
+            }
+            if kind == "machine"
+                && !matches!(
+                    building,
+                    "construction_center"
+                        | "time_warp_device"
+                        | "ray_receiver"
+                        | "micro_black_hole_connector"
+                )
+            {
+                factory_topology.ordinary_machine_indices.push(index);
+            }
+            if recipe == "matrix_research" {
+                factory_topology.research_entity_indices.push(index);
+            }
+            factory_topology.has_galactic_material_exporter |=
+                building == "galactic_material_exporter";
+            factory_topology.entity_planet_indices.push(
+                object_string(object, "planetId")
+                    .and_then(|id| planet_indices.get(id).copied())
+                    .unwrap_or(usize::MAX),
             );
-            self.entities
-                .routing_cursor
-                .push(object_number(object, "routingCursor"));
-            self.entities
-                .inputs
-                .push(parse_inventory(object.get("inputs"), &mut self.symbols));
-            self.entities
-                .outputs
-                .push(parse_inventory(object.get("outputs"), &mut self.symbols));
+            factory_topology.entity_grid_indices.push(
+                match object_string(object, "powerGridId").unwrap_or("grid-a") {
+                    "grid-a" => 0,
+                    "grid-b" => 1,
+                    "grid-c" => 2,
+                    _ => usize::MAX,
+                },
+            );
         }
         for (index, raw) in self.belt_raw.iter().enumerate() {
             let value =
@@ -600,7 +863,6 @@ impl CoreState {
             self.belts
                 .stack_sizes
                 .push(object_number(object, "stackSize").max(1.0));
-            self.belts.progress.push(object_number(object, "progress"));
             self.belts.priorities.push(
                 object
                     .get("priority")
@@ -608,14 +870,8 @@ impl CoreState {
                     .unwrap_or(1)
                     .min(2) as u8,
             );
-            self.belts
-                .total_transferred
-                .push(object_number(object, "totalTransferred"));
-            self.belts
-                .congestion
-                .push(object_number(object, "congestion"));
-            self.belts.last_flow.push(object_number(object, "lastFlow"));
         }
+        self.factory_topology = Arc::new(factory_topology);
         Ok(())
     }
 
@@ -625,6 +881,14 @@ impl CoreState {
 
     pub(crate) fn parse_belt(&self, index: usize) -> anyhow::Result<Value> {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
+    }
+
+    pub(crate) fn parse_entities_parallel(&self) -> anyhow::Result<Vec<Value>> {
+        parse_records_parallel(&self.entity_raw, "native core entity")
+    }
+
+    pub(crate) fn parse_belts_parallel(&self) -> anyhow::Result<Vec<Value>> {
+        parse_records_parallel(&self.belt_raw, "native core belt")
     }
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
@@ -638,6 +902,70 @@ impl CoreState {
     }
     pub(crate) fn belt_raw_mut(&mut self) -> &mut Vec<Box<str>> {
         &mut self.belt_raw
+    }
+
+    pub(crate) fn commit_simulated_state(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belts: Vec<Value>,
+    ) -> anyhow::Result<()> {
+        let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+        let mut profile_checkpoint = std::time::Instant::now();
+        macro_rules! profile_mark {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\tcommit-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                    profile_checkpoint = std::time::Instant::now();
+                }
+            };
+        }
+        macro_rules! profile_last {
+            ($label:literal) => {
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\tcommit-{}\t{:.3}",
+                        $label,
+                        profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    );
+                }
+            };
+        }
+        if entities.len() != self.entity_raw.len() || belts.len() != self.belt_raw.len() {
+            bail!("native simulation changed record topology");
+        }
+        for (index, entity) in entities.iter().enumerate() {
+            let object = entity
+                .as_object()
+                .ok_or_else(|| anyhow!("native simulated entity is not an object"))?;
+            if object_string(object, "id") != Some(self.entities.ids[index].as_ref()) {
+                bail!("native simulation changed entity identity");
+            }
+        }
+        for (index, belt) in belts.iter().enumerate() {
+            let object = belt
+                .as_object()
+                .ok_or_else(|| anyhow!("native simulated belt is not an object"))?;
+            if object_string(object, "id") != Some(self.belts.ids[index].as_ref()) {
+                bail!("native simulation changed belt identity");
+            }
+        }
+        profile_mark!("identity");
+
+        let entity_raw = encode_records_parallel(&entities, "native simulated entity")?;
+        let belt_raw = encode_records_parallel(&belts, "native simulated belt")?;
+        profile_mark!("encode");
+
+        self.base = base;
+        self.entity_raw = entity_raw;
+        self.belt_raw = belt_raw;
+        defer_record_drop(entities, belts);
+        profile_last!("install");
+        Ok(())
     }
 
     pub fn materialize(&self) -> anyhow::Result<Value> {
@@ -809,7 +1137,7 @@ impl CoreState {
         Ok(fields)
     }
 
-    pub fn domain_sha256(&self) -> String {
+    pub fn domain_sha256(&self) -> anyhow::Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(b"dsp-native-domain-v1\0");
         hasher.update(self.revision.to_le_bytes());
@@ -825,33 +1153,54 @@ impl CoreState {
             }
             hasher.update(b"\0");
         }
-        for index in 0..self.entities.ids.len() {
+        let mut symbols = self.symbols.clone();
+        for (index, raw) in self.entity_raw.iter().enumerate() {
+            let value: Value = serde_json::from_str(raw).context("decode native domain entity")?;
+            let entity = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native domain entity is not an object"))?;
             hasher.update(self.entities.ids[index].as_bytes());
             hasher.update(b"\0");
-            for entry in &self.entities.inputs[index] {
+            for entry in parse_inventory(entity.get("inputs"), &mut symbols) {
                 if let Some(item) = self.symbols.resolve(entry.item) {
+                    hasher.update(item.as_bytes());
+                } else if let Some(item) = symbols.resolve(entry.item) {
                     hasher.update(item.as_bytes());
                 }
                 hasher.update(entry.amount.to_bits().to_le_bytes());
             }
             hasher.update(b"|");
-            for entry in &self.entities.outputs[index] {
+            for entry in parse_inventory(entity.get("outputs"), &mut symbols) {
                 if let Some(item) = self.symbols.resolve(entry.item) {
+                    hasher.update(item.as_bytes());
+                } else if let Some(item) = symbols.resolve(entry.item) {
                     hasher.update(item.as_bytes());
                 }
                 hasher.update(entry.amount.to_bits().to_le_bytes());
             }
-            hasher.update(self.entities.progress[index].to_bits().to_le_bytes());
-            hasher.update(self.entities.utilization[index].to_bits().to_le_bytes());
-            hasher.update(self.entities.production_rate[index].to_bits().to_le_bytes());
+            hasher.update(object_number(entity, "progress").to_bits().to_le_bytes());
+            hasher.update(object_number(entity, "utilization").to_bits().to_le_bytes());
+            hasher.update(
+                object_number(entity, "productionRate")
+                    .to_bits()
+                    .to_le_bytes(),
+            );
         }
-        for index in 0..self.belts.ids.len() {
+        for (index, raw) in self.belt_raw.iter().enumerate() {
+            let value: Value = serde_json::from_str(raw).context("decode native domain belt")?;
+            let belt = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
             hasher.update(self.belts.ids[index].as_bytes());
-            hasher.update(self.belts.progress[index].to_bits().to_le_bytes());
-            hasher.update(self.belts.total_transferred[index].to_bits().to_le_bytes());
-            hasher.update(self.belts.last_flow[index].to_bits().to_le_bytes());
+            hasher.update(object_number(belt, "progress").to_bits().to_le_bytes());
+            hasher.update(
+                object_number(belt, "totalTransferred")
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            hasher.update(object_number(belt, "lastFlow").to_bits().to_le_bytes());
         }
-        hex::encode(hasher.finalize())
+        Ok(hex::encode(hasher.finalize()))
     }
 
     pub fn memory_estimate(&self) -> RuntimeMemoryEstimate {
@@ -861,13 +1210,10 @@ impl CoreState {
             .chain(self.belt_raw.iter())
             .map(|value| value.len() as u64)
             .sum();
-        let inventory_entry_count = self
-            .entities
-            .inputs
-            .iter()
-            .chain(self.entities.outputs.iter())
-            .map(|values| values.len() as u64)
-            .sum();
+        // Hot simulation data lives only in the authoritative records. Keeping
+        // a second inventory/progress mirror made every checkpoint retain a
+        // large stale object graph without accelerating the native step.
+        let inventory_entry_count = 0;
         let indexed_string_bytes = self.symbols.estimated_bytes()
             + self
                 .entity_index
@@ -881,14 +1227,21 @@ impl CoreState {
                 .sum::<u64>();
         let entity_rows = self.entities.ids.len() as u64;
         let belt_rows = self.belts.ids.len() as u64;
-        let numeric_columns = entity_rows * 112 + belt_rows * 104;
+        let numeric_columns = entity_rows * 56 + belt_rows * 72;
         let index_overhead = ((self.entity_index.capacity() + self.belt_index.capacity())
             * (size_of::<String>() + size_of::<usize>())) as u64;
+        let topology_index_bytes = self
+            .prepared_belt_routes
+            .as_ref()
+            .map(|routes| routes.estimated_bytes())
+            .unwrap_or(0)
+            + self.factory_topology.estimated_bytes();
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + inventory_entry_count * size_of::<ItemQuantity>() as u64
             + numeric_columns
             + index_overhead
+            + topology_index_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
@@ -896,6 +1249,7 @@ impl CoreState {
             raw_record_bytes,
             indexed_string_bytes,
             inventory_entry_count,
+            topology_index_bytes,
             estimated_runtime_bytes,
         }
     }
@@ -938,7 +1292,7 @@ impl CoreState {
             canonical_sha256,
             canonical_components,
             canonical_fields,
-            domain_sha256: self.domain_sha256(),
+            domain_sha256: self.domain_sha256()?,
             catalog_sha256: self.catalog.fingerprint.clone(),
             registry_fingerprint: self.identity.registry_fingerprint.clone(),
             memory: self.memory_estimate(),

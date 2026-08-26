@@ -489,6 +489,53 @@ function interstellarLogisticsState(): GameState {
   return state;
 }
 
+function warpedInterstellarLogisticsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push(
+    "interstellar_logistics",
+    "space_warp",
+    "logistics_engine_1",
+    "logistics_capacity_1",
+  );
+  state.exploration.unlockedSystemIds.push("borealis");
+  state.construction.interstellar_logistics_station = 2;
+  state.activePlanetId = "home";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 820, y: 80 }, 1);
+  const supplyId = state.entities.find((entity) => entity.buildingId === "interstellar_logistics_station")!.id;
+  state.activePlanetId = "frost";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 200, y: 80 }, 1);
+  const demandId = state.entities.find((entity) =>
+    entity.buildingId === "interstellar_logistics_station" && entity.id !== supplyId)!.id;
+  state.activePlanetId = "home";
+  for (const stationId of [supplyId, demandId]) {
+    state = setStationSlotItem(state, stationId, 0, "titanium_ingot");
+  }
+  state = setStationSlotMode(state, demandId, 0, "remote", "demand");
+  state = setStationSlotMinimumLoad(state, demandId, 0, 0.5);
+  state = setStationSlotMinimumLoad(state, supplyId, 0, 0.25);
+  const supply = state.entities.find((entity) => entity.id === supplyId)!;
+  const demand = state.entities.find((entity) => entity.id === demandId)!;
+  supply.outputs = { titanium_ingot: 400 };
+  supply.inputs = { titanium_ingot: 0 };
+  supply.stationVessels = 1;
+  supply.stationWarpers = 1;
+  demand.outputs = { titanium_ingot: 0 };
+  demand.inputs = { titanium_ingot: 0 };
+  demand.stationVessels = 2;
+  demand.stationWarpers = 2;
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  state.entities.push({
+    ...wind,
+    id: "native_frost_wind_fixture",
+    planetId: "frost",
+    position: { x: 0, y: -180 },
+    machineCount: 10,
+    inputs: {},
+    outputs: {},
+  });
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -842,6 +889,47 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "interstellar-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "interstellar-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches exact direct warp routes, warper consumption, and cross-system power", async () => {
+    const initial = warpedInterstellarLogisticsState();
+    const checkpoint = await seed(initial, 198);
+    for (const seconds of [1, 8, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `warped-interstellar-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `warped-interstellar-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.nextId, `warped-interstellar-${seconds} 路线 ID`).toBe(expected.nextId);
+      expect(advanced.summary.canonicalFields, `warped-interstellar-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `warped-interstellar-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `warped-interstellar-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "warped-interstellar-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "warped-interstellar-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

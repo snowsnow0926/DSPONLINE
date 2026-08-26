@@ -21,6 +21,15 @@ struct Slot {
     min_stock: f64,
     max_stock: f64,
     priority: usize,
+    route_policy: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteEconomics {
+    requires_warp: bool,
+    duration: f64,
+    distance_ly: f64,
+    warpers_per_vessel: f64,
 }
 
 #[derive(Debug, Default)]
@@ -110,6 +119,13 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             {
                 bail!("native interstellar minimum load is invalid");
             }
+            let route_policy = string_at(slot, "routePolicy").unwrap_or("relay-preferred");
+            if !matches!(
+                route_policy,
+                "direct" | "relay-preferred" | "relay-required"
+            ) {
+                bail!("native interstellar route policy is invalid");
+            }
             Ok(Slot {
                 item_id: string_at(slot, "itemId").map(str::to_owned),
                 remote_mode: remote_mode.to_owned(),
@@ -121,6 +137,7 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .min(2) as usize,
+                route_policy: route_policy.to_owned(),
             })
         })
         .collect()
@@ -307,30 +324,74 @@ fn travel_multiplier(base: &Map<String, Value>, planet_id: &str) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn trip_duration(
+fn system_distance_ly(base: &Map<String, Value>, source_system: &str, target_system: &str) -> f64 {
+    if source_system == target_system {
+        return 0.0;
+    }
+    let profile = |system_id: &str, key: &str| {
+        base.get("galaxy")
+            .and_then(Value::as_object)
+            .and_then(|galaxy| galaxy.get("systemProfiles"))
+            .and_then(Value::as_object)
+            .and_then(|profiles| profiles.get(system_id))
+            .and_then(Value::as_object)
+            .and_then(|profile| profile.get(key))
+            .map(|value| finite_number(Some(value)))
+            .unwrap_or(0.0)
+    };
+    let dx = profile(source_system, "positionX") - profile(target_system, "positionX");
+    let dy = profile(source_system, "positionY") - profile(target_system, "positionY");
+    rounded(dx.hypot(dy).max(0.1), 4)
+}
+
+fn route_economics(
     state: &CoreState,
     base: &Map<String, Value>,
     supply: &Map<String, Value>,
     demand: &Map<String, Value>,
-) -> anyhow::Result<f64> {
+    demand_slot: &Slot,
+) -> anyhow::Result<Option<RouteEconomics>> {
     let supply_planet = planet(state, supply)
         .ok_or_else(|| anyhow!("native interstellar supply planet is missing"))?;
     let demand_planet = planet(state, demand)
         .ok_or_else(|| anyhow!("native interstellar demand planet is missing"))?;
-    if supply_planet.system_id != demand_planet.system_id {
-        bail!("native interstellar warped route is outside the admitted slice");
-    }
-    let orbit_span = supply_planet
-        .orbit_index
-        .abs_diff(demand_planet.orbit_index)
-        .max(1) as f64;
     let environment = (travel_multiplier(base, &supply_planet.id)
         + travel_multiplier(base, &demand_planet.id))
         / 2.0;
-    Ok(rounded(
-        BASE_TRIP_SECONDS / logistics_speed(base) * environment * (0.9 + orbit_span * 0.1),
-        2,
-    ))
+    if supply_planet.system_id == demand_planet.system_id {
+        let orbit_span = supply_planet
+            .orbit_index
+            .abs_diff(demand_planet.orbit_index)
+            .max(1) as f64;
+        return Ok(Some(RouteEconomics {
+            requires_warp: false,
+            duration: rounded(
+                BASE_TRIP_SECONDS / logistics_speed(base) * environment * (0.9 + orbit_span * 0.1),
+                2,
+            ),
+            distance_ly: 0.0,
+            warpers_per_vessel: 0.0,
+        }));
+    }
+    if demand_slot.route_policy == "relay-required" {
+        return Ok(None);
+    }
+    let distance = system_distance_ly(base, &supply_planet.system_id, &demand_planet.system_id);
+    let distance_factor = 0.75 + distance / 24.0;
+    let long_leg_penalty = if distance > 12.0 {
+        1.0 + (distance - 12.0) / 14.0
+    } else {
+        1.0
+    };
+    Ok(Some(RouteEconomics {
+        requires_warp: true,
+        duration: rounded(
+            12.0 / logistics_speed(base) * environment * distance_factor * long_leg_penalty,
+            2,
+        ),
+        distance_ly: rounded(distance, 2),
+        warpers_per_vessel: 1.0,
+    }))
 }
 
 fn route_owner_id<'a>(demand: &'a Map<String, Value>, route: &'a Map<String, Value>) -> &'a str {
@@ -422,14 +483,20 @@ fn peer_matches(
         let peer = entities[peer_index].as_object().expect("station object");
         if string_at(peer, "buildingId") != Some("interstellar_logistics_station")
             || string_at(peer, "planetId") == planet_id
-            || !same_system(state, station, peer)
             || planet(state, peer).is_none_or(|planet| !system_unlocked(base, &planet.system_id))
         {
             continue;
         }
         for (peer_slot_index, peer_slot) in slots(peer)?.iter().enumerate() {
             if peer_slot.item_id.as_deref() == Some(item_id) && peer_slot.remote_mode == opposite {
-                matches.push((peer_index, peer_slot_index));
+                let (supply, demand, demand_slot) = if slot.remote_mode == "demand" {
+                    (peer, station, slot)
+                } else {
+                    (station, peer, peer_slot)
+                };
+                if route_economics(state, base, supply, demand, demand_slot)?.is_some() {
+                    matches.push((peer_index, peer_slot_index));
+                }
             }
         }
     }
@@ -513,6 +580,10 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 .is_some_and(|value| !value.is_null())
             || station.get("quantumTarget").and_then(Value::as_bool) == Some(true)
             || station
+                .get("stationHubEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            || station
                 .get("stationWarperAutoRefill")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
@@ -544,55 +615,31 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
                 .and_then(|id| indexes.get(id))
                 .copied();
             let owner_valid = indexes.contains_key(route_owner_id(station, route));
-            let same_system_route = peer_index.is_some_and(|peer_index| {
+            let same_system_route = peer_index.and_then(|peer_index| {
                 entities[peer_index]
                     .as_object()
-                    .is_some_and(|peer| same_system(state, station, peer))
+                    .map(|peer| same_system(state, station, peer))
             });
+            let expected_warp = same_system_route.map(|same| !same);
             if string_at(route, "scope") != Some("remote")
-                || !same_system_route
+                || expected_warp.is_none()
                 || !owner_valid
                 || string_at(route, "itemId").is_none_or(|id| !state.catalog.items.contains_key(id))
-                || route.get("requiresWarp").and_then(Value::as_bool) != Some(false)
+                || route.get("requiresWarp").and_then(Value::as_bool) != expected_warp
                 || route
                     .get("waypointStationIds")
                     .and_then(Value::as_array)
                     .is_none_or(|ids| !ids.is_empty())
-                || finite_number(route.get("warpersPerVessel")).abs() > EPSILON
+                || (finite_number(route.get("warpersPerVessel"))
+                    - if expected_warp == Some(true) {
+                        1.0
+                    } else {
+                        0.0
+                    })
+                .abs()
+                    > EPSILON
             {
                 return Ok(Some("interstellar-route-invalid"));
-            }
-        }
-        for (slot_index, slot) in station_slots.iter().enumerate() {
-            if slot.item_id.is_none() || slot.remote_mode == "storage" {
-                continue;
-            }
-            let item_id = slot.item_id.as_deref().unwrap_or_default();
-            let opposite = if slot.remote_mode == "supply" {
-                "demand"
-            } else {
-                "supply"
-            };
-            for peer_index in station_indices(&entities) {
-                if peer_index == station_index {
-                    continue;
-                }
-                let peer = entities[peer_index].as_object().expect("station object");
-                if string_at(peer, "buildingId") != Some("interstellar_logistics_station")
-                    || string_at(peer, "planetId") == string_at(station, "planetId")
-                {
-                    continue;
-                }
-                let configured = slots(peer).is_ok_and(|peer_slots| {
-                    peer_slots.iter().any(|peer_slot| {
-                        peer_slot.item_id.as_deref() == Some(item_id)
-                            && peer_slot.remote_mode == opposite
-                    })
-                });
-                if configured && !same_system(state, station, peer) {
-                    let _ = slot_index;
-                    return Ok(Some("interstellar-warped-route-unsupported"));
-                }
             }
         }
         let planet = planet(state, station);
@@ -651,6 +698,10 @@ pub(crate) fn ready_station_indices(
                     };
                 let demand = entities[demand_index].as_object().expect("station object");
                 let supply = entities[supply_index].as_object().expect("station object");
+                let Some(economics) = route_economics(state, base, supply, demand, demand_slot)?
+                else {
+                    continue;
+                };
                 let available = (item_amount(supply, "outputs", item_id) - supply_slot.min_stock)
                     .max(0.0)
                     .floor();
@@ -670,8 +721,16 @@ pub(crate) fn ready_station_indices(
                     let has_vehicle = installed_vessels(owner)
                         - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
                         > 0.0;
+                    let warp_ready = !economics.requires_warp
+                        || (completed_tech(base, "space_warp")
+                            && owner
+                                .get("stationWarpEnabled")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            && finite_number(owner.get("stationWarpers"))
+                                >= economics.warpers_per_vessel);
                     let minimum = minimum_cargo(base, owner_slot);
-                    if has_vehicle && available >= minimum && free >= minimum {
+                    if has_vehicle && warp_ready && available >= minimum && free >= minimum {
                         ready.insert(station_index);
                         break 'slots;
                     }
@@ -800,6 +859,14 @@ pub(crate) fn dispatch(
                     .expect("station object")
                     .clone();
                 let supply_slot = slots(&supply_snapshot)?[peer_slot_index].clone();
+                let Some(economics) =
+                    route_economics(state, base, &supply_snapshot, &demand_snapshot, slot)?
+                else {
+                    continue;
+                };
+                if economics.requires_warp && !completed_tech(base, "space_warp") {
+                    continue;
+                }
                 let source_power = powers.get(&supply_index).copied().unwrap_or(0.0);
                 let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
                 let power_factor = source_power.min(target_power);
@@ -811,7 +878,17 @@ pub(crate) fn dispatch(
                     let free_vehicles = (installed_vessels(owner)
                         - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
                     .max(0.0);
-                    if free_vehicles < 1.0 || power_factor <= EPSILON {
+                    let warp_available =
+                        finite_number(owner.get("stationWarpers")).floor().max(0.0);
+                    if free_vehicles < 1.0
+                        || power_factor <= EPSILON
+                        || (economics.requires_warp
+                            && (!owner
+                                .get("stationWarpEnabled")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                                || warp_available < economics.warpers_per_vessel))
+                    {
                         continue;
                     }
                     let available = (item_amount(&supply_snapshot, "outputs", &item_id)
@@ -825,9 +902,13 @@ pub(crate) fn dispatch(
                         .floor()
                         .max(0.0);
                     let minimum = minimum_cargo(base, &owner_slot);
-                    let dispatchable = free_vehicles
+                    let mut dispatchable = free_vehicles
                         .min((available / minimum).floor())
                         .min((remaining_free / minimum).floor());
+                    if economics.requires_warp {
+                        dispatchable = dispatchable
+                            .min((warp_available / economics.warpers_per_vessel.max(1.0)).floor());
+                    }
                     if dispatchable < 1.0 {
                         continue;
                     }
@@ -861,7 +942,6 @@ pub(crate) fn dispatch(
                         .unwrap_or_default()
                         .to_owned();
                     let owner_id = string_at(owner, "id").unwrap_or_default().to_owned();
-                    let duration = trip_duration(state, base, &supply_snapshot, &demand_snapshot)?;
                     let route = json!({
                         "id": format!("route_{}", next_id as u64),
                         "slotIndex": *slot_index,
@@ -871,11 +951,11 @@ pub(crate) fn dispatch(
                         "cargo": cargo,
                         "vehicleCount": dispatchable,
                         "progress": initial_progress,
-                        "duration": duration,
-                        "requiresWarp": false,
+                        "duration": economics.duration,
+                        "requiresWarp": economics.requires_warp,
                         "waypointStationIds": [],
-                        "distanceLy": 0,
-                        "warpersPerVessel": 0,
+                        "distanceLy": economics.distance_ly,
+                        "warpersPerVessel": economics.warpers_per_vessel,
                         "vehicleStationId": owner_id,
                     });
                     entities[demand_index]
@@ -898,6 +978,16 @@ pub(crate) fn dispatch(
                     }
                     remaining_free = (remaining_free - cargo).max(0.0);
                     set_number(base, "nextId", next_id + 1.0)?;
+                    if economics.requires_warp {
+                        let owner = entities[owner_index]
+                            .as_object_mut()
+                            .expect("station object");
+                        set_number(
+                            owner,
+                            "stationWarpers",
+                            warp_available - dispatchable * economics.warpers_per_vessel,
+                        )?;
+                    }
                     {
                         let demand = entities[demand_index]
                             .as_object_mut()

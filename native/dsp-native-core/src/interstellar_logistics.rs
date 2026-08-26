@@ -285,6 +285,13 @@ fn completed_tech(base: &Map<String, Value>, id: &str) -> bool {
         .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
 }
 
+fn traditional_remote_disabled(entity: &Map<String, Value>) -> bool {
+    string_at(entity, "quantumMode") == Some("quantum")
+        || entity
+            .get("quantumTransition")
+            .is_some_and(|value| !value.is_null())
+}
+
 pub(crate) fn refill_station_warpers(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -315,6 +322,7 @@ pub(crate) fn refill_station_warpers(
             continue;
         };
         if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+            || traditional_remote_disabled(station)
             || !station
                 .get("stationWarperAutoRefill")
                 .and_then(Value::as_bool)
@@ -972,6 +980,9 @@ fn peer_matches(
     if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
         return Ok(Vec::new());
     }
+    if traditional_remote_disabled(station) {
+        return Ok(Vec::new());
+    }
     let station_slots = slots(station)?;
     let slot = station_slots
         .get(slot_index)
@@ -994,7 +1005,8 @@ fn peer_matches(
             continue;
         }
         let peer = entities[peer_index].as_object().expect("station object");
-        if string_at(peer, "planetId") == planet_id
+        if traditional_remote_disabled(peer)
+            || string_at(peer, "planetId") == planet_id
             || planet(state, peer).is_none_or(|planet| !system_unlocked(base, &planet.system_id))
         {
             continue;
@@ -1128,10 +1140,12 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             Some("orbital_collector") => {
                 let item_id = string_at(station, "storedItemId");
                 let planet_id = string_at(station, "planetId").unwrap_or_default();
-                if !matches!(string_at(station, "quantumMode"), None | Some("legacy"))
-                    || station
-                        .get("quantumTransition")
-                        .is_some_and(|value| !value.is_null())
+                if !matches!(
+                    string_at(station, "quantumMode"),
+                    None | Some("legacy" | "quantum")
+                ) || station
+                    .get("quantumTransition")
+                    .is_some_and(|value| !value.is_null())
                     || item_id.is_none_or(|id| {
                         !state.catalog.items.contains_key(id)
                             || orbital_yield(base, planet_id, id) <= 0.0
@@ -1155,7 +1169,10 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         ) || station
             .get("stationModeTransition")
             .is_some_and(|value| !value.is_null())
-            || !matches!(string_at(station, "quantumMode"), None | Some("legacy"))
+            || !matches!(
+                string_at(station, "quantumMode"),
+                None | Some("legacy" | "quantum")
+            )
             || station
                 .get("quantumTransition")
                 .is_some_and(|value| !value.is_null())
@@ -1242,6 +1259,9 @@ pub(crate) fn ready_station_indices(
     for station_index in station_indices(entities) {
         let station = entities[station_index].as_object().expect("station object");
         if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
+            continue;
+        }
+        if traditional_remote_disabled(station) {
             continue;
         }
         if route_active_for_station(entities, &indexes, station_index) {
@@ -1353,6 +1373,9 @@ pub(crate) fn dispatch(
             .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?
             .clone();
         if string_at(&demand_snapshot, "buildingId") != Some("interstellar_logistics_station") {
+            continue;
+        }
+        if traditional_remote_disabled(&demand_snapshot) {
             continue;
         }
         let demand_slots = slots(&demand_snapshot)?;
@@ -1858,6 +1881,9 @@ pub(crate) fn update_congestion(
             .as_object()
             .expect("station object");
         if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
+            continue;
+        }
+        if traditional_remote_disabled(station) {
             continue;
         }
         let station_slots = slots(station)?;

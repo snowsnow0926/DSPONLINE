@@ -235,6 +235,7 @@ export interface DesktopNativeCoreDomainCoverage {
   relayLogistics: boolean;
   orbitalCollectors: boolean;
   stationWarperAutoRefill: boolean;
+  quantumLogisticsNetwork: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

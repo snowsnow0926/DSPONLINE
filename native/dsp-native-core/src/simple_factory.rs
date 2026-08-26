@@ -441,16 +441,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     if !empty_object(base.get("systemSpaceStations")) {
         return Some("system-space-station-active");
     }
-    let quantum = base.get("quantumLogisticsNetwork");
-    if bool_at(quantum, &["enabled"])
-        || !empty_object(
-            quantum
-                .and_then(Value::as_object)
-                .and_then(|value| value.get("inventory")),
-        )
-    {
-        return Some("quantum-network-active");
-    }
     let endgame = base.get("endgame");
     if endgame
         .and_then(Value::as_object)
@@ -674,6 +664,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::local_logistics::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::interstellar_logistics::admission_reason(state)? {
@@ -1967,9 +1960,15 @@ fn simulate_step(
     belts: &mut [Value],
     seconds: f64,
 ) -> anyhow::Result<()> {
+    let elapsed_before_step = finite_number(base.get("elapsedSeconds"));
+    let projected_elapsed = rounded(elapsed_before_step + seconds, 4);
+    let first_quantum_boundary = (elapsed_before_step / 5.0).floor() as u64 + 1;
+    let last_quantum_boundary = (projected_elapsed / 5.0).floor() as u64;
+    let crossed_quantum_boundary = first_quantum_boundary <= last_quantum_boundary;
     crate::local_logistics::reset_runtime(entities)?;
     transfer_logistics_buffers(state, base, entities)?;
     crate::local_logistics::transfer_buffers(state, base, entities)?;
+    crate::quantum_logistics::flush_supply_buffers(base, entities)?;
     crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
     let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
     crate::interstellar_logistics::run_orbital_collectors(
@@ -2156,6 +2155,13 @@ fn simulate_step(
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
         state, base, entities,
     )?);
+    ready_stations.extend(entities.iter().enumerate().filter_map(|(index, entity)| {
+        let entity = entity.as_object()?;
+        (string_at(entity, "kind") == Some("station")
+            && string_at(entity, "buildingId") == Some("interstellar_logistics_station")
+            && string_at(entity, "quantumMode") == Some("quantum"))
+        .then_some(index)
+    }));
     let mut disconnected_ready_stations = Vec::new();
     for &entity_index in &ready_stations {
         let object = entities[entity_index]
@@ -2909,6 +2915,31 @@ fn simulate_step(
         }
     }
 
+    let total_items_before_global = planet_ids
+        .iter()
+        .map(|planet_id| {
+            entities
+                .iter()
+                .filter_map(Value::as_object)
+                .filter(|entity| string_at(entity, "planetId") == Some(planet_id))
+                .map(|entity| finite_number(entity.get("productionRate")))
+                .fold(0.0_f64, |sum, value| sum + value)
+        })
+        .collect::<Vec<_>>();
+
+    let quantum_flow = if crossed_quantum_boundary {
+        crate::quantum_logistics::settle_downloads(
+            state,
+            base,
+            entities,
+            &belt_reservation.output_credits,
+            first_quantum_boundary as f64 * 5.0,
+            5.0,
+        )?
+    } else {
+        None
+    };
+
     crate::belts::transfer(
         state,
         base,
@@ -2985,12 +3016,7 @@ fn simulate_step(
         combined.storage_capacity_mj = capacity_mj;
         combined.fuel_electric_energy_mj = fuel_electric_mj;
         combined.rated_fuel_generator_kw = rated_fuel_kw;
-        let total_items = entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| string_at(entity, "planetId") == Some(planet_id))
-            .map(|entity| finite_number(entity.get("productionRate")))
-            .fold(0.0_f64, |sum, value| sum + value);
+        let total_items = total_items_before_global[planet];
         power_grid_metrics.insert(planet_id.clone(), Value::Object(per_grid));
         planet_metrics.insert(
             planet_id.clone(),
@@ -3024,8 +3050,19 @@ fn simulate_step(
     if let Some(swarm) = base.get_mut("dysonSwarm").and_then(Value::as_object_mut) {
         swarm.insert("receiverLoadKw".to_owned(), Value::from(0));
     }
-    let elapsed = rounded(finite_number(base.get("elapsedSeconds")) + seconds, 4);
+    let elapsed = projected_elapsed;
     set_number(base, "elapsedSeconds", elapsed)?;
+    if crossed_quantum_boundary {
+        for boundary in first_quantum_boundary..=last_quantum_boundary {
+            crate::quantum_logistics::settle_uploads(
+                base,
+                entities,
+                boundary as f64 * 5.0,
+                quantum_flow.clone(),
+                5.0,
+            )?;
+        }
+    }
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
         let mut started = finite_number(endgame.get("exportWindowStartedAt"));
         if started <= 0.0 {

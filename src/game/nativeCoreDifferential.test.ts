@@ -637,6 +637,50 @@ function orbitalCollectorLogisticsState(): GameState {
   return state;
 }
 
+function quantumLogisticsState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("interstellar_logistics", "orbital_collection", "quantum_logistics_network");
+  state.quantumLogisticsNetwork.enabled = true;
+  state.quantumLogisticsNetwork.inventory.copper_ore = "5";
+  state.construction.interstellar_logistics_station = 2;
+  state.construction.orbital_collector = 1;
+  state.activePlanetId = "home";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 820, y: 80 }, 1);
+  const supplyId = state.entities.find((entity) => entity.buildingId === "interstellar_logistics_station")!.id;
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 1040, y: 80 }, 1);
+  const demandId = state.entities.find((entity) =>
+    entity.buildingId === "interstellar_logistics_station" && entity.id !== supplyId)!.id;
+  state = setStationSlotItem(state, supplyId, 0, "iron_ore");
+  state = setStationSlotMode(state, supplyId, 0, "remote", "supply");
+  state = setStationSlotItem(state, demandId, 0, "iron_ore");
+  state = setStationSlotMode(state, demandId, 0, "remote", "demand");
+  state = setStationSlotItem(state, demandId, 1, "copper_ore");
+  state = setStationSlotMode(state, demandId, 1, "remote", "demand");
+  state = setStationSlotPriority(state, demandId, 0, 2);
+  const supply = state.entities.find((entity) => entity.id === supplyId)!;
+  const demand = state.entities.find((entity) => entity.id === demandId)!;
+  for (const station of [supply, demand]) {
+    station.stationTier = 2;
+    station.quantumMode = "quantum";
+    station.stationVessels = 0;
+  }
+  supply.inputs = { iron_ore: 20 };
+  supply.outputs = { iron_ore: 80 };
+  demand.inputs = { iron_ore: 0, copper_ore: 0 };
+  demand.outputs = { iron_ore: 0, copper_ore: 0 };
+
+  state.activePlanetId = "giant";
+  state = placeBuilding(state, "orbital_collector", { x: 0, y: 0 }, 1);
+  const collector = state.entities.find((entity) => entity.buildingId === "orbital_collector")!;
+  collector.quantumMode = "quantum";
+  collector.storedItemId = "hydrogen";
+  collector.inputs = {};
+  collector.outputs = { hydrogen: 150 };
+  collector.progress = 0.25;
+  state.activePlanetId = "home";
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1155,6 +1199,48 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
     expect(advanced.summary.canonicalFields, "orbital-collector-60x1 顶层字段").toEqual(canonicalFields(expected));
     expect(advanced.summary.canonicalSha256, "orbital-collector-60x1 完整哈希").toBe(canonicalSha256(expected));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 90_000);
+
+  it("matches exact five-second quantum uploads, downloads, BigInt inventory, and collectors", async () => {
+    const initial = quantumLogisticsState();
+    const checkpoint = await seed(initial, 202);
+    for (const seconds of [1, 4, 5, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `quantum-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["quantumLogisticsNetwork", "totalProduced", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `quantum-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.quantumLogisticsNetwork, `quantum-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+      expect(projection.base.planetMetrics, `quantum-${seconds} 行星指标`).toEqual(JSON.parse(JSON.stringify(expected.planetMetrics)));
+      expect(advanced.summary.canonicalFields, `quantum-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `quantum-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    const opened = await open(checkpoint);
+    let expected = initial;
+    let revision = checkpoint.revision;
+    let advanced: any = null;
+    for (let index = 0; index < 60; index += 1) {
+      expected = advanceSimulationBudget(expected, 1, 1);
+      advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: revision, simulationSeconds: 1, wallSeconds: 1 },
+      });
+      expect(advanced.supported, `quantum-60x1-${index}: ${advanced.reason ?? ""}`).toBe(true);
+      revision += 1;
+    }
+    expect(advanced.summary.canonicalFields, "quantum-60x1 顶层字段").toEqual(canonicalFields(expected));
+    expect(advanced.summary.canonicalSha256, "quantum-60x1 完整哈希").toBe(canonicalSha256(expected));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 

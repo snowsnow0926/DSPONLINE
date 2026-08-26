@@ -12,6 +12,7 @@ mod infinite_research;
 mod interstellar_logistics;
 mod local_logistics;
 pub mod production_history;
+mod quantum_logistics;
 pub mod replay;
 mod simple_factory;
 pub mod simulation;

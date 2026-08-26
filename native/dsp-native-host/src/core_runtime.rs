@@ -290,9 +290,10 @@ impl CoreRegistry {
         session_id: &str,
         base_fields: &[String],
         entity_ids: &[String],
+        belt_ids: &[String],
     ) -> anyhow::Result<Value> {
         self.session(session_id)?
-            .projection(base_fields, entity_ids)
+            .projection(base_fields, entity_ids, belt_ids)
     }
 
     pub fn apply_command(

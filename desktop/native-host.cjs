@@ -352,6 +352,7 @@ class NativeCoreSessionRegistry {
     const validSelectors = (values, maximum) => Array.isArray(values) && values.length <= maximum &&
       values.every((value) => validLogicalId(value, 160));
     if (!validSelectors(request?.baseFields, 64) || !validSelectors(request?.entityIds, 32) ||
+      !validSelectors(request?.beltIds, 64) ||
       request.baseFields.some((field) => field === "entities" || field === "belts")) {
       throw new TypeError("native core projection request is invalid");
     }
@@ -360,6 +361,7 @@ class NativeCoreSessionRegistry {
       sessionId: request.sessionId,
       baseFields: request.baseFields,
       entityIds: request.entityIds,
+      beltIds: request.beltIds,
     });
   }
 

@@ -312,9 +312,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
-    if !state.belt_index.is_empty() {
-        return Ok(Some("simple-factory-belts-active"));
-    }
     if let Some(reason) = inactive_global_reason(state) {
         return Ok(Some(reason));
     }
@@ -421,6 +418,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             || grid_metrics.is_none_or(|values| !values.contains_key(&planet.id))
     }) {
         return Ok(Some("simple-factory-planet-directory-incomplete"));
+    }
+    if let Some(reason) = crate::belts::admission_reason(state)? {
+        return Ok(Some(reason));
     }
     Ok(None)
 }
@@ -617,7 +617,9 @@ fn machine_output_cycles(
     recipe: &RecipeDefinition,
     capacity: f64,
     maximum: f64,
+    credits: Option<&HashMap<String, f64>>,
 ) -> f64 {
+    let entity_id = string_at(entity, "id").unwrap_or_default();
     let outputs = entity.get("outputs").and_then(Value::as_object);
     recipe
         .outputs
@@ -627,7 +629,12 @@ fn machine_output_cycles(
                 .and_then(|values| values.get(&output.item_id))
                 .map(|value| finite_number(Some(value)))
                 .unwrap_or(0.0);
-            let free = ((capacity - current).max(0.0) + EPSILON).floor();
+            let free = ((capacity - current).max(0.0)
+                + credits
+                    .map(|credits| crate::belts::output_credit(credits, entity_id, &output.item_id))
+                    .unwrap_or(0.0)
+                + EPSILON)
+                .floor();
             available.min((free / output.amount).floor().min(maximum.floor().max(0.0)))
         })
 }
@@ -648,7 +655,7 @@ fn machine_can_run(
         buffer_limit,
     );
     (machine_input_cycles(entity, recipe) + EPSILON).floor() >= 1.0
-        && (machine_output_cycles(entity, recipe, capacity, 1.0) + EPSILON).floor() >= 1.0
+        && (machine_output_cycles(entity, recipe, capacity, 1.0, None) + EPSILON).floor() >= 1.0
 }
 
 fn metric_value(grid_id: Option<&str>, grid: &GridRuntime, total_items_per_minute: f64) -> Value {
@@ -702,8 +709,11 @@ fn simulate_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
+    belts: &mut [Value],
     seconds: f64,
 ) -> anyhow::Result<()> {
+    crate::belts::transfer(state, base, entities, belts, seconds, true, None, seconds)?;
+    let belt_reservation = crate::belts::reserve(state, base, entities, belts)?;
     let planet_ids = state
         .catalog
         .planets
@@ -1039,8 +1049,14 @@ fn simulate_step(
                 production_buffer_limit,
             );
             let input_cycles = (machine_input_cycles(object, recipe) + EPSILON).floor();
-            let output_cycles =
-                (machine_output_cycles(object, recipe, capacity, input_cycles) + EPSILON).floor();
+            let output_cycles = (machine_output_cycles(
+                object,
+                recipe,
+                capacity,
+                input_cycles,
+                Some(&belt_reservation.output_credits),
+            ) + EPSILON)
+                .floor();
             let maximum_cycles = input_cycles.min(output_cycles);
             let progress_at_start = finite_number(object.get("progress"));
             let power_factor = power_factors.get(&entity_index).copied().unwrap_or(1.0);
@@ -1159,7 +1175,9 @@ fn simulate_step(
             miner_count,
             production_buffer_limit,
         );
-        let free = (capacity - current).max(0.0);
+        let entity_id = string_at(object, "id").unwrap_or_default();
+        let free = (capacity - current).max(0.0)
+            + crate::belts::output_credit(&belt_reservation.output_credits, entity_id, &resource);
         let remaining_resource = finite_number(object.get("resourceRemaining"))
             .floor()
             .max(0.0);
@@ -1259,6 +1277,17 @@ fn simulate_step(
         }
     }
 
+    crate::belts::transfer(
+        state,
+        base,
+        entities,
+        belts,
+        0.0,
+        false,
+        Some(&belt_reservation.allowance_by_belt),
+        seconds,
+    )?;
+
     let mut power_grid_metrics = Map::new();
     let mut planet_metrics = Map::new();
     for (planet, planet_id) in planet_ids.iter().enumerate() {
@@ -1347,6 +1376,9 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
     let mut entities = (0..state.entity_index.len())
         .map(|index| state.parse_entity(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut belts = (0..state.belt_index.len())
+        .map(|index| state.parse_belt(index))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let total = simulation_seconds;
     let step_size = if total >= 24.0 * 60.0 * 60.0 {
         30.0
@@ -1359,7 +1391,7 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
     while remaining > EPSILON {
         let step = remaining.min(step_size);
         let mut base = std::mem::take(state.base_value_mut());
-        simulate_step(state, &mut base, &mut entities, step)
+        simulate_step(state, &mut base, &mut entities, &mut belts, step)
             .context("advance native simple factory step")?;
         *state.base_value_mut() = base;
         remaining = (remaining - step).max(0.0);
@@ -1367,6 +1399,11 @@ pub(crate) fn advance(state: &mut CoreState, simulation_seconds: f64) -> anyhow:
     for (raw, entity) in state.entity_raw_mut().iter_mut().zip(entities) {
         *raw = serde_json::to_string(&entity)
             .context("encode native simple factory entity")?
+            .into_boxed_str();
+    }
+    for (raw, belt) in state.belt_raw_mut().iter_mut().zip(belts) {
+        *raw = serde_json::to_string(&belt)
+            .context("encode native simple factory belt")?
             .into_boxed_str();
     }
     let universe_matrix = number_at(

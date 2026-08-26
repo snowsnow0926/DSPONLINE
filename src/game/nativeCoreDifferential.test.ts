@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
-import { advanceSimulationBudget, createInitialState, placeBuilding } from "./engine";
+import { advanceSimulationBudget, connectBeltWithResult, createInitialState, placeBuilding } from "./engine";
 import { CAMPAIGN_TASKS } from "./campaign";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import type { GameState } from "./types";
@@ -158,11 +158,27 @@ function simpleMiningState(): GameState {
     },
   );
   state.construction.arc_smelter = 2;
-  state = placeBuilding(state, "arc_smelter", { x: 320, y: -180 }, 2);
-  const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
-  smelter.recipeId = "iron_ingot";
-  smelter.inputs.iron_ore = 2_000;
-  smelter.outputs.iron_ingot = 0;
+  state = placeBuilding(state, "arc_smelter", { x: 320, y: -180 }, 1);
+  state = placeBuilding(state, "arc_smelter", { x: 320, y: 20 }, 1);
+  const smelters = state.entities.filter((entity) => entity.buildingId === "arc_smelter");
+  for (const smelter of smelters) {
+    smelter.recipeId = "iron_ingot";
+    smelter.inputs.iron_ore = 0;
+    smelter.outputs.iron_ingot = 0;
+  }
+  state.construction.assembling_machine_mk1 = 1;
+  state = placeBuilding(state, "assembling_machine_mk1", { x: 620, y: -80 }, 1);
+  const assembler = state.entities.find((entity) => entity.buildingId === "assembling_machine_mk1")!;
+  assembler.recipeId = "gear";
+  assembler.inputs.iron_ingot = 0;
+  assembler.outputs.gear = 0;
+  state.construction.conveyor_belt_mk1 = 16;
+  state = connectBeltWithResult(state, "vein_iron", smelters[0].id, "iron_ore", 1, undefined, 2).state;
+  state = connectBeltWithResult(state, "vein_iron", smelters[1].id, "iron_ore", 1, undefined, 1).state;
+  state = connectBeltWithResult(state, smelters[0].id, assembler.id, "iron_ingot", 1, undefined, 2).state;
+  state = connectBeltWithResult(state, smelters[1].id, assembler.id, "iron_ingot", 1, undefined, 1).state;
+  state.belts[0].priority = 2;
+  state.belts[1].priority = 1;
   return state;
 }
 
@@ -282,9 +298,11 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         operation: "coreProjection",
         sessionId: opened.sessionId,
         entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id),
         baseFields: [],
       });
       expect(projection.entities, `${seconds} 秒实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `${seconds} 秒线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
@@ -325,9 +343,11 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.supported, `finite-${seconds} native support: ${advanced.reason ?? ""}`).toBe(true);
       const projection = await client.request({
         operation: "coreProjection", sessionId: opened.sessionId,
-        entityIds: expected.entities.map((entity) => entity.id), baseFields: [],
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: expected.belts.map((belt) => belt.id), baseFields: [],
       });
       expect(projection.entities, `finite-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `finite-${seconds} 线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(advanced.summary.canonicalFields, `finite-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `finite-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });

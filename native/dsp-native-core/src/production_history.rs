@@ -309,12 +309,13 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
 
 impl CoreState {
     pub(crate) fn record_production_history(&mut self) -> anyhow::Result<()> {
-        if !self.belt_index.is_empty() {
-            bail!("native production history does not yet support belts");
-        }
         let entities = (0..self.entity_index.len())
             .map(|index| self.parse_entity(index))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let belts = (0..self.belt_index.len())
+            .map(|index| self.parse_belt(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let (belt_capacity, belt_flow) = crate::belts::aggregate_flow(self, &belts)?;
         let extractor_output_capacities = ["mining_machine", "oil_extractor", "water_pump"]
             .into_iter()
             .filter_map(|id| {
@@ -696,7 +697,7 @@ impl CoreState {
             "generationKw": rounded(generation, 2),
             "demandKw": rounded(demand, 2),
             "machineEfficiency": if refresh { rounded(if productive_units > 0.0 { utilized_units / productive_units } else { 0.0 }, 4) } else { previous_number("machineEfficiency").unwrap_or(0.0) },
-            "logisticsEfficiency": if refresh { 0.0 } else { previous_number("logisticsEfficiency").unwrap_or(0.0) },
+            "logisticsEfficiency": if refresh { rounded(if belt_capacity > 0.0 { (belt_flow / belt_capacity).min(1.0) } else { 0.0 }, 4) } else { previous_number("logisticsEfficiency").unwrap_or(0.0) },
             "powerEfficiency": rounded(if demand > 0.0 { (delivered / demand).min(1.0) } else { 1.0 }, 4),
             "activeMachines": if refresh { active.floor().max(0.0) } else { previous_number("activeMachines").unwrap_or(0.0).floor().max(0.0) },
             "blockedMachines": if refresh { blocked.floor().max(0.0) } else { previous_number("blockedMachines").unwrap_or(0.0).floor().max(0.0) },

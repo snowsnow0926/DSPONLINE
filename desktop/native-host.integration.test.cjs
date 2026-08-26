@@ -171,15 +171,18 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     sessionId: opened.sessionId,
     baseFields: ["paused", "elapsedSeconds"],
     entityIds: ["vein"],
+    beltIds: ["belt"],
   });
   assert.deepEqual(projection.base, { paused: true, elapsedSeconds: 0 });
   assert.deepEqual(projection.entities, [JSON.parse(entities)[0]]);
+  assert.deepEqual(projection.belts, [JSON.parse(belts)[0]]);
   await assert.rejects(
     client.request({
       operation: "coreProjection",
       sessionId: opened.sessionId,
       baseFields: ["entities"],
       entityIds: [],
+      beltIds: [],
     }),
     /unbounded collection/,
   );

@@ -150,7 +150,8 @@ fn handle_request(
             session_id,
             base_fields,
             entity_ids,
-        } => cores.projection(&session_id, &base_fields, &entity_ids)?,
+            belt_ids,
+        } => cores.projection(&session_id, &base_fields, &entity_ids, &belt_ids)?,
         ControlRequest::CoreApplyCommand {
             session_id,
             command,

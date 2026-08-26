@@ -193,9 +193,11 @@ export interface DesktopNativeCoreDomainCoverage {
   quiescentClock: boolean;
   infiniteSolidMining: boolean;
   finiteSolidMining: boolean;
+  fluidMining: boolean;
   windPower: boolean;
   renewablePower: boolean;
   ordinaryProduction: boolean;
+  ordinaryBelts: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;
@@ -254,12 +256,14 @@ export interface DesktopNativeCoreCommandRequest extends DesktopNativeCoreSessio
 export interface DesktopNativeCoreProjectionRequest extends DesktopNativeCoreSessionRequest {
   baseFields: string[];
   entityIds: string[];
+  beltIds: string[];
 }
 
 export interface DesktopNativeCoreProjectionResult {
   revision: number;
   base: Record<string, unknown>;
   entities: Array<Record<string, unknown>>;
+  belts: Array<Record<string, unknown>>;
 }
 
 export interface DesktopNativeCoreCommandResult {

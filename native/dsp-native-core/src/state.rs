@@ -14,6 +14,7 @@ const MAX_INTERNAL_RECORDS: usize = 4_096;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
 const MAX_BELT_COUNT: usize = 4_000_000;
 const MAX_PROJECTION_ENTITIES: usize = 32;
+const MAX_PROJECTION_BELTS: usize = 64;
 const MAX_PROJECTION_BASE_FIELDS: usize = 64;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const NONE_SYMBOL: u32 = u32::MAX;
@@ -51,6 +52,7 @@ pub struct DomainCoverage {
     pub wind_power: bool,
     pub renewable_power: bool,
     pub ordinary_production: bool,
+    pub ordinary_belts: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -77,6 +79,7 @@ impl DomainCoverage {
             wind_power: true,
             renewable_power: true,
             ordinary_production: true,
+            ordinary_belts: true,
             mining: false,
             production: false,
             research: false,
@@ -618,9 +621,11 @@ impl CoreState {
         &self,
         base_fields: &[String],
         entity_ids: &[String],
+        belt_ids: &[String],
     ) -> anyhow::Result<Value> {
         if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
             || entity_ids.len() > MAX_PROJECTION_ENTITIES
+            || belt_ids.len() > MAX_PROJECTION_BELTS
         {
             bail!("native core projection selection is too large");
         }
@@ -634,6 +639,7 @@ impl CoreState {
         if base_fields
             .iter()
             .chain(entity_ids)
+            .chain(belt_ids)
             .any(|value| !valid_key(value))
         {
             bail!("native core projection contains an invalid selector");
@@ -652,10 +658,16 @@ impl CoreState {
             .filter_map(|id| self.entity_index.get(id).copied())
             .map(|index| self.parse_entity(index))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let belts = belt_ids
+            .iter()
+            .filter_map(|id| self.belt_index.get(id).copied())
+            .map(|index| self.parse_belt(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let value = serde_json::json!({
             "revision": self.revision,
             "base": base,
             "entities": entities,
+            "belts": belts,
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native core projection exceeds the byte limit");

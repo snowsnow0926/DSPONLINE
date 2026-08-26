@@ -4,6 +4,7 @@
 //! host process supplies already verified checkpoint records; this library
 //! owns the compact runtime state and exposes bounded summaries/operations.
 
+mod belts;
 pub mod canonical;
 pub mod catalog;
 pub mod command;

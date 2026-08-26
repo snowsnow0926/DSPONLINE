@@ -70,6 +70,8 @@ pub enum ControlRequest {
         base_fields: Vec<String>,
         #[serde(default)]
         entity_ids: Vec<String>,
+        #[serde(default)]
+        belt_ids: Vec<String>,
     },
     CoreApplyCommand {
         session_id: String,

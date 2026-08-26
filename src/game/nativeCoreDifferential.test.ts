@@ -346,6 +346,19 @@ function finiteResearchState(): GameState {
   return state;
 }
 
+function partialCampaignResearchState(): GameState {
+  const state = finiteResearchState();
+  state.campaign = {
+    activeChapterId: "foundation",
+    activeTaskId: "mine_first_ore",
+    completedTaskIds: [],
+    rewardedTaskIds: [],
+  };
+  state.productionHistory = [];
+  state.historyRecordedAt = 0;
+  return state;
+}
+
 function infiniteResearchState(): GameState {
   const state = finiteResearchState();
   if (!state.research.completedTechIds.includes("universe_matrix")) {
@@ -1543,6 +1556,33 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.construction, `research-${seconds} 科研奖励`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
       expect(advanced.summary.canonicalFields, `research-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 60_000);
+
+  it("matches partial campaign completion, rewards, and research-lab blocked diagnostics", async () => {
+    const initial = partialCampaignResearchState();
+    const checkpoint = await seed(initial, 180);
+    for (const seconds of [1, 5, 10]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      expect(expected.campaign.completedTaskIds.length).toBeGreaterThan(0);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `partial-campaign-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["campaign", "construction", "tray", "productionHistory"],
+      });
+      expect(projection.base.campaign, `partial-campaign-${seconds} 任务状态`).toEqual(JSON.parse(JSON.stringify(expected.campaign)));
+      expect(projection.base.construction, `partial-campaign-${seconds} 建筑奖励`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
+      expect(projection.base.tray, `partial-campaign-${seconds} 物品奖励`).toEqual(JSON.parse(JSON.stringify(expected.tray)));
+      expect(projection.base.productionHistory, `partial-campaign-${seconds} 阻塞统计`).toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
+      expect(advanced.summary.canonicalFields, `partial-campaign-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `partial-campaign-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 60_000);

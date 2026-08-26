@@ -578,6 +578,11 @@ impl CoreState {
                     {
                         return true;
                     }
+                    if recipe.id == "matrix_research"
+                        && !crate::simple_factory::has_active_research(base)
+                    {
+                        return true;
+                    }
                     let count = finite_number(entity.get("machineCount")).unwrap_or(0.0);
                     let capacity =
                         stacked_capacity(building.output_capacity, count, production_buffer_limit);
@@ -602,16 +607,28 @@ impl CoreState {
                     if output_blocked {
                         return true;
                     }
-                    let missing_input = recipe.inputs.iter().any(|input| {
-                        entity
-                            .get("inputs")
-                            .and_then(Value::as_object)
-                            .and_then(|values| values.get(&input.item_id))
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0)
-                            + EPSILON
-                            < input.amount
-                    });
+                    let inputs = entity.get("inputs").and_then(Value::as_object);
+                    let missing_input = if recipe.id == "matrix_research" {
+                        crate::simple_factory::remaining_research_costs(self, base)
+                            .iter()
+                            .any(|(item_id, _)| {
+                                inputs
+                                    .and_then(|values| values.get(item_id))
+                                    .and_then(Value::as_f64)
+                                    .unwrap_or(0.0)
+                                    + EPSILON
+                                    < 1.0
+                            })
+                    } else {
+                        recipe.inputs.iter().any(|input| {
+                            inputs
+                                .and_then(|values| values.get(&input.item_id))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)
+                                + EPSILON
+                                < input.amount
+                        })
+                    };
                     if missing_input {
                         return true;
                     }

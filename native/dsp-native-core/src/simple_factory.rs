@@ -12,42 +12,6 @@ const DEFAULT_BUILDING_BUFFER_LIMIT: f64 = 1_000_000.0;
 const MAX_BUILDING_BUFFER_LIMIT: f64 = 100_000_000.0;
 const GRID_IDS: [&str; 3] = ["grid-a", "grid-b", "grid-c"];
 
-const CAMPAIGN_TASK_IDS: [&str; 31] = [
-    "mine_first_ore",
-    "smelt_iron",
-    "deploy_miner",
-    "lay_first_belt",
-    "deploy_matrix_lab",
-    "produce_blue_matrix",
-    "refine_oil",
-    "produce_plastic",
-    "produce_red_matrix",
-    "deploy_planetary_station",
-    "complete_planetary_trip",
-    "produce_structure_matrix",
-    "unlock_borealis",
-    "deploy_interstellar_station",
-    "complete_interstellar_trip",
-    "produce_information_matrix",
-    "produce_gravity_matrix",
-    "produce_universe_matrix",
-    "launch_solar_sail",
-    "launch_carrier_rocket",
-    "build_dyson_structure",
-    "absorb_shell_sail",
-    "side_storage",
-    "side_stable_power",
-    "side_belt_upgrade",
-    "side_rare_resource",
-    "side_spray_coater",
-    "side_blueprint",
-    "endgame_infinite_research",
-    "endgame_export",
-    "endgame_score",
-    // endgame_mastery is checked separately below. Keeping this explicit
-    // list catches accidental campaign additions at the native boundary.
-];
-
 #[derive(Debug, Clone, Copy, Default)]
 struct PlanetProfile {
     wind_multiplier: f64,
@@ -355,47 +319,13 @@ fn allocate_power_by_priority(
     allocated
 }
 
-fn exact_campaign_complete(base: &Map<String, Value>) -> bool {
-    let Some(campaign) = base.get("campaign").and_then(Value::as_object) else {
-        return false;
-    };
-    if campaign
-        .get("activeTaskId")
-        .is_none_or(|value| !value.is_null())
-        || campaign.get("activeChapterId").and_then(Value::as_str) != Some("galactic_endgame")
-    {
-        return false;
-    }
-    let expected = CAMPAIGN_TASK_IDS
-        .iter()
-        .copied()
-        .chain(std::iter::once("endgame_mastery"))
-        .collect::<HashSet<_>>();
-    let ids = |key: &str| {
-        campaign
-            .get(key)
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default()
-    };
-    ids("completedTaskIds") == expected && ids("rewardedTaskIds") == expected
-}
-
 fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     let base = state.base_value();
     if base.get("mode").and_then(Value::as_str) != Some("normal") {
         return Some("speedrun-factory-requires-domain-core");
     }
-    if !exact_campaign_complete(base) {
-        return Some("campaign-completion-requires-domain-core");
-    }
-    if !empty_array(base.get("handcraftQueue")) || !empty_array(base.get("constructionQueue")) {
-        return Some("craft-or-construction-queue-active");
+    if !empty_array(base.get("handcraftQueue")) {
+        return Some("handcraft-queue-active");
     }
     if !base
         .get("exploration")
@@ -424,6 +354,9 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
 pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     if let Some(reason) = inactive_global_reason(state) {
         return Ok(Some(reason));
+    }
+    if crate::campaign::validate_state(state.base_value()).is_err() {
+        return Ok(Some("campaign-state-invalid"));
     }
     if state.entity_index.is_empty() {
         return Ok(Some("simple-factory-is-empty"));
@@ -1055,37 +988,76 @@ fn endgame_unlocked(base: &Map<String, Value>) -> bool {
     completed_tech(base, "universe_matrix")
 }
 
-fn has_active_research(base: &Map<String, Value>) -> bool {
+pub(crate) fn has_active_research(base: &Map<String, Value>) -> bool {
     selected_technology_id(base).is_some()
         || active_infinite_research_id(base).is_some() && endgame_unlocked(base)
 }
 
-fn remaining_research_costs(state: &CoreState, base: &Map<String, Value>) -> Vec<(String, f64)> {
-    let Some(technology_id) = selected_technology_id(base) else {
-        return Vec::new();
-    };
-    let Some(technology) = state.catalog.technologies.get(technology_id) else {
+pub(crate) fn remaining_research_costs(
+    state: &CoreState,
+    base: &Map<String, Value>,
+) -> Vec<(String, f64)> {
+    if let Some((technology_id, technology)) = selected_technology_id(base).and_then(|id| {
+        state
+            .catalog
+            .technologies
+            .get(id)
+            .map(|technology| (id, technology))
+    }) {
+        let progress = base
+            .get("research")
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("progressByTech"))
+            .and_then(Value::as_object)
+            .and_then(|progress| progress.get(technology_id))
+            .and_then(Value::as_object);
+        return technology
+            .costs
+            .iter()
+            .filter_map(|cost| {
+                let completed = progress
+                    .and_then(|values| values.get(&cost.item_id))
+                    .map(|value| finite_number(Some(value)))
+                    .unwrap_or(0.0);
+                let remaining = (cost.amount - completed).max(0.0);
+                (remaining > 0.0).then(|| (cost.item_id.clone(), remaining))
+            })
+            .collect();
+    }
+    let Some(infinite_id) = active_infinite_research_id(base).filter(|_| endgame_unlocked(base))
+    else {
         return Vec::new();
     };
     let progress = base
-        .get("research")
+        .get("endgame")
         .and_then(Value::as_object)
-        .and_then(|research| research.get("progressByTech"))
+        .and_then(|endgame| endgame.get("infiniteResearch"))
         .and_then(Value::as_object)
-        .and_then(|progress| progress.get(technology_id))
+        .and_then(|research| research.get(infinite_id))
         .and_then(Value::as_object);
-    technology
-        .costs
-        .iter()
-        .filter_map(|cost| {
-            let completed = progress
-                .and_then(|values| values.get(&cost.item_id))
-                .map(|value| finite_number(Some(value)))
-                .unwrap_or(0.0);
-            let remaining = (cost.amount - completed).max(0.0);
-            (remaining > 0.0).then(|| (cost.item_id.clone(), remaining))
+    let level = progress
+        .and_then(|progress| progress.get("level"))
+        .map(|value| {
+            finite_number(Some(value))
+                .floor()
+                .clamp(0.0, u32::MAX as f64) as u32
         })
-        .collect()
+        .unwrap_or(0);
+    if crate::infinite_research::maximum_level(infinite_id).is_none_or(|maximum| level >= maximum) {
+        return Vec::new();
+    }
+    let completed = progress
+        .and_then(|progress| progress.get("progress"))
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u128>().ok())
+        .unwrap_or(0);
+    let remaining = crate::infinite_research::cost(infinite_id, level)
+        .unwrap_or(0)
+        .saturating_sub(completed)
+        .min(MAX_BUILDING_BUFFER_LIMIT as u128);
+    (remaining > 0)
+        .then(|| vec![("universe_matrix".to_owned(), remaining as f64)])
+        .unwrap_or_default()
 }
 
 fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()> {

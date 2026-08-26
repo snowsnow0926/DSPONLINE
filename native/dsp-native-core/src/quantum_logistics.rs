@@ -499,7 +499,10 @@ fn bandwidth_for_index(
     indexed_endpoint_indices: Option<&[usize]>,
 ) -> (f64, f64, f64) {
     let level = logistics_level(base);
-    let multiplier = (1.0 + 0.05 * level).powi(2);
+    // Match JavaScript's explicit `base * base` operation. `powi(2)` may
+    // differ by one ULP for very large research levels.
+    let multiplier_base = 1.0 + 0.05 * level;
+    let multiplier = multiplier_base * multiplier_base;
     let mut tower_stacks = 0.0;
     let mut collector_stacks = 0.0;
     let mut add_endpoint = |entity: &Map<String, Value>| {
@@ -528,7 +531,26 @@ fn bandwidth_for_index(
 }
 
 pub(crate) fn runtime_bandwidth(base: &Map<String, Value>, entities: &[Value]) -> RuntimeBandwidth {
-    let (per_minute, tower_stacks, collector_stacks) = bandwidth_for_index(base, entities, None);
+    let level = logistics_level(base);
+    let multiplier_base = 1.0 + 0.05 * level;
+    let multiplier = multiplier_base * multiplier_base;
+    let mut per_minute = 0.0;
+    let mut tower_stacks = 0.0;
+    let mut collector_stacks = 0.0;
+    // Immediate uploads create their runtime-flow snapshot through the legacy
+    // non-indexed JavaScript path. That path adds each tower's bandwidth in
+    // persisted entity order instead of multiplying the aggregate stack count.
+    // Preserve that operation order here because huge research levels can make
+    // the two mathematically equivalent expressions differ by one ULP.
+    for entity in entities.iter().filter_map(Value::as_object) {
+        if is_quantum_station(entity) {
+            let stacks = finite_number(entity.get("machineCount")).floor().max(0.0);
+            tower_stacks += stacks;
+            per_minute += UNIT_CAP_PER_MINUTE * multiplier * stacks;
+        } else if is_quantum_collector(entity) {
+            collector_stacks += finite_number(entity.get("machineCount")).floor().max(0.0);
+        }
+    }
     RuntimeBandwidth {
         per_minute,
         tower_stacks,

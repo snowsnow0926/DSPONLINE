@@ -8,7 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
-import { advanceSimulationBudget } from "./engine";
+import { advanceSimulationBudget, createSimulationLookupContext, getEntityOperatingStatus } from "./engine";
 import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
@@ -253,10 +253,43 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
         advancedSummary.canonicalFields?.[key] !== expectedFields[key]);
+      const mismatchProjection = fieldMismatches.length > 0
+        ? await client.request({
+          operation: "coreProjection",
+          sessionId: opened.sessionId,
+          entityIds: [], beltIds: [], baseFields: fieldMismatches,
+        })
+        : { base: {} };
+      const mismatchDetails = fieldMismatches.flatMap((key) => firstDifferences(
+        mismatchProjection.base?.[key],
+        (expected as unknown as Record<string, unknown>)[key],
+        20,
+      ).map((difference) => ({ ...difference, path: `${key}${difference.path ? `.${difference.path}` : ""}` }))).slice(0, 40);
+      const blockedMachineGroups = fieldMismatches.includes("productionHistory")
+        ? (() => {
+          const lookup = createSimulationLookupContext(expected);
+          const groups = new Map<string, { units: number; blocked: number }>();
+          for (const entity of expected.entities) {
+            if (entity.kind !== "machine" && !(entity.kind === "vein" && entity.minerCount > 0)) continue;
+            const key = `${entity.kind}:${entity.buildingId ?? entity.resourceId ?? "unknown"}:${entity.recipeId ?? "none"}`;
+            const units = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
+            const group = groups.get(key) ?? { units: 0, blocked: 0 };
+            group.units += units;
+            if (getEntityOperatingStatus(expected, entity, lookup).tone === "blocked") group.blocked += units;
+            groups.set(key, group);
+          }
+          return [...groups].map(([key, value]) => ({ key, ...value }))
+            .filter((group) => group.blocked > 0)
+            .sort((left, right) => right.blocked - left.blocked)
+            .slice(0, 30);
+        })()
+        : [];
       console.log(JSON.stringify({
         nativeCoreExactRealSaveAdvance: {
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
           fieldMismatches,
+          mismatchDetails,
+          blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
           nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),

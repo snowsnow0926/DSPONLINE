@@ -5,6 +5,7 @@
 //! owns the compact runtime state and exposes bounded summaries/operations.
 
 mod belts;
+mod campaign;
 pub mod canonical;
 pub mod catalog;
 pub mod command;

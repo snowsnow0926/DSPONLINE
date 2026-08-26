@@ -1540,13 +1540,24 @@ pub(crate) fn is_operating_blocked(
     }
     let entity_id = string_at(entity, "id").unwrap_or_default();
     let planet_id = string_at(entity, "planetId").unwrap_or_default();
-    let Some(job) = automation
+    let jobs = automation
         .get("jobs")
         .and_then(Value::as_object)
-        .and_then(|jobs| jobs.get(entity_id))
-        .and_then(Value::as_object)
-    else {
-        return Ok(false);
+        .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
+    let Some(job) = jobs.get(entity_id).and_then(Value::as_object) else {
+        // The JavaScript status path still tries to plan the next globally
+        // deficient target for an idle center. A missing plan means that the
+        // center is visibly blocked even though no persisted job exists yet.
+        let Some(target) = select_target(state, base, automation, jobs) else {
+            return Ok(false);
+        };
+        let empty = Map::new();
+        let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+        let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
+        let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+        return Ok(
+            crate::construction_planner::build_plan(state, base, &target, inventory).is_none(),
+        );
     };
     let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
     let Some(step) = job

@@ -322,6 +322,14 @@ impl CoreState {
                 &prepared.belts,
             )?;
             profile_mark!("production-history");
+            crate::campaign::synchronize(
+                self,
+                &mut prepared.base,
+                &prepared.entities,
+                &prepared.belts,
+            )?;
+            crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
+            profile_mark!("campaign");
             self.commit_simulated_state(prepared.base, prepared.entities, prepared.belts)?;
             self.revision += 1;
             profile_mark!("commit-state");

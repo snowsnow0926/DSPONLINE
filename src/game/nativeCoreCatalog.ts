@@ -31,6 +31,9 @@ export function createNativeCoreCatalog(
     planets: byId(PLANET_LIST.map((planet) => ({
       id: planet.id,
       systemId: planet.systemId,
+      kind: planet.kind,
+      orbitIndex: planet.orbitIndex,
+      orbitalYields: { ...planet.orbitalYields },
     }))),
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,

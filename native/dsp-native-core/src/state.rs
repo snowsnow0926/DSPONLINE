@@ -61,6 +61,7 @@ pub struct DomainCoverage {
     pub ordinary_belts: bool,
     pub storage_and_splitters: bool,
     pub planetary_logistics: bool,
+    pub same_system_interstellar_logistics: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -96,6 +97,7 @@ impl DomainCoverage {
             ordinary_belts: true,
             storage_and_splitters: true,
             planetary_logistics: true,
+            same_system_interstellar_logistics: true,
             mining: false,
             production: false,
             research: false,
@@ -934,6 +936,9 @@ mod tests {
                 planets: vec![PlanetDefinition {
                     id: "home".into(),
                     system_id: "helios".into(),
+                    kind: "terrestrial".into(),
+                    orbit_index: 1,
+                    orbital_yields: HashMap::new(),
                 }],
                 items: vec![ItemDefinition {
                     id: "iron_ore".into(),

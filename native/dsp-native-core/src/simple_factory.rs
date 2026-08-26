@@ -676,6 +676,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     if let Some(reason) = crate::local_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
+    if let Some(reason) = crate::interstellar_logistics::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
     Ok(None)
 }
 
@@ -2142,7 +2145,10 @@ fn simulate_step(
         }
     }
 
-    let ready_stations = crate::local_logistics::ready_station_indices(state, base, entities)?;
+    let mut ready_stations = crate::local_logistics::ready_station_indices(state, base, entities)?;
+    ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
+        state, base, entities,
+    )?);
     let mut disconnected_ready_stations = Vec::new();
     for &entity_index in &ready_stations {
         let object = entities[entity_index]
@@ -2926,7 +2932,12 @@ fn simulate_step(
             ))
         })
         .collect::<HashMap<_, _>>();
-    crate::local_logistics::settle(state, base, entities, seconds, &station_powers)?;
+    crate::local_logistics::dispatch(state, base, entities, &station_powers)?;
+    crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
+    crate::local_logistics::advance_routes(entities, seconds, &station_powers)?;
+    crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
+    crate::local_logistics::update_congestion(entities)?;
+    crate::interstellar_logistics::update_congestion(state, base, entities)?;
 
     let mut power_grid_metrics = Map::new();
     let mut planet_metrics = Map::new();

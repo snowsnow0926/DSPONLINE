@@ -30,6 +30,10 @@ pub struct ItemDefinition {
 pub struct PlanetDefinition {
     pub id: String,
     pub system_id: String,
+    pub kind: String,
+    pub orbit_index: u16,
+    #[serde(default)]
+    pub orbital_yields: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +196,13 @@ impl RuntimeCatalog {
             bail!("native catalog planet directory is empty");
         }
         for planet in &snapshot.planets {
-            if !valid_id(&planet.system_id) {
+            if !valid_id(&planet.system_id)
+                || !matches!(planet.kind.as_str(), "terrestrial" | "gas-giant")
+                || planet.orbit_index == 0
+                || planet.orbital_yields.iter().any(|(item_id, rate)| {
+                    !item_ids.contains(item_id.as_str()) || !rate.is_finite() || *rate <= 0.0
+                })
+            {
                 bail!("native catalog planet system ID is invalid: {}", planet.id);
             }
         }

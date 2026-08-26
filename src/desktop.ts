@@ -173,6 +173,9 @@ export interface DesktopNativeCoreRecipeDefinition {
 export interface DesktopNativeCorePlanetDefinition {
   id: string;
   systemId: string;
+  kind: "terrestrial" | "gas-giant";
+  orbitIndex: number;
+  orbitalYields: Record<string, number>;
 }
 
 export interface DesktopNativeCoreCatalog {
@@ -227,6 +230,7 @@ export interface DesktopNativeCoreDomainCoverage {
   ordinaryBelts: boolean;
   storageAndSplitters: boolean;
   planetaryLogistics: boolean;
+  sameSystemInterstellarLogistics: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;

@@ -20,6 +20,7 @@ pub mod replay;
 mod simple_factory;
 pub mod simulation;
 pub mod state;
+mod system_space_station;
 
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,

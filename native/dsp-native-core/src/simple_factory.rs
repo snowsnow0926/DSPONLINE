@@ -410,20 +410,6 @@ fn inactive_global_reason(state: &CoreState) -> Option<&'static str> {
     {
         return Some("time-warp-active");
     }
-    if base
-        .get("systemSpaceStations")
-        .and_then(Value::as_object)
-        .is_some_and(|stations| {
-            stations.values().any(|station| {
-                station
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_none_or(|status| status != "not-started")
-            })
-        })
-    {
-        return Some("system-space-station-active");
-    }
     let endgame = base.get("endgame");
     if endgame
         .and_then(Value::as_object)
@@ -641,6 +627,9 @@ pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Optio
         return Ok(Some("simple-factory-planet-directory-incomplete"));
     }
     if let Some(reason) = crate::orbital_station::admission_reason(state)? {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = crate::system_space_station::admission_reason(state)? {
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::belts::admission_reason(state)? {
@@ -2430,6 +2419,9 @@ fn simulate_step(
                 .copied(),
         );
     }
+    ready_stations.extend(crate::system_space_station::active_power_consumers(
+        state, base, entities,
+    ));
     let mut disconnected_ready_stations = Vec::new();
     for &entity_index in &ready_stations {
         let object = entities[entity_index]
@@ -3417,7 +3409,15 @@ fn simulate_step(
     set_number(base, "elapsedSeconds", elapsed)?;
     if crossed_quantum_boundary {
         for boundary in first_quantum_boundary..=last_quantum_boundary {
+            crate::system_space_station::settle_mode_transitions(entities)?;
             crate::quantum_logistics::settle_transitions(base, entities)?;
+            crate::system_space_station::settle_construction(state, base, entities)?;
+            crate::system_space_station::settle_hubs(
+                state,
+                base,
+                entities,
+                boundary as f64 * crate::system_space_station::boundary_seconds(),
+            )?;
             crate::quantum_logistics::settle_uploads(
                 base,
                 entities,
@@ -3518,6 +3518,13 @@ pub(crate) fn prepare_advance(
         })
     {
         step_size = step_size.min(5.0);
+    }
+    if entities
+        .iter()
+        .filter_map(Value::as_object)
+        .any(|entity| crate::system_space_station::is_elevator(entity))
+    {
+        step_size = step_size.min(crate::system_space_station::boundary_seconds());
     }
     let mut remaining = total;
     while remaining > EPSILON {

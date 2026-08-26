@@ -20,6 +20,7 @@ import {
 import { CAMPAIGN_TASKS } from "./campaign";
 import { getConstructionDefinition } from "./content";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
+import { startSystemSpaceStationConstruction } from "./systemSpaceStation";
 import type { GameState } from "./types";
 
 const require = createRequire(import.meta.url);
@@ -1055,6 +1056,110 @@ function orbitalCargoContractState(): GameState {
   return state;
 }
 
+function systemSpaceStationConstructionState(): GameState {
+  let state = simpleMiningState();
+  state.research.completedTechIds.push("system_space_station_engineering");
+  if (!state.exploration.unlockedSystemIds.includes("helios")) state.exploration.unlockedSystemIds.push("helios");
+  state.construction.space_station_construction_launcher = 1;
+  state = placeBuilding(state, "space_station_construction_launcher", { x: 1_500, y: 620 }, 1);
+  state = startSystemSpaceStationConstruction(state, "helios");
+  const launcher = state.entities.find((entity) => entity.buildingId === "space_station_construction_launcher")!;
+  launcher.inputs = {
+    titanium_alloy: 1_000_000,
+    frame_material: 2_500_000,
+    small_carrier_rocket: 100_000,
+    universe_matrix: 1_100_000,
+    dyson_sphere_component: 1_000_000,
+    titanium_glass: 1_000_000,
+    quantum_chip: 2_500_000,
+    antimatter_fuel_rod: 250_000,
+    annihilation_constraint_sphere: 500_000,
+    strange_matter: 1_000_000,
+    plane_filter: 1_000_000,
+    processor: 5_000_000,
+    particle_broadband: 2_000_000,
+  };
+  launcher.powerFactor = 0.625;
+  state.entities.find((entity) => entity.buildingId === "wind_turbine")!.machineCount = 100_000;
+  return state;
+}
+
+function systemHubElevatorState(): GameState {
+  let state = simpleMiningState();
+  const defaults = createInitialState(0x61a7e001);
+  state.systemSpaceStations = {
+    helios: JSON.parse(JSON.stringify(defaults.systemSpaceStations.helios)),
+    borealis: JSON.parse(JSON.stringify(defaults.systemSpaceStations.borealis)),
+  };
+  state.systemSpaceStations.helios!.status = "operational";
+  state.systemSpaceStations.borealis!.status = "operational";
+  state.systemSpaceStations.helios!.itemPolicies.iron_ingot = {
+    interstellarEnabled: true, reserve: "0", target: "0",
+  };
+  state.systemSpaceStations.borealis!.itemPolicies.iron_ingot = {
+    interstellarEnabled: true, reserve: "0", target: "2000",
+  };
+  state.systemSpaceStations.helios!.inventory.iron_ingot = "1000";
+  state.galacticHubNetwork = JSON.parse(JSON.stringify(defaults.galacticHubNetwork));
+  state.galacticHubNetwork.warpers = "200";
+  state.research.completedTechIds.push("unified_system_logistics_protocol");
+  state.construction.interstellar_logistics_station = 2;
+  state.activePlanetId = "home";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 1_250, y: 760 }, 1);
+  state.activePlanetId = "frost";
+  state = placeBuilding(state, "interstellar_logistics_station", { x: 1_250, y: 760 }, 1);
+  state.activePlanetId = "home";
+  state.tray = state.planetTrays.home;
+  const [homeElevator, frostElevator] = state.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station");
+  for (const elevator of [homeElevator, frostElevator]) {
+    elevator.stationTier = 2;
+    elevator.stationOperationMode = "elevator";
+    elevator.stationModeTransition = null;
+    elevator.stationSlots = [];
+    elevator.stationRoutes = [];
+    elevator.elevatorOutputItems = [null, null, null, null, null];
+    elevator.inputs = {};
+    elevator.outputs = {};
+    elevator.powerFactor = 0.8;
+  }
+  homeElevator.stationVessels = 20;
+  frostElevator.stationVessels = 0;
+  frostElevator.elevatorOutputItems = ["iron_ingot", null, null, null, null];
+
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  state.entities.push(
+    {
+      ...storage,
+      id: "native_hub_input_feed",
+      planetId: "home",
+      position: { x: 1_000, y: 760 },
+      storedItemId: "iron_ingot",
+      inputs: { iron_ingot: 0 },
+      outputs: { iron_ingot: 50_000 },
+      routingCursor: 0,
+    },
+    {
+      ...storage,
+      id: "native_hub_output_sink",
+      planetId: "frost",
+      position: { x: 1_500, y: 760 },
+      storedItemId: "iron_ingot",
+      inputs: { iron_ingot: 0 },
+      outputs: { iron_ingot: 0 },
+      routingCursor: 0,
+    },
+  );
+  state.construction.conveyor_belt_mk3 = 256;
+  state = connectBeltWithResult(
+    state, "native_hub_input_feed", homeElevator.id, "iron_ingot", 3, undefined, 32,
+  ).state;
+  state = connectBeltWithResult(
+    state, frostElevator.id, "native_hub_output_sink", "iron_ingot", 3, undefined, 32,
+  ).state;
+  state.entities.find((entity) => entity.buildingId === "wind_turbine")!.machineCount = 100_000;
+  return state;
+}
+
 describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-differential-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
@@ -1913,6 +2018,56 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.orbitalStation, `orbital-contract-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
       expect(advanced.summary.canonicalFields, `orbital-contract-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `orbital-contract-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("matches powered construction-launcher settlement across system-station phases", async () => {
+    const initial = systemSpaceStationConstructionState();
+    const checkpoint = await seed(initial, 209);
+    for (const seconds of [1, 5, 10, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `system-construction-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["systemSpaceStations", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `system-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.base.systemSpaceStations, `system-construction-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.systemSpaceStations)));
+      expect(advanced.summary.canonicalFields, `system-construction-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `system-construction-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("matches elevator belts, local hub settlement, cross-system fleet dispatch, and returns", async () => {
+    const initial = systemHubElevatorState();
+    const checkpoint = await seed(initial, 210);
+    for (const seconds of [1, 5, 10, 30, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `system-hub-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
+        baseFields: ["systemSpaceStations", "galacticHubNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
+      });
+      expect(projection.entities, `system-hub-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.belts, `system-hub-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
+      expect(projection.base.systemSpaceStations, `system-hub-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.systemSpaceStations)));
+      expect(projection.base.galacticHubNetwork, `system-hub-${seconds} 舰队`).toEqual(JSON.parse(JSON.stringify(expected.galacticHubNetwork)));
+      expect(advanced.summary.canonicalFields, `system-hub-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `system-hub-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 90_000);

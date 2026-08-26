@@ -455,6 +455,17 @@ fn move_to_target(
 }
 
 fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str) -> bool {
+    if crate::system_space_station::is_elevator(source) {
+        return source
+            .get("elevatorOutputItems")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .take(5)
+                    .any(|configured| configured.as_str() == Some(item_id))
+            });
+    }
     match string_at(source, "kind") {
         Some("vein") => string_at(source, "resourceId") == Some(item_id),
         Some("machine" | "power") => string_at(source, "recipeId")
@@ -485,6 +496,9 @@ fn target_consumes(
     item_id: &str,
     target_port_index: Option<u8>,
 ) -> bool {
+    if crate::system_space_station::is_elevator(target) {
+        return state.catalog.items.contains_key(item_id);
+    }
     if string_at(target, "buildingId") == Some("orbital_cargo_terminal") {
         return crate::orbital_station::terminal_accepts(state, target, item_id, target_port_index);
     }
@@ -870,12 +884,6 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         let Some(belt) = belt.as_object() else {
             return Ok(Some("ordinary-belt-record-invalid"));
         };
-        if belt
-            .get("elevatorOutputIndex")
-            .is_some_and(|value| !value.is_null())
-        {
-            return Ok(Some("ordinary-belt-special-port-unsupported"));
-        }
         let Some(source_id) = string_at(belt, "source") else {
             return Ok(Some("ordinary-belt-endpoint-invalid"));
         };
@@ -903,6 +911,28 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             .get("targetPortIndex")
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok());
+        let elevator_output_index = belt
+            .get("elevatorOutputIndex")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok());
+        if crate::system_space_station::is_elevator(source) {
+            if elevator_output_index.is_some_and(|index| {
+                index > 4
+                    || source
+                        .get("elevatorOutputItems")
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.get(usize::from(index)))
+                        .and_then(Value::as_str)
+                        != Some(item_id)
+            }) {
+                return Ok(Some("elevator-belt-output-port-invalid"));
+            }
+        } else if belt
+            .get("elevatorOutputIndex")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(Some("ordinary-belt-special-port-unsupported"));
+        }
         if string_at(target, "buildingId") == Some("micro_black_hole_connector") {
             let valid_port = target_port_index.is_some_and(|index| index <= 2)
                 && target

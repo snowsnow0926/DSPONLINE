@@ -157,9 +157,18 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, entity)| {
-            entity
-                .as_object()
-                .and_then(|object| (string_at(object, "kind") == Some("station")).then_some(index))
+            entity.as_object().and_then(|object| {
+                let building = string_at(object, "buildingId");
+                (string_at(object, "kind") == Some("station")
+                    && matches!(
+                        building,
+                        Some("planetary_logistics_station" | "interstellar_logistics_station")
+                    )
+                    && !(building == Some("interstellar_logistics_station")
+                        && finite_number(object.get("stationTier")).floor() == 2.0
+                        && string_at(object, "stationOperationMode") == Some("elevator")))
+                .then_some(index)
+            })
         })
         .collect()
 }
@@ -493,10 +502,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         {
             return Ok(Some("local-logistics-operation-mode-unsupported"));
         }
-        if station
-            .get("stationModeTransition")
-            .is_some_and(|value| !value.is_null())
-        {
+        if station.get("stationModeTransition").is_some_and(|value| {
+            !value.is_null() && !matches!(value.as_str(), Some("to-elevator" | "to-legacy"))
+        }) {
             return Ok(Some("local-logistics-transition-unsupported"));
         }
         let station_slots = match slots(station) {
@@ -556,7 +564,8 @@ pub(crate) fn transfer_buffers(
     base: &Map<String, Value>,
     entities: &mut [Value],
 ) -> anyhow::Result<()> {
-    for &station_index in &state.factory_topology.station_indices {
+    let station_indices = station_indices(entities);
+    for station_index in station_indices {
         let station = entities[station_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native local station is invalid"))?;
@@ -586,12 +595,12 @@ pub(crate) fn ready_station_indices(
     base: &Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<HashSet<usize>> {
-    let station_indices = &state.factory_topology.station_indices;
-    let directory = build_peer_directory(entities, station_indices)?;
-    if !directory_has_local_pair(&directory) && !has_local_route(entities, station_indices) {
+    let station_indices = station_indices(entities);
+    let directory = build_peer_directory(entities, &station_indices)?;
+    if !directory_has_local_pair(&directory) && !has_local_route(entities, &station_indices) {
         return Ok(HashSet::new());
     }
-    let ledger = build_ledger(entities, &state.entity_index, station_indices);
+    let ledger = build_ledger(entities, &state.entity_index, &station_indices);
     let mut ready = HashSet::new();
     for &station_index in &directory.station_indices {
         let station = entities[station_index].as_object().expect("station object");
@@ -691,13 +700,13 @@ pub(crate) fn dispatch(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
-    let station_indices = &state.factory_topology.station_indices;
-    let directory = build_peer_directory(entities, station_indices)?;
-    if !directory_has_local_pair(&directory) && !has_local_route(entities, station_indices) {
+    let station_indices = station_indices(entities);
+    let directory = build_peer_directory(entities, &station_indices)?;
+    if !directory_has_local_pair(&directory) && !has_local_route(entities, &station_indices) {
         return Ok(());
     }
     let indexes = &state.entity_index;
-    let mut ledger = build_ledger(entities, indexes, station_indices);
+    let mut ledger = build_ledger(entities, indexes, &station_indices);
     for &demand_index in &directory.station_indices {
         let demand_snapshot = entities[demand_index]
             .as_object()
@@ -950,13 +959,13 @@ pub(crate) fn advance_routes(
     seconds: f64,
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
-    let station_indices = &state.factory_topology.station_indices;
-    if !has_local_route(entities, station_indices) {
+    let station_indices = station_indices(entities);
+    if !has_local_route(entities, &station_indices) {
         return Ok(());
     }
     let indexes = &state.entity_index;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
-    for &demand_index in station_indices {
+    for &demand_index in &station_indices {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local demand is invalid"))?
@@ -1082,9 +1091,9 @@ pub(crate) fn advance_routes(
 }
 
 pub(crate) fn update_congestion(state: &CoreState, entities: &mut [Value]) -> anyhow::Result<()> {
-    let station_indices = &state.factory_topology.station_indices;
-    let directory = build_peer_directory(entities, station_indices)?;
-    if !directory_has_local_pair(&directory) && !has_local_route(entities, station_indices) {
+    let station_indices = station_indices(entities);
+    let directory = build_peer_directory(entities, &station_indices)?;
+    if !directory_has_local_pair(&directory) && !has_local_route(entities, &station_indices) {
         for &station_index in &directory.station_indices {
             let station = entities[station_index]
                 .as_object_mut()
@@ -1099,7 +1108,7 @@ pub(crate) fn update_congestion(state: &CoreState, entities: &mut [Value]) -> an
         }
         return Ok(());
     }
-    let ledger = build_ledger(entities, &state.entity_index, station_indices);
+    let ledger = build_ledger(entities, &state.entity_index, &station_indices);
     let mut updates = Vec::with_capacity(directory.station_indices.len());
     for &station_index in &directory.station_indices {
         let station = entities[station_index].as_object().expect("station object");

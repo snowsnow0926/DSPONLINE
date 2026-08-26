@@ -167,9 +167,15 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, entity)| {
-            entity
-                .as_object()
-                .and_then(|object| (string_at(object, "kind") == Some("station")).then_some(index))
+            entity.as_object().and_then(|object| {
+                let building = string_at(object, "buildingId");
+                (string_at(object, "kind") == Some("station")
+                    && (building == Some("orbital_collector")
+                        || building == Some("interstellar_logistics_station")
+                            && !(finite_number(object.get("stationTier")).floor() == 2.0
+                                && string_at(object, "stationOperationMode") == Some("elevator"))))
+                .then_some(index)
+            })
         })
         .collect()
 }
@@ -1164,14 +1170,12 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         if !matches!(
             string_at(station, "stationOperationMode"),
             None | Some("legacy")
-        ) || station
-            .get("stationModeTransition")
-            .is_some_and(|value| !value.is_null())
-            || !matches!(
-                string_at(station, "quantumMode"),
-                None | Some("legacy" | "quantum" | "transitioning")
-            )
-        {
+        ) || station.get("stationModeTransition").is_some_and(|value| {
+            !value.is_null() && !matches!(value.as_str(), Some("to-elevator" | "to-legacy"))
+        }) || !matches!(
+            string_at(station, "quantumMode"),
+            None | Some("legacy" | "quantum" | "transitioning")
+        ) {
             return Ok(Some("interstellar-station-mode-unsupported"));
         }
         let station_slots = match slots(station) {

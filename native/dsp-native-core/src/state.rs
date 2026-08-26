@@ -121,6 +121,10 @@ pub struct DomainCoverage {
     pub dyson_launchers: bool,
     pub dyson_ray_receivers: bool,
     pub orbital_cargo_terminals: bool,
+    pub system_space_station_construction: bool,
+    pub system_hub_logistics: bool,
+    pub elevator_belts: bool,
+    pub station_mode_transitions: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -172,6 +176,10 @@ impl DomainCoverage {
             dyson_launchers: true,
             dyson_ray_receivers: true,
             orbital_cargo_terminals: true,
+            system_space_station_construction: true,
+            system_hub_logistics: true,
+            elevator_belts: true,
+            station_mode_transitions: true,
             mining: false,
             production: false,
             research: false,
@@ -323,6 +331,7 @@ pub(crate) struct FactoryTopology {
     pub logistics_buffer_indices: Vec<usize>,
     pub material_delivery_hub_indices: Vec<usize>,
     pub orbital_cargo_terminal_indices: Vec<usize>,
+    pub space_station_launcher_indices: Vec<usize>,
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
     pub ordinary_machine_indices: Vec<usize>,
@@ -342,6 +351,7 @@ impl FactoryTopology {
             + self.logistics_buffer_indices.capacity()
             + self.material_delivery_hub_indices.capacity()
             + self.orbital_cargo_terminal_indices.capacity()
+            + self.space_station_launcher_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
@@ -926,6 +936,9 @@ impl CoreState {
             }
             if building == "orbital_cargo_terminal" {
                 factory_topology.orbital_cargo_terminal_indices.push(index);
+            }
+            if building == "space_station_construction_launcher" {
+                factory_topology.space_station_launcher_indices.push(index);
             }
             if kind == "power"
                 || (kind == "machine" && building == "ray_receiver" && recipe == "ray_power")

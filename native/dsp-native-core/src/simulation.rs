@@ -225,22 +225,49 @@ impl CoreState {
                 summary: self.summary()?,
             });
         }
-        if let Some(reason) = clock_only_reason(self) {
+        let clock_reason = clock_only_reason(self);
+        let simple_factory_reason = if clock_reason.is_some() {
+            crate::simple_factory::admission_reason(self)?
+        } else {
+            Some("quiescent-state")
+        };
+        if let (Some(clock_reason), Some(simple_reason)) = (clock_reason, simple_factory_reason) {
             return Ok(CoreAdvanceResult {
                 supported: false,
                 exact_scope: "unsupported-domain",
                 changed: false,
                 previous_revision,
                 revision: self.revision,
-                reason: Some(reason.to_owned()),
+                reason: Some(if clock_reason == "factory-records-active" {
+                    simple_reason.to_owned()
+                } else {
+                    clock_reason.to_owned()
+                }),
                 summary: self.summary()?,
+            });
+        }
+
+        let mut next = self.clone();
+        if simple_factory_reason.is_none() {
+            crate::simple_factory::advance(&mut next, simulation_seconds)?;
+            next.record_production_history()?;
+            next.revision += 1;
+            let summary = next.summary()?;
+            *self = next;
+            return Ok(CoreAdvanceResult {
+                supported: true,
+                exact_scope: "simple-factory-v1",
+                changed: true,
+                previous_revision,
+                revision: self.revision,
+                reason: None,
+                summary,
             });
         }
 
         // The predicate above is deliberately stricter than the JS fast path.
         // Once admitted, only global clock/diagnostic fields can change and
         // this implementation mirrors fastForwardQuiescentState exactly.
-        let mut next = self.clone();
         let base = next.base_value_mut();
         let elapsed_before = base
             .get("elapsedSeconds")
@@ -298,7 +325,7 @@ impl CoreState {
         // Normal-mode quiescent state has no speedrun wall clock. The budget
         // is accepted solely to prove segmentation equivalence.
         let _ = wall_seconds;
-        next.record_quiescent_production_history()?;
+        next.record_production_history()?;
         next.revision += 1;
         let summary = next.summary()?;
         *self = next;

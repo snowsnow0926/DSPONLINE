@@ -25,6 +25,13 @@ pub struct ItemDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlanetDefinition {
+    pub id: String,
+    pub system_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildingDefinition {
     pub id: String,
     pub kind: String,
@@ -63,6 +70,7 @@ pub struct BeltDefinition {
 pub struct CatalogSnapshot {
     pub protocol_version: u16,
     pub registry_fingerprint: String,
+    pub planets: Vec<PlanetDefinition>,
     pub items: Vec<ItemDefinition>,
     pub buildings: Vec<BuildingDefinition>,
     pub recipes: Vec<RecipeDefinition>,
@@ -73,6 +81,7 @@ pub struct CatalogSnapshot {
 pub struct RuntimeCatalog {
     pub snapshot: CatalogSnapshot,
     pub fingerprint: String,
+    pub planets: Vec<PlanetDefinition>,
     pub items: HashMap<String, ItemDefinition>,
     pub buildings: HashMap<String, BuildingDefinition>,
     pub recipes: HashMap<String, RecipeDefinition>,
@@ -117,10 +126,12 @@ impl RuntimeCatalog {
         let total = snapshot.items.len()
             + snapshot.buildings.len()
             + snapshot.recipes.len()
-            + snapshot.belts.len();
+            + snapshot.belts.len()
+            + snapshot.planets.len();
         if total == 0 || total > MAX_CATALOG_ENTRIES {
             bail!("native catalog entry count is invalid");
         }
+        unique_ids(snapshot.planets.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.items.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.buildings.iter().map(|value| value.id.as_str()))?;
         unique_ids(snapshot.recipes.iter().map(|value| value.id.as_str()))?;
@@ -129,6 +140,14 @@ impl RuntimeCatalog {
             .iter()
             .map(|value| value.id.as_str())
             .collect::<HashSet<_>>();
+        if snapshot.planets.is_empty() {
+            bail!("native catalog planet directory is empty");
+        }
+        for planet in &snapshot.planets {
+            if !valid_id(&planet.system_id) {
+                bail!("native catalog planet system ID is invalid: {}", planet.id);
+            }
+        }
         let building_ids = snapshot
             .buildings
             .iter()
@@ -194,6 +213,7 @@ impl RuntimeCatalog {
         }
         let material = serde_json::to_value(&snapshot).context("serialize native catalog")?;
         let fingerprint = canonical_sha256(&material);
+        let planets = snapshot.planets.clone();
         let items = snapshot
             .items
             .iter()
@@ -225,6 +245,7 @@ impl RuntimeCatalog {
         Ok(Self {
             snapshot,
             fingerprint,
+            planets,
             items,
             buildings,
             recipes,

@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   compactNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-compact", request),
   openNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-open", request),
   getNativeCoreStatus: (request) => ipcRenderer.invoke("desktop:native-core-status", request),
+  getNativeCoreProjection: (request) => ipcRenderer.invoke("desktop:native-core-projection", request),
   applyNativeCoreCommand: (request) => ipcRenderer.invoke("desktop:native-core-apply-command", request),
   advanceNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-advance", request),
   compareNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-compare", request),

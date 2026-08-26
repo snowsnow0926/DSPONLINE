@@ -1,6 +1,7 @@
 import {
   BUILDINGS,
   ITEMS,
+  PLANET_LIST,
   RECIPES,
   getBeltSpeed,
   getBeltTiers,
@@ -21,6 +22,10 @@ export function createNativeCoreCatalog(
   return {
     protocolVersion: 1,
     registryFingerprint: runtime.fingerprint,
+    planets: byId(PLANET_LIST.map((planet) => ({
+      id: planet.id,
+      systemId: planet.systemId,
+    }))),
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,
       kind: item.kind,
@@ -46,4 +51,3 @@ export function createNativeCoreCatalog(
     belts: getBeltTiers().map((tier) => ({ tier, speed: getBeltSpeed(tier) })),
   };
 }
-

@@ -13,6 +13,9 @@ const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
 const MAX_INTERNAL_RECORDS: usize = 4_096;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
 const MAX_BELT_COUNT: usize = 4_000_000;
+const MAX_PROJECTION_ENTITIES: usize = 32;
+const MAX_PROJECTION_BASE_FIELDS: usize = 64;
+const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const NONE_SYMBOL: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +45,12 @@ pub struct DomainCoverage {
     pub state_container: bool,
     pub command_patches: bool,
     pub quiescent_clock: bool,
+    pub infinite_solid_mining: bool,
+    pub finite_solid_mining: bool,
+    pub fluid_mining: bool,
+    pub wind_power: bool,
+    pub renewable_power: bool,
+    pub ordinary_production: bool,
     pub mining: bool,
     pub production: bool,
     pub research: bool,
@@ -62,6 +71,12 @@ impl DomainCoverage {
             state_container: true,
             command_patches: true,
             quiescent_clock: true,
+            infinite_solid_mining: true,
+            finite_solid_mining: true,
+            fluid_mining: true,
+            wind_power: true,
+            renewable_power: true,
+            ordinary_production: true,
             mining: false,
             production: false,
             research: false,
@@ -599,6 +614,55 @@ impl CoreState {
         Ok(Value::Object(state))
     }
 
+    pub fn projection(
+        &self,
+        base_fields: &[String],
+        entity_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
+            || entity_ids.len() > MAX_PROJECTION_ENTITIES
+        {
+            bail!("native core projection selection is too large");
+        }
+        let valid_key = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+                })
+        };
+        if base_fields
+            .iter()
+            .chain(entity_ids)
+            .any(|value| !valid_key(value))
+        {
+            bail!("native core projection contains an invalid selector");
+        }
+        let mut base = Map::new();
+        for field in base_fields {
+            if matches!(field.as_str(), "entities" | "belts") {
+                bail!("native core projection cannot select an unbounded collection");
+            }
+            if let Some(value) = self.base.get(field) {
+                base.insert(field.clone(), value.clone());
+            }
+        }
+        let entities = entity_ids
+            .iter()
+            .filter_map(|id| self.entity_index.get(id).copied())
+            .map(|index| self.parse_entity(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let value = serde_json::json!({
+            "revision": self.revision,
+            "base": base,
+            "entities": entities,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native core projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
     pub fn canonical_sha256(&self) -> anyhow::Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(b"{");
@@ -829,7 +893,8 @@ impl CoreState {
 mod tests {
     use super::*;
     use crate::catalog::{
-        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, RuntimeCatalog,
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
+        RuntimeCatalog,
     };
     use serde_json::json;
 
@@ -838,6 +903,10 @@ mod tests {
             CatalogSnapshot {
                 protocol_version: 1,
                 registry_fingerprint: "core".into(),
+                planets: vec![PlanetDefinition {
+                    id: "home".into(),
+                    system_id: "helios".into(),
+                }],
                 items: vec![ItemDefinition {
                     id: "iron_ore".into(),
                     kind: "solid".into(),

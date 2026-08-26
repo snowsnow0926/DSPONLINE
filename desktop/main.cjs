@@ -572,6 +572,11 @@ ipcMain.handle("desktop:native-core-status", async (event, request) => {
   return nativeCoreSessions.status(ownerId, request?.sessionId);
 });
 
+ipcMain.handle("desktop:native-core-projection", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.projection(ownerId, request);
+});
+
 ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
   const ownerId = requireTrustedNativeSender(event);
   return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);

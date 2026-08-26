@@ -347,6 +347,22 @@ class NativeCoreSessionRegistry {
     return this.client.request({ operation: "coreStatus", sessionId });
   }
 
+  projection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const validSelectors = (values, maximum) => Array.isArray(values) && values.length <= maximum &&
+      values.every((value) => validLogicalId(value, 160));
+    if (!validSelectors(request?.baseFields, 64) || !validSelectors(request?.entityIds, 32) ||
+      request.baseFields.some((field) => field === "entities" || field === "belts")) {
+      throw new TypeError("native core projection request is invalid");
+    }
+    return this.client.request({
+      operation: "coreProjection",
+      sessionId: request.sessionId,
+      baseFields: request.baseFields,
+      entityIds: request.entityIds,
+    });
+  }
+
   applyCommand(ownerId, sessionId, command) {
     this.assertOwner(ownerId, sessionId);
     return this.client.request({ operation: "coreApplyCommand", sessionId, command: normalizeNativeCoreCommand(command) });

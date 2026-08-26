@@ -64,6 +64,13 @@ pub enum ControlRequest {
     CoreStatus {
         session_id: String,
     },
+    CoreProjection {
+        session_id: String,
+        #[serde(default)]
+        base_fields: Vec<String>,
+        #[serde(default)]
+        entity_ids: Vec<String>,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,

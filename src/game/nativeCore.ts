@@ -3,6 +3,7 @@ import {
   type DesktopNativeCoreCompareResult,
   type DesktopNativeCoreOpenResult,
   type DesktopNativeCoreSummary,
+  type DesktopNativeCoreProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -14,6 +15,7 @@ export interface WindowsNativeCoreShadow {
   readonly sessionId: string;
   readonly checkpoint: DesktopNativeSaveCommitResult;
   status(): Promise<DesktopNativeCoreSummary>;
+  projection(request: { baseFields?: string[]; entityIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: { baseRevision: number; simulationSeconds: number; wallSeconds: number }): Promise<{ supported: boolean; revision: number; reason?: string }>;
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult>;
@@ -33,6 +35,17 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     const desktop = getDesktopBridge();
     if (!desktop) throw new Error("Windows 原生核心桥接已断开");
     return desktop.getNativeCoreStatus({ sessionId: this.sessionId });
+  }
+
+  async projection(request: { baseFields?: string[]; entityIds?: string[] }): Promise<DesktopNativeCoreProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    return desktop.getNativeCoreProjection({
+      sessionId: this.sessionId,
+      baseFields: request.baseFields ?? [],
+      entityIds: request.entityIds ?? [],
+    });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

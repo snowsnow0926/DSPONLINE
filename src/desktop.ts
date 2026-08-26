@@ -32,6 +32,7 @@ export interface DesktopBridge {
   compactNativeSave: (request: DesktopNativeSaveSlotRequest & { retainGenerations?: number }) => Promise<{ removedGenerations: number }>;
   openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
+  getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
@@ -163,9 +164,15 @@ export interface DesktopNativeCoreRecipeDefinition {
   outputs: Array<{ itemId: string; amount: number }>;
 }
 
+export interface DesktopNativeCorePlanetDefinition {
+  id: string;
+  systemId: string;
+}
+
 export interface DesktopNativeCoreCatalog {
   protocolVersion: 1;
   registryFingerprint: string;
+  planets: DesktopNativeCorePlanetDefinition[];
   items: DesktopNativeCoreItemDefinition[];
   buildings: DesktopNativeCoreBuildingDefinition[];
   recipes: DesktopNativeCoreRecipeDefinition[];
@@ -184,6 +191,11 @@ export interface DesktopNativeCoreDomainCoverage {
   stateContainer: boolean;
   commandPatches: boolean;
   quiescentClock: boolean;
+  infiniteSolidMining: boolean;
+  finiteSolidMining: boolean;
+  windPower: boolean;
+  renewablePower: boolean;
+  ordinaryProduction: boolean;
   mining: boolean;
   production: boolean;
   research: boolean;
@@ -239,6 +251,17 @@ export interface DesktopNativeCoreCommandRequest extends DesktopNativeCoreSessio
   command: Record<string, unknown>;
 }
 
+export interface DesktopNativeCoreProjectionRequest extends DesktopNativeCoreSessionRequest {
+  baseFields: string[];
+  entityIds: string[];
+}
+
+export interface DesktopNativeCoreProjectionResult {
+  revision: number;
+  base: Record<string, unknown>;
+  entities: Array<Record<string, unknown>>;
+}
+
 export interface DesktopNativeCoreCommandResult {
   previousRevision: number;
   revision: number;
@@ -255,7 +278,7 @@ export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessio
 
 export interface DesktopNativeCoreAdvanceResult {
   supported: boolean;
-  exactScope: "no-change" | "clock-only" | "unsupported-domain";
+  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "unsupported-domain";
   changed: boolean;
   previousRevision: number;
   revision: number;

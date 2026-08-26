@@ -91,6 +91,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   });
   const hello = await client.start("integration-test");
   assert.ok(hello.capabilities.includes("native-core-shadow-v1"));
+  assert.ok(hello.capabilities.includes("native-core-projection-v1"));
   const base = JSON.stringify({ version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 0, paused: false });
   const entities = JSON.stringify([{ id: "vein", kind: "vein", planetId: "home", resourceId: "iron_ore", minerCount: 2, inputs: {}, outputs: { iron_ore: 3 }, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0 }]);
   const belts = JSON.stringify([{ id: "belt", planetId: "home", source: "vein", target: "sink", itemId: "iron_ore", lanes: 1, tier: 1, priority: 1, progress: 0, lastFlow: 0 }]);
@@ -149,6 +150,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     catalog: {
       protocolVersion: 1,
       registryFingerprint: "builtin:test",
+      planets: [{ id: "home", systemId: "helios" }],
       items: [{ id: "iron_ore", kind: "solid" }],
       buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
       recipes: [],
@@ -164,6 +166,23 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(opened.summary.beltCount, 1);
   assert.equal(opened.summary.paused, true);
   assert.equal(opened.summary.coverage.authorityEligible, false);
+  const projection = await client.request({
+    operation: "coreProjection",
+    sessionId: opened.sessionId,
+    baseFields: ["paused", "elapsedSeconds"],
+    entityIds: ["vein"],
+  });
+  assert.deepEqual(projection.base, { paused: true, elapsedSeconds: 0 });
+  assert.deepEqual(projection.entities, [JSON.parse(entities)[0]]);
+  await assert.rejects(
+    client.request({
+      operation: "coreProjection",
+      sessionId: opened.sessionId,
+      baseFields: ["entities"],
+      entityIds: [],
+    }),
+    /unbounded collection/,
+  );
   const applied = await client.request({
     operation: "coreApplyCommand",
     sessionId: opened.sessionId,

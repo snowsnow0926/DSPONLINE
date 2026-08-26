@@ -285,6 +285,16 @@ impl CoreRegistry {
         self.session(session_id)?.summary()
     }
 
+    pub fn projection(
+        &self,
+        session_id: &str,
+        base_fields: &[String],
+        entity_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .projection(base_fields, entity_ids)
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

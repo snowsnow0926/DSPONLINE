@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
-import { advanceSimulationBudget, createInitialState } from "./engine";
+import { advanceSimulationBudget, createInitialState, placeBuilding } from "./engine";
+import { CAMPAIGN_TASKS } from "./campaign";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import type { GameState } from "./types";
 
@@ -84,6 +85,97 @@ function quiescentState(): GameState {
   state.endgame.activeInfiniteResearchId = null;
   state.endgame.constructionActivity.activityId = null;
   for (const project of Object.values(state.endgame.exportProjects)) project.enabled = false;
+  return state;
+}
+
+function simpleMiningState(): GameState {
+  let state = createInitialState(0x5e71cafe);
+  state.entities = state.entities.filter((entity) =>
+    ["vein_iron", "vein_water", "vein_oil"].includes(entity.id));
+  const configureExtractor = (
+    entityId: string,
+    extractorBuildingId: "mining_machine" | "water_pump" | "oil_extractor",
+    minerCount: number,
+  ) => {
+    const vein = state.entities.find((entity) => entity.id === entityId)!;
+    vein.minerCount = minerCount;
+    vein.extractorBuildingId = extractorBuildingId;
+    vein.outputs[vein.resourceId!] = 0;
+    vein.progress = 0;
+    vein.utilization = 0;
+    vein.productionRate = 0;
+  };
+  configureExtractor("vein_iron", "mining_machine", 4);
+  configureExtractor("vein_water", "water_pump", 2);
+  configureExtractor("vein_oil", "oil_extractor", 1);
+  state.belts = [];
+  state.settings.resourceMode = "infinite";
+  state.constructionAutomation.enabled = false;
+  state.constructionAutomation.jobs = {};
+  state.constructionAutomation.targetStock = {};
+  state.exploration.missions = [];
+  state.systemSpaceStations = {};
+  state.quantumLogisticsNetwork.enabled = false;
+  state.quantumLogisticsNetwork.inventory = {};
+  state.timeWarp.enabled = false;
+  state.timeWarp.controllerEntityId = null;
+  state.timeWarp.pendingSimulationSeconds = 0;
+  state.timeWarp.pendingWallSeconds = 0;
+  state.endgame.activeInfiniteResearchId = null;
+  state.endgame.infiniteResearch.vein_utilization.level = 3;
+  state.endgame.constructionActivity.activityId = null;
+  for (const project of Object.values(state.endgame.exportProjects)) project.enabled = false;
+  state.research.completedTechIds = ["mining_speed_2"];
+  const completedCampaign = CAMPAIGN_TASKS.map((task) => task.id);
+  state.campaign = {
+    activeChapterId: "galactic_endgame",
+    activeTaskId: null,
+    completedTaskIds: [...completedCampaign],
+    rewardedTaskIds: [...completedCampaign],
+  };
+  state.construction.wind_turbine = 2;
+  state = placeBuilding(state, "wind_turbine", { x: 0, y: -180 }, 2);
+  const wind = state.entities.find((entity) => entity.buildingId === "wind_turbine")!;
+  state.entities.push(
+    {
+      ...wind,
+      id: "native_solar_fixture",
+      buildingId: "solar_panel",
+      machineCount: 3,
+      position: { x: 160, y: -180 },
+      inputs: {},
+      outputs: {},
+    },
+    {
+      ...wind,
+      id: "native_geothermal_fixture",
+      buildingId: "geothermal_power_station",
+      planetId: "ashen",
+      machineCount: 1,
+      position: { x: 0, y: 0 },
+      inputs: {},
+      outputs: {},
+    },
+  );
+  state.construction.arc_smelter = 2;
+  state = placeBuilding(state, "arc_smelter", { x: 320, y: -180 }, 2);
+  const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+  smelter.recipeId = "iron_ingot";
+  smelter.inputs.iron_ore = 2_000;
+  smelter.outputs.iron_ingot = 0;
+  return state;
+}
+
+function finiteMiningState(): GameState {
+  const state = simpleMiningState();
+  state.settings.resourceMode = "finite";
+  for (const entityId of ["vein_iron", "vein_oil"]) {
+    const vein = state.entities.find((entity) => entity.id === entityId)!;
+    vein.resourceRemaining = 3;
+    vein.resourceCapacity = 3;
+    vein.resourceDepletionRemainder = 0;
+    vein.outputs[vein.resourceId!] = 0;
+  }
   return state;
 }
 
@@ -174,4 +266,113 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 30_000);
+
+  it("matches infinite mining, ordinary production, and renewable allocation at an exact boundary", async () => {
+    const initial = simpleMiningState();
+    const checkpoint = await seed(initial, 100);
+    for (const seconds of [1, 10, 60, 600]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `${seconds} 秒 native support: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection",
+        sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        baseFields: [],
+      });
+      expect(projection.entities, `${seconds} 秒实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    for (const sequence of [
+      { label: "simple-factory-60x1s", steps: Array.from({ length: 60 }, () => 1) },
+      { label: "simple-factory-10x60s", steps: Array.from({ length: 10 }, () => 60) },
+    ]) {
+      const opened = await open(checkpoint);
+      let expected = initial;
+      let revision = checkpoint.revision;
+      let advanced: any = null;
+      for (const seconds of sequence.steps) {
+        expected = advanceSimulationBudget(expected, seconds, seconds);
+        advanced = await client.request({
+          operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: revision, simulationSeconds: seconds, wallSeconds: seconds },
+        });
+        expect(advanced.supported, `${sequence.label} native support: ${advanced.reason ?? ""}`).toBe(true);
+        revision += 1;
+      }
+      expect(advanced.summary.canonicalFields, `${sequence.label} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `${sequence.label} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 120_000);
+
+  it("matches finite reserve depletion and the exhausted boundary", async () => {
+    const initial = finiteMiningState();
+    const checkpoint = await seed(initial, 150);
+    for (const seconds of [1, 10, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `finite-${seconds} native support: ${advanced.reason ?? ""}`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id), baseFields: [],
+      });
+      expect(projection.entities, `finite-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(advanced.summary.canonicalFields, `finite-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `finite-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 30_000);
+
+  it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(
+    "matches long mining boundaries and segmented offline settlement",
+    async () => {
+      const initial = simpleMiningState();
+      const checkpoint = await seed(initial, 200);
+      for (const seconds of [60, 600, 8 * 60 * 60, 30 * 24 * 60 * 60]) {
+        const opened = await open(checkpoint);
+        const expected = advanceSimulationBudget(initial, seconds, seconds);
+        const advanced = await client.request({
+          operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+        });
+        expect(advanced.supported, `long-${seconds} native support: ${advanced.reason ?? ""}`).toBe(true);
+        expect(advanced.summary.canonicalFields, `long-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+        expect(advanced.summary.canonicalSha256, `long-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      }
+      for (const sequence of [
+        { label: "mining-8x1h", steps: Array.from({ length: 8 }, () => 60 * 60) },
+        { label: "mining-30x1d", steps: Array.from({ length: 30 }, () => 24 * 60 * 60) },
+      ]) {
+        const opened = await open(checkpoint);
+        let expected = initial;
+        let revision = checkpoint.revision;
+        let advanced: any = null;
+        for (const seconds of sequence.steps) {
+          expected = advanceSimulationBudget(expected, seconds, seconds);
+          advanced = await client.request({
+            operation: "coreAdvance", sessionId: opened.sessionId,
+            request: { baseRevision: revision, simulationSeconds: seconds, wallSeconds: seconds },
+          });
+          expect(advanced.supported, `${sequence.label} native support: ${advanced.reason ?? ""}`).toBe(true);
+          revision += 1;
+        }
+        expect(advanced.summary.canonicalFields, `${sequence.label} 顶层字段`).toEqual(canonicalFields(expected));
+        expect(advanced.summary.canonicalSha256, `${sequence.label} 完整哈希`).toBe(canonicalSha256(expected));
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      }
+    },
+    240_000,
+  );
 });

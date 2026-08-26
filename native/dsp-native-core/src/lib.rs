@@ -9,12 +9,13 @@ pub mod catalog;
 pub mod command;
 pub mod production_history;
 pub mod replay;
+mod simple_factory;
 pub mod simulation;
 pub mod state;
 
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
-    RecipeDefinition,
+    PlanetDefinition, RecipeDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
 pub use simulation::{CoreAdvanceRequest, CoreAdvanceResult};

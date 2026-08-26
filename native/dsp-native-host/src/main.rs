@@ -63,6 +63,7 @@ fn handle_request(
                     "native-core-state-v1",
                     "native-core-shadow-v1",
                     "native-core-command-v1",
+                    "native-core-projection-v1",
                 ],
             })?
         }
@@ -145,6 +146,11 @@ fn handle_request(
             catalog,
         )?)?,
         ControlRequest::CoreStatus { session_id } => to_value(cores.status(&session_id)?)?,
+        ControlRequest::CoreProjection {
+            session_id,
+            base_fields,
+            entity_ids,
+        } => cores.projection(&session_id, &base_fields, &entity_ids)?,
         ControlRequest::CoreApplyCommand {
             session_id,
             command,

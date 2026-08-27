@@ -9,6 +9,7 @@ import {
   createSimulationAdvanceSession,
   getEntityInputCapacity,
   getEntityOutputCapacity,
+  getEntityProliferatorItemId,
   getTechnologyConstructionRewards,
   hasActiveResearch,
   normalizeConstructionAutomationCursor,
@@ -983,6 +984,15 @@ export interface PureIdleAffineContract {
   maximumSimulationSeconds?: number;
   /** Per-item credit horizons for the low-memory 30-second estimator. */
   maximumSimulationSecondsByItem?: Record<string, number>;
+  /**
+   * Conservative, closed-flow production factors proven from all three exact
+   * calibration windows. A positive factor means the item's sampled
+   * manufacture is funded by repeatable upstream production instead of a
+   * one-shot station/cache drawdown. These entries deliberately carry no
+   * inventory delta: production and its observed internal consumption cancel
+   * inside the certified steady-state domain.
+   */
+  steadyStateFactorsByItem?: Record<string, number>;
 }
 
 /** Legacy worker-call shape retained while conservative sampled tails are disabled. */
@@ -2032,6 +2042,275 @@ function validateAggregateConservation(before: AggregateConservationBaseline, af
   return null;
 }
 
+interface PureIdleFlowSnapshot {
+  stores: Map<string, bigint>;
+  produced: Map<string, bigint>;
+  grants: Map<string, bigint>;
+  failure?: string;
+}
+
+interface PureIdleSteadyStateResult {
+  contract: PureIdleAffineContract;
+  researchLedger: ResearchMacroLedger;
+}
+
+const PURE_IDLE_FLOW_FACTOR_SCALE = 1_000_000n;
+const PURE_IDLE_MATERIAL_POWER_BUILDINGS = new Set([
+  "thermal_power_plant",
+  "mini_fusion_power_plant",
+  "artificial_star",
+]);
+
+function capturePureIdleFlowSnapshot(state: GameState): PureIdleFlowSnapshot {
+  const stores = captureAggregateItemStores(state);
+  const grants = captureKnownMaterialGrants(state);
+  const produced = new Map<string, bigint>();
+  let failure = stores.failure ?? grants.failure;
+  for (const [itemId, raw] of Object.entries(state.totalProduced)) {
+    if (!Number.isSafeInteger(raw) || raw < 0) {
+      failure ??= `totalProduced.${itemId} 不是非负安全整数`;
+      continue;
+    }
+    produced.set(itemId, BigInt(raw));
+  }
+  return {
+    stores: stores.totals,
+    grants: grants.totals,
+    produced,
+    ...(failure ? { failure } : {}),
+  };
+}
+
+function pureIdleFlowRatio(numerator: bigint, denominator: bigint): number {
+  if (denominator <= 0n) return numerator > 0n ? 1 : 0;
+  if (numerator <= 0n) return 0;
+  const scaled = numerator * PURE_IDLE_FLOW_FACTOR_SCALE / denominator;
+  return Math.max(0, Math.min(1, Number(scaled) / Number(PURE_IDLE_FLOW_FACTOR_SCALE)));
+}
+
+function activePureIdleRecipeDependencies(states: readonly GameState[]): Map<string, Set<string>> {
+  const dependencies = new Map<string, Set<string>>();
+  const add = (outputItemId: string, inputItemId: string): void => {
+    let inputs = dependencies.get(outputItemId);
+    if (!inputs) dependencies.set(outputItemId, inputs = new Set());
+    inputs.add(inputItemId);
+  };
+  for (const state of states) {
+    for (const entity of state.entities) {
+      if (entity.machineCount < 1 || entity.productionRate <= EPSILON) continue;
+      const recipe = getRecipe(entity.recipeId);
+      if (!recipe || recipe.outputs.length < 1) continue;
+      const inputIds = recipe.inputs.map((input) => input.itemId);
+      const proliferatorItemId = entity.sprayCoaterInstalled
+        ? getEntityProliferatorItemId(entity)
+        : undefined;
+      for (const output of recipe.outputs) {
+        for (const inputItemId of inputIds) add(output.itemId, inputItemId);
+        // Spray is optional for exact simulation, but the measured boosted
+        // rate is not. Treat its sampled supply as a hard dependency so the
+        // steady-state certificate can only under-credit when spray runs out.
+        if (proliferatorItemId) add(output.itemId, proliferatorItemId);
+      }
+    }
+  }
+
+  // A factory materially powered by burning inventory must also prove that
+  // fuel flow. Tiny legacy fuel generators beside a mature Dyson grid are
+  // ignored only below one percent of observed generation; losing them cannot
+  // invalidate the measured power factor at the precision of this contract.
+  const calibrated = states.at(-1);
+  if (calibrated) {
+    const fuelEntities = calibrated.entities.filter((entity) =>
+      entity.buildingId && PURE_IDLE_MATERIAL_POWER_BUILDINGS.has(entity.buildingId) &&
+      (entity.powerOutputKw ?? 0) > EPSILON && entity.fuelItemId);
+    const fuelGenerationKw = fuelEntities.reduce((sum, entity) => sum + Math.max(0, entity.powerOutputKw ?? 0), 0);
+    let totalGenerationKw = 0;
+    for (const grids of Object.values(calibrated.powerGridMetrics)) {
+      for (const metrics of Object.values(grids)) totalGenerationKw += Math.max(0, metrics.generationKw);
+    }
+    if (fuelGenerationKw > Math.max(1, totalGenerationKw) * 0.01) {
+      const fuelItemIds = new Set(fuelEntities.flatMap((entity) => entity.fuelItemId ? [entity.fuelItemId] : []));
+      for (const inputs of dependencies.values()) {
+        for (const fuelItemId of fuelItemIds) inputs.add(fuelItemId);
+      }
+    }
+  }
+  return dependencies;
+}
+
+function scalePureIdleResearchLedger(
+  ledger: ResearchMacroLedger,
+  factors: Readonly<Record<string, number>>,
+): ResearchMacroLedger {
+  const activeItems = Object.entries(ledger.inflowPerWindow)
+    .filter(([, amount]) => (amount ?? 0n) > 0n)
+    .map(([itemId]) => itemId);
+  if (activeItems.length < 1 || activeItems.some((itemId) => factors[itemId] === undefined)) return ledger;
+  const factor = Math.min(...activeItems.map((itemId) => factors[itemId] ?? 0));
+  const scaled = BigInt(Math.max(0, Math.min(Number(PURE_IDLE_FLOW_FACTOR_SCALE),
+    Math.floor(factor * Number(PURE_IDLE_FLOW_FACTOR_SCALE)))));
+  if (scaled >= PURE_IDLE_FLOW_FACTOR_SCALE) return ledger;
+  const scale = (value: bigint): bigint => value * scaled / PURE_IDLE_FLOW_FACTOR_SCALE;
+  return {
+    ...ledger,
+    unitsPerWindow: scale(ledger.unitsPerWindow),
+    observedUnits: scale(ledger.observedUnits),
+    inflowPerWindow: Object.fromEntries(Object.entries(ledger.inflowPerWindow).map(([itemId, amount]) => [
+      itemId,
+      scale(amount ?? 0n),
+    ])),
+  };
+}
+
+/**
+ * Replace cache-depletion extrapolation with a closed steady-flow certificate
+ * wherever all three exact windows prove repeatable upstream supply.
+ *
+ * Items that cannot be proven retain the historical depletion-only contract
+ * and finite horizon. Certified items retain only conservative monotonic
+ * production counters; their sampled store transfers cancel inside the
+ * closed domain and therefore are never copied into persistent inventory.
+ */
+function createPureIdleSteadyStateContract(
+  source: GameState,
+  calibrated: GameState,
+  sampledContract: PureIdleAffineContract,
+  flowSnapshots: readonly PureIdleFlowSnapshot[],
+  researchLedger: ResearchMacroLedger,
+): PureIdleSteadyStateResult {
+  const bounded = freezePureIdleLightweightStoreReplenishment(sampledContract);
+  const boundedByItem = calculatePureIdleLightweightBoundaries(calibrated, sampledContract);
+  const boundedContract = boundedByItem ? { ...bounded, maximumSimulationSecondsByItem: boundedByItem } : bounded;
+  if (flowSnapshots.length < 2 || flowSnapshots.some((snapshot) => snapshot.failure)) {
+    return { contract: boundedContract, researchLedger };
+  }
+
+  const itemIds = new Set<string>();
+  for (const snapshot of flowSnapshots) {
+    for (const itemId of snapshot.stores.keys()) itemIds.add(itemId);
+    for (const itemId of snapshot.produced.keys()) itemIds.add(itemId);
+    for (const itemId of snapshot.grants.keys()) itemIds.add(itemId);
+  }
+  const dependencies = activePureIdleRecipeDependencies([source, calibrated]);
+  for (const [outputItemId, inputs] of dependencies) {
+    itemIds.add(outputItemId);
+    for (const inputItemId of inputs) itemIds.add(inputItemId);
+  }
+
+  const minimumProducedByWindow = new Map<string, bigint>();
+  const totalProducedByCalibration = new Map<string, bigint>();
+  const totalConsumedByCalibration = new Map<string, bigint>();
+  const invalidItems = new Set<string>();
+  for (const itemId of itemIds) {
+    let minimumProduced: bigint | undefined;
+    let totalProduced = 0n;
+    let totalConsumed = 0n;
+    for (let index = 1; index < flowSnapshots.length; index += 1) {
+      const before = flowSnapshots[index - 1];
+      const after = flowSnapshots[index];
+      const produced = (after.produced.get(itemId) ?? 0n) - (before.produced.get(itemId) ?? 0n);
+      const granted = (after.grants.get(itemId) ?? 0n) - (before.grants.get(itemId) ?? 0n);
+      const stockDelta = (after.stores.get(itemId) ?? 0n) - (before.stores.get(itemId) ?? 0n);
+      const consumed = produced + granted - stockDelta;
+      if (produced < 0n || granted < 0n || consumed < 0n) {
+        invalidItems.add(itemId);
+        break;
+      }
+      minimumProduced = minimumProduced === undefined || produced < minimumProduced ? produced : minimumProduced;
+      totalProduced += produced;
+      totalConsumed += consumed;
+    }
+    minimumProducedByWindow.set(itemId, invalidItems.has(itemId) ? 0n : minimumProduced ?? 0n);
+    totalProducedByCalibration.set(itemId, invalidItems.has(itemId) ? 0n : totalProduced);
+    totalConsumedByCalibration.set(itemId, invalidItems.has(itemId) ? 0n : totalConsumed);
+  }
+
+  const factors = new Map<string, number>();
+  for (const itemId of itemIds) factors.set(itemId, (minimumProducedByWindow.get(itemId) ?? 0n) > 0n ? 1 : 0);
+  const coverage = (itemId: string): number => {
+    // Store routing phases can move a large cache during one ten-second
+    // checkpoint and reverse it in the next. Use the complete thirty-second
+    // material identity for coverage, while the credited production rate
+    // below still uses the slowest individual window.
+    const produced = totalProducedByCalibration.get(itemId) ?? 0n;
+    const consumed = totalConsumedByCalibration.get(itemId) ?? 0n;
+    const factor = factors.get(itemId) ?? 0;
+    return consumed > 0n
+      ? Math.min(factor, pureIdleFlowRatio(produced, consumed) * factor)
+      : produced > 0n ? factor : 0;
+  };
+  const passLimit = Math.max(1, Object.keys(ITEMS).length * 2);
+  for (let pass = 0; pass < passLimit; pass += 1) {
+    let changed = false;
+    for (const [outputItemId, inputs] of dependencies) {
+      let next = factors.get(outputItemId) ?? 0;
+      for (const inputItemId of inputs) next = Math.min(next, coverage(inputItemId));
+      const previous = factors.get(outputItemId) ?? 0;
+      if (next + 1e-9 < previous) {
+        factors.set(outputItemId, next);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  const existingProducedDeltas = new Map<string, AffineDelta>();
+  for (const delta of sampledContract.deltas) {
+    if (delta.path[0] === "totalProduced" && typeof delta.path[1] === "string" &&
+      delta.kind === "number" && Number(delta.delta) > EPSILON) {
+      existingProducedDeltas.set(delta.path[1], delta);
+    }
+  }
+  const windowCount = BigInt(flowSnapshots.length - 1);
+  const certifiedFactors: Record<string, number> = {};
+  const steadyProducedDeltas: AffineDelta[] = [];
+  for (const itemId of [...itemIds].sort()) {
+    const factor = Math.max(0, Math.min(1, factors.get(itemId) ?? 0));
+    const producedPerWindow = minimumProducedByWindow.get(itemId) ?? 0n;
+    const scaledFactor = BigInt(Math.floor(factor * Number(PURE_IDLE_FLOW_FACTOR_SCALE)));
+    let certifiedDelta = producedPerWindow * windowCount * scaledFactor / PURE_IDLE_FLOW_FACTOR_SCALE;
+    const existing = existingProducedDeltas.get(itemId);
+    if (existing && existing.kind === "number") {
+      certifiedDelta = certifiedDelta < BigInt(Math.max(0, Math.floor(Number(existing.delta))))
+        ? certifiedDelta
+        : BigInt(Math.max(0, Math.floor(Number(existing.delta))));
+    }
+    if (certifiedDelta <= 0n || certifiedDelta > BigInt(Number.MAX_SAFE_INTEGER)) continue;
+    certifiedFactors[itemId] = factor;
+    if (!PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(itemId as ItemId)) {
+      steadyProducedDeltas.push({
+        path: ["totalProduced", itemId],
+        kind: "number",
+        delta: Number(certifiedDelta),
+        integer: true,
+      });
+    }
+  }
+  const certifiedItems = new Set(Object.keys(certifiedFactors));
+  if (certifiedItems.size < 1) return { contract: boundedContract, researchLedger };
+
+  const deltas = bounded.deltas.filter((delta) => {
+    const itemId = pureIdleLightweightContractItemId(delta.path);
+    if (!itemId || !certifiedItems.has(itemId)) return true;
+    return false;
+  });
+  deltas.push(...steadyProducedDeltas);
+  const remainingBoundaries = Object.fromEntries(Object.entries(boundedByItem ?? {})
+    .filter(([itemId]) => !certifiedItems.has(itemId)));
+  const contract: PureIdleAffineContract = {
+    ...bounded,
+    deltas,
+    steadyStateFactorsByItem: certifiedFactors,
+    ...(Object.keys(remainingBoundaries).length > 0
+      ? { maximumSimulationSecondsByItem: remainingBoundaries }
+      : {}),
+  };
+  return {
+    contract,
+    researchLedger: scalePureIdleResearchLedger(researchLedger, certifiedFactors),
+  };
+}
+
 const PURE_IDLE_TERMINAL_MATERIALS = ["small_carrier_rocket", "solar_sail"] as const;
 type PureIdleTerminalMaterialId = typeof PURE_IDLE_TERMINAL_MATERIALS[number];
 
@@ -2104,6 +2383,38 @@ function createPureIdleRocketMacroLedger(
       calibrationSeconds,
       producedPerWindow: produced,
       launchedPerWindow: launched,
+      launchesBySystemPerWindow,
+    },
+  };
+}
+
+function scalePureIdleRocketCalibrationForSteadyState(
+  calibration: PureIdleRocketMacroLedgerCalibration,
+  contract: PureIdleAffineContract,
+): PureIdleRocketMacroLedgerCalibration {
+  const ledger = calibration.ledger;
+  const factor = contract.steadyStateFactorsByItem?.small_carrier_rocket;
+  if (!ledger || factor === undefined || factor <= 0) return calibration;
+  if (factor >= 1 - 1e-9) return calibration;
+  const scaledFactor = BigInt(Math.max(0, Math.min(Number(PURE_IDLE_FLOW_FACTOR_SCALE),
+    Math.floor(factor * Number(PURE_IDLE_FLOW_FACTOR_SCALE)))));
+  const launchesBySystemPerWindow: Record<string, number> = {};
+  let launchedPerWindow = 0;
+  for (const [systemId, amount] of Object.entries(ledger.launchesBySystemPerWindow).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0)) {
+    const scaled = Number(BigInt(amount) * scaledFactor / PURE_IDLE_FLOW_FACTOR_SCALE);
+    if (scaled > 0) launchesBySystemPerWindow[systemId] = scaled;
+    launchedPerWindow += scaled;
+  }
+  const producedPerWindow = Number(BigInt(ledger.producedPerWindow) * scaledFactor / PURE_IDLE_FLOW_FACTOR_SCALE);
+  if (launchedPerWindow < 1 || producedPerWindow < launchedPerWindow) {
+    return { rejectionReason: "火箭稳态供给因子低于一个可验证发射事件，尾段已冻结" };
+  }
+  return {
+    ledger: {
+      ...ledger,
+      producedPerWindow,
+      launchedPerWindow,
       launchesBySystemPerWindow,
     },
   };
@@ -2525,6 +2836,7 @@ export function createPureIdleLightweightCalibration(
   if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
   const sharedPaths = new Map<string, AffinePath>();
   const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
+  const flowSnapshots = [capturePureIdleFlowSnapshot(state)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
   const rocketSnapshots = [capturePureIdleRocketCalibrationSnapshot(state)];
   const entityIds = state.entities.map((entity) => entity.id);
@@ -2547,6 +2859,7 @@ export function createPureIdleLightweightCalibration(
       (candidate) => {
         topologyStable &&= sameStableIdValues(entityIds, candidate.entities) && sameStableIdValues(beltIds, candidate.belts);
         snapshots.push(capturePureIdleLightweightSnapshot(candidate, sharedPaths));
+        flowSnapshots.push(capturePureIdleFlowSnapshot(candidate));
         researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
         rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
       },
@@ -2563,7 +2876,7 @@ export function createPureIdleLightweightCalibration(
     )
     : null;
   snapshots.length = 0;
-  const researchLedger = createResearchMacroLedgerFromSnapshots(
+  let researchLedger = createResearchMacroLedgerFromSnapshots(
     researchSnapshots,
     FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
   );
@@ -2586,16 +2899,24 @@ export function createPureIdleLightweightCalibration(
   if (activeFiniteResource || !topologyStable) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   } else {
-    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
-    if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
+    const steadyState = createPureIdleSteadyStateContract(
+      state,
+      shadow,
+      sampledContract,
+      flowSnapshots,
+      researchLedger,
+    );
+    contract = steadyState.contract;
+    researchLedger = steadyState.researchLedger;
   }
-  const rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
+  let rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
     ? { rejectionReason: "存在正在开采的有限矿脉，火箭尾段不能安全外推" }
     : !topologyStable
       ? { rejectionReason: "校准期间工厂拓扑发生变化，火箭尾段已冻结" }
       : contract.deltas.length < 1
         ? { rejectionReason: "普通生产样本未形成闭合合同，火箭尾段已冻结" }
         : createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS);
+  rocketCalibration = scalePureIdleRocketCalibrationForSteadyState(rocketCalibration, contract);
   return {
     contract,
     researchLedger,
@@ -2618,6 +2939,7 @@ async function createPureIdleLightweightCalibrationAsync(
   if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
   const sharedPaths = new Map<string, AffinePath>();
   const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
+  const flowSnapshots = [capturePureIdleFlowSnapshot(state)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
   const rocketSnapshots = [capturePureIdleRocketCalibrationSnapshot(state)];
   let shadow = structuredClone(state);
@@ -2635,6 +2957,7 @@ async function createPureIdleLightweightCalibrationAsync(
       (candidate, index) => {
         topologyStable &&= sameStableIds(state.entities, candidate.entities) && sameStableIds(state.belts, candidate.belts);
         snapshots.push(capturePureIdleLightweightSnapshot(candidate, sharedPaths));
+        flowSnapshots.push(capturePureIdleFlowSnapshot(candidate));
         researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
         rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
         asyncOptions.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, FAST_OFFLINE_CALIBRATION_SECONDS);
@@ -2652,7 +2975,7 @@ async function createPureIdleLightweightCalibrationAsync(
     )
     : null;
   snapshots.length = 0;
-  const researchLedger = createResearchMacroLedgerFromSnapshots(
+  let researchLedger = createResearchMacroLedgerFromSnapshots(
     researchSnapshots,
     FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
   );
@@ -2672,16 +2995,24 @@ async function createPureIdleLightweightCalibrationAsync(
   if (activeFiniteResource || !topologyStable) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   } else {
-    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
-    if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
+    const steadyState = createPureIdleSteadyStateContract(
+      state,
+      shadow,
+      sampledContract,
+      flowSnapshots,
+      researchLedger,
+    );
+    contract = steadyState.contract;
+    researchLedger = steadyState.researchLedger;
   }
-  const rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
+  let rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
     ? { rejectionReason: "存在正在开采的有限矿脉，火箭尾段不能安全外推" }
     : !topologyStable
       ? { rejectionReason: "校准期间工厂拓扑发生变化，火箭尾段已冻结" }
       : contract.deltas.length < 1
         ? { rejectionReason: "普通生产样本未形成闭合合同，火箭尾段已冻结" }
         : createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS);
+  rocketCalibration = scalePureIdleRocketCalibrationForSteadyState(rocketCalibration, contract);
   return {
     contract,
     researchLedger,

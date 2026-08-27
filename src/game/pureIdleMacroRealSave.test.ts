@@ -70,6 +70,9 @@ realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () 
     const settlementFinishedAt = performance.now();
     const finalWhiteDelta = (result.state.totalProduced.universe_matrix ?? 0) -
       (checkpoint.totalProduced.universe_matrix ?? 0);
+    const whiteLine = result.summary.terminalLines.find((line) => line.id === "white-matrix");
+    const rocketLine = result.summary.terminalLines.find((line) => line.id === "dyson-rockets");
+    const sailLine = result.summary.terminalLines.find((line) => line.id === "solar-sails");
 
     expect(result.summary).toMatchObject({
       algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
@@ -90,10 +93,20 @@ realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () 
       lastValidationReason: result.summary.lastValidationReason,
       degradedReason: result.summary.degradedReason,
       boundaryCorrections: result.summary.boundaryCorrections,
+      steadyStateItemCount: Object.keys(session.contract.steadyStateFactorsByItem ?? {}).length,
+      universeMatrixSteadyFactor: session.contract.steadyStateFactorsByItem?.universe_matrix,
+      minimumEfficiency: result.summary.minimumEfficiency,
     }));
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
     expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
     expect(finalRocketDelta).toBeGreaterThan(calibratedRocketDelta);
+    expect(session.contract.steadyStateFactorsByItem?.universe_matrix).toBeGreaterThan(0);
+    expect(session.contract.maximumSimulationSecondsByItem?.universe_matrix).toBeUndefined();
+    expect(whiteLine?.efficiency).toBeGreaterThan(0);
+    expect(whiteLine?.sustainableRatePerMinute).toBeGreaterThan(0);
+    expect(rocketLine?.efficiency).toBeGreaterThan(0);
+    expect(sailLine?.efficiency).toBeNull();
+    expect(result.summary.minimumEfficiency).toBeGreaterThan(0);
     for (const systemId of Object.keys(calibratedRocketPlanDeltas) as Array<keyof typeof checkpoint.dysonPlans>) {
       expect(result.state.dysonPlans[systemId].structurePoints - checkpoint.dysonPlans[systemId].structurePoints)
         .toBeGreaterThan(calibratedRocketPlanDeltas[systemId]);

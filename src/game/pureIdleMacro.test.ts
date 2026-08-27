@@ -93,6 +93,43 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
   });
 }
 
+function addInfiniteIronSupply(state: GameState): void {
+  state.settings.resourceMode = "infinite";
+  state.entities.push({
+    id: "pure-idle-infinite-iron",
+    kind: "vein",
+    planetId: "home",
+    position: { x: -200, y: 0 },
+    interactionLocked: false,
+    resourceId: "iron_ore",
+    extractorBuildingId: "mining_machine",
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 0,
+    minerCount: 1_000,
+    inputs: {},
+    outputs: { iron_ore: 1_000 },
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.belts.push({
+    id: "pure-idle-infinite-iron-feed",
+    planetId: "home",
+    source: "pure-idle-infinite-iron",
+    target: "pure-idle-smelter",
+    itemId: "iron_ore",
+    lanes: 1,
+    tier: 3,
+    sorterTier: 3,
+    progress: 0,
+    priority: 1,
+    totalTransferred: 0,
+    lastFlow: 0,
+  });
+}
+
 function addRecursiveConstructionCenter(state: GameState, target = 100): void {
   addWindGeneration(state, 50_000_000);
   if (!state.research.completedTechIds.includes("construction_automation")) {
@@ -696,6 +733,40 @@ describe("pure idle macro session", () => {
     expect(session.candidate.totalProduced.annihilation_constraint_sphere ?? 0).toBe(2);
     expect(session.candidate.entities.find((entity) => entity.id === assembler.id)!.inputs)
       .toMatchObject({ particle_container: 0, processor: 0 });
+  });
+
+  it("keeps an infinite closed supply chain productive after its transient caches would have expired", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addProductiveSmelter(source, 100);
+    addInfiniteIronSupply(source);
+    advanceExactSimulationWindow(source, 60, 4);
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "steady-flow certificate regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "steady-flow certificate segmented regression",
+    );
+    const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
+
+    const summary = advancePureIdleMacroSession(session, 24 * 60 * 60);
+    advancePureIdleMacroSession(segmented, 102);
+    advancePureIdleMacroSession(segmented, 10 * 60);
+    advancePureIdleMacroSession(segmented, 24 * 60 * 60);
+
+    expect(session.contract.steadyStateFactorsByItem?.iron_ingot).toBeGreaterThan(0);
+    expect(session.contract.maximumSimulationSecondsByItem?.iron_ingot).toBeUndefined();
+    expect(session.candidate.totalProduced.iron_ingot ?? 0).toBeGreaterThan(prefixProduced);
+    expect(summary.minimumEfficiency === null || summary.minimumEfficiency > 0).toBe(true);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(session.candidate));
+    expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
   });
 
   it("keeps compact conservative counters deterministic across idle boundaries", () => {

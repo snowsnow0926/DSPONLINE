@@ -26,7 +26,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v8-multisystem-rocket-ledger";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v9-steady-flow-certificate";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -310,10 +310,12 @@ function line(
   currentRate: number,
   boundaryCorrections: number,
   itemId?: ItemId,
+  supported = true,
+  unsupportedReason = "该终局事件尚未纳入可证明宏观账本",
 ): PureIdleLineStatus {
   const calibrationRatePerMinute = Math.max(0, rate * 60);
   const sustainableRatePerMinute = Math.max(0, currentRate * 60);
-  const efficiency = calibrationRatePerMinute <= 1e-9
+  const efficiency = !supported || calibrationRatePerMinute <= 1e-9
     ? null
     : Math.max(0, Math.min(1, sustainableRatePerMinute / calibrationRatePerMinute));
   return {
@@ -323,8 +325,10 @@ function line(
     calibrationRatePerMinute,
     sustainableRatePerMinute,
     efficiency,
-    reason: efficiency === null
-      ? "启动校准期间未运行"
+    reason: !supported
+      ? unsupportedReason
+      : efficiency === null
+        ? "启动校准期间未运行"
       : boundaryCorrections > 0
         ? "库存或容量边界已执行安全修正"
         : efficiency >= 0.9
@@ -335,12 +339,30 @@ function line(
 
 function terminalLines(session: PureIdleMacroSession): PureIdleLineStatus[] {
   const currentRate = session.currentRate;
+  const extrapolatesWhiteMatrix = session.contract.deltas.some((delta) =>
+    delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix") ||
+    currentRate.whiteMatrixProduced > 1e-9;
   return [
-    line("white-matrix", "白矩阵", session.calibrationRate.whiteMatrixProduced, currentRate.whiteMatrixProduced, session.boundaryCorrections, "universe_matrix"),
-    line("dyson-rockets", "小型运载火箭", session.calibrationRate.rocketsLaunched, currentRate.rocketsLaunched, session.boundaryCorrections, "small_carrier_rocket"),
-    line("solar-sails", "太阳帆吸收", session.calibrationRate.sailsAbsorbed, currentRate.sailsAbsorbed, session.boundaryCorrections, "solar_sail"),
-    line("dyson-structure", "戴森结构点", session.calibrationRate.structurePoints, currentRate.structurePoints, session.boundaryCorrections),
+    line("white-matrix", "白矩阵", session.calibrationRate.whiteMatrixProduced, currentRate.whiteMatrixProduced,
+      session.boundaryCorrections, "universe_matrix", extrapolatesWhiteMatrix,
+      "白矩阵没有形成可持续供需证书"),
+    line("dyson-rockets", "小型运载火箭", session.calibrationRate.rocketsLaunched, currentRate.rocketsLaunched,
+      session.boundaryCorrections, "small_carrier_rocket", Boolean(session.rocketLedger),
+      "火箭制造与多星系发射没有形成闭合事件账本"),
+    line("solar-sails", "太阳帆吸收", session.calibrationRate.sailsAbsorbed, currentRate.sailsAbsorbed,
+      session.boundaryCorrections, "solar_sail", false, "太阳帆吸收暂未纳入可证明宏观账本，不计入最低效率"),
+    line("dyson-structure", "戴森结构点", session.calibrationRate.structurePoints, currentRate.structurePoints,
+      session.boundaryCorrections, undefined, Boolean(session.rocketLedger),
+      "戴森结构没有形成闭合火箭事件账本"),
   ];
+}
+
+function pureIdleContractProductionRate(contract: PureIdleAffineContract, itemId: ItemId): number {
+  const delta = contract.deltas.find((entry) =>
+    entry.path[0] === "totalProduced" && entry.path[1] === itemId && entry.kind === "number");
+  return delta && contract.calibrationSeconds > 0
+    ? Math.max(0, Number(delta.delta) / contract.calibrationSeconds)
+    : 0;
 }
 
 export function summarizePureIdleMacroSession(session: PureIdleMacroSession): PureIdleMacroSummary {
@@ -519,11 +541,9 @@ export function createConservativePureIdleMacroSession(
       capturePureIdleTerminalSnapshot(calibrated.calibratedState),
       prefixSeconds,
     );
-    const extrapolatesWhiteMatrix = contract.deltas.some((delta) =>
-      delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix");
     currentRate = {
       ...emptyRate,
-      whiteMatrixProduced: extrapolatesWhiteMatrix ? measuredRate.whiteMatrixProduced : 0,
+      whiteMatrixProduced: pureIdleContractProductionRate(contract, "universe_matrix"),
       rocketsLaunched: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
       structurePoints: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
     };
@@ -551,13 +571,16 @@ export function createConservativePureIdleMacroSession(
     candidate = state;
   }
   const productiveTail = !prefixFailure && contract.deltas.length > 0 && contract.maximumSimulationSeconds !== 0;
+  const steadyStateItemCount = Object.keys(contract.steadyStateFactorsByItem ?? {}).length;
   const terminalTailDescription = rocketLedger
     ? `火箭按 ${Object.keys(rocketLedger.launchesBySystemPerWindow).length} 个恒星系的稳定事件账本推进；太阳帆、出口和合同尾段冻结`
     : `${rocketLedgerRejectionReason ?? "火箭样本未形成闭合事件账本"}；戴森发射、太阳帆、出口和合同尾段冻结`;
   const degradedReason = prefixFailure
     ? `${reason}；30 秒轻量校准未完成：${prefixFailure}`
     : productiveTail
-      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进，建筑制造巨构再按真实库存递归结算；${terminalTailDescription}`
+      ? steadyStateItemCount > 0
+        ? `${reason}；已用 3 个 10 秒精确窗口为 ${steadyStateItemCount} 类物料建立闭合稳态供需证书；可持续产线不再受物流缓存波动误停，未获证明的缓存产线仍按真实边界停止；建筑制造巨构按真实库存递归结算；${terminalTailDescription}`
+        : `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进，建筑制造巨构再按真实库存递归结算；${terminalTailDescription}`
       : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
@@ -950,7 +973,10 @@ export function advancePureIdleMacroSession(
       const construction = advanceConstructionAutomationMacroInPlace(session.candidate, constructionSeconds);
       session.pendingConstructionSimulationSeconds = 0;
       if (construction.completed > 0) {
-        session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；普通产线仍受轻量物料边界保护`;
+        const productionGuard = Object.keys(session.contract.steadyStateFactorsByItem ?? {}).length > 0
+          ? "普通产线继续按闭合稳态证书结算"
+          : "普通产线仍受轻量物料边界保护";
+        session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；${productionGuard}`;
       }
     }
     throwIfMacroInterrupted(options);

@@ -423,7 +423,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v8-multisystem-rocket-ledger");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v9-steady-flow-certificate");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -1053,7 +1053,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v8-multisystem-rocket-ledger");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v9-steady-flow-certificate");
     expect(result.complexityStrategy).toBe("fast");
     expect(result.conservativeOnly).toBe(true);
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);

@@ -1314,7 +1314,7 @@ test("real large pure-idle stop persists and rebases without main-thread payload
   await startPureIdle.click();
   const idle = page.getByRole("dialog", { name: "纯挂机" });
   await expect(idle).toBeVisible({ timeout: 120_000 });
-  await expect(idle).toContainText(/正常宏观结算中|保守宏观结算中/, { timeout: 120_000 });
+  await expect(idle).toContainText(/正常宏观结算中|稳态宏观结算中|保守宏观结算中/, { timeout: 120_000 });
 
   await page.evaluate(() => {
     const counters = { parse: 0, stringify: 0, textEncoder: 0, longTasks: [] as Array<{ startTime: number; duration: number }> };

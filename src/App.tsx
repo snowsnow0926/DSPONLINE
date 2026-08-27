@@ -4301,8 +4301,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setPureIdleRecoveryContinueState(false);
       setNotice(summary.conservativeOnly
         ? workerFailureFallback
-          ? "精确 Worker 连续失败，已用 3 × 10 秒可验证前缀建立保守宏观；原存档和恢复日志保持有效"
-          : "大型工厂已用 3 × 10 秒可验证前缀建立低内存宏观结算；稳定产线会继续按安全边界推进"
+          ? "精确 Worker 重建已切换到低内存路径；3 × 10 秒校准完成，闭合稳态产线继续结算，原存档和恢复日志保持有效"
+          : "大型工厂已用 3 × 10 秒校准建立低内存稳态结算；闭合供需产线持续推进，缓存产线仍受真实边界保护"
         : record.summary ? "纯挂机已从恢复日志继续，未结算墙钟时间保持不变" : "纯挂机校准完成，宏观守恒结算已开始");
       return client;
     } catch (error) {

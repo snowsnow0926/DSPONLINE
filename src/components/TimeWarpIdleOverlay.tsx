@@ -142,7 +142,10 @@ export function TimeWarpIdleOverlay({
   const phaseLabel = macroSummary
     ? macroSummary.phase === "preparing-power" ? "正在准备供电快照"
       : macroSummary.phase === "calibrating" ? "正在执行有界精确校准"
-        : macroSummary.phase === "conservative" ? "保守宏观结算中"
+        : macroSummary.phase === "conservative"
+          ? macroSummary.conservativeOnly && macroSummary.validationFailures === 0
+            ? "稳态宏观结算中"
+            : "保守宏观结算中"
           : macroSummary.phase === "research-boundary" ? "正在处理科研边界"
             : macroSummary.phase === "validating" ? "正在后台校验"
               : macroSummary.phase === "finalizing" ? "正在结算并验证存档"
@@ -196,7 +199,9 @@ export function TimeWarpIdleOverlay({
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
           : conservativeOnly
-            ? "精确 Worker 连续失败，已先结算 1 秒可验证前缀；其余不确定产线冻结，不会伪造产量，停止后仍可重试精确恢复。"
+            ? macroSummary?.validationFailures
+              ? "精确校准未能形成完整证书；系统仅提交已验证前缀，未获证明的尾段保持冻结，主存档不会被不完整候选覆盖。"
+              : "终局大存档已通过 3 × 10 秒精确校准建立闭合稳态供需证书；可持续产线长期按高倍率结算，只有依赖一次性缓存或尚未建模的事件会安全停止。"
             : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
 
         <section className="time-warp-idle-metrics" aria-label="运行摘要">

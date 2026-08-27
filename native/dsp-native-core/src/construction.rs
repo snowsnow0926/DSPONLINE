@@ -889,6 +889,136 @@ fn consume_requirements(
     Ok(true)
 }
 
+fn reserve_requirements(
+    base: &mut Map<String, Value>,
+    buffers: &mut Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    job: &mut Map<String, Value>,
+    requirements: &[ItemAmount],
+) -> anyhow::Result<bool> {
+    let mut inventory = job
+        .get("inventory")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+    let mut planet_tray = tray(base, planet_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+    let mut quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in requirements {
+        let required = floor_amount(requirement.amount);
+        let already_reserved = required.min(inventory_amount(&inventory, &requirement.item_id));
+        let mut remaining = required - already_reserved;
+        let in_tray = inventory_amount(&planet_tray, &requirement.item_id);
+        let from_tray = remaining.min(in_tray);
+        set_inventory_amount(&mut planet_tray, &requirement.item_id, in_tray - from_tray)?;
+        remaining -= from_tray;
+        let in_quantum = inventory_amount(&quantum, &requirement.item_id);
+        let from_quantum = remaining.min(in_quantum);
+        set_inventory_amount(
+            &mut quantum,
+            &requirement.item_id,
+            in_quantum - from_quantum,
+        )?;
+        remaining -= from_quantum;
+        if remaining > 0.0 {
+            return Ok(false);
+        }
+        let current = inventory_amount(&inventory, &requirement.item_id);
+        set_inventory_amount(
+            &mut inventory,
+            &requirement.item_id,
+            current + from_tray + from_quantum,
+        )?;
+    }
+    *tray_mut(base, planet_id)
+        .ok_or_else(|| anyhow!("native construction planet tray is missing"))? = planet_tray;
+    job.insert("inventory".to_owned(), Value::Object(inventory));
+    if quantum
+        .values()
+        .any(|amount| floor_amount(finite_number(Some(amount))) > 0.0)
+    {
+        buffers.insert(entity_id.to_owned(), Value::Object(quantum));
+    } else {
+        buffers.remove(entity_id);
+    }
+    Ok(true)
+}
+
+fn repair_job(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    job: &mut Map<String, Value>,
+) -> anyhow::Result<bool> {
+    let Some(construction_id) = string_at(job, "constructionId").map(str::to_owned) else {
+        return Ok(false);
+    };
+    let Some(target) = crate::construction_planner::targets(state)
+        .into_iter()
+        .find(|target| target.id == construction_id)
+    else {
+        return Ok(false);
+    };
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+    if let Some(job_inventory) = job.get("inventory").and_then(Value::as_object) {
+        for (item_id, amount) in job_inventory {
+            let current = inventory.get(item_id).copied().unwrap_or(0.0);
+            inventory.insert(
+                item_id.clone(),
+                floor_amount(current + finite_number(Some(amount))),
+            );
+        }
+    }
+    let Some(plan) = crate::construction_planner::build_plan(state, base, &target, inventory)
+    else {
+        return Ok(false);
+    };
+    if plan.steps.is_empty() {
+        return Ok(false);
+    }
+    let replacement = planned_job_value(&target, plan)
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("native repaired construction job is invalid"))?;
+    let replacement_steps = replacement
+        .get("steps")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow!("native repaired construction steps are invalid"))?;
+    let replacement_decisions = replacement
+        .get("recipeDecisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+    let steps = job
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native construction job steps are missing"))?;
+    steps.truncate(step_index.min(steps.len()));
+    steps.extend(replacement_steps);
+    job.insert(
+        "recipeDecisions".to_owned(),
+        Value::Array(replacement_decisions),
+    );
+    set_number(job, "elapsedSeconds", 0.0)?;
+    Ok(true)
+}
+
 fn normalize_quantum_buffers(buffers: &mut Map<String, Value>) {
     for value in buffers.values_mut() {
         if let Some(inventory) = value.as_object_mut() {
@@ -1307,18 +1437,34 @@ pub(crate) fn run_centers(
             };
             let step = parse_step(step_value)?;
             let requirements = requirements(state, &step)?;
-            let job_inventory = current_job
-                .get("inventory")
-                .and_then(Value::as_object)
-                .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-            let empty_quantum = Map::new();
-            let quantum = buffers
-                .get(&entity_id)
-                .and_then(Value::as_object)
-                .unwrap_or(&empty_quantum);
-            let tray = tray(base, &planet_id)
-                .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-            if !requirements_available(job_inventory, tray, quantum, &requirements) {
+            let inputs_available = {
+                let job_inventory = current_job
+                    .get("inventory")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+                let empty_quantum = Map::new();
+                let quantum = buffers
+                    .get(&entity_id)
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty_quantum);
+                let planet_tray = tray(base, &planet_id)
+                    .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+                requirements_available(job_inventory, planet_tray, quantum, &requirements)
+            };
+            if !inputs_available {
+                if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
+                    continue;
+                }
+                break;
+            }
+            if !reserve_requirements(
+                base,
+                &mut buffers,
+                &entity_id,
+                &planet_id,
+                current_job,
+                &requirements,
+            )? {
                 break;
             }
             let duration = step_duration(state, base, &step)?;

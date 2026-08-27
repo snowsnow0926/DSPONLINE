@@ -11680,10 +11680,36 @@ function constructionAutomationBatchInputsAvailable(
   cycles = 1,
   entityId?: string,
 ): boolean {
+  return constructionAutomationBatchMaximumCyclesForStock(state, planetId, batch, entityId) >=
+    Math.max(1, Math.floor(cycles));
+}
+
+/**
+ * A repeatable batch can return part of an input as the working capital for
+ * its next cycle. Requiring `cost * cycles` up front incorrectly turns a
+ * closed recursive recipe into one job per scheduler iteration. The first
+ * cycle needs the full prefix; every later cycle needs only the net loss.
+ */
+function constructionAutomationBatchMaximumCyclesForStock(
+  state: GameState,
+  planetId: PlanetId,
+  batch: RepeatableConstructionAutomationBatch,
+  entityId?: string,
+): number {
   const tray = trayForPlanet(state, planetId);
   const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
-  return (Object.entries(batch.trayCosts) as Array<[ItemId, number]>).every(([itemId, amount]) =>
-    constructionQuantumAvailable(tray, {}, quantumBuffer, itemId) >= constructionQuantumSafeMultiply(amount, cycles));
+  let maximum = Number.MAX_SAFE_INTEGER;
+  for (const [itemId, rawCost] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
+    const cost = Math.max(0, Math.floor(rawCost));
+    if (cost < 1) continue;
+    const returned = Math.max(0, Math.floor(batch.trayReturns[itemId] ?? 0));
+    const available = constructionQuantumAvailable(tray, {}, quantumBuffer, itemId);
+    if (available < cost) return 0;
+    const netCost = Math.max(0, cost - returned);
+    if (netCost < 1) continue;
+    maximum = Math.min(maximum, 1 + Math.floor((available - cost) / netCost));
+  }
+  return maximum;
 }
 
 function constructionAutomationCachedPlanValid(
@@ -11725,6 +11751,10 @@ function constructionAutomationCachedPlanValid(
 function constructionAutomationPlanningState(state: GameState, planetId: PlanetId): GameState {
   const sourceTray = trayForPlanet(state, planetId);
   const tray = { ...sourceTray };
+  const quantumMaterialBuffer = state.constructionAutomation.quantumMaterialBuffer
+    ? Object.fromEntries(Object.entries(state.constructionAutomation.quantumMaterialBuffer)
+      .map(([entityId, inventory]) => [entityId, { ...inventory }]))
+    : undefined;
   return {
     ...state,
     tray: planetId === state.activePlanetId ? tray : state.tray,
@@ -11737,6 +11767,7 @@ function constructionAutomationPlanningState(state: GameState, planetId: PlanetI
       targetStock: { ...state.constructionAutomation.targetStock },
       destroyedByproducts: { ...state.constructionAutomation.destroyedByproducts },
       jobs: {},
+      ...(quantumMaterialBuffer ? { quantumMaterialBuffer } : {}),
     },
   };
 }
@@ -11853,6 +11884,7 @@ function tryBuildStableConstructionAutomationCycle(
   first: RepeatableConstructionAutomationBatch,
   budget: ConstructionAutomationComputeBudget,
   profiler?: SimulationProfiler,
+  entityId?: string,
 ): RepeatableConstructionAutomationBatch | null {
   const maxProbeJobs = 8;
   if (first.jobsPerCycle !== 1 || budget.remainingPlanBuilds < 1) return null;
@@ -11864,10 +11896,15 @@ function tryBuildStableConstructionAutomationCycle(
   const cycleStateItems = new Set<ItemId>();
   for (let probe = 1; probe <= maxProbeJobs; probe += 1) {
     for (const itemId of Object.keys(current.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
-    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1);
+    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1, entityId);
     if (JSON.stringify(planning.constructionAutomation.destroyedByproducts) !== destroyedBefore) return null;
     if (budget.remainingPlanBuilds < 1) return null;
-    const nextPlan = buildConstructionAutomationPlan(planning, definition, planetId);
+    const nextPlan = buildConstructionAutomationPlan(
+      planning,
+      definition,
+      planetId,
+      entityId ? constructionAutomationQuantumBuffer(planning, entityId) : undefined,
+    );
     budget.remainingPlanBuilds -= 1;
     if (profiler) profiler.constructionPlanBuilds += 1;
     if (nextPlan.blocker) return null;
@@ -11963,18 +12000,17 @@ function applyConstructionAutomationBatch(
   const count = cycleCount * Math.max(1, Math.floor(batch.jobsPerCycle));
   const tray = trayForPlanet(state, planetId);
   const quantumBuffer = entityId ? { ...constructionAutomationQuantumBuffer(state, entityId) } : undefined;
-  if (!entityId) {
-    for (const itemId of batch.touchedTrayItems) {
-      if (tray[itemId] === undefined) tray[itemId] = 0;
-    }
+  if (!constructionAutomationBatchInputsAvailable(state, planetId, batch, cycleCount, entityId)) return 0;
+  for (const itemId of batch.touchedTrayItems) {
+    if (tray[itemId] === undefined) tray[itemId] = 0;
   }
-  for (const [itemId, amount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
-    let remaining = constructionQuantumSafeMultiply(amount, cycleCount);
-    const fromTray = Math.min(remaining, Math.max(0, Math.floor(tray[itemId] ?? 0)));
+  const consumeCombined = (itemId: ItemId, rawAmount: number, trayFloor = 0): boolean => {
+    let remaining = Math.max(0, Math.floor(rawAmount));
+    const currentTrayAmount = Math.max(0, Math.floor(tray[itemId] ?? 0));
+    const fromTray = Math.min(remaining, Math.max(0, currentTrayAmount - Math.max(0, Math.floor(trayFloor))));
     if (fromTray > 0) {
-      const nextTrayAmount = Math.max(0, Math.floor(tray[itemId] ?? 0) - fromTray);
-      if (entityId && nextTrayAmount < 1) delete tray[itemId];
-      else tray[itemId] = nextTrayAmount;
+      const nextTrayAmount = currentTrayAmount - fromTray;
+      tray[itemId] = nextTrayAmount;
       remaining -= fromTray;
     }
     if (entityId && quantumBuffer && remaining > 0) {
@@ -11986,14 +12022,11 @@ function applyConstructionAutomationBatch(
         remaining -= fromQuantum;
       }
     }
-    // The caller checks availability first. Clamp rather than inventing a
-    // negative stack if a malformed imported batch reaches this path.
-    if (remaining > 0 && !entityId) tray[itemId] = 0;
-  }
-  if (entityId && quantumBuffer) setConstructionAutomationQuantumBuffer(state, entityId, quantumBuffer);
-  for (const [itemId, amount] of Object.entries(batch.trayReturns) as Array<[ItemId, number]>) {
-    const returned = Math.max(0, Math.floor(amount * cycleCount));
-    if (returned < 1) continue;
+    return remaining < 1;
+  };
+  const storeTrayReturn = (itemId: ItemId, rawAmount: number): void => {
+    const returned = Math.max(0, Math.floor(rawAmount));
+    if (returned < 1) return;
     const current = Math.max(0, Math.floor(tray[itemId] ?? 0));
     const stored = Math.min(returned, Math.max(0, getPlanetTrayItemLimit(state, planetId) - current));
     if (stored > 0) tray[itemId] = current + stored;
@@ -12003,7 +12036,42 @@ function applyConstructionAutomationBatch(
         (state.constructionAutomation.destroyedByproducts[itemId] ?? 0) + destroyed,
       ));
     }
+  };
+  const materialItems = new Set<ItemId>([
+    ...Object.keys(batch.trayCosts),
+    ...Object.keys(batch.trayReturns),
+  ] as ItemId[]);
+  for (const itemId of materialItems) {
+    const cost = Math.max(0, Math.floor(batch.trayCosts[itemId] ?? 0));
+    const returned = Math.max(0, Math.floor(batch.trayReturns[itemId] ?? 0));
+    if (cost < 1) {
+      if (returned > 0) storeTrayReturn(itemId, constructionQuantumSafeMultiply(returned, cycleCount));
+      continue;
+    }
+    if (returned < 1) {
+      consumeCombined(itemId, constructionQuantumSafeMultiply(cost, cycleCount));
+      continue;
+    }
+    // Execute the prefix once so source ordering (tray before direct quantum)
+    // and by-product capacity exactly match the authoritative single cycle.
+    consumeCombined(itemId, cost);
+    storeTrayReturn(itemId, returned);
+    const tailCycles = cycleCount - 1;
+    if (tailCycles < 1) continue;
+    if (cost > returned) {
+      // Keep the returned units as working capital and aggregate only the net
+      // loss of the remaining cycles. This is equivalent to replaying every
+      // deduct/return pair without a per-job loop.
+      consumeCombined(
+        itemId,
+        constructionQuantumSafeMultiply(cost - returned, tailCycles),
+        Math.min(returned, Math.max(0, Math.floor(tray[itemId] ?? 0))),
+      );
+    } else if (returned > cost) {
+      storeTrayReturn(itemId, constructionQuantumSafeMultiply(returned - cost, tailCycles));
+    }
   }
+  if (entityId && quantumBuffer) setConstructionAutomationQuantumBuffer(state, entityId, quantumBuffer);
   for (const [itemId, amount] of Object.entries(batch.fleetReturns) as Array<[ItemId, number]>) {
     const returned = Math.max(0, Math.floor(amount * cycleCount));
     if (returned > 0 && isPortableFleetItem(itemId)) {
@@ -12045,15 +12113,12 @@ function tryRunConstructionAutomationBatch(
   const jobsForTarget = Math.ceil(Math.max(0, target - current) / definition.outputAmount);
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
   if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable, 1, directEntityId)) return null;
-  const tray = trayForPlanet(state, entity.planetId);
-  const quantumBuffer = directEntityId ? constructionAutomationQuantumBuffer(state, entity.id) : {};
-  let cyclesForStock = Number.MAX_SAFE_INTEGER;
-  for (const [itemId, amount] of Object.entries(repeatable.trayCosts) as Array<[ItemId, number]>) {
-    if (amount < 1) continue;
-    cyclesForStock = Math.min(cyclesForStock, Math.floor(
-      constructionQuantumAvailable(tray, {}, quantumBuffer, itemId) / Math.max(1, Math.floor(amount)),
-    ));
-  }
+  const cyclesForStock = constructionAutomationBatchMaximumCyclesForStock(
+    state,
+    entity.planetId,
+    repeatable,
+    directEntityId,
+  );
   const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id) &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
     constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
@@ -12180,9 +12245,14 @@ function runConstructionCenters(
           // resulting repeatable batch consumes the center buffer directly,
           // so a high-stack center is not reduced to one atomic job per loop.
           const cachedDirect = directResolvedByTarget.get(target.definition.id);
-          if (cachedDirect && !cachedDirect.plan.blocker) {
+          const cachedDirectValid = cachedDirect && !cachedDirect.plan.blocker && cachedDirect.batch &&
+            constructionAutomationBatchInputsAvailable(state, entity.planetId, cachedDirect.batch, 1, entity.id) &&
+            (cachedDirect.batch.jobsPerCycle <= 1 ||
+              constructionAutomationCycleStateMatches(state, entity.planetId, cachedDirect.batch));
+          if (cachedDirectValid) {
             resolved = cachedDirect;
           } else {
+            directResolvedByTarget.delete(target.definition.id);
             if (budget.remainingPlanBuilds < 1) {
               if (profiler) profiler.constructionGuardHits += 1;
               break;
@@ -12190,11 +12260,34 @@ function runConstructionCenters(
             budget.remainingPlanBuilds -= 1;
             if (profiler) profiler.constructionPlanBuilds += 1;
             const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer);
+            const directBaseBatch = directPlan.blocker
+              ? null
+              : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan);
+            const directBatch = directBaseBatch &&
+              !constructionAutomationBatchCanRepeat(state, entity.planetId, directBaseBatch) &&
+              hasSingleConstructionAutomationTarget(state, target.definition.id)
+              ? (tryBuildStableConstructionAutomationCycle(
+                state,
+                target.definition,
+                entity.planetId,
+                directBaseBatch,
+                budget,
+                profiler,
+                entity.id,
+              ) ?? directBaseBatch)
+              : directBaseBatch;
             resolved = {
               plan: directPlan,
-              batch: directPlan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan),
+              batch: directBatch,
             };
-            if (!directPlan.blocker) directResolvedByTarget.set(target.definition.id, resolved);
+            // A non-repeatable one-job phase must be rebuilt after its return
+            // changes the recursive recipe. Cache only a proven repeatable
+            // batch or a finite stable cycle.
+            if (!directPlan.blocker && directBatch &&
+              (directBatch.jobsPerCycle > 1 ||
+                constructionAutomationBatchCanRepeat(state, entity.planetId, directBatch))) {
+              directResolvedByTarget.set(target.definition.id, resolved);
+            }
           }
         } else {
           resolved = batchConstructionAutomation

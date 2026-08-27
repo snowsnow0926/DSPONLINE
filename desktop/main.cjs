@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
+const { registerWindowClosedCleanup } = require("./window-lifecycle.cjs");
 const {
   contract: cloudTransferContract,
   exactUint8Array,
@@ -381,7 +382,7 @@ function openExternalUrl(url) {
 
 function createWindow() {
   const saved = visibleWindowState();
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: saved?.bounds.width ?? 1500,
     height: saved?.bounds.height ?? 960,
     x: saved?.bounds.x,
@@ -400,16 +401,17 @@ function createWindow() {
       backgroundThrottling: true,
     },
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow = window;
+  window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
+  window.webContents.on("will-navigate", (event, url) => {
     if (allowLoadedNavigation(url)) return;
     event.preventDefault();
     openExternalUrl(url);
   });
-  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+  window.webContents.on("render-process-gone", (_event, details) => {
     if (details.reason === "clean-exit") return;
     dialog.showMessageBox({
       type: "error",
@@ -418,31 +420,37 @@ function createWindow() {
       detail: `原因：${details.reason}`,
     }).catch(() => undefined);
   });
-  mainWindow.on("resize", () => {
+  window.on("resize", () => {
     scheduleReadableDesktopZoom();
     scheduleWindowStateSave();
   });
-  mainWindow.on("move", scheduleWindowStateSave);
-  mainWindow.on("close", persistWindowState);
-  mainWindow.on("closed", () => {
-    const ownerId = mainWindow?.webContents?.id;
-    if (ownerId && nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
-    if (ownerId && nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
-    cancelAllApiRequests();
-    cancelAllAccountArchiveDownloads();
-    mainWindow = null;
+  window.on("move", scheduleWindowStateSave);
+  window.on("close", persistWindowState);
+  registerWindowClosedCleanup(window, {
+    abortNativeSaveOwner: (ownerId) => {
+      if (nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
+    },
+    closeNativeCoreOwner: (ownerId) => {
+      if (nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
+    },
+    cancelApiRequests: cancelAllApiRequests,
+    cancelAccountArchiveDownloads: cancelAllAccountArchiveDownloads,
+    clearWindow: (closedWindow) => {
+      if (mainWindow === closedWindow) mainWindow = null;
+    },
   });
 
   if (isDevelopment) {
-    void mainWindow.loadURL(process.env.DSP_DESKTOP_DEV_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    void window.loadURL(process.env.DSP_DESKTOP_DEV_URL);
+    window.webContents.openDevTools({ mode: "detach" });
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    void window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
-  mainWindow.once("ready-to-show", () => {
-    if (saved?.maximized || !saved) mainWindow.maximize();
+  window.once("ready-to-show", () => {
+    if (window.isDestroyed() || mainWindow !== window) return;
+    if (saved?.maximized || !saved) window.maximize();
     scheduleReadableDesktopZoom();
-    mainWindow.show();
+    window.show();
   });
 }
 
@@ -824,7 +832,10 @@ ipcMain.handle("desktop:update-ready", (event) => {
 });
 
 async function requestRendererSaveBeforeUpdate() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  const contents = window.webContents;
+  if (contents.isDestroyed()) return;
   if (updateShutdownPromise) return updateShutdownPromise;
   updateShutdownRequested = true;
   updateShutdownPromise = new Promise((resolve) => {
@@ -836,7 +847,7 @@ async function requestRendererSaveBeforeUpdate() {
       resolve();
     };
     updateShutdownResolve = finish;
-    mainWindow.webContents.send("desktop:prepare-for-update");
+    if (!contents.isDestroyed()) contents.send("desktop:prepare-for-update");
     setTimeout(finish, 15_000);
   }).finally(() => {
     updateShutdownPromise = null;
@@ -863,7 +874,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();

@@ -1293,3 +1293,13 @@ Tauri、WebView2、Qt 或纯原生 UI 只能在上述核心优化后重新评估
 6. 生产云 v47 往返、下载页和 VPS 切换。
 
 因此 1.2.3 的对外描述必须是“Windows 原生增量热路径开发候选”，不能写成“三层最终架构已全部验收”。正式发布仍由独立 Release Agent 在固定 clean SHA 上执行。
+
+### 20.3 新鲜门禁与候选身份
+
+- 候选运行时代码：`6cdd86e7675d95da9834f3592b1d4c980830506e`；Build ID：`1.2.3+6cdd86e7675d`。
+- Vitest：196 文件通过/13 跳过，1,614 项通过/27 跳过；server 384/2 + station 4/4；ops 56/6。
+- native JavaScript/工具 36/36；Rust workspace 24/24；长差分 37/37；10,000 次确定性故障注入通过。
+- Chromium 431/27、durable 7/7、production preview 3/3，均 0 失败。
+- TypeScript、Rust fmt/clippy、production build/startup budget、125 个许可证、根/server 0 漏洞和 `git diff --check` 通过。
+- Windows x64 unpacked 为 75 文件、408,489,149 B；FileVersion 1.2.3、ProductVersion 1.2.3.0、Authenticode `NotSigned`；clean 包隔离启动通过。
+- 详细实现、真实档原始数字、制品 SHA 和残余 Gate 见 [1.2.3 开发与实测报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md) 与 [1.2.3 候选说明](./releases/1.2.3-candidate.md)。

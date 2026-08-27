@@ -13,6 +13,7 @@ import {
 } from "./pureIdleMacro";
 import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
 import {
+  advanceExactSimulationWindow,
   applyPureIdleAffineContract,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
@@ -81,6 +82,28 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
     machineCount,
     minerCount: 0,
     inputs: { iron_ore: machineCount * 100 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
+function addSlowProductiveAssembler(state: GameState): void {
+  addWindGeneration(state, 50_000_000);
+  if (!state.research.completedTechIds.includes("antimatter")) state.research.completedTechIds.push("antimatter");
+  state.entities.push({
+    id: "pure-idle-slow-assembler",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 100, y: 100 },
+    interactionLocked: false,
+    buildingId: "assembling_machine_mk1",
+    recipeId: "annihilation_constraint_sphere",
+    machineCount: 1,
+    minerCount: 0,
+    inputs: { particle_container: 10_000, processor: 10_000 },
     outputs: {},
     progress: 0,
     routingCursor: 0,
@@ -431,7 +454,7 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
-  it("settles a bounded exact prefix before freezing the uncertain conservative tail", () => {
+  it("keeps the 30-second lightweight calibration isolated until wall time reaches its checkpoint", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 9;
@@ -444,11 +467,12 @@ describe("pure idle macro session", () => {
     );
 
     expect(session.calibrationCheckpoint).toBeDefined();
-    expect(session.candidate.elapsedSeconds - source.elapsedSeconds).toBeCloseTo(
+    expect(session.candidate.elapsedSeconds).toBe(source.elapsedSeconds);
+    expect(session.calibrationCheckpoint!.candidate.elapsedSeconds - source.elapsedSeconds).toBeCloseTo(
       PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS,
       6,
     );
-    expect(session.lastValidationReason).toContain("已先精确结算");
+    expect(session.lastValidationReason).toContain("已精确结算 30 秒");
 
     const summary = advancePureIdleMacroSession(session, 30 * 24 * 60 * 60);
     const finalized = finalizePureIdleMacroSession(session, 30 * 24 * 60 * 60, createContentPackRegistry());
@@ -456,7 +480,7 @@ describe("pure idle macro session", () => {
     expect(summary).toMatchObject({
       phase: "conservative",
       conservativeOnly: true,
-      calibrationWindowsCompleted: 0,
+      calibrationWindowsCompleted: 3,
       settledWallSeconds: 30 * 24 * 60 * 60,
       settledSimulationSeconds: 9 * 30 * 24 * 60 * 60,
     });
@@ -474,7 +498,7 @@ describe("pure idle macro session", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
-  it("keeps only measured exact-prefix production and freezes the conservative high-multiplier tail", () => {
+  it("uses the 30-second lightweight sample to extrapolate ordinary production", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 9;
@@ -487,20 +511,62 @@ describe("pure idle macro session", () => {
       "large-save memory guard",
     );
 
-    const prefixProduced = session.candidate.totalProduced.iron_ingot ?? 0;
-    expect(session.contractVersion).toBe(0);
-    expect(session.calibrationWindowsCompleted).toBe(0);
-    expect(session.contract.deltas).toEqual([]);
+    const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
+    expect(session.contractVersion).toBe(1);
+    expect(session.calibrationWindowsCompleted).toBe(3);
+    expect(session.contract.deltas.length).toBeGreaterThan(0);
     expect(prefixProduced).toBeGreaterThan(baselineProduced);
 
-    const summary = advancePureIdleMacroSession(session, 24 * 60 * 60);
-    const finalized = finalizePureIdleMacroSession(session, 24 * 60 * 60, createContentPackRegistry());
+    const summary = advancePureIdleMacroSession(session, 60);
+    const finalized = finalizePureIdleMacroSession(session, 60, createContentPackRegistry());
     expect(summary.phase).toBe("conservative");
     expect(summary.actualMultiplier).toBe(9);
-    expect(finalized.state.elapsedSeconds - source.elapsedSeconds).toBe(9 * 24 * 60 * 60);
-    expect(finalized.state.totalProduced.iron_ingot ?? 0).toBe(prefixProduced);
-    expect(finalized.state.tray).toEqual(session.candidate.tray);
+    expect(finalized.state.elapsedSeconds - source.elapsedSeconds).toBe(9 * 60);
+    expect(finalized.state.totalProduced.iron_ingot ?? 0).toBeGreaterThan(prefixProduced);
+    expect(finalized.state.entities.find((entity) => entity.id === "pure-idle-smelter")!.inputs.iron_ore).toBeGreaterThanOrEqual(0);
     expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("detects a slow production cycle that a one-second probe reports as zero", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addSlowProductiveAssembler(source);
+    const oneSecond = advanceExactSimulationWindow(structuredClone(source), 1, 1 / 8);
+    expect(oneSecond.totalProduced.annihilation_constraint_sphere ?? 0).toBe(0);
+
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "large-save memory guard",
+    );
+    const calibrated = session.calibrationCheckpoint!.candidate.totalProduced.annihilation_constraint_sphere ?? 0;
+    expect(calibrated).toBeGreaterThan(0);
+
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.candidate.totalProduced.annihilation_constraint_sphere ?? 0).toBeGreaterThan(calibrated);
+  });
+
+  it("does not reuse a finite cached ingredient after the 30-second sample", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addSlowProductiveAssembler(source);
+    const assembler = source.entities.find((entity) => entity.id === "pure-idle-slow-assembler")!;
+    assembler.inputs.particle_container = 2;
+    assembler.inputs.processor = 2;
+
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "large-save memory guard",
+    );
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.candidate.totalProduced.annihilation_constraint_sphere ?? 0).toBe(2);
+    expect(session.candidate.entities.find((entity) => entity.id === assembler.id)!.inputs)
+      .toMatchObject({ particle_container: 0, processor: 0 });
   });
 
   it("keeps compact conservative counters deterministic across idle boundaries", () => {
@@ -517,6 +583,9 @@ describe("pure idle macro session", () => {
 
     expect(hashGameState(incremental.candidate)).toBe(hashGameState(single.candidate));
     expect(incremental.conservativeIntegerRemainders).toEqual(single.conservativeIntegerRemainders);
+    expect(incremental.conservativeDecimalRemainders).toEqual(single.conservativeDecimalRemainders);
+    expect(incremental.conservativeRemainingSimulationSecondsByItem)
+      .toEqual(single.conservativeRemainingSimulationSecondsByItem);
     expect(incremental.researchRemainder).toBe(single.researchRemainder);
   });
 
@@ -528,7 +597,8 @@ describe("pure idle macro session", () => {
     const sourceHash = hashGameState(source);
     const initialRockets = source.entities.find((entity) => entity.id === "prefilled-rocket-silo")!.inputs.small_carrier_rocket ?? 0;
     const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
-    const exactPrefixLaunches = session.candidate.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched;
+    const exactPrefixLaunches = session.calibrationCheckpoint!.candidate.dysonSphere.totalRocketsLaunched -
+      source.dysonSphere.totalRocketsLaunched;
 
     advancePureIdleMacroSession(session, 30);
     const finalized = finalizePureIdleMacroSession(session, 30, createContentPackRegistry()).state;
@@ -666,7 +736,7 @@ describe("pure idle macro session", () => {
     expect(hashGameState(state)).toBe(sourceHash);
   });
 
-  it.each(["inventory-exhausted", "output-blocked", "no-power", "low-power", "production-stopped"])(
+  it.each(["inventory-exhausted", "output-blocked", "no-power", "production-stopped"])(
     "freezes the conservative tail at the last exact checkpoint for %s",
     (condition) => {
       const source = pureIdleState();
@@ -678,17 +748,29 @@ describe("pure idle macro session", () => {
       if (condition === "output-blocked") smelter.outputs.iron_ingot = source.settings.productionBufferLimit;
       if (condition === "production-stopped") smelter.inputs.iron_ore = 0;
       if (condition === "no-power") source.entities = source.entities.filter((entity) => entity.kind !== "power");
-      if (condition === "low-power") {
-        const wind = source.entities.find((entity) => entity.kind === "power");
-        if (wind) wind.machineCount = 1;
-      }
       const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative boundary");
-      const prefixProduced = session.candidate.totalProduced.iron_ingot ?? 0;
+      const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
       advancePureIdleMacroSession(session, 60 * 60);
       expect(session.candidate.totalProduced.iron_ingot ?? 0).toBe(prefixProduced);
       expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
     },
   );
+
+  it("keeps low-power production productive at the measured 30-second rate", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addProductiveSmelter(source, 1_000);
+    const wind = source.entities.find((entity) => entity.kind === "power");
+    if (wind) wind.machineCount = 1;
+    const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative low-power");
+    const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
+
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.candidate.totalProduced.iron_ingot ?? 0).toBeGreaterThan(prefixProduced);
+    expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
+  });
 
   it("honours cancellation before mutating a macro boundary", () => {
     const session = createPureIdleMacroSession(structuredClone(pureIdleState()), "extreme");

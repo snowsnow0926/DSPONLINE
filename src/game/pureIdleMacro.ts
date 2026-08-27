@@ -5,11 +5,13 @@ import {
   setPaused,
   settleCompletedResearchBoundaries,
 } from "./engine";
+import { MATRIX_ITEM_IDS } from "./content";
 import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
   createPureIdleAffineCalibration,
+  createPureIdleLightweightCalibration,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
 import {
@@ -20,17 +22,19 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v4";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v5-lite";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
 /**
- * Even when a full affine calibration is unsafe, settle a tiny exact prefix
- * before freezing the uncertain long tail.  This keeps a complex factory from
- * appearing completely idle while bounding Worker cost and memory.
+ * Complex saves use the same 30 simulated seconds as the historical macro
+ * path, but retain only a lightweight material sample instead of four generic
+ * full-state affine snapshots.
  */
-export const PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS = 1;
-export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 30_000;
+export const PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS = 30;
+// The default must cover the three-window lightweight calibration. Device
+// classification can raise it further for constrained/low-memory hardware.
+export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 90_000;
 
 export type PureIdleMacroMode = "stable" | "extreme";
 export type PureIdleMacroPhase =
@@ -137,6 +141,12 @@ export interface PureIdleMacroSession {
   conservativeOnly: boolean;
   /** Fractional carry for repeated compact integer counter buckets. */
   conservativeIntegerRemainders: Record<string, number>;
+  /** Exact carry for repeated compact decimal inventory buckets. */
+  conservativeDecimalRemainders: Record<string, bigint>;
+  /** Remaining productive tail before the sampled input/output boundary. */
+  conservativeRemainingSimulationSeconds: number | null;
+  /** Per-item productive horizons for the lightweight sampled contract. */
+  conservativeRemainingSimulationSecondsByItem: Record<string, number>;
   /**
    * Exact one-shot prefix produced by calibration. It is consumed when the
    * wall clock crosses the calibration boundary and then released.
@@ -449,10 +459,16 @@ export function createConservativePureIdleMacroSession(
     sailsInOrbit: 0,
     activityDelivered: {},
   };
+  let contract: PureIdleAffineContract = {
+    deltas: [],
+    calibrationSeconds: PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS,
+    calibrationWallSeconds: PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS / actualMultiplier,
+  };
   let candidate = state;
   let measuredRate = cloneRate(emptyRate);
+  let currentRate = cloneRate(emptyRate);
   const prefixSeconds = PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS;
-  const researchLedger: ResearchMacroLedger = {
+  let researchLedger: ResearchMacroLedger = {
     unitsPerWindow: 0n,
     windowSeconds: prefixSeconds,
     observedUnits: 0n,
@@ -461,69 +477,80 @@ export function createConservativePureIdleMacroSession(
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
   try {
-    // Keep the fallback transactional if the exact probe throws halfway
-    // through a complex state. The Worker can discard this bounded clone.
-    const prefixSource = structuredClone(state);
-    candidate = advanceExactSimulationWindow(
-      prefixSource,
-      prefixSeconds,
+    const calibrated = createPureIdleLightweightCalibration(
+      state,
       prefixSeconds / actualMultiplier,
     );
-    refreshDysonGenerationSnapshot(candidate);
+    if (!calibrated) throw new Error("30 秒轻量校准没有形成可用样本");
+    contract = calibrated.contract;
+    researchLedger = calibrated.researchLedger;
+    refreshDysonGenerationSnapshot(calibrated.calibratedState);
     measuredRate = rateBetween(
       baseline,
-      capturePureIdleTerminalSnapshot(candidate),
+      capturePureIdleTerminalSnapshot(calibrated.calibratedState),
       prefixSeconds,
     );
+    const extrapolatesWhiteMatrix = contract.deltas.some((delta) =>
+      delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix");
+    currentRate = {
+      ...emptyRate,
+      whiteMatrixProduced: extrapolatesWhiteMatrix ? measuredRate.whiteMatrixProduced : 0,
+    };
     calibrationCheckpoint = {
       baseWallSeconds: 0,
       baseSimulationSeconds: 0,
       wallSeconds: prefixSeconds / actualMultiplier,
       simulationSeconds: prefixSeconds,
-      candidate,
+      candidate: calibrated.calibratedState,
     };
   } catch (error) {
-    // A failed prefix must not turn a recoverable fallback into a failed
-    // settlement. Keep the old zero-production behavior and expose the exact
-    // reason to the caller instead of fabricating a rate.
-    prefixFailure = error instanceof Error ? error.message : "短窗口精确结算失败";
+    // A failed calibration must not turn a recoverable fallback into a failed
+    // settlement. Keep time-only behavior and expose the reason instead of
+    // fabricating a rate from an incomplete sample.
+    prefixFailure = error instanceof Error ? error.message : "30 秒轻量校准失败";
     candidate = state;
   }
+  const productiveTail = !prefixFailure && contract.deltas.length > 0 && contract.maximumSimulationSeconds !== 0;
   const degradedReason = prefixFailure
-    ? `${reason}；短窗口精确结算未完成：${prefixFailure}`
-    : `${reason}；已先精确结算 ${prefixSeconds} 秒；尾段产线与科研缺少闭合物料账本，已冻结，仅推进时间`;
+    ? `${reason}；30 秒轻量校准未完成：${prefixFailure}`
+    : productiveTail
+      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料各自的净消耗边界推进，戴森发射、出口、合同和巨构交付尾段冻结`
+      : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
     phase: "conservative",
     candidate,
-    contract: {
-      deltas: [],
-      calibrationSeconds: prefixSeconds,
-      calibrationWallSeconds: prefixSeconds / actualMultiplier,
-    },
+    contract,
     researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
-    currentRate: cloneRate(emptyRate),
+    currentRate,
     settledWallSeconds: 0,
     settledSimulationSeconds: 0,
-    contractVersion: 0,
+    contractVersion: productiveTail ? 1 : 0,
     validationCount: 0,
-    validationFailures: 1,
+    validationFailures: prefixFailure ? 1 : 0,
     lastValidationDurationMs: 0,
     lastValidationDeviation: 1,
     lastValidationReason: `已切换保守宏观：${degradedReason}`,
     nextValidationAtWallSeconds: null,
     boundaryCorrections: 0,
-    calibrationWindowsCompleted: 0,
+    calibrationWindowsCompleted: prefixFailure ? 0 : 3,
     actualMultiplier,
     degradedReason,
     computationDurationMs: 0,
     conservativeOnly: true,
     conservativeIntegerRemainders: {},
+    conservativeDecimalRemainders: {},
+    conservativeRemainingSimulationSeconds: productiveTail
+      ? contract.maximumSimulationSeconds ?? null
+      : 0,
+    conservativeRemainingSimulationSecondsByItem: productiveTail
+      ? { ...(contract.maximumSimulationSecondsByItem ?? {}) }
+      : {},
     ...(calibrationCheckpoint ? { calibrationCheckpoint } : {}),
   };
 }
@@ -573,6 +600,9 @@ export function createPureIdleMacroSession(
     computationDurationMs: 0,
     conservativeOnly: false,
     conservativeIntegerRemainders: {},
+    conservativeDecimalRemainders: {},
+    conservativeRemainingSimulationSeconds: null,
+    conservativeRemainingSimulationSecondsByItem: {},
     calibrationCheckpoint: {
       baseWallSeconds: 0,
       baseSimulationSeconds: 0,
@@ -676,6 +706,23 @@ export function advancePureIdleMacroSession(
     const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     session.actualMultiplier = multiplier;
     const macroSimulationSeconds = macroWallSeconds * multiplier;
+    const conservativeMacroSimulationSeconds = session.conservativeOnly
+      ? session.conservativeRemainingSimulationSeconds === null
+        ? macroSimulationSeconds
+        : Math.min(macroSimulationSeconds, Math.max(0, session.conservativeRemainingSimulationSeconds))
+      : macroSimulationSeconds;
+    const conservativeSimulationSecondsByItem = session.conservativeOnly
+      ? Object.fromEntries(Object.entries(session.conservativeRemainingSimulationSecondsByItem).map(([itemId, remaining]) => [
+        itemId,
+        Math.min(conservativeMacroSimulationSeconds, Math.max(0, remaining)),
+      ]))
+      : undefined;
+    const conservativeResearchSimulationSeconds = session.conservativeOnly
+      ? MATRIX_ITEM_IDS.reduce((seconds, itemId) => {
+        const itemSeconds = conservativeSimulationSecondsByItem?.[itemId];
+        return itemSeconds === undefined ? seconds : Math.min(seconds, itemSeconds);
+      }, conservativeMacroSimulationSeconds)
+      : macroSimulationSeconds;
     let exactQuantumConstructionTail = false;
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
@@ -700,19 +747,21 @@ export function advancePureIdleMacroSession(
           return { ok: true as const, boundaryCorrections: 0 };
         })()
       : session.conservativeOnly
-        ? session.contract.deltas.length > 0
+        ? session.contract.deltas.length > 0 && conservativeMacroSimulationSeconds > 1e-9
           ? applyPureIdleAffineContract(
             session.candidate,
             session.contract,
-            macroSimulationSeconds,
-            macroWallSeconds,
+            conservativeMacroSimulationSeconds,
+            multiplier > 0 ? conservativeMacroSimulationSeconds / multiplier : 0,
             {
               allowExactFallback: false,
               skipUnsafeIntegerPaths: true,
               integerRemainders: session.conservativeIntegerRemainders,
+              decimalRemainders: session.conservativeDecimalRemainders,
+              simulationSecondsByItem: conservativeSimulationSecondsByItem,
             },
           )
-          : { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "保守宏观尾段冻结" }
+          : { ok: true as const, boundaryCorrections: 0 }
         : applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
     throwIfMacroInterrupted(options);
     if (!applied.ok) {
@@ -723,6 +772,12 @@ export function advancePureIdleMacroSession(
       session.degradedReason = applied.failure ?? "宏观守恒桶未通过安全校验";
       session.lastValidationReason = `已切换保守宏观：${session.degradedReason}`;
       if (!session.conservativeOnly) session.validationFailures += 1;
+      else {
+        session.conservativeRemainingSimulationSeconds = 0;
+        for (const itemId of Object.keys(session.conservativeRemainingSimulationSecondsByItem)) {
+          session.conservativeRemainingSimulationSecondsByItem[itemId] = 0;
+        }
+      }
       session.candidate.elapsedSeconds += macroSimulationSeconds;
     } else {
       session.phase = session.conservativeOnly ? "conservative" : "running";
@@ -733,10 +788,41 @@ export function advancePureIdleMacroSession(
       // once after its cumulative counters have been applied.
       if (session.conservativeOnly) {
         session.candidate.elapsedSeconds += macroSimulationSeconds;
+        if (session.conservativeRemainingSimulationSeconds !== null) {
+          session.conservativeRemainingSimulationSeconds = Math.max(
+            0,
+            session.conservativeRemainingSimulationSeconds - conservativeMacroSimulationSeconds,
+          );
+        }
+        let exhaustedItems = 0;
+        for (const [itemId, creditedSeconds] of Object.entries(conservativeSimulationSecondsByItem ?? {})) {
+          const beforeRemaining = session.conservativeRemainingSimulationSecondsByItem[itemId] ?? 0;
+          const afterRemaining = Math.max(0, beforeRemaining - creditedSeconds);
+          session.conservativeRemainingSimulationSecondsByItem[itemId] = afterRemaining;
+          if (beforeRemaining > 1e-9 && afterRemaining <= 1e-9) exhaustedItems += 1;
+        }
+        const whiteMatrixStopped = (session.conservativeRemainingSimulationSecondsByItem.universe_matrix ?? 1) <= 1e-9;
+        if (conservativeMacroSimulationSeconds + 1e-9 < macroSimulationSeconds || whiteMatrixStopped) {
+          session.currentRate = {
+            dysonGenerationKw: 0,
+            whiteMatrixProduced: 0,
+            rocketsLaunched: 0,
+            sailsAbsorbed: 0,
+            structurePoints: 0,
+            shellSails: 0,
+            sailsInOrbit: 0,
+            activityDelivered: {},
+          };
+        }
+        if (conservativeMacroSimulationSeconds + 1e-9 < macroSimulationSeconds) {
+          session.lastValidationReason = "30 秒样本的全局安全边界已耗尽；剩余尾段只推进时间";
+        } else if (exhaustedItems > 0) {
+          session.lastValidationReason = `30 秒样本中 ${exhaustedItems} 类净消耗物料已到边界；相关物料停止外推，其他产线继续`;
+        }
       }
     }
     const macroResearchSeconds = session.conservativeOnly
-      ? 0
+      ? applied.ok ? conservativeResearchSimulationSeconds : 0
       : exactQuantumConstructionTail
         ? 0
         : Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));

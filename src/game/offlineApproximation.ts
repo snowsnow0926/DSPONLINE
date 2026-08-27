@@ -897,6 +897,14 @@ export interface PureIdleAffineContract {
   deltas: AffineDelta[];
   calibrationSeconds: number;
   calibrationWallSeconds: number;
+  /**
+   * Optional conservative credit horizon measured from the calibrated state.
+   * The pure-idle controller advances wall/game time after this boundary but
+   * must not keep copying production measured before an input/output boundary.
+   */
+  maximumSimulationSeconds?: number;
+  /** Per-item credit horizons for the low-memory 30-second estimator. */
+  maximumSimulationSecondsByItem?: Record<string, number>;
 }
 
 /** Legacy worker-call shape retained while conservative sampled tails are disabled. */
@@ -993,6 +1001,168 @@ function isPureIdleTransientPath(path: AffinePath): boolean {
 
 function isDynamicMapEntryPath(path: AffinePath): boolean {
   return typeof path.at(-2) === "string" && AFFINE_DYNAMIC_MAP_KEYS.has(path.at(-2) as string);
+}
+
+const PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS = new Set<ItemId>([
+  // Launching these items changes separate Dyson terminal ledgers. The quick
+  // 30-second estimator deliberately leaves both manufacture and consumption
+  // at the exact checkpoint until the terminal subsystem has its own closed
+  // sampled ledger.
+  "small_carrier_rocket",
+  "solar_sail",
+]);
+
+function appendPureIdleLightweightEntry(
+  snapshot: AffineSnapshot,
+  path: AffinePath,
+  raw: unknown,
+): void {
+  const itemId = typeof path.at(-1) === "string" ? path.at(-1) as ItemId : undefined;
+  if (itemId && PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(itemId)) return;
+  const key = pathKey(path);
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    snapshot.entries.set(key, { kind: "number", value: raw, integer: Number.isSafeInteger(raw) });
+  } else if (typeof raw === "string" && /^\d+$/.test(raw) && isDecimalAffinePath(path)) {
+    try {
+      snapshot.entries.set(key, { kind: "decimal", value: BigInt(raw) });
+    } catch {
+      return;
+    }
+  } else {
+    return;
+  }
+  if (!snapshot.paths.has(key)) snapshot.paths.set(key, path);
+}
+
+function appendPureIdleLightweightMap(
+  snapshot: AffineSnapshot,
+  prefix: AffinePath,
+  values: Record<string, unknown> | undefined,
+): void {
+  if (!values) return;
+  for (const [key, value] of Object.entries(values)) {
+    appendPureIdleLightweightEntry(snapshot, [...prefix, key], value);
+  }
+}
+
+/**
+ * Capture only persistent material stores and their matching monotonic
+ * production counters. Unlike the historical generic affine
+ * snapshot this does not retain paths for positions, UI state, topology,
+ * diagnostics or cyclic machine phases.
+ */
+function capturePureIdleLightweightSnapshot(
+  state: GameState,
+  sharedPaths: Map<string, AffinePath>,
+): AffineSnapshot {
+  const snapshot: AffineSnapshot = { entries: new Map(), paths: sharedPaths };
+  appendPureIdleLightweightMap(snapshot, ["totalProduced"], state.totalProduced as Record<string, unknown>);
+  appendPureIdleLightweightMap(snapshot, ["tray"], state.tray as Record<string, unknown>);
+  for (const [planetId, tray] of Object.entries(state.planetTrays)) {
+    // `tray` is the authoritative active-planet ownership location. Avoid
+    // extrapolating the serialized duplicate as a second material store.
+    if (planetId === state.activePlanetId) continue;
+    appendPureIdleLightweightMap(snapshot, ["planetTrays", planetId], tray as Record<string, unknown>);
+  }
+  appendPureIdleLightweightMap(
+    snapshot,
+    ["quantumLogisticsNetwork", "inventory"],
+    state.quantumLogisticsNetwork.inventory as Record<string, unknown>,
+  );
+  for (let index = 0; index < state.entities.length; index += 1) {
+    const entity = state.entities[index];
+    appendPureIdleLightweightMap(snapshot, ["entities", index, "inputs"], entity.inputs as Record<string, unknown>);
+    appendPureIdleLightweightMap(snapshot, ["entities", index, "outputs"], entity.outputs as Record<string, unknown>);
+  }
+  return snapshot;
+}
+
+function hasActiveFinitePureIdleResource(state: GameState): boolean {
+  return state.entities.some((entity) => {
+    if (entity.kind !== "vein" || entity.minerCount < 1 || !entity.resourceId) return false;
+    return getResourceReserveSnapshot(state, entity)?.infinite === false;
+  });
+}
+
+function isPureIdleLightweightStorePath(path: AffinePath): boolean {
+  return (path[0] === "entities" && (path[2] === "inputs" || path[2] === "outputs")) ||
+    path[0] === "tray" || path[0] === "planetTrays" ||
+    (path[0] === "quantumLogisticsNetwork" && path[1] === "inventory");
+}
+
+function pureIdleLightweightStoreItemId(path: AffinePath): string | null {
+  if (path[0] === "entities" && (path[2] === "inputs" || path[2] === "outputs") && typeof path[3] === "string") {
+    return path[3];
+  }
+  if (path[0] === "tray" && typeof path[1] === "string") return path[1];
+  if (path[0] === "planetTrays" && typeof path[2] === "string") return path[2];
+  if (path[0] === "quantumLogisticsNetwork" && path[1] === "inventory" && typeof path[2] === "string") return path[2];
+  return null;
+}
+
+function pureIdleLightweightContractItemId(path: AffinePath): string | null {
+  if (path[0] === "totalProduced" && typeof path[1] === "string") return path[1];
+  return pureIdleLightweightStoreItemId(path);
+}
+
+function calculatePureIdleLightweightBoundaries(
+  state: GameState,
+  contract: PureIdleAffineContract,
+): Record<string, number> | undefined {
+  const captured = captureAggregateItemStores(state);
+  if (captured.failure) return undefined;
+  const microsPerUnit = 1_000_000n;
+  const deltasByItem = new Map<string, bigint>();
+  for (const delta of contract.deltas) {
+    if (!isPureIdleLightweightStorePath(delta.path)) continue;
+    const itemId = pureIdleLightweightStoreItemId(delta.path);
+    if (!itemId) continue;
+    const deltaMicros = delta.kind === "decimal"
+      ? (delta.delta as bigint) * microsPerUnit
+      : BigInt(Math.round(Number(delta.delta) * Number(microsPerUnit)));
+    deltasByItem.set(itemId, (deltasByItem.get(itemId) ?? 0n) + deltaMicros);
+  }
+  const maximumByItem: Record<string, number> = {};
+  const calibrationSeconds = BigInt(Math.max(1, Math.floor(contract.calibrationSeconds)));
+  for (const [itemId, deltaMicros] of deltasByItem) {
+    if (deltaMicros >= 0n) continue;
+    const available = captured.totals.get(itemId) ?? 0n;
+    const seconds = available * calibrationSeconds * microsPerUnit / -deltaMicros;
+    if (seconds <= BigInt(Number.MAX_SAFE_INTEGER)) maximumByItem[itemId] = Math.max(0, Number(seconds));
+  }
+  // A product cannot keep receiving cumulative-production credit after one
+  // of the sampled ingredients that funds it has reached its boundary. This
+  // deliberately chooses the shortest active-producer path when several
+  // recipes make the same item: under-crediting is acceptable in the compact
+  // fallback, reusing a finite cache to manufacture indefinitely is not.
+  const activeRecipeEdges = state.entities.flatMap((entity) => {
+    if (entity.productionRate <= EPSILON) return [];
+    const recipe = getRecipe(entity.recipeId);
+    if (!recipe || recipe.outputs.length === 0) return [];
+    return recipe.outputs
+      .filter((output) => !PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(output.itemId))
+      .map((output) => ({
+        outputItemId: output.itemId,
+        inputItemIds: recipe.inputs.map((input) => input.itemId),
+      }));
+  });
+  for (let pass = 0; pass < Object.keys(ITEMS).length; pass += 1) {
+    let changed = false;
+    for (const edge of activeRecipeEdges) {
+      const finiteInputs = edge.inputItemIds
+        .map((itemId) => maximumByItem[itemId])
+        .filter((seconds): seconds is number => seconds !== undefined);
+      if (finiteInputs.length === 0) continue;
+      const inherited = Math.min(...finiteInputs);
+      const current = maximumByItem[edge.outputItemId];
+      if (current === undefined || inherited < current) {
+        maximumByItem[edge.outputItemId] = inherited;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return Object.keys(maximumByItem).length > 0 ? maximumByItem : undefined;
 }
 
 function createFastAffineContractFromSnapshots(
@@ -1131,6 +1301,8 @@ function applyFastAffineContract(
   rejectPureIdleTransientPaths = false,
   skipUnsafeIntegerPaths = false,
   integerRemainders?: Record<string, number>,
+  decimalRemainders?: Record<string, bigint>,
+  simulationSecondsByItem?: Record<string, number>,
 ): FastContractApplicationResult {
   if (!Number.isFinite(simulationSeconds) || simulationSeconds < 0 || !Number.isFinite(wallSeconds) || wallSeconds < 0) {
     return { ok: false, failure: "时间参数非法" };
@@ -1141,7 +1313,14 @@ function applyFastAffineContract(
       return { ok: false, failure: `宏观合同包含不允许外推的瞬时字段 ${JSON.stringify(delta.path)}` };
     }
     const current = readAffinePath(state, delta.path);
-    const scaledSeconds = scaleFastSeconds(delta.path, simulationSeconds, wallSeconds);
+    const itemId = pureIdleLightweightContractItemId(delta.path);
+    const sampledSeconds = itemId && simulationSecondsByItem?.[itemId] !== undefined
+      ? Math.max(0, Math.min(simulationSeconds, finiteNumber(simulationSecondsByItem[itemId])))
+      : simulationSeconds;
+    const sampledWallSeconds = simulationSeconds > EPSILON
+      ? wallSeconds * sampledSeconds / simulationSeconds
+      : 0;
+    const scaledSeconds = scaleFastSeconds(delta.path, sampledSeconds, sampledWallSeconds);
     const denominator = pathHasString(delta.path, new Set(["elapsedActiveSeconds"]))
       ? contract.calibrationWallSeconds
       : contract.calibrationSeconds;
@@ -1183,8 +1362,10 @@ function applyFastAffineContract(
       return { ok: false, failure: `十进制字段不可用 ${pathLabel}` };
     }
     try {
-      const numerator = BigInt(Math.max(0, Math.floor(scaledSeconds))) * (delta.delta as bigint);
-      const scaled = divideBigIntTowardZero(numerator, BigInt(Math.max(1, Math.floor(denominator))));
+      const decimalDenominator = BigInt(Math.max(1, Math.floor(denominator)));
+      const numerator = BigInt(Math.max(0, Math.floor(scaledSeconds))) * (delta.delta as bigint) +
+        (decimalRemainders?.[pathLabel] ?? 0n);
+      const scaled = divideBigIntTowardZero(numerator, decimalDenominator);
       const next = BigInt(base) + scaled;
       if (next < 0n) {
         // Decimal inventory fields are non-negative stores.  A linear tail
@@ -1193,12 +1374,18 @@ function applyFastAffineContract(
         // still within the allowed error budget.
         if (isDecimalAffinePath(delta.path)) {
           if (!writeAffinePath(state, delta.path, "0")) return { ok: false, failure: `无法写入十进制字段 ${pathLabel}` };
+          if (decimalRemainders) delete decimalRemainders[pathLabel];
           corrections += 1;
           continue;
         }
         return { ok: false, failure: `十进制字段变为负数 ${pathLabel}` };
       }
       if (!writeAffinePath(state, delta.path, next.toString())) return { ok: false, failure: `无法写入十进制字段 ${pathLabel}` };
+      if (decimalRemainders) {
+        const remainder = numerator - scaled * decimalDenominator;
+        if (remainder !== 0n) decimalRemainders[pathLabel] = remainder;
+        else delete decimalRemainders[pathLabel];
+      }
     } catch {
       return { ok: false, failure: `十进制字段计算失败 ${pathLabel}` };
     }
@@ -1235,6 +1422,10 @@ export interface PureIdleAffineApplicationOptions {
   skipUnsafeIntegerPaths?: boolean;
   /** Worker-only fractional carry for repeated integer counter buckets. */
   integerRemainders?: Record<string, number>;
+  /** Worker-only exact carry for repeated decimal inventory buckets. */
+  decimalRemainders?: Record<string, bigint>;
+  /** Optional per-item credited duration for the lightweight contract. */
+  simulationSecondsByItem?: Record<string, number>;
 }
 
 type ItemStore = Partial<Record<string, number | string>>;
@@ -1780,6 +1971,71 @@ export function createPureIdleAffineCalibration(
   };
 }
 
+/**
+ * Low-memory calibration used by complex saves that would exceed the generic
+ * affine snapshot budget. It still observes three exact ten-second windows,
+ * but retains only material stores and total production counters.
+ * Terminal rocket/sail outcomes remain frozen after the exact prefix.
+ */
+export function createPureIdleLightweightCalibration(
+  state: GameState,
+  calibrationWallSeconds: number,
+): PureIdleAffineCalibration | null {
+  if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
+  const sharedPaths = new Map<string, AffinePath>();
+  const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
+  const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
+  let shadow = structuredClone(state);
+  let topologyStable = true;
+  for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
+    shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
+    topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
+    snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
+    researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
+  }
+  const sampled = topologyStable
+    ? createFastAffineContractFromSnapshots(
+      snapshots,
+      FAST_OFFLINE_CALIBRATION_SECONDS,
+      calibrationWallSeconds,
+      true,
+    )
+    : null;
+  snapshots.length = 0;
+  const researchLedger = createResearchMacroLedgerFromSnapshots(
+    researchSnapshots,
+    FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+  );
+  if (!researchLedger) return null;
+
+  let contract: PureIdleAffineContract = sampled
+    ? removeResearchInputDeltas({
+      ...sampled,
+      deltas: sampled.deltas.filter((delta) => delta.kind === "number" ? Math.abs(Number(delta.delta)) > EPSILON : delta.delta !== 0n),
+    }, state)
+    : {
+      deltas: [],
+      calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
+      calibrationWallSeconds,
+    };
+
+  // Finite vein reserves are not represented by the lightweight store sample.
+  // Keep the exact prefix but do not copy its mined output past the checkpoint.
+  if (hasActiveFinitePureIdleResource(state) || !topologyStable) {
+    contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
+  } else {
+    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, contract);
+    if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
+  }
+  return {
+    contract,
+    researchLedger,
+    calibratedState: shadow,
+    calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
+    calibrationWallSeconds,
+  };
+}
+
 /** Worker-only mutable application. The caller must discard the candidate on failure. */
 export function applyPureIdleAffineContract(
   state: GameState,
@@ -1792,10 +2048,16 @@ export function applyPureIdleAffineContract(
   const before = captureAggregateConservationBaseline(state);
   const candidate = structuredClone(state);
   const integerRemainders = options.integerRemainders ? { ...options.integerRemainders } : undefined;
+  const decimalRemainders = options.decimalRemainders ? { ...options.decimalRemainders } : undefined;
   const commitIntegerRemainders = (next: Record<string, number> | undefined): void => {
     if (!options.integerRemainders) return;
     for (const key of Object.keys(options.integerRemainders)) delete options.integerRemainders[key];
     if (next) Object.assign(options.integerRemainders, next);
+  };
+  const commitDecimalRemainders = (next: Record<string, bigint> | undefined): void => {
+    if (!options.decimalRemainders) return;
+    for (const key of Object.keys(options.decimalRemainders)) delete options.decimalRemainders[key];
+    if (next) Object.assign(options.decimalRemainders, next);
   };
   const applied = applyFastAffineContract(
     candidate,
@@ -1805,9 +2067,11 @@ export function applyPureIdleAffineContract(
     true,
     options.skipUnsafeIntegerPaths ?? false,
     integerRemainders,
+    decimalRemainders,
+    options.simulationSecondsByItem,
   );
   if (!applied.ok) return { ok: false, boundaryCorrections: 0, failure: applied.failure };
-  const normalized = normalizeFastSettlementState(candidate);
+  const normalized = normalizeFastSettlementState(candidate, state);
   if (!normalized.ok) {
     return {
       ok: false,
@@ -1828,7 +2092,7 @@ export function applyPureIdleAffineContract(
       };
     }
     const exact = runExact(structuredClone(state), simulationSeconds, wallSeconds);
-    const exactNormalized = normalizeFastSettlementState(exact);
+    const exactNormalized = normalizeFastSettlementState(exact, state);
     if (!exactNormalized.ok) {
       return {
         ok: false,
@@ -1849,6 +2113,7 @@ export function applyPureIdleAffineContract(
     refreshDysonGenerationSnapshot(exact);
     Object.assign(state, exact);
     commitIntegerRemainders(undefined);
+    commitDecimalRemainders(undefined);
     return {
       ok: true,
       boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections + exactNormalized.corrections + 1,
@@ -1883,6 +2148,7 @@ export function applyPureIdleAffineContract(
   // never trusted as independent evidence for a candidate's legitimacy.
   refreshDysonGenerationSnapshot(candidate);
   commitIntegerRemainders(integerRemainders);
+  commitDecimalRemainders(decimalRemainders);
   Object.assign(state, candidate);
   return {
     ok: true,
@@ -1893,13 +2159,16 @@ export function applyPureIdleAffineContract(
 function normalizeFastNumberMap(
   record: Record<string, number>,
   limit?: number,
+  protectedValues?: Record<string, number>,
 ): { ok: boolean; corrections: number } {
   let corrections = 0;
   for (const [key, raw] of Object.entries(record)) {
     if (!Number.isFinite(raw)) return { ok: false, corrections };
     let value = Math.floor(raw + EPSILON);
     if (value < 0) { value = 0; corrections += 1; }
-    if (limit !== undefined && limit > 0 && value > limit) { value = Math.floor(limit); corrections += 1; }
+    const protectedValue = Math.max(0, Math.floor(protectedValues?.[key] ?? 0));
+    const effectiveLimit = limit !== undefined && limit > 0 ? Math.max(Math.floor(limit), protectedValue) : undefined;
+    if (effectiveLimit !== undefined && value > effectiveLimit) { value = effectiveLimit; corrections += 1; }
     if (!Number.isSafeInteger(value)) return { ok: false, corrections };
     record[key] = value;
   }
@@ -1909,6 +2178,7 @@ function normalizeFastNumberMap(
 function clampDecimalMap(
   record: Partial<Record<string, string>>,
   capacities?: Partial<Record<string, string>>,
+  protectedValues?: Partial<Record<string, string>>,
 ): { ok: boolean; corrections: number } {
   let corrections = 0;
   for (const [key, raw] of Object.entries(record)) {
@@ -1917,7 +2187,12 @@ function clampDecimalMap(
       let value = BigInt(raw!);
       const capacity = capacities?.[key];
       if (capacity !== undefined && /^\d+$/.test(capacity)) {
-        const max = BigInt(capacity);
+        const protectedValue = protectedValues?.[key];
+        const protectedMax = protectedValue !== undefined && /^\d+$/.test(protectedValue)
+          ? BigInt(protectedValue)
+          : 0n;
+        const configuredMax = BigInt(capacity);
+        const max = configuredMax > protectedMax ? configuredMax : protectedMax;
         if (value > max) { value = max; corrections += 1; }
       }
       record[key] = value.toString();
@@ -1974,7 +2249,10 @@ interface FastSettlementNormalizationResult {
   failure?: string;
 }
 
-function normalizeFastSettlementState(state: GameState): FastSettlementNormalizationResult {
+function normalizeFastSettlementState(
+  state: GameState,
+  protectedBaseline?: GameState,
+): FastSettlementNormalizationResult {
   const initialFailure = findInvalidFastNumber(state);
   if (initialFailure) return { ok: false, corrections: 0, failure: initialFailure };
   let corrections = 0;
@@ -2000,7 +2278,11 @@ function normalizeFastSettlementState(state: GameState): FastSettlementNormaliza
     const constructionCursor = normalizeConstructionAutomationCursor(state.constructionAutomation.cursor);
     if (constructionCursor !== state.constructionAutomation.cursor) corrections += 1;
     state.constructionAutomation.cursor = constructionCursor;
-    for (const entity of state.entities) {
+    for (let entityIndex = 0; entityIndex < state.entities.length; entityIndex += 1) {
+      const entity = state.entities[entityIndex];
+      const protectedEntity = protectedBaseline?.entities[entityIndex]?.id === entity.id
+        ? protectedBaseline.entities[entityIndex]
+        : undefined;
       const routingCursor = normalizeCursor(entity.routingCursor);
       const dispatchCursor = normalizeCursor(entity.stationDispatchCursor, entity.stationRoutes?.length);
       if (routingCursor === null || dispatchCursor === null) return { ok: false, corrections };
@@ -2010,8 +2292,16 @@ function normalizeFastSettlementState(state: GameState): FastSettlementNormaliza
       if (entity.stationDispatchCursor !== undefined) entity.stationDispatchCursor = dispatchCursor;
       const inputCapacity = getEntityInputCapacity(state, entity);
       const outputCapacity = getEntityOutputCapacity(state, entity);
-      const inputs = normalizeFastNumberMap(entity.inputs, inputCapacity > 0 ? inputCapacity : undefined);
-      const outputs = normalizeFastNumberMap(entity.outputs, outputCapacity > 0 ? outputCapacity : undefined);
+      const inputs = normalizeFastNumberMap(
+        entity.inputs,
+        inputCapacity > 0 ? inputCapacity : undefined,
+        protectedEntity?.inputs,
+      );
+      const outputs = normalizeFastNumberMap(
+        entity.outputs,
+        outputCapacity > 0 ? outputCapacity : undefined,
+        protectedEntity?.outputs,
+      );
       if (!inputs.ok || !outputs.ok) return { ok: false, corrections };
       corrections += inputs.corrections + outputs.corrections;
       if (!Number.isFinite(entity.progress)) return { ok: false, corrections };
@@ -2081,7 +2371,11 @@ function normalizeFastSettlementState(state: GameState): FastSettlementNormaliza
       corrections += normalized.corrections;
     }
     const trayLimit = Math.max(0, Math.floor(state.planetTrayItemLimits[state.activePlanetId] ?? 0));
-    const currentTray = normalizeFastNumberMap(state.tray as Record<string, number>, trayLimit > 0 ? trayLimit : undefined);
+    const currentTray = normalizeFastNumberMap(
+      state.tray as Record<string, number>,
+      trayLimit > 0 ? trayLimit : undefined,
+      protectedBaseline?.tray as Record<string, number> | undefined,
+    );
     if (!currentTray.ok) return { ok: false, corrections };
     corrections += currentTray.corrections;
     const construction = normalizeFastNumberMap(state.construction as Record<string, number>);
@@ -2094,7 +2388,11 @@ function normalizeFastSettlementState(state: GameState): FastSettlementNormaliza
     if (state.speedrun && (!Number.isFinite(state.speedrun.elapsedActiveSeconds) || state.speedrun.elapsedActiveSeconds < 0 || !Number.isSafeInteger(Math.floor(state.speedrun.elapsedActiveSeconds)))) return { ok: false, corrections };
     const quantum = state.quantumLogisticsNetwork?.inventory;
     if (quantum) {
-      const normalized = clampDecimalMap(quantum, state.quantumLogisticsNetwork.itemCapacities);
+      const normalized = clampDecimalMap(
+        quantum,
+        state.quantumLogisticsNetwork.itemCapacities,
+        protectedBaseline?.quantumLogisticsNetwork.inventory,
+      );
       if (!normalized.ok) return { ok: false, corrections };
       corrections += normalized.corrections;
     }

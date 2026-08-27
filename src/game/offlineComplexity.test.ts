@@ -57,8 +57,24 @@ describe("offline workload classification", () => {
       device: { deviceMemoryGb: 16, hardwareConcurrency: 12, coarsePointer: false, workerSupported: true },
     });
     expect(report.recommendedStrategy).toBe("conservative");
-    expect(report.recommendedDeadlineMs).toBe(30_000);
+    expect(report.recommendedDeadlineMs).toBe(90_000);
     expect(report.warning).toContain("内存风险");
+  });
+
+  it("gives the three-window conservative calibration enough real-time budget on constrained devices", () => {
+    const state = createPlayerInitialState();
+    const constrained = classifyOfflineWorkload(state, 30 * 24 * 60 * 60, {
+      serializedBytes: 80 * 1024 * 1024,
+      device: { deviceMemoryGb: 6, hardwareConcurrency: 4, coarsePointer: false, workerSupported: true },
+    });
+    const lowMemory = classifyOfflineWorkload(state, 30 * 24 * 60 * 60, {
+      serializedBytes: 80 * 1024 * 1024,
+      device: { deviceMemoryGb: 2, hardwareConcurrency: 2, coarsePointer: true, workerSupported: true },
+    });
+    expect(constrained.recommendedStrategy).toBe("conservative");
+    expect(constrained.recommendedDeadlineMs).toBe(120_000);
+    expect(lowMemory.recommendedStrategy).toBe("conservative");
+    expect(lowMemory.recommendedDeadlineMs).toBe(180_000);
   });
 
   it("never changes the input state and keeps speedrun work exact", () => {

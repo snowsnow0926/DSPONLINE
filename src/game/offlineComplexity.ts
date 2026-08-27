@@ -163,8 +163,14 @@ export function classifyOfflineWorkload(
   }
   const recommendedDeadlineMs = recommendedStrategy === "exact"
     ? 0
-    : device.deviceClass === "standard" ? 30_000
-      : device.deviceClass === "constrained" ? 60_000 : 75_000;
+    : recommendedStrategy === "conservative"
+      // v5-lite deliberately observes three exact ten-second windows. Large
+      // saves can need more than the historical 30-second real-time budget,
+      // even though the resulting settlement is still constant-time.
+      ? device.deviceClass === "standard" ? 90_000
+        : device.deviceClass === "constrained" ? 120_000 : 180_000
+      : device.deviceClass === "standard" ? 30_000
+        : device.deviceClass === "constrained" ? 60_000 : 75_000;
   const reasons: string[] = [];
   if (state.entities.length >= 3_000) reasons.push(`实体 ${state.entities.length.toLocaleString("zh-CN")}`);
   if (state.belts.length >= 6_000) reasons.push(`线路 ${state.belts.length.toLocaleString("zh-CN")}`);

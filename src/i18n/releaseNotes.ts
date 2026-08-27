@@ -27,6 +27,35 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release122Copy = {
+  date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
+  title: { "zh-CN": "纯挂机 30 秒轻量采样恢复产量", en: "Pure Idle Restores Production with a Lightweight 30-second Sample" },
+  summary: {
+    "zh-CN": "1.2.2 将大型存档的保守纯挂机从 1 秒零产量探针升级为 3 个 10 秒精确窗口，并用轻量物料快照外推普通生产与科研；火箭、太阳帆、戴森结构、出口、合同和巨构交付仍不做无账本复制。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.2 replaces the one-second zero-output probe for large-save conservative pure idle with three exact ten-second windows and extrapolates ordinary production and research from a lightweight material snapshot. Rockets, sails, Dyson structures, exports, contracts, and megastructure deliveries are still never copied without a ledger. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  sampleTitle: { "zh-CN": "慢周期产线不再被首秒误判为 0", en: "Slow production cycles are no longer judged by the first second" },
+  sampleDescription: {
+    "zh-CN": "保守路径连续观察 0～10、10～20、20～30 秒三个窗口；20 秒等慢配方只要在样本中真实完成，就可以形成普通产线外推合同。",
+    en: "The conservative path observes the 0-10, 10-20, and 20-30 second windows. Slow recipes such as 20-second cycles can form an ordinary-production contract once they actually complete inside the sample.",
+  },
+  memoryTitle: { "zh-CN": "大存档只保留轻量物料样本", en: "Large saves retain only a lightweight material sample" },
+  memoryDescription: {
+    "zh-CN": "校准只记录累计生产、行星/量子库存和建筑输入输出，不再为每个窗口保留完整状态、线路诊断和循环相位；真实 44 MB 存档门禁结束时堆使用约 858 MiB。",
+    en: "Calibration records cumulative production, planet/quantum inventory, and entity inputs/outputs without retaining a full state, belt diagnostics, or cyclic phases for every window. The real 44 MB save gate ended at about 858 MiB of heap use.",
+  },
+  boundaryTitle: { "zh-CN": "有限缓存按物料边界停止", en: "Finite caches stop at material boundaries" },
+  boundaryDescription: {
+    "zh-CN": "每种物料分别计算净消耗可支撑时间，并沿活动配方向下游传播；一个缓存耗尽只停止受影响的产物，不把整个工厂重新判为零。",
+    en: "Each item receives its own net-consumption horizon, propagated through active recipes. Exhausting one cache stops affected products without turning the entire factory back into zero output.",
+  },
+  safetyTitle: { "zh-CN": "戴森与终局结果继续冻结尾段", en: "Dyson and terminal outcomes remain frozen in the tail" },
+  safetyDescription: {
+    "zh-CN": "小型运载火箭、太阳帆、结构/壳面、银河出口、合同和巨构交付只获得已精确执行的 30 秒前缀；候选仍须通过守恒、序列化、inspectSave 和重载门禁。",
+    en: "Carrier rockets, sails, structures/shells, galactic exports, contracts, and megastructure deliveries receive only the exact 30-second prefix. Candidates still pass conservation, serialization, inspectSave, and reload gates.",
+  },
+} as const;
+
 const release121Copy = {
   date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
   title: { "zh-CN": "Windows 大型存档性能优化", en: "Windows Large-save Performance Optimization" },
@@ -674,6 +703,10 @@ function release121Message(locale: AppLocale, key: keyof typeof release121Copy):
   return release121Copy[key][locale];
 }
 
+function release122Message(locale: AppLocale, key: keyof typeof release122Copy): string {
+  return release122Copy[key][locale];
+}
+
 function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
@@ -708,6 +741,22 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-27-v1.2.2",
+    date: release122Message(locale, "date"),
+    version: "1.2.2",
+    title: release122Message(locale, "title"),
+    summary: release122Message(locale, "summary"),
+    items: [
+      { id: "pure-idle-30-second-sample", title: release122Message(locale, "sampleTitle"), description: release122Message(locale, "sampleDescription") },
+      { id: "pure-idle-lightweight-snapshot", title: release122Message(locale, "memoryTitle"), description: release122Message(locale, "memoryDescription") },
+      { id: "pure-idle-material-horizons", title: release122Message(locale, "boundaryTitle"), description: release122Message(locale, "boundaryDescription") },
+      { id: "pure-idle-terminal-freeze", title: release122Message(locale, "safetyTitle"), description: release122Message(locale, "safetyDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes121(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-27-v1.2.1",
     date: release121Message(locale, "date"),

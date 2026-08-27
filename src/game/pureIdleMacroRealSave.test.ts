@@ -19,8 +19,9 @@ const realSaveDescribe = fixturePath ? describe : describe.skip;
  *
  *   DSP_V120_REAL_PURE_IDLE_FIXTURE=<path> npx vitest run src/game/pureIdleMacroRealSave.test.ts
  */
-realSaveDescribe("1.2.0 real-save conservative pure-idle conservation gate", () => {
-  it("keeps the unproven tail frozen, reloadable, and source-file exact", { timeout: 180_000 }, () => {
+realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
+  it("extrapolates ordinary production while keeping terminal tails frozen and reloadable", { timeout: 180_000 }, () => {
+    const testStartedAt = performance.now();
     const beforeStat = statSync(fixturePath!);
     const sourceRaw = readFileSync(fixturePath!, "utf8");
     const sourceFileHash = createHash("sha256").update(sourceRaw, "utf8").digest("hex");
@@ -40,23 +41,43 @@ realSaveDescribe("1.2.0 real-save conservative pure-idle conservation gate", () 
     checkpoint.timeWarp.controllerEntityId = controller!.id;
     const checkpointHash = hashGameState(checkpoint);
 
+    const calibrationStartedAt = performance.now();
     const session = createPureIdleMacroSession(structuredClone(checkpoint), "extreme", {
-      forceConservativeReason: "1.2.0 real-save conservation release gate",
+      forceConservativeReason: "1.2.2 real-save lightweight calibration release gate",
     });
-    const result = finalizePureIdleMacroCandidate(session, 30);
+    const calibrationFinishedAt = performance.now();
+    const calibrated = session.calibrationCheckpoint?.candidate;
+    expect(calibrated).toBeDefined();
+    const calibratedWhiteDelta = (calibrated!.totalProduced.universe_matrix ?? 0) -
+      (checkpoint.totalProduced.universe_matrix ?? 0);
+    const calibratedRocketDelta = calibrated!.dysonSphere.totalRocketsLaunched -
+      checkpoint.dysonSphere.totalRocketsLaunched;
+    expect(calibratedWhiteDelta).toBeGreaterThan(0);
+    const targetWallSeconds = 10 * 60;
+    const result = finalizePureIdleMacroCandidate(session, targetWallSeconds);
+    const settlementFinishedAt = performance.now();
+    const finalWhiteDelta = (result.state.totalProduced.universe_matrix ?? 0) -
+      (checkpoint.totalProduced.universe_matrix ?? 0);
 
     expect(result.summary).toMatchObject({
       algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
       conservativeOnly: true,
-      settledWallSeconds: 30,
+      calibrationWindowsCompleted: 3,
+      contractVersion: 1,
+      settledWallSeconds: targetWallSeconds,
     });
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
+    expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
+    expect(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched)
+      .toBe(calibratedRocketDelta);
     expect(validatePureIdleTerminalMaterialConservation(checkpoint, result.state)).toBeNull();
     expect(result.state.dysonSphere.structurePoints - checkpoint.dysonSphere.structurePoints)
       .toBe(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched);
     expect(hashGameState(checkpoint)).toBe(checkpointHash);
 
+    const serializationStartedAt = performance.now();
     const reloaded = inspectSave(serializeEnvelope(result.state));
+    const serializationFinishedAt = performance.now();
     expect(reloaded).toMatchObject({ valid: true, checksum: "valid", formatVersion: 2, stateVersion: 47 });
     expect(validatePureIdleTerminalMaterialConservation(checkpoint, reloaded.state!)).toBeNull();
 
@@ -67,5 +88,20 @@ realSaveDescribe("1.2.0 real-save conservative pure-idle conservation gate", () 
       mtimeMs: afterStat.mtimeMs,
       hash: createHash("sha256").update(afterRaw, "utf8").digest("hex"),
     }).toEqual({ size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, hash: sourceFileHash });
+    console.info("[pure-idle-v5-lite-real-save]", JSON.stringify({
+      sourceBytes: beforeStat.size,
+      entityCount: checkpoint.entities.length,
+      beltCount: checkpoint.belts.length,
+      targetWallSeconds,
+      actualMultiplier: result.summary.actualMultiplier,
+      calibratedWhiteDelta,
+      finalWhiteDelta,
+      calibratedRocketDelta,
+      calibrationMs: Math.round(calibrationFinishedAt - calibrationStartedAt),
+      settlementMs: Math.round(settlementFinishedAt - calibrationFinishedAt),
+      serializationAndReloadMs: Math.round(serializationFinishedAt - serializationStartedAt),
+      totalTestMs: Math.round(performance.now() - testStartedAt),
+      heapUsedMiBAtEnd: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+    }));
   });
 });

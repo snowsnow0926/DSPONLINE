@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-27-v1.2.1";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.2";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,15 +110,13 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Windows Large-save Performance Optimization" });
+  const dialog = page.getByRole("dialog", { name: "Pure Idle Restores Production with a Lightweight 30-second Sample" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.1");
-  await expect(dialog).toContainText("Native large-save cold start avoids repeated parsing");
-  await expect(dialog).toContainText("Native state summaries use one fused scan");
-  await expect(dialog).toContainText("Transactional commands share unchanged native records");
-  await expect(dialog).toContainText("Unchanged revisions reuse verified save chunks");
-  await expect(dialog).toContainText("Windows packages reject Android build residue");
-  await expect(dialog).toContainText("Native authority cutover remains disabled");
+  await expect(dialog).toContainText("1.2.2");
+  await expect(dialog).toContainText("Slow production cycles are no longer judged by the first second");
+  await expect(dialog).toContainText("Large saves retain only a lightweight material sample");
+  await expect(dialog).toContainText("Finite caches stop at material boundaries");
+  await expect(dialog).toContainText("Dyson and terminal outcomes remain frozen in the tail");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

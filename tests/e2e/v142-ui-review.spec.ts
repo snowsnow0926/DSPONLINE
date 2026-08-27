@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-27-v1.2.1";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.2";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,15 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "Windows 大型存档性能优化");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.1");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(dialog).toContainText("大型存档原生冷启动减少重复解析");
-  await expect(dialog).toContainText("原生状态摘要合并为单次扫描");
-  await expect(dialog).toContainText("事务命令共享未变化的原生记录");
-  await expect(dialog).toContainText("未变化 revision 的保存复用已验证区块");
-  await expect(dialog).toContainText("Windows 包拒绝 Android 构建残留");
-  await expect(dialog).toContainText("原生接管仍保持关闭");
+  await expect(dialog).toHaveAttribute("aria-label", "纯挂机 30 秒轻量采样恢复产量");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.2");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(4);
+  await expect(dialog).toContainText("慢周期产线不再被首秒误判为 0");
+  await expect(dialog).toContainText("大存档只保留轻量物料样本");
+  await expect(dialog).toContainText("有限缓存按物料边界停止");
+  await expect(dialog).toContainText("戴森与终局结果继续冻结尾段");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -4075,7 +4075,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             skippedUnchanged: journal.changedChunks === 0,
           };
         } catch (error) {
-          if (import.meta.env.DEV) console.warn("[1.2.1] chunked autosave fell back to verified full save", error);
+          if (import.meta.env.DEV) console.warn("[1.2.2] chunked autosave fell back to verified full save", error);
           const returnedTransfer = (error as ChunkedSaveTransferFailure).sourceStateTransfer;
           if (checkpoint && returnedTransfer) {
             latestAuthoritativeCheckpointTransferRef.current = { ...checkpoint, transfer: returnedTransfer };

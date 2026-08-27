@@ -348,7 +348,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.durationMs).toBeLessThan(30_000);
   });
 
-  test("migrates a pure-idle-macro-v2 recovery summary with active research to v4", async ({ page }) => {
+  test("migrates a pure-idle-macro-v2 recovery summary with active research to v5-lite", async ({ page }) => {
     const result = await page.evaluate(async () => {
       const contentPacks = await import("/src/game/contentPacks.ts");
       const engine = await import("/src/game/engine.ts");
@@ -423,7 +423,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v4");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v5-lite");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -778,7 +778,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.message).toContain("injected invalid source");
   });
 
-  test("persists two Worker failures across reload and keeps every macro operation zero-calibration", async ({ page }) => {
+  test("persists two Worker failures across reload and keeps every macro operation on lightweight calibration", async ({ page }) => {
     const created = await page.evaluate(async () => {
       const engine = await import("/src/game/engine.ts");
       const recovery = await import("/src/game/pureIdleRecovery.ts");
@@ -849,9 +849,9 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
 
     expect(restored.persistedFailures).toBe(2);
     expect(restored.forceConservativeReason).toContain("连续 2 次 Worker 失败");
-    expect(restored.initialized).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 0 });
-    expect(restored.advanced).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 0 });
-    expect(restored.finalized).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 0 });
+    expect(restored.initialized).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 3 });
+    expect(restored.advanced).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 3 });
+    expect(restored.finalized).toMatchObject({ conservativeOnly: true, calibrationWindowsCompleted: 3 });
     expect(restored.valid).toBe(true);
   });
 
@@ -1053,7 +1053,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v4");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v5-lite");
     expect(result.complexityStrategy).toBe("conservative");
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.powerLimitedMultiplier).toBeGreaterThanOrEqual(1);

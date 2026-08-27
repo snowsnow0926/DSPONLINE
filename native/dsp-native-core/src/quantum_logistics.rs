@@ -195,7 +195,7 @@ pub(crate) fn supply_free_capacity_in_session(
         .find(|slot| slot.item_id.as_deref() == Some(item_id) && slot.remote_mode == "supply")
         .ok_or_else(|| anyhow!("native quantum supply slot disappeared"))?;
     let current = network.inventory.get(item_id).cloned().unwrap_or_default();
-    let capacity = item_capacity(&network, item_id);
+    let capacity = item_capacity(network, item_id);
     let network_free = if capacity > current {
         (capacity - current)
             .to_u64()
@@ -1227,11 +1227,11 @@ pub(crate) fn settle_uploads(
     let mut flow = previous_flow
         .clone()
         .unwrap_or_else(|| create_flow(base, entities, &network, boundary_second));
-    if previous_flow.is_none() {
-        if let Some(existing) = &existing_flow {
-            for (item_id, amount) in &existing.uploaded {
-                add_flow(&mut flow.uploaded, item_id, amount);
-            }
+    if previous_flow.is_none()
+        && let Some(existing) = &existing_flow
+    {
+        for (item_id, amount) in &existing.uploaded {
+            add_flow(&mut flow.uploaded, item_id, amount);
         }
     }
     let (per_minute, tower_stacks, collector_stacks) =

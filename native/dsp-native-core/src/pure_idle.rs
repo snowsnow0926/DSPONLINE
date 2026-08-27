@@ -62,6 +62,7 @@ fn unsupported(
         algorithm_version: Some(ALGORITHM_VERSION),
         exact_calibration_seconds: Some(0.0),
         approximated_seconds: Some(0.0),
+        belt_scheduler: None,
         summary: request
             .include_diagnostics
             .then(|| state.summary())
@@ -177,6 +178,7 @@ pub(crate) fn advance(
 
     let previous_revision = state.revision;
     let revision = candidate.revision;
+    let belt_scheduler = exact.belt_scheduler.take();
     *state = candidate;
     Ok(CoreAdvanceResult {
         supported: true,
@@ -195,6 +197,7 @@ pub(crate) fn advance(
         algorithm_version: Some(ALGORITHM_VERSION),
         exact_calibration_seconds: Some(exact_seconds),
         approximated_seconds: Some(tail_seconds),
+        belt_scheduler,
         summary: request
             .include_diagnostics
             .then(|| state.summary())

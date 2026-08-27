@@ -3,6 +3,7 @@ import type {
   DesktopNativeCoreProjectionResult,
   DesktopNativeCoreSummary,
   DesktopNativeSaveCommitResult,
+  DesktopNativeCoreExportResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import {
@@ -423,6 +424,27 @@ export class WindowsNativeCoreBetaController {
       const reason = error instanceof Error ? error.message : "原生权威检查点失败";
       this.authorityState = handleNativeCoreExit(this.authorityState, `authority-checkpoint-failed:${reason}`);
       throw new NativeCoreAuthorityPausedError(`原生检查点不确定，工厂已暂停：${reason}`, this.authorityState);
+    }
+  }
+
+  async exportAuthoritativeV47(
+    exportId: string,
+    suggestedName?: string,
+    savedAtMs = this.now(),
+  ): Promise<DesktopNativeCoreExportResult> {
+    if (this.authorityState.phase !== "native-authoritative" ||
+      this.authorityState.authority !== "native" || !this.session) {
+      throw new Error("只有原生权威可以直接流式导出 v47 存档");
+    }
+    try {
+      const result = await this.session.exportV47(exportId, suggestedName, savedAtMs);
+      if (!this.lastSummary || result.result.revision !== this.lastSummary.revision) {
+        throw new Error("原生导出 revision 与当前权威状态不一致");
+      }
+      return result;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "原生权威导出失败";
+      throw new Error(`原生 v47 导出失败，权威工厂未改变：${reason}`);
     }
   }
 

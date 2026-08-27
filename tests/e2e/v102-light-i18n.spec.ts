@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-27-v1.2.2";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.3";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,13 +110,14 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Pure Idle Restores Production with a Lightweight 30-second Sample" });
+  const dialog = page.getByRole("dialog", { name: "Windows Native Incremental Hot-path Optimization" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.2");
-  await expect(dialog).toContainText("Slow production cycles are no longer judged by the first second");
-  await expect(dialog).toContainText("Large saves retain only a lightweight material sample");
-  await expect(dialog).toContainText("Finite caches stop at material boundaries");
-  await expect(dialog).toContainText("Dyson and terminal outcomes remain frozen in the tail");
+  await expect(dialog).toContainText("1.2.3");
+  await expect(dialog).toContainText("Active saves encode only genuinely dirty pages");
+  await expect(dialog).toContainText("Stable belts sleep and wake at the exact simulation boundary");
+  await expect(dialog).toContainText("The UI requests bounded viewport and statistics pages");
+  await expect(dialog).toContainText("The native core streams compatible v47 exports");
+  await expect(dialog).toContainText("Native authority remains fail-closed");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

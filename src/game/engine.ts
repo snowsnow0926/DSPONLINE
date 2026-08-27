@@ -2297,12 +2297,13 @@ export function createSimulationLookupContext(
       .sort((left, right) => left.belt.id.localeCompare(right.belt.id))
       .forEach((route, index) => { route.stableSourceOrder = index; });
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
-    // Input settlement runs before this step's production. A machine that is
-    // merely capable of producing does not have cargo to pull yet; scanning it
-    // here made every late-game route look active and defeated the dormant
-    // queue. Output reservation/settlement below re-admits a group as soon as
-    // its output buffer receives cargo.
-    const active = sourceAmount > EPSILON || context.beltRuntime.activeGroupKeys.has(group.key);
+    // Input settlement establishes this step's belt credit before production.
+    // A source that can produce during the step must therefore stay awake even
+    // with an empty checkpoint buffer; otherwise its first output is delayed by
+    // one simulation boundary. Only groups with a closed no-production proof
+    // are counted as dormant.
+    const active = sourceAmount > EPSILON || group.potentiallyProduces ||
+      context.beltRuntime.activeGroupKeys.has(group.key);
     const planetRuntime = context.beltRuntime.byPlanet.get(group.planetId);
     for (const route of group.routes) {
       if (active) planetRuntime?.activeBelts.add(route.belt.id);
@@ -4523,12 +4524,12 @@ function activeBeltSettlementRoutes(
   const groupKeys = new Set<string>();
   for (const group of lookup.beltRuntime.routeGroups) {
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
-    // Production has already happened by the time the output phase calls
-    // this helper. The input phase calls it before production, so a
-    // `potentiallyProduces` flag cannot justify a scan in either phase.
-    // Current source output, persisted flow, and reservation allowances are
-    // the exact signals that can move cargo now.
-    const active = sourceAmount > EPSILON || lookup.beltRuntime.activeGroupKeys.has(group.key) ||
+    // A positive-duration input phase must also advance and reserve routes for
+    // sources that can produce later in this same step. At the zero-duration
+    // output phase, source output and the reservation are the exact wake
+    // signals, so `potentiallyProduces` alone is no longer needed.
+    const active = sourceAmount > EPSILON || (seconds > EPSILON && group.potentiallyProduces) ||
+      lookup.beltRuntime.activeGroupKeys.has(group.key) ||
       allowanceGroupKeys.has(group.key);
     if (!active) continue;
     groupKeys.add(group.key);

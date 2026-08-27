@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.2");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
     }
   });
 }
@@ -1602,13 +1602,14 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机 30 秒轻量采样恢复产量");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.2");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
-  await expect(releaseNotes).toContainText("慢周期产线不再被首秒误判为 0");
-  await expect(releaseNotes).toContainText("大存档只保留轻量物料样本");
-  await expect(releaseNotes).toContainText("有限缓存按物料边界停止");
-  await expect(releaseNotes).toContainText("戴森与终局结果继续冻结尾段");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生增量热路径优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.3");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toContainText("活动存档只编码真实脏页");
+  await expect(releaseNotes).toContainText("稳定线路可休眠并在同一步准确唤醒");
+  await expect(releaseNotes).toContainText("UI 只请求有界视口与统计页");
+  await expect(releaseNotes).toContainText("v47 兼容存档由原生核心流式导出");
+  await expect(releaseNotes).toContainText("原生权威继续失败关闭");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1634,15 +1635,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机 30 秒轻量采样恢复产量");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.2");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v122-1440.png", fullPage: true });
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生增量热路径优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.3");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v122-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1665,7 +1666,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v122-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1674,16 +1675,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-27-v1.2.2");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-27-v1.2.3");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
   await page.getByRole("button", { name: "查看2026年8月27日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机 30 秒轻量采样恢复产量");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.2");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生增量热路径优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.3");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1693,12 +1694,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机 30 秒轻量采样恢复产量");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.2");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 原生增量热路径优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.3");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v122-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });

@@ -507,10 +507,10 @@ pub(crate) fn static_admission_reason(state: &CoreState) -> anyhow::Result<Optio
             return Ok(Some("simple-factory-research-catalog-invalid"));
         }
     }
-    if let Some(infinite_id) = active_infinite_research_id(base) {
-        if !crate::infinite_research::valid_id(infinite_id) || !endgame_unlocked(base) {
-            return Ok(Some("simple-factory-infinite-research-invalid"));
-        }
+    if let Some(infinite_id) = active_infinite_research_id(base)
+        && (!crate::infinite_research::valid_id(infinite_id) || !endgame_unlocked(base))
+    {
+        return Ok(Some("simple-factory-infinite-research-invalid"));
     }
     let profiles = base
         .get("galaxy")
@@ -1027,9 +1027,11 @@ pub(crate) fn remaining_research_costs(
         .unwrap_or(0)
         .saturating_sub(completed)
         .min(MAX_BUILDING_BUFFER_LIMIT as u128);
-    (remaining > 0)
-        .then(|| vec![("universe_matrix".to_owned(), remaining as f64)])
-        .unwrap_or_default()
+    if remaining > 0 {
+        vec![("universe_matrix".to_owned(), remaining as f64)]
+    } else {
+        Vec::new()
+    }
 }
 
 fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()> {
@@ -1906,11 +1908,9 @@ fn material_delivery_items(state: &CoreState, entity: &Map<String, Value>) -> Ve
             }
         }
     }
-    if !used_slots {
-        if let Some(legacy) = entity.get("deliveryItemIds").and_then(Value::as_array) {
-            for item_id in legacy.iter().filter_map(Value::as_str).take(3) {
-                append(item_id);
-            }
+    if !used_slots && let Some(legacy) = entity.get("deliveryItemIds").and_then(Value::as_array) {
+        for item_id in legacy.iter().filter_map(Value::as_str).take(3) {
+            append(item_id);
         }
     }
     items
@@ -3537,6 +3537,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub base: Map<String, Value>,
     pub entities: Vec<Value>,
     pub belts: Vec<Value>,
+    pub changed_belt_indices: Vec<usize>,
+    pub belt_scheduler: crate::belts::BeltSchedulerDiagnostics,
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
 }
 
@@ -3584,7 +3586,8 @@ pub(crate) fn prepare_advance(
     } else {
         std::sync::Arc::new(crate::belts::prepare_routes(state, &entities, &belts)?)
     };
-    let mut belt_runtime = crate::belts::BeltRuntime::from_values(&belts)?;
+    let mut belt_runtime =
+        crate::belts::BeltRuntime::from_values(state, &entities, &belts, &belt_routes)?;
     let mut base = state.base_value().clone();
     if let (Some(active_planet), Some(tray)) = (
         base.get("activePlanetId")
@@ -3623,7 +3626,7 @@ pub(crate) fn prepare_advance(
     if entities
         .iter()
         .filter_map(Value::as_object)
-        .any(|entity| crate::system_space_station::is_elevator(entity))
+        .any(crate::system_space_station::is_elevator)
     {
         step_size = step_size.min(crate::system_space_station::boundary_seconds());
     }
@@ -3644,8 +3647,8 @@ pub(crate) fn prepare_advance(
     let mut advanced_wall = 0.0;
     while remaining > EPSILON {
         let mut step = remaining.min(step_size);
-        if wall_per_simulation_second > EPSILON {
-            if let Some(activity) = base
+        if wall_per_simulation_second > EPSILON
+            && let Some(activity) = base
                 .get("endgame")
                 .and_then(Value::as_object)
                 .and_then(|endgame| endgame.get("constructionActivity"))
@@ -3656,18 +3659,15 @@ pub(crate) fn prepare_advance(
                         .and_then(Value::as_str)
                         .is_some_and(|id| !id.is_empty())
                 })
-            {
-                let clock = finite_number(activity.get("activityClockMs"));
-                for boundary_key in ["startsAtMs", "endsAtMs"] {
-                    let until_boundary_wall =
-                        (finite_number(activity.get(boundary_key)) - clock) / 1_000.0;
-                    let until_boundary_simulation =
-                        until_boundary_wall / wall_per_simulation_second;
-                    if until_boundary_simulation > EPSILON
-                        && until_boundary_simulation < step - EPSILON
-                    {
-                        step = until_boundary_simulation;
-                    }
+        {
+            let clock = finite_number(activity.get("activityClockMs"));
+            for boundary_key in ["startsAtMs", "endsAtMs"] {
+                let until_boundary_wall =
+                    (finite_number(activity.get(boundary_key)) - clock) / 1_000.0;
+                let until_boundary_simulation = until_boundary_wall / wall_per_simulation_second;
+                if until_boundary_simulation > EPSILON && until_boundary_simulation < step - EPSILON
+                {
+                    step = until_boundary_simulation;
                 }
             }
         }
@@ -3732,7 +3732,7 @@ pub(crate) fn prepare_advance(
         crate::speedrun::advance_clock(state, &mut base, remaining_wall)?;
     }
     profile_mark!("simulate-steps");
-    belt_runtime.write_back(&mut belts)?;
+    let (changed_belt_indices, belt_scheduler) = belt_runtime.write_back(&mut belts)?;
     profile_mark!("belt-runtime-write-back");
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-after");
@@ -3741,21 +3741,22 @@ pub(crate) fn prepare_advance(
         set_number(time_warp, "pendingWallSeconds", 0.0)?;
     }
     let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
-    if base.get("mode").and_then(Value::as_str) == Some("normal") && universe_matrix >= 1.0 {
-        if let Some(station) = base
+    if base.get("mode").and_then(Value::as_str) == Some("normal")
+        && universe_matrix >= 1.0
+        && let Some(station) = base
             .get_mut("orbitalStation")
             .and_then(Value::as_object_mut)
-        {
-            if station.get("status").and_then(Value::as_str) == Some("locked") {
-                station.insert("status".to_owned(), Value::from("eligible"));
-            }
-        }
+        && station.get("status").and_then(Value::as_str) == Some("locked")
+    {
+        station.insert("status".to_owned(), Value::from("eligible"));
     }
     let _ = profile_checkpoint.elapsed();
     Ok(PreparedFactoryAdvance {
         base,
         entities,
         belts,
+        changed_belt_indices,
+        belt_scheduler,
         belt_routes,
     })
 }

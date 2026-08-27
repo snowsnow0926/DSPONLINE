@@ -6,6 +6,7 @@ use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
     CommandApplyResult, CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult,
     CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
+    V47EnvelopeExportResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -249,6 +250,16 @@ pub struct CoreCommitOperationResult {
 pub struct CoreCheckpointResult {
     pub checkpoint: SaveCommitResult,
     pub summary: CoreStateSummary,
+    pub encoded_records: usize,
+    pub reused_records: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreExportResult {
+    pub export_id: String,
+    pub mode: String,
+    pub result: V47EnvelopeExportResult,
 }
 
 pub struct CoreRegistry {
@@ -339,6 +350,54 @@ impl CoreRegistry {
             .projection(base_fields, entity_ids, belt_ids)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection(
+        &self,
+        session_id: &str,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.viewport_projection(
+            base_fields,
+            planet_id,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            entity_cursor,
+            entity_limit,
+            belt_limit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn statistics_projection(
+        &self,
+        session_id: &str,
+        min_elapsed_seconds: f64,
+        max_elapsed_seconds: f64,
+        cursor: usize,
+        limit: usize,
+        planet_id: Option<&str>,
+        item_id: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.statistics_projection(
+            min_elapsed_seconds,
+            max_elapsed_seconds,
+            cursor,
+            limit,
+            planet_id,
+            item_id,
+        )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,
@@ -375,10 +434,10 @@ impl CoreRegistry {
         {
             bail!("native authoritative operation bounds are invalid");
         }
-        if let Some(command) = request.command.as_ref() {
-            if command.base_revision != request.base_revision {
-                bail!("native authoritative command base revision is invalid");
-            }
+        if let Some(command) = request.command.as_ref()
+            && command.base_revision != request.base_revision
+        {
+            bail!("native authoritative command base revision is invalid");
         }
 
         let (slot, fingerprint, current_revision) = {
@@ -559,31 +618,36 @@ impl CoreRegistry {
         let transaction_id = begin.transaction_id;
         let written = self
             .session(session_id)?
-            .visit_internal_checkpoint_records(saved_at_ms, |key, value| {
+            .visit_dirty_internal_checkpoint_records(saved_at_ms, |key, value| {
                 store.put(&transaction_id, key, Some(value))
             });
-        let active_keys = match written {
-            Ok(keys) => keys,
+        let visit_result = match written {
+            Ok(result) => result,
             Err(error) => {
+                self.session(session_id)?.abort_checkpoint_visit();
                 store.abort(&transaction_id);
                 return Err(error.context("stream native core checkpoint records"));
             }
         };
+        let active_keys = visit_result.active_keys.clone();
         let active = active_keys
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
         let prefix = format!("dsp-idle-network.internal.v1.chunked.v1.{mode}.");
         for key in previous_keys {
-            if key.starts_with(&prefix) && !active.contains(&key) {
-                if let Err(error) = store.put(&transaction_id, &key, None) {
-                    store.abort(&transaction_id);
-                    return Err(error.context("remove stale native core checkpoint record"));
-                }
+            if key.starts_with(&prefix)
+                && !active.contains(&key)
+                && let Err(error) = store.put(&transaction_id, &key, None)
+            {
+                self.session(session_id)?.abort_checkpoint_visit();
+                store.abort(&transaction_id);
+                return Err(error.context("remove stale native core checkpoint record"));
             }
         }
         let checkpoint = match store.commit(&transaction_id) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
+                self.session(session_id)?.abort_checkpoint_visit();
                 store.abort(&transaction_id);
                 return Err(error.context("publish native core checkpoint"));
             }
@@ -593,6 +657,31 @@ impl CoreRegistry {
         Ok(CoreCheckpointResult {
             checkpoint,
             summary: state.summary()?,
+            encoded_records: visit_result.encoded_records,
+            reused_records: visit_result.reused_records,
+        })
+    }
+
+    pub fn export_v47(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        export_id: &str,
+        saved_at_ms: u64,
+    ) -> anyhow::Result<CoreExportResult> {
+        validate_session_id(session_id)?;
+        if saved_at_ms > MAX_SAFE_INTEGER {
+            bail!("native core export timestamp is invalid");
+        }
+        let state = self.session(session_id)?;
+        let mode = state.identity.mode.clone();
+        let result = store.publish_export(export_id, |writer| {
+            state.write_v47_envelope(saved_at_ms, writer)
+        })?;
+        Ok(CoreExportResult {
+            export_id: export_id.to_owned(),
+            mode,
+            result,
         })
     }
 

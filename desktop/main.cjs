@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
@@ -20,6 +21,7 @@ const {
   serializeAccountArchiveDownloadError,
 } = require("./account-archive-download.cjs");
 const {
+  encodeNativeProjectionTransfer,
   NativeHostClient,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
@@ -48,6 +50,16 @@ const maximumSmallRequestBytes = 8 * 1024 * 1024;
 const maximumResponseBytes = cloudTransferContract.singleSaveResponseLimitBytes;
 const DESKTOP_BASE_SCALE = 0.8;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+
+function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
 
 let mainWindow = null;
 let updater = null;
@@ -577,6 +589,62 @@ ipcMain.handle("desktop:native-core-projection", async (event, request) => {
   return nativeCoreSessions.projection(ownerId, request);
 });
 
+ipcMain.handle("desktop:native-core-viewport-projection", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.viewportProjection(ownerId, request);
+});
+
+ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  return nativeCoreSessions.statisticsProjection(ownerId, request);
+});
+
+ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  const run = async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!request || typeof request !== "object" ||
+      !validNativeLogicalId(request.sessionId, 128) ||
+      !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
+      !["viewport-v1", "statistics-v1"].includes(request.projectionType) ||
+      !request.payload || typeof request.payload !== "object" ||
+      Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
+      throw new Error("原生投影二进制请求无效");
+    }
+    const normalizedRequest = { ...request.payload, sessionId: request.sessionId };
+    const result = request.projectionType === "viewport-v1"
+      ? await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest)
+      : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    const transfer = encodeNativeProjectionTransfer({
+      sessionId: request.sessionId,
+      sequence: request.sequence,
+      projectionType: request.projectionType,
+      result,
+    });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("原生投影二进制确认超时")), 15_000);
+      const onMessage = ({ data }) => {
+        if (data?.projectionAck?.sequence !== transfer.header.sequence ||
+          data.projectionAck.sha256 !== transfer.header.sha256) return;
+        clearTimeout(timer);
+        port.removeListener("message", onMessage);
+        resolve();
+      };
+      port.on("message", onMessage);
+      const payload = new Uint8Array(transfer.payload);
+      // Electron's MessagePortMain transfer list only accepts MessagePortMain
+      // objects. Uint8Array still keeps the data plane binary and bounded; the
+      // renderer-side port owns the received clone and ACKs its exact digest.
+      port.postMessage({ header: transfer.header, payload });
+    });
+  };
+  port.start();
+  void run()
+    .catch((error) => postTransferError(port, error))
+    .finally(() => closeTransferPort(port));
+});
+
 ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
   const ownerId = requireTrustedNativeSender(event);
   return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
@@ -595,6 +663,67 @@ ipcMain.handle("desktop:native-core-commit-operation", async (event, request) =>
 ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
   const ownerId = requireTrustedNativeSender(event);
   return nativeCoreSessions.checkpoint(ownerId, request);
+});
+
+ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
+  const ownerId = requireTrustedNativeSender(event);
+  const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
+    ? request.suggestedName
+    : `dsp-idle-native-${Date.now()}.json`;
+  const prepared = await nativeCoreSessions.exportV47(ownerId, request);
+  const sourcePath = path.join(nativeHostClient.rootPath, "exports", `${prepared.exportId}.json`);
+  const sourceStat = await fs.promises.stat(sourcePath);
+  const sourceSha256 = sourceStat.isFile() ? await sha256File(sourcePath) : "";
+  if (!sourceStat.isFile() || sourceStat.size !== prepared.result.byteLength ||
+    sourceSha256 !== prepared.result.envelopeSha256) {
+    throw new Error("原生兼容导出文件身份校验失败");
+  }
+  const selection = await dialog.showSaveDialog(mainWindow, {
+    title: "导出 DSP极简网络 v47 存档",
+    defaultPath: path.join(app.getPath("downloads"), suggestedName),
+    buttonLabel: "保存存档",
+    filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
+    properties: ["showOverwriteConfirmation", "createDirectory"],
+  });
+  if (selection.canceled || !selection.filePath) {
+    return { ...prepared, cancelled: true };
+  }
+  const targetPath = path.resolve(selection.filePath);
+  const targetDirectory = path.dirname(targetPath);
+  const replacementToken = `${process.pid}-${Date.now()}-${prepared.exportId}`;
+  const temporaryPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.part`);
+  const backupPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.previous`);
+  let existingTargetMoved = false;
+  try {
+    await fs.promises.copyFile(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
+    const temporaryStat = await fs.promises.stat(temporaryPath);
+    const temporarySha256 = temporaryStat.isFile() ? await sha256File(temporaryPath) : "";
+    if (!temporaryStat.isFile() || temporaryStat.size !== prepared.result.byteLength ||
+      temporarySha256 !== prepared.result.envelopeSha256) {
+      throw new Error("原生导出副本长度校验失败");
+    }
+    const targetStat = await fs.promises.lstat(targetPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (targetStat && !targetStat.isFile()) throw new Error("原生导出目标不是普通文件");
+    if (targetStat) {
+      await fs.promises.rename(targetPath, backupPath);
+      existingTargetMoved = true;
+    }
+    await fs.promises.rename(temporaryPath, targetPath);
+  } catch (error) {
+    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+    if (existingTargetMoved) {
+      const targetExists = await fs.promises.lstat(targetPath)
+        .then(() => true)
+        .catch((targetError) => targetError?.code === "ENOENT" ? false : true);
+      if (!targetExists) await fs.promises.rename(backupPath, targetPath).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (existingTargetMoved) await fs.promises.rm(backupPath, { force: true }).catch(() => undefined);
+  return { ...prepared, cancelled: false, fileName: path.basename(targetPath) };
 });
 
 ipcMain.handle("desktop:native-core-compare", async (event, request) => {

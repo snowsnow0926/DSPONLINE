@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-27-v1.2.2";
+const RELEASE_NOTE_ID = "2026-08-27-v1.2.3";
 const VISUAL_FIXTURE_SESSION_KEY = "dsp-idle-network.ui-visual-fixture-seeded.v1";
 
 async function seedVisualFactory(page: Page, options: { fontScale?: number; extreme?: boolean } = {}) {

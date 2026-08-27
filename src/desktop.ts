@@ -33,10 +33,14 @@ export interface DesktopBridge {
   openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
+  getNativeCoreViewportProjection: (request: DesktopNativeCoreViewportProjectionRequest) => Promise<DesktopNativeCoreViewportProjectionResult>;
+  getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
+  requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   commitNativeCoreOperation: (request: DesktopNativeCoreCommitOperationRequest) => Promise<DesktopNativeCoreCommitOperationResult>;
   checkpointNativeCore: (request: DesktopNativeCoreCheckpointRequest) => Promise<DesktopNativeCoreCheckpointResult>;
+  exportNativeCoreV47: (request: DesktopNativeCoreExportRequest) => Promise<DesktopNativeCoreExportResult>;
   compareNativeCore: (request: DesktopNativeCoreCompareRequest) => Promise<DesktopNativeCoreCompareResult>;
   closeNativeCore: (request: DesktopNativeCoreSessionRequest) => Promise<{ closed: boolean }>;
   requestApi: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
@@ -353,6 +357,74 @@ export interface DesktopNativeCoreProjectionResult {
   belts: Array<Record<string, unknown>>;
 }
 
+export interface DesktopNativeCoreViewportProjectionRequest extends DesktopNativeCoreSessionRequest {
+  baseFields?: string[];
+  planetId: string;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  entityCursor?: number;
+  entityLimit: number;
+  beltLimit: number;
+}
+
+export interface DesktopNativeCoreViewportProjectionResult {
+  schemaVersion: 1;
+  projectionType: "viewport-v1";
+  revision: number;
+  planetId: string;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  base: Record<string, unknown>;
+  entities: Array<Record<string, unknown>>;
+  belts: Array<Record<string, unknown>>;
+  nextEntityCursor: number | null;
+  truncatedBelts: boolean;
+}
+
+export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
+  minElapsedSeconds: number;
+  maxElapsedSeconds: number;
+  cursor?: number;
+  limit: number;
+  planetId?: string;
+  itemId?: string;
+}
+
+export interface DesktopNativeCoreStatisticsProjectionResult {
+  schemaVersion: 1;
+  projectionType: "statistics-v1";
+  revision: number;
+  window: { minElapsedSeconds: number; maxElapsedSeconds: number };
+  filters: { planetId: string | null; itemId: string | null };
+  samples: Array<Record<string, unknown>>;
+  nextCursor: number | null;
+}
+
+export type DesktopNativeCoreProjectionTransferRequest =
+  | {
+      sessionId: string;
+      projectionType: "viewport-v1";
+      payload: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "statistics-v1";
+      payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
+    };
+
+export interface DesktopNativeCoreProjectionTransferHeader {
+  schemaVersion: 1;
+  sessionId: string;
+  revision: number;
+  sequence: number;
+  projectionType: "viewport-v1" | "statistics-v1";
+  payloadLength: number;
+  sha256: string;
+}
+
+export interface DesktopNativeCoreProjectionTransferResult {
+  header: DesktopNativeCoreProjectionTransferHeader;
+  bodyBuffer: ArrayBuffer;
+}
+
 export interface DesktopNativeCoreCommandResult {
   previousRevision: number;
   revision: number;
@@ -379,7 +451,23 @@ export interface DesktopNativeCoreAdvanceResult {
   algorithmVersion?: string;
   exactCalibrationSeconds?: number;
   approximatedSeconds?: number;
+  beltScheduler?: DesktopNativeBeltSchedulerDiagnostics;
   summary?: DesktopNativeCoreSummary;
+}
+
+export interface DesktopNativeBeltSchedulerDiagnostics {
+  routeCount: number;
+  groupCount: number;
+  activeQueueEnabled: boolean;
+  transferPasses: number;
+  reservationPasses: number;
+  fullScanPasses: number;
+  transferRouteChecks: number;
+  reservationRouteChecks: number;
+  stableRoutesSkipped: number;
+  wakeCount: number;
+  sleepCount: number;
+  changedBeltRecords: number;
 }
 
 export interface DesktopNativeCoreCommitOperationRequest extends DesktopNativeCoreSessionRequest {
@@ -410,6 +498,28 @@ export interface DesktopNativeCoreCheckpointRequest extends DesktopNativeCoreSes
 export interface DesktopNativeCoreCheckpointResult {
   checkpoint: DesktopNativeSaveCommitResult;
   summary: DesktopNativeCoreSummary;
+  encodedRecords: number;
+  reusedRecords: number;
+}
+
+export interface DesktopNativeCoreExportRequest extends DesktopNativeCoreSessionRequest {
+  exportId: string;
+  savedAtMs: number;
+  suggestedName?: string;
+}
+
+export interface DesktopNativeCoreExportResult {
+  exportId: string;
+  mode: "normal" | "speedrun";
+  result: {
+    revision: number;
+    savedAtMs: number;
+    byteLength: number;
+    envelopeSha256: string;
+    stateChecksum: string;
+  };
+  cancelled: boolean;
+  fileName?: string;
 }
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {

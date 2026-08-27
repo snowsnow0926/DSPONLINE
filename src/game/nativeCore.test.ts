@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { advanceNativeCoreSegmented, partitionNativeAdvanceBudget } from "./nativeCore";
+import type { DesktopNativeCoreProjectionTransferResult } from "../desktop";
+import {
+  advanceNativeCoreSegmented,
+  decodeNativeCoreProjectionTransfer,
+  partitionNativeAdvanceBudget,
+} from "./nativeCore";
 
 describe("Windows native core segmented advance", () => {
   it("preserves exact simulation and wall totals across cancellable boundaries", () => {
@@ -66,5 +71,77 @@ describe("Windows native core segmented advance", () => {
       supported: true,
       revision: request.baseRevision,
     }), { baseRevision: 9, simulationSeconds: 1, wallSeconds: 1 })).rejects.toThrow(/不连续 revision/);
+  });
+});
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function transferFor(value: Record<string, unknown>): Promise<DesktopNativeCoreProjectionTransferResult> {
+  const bodyBuffer = new TextEncoder().encode(JSON.stringify(value)).buffer;
+  const sha256 = hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bodyBuffer)));
+  return {
+    header: {
+      schemaVersion: 1,
+      sessionId: "core-1",
+      revision: Number(value.revision),
+      sequence: 9,
+      projectionType: value.projectionType as "viewport-v1",
+      payloadLength: bodyBuffer.byteLength,
+      sha256,
+    },
+    bodyBuffer,
+  };
+}
+
+describe("native core transferable projections", () => {
+  it("verifies and decodes one bounded viewport block", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "viewport-v1",
+      revision: 12,
+      planetId: "home",
+      bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+      base: {},
+      entities: [],
+      belts: [],
+      nextEntityCursor: null,
+      truncatedBelts: false,
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "viewport-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it("rejects a corrupted payload before installing it", async () => {
+    const transfer = await transferFor({
+      schemaVersion: 1,
+      projectionType: "viewport-v1",
+      revision: 12,
+    });
+    new Uint8Array(transfer.bodyBuffer)[0] ^= 0xff;
+    await expect(decodeNativeCoreProjectionTransfer(transfer, {
+      sessionId: "core-1",
+      projectionType: "viewport-v1",
+    })).rejects.toThrow(/校验失败/);
+  });
+
+  it("rejects a mismatched session or revision identity", async () => {
+    const transfer = await transferFor({
+      schemaVersion: 1,
+      projectionType: "viewport-v1",
+      revision: 12,
+    });
+    await expect(decodeNativeCoreProjectionTransfer(transfer, {
+      sessionId: "core-2",
+      projectionType: "viewport-v1",
+    })).rejects.toThrow(/边界无效/);
+    transfer.header.revision = 13;
+    await expect(decodeNativeCoreProjectionTransfer(transfer, {
+      sessionId: "core-1",
+      projectionType: "viewport-v1",
+    })).rejects.toThrow(/正文身份无效/);
   });
 });

@@ -5,9 +5,11 @@ const test = require("node:test");
 
 const {
   CONTROL_RESPONSE_KIND,
+  MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   crc32,
+  encodeNativeProjectionTransfer,
   encodeFrame,
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
@@ -32,6 +34,42 @@ test("native frame corruption is rejected", () => {
   frame[frame.length - 1] ^= 0xff;
   assert.throws(() => parseFrames(frame), /checksum/);
   assert.equal(crc32(Buffer.from("123456789")), 0xcbf43926);
+});
+
+test("native projection transfer carries bounded identity and SHA-256 metadata", () => {
+  const transfer = encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 7,
+    projectionType: "viewport-v1",
+    result: {
+      schemaVersion: 1,
+      projectionType: "viewport-v1",
+      revision: 12,
+      entities: [{ id: "entity-1" }],
+      belts: [],
+    },
+  });
+  assert.deepEqual(transfer.header, {
+    schemaVersion: 1,
+    sessionId: "core-1",
+    revision: 12,
+    sequence: 7,
+    projectionType: "viewport-v1",
+    payloadLength: transfer.payload.byteLength,
+    sha256: require("node:crypto").createHash("sha256").update(transfer.payload).digest("hex"),
+  });
+  assert.equal(JSON.parse(transfer.payload).revision, 12);
+  assert.throws(() => encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 8,
+    projectionType: "statistics-v1",
+    result: {
+      schemaVersion: 1,
+      projectionType: "statistics-v1",
+      revision: 12,
+      samples: [{ payload: "x".repeat(MAX_NATIVE_PROJECTION_TRANSFER_BYTES) }],
+    },
+  }), /transferable block limit/);
 });
 
 test("renderer requests cannot provide paths or oversized batches", () => {

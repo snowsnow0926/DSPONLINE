@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Write as IoWrite;
 use std::mem::size_of;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, OnceLock};
@@ -21,7 +22,85 @@ const MAX_PROJECTION_ENTITIES: usize = 32;
 const MAX_PROJECTION_BELTS: usize = 64;
 const MAX_PROJECTION_BASE_FIELDS: usize = 64;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
+const MAX_VIEWPORT_PROJECTION_ENTITIES: usize = 4_096;
+const MAX_VIEWPORT_PROJECTION_BELTS: usize = 8_192;
+const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
 const NONE_SYMBOL: u32 = u32::MAX;
+const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
+const BELT_CHECKPOINT_CHUNK_SIZE: usize = 2_048;
+
+#[derive(Debug, Clone, Default)]
+struct SaveDirtyPages {
+    base: bool,
+    entity_pages: BTreeSet<usize>,
+    belt_pages: BTreeSet<usize>,
+    entity_topology: bool,
+    belt_topology: bool,
+}
+
+impl SaveDirtyPages {
+    fn mark_entity(&mut self, index: usize) {
+        self.entity_pages
+            .insert(index / ENTITY_CHECKPOINT_CHUNK_SIZE);
+    }
+
+    fn mark_belt(&mut self, index: usize) {
+        self.belt_pages.insert(index / BELT_CHECKPOINT_CHUNK_SIZE);
+    }
+
+    fn mark_entity_topology(&mut self) {
+        self.entity_topology = true;
+        self.entity_pages.clear();
+    }
+
+    fn mark_belt_topology(&mut self) {
+        self.belt_topology = true;
+        self.belt_pages.clear();
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalCheckpointVisitResult {
+    pub active_keys: Vec<String>,
+    pub encoded_records: usize,
+    pub reused_records: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct V47EnvelopeExportResult {
+    pub revision: u64,
+    pub saved_at_ms: u64,
+    pub byte_length: u64,
+    pub envelope_sha256: String,
+    pub state_checksum: String,
+}
+
+struct Utf16Fnv1a {
+    value: u32,
+}
+
+impl Utf16Fnv1a {
+    fn new() -> Self {
+        Self { value: 0x811c9dc5 }
+    }
+
+    fn update(&mut self, text: &str) {
+        for unit in text.encode_utf16() {
+            self.value ^= u32::from(unit);
+            self.value = self.value.wrapping_mul(0x01000193);
+        }
+    }
+
+    fn finish(&self) -> String {
+        format!("{:08x}", self.value)
+    }
+}
 
 struct DeferredRecordDrop {
     entities: Vec<Value>,
@@ -346,6 +425,8 @@ pub(crate) struct EntityColumns {
     pub stored_items: Vec<u32>,
     pub machine_counts: Vec<f64>,
     pub miner_counts: Vec<f64>,
+    pub position_x: Vec<f64>,
+    pub position_y: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -379,6 +460,8 @@ pub(crate) struct FactoryTopology {
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
     pub entity_grid_indices: Vec<usize>,
+    pub entities_by_planet: Vec<Vec<usize>>,
+    pub belts_by_planet: Vec<Vec<usize>>,
     pub has_galactic_material_exporter: bool,
 }
 
@@ -400,7 +483,13 @@ impl FactoryTopology {
             + self.research_entity_indices.capacity()
             + self.entity_planet_indices.capacity()
             + self.entity_grid_indices.capacity();
-        (index_capacity * size_of::<usize>()) as u64
+        let planet_index_capacity = self
+            .entities_by_planet
+            .iter()
+            .chain(self.belts_by_planet.iter())
+            .map(Vec::capacity)
+            .sum::<usize>();
+        ((index_capacity + planet_index_capacity) * size_of::<usize>()) as u64
     }
 }
 
@@ -422,6 +511,12 @@ pub struct CoreState {
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
     prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
+    /// Persistence dirtiness is deliberately independent from the simulation
+    /// wake queues. A successful checkpoint clears only this structure; belt
+    /// or logistics scheduling state is never acknowledged by the saver.
+    save_dirty: SaveDirtyPages,
+    checkpoint_chunks: Vec<ChunkMetadata>,
+    pending_checkpoint_chunks: RefCell<Option<Vec<ChunkMetadata>>>,
     /// Canonical diagnostics are intentionally expensive on very large saves.
     /// A revision is immutable from the protocol's point of view, so repeated
     /// status/compare/checkpoint calls can safely reuse the small digest result
@@ -439,6 +534,26 @@ fn object_number(object: &Map<String, Value>, key: &str) -> f64 {
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0)
+}
+
+fn retain_statistics_item(value: &mut Value, item_id: &str) {
+    if let Some(record) = value.as_object_mut() {
+        record.retain(|key, _| key == item_id);
+    }
+}
+
+fn retain_statistics_planet(value: &mut Value, planet_id: Option<&str>, item_id: Option<&str>) {
+    let Some(planets) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(planet_id) = planet_id {
+        planets.retain(|key, _| key == planet_id);
+    }
+    if let Some(item_id) = item_id {
+        for rates in planets.values_mut() {
+            retain_statistics_item(rates, item_id);
+        }
+    }
 }
 
 fn parse_inventory(value: Option<&Value>, symbols: &mut Symbols) -> Vec<ItemQuantity> {
@@ -745,6 +860,9 @@ impl CoreState {
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
+            save_dirty: SaveDirtyPages::default(),
+            checkpoint_chunks: manifest.chunks.clone(),
+            pending_checkpoint_chunks: RefCell::new(None),
             summary_cache: RefCell::new(None),
         };
         // Startup needs parsed records both for indexes and prepared belt
@@ -761,6 +879,14 @@ impl CoreState {
                 &parsed_belts,
             )?));
         }
+        // `coreOpen` must return a verified canonical proof. Reuse the parsed
+        // startup graph that index/admission construction already owns rather
+        // than dropping it and immediately decoding 80k entities plus 155k
+        // belts a second time for the first summary.
+        let canonical = state
+            .canonical_digest_bundle_with_parsed(Some(&parsed_entities), Some(&parsed_belts))?;
+        let summary = state.summary_from_digest(canonical);
+        state.summary_cache.replace(Some((state.revision, summary)));
         Ok(state)
     }
 
@@ -772,8 +898,6 @@ impl CoreState {
         saved_at_ms: u64,
         mut visit: impl FnMut(&str, &str) -> anyhow::Result<()>,
     ) -> anyhow::Result<Vec<String>> {
-        const ENTITY_CHUNK_SIZE: usize = 1_024;
-        const BELT_CHUNK_SIZE: usize = 2_048;
         let prefix = format!(
             "dsp-idle-network.internal.v1.chunked.v1.{}.",
             self.identity.mode
@@ -811,6 +935,7 @@ impl CoreState {
             1,
             serde_json::to_string(&Value::Object(self.base.clone()))?,
         )?;
+        #[allow(clippy::type_complexity)]
         let emit_raw_ranges =
             |values: &[RawRecord],
              kind: &str,
@@ -846,8 +971,18 @@ impl CoreState {
                 }
                 Ok(())
             };
-        emit_raw_ranges(&self.entity_raw, "entities", ENTITY_CHUNK_SIZE, &mut emit)?;
-        emit_raw_ranges(&self.belt_raw, "belts", BELT_CHUNK_SIZE, &mut emit)?;
+        emit_raw_ranges(
+            &self.entity_raw,
+            "entities",
+            ENTITY_CHECKPOINT_CHUNK_SIZE,
+            &mut emit,
+        )?;
+        emit_raw_ranges(
+            &self.belt_raw,
+            "belts",
+            BELT_CHECKPOINT_CHUNK_SIZE,
+            &mut emit,
+        )?;
 
         let mut root_material = String::new();
         for chunk in &metadata {
@@ -878,10 +1013,191 @@ impl CoreState {
         Ok(active_keys)
     }
 
+    /// Emits only checkpoint records whose owning page is dirty while still
+    /// returning the complete active-key set required for stale-record
+    /// removal. Clean page metadata is reused from the verified generation;
+    /// the save transaction already starts from that generation's manifest.
+    /// Dirtiness is not cleared here because the filesystem commit may still
+    /// fail after this method returns.
+    pub fn visit_dirty_internal_checkpoint_records(
+        &self,
+        saved_at_ms: u64,
+        mut visit: impl FnMut(&str, &str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<InternalCheckpointVisitResult> {
+        let prefix = format!(
+            "dsp-idle-network.internal.v1.chunked.v1.{}.",
+            self.identity.mode
+        );
+        let previous = self
+            .checkpoint_chunks
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut metadata = Vec::<ChunkMetadata>::new();
+        let mut active_keys = Vec::<String>::new();
+        let mut encoded_records = 0_usize;
+        let mut reused_records = 0_usize;
+
+        let mut install = |chunk: ChunkMetadata, text: Option<String>| -> anyhow::Result<()> {
+            let key = format!("{prefix}chunk.{}", encoded_chunk_id(&chunk.id));
+            if let Some(text) = text {
+                visit(&key, &text)?;
+                encoded_records += 1;
+            } else {
+                reused_records += 1;
+            }
+            active_keys.push(key);
+            metadata.push(chunk);
+            Ok(())
+        };
+
+        let base_text = self
+            .save_dirty
+            .base
+            .then(|| serde_json::to_string(&Value::Object(self.base.clone())))
+            .transpose()?;
+        if let Some(text) = base_text {
+            install(
+                ChunkMetadata {
+                    id: "base".to_owned(),
+                    kind: "base".to_owned(),
+                    offset: 0,
+                    count: 1,
+                    checksum: fnv1a_utf8(text.as_bytes()),
+                    bytes: text.len(),
+                },
+                Some(text),
+            )?;
+        } else if let Some(chunk) = previous.get("base") {
+            install(chunk.clone(), None)?;
+        } else {
+            let text = serde_json::to_string(&Value::Object(self.base.clone()))?;
+            install(
+                ChunkMetadata {
+                    id: "base".to_owned(),
+                    kind: "base".to_owned(),
+                    offset: 0,
+                    count: 1,
+                    checksum: fnv1a_utf8(text.as_bytes()),
+                    bytes: text.len(),
+                },
+                Some(text),
+            )?;
+        }
+
+        let mut install_pages = |values: &[RawRecord],
+                                 kind: &str,
+                                 chunk_size: usize,
+                                 topology_dirty: bool,
+                                 dirty_pages: &BTreeSet<usize>|
+         -> anyhow::Result<()> {
+            let page_count = values.len().max(1).div_ceil(chunk_size);
+            for page in 0..page_count {
+                let offset = page * chunk_size;
+                let end = (offset + chunk_size).min(values.len());
+                let count = end.saturating_sub(offset);
+                let id = format!("{kind}:{offset:08}");
+                let cached = previous.get(&id).filter(|chunk| {
+                    chunk.kind == kind && chunk.offset == offset && chunk.count == count
+                });
+                if !topology_dirty
+                    && !dirty_pages.contains(&page)
+                    && let Some(chunk) = cached
+                {
+                    install((*chunk).clone(), None)?;
+                    continue;
+                }
+                let capacity = values[offset..end]
+                    .iter()
+                    .map(|raw| raw.len() + 1)
+                    .sum::<usize>()
+                    .saturating_add(1);
+                let mut text = String::with_capacity(capacity);
+                text.push('[');
+                for (relative, raw) in values[offset..end].iter().enumerate() {
+                    if relative > 0 {
+                        text.push(',');
+                    }
+                    text.push_str(raw);
+                }
+                text.push(']');
+                install(
+                    ChunkMetadata {
+                        id,
+                        kind: kind.to_owned(),
+                        offset,
+                        count,
+                        checksum: fnv1a_utf8(text.as_bytes()),
+                        bytes: text.len(),
+                    },
+                    Some(text),
+                )?;
+            }
+            Ok(())
+        };
+        install_pages(
+            &self.entity_raw,
+            "entities",
+            ENTITY_CHECKPOINT_CHUNK_SIZE,
+            self.save_dirty.entity_topology,
+            &self.save_dirty.entity_pages,
+        )?;
+        install_pages(
+            &self.belt_raw,
+            "belts",
+            BELT_CHECKPOINT_CHUNK_SIZE,
+            self.save_dirty.belt_topology,
+            &self.save_dirty.belt_pages,
+        )?;
+
+        let total_bytes = metadata.iter().map(|chunk| chunk.bytes).sum::<usize>();
+        let mut root_material = String::new();
+        for chunk in &metadata {
+            use std::fmt::Write as _;
+            write!(
+                root_material,
+                "{}:{}:{}:{}:{}:{};",
+                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
+            )?;
+        }
+        let manifest_key = format!("{prefix}manifest");
+        let manifest = serde_json::to_string(&serde_json::json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": self.identity.mode,
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": saved_at_ms,
+            "basePrimaryChecksum": self.identity.base_primary_checksum,
+            "chunkRootChecksum": fnv1a_utf8(root_material.as_bytes()),
+            "totalBytes": total_bytes,
+            "entityCount": self.entity_raw.len(),
+            "beltCount": self.belt_raw.len(),
+            "chunks": metadata,
+        }))?;
+        visit(&manifest_key, &manifest)?;
+        encoded_records += 1;
+        active_keys.push(manifest_key);
+        *self.pending_checkpoint_chunks.borrow_mut() = Some(metadata);
+        Ok(InternalCheckpointVisitResult {
+            active_keys,
+            encoded_records,
+            reused_records,
+        })
+    }
+
     pub fn install_checkpoint_identity(&mut self, generation: u64, root_hash: String) {
         self.identity.generation = generation;
         self.identity.root_hash = root_hash;
         self.identity.revision = self.revision;
+        if let Some(chunks) = self.pending_checkpoint_chunks.get_mut().take() {
+            self.checkpoint_chunks = chunks;
+        }
+        self.save_dirty.clear();
+    }
+
+    pub fn abort_checkpoint_visit(&self) {
+        self.pending_checkpoint_chunks.borrow_mut().take();
     }
 
     pub(crate) fn refresh_factory_static_admission(&mut self) -> anyhow::Result<()> {
@@ -940,7 +1256,11 @@ impl CoreState {
             .enumerate()
             .map(|(index, planet)| (planet.id.as_str(), index))
             .collect::<HashMap<_, _>>();
-        let mut factory_topology = FactoryTopology::default();
+        let mut factory_topology = FactoryTopology {
+            entities_by_planet: vec![Vec::new(); self.catalog.planets.len()],
+            belts_by_planet: vec![Vec::new(); self.catalog.planets.len()],
+            ..FactoryTopology::default()
+        };
         for (index, value) in entity_values.iter().enumerate() {
             let object = value
                 .as_object()
@@ -975,6 +1295,21 @@ impl CoreState {
             self.entities
                 .miner_counts
                 .push(object_number(object, "minerCount"));
+            let position = object.get("position").and_then(Value::as_object);
+            self.entities.position_x.push(
+                position
+                    .and_then(|value| value.get("x"))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(0.0),
+            );
+            self.entities.position_y.push(
+                position
+                    .and_then(|value| value.get("y"))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(0.0),
+            );
 
             let kind = object_string(object, "kind").unwrap_or_default();
             let building = object_string(object, "buildingId").unwrap_or_default();
@@ -1038,11 +1373,13 @@ impl CoreState {
             }
             factory_topology.has_galactic_material_exporter |=
                 building == "galactic_material_exporter";
-            factory_topology.entity_planet_indices.push(
-                object_string(object, "planetId")
-                    .and_then(|id| planet_indices.get(id).copied())
-                    .unwrap_or(usize::MAX),
-            );
+            let entity_planet = object_string(object, "planetId")
+                .and_then(|id| planet_indices.get(id).copied())
+                .unwrap_or(usize::MAX);
+            factory_topology.entity_planet_indices.push(entity_planet);
+            if let Some(indices) = factory_topology.entities_by_planet.get_mut(entity_planet) {
+                indices.push(index);
+            }
             factory_topology.entity_grid_indices.push(
                 match object_string(object, "powerGridId").unwrap_or("grid-a") {
                     "grid-a" => 0,
@@ -1092,6 +1429,12 @@ impl CoreState {
                     .unwrap_or(1)
                     .min(2) as u8,
             );
+            if let Some(planet) = object_string(object, "planetId")
+                .and_then(|id| planet_indices.get(id).copied())
+                .and_then(|planet| factory_topology.belts_by_planet.get_mut(planet))
+            {
+                planet.push(index);
+            }
         }
         self.factory_topology = Arc::new(factory_topology);
         Ok(())
@@ -1115,17 +1458,33 @@ impl CoreState {
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
         self.summary_cache.get_mut().take();
+        self.save_dirty.base = true;
         &mut self.base
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
     }
-    pub(crate) fn entity_raw_mut(&mut self) -> &mut Vec<RawRecord> {
+    pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
         self.summary_cache.get_mut().take();
+        self.entity_raw[index] = value;
+        self.save_dirty.mark_entity(index);
+    }
+
+    pub(crate) fn replace_belt_raw(&mut self, index: usize, value: RawRecord) {
+        self.summary_cache.get_mut().take();
+        self.belt_raw[index] = value;
+        self.save_dirty.mark_belt(index);
+    }
+
+    pub(crate) fn entity_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
+        self.summary_cache.get_mut().take();
+        self.save_dirty.mark_entity_topology();
         &mut self.entity_raw
     }
-    pub(crate) fn belt_raw_mut(&mut self) -> &mut Vec<RawRecord> {
+
+    pub(crate) fn belt_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
         self.summary_cache.get_mut().take();
+        self.save_dirty.mark_belt_topology();
         &mut self.belt_raw
     }
 
@@ -1134,7 +1493,10 @@ impl CoreState {
         base: Map<String, Value>,
         entities: Vec<Value>,
         belts: Vec<Value>,
-    ) -> anyhow::Result<()> {
+        changed_belt_indices: &[usize],
+        next_revision: u64,
+        populate_summary_cache: bool,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
         self.summary_cache.get_mut().take();
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
@@ -1161,7 +1523,10 @@ impl CoreState {
                 }
             };
         }
-        if entities.len() != self.entity_raw.len() || belts.len() != self.belt_raw.len() {
+        if entities.len() != self.entity_raw.len()
+            || belts.len() != self.belt_raw.len()
+            || next_revision != self.revision.saturating_add(1)
+        {
             bail!("native simulation changed record topology");
         }
         for (index, entity) in entities.iter().enumerate() {
@@ -1182,16 +1547,163 @@ impl CoreState {
         }
         profile_mark!("identity");
 
-        let entity_raw = encode_records_parallel(&entities, "native simulated entity")?;
-        let belt_raw = encode_records_parallel(&belts, "native simulated belt")?;
+        let mut previous_changed_belt = None;
+        for &index in changed_belt_indices {
+            if index >= belts.len()
+                || previous_changed_belt.is_some_and(|previous| index <= previous)
+            {
+                bail!("native simulated belt dirty index is invalid");
+            }
+            previous_changed_belt = Some(index);
+        }
+
+        let mut entity_raw = encode_records_parallel(&entities, "native simulated entity")?;
+        let mut belt_raw = self.belt_raw.clone();
+        if changed_belt_indices.len() > belts.len() / 3 {
+            belt_raw = encode_records_parallel(&belts, "native simulated belt")?;
+        } else {
+            for &index in changed_belt_indices {
+                belt_raw[index] = serde_json::to_string(&belts[index])
+                    .context("encode dirty native simulated belt")?
+                    .into();
+            }
+        }
         profile_mark!("encode");
 
+        if self.base != base {
+            self.save_dirty.base = true;
+        }
+        for (index, (previous, next)) in self
+            .entity_raw
+            .iter()
+            .zip(entity_raw.iter_mut())
+            .enumerate()
+        {
+            if previous.as_ref() == next.as_ref() {
+                *next = previous.clone();
+            } else {
+                self.save_dirty.mark_entity(index);
+            }
+        }
+        if changed_belt_indices.len() > belts.len() / 3 {
+            for (index, (previous, next)) in
+                self.belt_raw.iter().zip(belt_raw.iter_mut()).enumerate()
+            {
+                if previous.as_ref() == next.as_ref() {
+                    *next = previous.clone();
+                } else {
+                    self.save_dirty.mark_belt(index);
+                }
+            }
+        } else {
+            for &index in changed_belt_indices {
+                if self.belt_raw[index].as_ref() == belt_raw[index].as_ref() {
+                    belt_raw[index] = self.belt_raw[index].clone();
+                } else {
+                    self.save_dirty.mark_belt(index);
+                }
+            }
+        }
         self.base = base;
         self.entity_raw = entity_raw;
         self.belt_raw = belt_raw;
+        self.revision = next_revision;
+        let summary = if populate_summary_cache {
+            let canonical =
+                self.canonical_digest_bundle_with_parsed(Some(&entities), Some(&belts))?;
+            let summary = self.summary_from_digest(canonical);
+            self.summary_cache
+                .replace(Some((self.revision, summary.clone())));
+            Some(summary)
+        } else {
+            None
+        };
         defer_record_drop(entities, belts);
         profile_last!("install");
-        Ok(())
+        Ok(summary)
+    }
+
+    /// Streams a public v47/envelope-v2 export directly from native-owned
+    /// records. The state is never materialized as a second `Value` graph or
+    /// one giant String. The legacy checksum is calculated over the exact
+    /// UTF-16 JSON code units while SHA-256 and byte length are calculated over
+    /// the bytes written to the destination.
+    pub fn write_v47_envelope(
+        &self,
+        saved_at_ms: u64,
+        mut writer: impl IoWrite,
+    ) -> anyhow::Result<V47EnvelopeExportResult> {
+        if self.identity.state_version != 47 || saved_at_ms > 9_007_199_254_740_991 {
+            bail!("native v47 export identity is invalid");
+        }
+        let mut envelope_sha = Sha256::new();
+        let mut byte_length = 0_u64;
+        let mut state_checksum = Utf16Fnv1a::new();
+        state_checksum.update("{\"formatVersion\":2,\"state\":");
+        let checksum;
+        {
+            let mut write = |text: &str| -> anyhow::Result<()> {
+                writer.write_all(text.as_bytes())?;
+                envelope_sha.update(text.as_bytes());
+                byte_length = byte_length.saturating_add(text.len() as u64);
+                Ok(())
+            };
+            let prefix = format!(
+                "{{\"formatVersion\":2,\"kind\":\"primary\",\"mode\":{},\"slot\":\"main\",\"savedAt\":{},\"state\":",
+                serde_json::to_string(&self.identity.mode)?,
+                saved_at_ms,
+            );
+            write(&prefix)?;
+
+            {
+                let mut write_state = |text: &str| -> anyhow::Result<()> {
+                    state_checksum.update(text);
+                    write(text)
+                };
+                write_state("{")?;
+                let mut first = true;
+                for (key, value) in &self.base {
+                    if !first {
+                        write_state(",")?;
+                    }
+                    first = false;
+                    write_state(&serde_json::to_string(key)?)?;
+                    write_state(":")?;
+                    write_state(&serde_json::to_string(value)?)?;
+                }
+                for (key, records) in [
+                    ("entities", self.entity_raw.as_slice()),
+                    ("belts", self.belt_raw.as_slice()),
+                ] {
+                    if !first {
+                        write_state(",")?;
+                    }
+                    first = false;
+                    write_state(&serde_json::to_string(key)?)?;
+                    write_state(":")?;
+                    write_state("[")?;
+                    for (index, raw) in records.iter().enumerate() {
+                        if index > 0 {
+                            write_state(",")?;
+                        }
+                        write_state(raw)?;
+                    }
+                    write_state("]")?;
+                }
+                write_state("}")?;
+            }
+            state_checksum.update("}");
+            checksum = state_checksum.finish();
+            write(&format!(",\"checksum\":\"{checksum}\"}}"))?;
+        }
+        writer.flush()?;
+        Ok(V47EnvelopeExportResult {
+            revision: self.revision,
+            saved_at_ms,
+            byte_length,
+            envelope_sha256: hex::encode(envelope_sha.finalize()),
+            state_checksum: checksum,
+        })
     }
 
     pub fn materialize(&self) -> anyhow::Result<Value> {
@@ -1271,6 +1783,230 @@ impl CoreState {
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native core projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
+    /// Produces a bounded current-viewport projection without materializing or
+    /// transferring the complete factory. Stable cursors paginate dense
+    /// regions in persisted entity order; belts are limited to connections
+    /// touching the returned node page.
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection(
+        &self,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_limit: usize,
+    ) -> anyhow::Result<Value> {
+        if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
+            || entity_limit == 0
+            || entity_limit > MAX_VIEWPORT_PROJECTION_ENTITIES
+            || belt_limit > MAX_VIEWPORT_PROJECTION_BELTS
+            || entity_cursor > self.entity_raw.len()
+            || [min_x, min_y, max_x, max_y]
+                .iter()
+                .any(|value| !value.is_finite())
+            || min_x > max_x
+            || min_y > max_y
+            || max_x - min_x > 10_000_000.0
+            || max_y - min_y > 10_000_000.0
+        {
+            bail!("native viewport projection bounds are invalid");
+        }
+        let valid_key = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+                })
+        };
+        if !valid_key(planet_id)
+            || base_fields
+                .iter()
+                .any(|field| !valid_key(field) || matches!(field.as_str(), "entities" | "belts"))
+        {
+            bail!("native viewport projection selector is invalid");
+        }
+        let planet_index = self
+            .catalog
+            .planets
+            .iter()
+            .position(|planet| planet.id == planet_id)
+            .ok_or_else(|| anyhow!("native viewport projection planet is missing"))?;
+        let candidates = self
+            .factory_topology
+            .entities_by_planet
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport projection planet index is invalid"))?;
+        let matching = candidates.iter().copied().filter(|&index| {
+            let x = self.entities.position_x[index];
+            let y = self.entities.position_y[index];
+            x >= min_x && x <= max_x && y >= min_y && y <= max_y
+        });
+        let mut selected_indices = matching
+            .skip(entity_cursor)
+            .take(entity_limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more_entities = selected_indices.len() > entity_limit;
+        selected_indices.truncate(entity_limit);
+        let selected_ids = selected_indices
+            .iter()
+            .map(|&index| self.entities.ids[index].as_ref())
+            .collect::<HashSet<_>>();
+        let mut selected_belts = self
+            .factory_topology
+            .belts_by_planet
+            .get(planet_index)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&index| {
+                let source = self.symbols.resolve(self.belts.sources[index]);
+                let target = self.symbols.resolve(self.belts.targets[index]);
+                source.is_some_and(|id| selected_ids.contains(id))
+                    || target.is_some_and(|id| selected_ids.contains(id))
+            })
+            .take(belt_limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more_belts = selected_belts.len() > belt_limit;
+        selected_belts.truncate(belt_limit);
+
+        let mut base = Map::new();
+        for field in base_fields {
+            if let Some(value) = self.base.get(field) {
+                base.insert(field.clone(), value.clone());
+            }
+        }
+        let entities = selected_indices
+            .iter()
+            .copied()
+            .map(|index| self.parse_entity(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let belts = selected_belts
+            .iter()
+            .copied()
+            .map(|index| self.parse_belt(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let next_entity_cursor = has_more_entities.then_some(entity_cursor + entities.len());
+        let value = serde_json::json!({
+            "schemaVersion": 1,
+            "projectionType": "viewport-v1",
+            "revision": self.revision,
+            "planetId": planet_id,
+            "bounds": { "minX": min_x, "minY": min_y, "maxX": max_x, "maxY": max_y },
+            "base": base,
+            "entities": entities,
+            "belts": belts,
+            "nextEntityCursor": next_entity_cursor,
+            "truncatedBelts": has_more_belts,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native viewport projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
+    /// Returns only the requested window from the already-maintained native
+    /// rolling history. This query never reparses or scans entity/belt records,
+    /// and filters are applied before the bounded IPC payload is encoded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn statistics_projection(
+        &self,
+        min_elapsed_seconds: f64,
+        max_elapsed_seconds: f64,
+        cursor: usize,
+        limit: usize,
+        planet_id: Option<&str>,
+        item_id: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let valid_selector = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                })
+        };
+        if !min_elapsed_seconds.is_finite()
+            || !max_elapsed_seconds.is_finite()
+            || min_elapsed_seconds < 0.0
+            || min_elapsed_seconds > max_elapsed_seconds
+            || limit == 0
+            || limit > MAX_STATISTICS_PROJECTION_SAMPLES
+            || planet_id.is_some_and(|value| !valid_selector(value))
+            || item_id.is_some_and(|value| !valid_selector(value))
+        {
+            bail!("native statistics projection selector is invalid");
+        }
+        if let Some(planet_id) = planet_id
+            && !self
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == planet_id)
+        {
+            bail!("native statistics projection planet is missing");
+        }
+        if let Some(item_id) = item_id
+            && !self.catalog.items.contains_key(item_id)
+        {
+            bail!("native statistics projection item is missing");
+        }
+        let history = self
+            .base
+            .get("productionHistory")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let matching = history.iter().filter(|sample| {
+            sample
+                .get("elapsedSeconds")
+                .and_then(Value::as_f64)
+                .is_some_and(|elapsed| {
+                    elapsed >= min_elapsed_seconds && elapsed <= max_elapsed_seconds
+                })
+        });
+        let mut samples = matching
+            .skip(cursor)
+            .take(limit.saturating_add(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = samples.len() > limit;
+        samples.truncate(limit);
+        for sample in &mut samples {
+            let Some(sample) = sample.as_object_mut() else {
+                bail!("native statistics history sample is invalid");
+            };
+            if let Some(item_id) = item_id {
+                for key in ["productionPerMinute", "consumptionPerMinute", "inventory"] {
+                    if let Some(value) = sample.get_mut(key) {
+                        retain_statistics_item(value, item_id);
+                    }
+                }
+            }
+            for key in ["planetProductionPerMinute", "planetConsumptionPerMinute"] {
+                if let Some(value) = sample.get_mut(key) {
+                    retain_statistics_planet(value, planet_id, item_id);
+                }
+            }
+        }
+        let sample_count = samples.len();
+        let value = serde_json::json!({
+            "schemaVersion": 1,
+            "projectionType": "statistics-v1",
+            "revision": self.revision,
+            "window": { "minElapsedSeconds": min_elapsed_seconds, "maxElapsedSeconds": max_elapsed_seconds },
+            "filters": { "planetId": planet_id, "itemId": item_id },
+            "samples": samples,
+            "nextCursor": has_more.then_some(cursor + sample_count),
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native statistics projection exceeds the byte limit");
         }
         Ok(value)
     }
@@ -1368,7 +2104,17 @@ impl CoreState {
     /// for the full hash, twice more through components/fields, and once for
     /// the domain hash. Large 1.1.x saves therefore spent several seconds on
     /// duplicate JSON decoding for every diagnostics request.
-    fn canonical_digest_bundle(&self) -> anyhow::Result<CanonicalDigestBundle> {
+    fn canonical_digest_bundle_with_parsed(
+        &self,
+        parsed_entities: Option<&[Value]>,
+        parsed_belts: Option<&[Value]>,
+    ) -> anyhow::Result<CanonicalDigestBundle> {
+        if parsed_entities.is_some() != parsed_belts.is_some()
+            || parsed_entities.is_some_and(|values| values.len() != self.entity_raw.len())
+            || parsed_belts.is_some_and(|values| values.len() != self.belt_raw.len())
+        {
+            bail!("native canonical parsed record count is inconsistent");
+        }
         let mut canonical = Sha256::new();
         let mut entities = Sha256::new();
         let mut belts = Sha256::new();
@@ -1397,11 +2143,17 @@ impl CoreState {
                             canonical.update(b",");
                             entities.update(b",");
                         }
-                        let value =
-                            serde_json::from_str(raw).context("decode native canonical entity")?;
-                        update_canonical(&mut canonical, &value);
-                        update_canonical(&mut entities, &value);
-                        self.update_domain_entity(&mut domain, &mut domain_symbols, index, &value)?;
+                        let decoded;
+                        let value = if let Some(values) = parsed_entities {
+                            &values[index]
+                        } else {
+                            decoded = serde_json::from_str(raw)
+                                .context("decode native canonical entity")?;
+                            &decoded
+                        };
+                        update_canonical(&mut canonical, value);
+                        update_canonical(&mut entities, value);
+                        self.update_domain_entity(&mut domain, &mut domain_symbols, index, value)?;
                     }
                     canonical.update(b"]");
                 }
@@ -1412,10 +2164,16 @@ impl CoreState {
                             canonical.update(b",");
                             belts.update(b",");
                         }
-                        let value =
-                            serde_json::from_str(raw).context("decode native canonical belt")?;
-                        update_canonical(&mut canonical, &value);
-                        update_canonical(&mut belts, &value);
+                        let decoded;
+                        let value = if let Some(values) = parsed_belts {
+                            &values[index]
+                        } else {
+                            decoded = serde_json::from_str(raw)
+                                .context("decode native canonical belt")?;
+                            &decoded
+                        };
+                        update_canonical(&mut canonical, value);
+                        update_canonical(&mut belts, value);
                         let belt = value
                             .as_object()
                             .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
@@ -1462,6 +2220,10 @@ impl CoreState {
             canonical_fields,
             domain_sha256: hex::encode(domain.finalize()),
         })
+    }
+
+    fn canonical_digest_bundle(&self) -> anyhow::Result<CanonicalDigestBundle> {
+        self.canonical_digest_bundle_with_parsed(None, None)
     }
 
     fn start_domain_hasher(&self) -> Sha256 {
@@ -1619,7 +2381,12 @@ impl CoreState {
                 .sum::<u64>();
         let entity_rows = self.entities.ids.len() as u64;
         let belt_rows = self.belts.ids.len() as u64;
-        let numeric_columns = entity_rows * 56 + belt_rows * 72;
+        // The pre-1.2.3 estimate accounted for IDs, interned symbols and
+        // machine/miner counts as 56 bytes per entity row. Position x/y add
+        // two more f64 columns. Keep this estimate in lockstep with
+        // `EntityColumns` so the native memory budget does not under-report
+        // the viewport indexes.
+        let numeric_columns = entity_rows * 72 + belt_rows * 72;
         let index_overhead = ((self.entity_index.capacity() + self.belt_index.capacity())
             * (size_of::<String>() + size_of::<usize>())) as u64;
         let topology_index_bytes = self
@@ -1646,18 +2413,8 @@ impl CoreState {
         }
     }
 
-    pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
-        if let Some(summary) = self
-            .summary_cache
-            .borrow()
-            .as_ref()
-            .filter(|(revision, _)| *revision == self.revision)
-            .map(|(_, summary)| summary.clone())
-        {
-            return Ok(summary);
-        }
-        let canonical = self.canonical_digest_bundle()?;
-        let summary = CoreStateSummary {
+    fn summary_from_digest(&self, canonical: CanonicalDigestBundle) -> CoreStateSummary {
+        CoreStateSummary {
             revision: self.revision,
             state_version: self
                 .base
@@ -1696,7 +2453,21 @@ impl CoreState {
             registry_fingerprint: self.identity.registry_fingerprint.clone(),
             memory: self.memory_estimate(),
             coverage: self.coverage.clone(),
-        };
+        }
+    }
+
+    pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
+        if let Some(summary) = self
+            .summary_cache
+            .borrow()
+            .as_ref()
+            .filter(|(revision, _)| *revision == self.revision)
+            .map(|(_, summary)| summary.clone())
+        {
+            return Ok(summary);
+        }
+        let canonical = self.canonical_digest_bundle()?;
+        let summary = self.summary_from_digest(canonical);
         self.summary_cache
             .replace(Some((self.revision, summary.clone())));
         Ok(summary)
@@ -1849,6 +2620,51 @@ mod tests {
     }
 
     #[test]
+    fn statistics_projection_filters_the_compact_history_without_factory_records() {
+        let mut state = CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".into(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".into(),
+                registry_fingerprint: "core".into(),
+                base_primary_checksum: "12345678".into(),
+            },
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.base.insert(
+            "productionHistory".into(),
+            json!([
+                {"elapsedSeconds":1,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60,"hidden":5},"consumptionPerMinute":{"iron_ore":2,"hidden":1},"inventory":{"iron_ore":3,"hidden":9},"planetProductionPerMinute":{"home":{"iron_ore":60,"hidden":5}},"planetConsumptionPerMinute":{"home":{"iron_ore":2,"hidden":1}}},
+                {"elapsedSeconds":2,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":120},"consumptionPerMinute":{},"inventory":{"iron_ore":5},"planetProductionPerMinute":{"home":{"iron_ore":120}},"planetConsumptionPerMinute":{"home":{}}},
+                {"elapsedSeconds":3,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":180},"consumptionPerMinute":{},"inventory":{"iron_ore":8},"planetProductionPerMinute":{"home":{"iron_ore":180}},"planetConsumptionPerMinute":{"home":{}}}
+            ]),
+        );
+        let first = state
+            .statistics_projection(1.0, 3.0, 0, 2, Some("home"), Some("iron_ore"))
+            .unwrap();
+        assert_eq!(first["projectionType"], "statistics-v1");
+        assert_eq!(first["samples"].as_array().unwrap().len(), 2);
+        assert_eq!(first["nextCursor"], 2);
+        assert!(
+            first["samples"][0]["productionPerMinute"]
+                .get("hidden")
+                .is_none()
+        );
+        let second = state
+            .statistics_projection(1.0, 3.0, 2, 2, Some("home"), Some("iron_ore"))
+            .unwrap();
+        assert_eq!(second["samples"].as_array().unwrap().len(), 1);
+        assert!(second["nextCursor"].is_null());
+        assert_eq!(state.entity_raw.len(), 1);
+        assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    #[test]
     fn streams_a_compatible_bounded_checkpoint_without_materializing_game_state() {
         let identity = CoreCheckpointIdentity {
             slot: "normal-main".into(),
@@ -1885,6 +2701,216 @@ mod tests {
         let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
         assert_eq!(manifest["savedAt"], 42);
         assert_eq!(manifest["basePrimaryChecksum"], "12345678");
+    }
+
+    #[test]
+    fn streams_v47_envelope_with_exact_legacy_checksum_and_sha256() {
+        let identity = CoreCheckpointIdentity {
+            slot: "normal-main".into(),
+            generation: 1,
+            root_hash: "a".repeat(64),
+            revision: 7,
+            state_version: 47,
+            mode: "normal".into(),
+            registry_fingerprint: "core".into(),
+            base_primary_checksum: "12345678".into(),
+        };
+        let state =
+            CoreState::from_internal_records(identity, &fixture_records(), fixture_catalog())
+                .unwrap();
+        let mut bytes = Vec::new();
+        let result = state.write_v47_envelope(42, &mut bytes).unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["formatVersion"], 2);
+        assert_eq!(envelope["state"]["version"], 47);
+        assert_eq!(envelope["state"]["entities"][0]["id"], "vein");
+        let raw = String::from_utf8(bytes.clone()).unwrap();
+        let state_start = raw.find("\"state\":").unwrap() + "\"state\":".len();
+        let state_end = raw.rfind(",\"checksum\":").unwrap();
+        let state_text = &raw[state_start..state_end];
+        let mut checksum = Utf16Fnv1a::new();
+        checksum.update("{\"formatVersion\":2,\"state\":");
+        checksum.update(state_text);
+        checksum.update("}");
+        assert_eq!(envelope["checksum"], checksum.finish());
+        assert_eq!(result.state_checksum, checksum.finish());
+        assert_eq!(result.byte_length, bytes.len() as u64);
+        assert_eq!(result.envelope_sha256, hex::encode(Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn dirty_checkpoint_reuses_clean_pages_until_commit_acknowledges_them() {
+        let identity = CoreCheckpointIdentity {
+            slot: "normal-main".into(),
+            generation: 1,
+            root_hash: "a".repeat(64),
+            revision: 7,
+            state_version: 47,
+            mode: "normal".into(),
+            registry_fingerprint: "core".into(),
+            base_primary_checksum: "12345678".into(),
+        };
+        let mut state = CoreState::from_internal_records(
+            identity.clone(),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let mut first_delta = BTreeMap::<String, Vec<u8>>::new();
+        let first = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                first_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(first.encoded_records, 1);
+        assert_eq!(first.reused_records, 3);
+        assert_eq!(first_delta.len(), 1);
+        assert!(first_delta.keys().all(|key| key.ends_with("manifest")));
+
+        // A failed filesystem transaction must not acknowledge a later dirty
+        // base/page. The next attempt has to emit them again.
+        state.abort_checkpoint_visit();
+        state
+            .base_value_mut()
+            .insert("elapsedSeconds".to_owned(), Value::from(1));
+        state.replace_entity_raw(
+            0,
+            Arc::<str>::from(
+                serde_json::to_string(&json!({
+                    "id":"vein","kind":"vein","planetId":"home","resourceId":"iron_ore",
+                    "minerCount":2,"inputs":{},"outputs":{"iron_ore":4},"progress":0,
+                    "utilization":0,"productionRate":0,"routingCursor":0
+                }))
+                .unwrap(),
+            ),
+        );
+        let mut retry_delta = BTreeMap::<String, Vec<u8>>::new();
+        let retry = state
+            .visit_dirty_internal_checkpoint_records(44, |key, value| {
+                retry_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(retry.encoded_records, 3);
+        assert_eq!(retry.reused_records, 1);
+        assert!(retry_delta.keys().any(|key| key.ends_with("chunk.base")));
+        assert!(
+            retry_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.entities%3A00000000"))
+        );
+
+        state.install_checkpoint_identity(2, "b".repeat(64));
+        let clean = state
+            .visit_dirty_internal_checkpoint_records(45, |_key, _value| Ok(()))
+            .unwrap();
+        assert_eq!(clean.encoded_records, 1);
+        assert_eq!(clean.reused_records, 3);
+    }
+
+    #[test]
+    fn dirty_checkpoint_encodes_only_the_changed_entity_page() {
+        let base = serde_json::to_vec(&json!({
+            "version":47,"mode":"normal","activePlanetId":"home","elapsedSeconds":0,"paused":false
+        }))
+        .unwrap();
+        let entities = (0..1_025)
+            .map(|index| {
+                json!({
+                    "id":format!("vein-{index}"),"kind":"vein","planetId":"home",
+                    "resourceId":"iron_ore","minerCount":0,"inputs":{},"outputs":{},
+                    "progress":0,"utilization":0,"productionRate":0,"routingCursor":0
+                })
+            })
+            .collect::<Vec<_>>();
+        let entity_pages = entities
+            .chunks(ENTITY_CHECKPOINT_CHUNK_SIZE)
+            .enumerate()
+            .map(|(page, values)| {
+                let offset = page * ENTITY_CHECKPOINT_CHUNK_SIZE;
+                let id = format!("entities:{offset:08}");
+                (id, offset, serde_json::to_vec(values).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let belts = serde_json::to_vec(&json!([])).unwrap();
+        let mut chunk_values = vec![json!({
+            "id":"base","kind":"base","offset":0,"count":1,
+            "checksum":fnv1a_utf8(&base),"bytes":base.len()
+        })];
+        for (id, offset, bytes) in &entity_pages {
+            chunk_values.push(json!({
+                "id":id,"kind":"entities","offset":offset,
+                "count":serde_json::from_slice::<Vec<Value>>(bytes).unwrap().len(),
+                "checksum":fnv1a_utf8(bytes),"bytes":bytes.len()
+            }));
+        }
+        chunk_values.push(json!({
+            "id":"belts:00000000","kind":"belts","offset":0,"count":0,
+            "checksum":fnv1a_utf8(&belts),"bytes":belts.len()
+        }));
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion":1,"envelopeFormatVersion":2,"mode":"normal","slot":"main",
+            "stateVersion":47,"savedAt":1,"basePrimaryChecksum":"12345678",
+            "chunkRootChecksum":"12345678","totalBytes":base.len()+belts.len()+entity_pages.iter().map(|(_,_,bytes)|bytes.len()).sum::<usize>(),
+            "entityCount":entities.len(),"beltCount":0,"chunks":chunk_values
+        }))
+        .unwrap();
+        let prefix = "dsp-idle-network.internal.v1.chunked.v1.normal.";
+        let mut records = BTreeMap::from([
+            (format!("{prefix}manifest"), manifest),
+            (format!("{prefix}chunk.base"), base),
+            (format!("{prefix}chunk.belts%3A00000000"), belts),
+        ]);
+        for (id, _, bytes) in entity_pages {
+            records.insert(format!("{prefix}chunk.{}", encoded_chunk_id(&id)), bytes);
+        }
+        let identity = CoreCheckpointIdentity {
+            slot: "normal-main".into(),
+            generation: 1,
+            root_hash: "a".repeat(64),
+            revision: 7,
+            state_version: 47,
+            mode: "normal".into(),
+            registry_fingerprint: "core".into(),
+            base_primary_checksum: "12345678".into(),
+        };
+        let mut state =
+            CoreState::from_internal_records(identity.clone(), &records, fixture_catalog())
+                .unwrap();
+        let mut changed = state.parse_entity(1_024).unwrap();
+        changed["outputs"]["iron_ore"] = Value::from(9);
+        state.replace_entity_raw(
+            1_024,
+            Arc::<str>::from(serde_json::to_string(&changed).unwrap()),
+        );
+        let mut delta = BTreeMap::new();
+        let visit = state
+            .visit_dirty_internal_checkpoint_records(2, |key, value| {
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visit.encoded_records, 2);
+        assert_eq!(visit.reused_records, 3);
+        assert!(
+            delta
+                .keys()
+                .any(|key| key.ends_with("chunk.entities%3A00001024"))
+        );
+        assert!(
+            !delta
+                .keys()
+                .any(|key| key.ends_with("chunk.entities%3A00000000"))
+        );
+
+        records.extend(delta);
+        let restored =
+            CoreState::from_internal_records(identity, &records, fixture_catalog()).unwrap();
+        assert_eq!(
+            restored.materialize().unwrap()["entities"][1_024]["outputs"]["iron_ore"],
+            9
+        );
     }
 
     #[test]

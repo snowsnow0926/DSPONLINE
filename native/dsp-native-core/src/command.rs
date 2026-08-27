@@ -187,7 +187,7 @@ impl CoreState {
                 .ok_or_else(|| anyhow!("native command entity is missing"))?;
             let mut value = next.parse_entity(index)?;
             apply_record_changes(&mut value, &record.changes)?;
-            next.entity_raw_mut()[index] = Arc::<str>::from(serde_json::to_string(&value)?);
+            next.replace_entity_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
             changed_entity_ids.push(record.id.clone());
         }
         let mut topology_dirty = false;
@@ -205,7 +205,7 @@ impl CoreState {
             {
                 bail!("native command removes a missing entity")
             }
-            next.entity_raw_mut().retain(|raw| {
+            next.entity_raw_mut_topology().retain(|raw| {
                 serde_json::from_str::<Value>(raw)
                     .ok()
                     .and_then(|value| {
@@ -222,7 +222,9 @@ impl CoreState {
             let mut additions = command.added_entities.clone();
             additions.sort_by_key(|entry| entry.index);
             for addition in additions {
-                if addition.index > next.entity_raw_mut().len() || !addition.value.is_object() {
+                if addition.index > next.entity_raw_mut_topology().len()
+                    || !addition.value.is_object()
+                {
                     bail!("native command entity insertion is invalid")
                 }
                 let id = addition
@@ -233,7 +235,7 @@ impl CoreState {
                 if next.entity_index.contains_key(id) {
                     bail!("native command added entity ID already exists")
                 }
-                next.entity_raw_mut().insert(
+                next.entity_raw_mut_topology().insert(
                     addition.index,
                     Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );
@@ -250,7 +252,7 @@ impl CoreState {
                 .ok_or_else(|| anyhow!("native command belt is missing"))?;
             let mut value = next.parse_belt(index)?;
             apply_record_changes(&mut value, &record.changes)?;
-            next.belt_raw_mut()[index] = Arc::<str>::from(serde_json::to_string(&value)?);
+            next.replace_belt_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
             changed_belt_ids.push(record.id.clone());
         }
         if !command.removed_belt_ids.is_empty() {
@@ -264,7 +266,7 @@ impl CoreState {
             if removed.iter().any(|id| !next.belt_index.contains_key(*id)) {
                 bail!("native command removes a missing belt")
             }
-            next.belt_raw_mut().retain(|raw| {
+            next.belt_raw_mut_topology().retain(|raw| {
                 serde_json::from_str::<Value>(raw)
                     .ok()
                     .and_then(|value| {
@@ -281,7 +283,9 @@ impl CoreState {
             let mut additions = command.added_belts.clone();
             additions.sort_by_key(|entry| entry.index);
             for addition in additions {
-                if addition.index > next.belt_raw_mut().len() || !addition.value.is_object() {
+                if addition.index > next.belt_raw_mut_topology().len()
+                    || !addition.value.is_object()
+                {
                     bail!("native command belt insertion is invalid")
                 }
                 let id = addition
@@ -292,7 +296,7 @@ impl CoreState {
                 if next.belt_index.contains_key(id) {
                     bail!("native command added belt ID already exists")
                 }
-                next.belt_raw_mut().insert(
+                next.belt_raw_mut_topology().insert(
                     addition.index,
                     Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );

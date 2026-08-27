@@ -15,8 +15,11 @@ import {
 } from "./contentPacks";
 import {
   advanceSimulationBudget,
+  advanceSimulationSession,
+  completeSimulationAdvanceSession,
   connectBeltWithResult,
   createInitialState,
+  createSimulationAdvanceSession,
   placeBuilding,
   setStationSlotItem,
   setStationSlotMinimumLoad,
@@ -221,6 +224,38 @@ function simpleMiningState(): GameState {
   state.belts[0].priority = 2;
   state.belts[1].priority = 1;
   state.belts.at(-2)!.priority = 0;
+  return state;
+}
+
+function dormantBeltWakeState(): GameState {
+  const state = simpleMiningState();
+  const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+  const template = state.belts.find((belt) => belt.source === smelter.id && belt.itemId === "iron_ingot")!;
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  const dormantSource = {
+    ...structuredClone(storage),
+    id: "native_dormant_source",
+    position: { x: 760, y: 360 },
+    inputs: { iron_ingot: 0 },
+    outputs: { iron_ingot: 0 },
+    storedItemId: "iron_ingot" as const,
+  };
+  state.entities.push(dormantSource);
+  // Keep more than the active-queue threshold behind a storage source that
+  // cannot create cargo by itself. Existing smelter/vein groups begin empty but
+  // can produce in this exact step and therefore must remain awake; treating
+  // those as dormant would delay the first output boundary.
+  for (let index = 0; index < 80; index += 1) {
+    state.belts.push({
+      ...template,
+      id: `native_dormant_wake_${String(index).padStart(3, "0")}`,
+      source: dormantSource.id,
+      progress: 0,
+      totalTransferred: 0,
+      lastFlow: 0,
+      congestion: 0,
+    });
+  }
   return state;
 }
 
@@ -2677,6 +2712,38 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(projection.base.timeWarp, `time-warp-${seconds} 控制器`).toEqual(JSON.parse(JSON.stringify(expected.timeWarp)));
       expect(advanced.summary.canonicalFields, `time-warp-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `time-warp-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 90_000);
+
+  it("wakes a large initially dormant belt cohort without changing exact settlement", async () => {
+    const initial = dormantBeltWakeState();
+    const checkpoint = await seed(initial, 217);
+    for (const seconds of [1, 5, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const fullScanSession = createSimulationAdvanceSession(initial, seconds, {
+        wallSeconds: seconds,
+        indexedLogistics: false,
+      });
+      advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
+      const fullScan = completeSimulationAdvanceSession(fullScanSession);
+      expect(canonicalSha256(expected), `dormant-wake-${seconds} JS active/full scan`).toBe(canonicalSha256(fullScan));
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `dormant-wake-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      expect(advanced.beltScheduler).toMatchObject({
+        activeQueueEnabled: true,
+        routeCount: initial.belts.length,
+      });
+      expect(advanced.beltScheduler.stableRoutesSkipped).toBeGreaterThanOrEqual(80);
+      expect(advanced.beltScheduler.transferRouteChecks + advanced.beltScheduler.reservationRouteChecks)
+        .toBeLessThan(advanced.beltScheduler.routeCount *
+          (advanced.beltScheduler.transferPasses + advanced.beltScheduler.reservationPasses));
+      expect(advanced.summary.canonicalFields, `dormant-wake-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `dormant-wake-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 90_000);

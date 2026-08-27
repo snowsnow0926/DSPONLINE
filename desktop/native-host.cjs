@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 
 const FRAME_MAGIC = Buffer.from("DSPNATV1", "ascii");
@@ -7,7 +8,33 @@ const FRAME_PROTOCOL_VERSION = 1;
 const CONTROL_REQUEST_KIND = 1;
 const CONTROL_RESPONSE_KIND = 2;
 const MAX_FRAME_PAYLOAD_BYTES = 8 * 1024 * 1024;
+const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
+  if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
+    !["viewport-v1", "statistics-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    result.schemaVersion !== 1 || result.projectionType !== projectionType ||
+    !Number.isSafeInteger(result.revision) || result.revision < 0) {
+    throw new TypeError("native core projection transfer is invalid");
+  }
+  const payload = Buffer.from(JSON.stringify(result), "utf8");
+  if (payload.byteLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES) {
+    throw new RangeError("native core projection exceeds the transferable block limit");
+  }
+  return {
+    header: {
+      schemaVersion: 1,
+      sessionId,
+      revision: result.revision,
+      sequence,
+      projectionType,
+      payloadLength: payload.byteLength,
+      sha256: createHash("sha256").update(payload).digest("hex"),
+    },
+    payload,
+  };
+}
 
 const crcTable = (() => {
   const table = new Uint32Array(256);
@@ -100,7 +127,7 @@ class NativeHostClient {
     this.exited = false;
   }
 
-  async start(clientVersion = "1.2.2") {
+  async start(clientVersion = "1.2.3") {
     if (this.child && !this.exited) return this.hello;
     if (this.startPromise) return this.startPromise;
     this.startPromise = (async () => {
@@ -396,6 +423,60 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  viewportProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const baseFields = request?.baseFields ?? [];
+    const bounds = request?.bounds;
+    const finiteBound = (value) => Number.isFinite(value) && Math.abs(value) <= 10_000_000;
+    if (!Array.isArray(baseFields) || baseFields.length > 64 ||
+      baseFields.some((field) => !validLogicalId(field, 160) || field === "entities" || field === "belts") ||
+      !validLogicalId(request?.planetId, 160) || !bounds ||
+      !finiteBound(bounds.minX) || !finiteBound(bounds.minY) ||
+      !finiteBound(bounds.maxX) || !finiteBound(bounds.maxY) ||
+      bounds.minX > bounds.maxX || bounds.minY > bounds.maxY ||
+      !Number.isSafeInteger(request?.entityCursor ?? 0) || (request?.entityCursor ?? 0) < 0 ||
+      !Number.isSafeInteger(request?.entityLimit) || request.entityLimit < 1 || request.entityLimit > 4096 ||
+      !Number.isSafeInteger(request?.beltLimit) || request.beltLimit < 0 || request.beltLimit > 8192) {
+      throw new TypeError("native core viewport projection request is invalid");
+    }
+    return this.client.request({
+      operation: "coreViewportProjection",
+      sessionId: request.sessionId,
+      baseFields,
+      planetId: request.planetId,
+      minX: bounds.minX,
+      minY: bounds.minY,
+      maxX: bounds.maxX,
+      maxY: bounds.maxY,
+      entityCursor: request.entityCursor ?? 0,
+      entityLimit: request.entityLimit,
+      beltLimit: request.beltLimit,
+    });
+  }
+
+  statisticsProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const validElapsed = (value) => Number.isFinite(value) && value >= 0 && value <= 30 * 24 * 60 * 60 * 10_000;
+    if (!validElapsed(request?.minElapsedSeconds) || !validElapsed(request?.maxElapsedSeconds) ||
+      request.minElapsedSeconds > request.maxElapsedSeconds ||
+      !Number.isSafeInteger(request?.cursor ?? 0) || (request?.cursor ?? 0) < 0 ||
+      !Number.isSafeInteger(request?.limit) || request.limit < 1 || request.limit > 512 ||
+      request?.planetId !== undefined && request.planetId !== null && !validLogicalId(request.planetId, 160) ||
+      request?.itemId !== undefined && request.itemId !== null && !validLogicalId(request.itemId, 160)) {
+      throw new TypeError("native core statistics projection request is invalid");
+    }
+    return this.client.request({
+      operation: "coreStatisticsProjection",
+      sessionId: request.sessionId,
+      minElapsedSeconds: request.minElapsedSeconds,
+      maxElapsedSeconds: request.maxElapsedSeconds,
+      cursor: request.cursor ?? 0,
+      limit: request.limit,
+      ...(request.planetId ? { planetId: request.planetId } : {}),
+      ...(request.itemId ? { itemId: request.itemId } : {}),
+    });
+  }
+
   applyCommand(ownerId, sessionId, command) {
     this.assertOwner(ownerId, sessionId);
     return this.client.request({ operation: "coreApplyCommand", sessionId, command: normalizeNativeCoreCommand(command) });
@@ -444,6 +525,20 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  exportV47(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!validLogicalId(request?.exportId, 128) || request.exportId.includes(":") || request.exportId.includes(".") ||
+      !Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
+      throw new TypeError("native core export request is invalid");
+    }
+    return this.client.request({
+      operation: "coreExportV47",
+      sessionId: request.sessionId,
+      exportId: request.exportId,
+      savedAtMs: request.savedAtMs,
+    }, 300_000);
+  }
+
   compare(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.revision) || request.revision < 0 ||
@@ -486,11 +581,13 @@ module.exports = {
   FRAME_MAGIC,
   FRAME_PROTOCOL_VERSION,
   MAX_FRAME_PAYLOAD_BYTES,
+  MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NativeHostClient,
   NativeHostError,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   crc32,
+  encodeNativeProjectionTransfer,
   encodeFrame,
   nativeHostBinaryPath,
   normalizeNativeSaveBegin,

@@ -3,6 +3,7 @@ use std::mem::size_of;
 
 use anyhow::{Context, anyhow, bail};
 use num_bigint::BigUint;
+use serde::Serialize;
 use serde_json::{Map, Number, Value};
 
 use crate::state::CoreState;
@@ -10,6 +11,23 @@ use crate::state::CoreState;
 const EPSILON: f64 = 0.0001;
 
 pub(crate) type OutputCredits = HashMap<(usize, u32), f64>;
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeltSchedulerDiagnostics {
+    pub route_count: usize,
+    pub group_count: usize,
+    pub active_queue_enabled: bool,
+    pub transfer_passes: u64,
+    pub reservation_passes: u64,
+    pub full_scan_passes: u64,
+    pub transfer_route_checks: u64,
+    pub reservation_route_checks: u64,
+    pub stable_routes_skipped: u64,
+    pub wake_count: u64,
+    pub sleep_count: u64,
+    pub changed_belt_records: usize,
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct BeltStepReservation {
@@ -27,16 +45,36 @@ pub(crate) struct BeltRuntime {
     congestion: Vec<f64>,
     last_flow: Vec<f64>,
     total_dirty: Vec<bool>,
+    // Runtime-only source/item wake state. A group may sleep only when its
+    // source has no cargo and every persisted belt signal is exactly idle.
+    // Production and logistics are checked again at every output boundary, so
+    // a sleeping group is re-admitted in the same deterministic step in which
+    // cargo becomes available.
+    active_groups: Vec<bool>,
+    active_queue_enabled: bool,
+    diagnostics: BeltSchedulerDiagnostics,
 }
 
 impl BeltRuntime {
-    pub(crate) fn from_values(belts: &[Value]) -> anyhow::Result<Self> {
+    pub(crate) fn from_values(
+        state: &CoreState,
+        entities: &[Value],
+        belts: &[Value],
+        prepared_routes: &PreparedRoutes,
+    ) -> anyhow::Result<Self> {
         let mut runtime = Self {
             progress: Vec::with_capacity(belts.len()),
             total_transferred: Vec::with_capacity(belts.len()),
             congestion: Vec::with_capacity(belts.len()),
             last_flow: Vec::with_capacity(belts.len()),
             total_dirty: vec![false; belts.len()],
+            active_groups: vec![false; prepared_routes.groups.len()],
+            active_queue_enabled: false,
+            diagnostics: BeltSchedulerDiagnostics {
+                route_count: prepared_routes.routes.len(),
+                group_count: prepared_routes.groups.len(),
+                ..BeltSchedulerDiagnostics::default()
+            },
         };
         for belt in belts {
             let belt = belt
@@ -51,25 +89,110 @@ impl BeltRuntime {
                 .push(finite_number(belt.get("congestion")));
             runtime.last_flow.push(finite_number(belt.get("lastFlow")));
         }
+        let mut initially_dormant_routes = 0_usize;
+        for (group_index, group) in prepared_routes.groups.iter().enumerate() {
+            let item_id = state
+                .symbols
+                .resolve(group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let source = entities[group.source_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native belt source is not an object"))?;
+            let has_source_output = output_amount(source, item_id) > EPSILON;
+            let has_runtime_signal = group.route_indices.iter().copied().any(|route_index| {
+                let belt_index = prepared_routes.routes[route_index].belt_index;
+                runtime.progress[belt_index].abs() > EPSILON
+                    || runtime.last_flow[belt_index].abs() > EPSILON
+                    || runtime.congestion[belt_index].abs() > EPSILON
+            });
+            runtime.active_groups[group_index] = has_source_output
+                || has_runtime_signal
+                || source_may_produce_during_step(state, source, item_id);
+            if !runtime.active_groups[group_index] {
+                initially_dormant_routes += group.route_indices.len();
+            }
+        }
+        let dormant_threshold = if prepared_routes.routes.len() >= 50_000 {
+            256.max(prepared_routes.routes.len().div_ceil(50))
+        } else {
+            64.max(prepared_routes.routes.len().div_ceil(10))
+        };
+        runtime.active_queue_enabled = initially_dormant_routes >= dormant_threshold;
+        runtime.diagnostics.active_queue_enabled = runtime.active_queue_enabled;
         Ok(runtime)
     }
 
-    pub(crate) fn write_back(self, belts: &mut [Value]) -> anyhow::Result<()> {
+    fn record_selection(
+        &mut self,
+        prepared_routes: &PreparedRoutes,
+        selected_groups: &[bool],
+        reservation: bool,
+    ) {
+        let selected_routes = prepared_routes
+            .groups
+            .iter()
+            .zip(selected_groups)
+            .filter_map(|(group, selected)| selected.then_some(group.route_indices.len() as u64))
+            .sum::<u64>();
+        let skipped = (prepared_routes.routes.len() as u64).saturating_sub(selected_routes);
+        if reservation {
+            self.diagnostics.reservation_passes =
+                self.diagnostics.reservation_passes.saturating_add(1);
+            self.diagnostics.reservation_route_checks = self
+                .diagnostics
+                .reservation_route_checks
+                .saturating_add(selected_routes);
+        } else {
+            self.diagnostics.transfer_passes = self.diagnostics.transfer_passes.saturating_add(1);
+            self.diagnostics.transfer_route_checks = self
+                .diagnostics
+                .transfer_route_checks
+                .saturating_add(selected_routes);
+        }
+        if !self.active_queue_enabled {
+            self.diagnostics.full_scan_passes = self.diagnostics.full_scan_passes.saturating_add(1);
+        }
+        self.diagnostics.stable_routes_skipped = self
+            .diagnostics
+            .stable_routes_skipped
+            .saturating_add(skipped);
+    }
+
+    pub(crate) fn write_back(
+        mut self,
+        belts: &mut [Value],
+    ) -> anyhow::Result<(Vec<usize>, BeltSchedulerDiagnostics)> {
         if belts.len() != self.progress.len() {
             bail!("native belt runtime topology changed");
         }
+        let mut changed = Vec::new();
         for (index, belt) in belts.iter_mut().enumerate() {
             let belt = belt
                 .as_object_mut()
                 .ok_or_else(|| anyhow!("native belt record is not an object"))?;
+            let same_number = |key: &str, next: f64| {
+                belt.get(key)
+                    .and_then(Value::as_f64)
+                    .is_some_and(|previous| previous.to_bits() == next.to_bits())
+            };
+            if same_number("progress", self.progress[index])
+                && same_number("lastFlow", self.last_flow[index])
+                && same_number("congestion", self.congestion[index])
+                && (!self.total_dirty[index]
+                    || same_number("totalTransferred", self.total_transferred[index]))
+            {
+                continue;
+            }
             set_number(belt, "progress", self.progress[index])?;
             set_number(belt, "lastFlow", self.last_flow[index])?;
             set_number(belt, "congestion", self.congestion[index])?;
             if self.total_dirty[index] {
                 set_number(belt, "totalTransferred", self.total_transferred[index])?;
             }
+            changed.push(index);
         }
-        Ok(())
+        self.diagnostics.changed_belt_records = changed.len();
+        Ok((changed, self.diagnostics))
     }
 }
 
@@ -166,6 +289,7 @@ enum BeltPostAction {
 fn advance_belt_clocks(
     runtime: &mut BeltRuntime,
     routes: &[Route],
+    selected_groups: &[bool],
     seconds: f64,
     belt_limit: f64,
 ) -> anyhow::Result<()> {
@@ -174,7 +298,11 @@ fn advance_belt_clocks(
     }
     let flow_decay = 0.8_f64.powf(seconds);
     let congestion_decay = 0.85_f64.powf(seconds);
-    for (index, route) in routes.iter().enumerate() {
+    for route in routes {
+        if !selected_groups[route.source_group] {
+            continue;
+        }
+        let index = route.belt_index;
         runtime.last_flow[index] = rounded(runtime.last_flow[index] * flow_decay, 3);
         runtime.congestion[index] = rounded(runtime.congestion[index] * congestion_decay, 3);
         let current = runtime.progress[index].max(0.0);
@@ -191,13 +319,18 @@ fn advance_belt_clocks(
 fn apply_belt_post_actions(
     runtime: &mut BeltRuntime,
     routes: &[Route],
+    selected_groups: &[bool],
     actions: &[BeltPostAction],
     seconds: f64,
     defer_source_depletion_reset: bool,
     flow_window_seconds: f64,
 ) -> anyhow::Result<()> {
-    for (index, (route, action)) in routes.iter().zip(actions).enumerate() {
-        match *action {
+    for route in routes {
+        if !selected_groups[route.source_group] {
+            continue;
+        }
+        let index = route.belt_index;
+        match actions[index] {
             BeltPostAction::None => {}
             BeltPostAction::ResetProgress => runtime.progress[index] = 0.0,
             BeltPostAction::Flow {
@@ -242,6 +375,71 @@ fn apply_belt_post_actions(
         }
     }
     Ok(())
+}
+
+fn select_active_groups(
+    state: &CoreState,
+    entities: &[Value],
+    runtime: &BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    allowance_caps: Option<&[f64]>,
+    seconds: f64,
+) -> anyhow::Result<Vec<bool>> {
+    if !runtime.active_queue_enabled {
+        return Ok(vec![true; prepared_routes.groups.len()]);
+    }
+    prepared_routes
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            let item_id = state
+                .symbols
+                .resolve(group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let source = entities[group.source_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native belt source is not an object"))?;
+            let has_allowance = allowance_caps.is_some_and(|caps| {
+                group.route_indices.iter().copied().any(|route_index| {
+                    caps.get(prepared_routes.routes[route_index].belt_index)
+                        .is_some_and(|value| value.is_finite() && *value >= 1.0)
+                })
+            });
+            Ok(runtime.active_groups[group_index]
+                || output_amount(source, item_id) > EPSILON
+                || seconds > EPSILON && source_may_produce_during_step(state, source, item_id)
+                || has_allowance)
+        })
+        .collect()
+}
+
+fn refresh_active_groups(
+    runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    selected_groups: &[bool],
+) {
+    if !runtime.active_queue_enabled {
+        return;
+    }
+    for (group_index, group) in prepared_routes.groups.iter().enumerate() {
+        if !selected_groups[group_index] {
+            continue;
+        }
+        let previous = runtime.active_groups[group_index];
+        let next = group.route_indices.iter().copied().any(|route_index| {
+            let belt_index = prepared_routes.routes[route_index].belt_index;
+            runtime.progress[belt_index].abs() > EPSILON
+                || runtime.last_flow[belt_index].abs() > EPSILON
+                || runtime.congestion[belt_index].abs() > EPSILON
+        });
+        runtime.active_groups[group_index] = next;
+        if next && !previous {
+            runtime.diagnostics.wake_count = runtime.diagnostics.wake_count.saturating_add(1);
+        } else if previous && !next {
+            runtime.diagnostics.sleep_count = runtime.diagnostics.sleep_count.saturating_add(1);
+        }
+    }
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -417,6 +615,7 @@ fn add_black_hole_destroyed(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn move_to_target(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -488,6 +687,32 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
             }),
         _ => false,
     }
+}
+
+fn source_may_produce_during_step(
+    state: &CoreState,
+    source: &Map<String, Value>,
+    item_id: &str,
+) -> bool {
+    if string_at(source, "kind") == Some("vein") {
+        return string_at(source, "resourceId") == Some(item_id);
+    }
+    if string_at(source, "recipeId")
+        .and_then(|id| state.catalog.recipes.get(id))
+        .is_some_and(|recipe| {
+            recipe
+                .outputs
+                .iter()
+                .any(|output| output.item_id == item_id)
+        })
+    {
+        return true;
+    }
+    matches!(
+        string_at(source, "buildingId"),
+        Some("orbital_collector" | "energy_exchanger")
+    ) || string_at(source, "kind") == Some("station")
+        && string_at(source, "quantumMode") == Some("quantum")
 }
 
 fn target_consumes(
@@ -704,8 +929,8 @@ fn target_capacity(
             .clamp(1.0, 100_000_000.0);
         capacity = capacity.min(proliferator_limit);
     }
-    if string_at(target, "kind") == Some("station") {
-        if let Some(max_stock) = target
+    if string_at(target, "kind") == Some("station")
+        && let Some(max_stock) = target
             .get("stationSlots")
             .and_then(Value::as_array)
             .into_iter()
@@ -714,9 +939,8 @@ fn target_capacity(
             .find(|slot| string_at(slot, "itemId") == Some(item_id))
             .map(|slot| finite_number(slot.get("maxStock")).floor().max(0.0))
             .filter(|value| *value > 0.0)
-        {
-            capacity = capacity.min(max_stock);
-        }
+    {
+        capacity = capacity.min(max_stock);
     }
     Ok(capacity - input_amount(target, item_id))
 }
@@ -997,6 +1221,7 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn transfer(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1019,7 +1244,16 @@ pub(crate) fn transfer(
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    advance_belt_clocks(belt_runtime, routes, seconds, belt_limit)?;
+    let selected_groups = select_active_groups(
+        state,
+        entities,
+        belt_runtime,
+        prepared_routes,
+        allowance_caps,
+        seconds,
+    )?;
+    belt_runtime.record_selection(prepared_routes, &selected_groups, false);
+    advance_belt_clocks(belt_runtime, routes, &selected_groups, seconds, belt_limit)?;
     let mut post_actions = vec![BeltPostAction::None; belt_runtime.progress.len()];
     let mut target_free = vec![f64::NAN; prepared_routes.target_slot_count];
     let mut groups = prepared_routes
@@ -1049,6 +1283,9 @@ pub(crate) fn transfer(
 
     for (route_index, route) in routes.iter().enumerate() {
         let index = route.source_group;
+        if !selected_groups[index] {
+            continue;
+        }
         if groups[index].available < 1.0 {
             if !defer_source_depletion_reset {
                 post_actions[route.belt_index] = BeltPostAction::ResetProgress;
@@ -1107,6 +1344,9 @@ pub(crate) fn transfer(
     }
 
     for (group_index, group) in groups.iter_mut().enumerate() {
+        if !selected_groups[group_index] {
+            continue;
+        }
         let prepared_group = &prepared_routes.groups[group_index];
         let item_id = state
             .symbols
@@ -1386,19 +1626,22 @@ pub(crate) fn transfer(
     apply_belt_post_actions(
         belt_runtime,
         routes,
+        &selected_groups,
         &post_actions,
         seconds,
         defer_source_depletion_reset,
         flow_window_seconds,
     )?;
-    crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)
+    crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)?;
+    refresh_active_groups(belt_runtime, prepared_routes, &selected_groups);
+    Ok(())
 }
 
 pub(crate) fn reserve(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    belt_runtime: &BeltRuntime,
+    belt_runtime: &mut BeltRuntime,
     prepared_routes: &PreparedRoutes,
 ) -> anyhow::Result<BeltStepReservation> {
     let routes = &prepared_routes.routes;
@@ -1413,7 +1656,13 @@ pub(crate) fn reserve(
     };
     let mut quantum_session = None;
     let mut target_free = vec![f64::NAN; prepared_routes.target_slot_count];
+    let selected_groups =
+        select_active_groups(state, entities, belt_runtime, prepared_routes, None, 0.0)?;
+    belt_runtime.record_selection(prepared_routes, &selected_groups, true);
     for route in routes {
+        if !selected_groups[route.source_group] {
+            continue;
+        }
         let allowance = (belt_runtime.progress[route.belt_index] + EPSILON)
             .floor()
             .max(0.0);

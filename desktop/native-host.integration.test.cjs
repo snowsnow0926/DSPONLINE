@@ -15,6 +15,15 @@ function fnv1a(value) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function fnv1aUtf16(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 const binaryPath = path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
 
 test("Electron client commits, recovers, deduplicates and appends WAL through the real Rust host", {
@@ -92,7 +101,16 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   const hello = await client.start("integration-test");
   assert.ok(hello.capabilities.includes("native-core-shadow-v1"));
   assert.ok(hello.capabilities.includes("native-core-projection-v1"));
-  const base = JSON.stringify({ version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 0, paused: false });
+  assert.ok(hello.capabilities.includes("native-core-viewport-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
+  const base = JSON.stringify({
+    version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 2, paused: false,
+    productionHistory: [
+      { elapsedSeconds: 1, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 60 }, consumptionPerMinute: {}, inventory: { iron_ore: 3 }, planetProductionPerMinute: { home: { iron_ore: 60 } }, planetConsumptionPerMinute: { home: {} } },
+      { elapsedSeconds: 2, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 120 }, consumptionPerMinute: {}, inventory: { iron_ore: 5 }, planetProductionPerMinute: { home: { iron_ore: 120 } }, planetConsumptionPerMinute: { home: {} } },
+    ],
+  });
   const entities = JSON.stringify([{ id: "vein", kind: "vein", planetId: "home", resourceId: "iron_ore", minerCount: 2, inputs: {}, outputs: { iron_ore: 3 }, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0 }]);
   const belts = JSON.stringify([{ id: "belt", planetId: "home", source: "vein", target: "sink", itemId: "iron_ore", lanes: 1, tier: 1, priority: 1, progress: 0, lastFlow: 0 }]);
   const chunks = [
@@ -181,9 +199,42 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     entityIds: ["vein"],
     beltIds: ["belt"],
   });
-  assert.deepEqual(projection.base, { paused: true, elapsedSeconds: 0 });
+  assert.deepEqual(projection.base, { paused: true, elapsedSeconds: 2 });
   assert.deepEqual(projection.entities, [JSON.parse(entities)[0]]);
   assert.deepEqual(projection.belts, [JSON.parse(belts)[0]]);
+  const viewportProjection = await client.request({
+    operation: "coreViewportProjection",
+    sessionId: opened.sessionId,
+    baseFields: ["paused"],
+    planetId: "home",
+    minX: -10,
+    minY: -10,
+    maxX: 10,
+    maxY: 10,
+    entityCursor: 0,
+    entityLimit: 16,
+    beltLimit: 32,
+  });
+  assert.equal(viewportProjection.projectionType, "viewport-v1");
+  assert.equal(viewportProjection.revision, 2);
+  assert.deepEqual(viewportProjection.entities.map((entity) => entity.id), ["vein"]);
+  assert.deepEqual(viewportProjection.belts.map((belt) => belt.id), ["belt"]);
+  assert.equal(viewportProjection.nextEntityCursor, null);
+  const statisticsProjection = await client.request({
+    operation: "coreStatisticsProjection",
+    sessionId: opened.sessionId,
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: 2,
+    cursor: 0,
+    limit: 1,
+    planetId: "home",
+    itemId: "iron_ore",
+  });
+  assert.equal(statisticsProjection.projectionType, "statistics-v1");
+  assert.equal(statisticsProjection.revision, 2);
+  assert.equal(statisticsProjection.samples.length, 1);
+  assert.equal(statisticsProjection.samples[0].productionPerMinute.iron_ore, 60);
+  assert.equal(statisticsProjection.nextCursor, 1);
   await assert.rejects(
     client.request({
       operation: "coreProjection",
@@ -244,13 +295,40 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   });
   assert.equal(nativeCheckpoint.checkpoint.generation, 2);
   assert.equal(nativeCheckpoint.checkpoint.revision, 3);
+  assert.equal(nativeCheckpoint.checkpoint.changedRecords, 2);
+  assert.equal(nativeCheckpoint.encodedRecords, 2);
+  assert.equal(nativeCheckpoint.reusedRecords, 2);
   assert.equal(nativeCheckpoint.summary.revision, 3);
+  const metadataOnlyCheckpoint = await client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 3,
+  });
+  assert.equal(metadataOnlyCheckpoint.checkpoint.generation, 3);
+  assert.equal(metadataOnlyCheckpoint.checkpoint.revision, 3);
+  assert.equal(metadataOnlyCheckpoint.checkpoint.changedRecords, 1);
+  assert.equal(metadataOnlyCheckpoint.encodedRecords, 1);
+  assert.equal(metadataOnlyCheckpoint.reusedRecords, 3);
+  const exported = await client.request({
+    operation: "coreExportV47",
+    sessionId: opened.sessionId,
+    exportId: "integration-v47",
+    savedAtMs: 4,
+  });
+  const exportPath = path.join(root, "exports", "integration-v47.json");
+  const exportRaw = fs.readFileSync(exportPath, "utf8");
+  const exportEnvelope = JSON.parse(exportRaw);
+  assert.equal(exported.result.revision, 3);
+  assert.equal(exported.result.byteLength, Buffer.byteLength(exportRaw));
+  assert.equal(exportEnvelope.state.version, 47);
+  assert.equal(exportEnvelope.state.paused, false);
+  assert.equal(exportEnvelope.checksum, fnv1aUtf16(JSON.stringify({ formatVersion: 2, state: exportEnvelope.state })));
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
   opened = await client.request({
     ...coreOpenRequest,
-    generation: nativeCheckpoint.checkpoint.generation,
-    rootHash: nativeCheckpoint.checkpoint.rootHash,
-    revision: nativeCheckpoint.checkpoint.revision,
+    generation: metadataOnlyCheckpoint.checkpoint.generation,
+    rootHash: metadataOnlyCheckpoint.checkpoint.rootHash,
+    revision: metadataOnlyCheckpoint.checkpoint.revision,
   });
   assert.equal(opened.replayedWalEntries, 0);
   assert.equal(opened.replayedRevision, 3);

@@ -110,6 +110,36 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     };
   }
 
+  async viewportProjection(request: { planetId: string; bounds: { minX: number; minY: number; maxX: number; maxY: number } }) {
+    return {
+      schemaVersion: 1 as const,
+      projectionType: "viewport-v1" as const,
+      revision: this.current.revision,
+      planetId: request.planetId,
+      bounds: request.bounds,
+      base: {},
+      entities: [],
+      belts: [],
+      nextEntityCursor: null,
+      truncatedBelts: false,
+    };
+  }
+
+  async statisticsProjection(request: { minElapsedSeconds: number; maxElapsedSeconds: number }) {
+    return {
+      schemaVersion: 1 as const,
+      projectionType: "statistics-v1" as const,
+      revision: this.current.revision,
+      window: {
+        minElapsedSeconds: request.minElapsedSeconds,
+        maxElapsedSeconds: request.maxElapsedSeconds,
+      },
+      filters: { planetId: null, itemId: null },
+      samples: [],
+      nextCursor: null,
+    };
+  }
+
   async applyCommand(_command: SimulationCommandPatch) {
     return { revision: this.current.revision, topologyDirty: false };
   }
@@ -157,7 +187,22 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
 
   async createCheckpoint() {
     const nextCheckpoint = { ...checkpoint, generation: 2, revision: this.current.revision, rootHash: "f".repeat(64) };
-    return { checkpoint: nextCheckpoint, summary: await this.status() };
+    return { checkpoint: nextCheckpoint, summary: await this.status(), encodedRecords: 1, reusedRecords: 0 };
+  }
+
+  async exportV47(exportId: string, _suggestedName?: string, savedAtMs = 1) {
+    return {
+      exportId,
+      mode: "normal" as const,
+      result: {
+        revision: this.current.revision,
+        savedAtMs,
+        byteLength: 1,
+        envelopeSha256: "a".repeat(64),
+        stateChecksum: "12345678",
+      },
+      cancelled: true,
+    };
   }
 
   async compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }) {

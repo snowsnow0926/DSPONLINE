@@ -75,6 +75,32 @@ pub enum ControlRequest {
         #[serde(default)]
         belt_ids: Vec<String>,
     },
+    CoreViewportProjection {
+        session_id: String,
+        #[serde(default)]
+        base_fields: Vec<String>,
+        planet_id: String,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        #[serde(default)]
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_limit: usize,
+    },
+    CoreStatisticsProjection {
+        session_id: String,
+        min_elapsed_seconds: f64,
+        max_elapsed_seconds: f64,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+        #[serde(default)]
+        planet_id: Option<String>,
+        #[serde(default)]
+        item_id: Option<String>,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -89,6 +115,11 @@ pub enum ControlRequest {
     },
     CoreCheckpoint {
         session_id: String,
+        saved_at_ms: u64,
+    },
+    CoreExportV47 {
+        session_id: String,
+        export_id: String,
         saved_at_ms: u64,
     },
     CoreCompare {

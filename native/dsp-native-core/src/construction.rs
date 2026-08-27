@@ -596,6 +596,7 @@ fn batch_can_repeat(base: &Map<String, Value>, planet_id: &str, batch: &Repeatab
         .all(|amount| floor_amount(*amount) < 1.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_repeatable_batch(
     base: &mut Map<String, Value>,
     automation: &mut Map<String, Value>,
@@ -730,6 +731,7 @@ fn apply_repeatable_batch(
     Ok(completed)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_run_repeatable_batch(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1069,6 +1071,7 @@ fn settle_excess(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1592,10 +1595,10 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
     let entity_ids = (0..state.entity_index.len())
-        .filter_map(|index| {
-            (state.symbols.resolve(state.entities.buildings[index]) == Some("construction_center"))
-                .then(|| state.entities.ids[index].to_string())
+        .filter(|&index| {
+            state.symbols.resolve(state.entities.buildings[index]) == Some("construction_center")
         })
+        .map(|index| state.entities.ids[index].to_string())
         .collect::<std::collections::HashSet<_>>();
     let buffers = automation
         .get("quantumMaterialBuffer")

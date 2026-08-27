@@ -3,9 +3,15 @@ import {
   type DesktopNativeCoreCompareResult,
   type DesktopNativeCoreCommitOperationResult,
   type DesktopNativeCoreCheckpointResult,
+  type DesktopNativeCoreExportResult,
   type DesktopNativeCoreOpenResult,
   type DesktopNativeCoreSummary,
   type DesktopNativeCoreProjectionResult,
+  type DesktopNativeCoreProjectionTransferResult,
+  type DesktopNativeCoreViewportProjectionRequest,
+  type DesktopNativeCoreViewportProjectionResult,
+  type DesktopNativeCoreStatisticsProjectionRequest,
+  type DesktopNativeCoreStatisticsProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -13,11 +19,49 @@ import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import type { SimulationCommandPatch } from "./simulationRuntimeProtocol";
 import type { SaveMode } from "./types";
 
+const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
+
+type NativeCoreTransferProjection =
+  | DesktopNativeCoreViewportProjectionResult
+  | DesktopNativeCoreStatisticsProjectionResult;
+
+function bytesToHex(bytes: Uint8Array): string {
+  let result = "";
+  for (const byte of bytes) result += byte.toString(16).padStart(2, "0");
+  return result;
+}
+
+export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTransferProjection>(
+  transfer: DesktopNativeCoreProjectionTransferResult,
+  expected: { sessionId: string; projectionType: T["projectionType"] },
+): Promise<T> {
+  const { header, bodyBuffer } = transfer;
+  if (!header || header.schemaVersion !== 1 || header.sessionId !== expected.sessionId ||
+    header.projectionType !== expected.projectionType || !Number.isSafeInteger(header.sequence) || header.sequence < 1 ||
+    !Number.isSafeInteger(header.revision) || header.revision < 0 ||
+    !Number.isSafeInteger(header.payloadLength) || header.payloadLength < 1 ||
+    header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
+    typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
+    !(bodyBuffer instanceof ArrayBuffer) || bodyBuffer.byteLength !== header.payloadLength) {
+    throw new Error("原生投影二进制响应边界无效");
+  }
+  const digest = bytesToHex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bodyBuffer)));
+  if (digest !== header.sha256) throw new Error("原生投影二进制响应校验失败");
+  const decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bodyBuffer)) as Partial<T>;
+  if (!decoded || decoded.schemaVersion !== 1 || decoded.projectionType !== expected.projectionType ||
+    decoded.revision !== header.revision) {
+    throw new Error("原生投影二进制正文身份无效");
+  }
+  return decoded as T;
+}
+
 export interface WindowsNativeCoreShadow {
   readonly sessionId: string;
   readonly checkpoint: DesktopNativeSaveCommitResult;
   status(): Promise<DesktopNativeCoreSummary>;
   projection(request: { baseFields?: string[]; entityIds?: string[]; beltIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
+  viewportProjection(request: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">): Promise<DesktopNativeCoreViewportProjectionResult>;
+  statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -36,6 +80,7 @@ export interface WindowsNativeCoreShadow {
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult>;
   createCheckpoint(savedAtMs?: number): Promise<DesktopNativeCoreCheckpointResult>;
+  exportV47(exportId: string, suggestedName?: string, savedAtMs?: number): Promise<DesktopNativeCoreExportResult>;
   compare(expected: { revision: number; canonicalSha256: string; domainSha256: string }): Promise<DesktopNativeCoreCompareResult>;
   close(): Promise<void>;
 }
@@ -189,6 +234,46 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     });
   }
 
+  async viewportProjection(
+    request: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreViewportProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "viewport-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreViewportProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "viewport-v1",
+      });
+    }
+    return desktop.getNativeCoreViewportProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async statisticsProjection(
+    request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStatisticsProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "statistics-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStatisticsProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "statistics-v1",
+      });
+    }
+    return desktop.getNativeCoreStatisticsProjection({ sessionId: this.sessionId, ...request });
+  }
+
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
@@ -249,6 +334,26 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       result.checkpoint.revision !== result.summary.revision ||
       result.checkpoint.generation <= this.checkpoint.generation) {
       throw new Error("Windows 原生核心检查点回执与权威 revision 不一致");
+    }
+    return result;
+  }
+
+  async exportV47(
+    exportId: string,
+    suggestedName?: string,
+    savedAtMs = Date.now(),
+  ): Promise<DesktopNativeCoreExportResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    const result = await desktop.exportNativeCoreV47({
+      sessionId: this.sessionId,
+      exportId,
+      savedAtMs,
+      ...(suggestedName ? { suggestedName } : {}),
+    });
+    if (result.result.revision < this.checkpoint.revision || result.result.savedAtMs !== savedAtMs) {
+      throw new Error("Windows 原生兼容导出回执与权威 revision 不一致");
     }
     return result;
   }

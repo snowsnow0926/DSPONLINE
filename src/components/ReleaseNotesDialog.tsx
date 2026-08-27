@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
@@ -15,6 +15,7 @@ const RELEASE_NOTES_1_1_8 = getReleaseNotes118("zh-CN");
 const RELEASE_NOTES_1_1_9 = getReleaseNotes119("zh-CN");
 const RELEASE_NOTES_1_2_0 = getReleaseNotes120("zh-CN");
 const RELEASE_NOTES_1_2_1 = getReleaseNotes121("zh-CN");
+const RELEASE_NOTES_1_2_2 = getReleaseNotes122("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
 const RELEASE_NOTES_1_0_42 = getReleaseNotes1042("zh-CN");
@@ -76,6 +77,11 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "native-active-dirty-pages": Database,
+  "native-event-driven-belts": Gauge,
+  "native-bounded-projections": Link2,
+  "native-streaming-v47-export": CloudUpload,
+  "native-authority-gate": ShieldCheck,
   "windows-native-incremental-save": Database,
   "windows-native-shadow-core": Gauge,
   "dyson-material-conservation": ShieldCheck,
@@ -169,6 +175,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_2_2,
   RELEASE_NOTES_1_2_1,
   RELEASE_NOTES_1_2_0,
   RELEASE_NOTES_1_1_9,

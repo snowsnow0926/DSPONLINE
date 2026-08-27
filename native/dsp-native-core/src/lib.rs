@@ -29,6 +29,7 @@ pub mod state;
 mod station_contracts;
 mod system_space_station;
 
+pub use belts::BeltSchedulerDiagnostics;
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
     ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition,
@@ -37,7 +38,8 @@ pub use catalog::{
 pub use command::{CommandApplyResult, SimulationCommandPatch};
 pub use simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 pub use state::{
-    CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage, RuntimeMemoryEstimate,
+    CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage,
+    InternalCheckpointVisitResult, RuntimeMemoryEstimate, V47EnvelopeExportResult,
 };
 
 pub const CORE_PROTOCOL_VERSION: u16 = 1;

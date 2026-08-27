@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
@@ -14,6 +14,37 @@ const MAX_KEY_BYTES: usize = 512;
 const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WAL_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
+
+struct Sha256CountingReader<R> {
+    inner: R,
+    digest: Sha256,
+    bytes_read: u64,
+}
+
+impl<R> Sha256CountingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+            bytes_read: 0,
+        }
+    }
+
+    fn finish(self) -> (u64, String) {
+        (self.bytes_read, hex::encode(self.digest.finalize()))
+    }
+}
+
+impl<R: Read> Read for Sha256CountingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let bytes = self.inner.read(buffer)?;
+        if bytes > 0 {
+            self.digest.update(&buffer[..bytes]);
+            self.bytes_read = self.bytes_read.saturating_add(bytes as u64);
+        }
+        Ok(bytes)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +201,42 @@ impl SaveStore {
         &self.root
     }
 
+    /// Publishes a bounded native-generated compatibility export under the
+    /// host-owned root. Renderer code supplies only a logical identifier and
+    /// can never choose an arbitrary filesystem path.
+    pub fn publish_export<T>(
+        &self,
+        export_id: &str,
+        write: impl FnOnce(&mut File) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        validate_export_id(export_id)?;
+        let export_root = self.root.join("exports");
+        fs::create_dir_all(&export_root)?;
+        let final_path = safe_child(&export_root, &format!("{export_id}.json"))?;
+        let temporary = safe_child(&export_root, &format!("{export_id}.part"))?;
+        if final_path.exists() || temporary.exists() {
+            bail!("native export identity already exists");
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let result = match write(&mut file) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&temporary);
+                return Err(error.context("stream native compatibility export"));
+            }
+        };
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &final_path)?;
+        sync_directory(&export_root)?;
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
         slot: &str,
@@ -400,13 +467,33 @@ impl SaveStore {
     }
 
     fn read_verified_chunk(&self, slot: &str, metadata: &ChunkMetadata) -> anyhow::Result<Vec<u8>> {
-        let compressed = fs::read(self.chunk_path(slot, &metadata.hash)?)?;
-        if compressed.len() as u64 != metadata.compressed_bytes
-            || sha256_hex(&compressed) != metadata.compressed_hash
+        let path = self.chunk_path(slot, &metadata.hash)?;
+        let file = File::open(&path)?;
+        if file.metadata()?.len() != metadata.compressed_bytes {
+            bail!("native save chunk compressed length is invalid");
+        }
+        // Feed the compressed file directly into zstd. The previous fs::read
+        // path held the complete compressed chunk next to the decoded record;
+        // a large save could therefore transiently pay for both buffers. This
+        // reader hashes and counts the immutable chunk as it is decoded, so the
+        // only record-sized allocation is the required uncompressed result.
+        let reader = Sha256CountingReader::new(file);
+        let mut decoder = zstd::stream::read::Decoder::new(reader)?;
+        let initial_capacity = usize::try_from(metadata.uncompressed_bytes)
+            .unwrap_or(MAX_RECORD_BYTES)
+            .min(MAX_RECORD_BYTES);
+        let mut decoded = Vec::with_capacity(initial_capacity);
+        decoder
+            .by_ref()
+            .take(metadata.uncompressed_bytes.saturating_add(1))
+            .read_to_end(&mut decoded)?;
+        let reader = decoder.finish().into_inner();
+        let (compressed_bytes, compressed_hash) = reader.finish();
+        if compressed_bytes != metadata.compressed_bytes
+            || compressed_hash != metadata.compressed_hash
         {
             bail!("native save chunk compressed length is invalid");
         }
-        let decoded = zstd::stream::decode_all(compressed.as_slice())?;
         if decoded.len() as u64 != metadata.uncompressed_bytes
             || sha256_hex(&decoded) != metadata.hash
         {
@@ -967,6 +1054,18 @@ fn validate_key(value: &str) -> anyhow::Result<()> {
         || value.contains(['/', '\\'])
     {
         bail!("native save record key is invalid");
+    }
+    Ok(())
+}
+
+fn validate_export_id(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("native export ID is invalid");
     }
     Ok(())
 }

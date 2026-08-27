@@ -8,7 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
-import { advanceSimulationBudget, createSimulationLookupContext, getEntityOperatingStatus } from "./engine";
+import { advanceSimulationBudget, createSimulationLookupContext, createSimulationProfiler, getEntityOperatingStatus } from "./engine";
 import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
@@ -261,8 +261,9 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     if (admission.supported) {
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
+      const jsProfiler = createSimulationProfiler();
       const jsAdvanceStartedAt = performance.now();
-      const expected = advanceSimulationBudget(expectedInitial, 1, 1);
+      const expected = advanceSimulationBudget(expectedInitial, 1, 1, jsProfiler);
       const jsAdvanceDurationMs = performance.now() - jsAdvanceStartedAt;
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
@@ -310,11 +311,42 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
         deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
         cachedDiagnosticsDurationMs: Number(cachedDiagnosticsDurationMs.toFixed(2)),
+        nativeBeltScheduler: admission.beltScheduler ?? null,
+        javascriptBeltScheduler: {
+          routeChecks: jsProfiler.beltRouteChecks,
+          stableRoutesSkipped: jsProfiler.beltStableRoutesSkipped,
+        },
       },
       }, null, 2));
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);
       expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
+      const integratedDiagnosticsStartedAt = performance.now();
+      const integratedDiagnostics = await client.request({
+        operation: "coreAdvance",
+        sessionId: opened.sessionId,
+        request: {
+          baseRevision: admission.revision,
+          simulationSeconds: 1,
+          wallSeconds: 1,
+          includeDiagnostics: true,
+        },
+      });
+      const integratedDiagnosticsDurationMs = performance.now() - integratedDiagnosticsStartedAt;
+      const expectedSecond = advanceSimulationBudget(expected, 1, 1);
+      const integratedCachedStartedAt = performance.now();
+      const integratedCached = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+      const integratedCachedDurationMs = performance.now() - integratedCachedStartedAt;
+      console.log(JSON.stringify({
+        nativeCoreIntegratedDiagnostics: {
+          exactState: integratedDiagnostics.summary?.canonicalSha256 === stableCanonicalSha256(expectedSecond),
+          advanceAndProofDurationMs: Number(integratedDiagnosticsDurationMs.toFixed(2)),
+          previousAdvanceThenProofDurationMs: Number((coreAdvanceDurationMs + diagnosticsDurationMs).toFixed(2)),
+          cachedStatusDurationMs: Number(integratedCachedDurationMs.toFixed(2)),
+        },
+      }, null, 2));
+      expect(integratedDiagnostics.summary?.canonicalSha256).toBe(stableCanonicalSha256(expectedSecond));
+      expect(integratedCached).toEqual(integratedDiagnostics.summary);
     }
     if (!admission.supported && String(admission.reason ?? "").startsWith("construction-")) {
       const constructionMasked = await client.request({

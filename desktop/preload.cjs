@@ -1,4 +1,80 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const { createHash } = require("node:crypto");
+
+const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
+let nativeProjectionSequence = 0;
+
+function requestNativeCoreProjectionTransfer(request) {
+  return new Promise((resolve, reject) => {
+    if (!request || typeof request !== "object" || typeof request.sessionId !== "string" ||
+      !["viewport-v1", "statistics-v1"].includes(request.projectionType) ||
+      !request.payload || typeof request.payload !== "object") {
+      reject(new TypeError("原生投影二进制请求无效"));
+      return;
+    }
+    nativeProjectionSequence = nativeProjectionSequence >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : nativeProjectionSequence + 1;
+    const sequence = nativeProjectionSequence;
+    const channel = new MessageChannel();
+    let settled = false;
+    const watchdog = setTimeout(() => {
+      finish(() => reject(new Error("原生投影二进制响应超时")));
+    }, 15_000);
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      channel.port1.close();
+      callback();
+    };
+    channel.port1.onmessage = (event) => {
+      if (event.data?.error) {
+        const error = new Error(event.data.error.message || "原生投影二进制请求失败");
+        error.name = event.data.error.name || "Error";
+        error.code = event.data.error.code;
+        finish(() => reject(error));
+        return;
+      }
+      const header = event.data?.header;
+      const rawPayload = event.data?.payload;
+      const payload = rawPayload instanceof Uint8Array
+        ? rawPayload
+        : rawPayload instanceof ArrayBuffer
+          ? new Uint8Array(rawPayload)
+          : null;
+      if (!header || header.schemaVersion !== 1 || header.sessionId !== request.sessionId ||
+        header.sequence !== sequence || header.projectionType !== request.projectionType ||
+        !Number.isSafeInteger(header.revision) || header.revision < 0 ||
+        !Number.isSafeInteger(header.payloadLength) || header.payloadLength < 1 ||
+        header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
+        typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
+        !payload || payload.byteLength !== header.payloadLength) {
+        finish(() => reject(new Error("原生投影二进制响应头无效")));
+        return;
+      }
+      const checksum = createHash("sha256")
+        .update(Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength))
+        .digest("hex");
+      if (checksum !== header.sha256) {
+        finish(() => reject(new Error("原生投影二进制响应校验失败")));
+        return;
+      }
+      const bodyBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+      channel.port1.postMessage({ projectionAck: { sequence, sha256: header.sha256 } });
+      finish(() => resolve({ header, bodyBuffer }));
+    };
+    channel.port1.onmessageerror = () => {
+      finish(() => reject(new Error("原生投影二进制响应无法读取")));
+    };
+    ipcRenderer.postMessage("desktop:native-core-projection-transfer", {
+      sessionId: request.sessionId,
+      projectionType: request.projectionType,
+      sequence,
+      payload: request.payload,
+    }, [channel.port2]);
+  });
+}
 
 contextBridge.exposeInMainWorld("dspDesktop", {
   isDesktop: true,
@@ -16,10 +92,14 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   openNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-open", request),
   getNativeCoreStatus: (request) => ipcRenderer.invoke("desktop:native-core-status", request),
   getNativeCoreProjection: (request) => ipcRenderer.invoke("desktop:native-core-projection", request),
+  getNativeCoreViewportProjection: (request) => ipcRenderer.invoke("desktop:native-core-viewport-projection", request),
+  getNativeCoreStatisticsProjection: (request) => ipcRenderer.invoke("desktop:native-core-statistics-projection", request),
+  requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => ipcRenderer.invoke("desktop:native-core-apply-command", request),
   advanceNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-advance", request),
   commitNativeCoreOperation: (request) => ipcRenderer.invoke("desktop:native-core-commit-operation", request),
   checkpointNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-checkpoint", request),
+  exportNativeCoreV47: (request) => ipcRenderer.invoke("desktop:native-core-export-v47", request),
   compareNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-compare", request),
   closeNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-close", request),
   requestApi: (request) => ipcRenderer.invoke("desktop:api-request", request),

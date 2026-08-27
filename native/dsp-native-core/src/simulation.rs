@@ -49,6 +49,8 @@ pub struct CoreAdvanceResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approximated_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub belt_scheduler: Option<crate::belts::BeltSchedulerDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<CoreStateSummary>,
 }
 
@@ -287,6 +289,7 @@ impl CoreState {
                 algorithm_version: None,
                 exact_calibration_seconds: None,
                 approximated_seconds: None,
+                belt_scheduler: None,
                 summary: request
                     .include_diagnostics
                     .then(|| self.summary())
@@ -314,6 +317,7 @@ impl CoreState {
                 algorithm_version: None,
                 exact_calibration_seconds: None,
                 approximated_seconds: None,
+                belt_scheduler: None,
                 summary: request
                     .include_diagnostics
                     .then(|| self.summary())
@@ -342,13 +346,19 @@ impl CoreState {
             profile_mark!("campaign");
             crate::speedrun::evaluate(self, &mut prepared.base)?;
             profile_mark!("speedrun");
-            self.commit_simulated_state(prepared.base, prepared.entities, prepared.belts)?;
-            self.revision += 1;
+            let belt_scheduler = prepared.belt_scheduler.clone();
+            let next_revision = previous_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("native core revision exhausted"))?;
+            let summary = self.commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belts,
+                &prepared.changed_belt_indices,
+                next_revision,
+                request.include_diagnostics,
+            )?;
             profile_mark!("commit-state");
-            let summary = request
-                .include_diagnostics
-                .then(|| self.summary())
-                .transpose()?;
             if request.include_diagnostics {
                 profile_last!("summary");
             }
@@ -362,6 +372,7 @@ impl CoreState {
                 algorithm_version: None,
                 exact_calibration_seconds: None,
                 approximated_seconds: None,
+                belt_scheduler: Some(belt_scheduler),
                 summary,
             });
         }
@@ -446,6 +457,7 @@ impl CoreState {
             algorithm_version: None,
             exact_calibration_seconds: None,
             approximated_seconds: None,
+            belt_scheduler: None,
             summary,
         })
     }

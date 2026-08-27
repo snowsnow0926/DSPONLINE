@@ -27,6 +27,40 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release123Copy = {
+  date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
+  title: { "zh-CN": "Windows 原生增量热路径优化", en: "Windows Native Incremental Hot-path Optimization" },
+  summary: {
+    "zh-CN": "1.2.3 为 Windows 原生候选补齐活动 revision 脏页保存、可证明唤醒的线路队列、有界视口与统计投影，以及不经过 renderer 完整正文的 v47 流式导出。极限档若绝大多数线路确实活跃，会自动退回精确全扫描；Rust 权威接管仍由 24 小时与多硬件 Gate 阻止。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.3 adds active-revision dirty-page saves, a provably wakeable belt queue, bounded viewport/statistics projections, and streaming v47 export that avoids a full renderer body to the Windows native candidate. Endgame saves automatically retain the exact full scan when most belts are genuinely active, and Rust authority cutover remains blocked by the 24-hour and multi-hardware gates. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  saveTitle: { "zh-CN": "活动存档只编码真实脏页", en: "Active saves encode only genuinely dirty pages" },
+  saveDescription: {
+    "zh-CN": "实体与线路页、顶层状态和拓扑分别记脏；只有 manifest、chunk、WAL 与 superblock 全部持久提交后才清除标记，失败重试会再次写出同一批脏页。",
+    en: "Entity pages, belt pages, top-level state, and topology track dirtiness separately. Flags clear only after the manifest, chunks, WAL, and superblock commit durably; a failed attempt emits the same dirty pages again.",
+  },
+  beltTitle: { "zh-CN": "稳定线路可休眠并在同一步准确唤醒", en: "Stable belts sleep and wake at the exact simulation boundary" },
+  beltDescription: {
+    "zh-CN": "源产出、目标消费、库存、电力和物流信号会唤醒对应路由组；活动比例过高时自动全扫描。开发指标同时报告检查、跳过、唤醒和退化次数，不能靠少结算换性能。",
+    en: "Source production, target consumption, inventory, power, and logistics signals wake the relevant route groups. Dense active factories fall back to full scans, and diagnostics report checks, skips, wakes, and fallbacks rather than hiding reduced settlement.",
+  },
+  projectionTitle: { "zh-CN": "UI 只请求有界视口与统计页", en: "The UI requests bounded viewport and statistics pages" },
+  projectionDescription: {
+    "zh-CN": "原生 Host 返回带 session、revision、sequence、长度和 SHA-256 的最多 1 MiB 二进制块；当前行星视口与生产历史可以分页获取，不要求把完整工厂送回 renderer。",
+    en: "The native host returns binary blocks capped at 1 MiB with session, revision, sequence, length, and SHA-256 identity. The current viewport and production history are pageable without returning the complete factory to the renderer.",
+  },
+  exportTitle: { "zh-CN": "v47 兼容存档由原生核心流式导出", en: "The native core streams compatible v47 exports" },
+  exportDescription: {
+    "zh-CN": "原生核心按规范顺序直接写出 envelope v2、UTF-16 兼容 checksum、字节数和 SHA-256；主进程复核文件身份后原子替换用户选择的目标，取消或失败不改变权威状态。",
+    en: "The native core writes envelope v2, the legacy UTF-16 checksum, byte length, and SHA-256 in canonical order. The main process verifies the file before replacing the selected target, while cancellation or failure leaves authority unchanged.",
+  },
+  boundaryTitle: { "zh-CN": "原生权威继续失败关闭", en: "Native authority remains fail-closed" },
+  boundaryDescription: {
+    "zh-CN": "1.2.3 不把内部影子能力伪装成已通过的稳定接管；完整纯挂机/时间扭曲覆盖、24 小时多硬件长跑、签名和灰度完成前，JavaScript 仍是玩家可见权威。",
+    en: "Version 1.2.3 does not present internal shadow capability as a validated stable cutover. JavaScript remains player-visible authority until complete pure-idle/time-warp coverage, 24-hour multi-hardware runs, signing, and rollout finish.",
+  },
+} as const;
+
 const release122Copy = {
   date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
   title: { "zh-CN": "纯挂机 30 秒轻量采样恢复产量", en: "Pure Idle Restores Production with a Lightweight 30-second Sample" },
@@ -707,6 +741,10 @@ function release122Message(locale: AppLocale, key: keyof typeof release122Copy):
   return release122Copy[key][locale];
 }
 
+function release123Message(locale: AppLocale, key: keyof typeof release123Copy): string {
+  return release123Copy[key][locale];
+}
+
 function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
@@ -741,6 +779,23 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-27-v1.2.3",
+    date: release123Message(locale, "date"),
+    version: "1.2.3",
+    title: release123Message(locale, "title"),
+    summary: release123Message(locale, "summary"),
+    items: [
+      { id: "native-active-dirty-pages", title: release123Message(locale, "saveTitle"), description: release123Message(locale, "saveDescription") },
+      { id: "native-event-driven-belts", title: release123Message(locale, "beltTitle"), description: release123Message(locale, "beltDescription") },
+      { id: "native-bounded-projections", title: release123Message(locale, "projectionTitle"), description: release123Message(locale, "projectionDescription") },
+      { id: "native-streaming-v47-export", title: release123Message(locale, "exportTitle"), description: release123Message(locale, "exportDescription") },
+      { id: "native-authority-gate", title: release123Message(locale, "boundaryTitle"), description: release123Message(locale, "boundaryDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes122(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-27-v1.2.2",
     date: release122Message(locale, "date"),

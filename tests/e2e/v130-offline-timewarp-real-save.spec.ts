@@ -138,7 +138,7 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
     expect(report.criticalFinite).toBe(true);
     expect(report.committed).toBe(true);
     expect(report.elapsedAdvance).toBeCloseTo(report.seconds, 3);
-    expect(report.approximation).toMatchObject({ mode: "approximate", algorithmVersion: "fast-30s-v3-lite" });
+    expect(report.approximation).toMatchObject({ mode: "approximate", algorithmVersion: "fast-30s-v4-indexed" });
     expect(["approximate", "bounded-exact"]).toContain(report.approximation?.settlementStatus);
     expect(report.workerRoundTripMs).toBeLessThan(120_000);
     expect(report.roundTripMs).toBeLessThan(150_000);
@@ -152,6 +152,7 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
         (specifier: string) => Promise<Record<string, (...args: never[]) => unknown>>;
       const storage = await loadModule("/src/game/storage.ts");
       const contentPacks = await loadModule("/src/game/contentPacks.ts");
+      const runtimeProtocol = await loadModule("/src/game/simulationRuntimeProtocol.ts");
       const parsed = await fetch("/__dsp_real_offline_timewarp_fixture.json").then((response) => response.json());
       const state = storage.migrateGame(parsed.state ?? parsed) as Record<string, any> | null;
       if (!state) throw new Error("fixture migration failed");
@@ -175,10 +176,28 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
         { multiplier: 8, simulationSeconds: 64 },
         { multiplier: 12, simulationSeconds: 96 },
         { multiplier: 16, simulationSeconds: 128 },
+        // The second consecutive 16x bucket must reuse the rolling certificate
+        // owned by the persistent simulation Worker instead of repeating the
+        // exact calibration and validation pair.
+        { multiplier: 16, simulationSeconds: 128 },
       ];
       const reports: Array<Record<string, any>> = [];
+      state.timeWarp.requestedMultiplier = slices[0].multiplier;
+      let clientState = state;
+      let acknowledgedRevision = 0;
       for (let index = 0; index < slices.length; index += 1) {
         const slice = slices[index];
+        let command: Record<string, any> | undefined;
+        if (index > 0 && clientState.timeWarp.requestedMultiplier !== slice.multiplier) {
+          const commandView = structuredClone(clientState);
+          commandView.timeWarp.requestedMultiplier = slice.multiplier;
+          command = runtimeProtocol.createSimulationCommandPatch(
+            clientState,
+            commandView,
+            acknowledgedRevision,
+          ) as Record<string, any> | undefined;
+          if (!command) throw new Error(`failed to build ${slice.multiplier}x command`);
+        }
         const startedAt = performance.now();
         const response = await new Promise<Record<string, any>>((resolve, reject) => {
           const timeout = window.setTimeout(() => reject(new Error(`${slice.multiplier}x Worker exceeded 15 seconds`)), 15_000);
@@ -194,6 +213,7 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
           worker.postMessage({
             id: index + 1,
             ...(index === 0 ? { state, registry } : {}),
+            ...(command ? { command } : {}),
             simulationSeconds: slice.simulationSeconds,
             wallSeconds: slice.simulationSeconds / slice.multiplier,
             registryFingerprint: registry.fingerprint,
@@ -201,6 +221,8 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
             approximate: true,
           });
         });
+        clientState = response.state ?? clientState;
+        acknowledgedRevision = Number(response.stateRevision ?? acknowledgedRevision);
         reports.push({
           multiplier: slice.multiplier,
           roundTripMs: performance.now() - startedAt,
@@ -243,13 +265,17 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
     expect(result.sourceUnchanged).toBe(true);
     expect(result.lateMessage).toBe(false);
     expect(result.terminateMs).toBeLessThan(1_000);
-    expect(result.reports).toHaveLength(3);
+    expect(result.reports).toHaveLength(4);
     console.log(`BROWSER_TIME_WARP ${JSON.stringify(result)}`);
     for (const report of result.reports) {
       expect(report.criticalFinite).toBe(true);
-      expect(report.approximation).toMatchObject({ mode: "approximate", algorithmVersion: "time-warp-lightweight-v4" });
+      expect(report.approximation).toMatchObject({ mode: "approximate", algorithmVersion: "time-warp-rolling-v5" });
       expect(report.durationMs).toBeLessThan(15_000);
       expect(report.roundTripMs).toBeLessThan(15_000);
     }
+    expect(result.reports.at(-1)?.approximation).toMatchObject({
+      certificateReused: true,
+      exactCalibrationSeconds: 0,
+    });
   });
 });

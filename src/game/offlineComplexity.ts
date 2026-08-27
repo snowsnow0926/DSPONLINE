@@ -118,10 +118,11 @@ export function classifyOfflineWorkload(
     layer.frames.length > 0 || layer.shells.length > 0,
   )).length + (state.dysonSwarm.sailsInOrbit > 0 || state.dysonSphere.totalRocketsLaunched > 0 ? 1 : 0);
   const estimatedSerializedBytes = Math.max(0, Math.floor(options.serializedBytes ?? estimateSerializedBytes(state)));
-  // fast-30s-v3-lite retains the immutable source, one mutable simulation
-  // candidate and compact material/research projections. It no longer keeps
-  // four generic full-state calibration/validation clones. This remains a
-  // conservative warning estimate, never an allocator or gameplay limit.
+  // fast-30s-v4-indexed retains the immutable source, one Worker-owned mutable
+  // calibration candidate and compact material/research projections. Lookup
+  // indexes are reused while entity/belt array identities remain stable, and
+  // four generic full-state calibration/validation clones are no longer kept.
+  // This remains a conservative warning estimate, never an allocator or limit.
   const estimatedPeakBytes = Math.max(estimatedSerializedBytes * 3, Math.floor(
     state.entities.length * 14_000 + state.belts.length * 6_500 + routeCount * 8_000 + estimatedSerializedBytes * 2,
   ));

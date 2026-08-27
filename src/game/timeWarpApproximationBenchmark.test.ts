@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { hashGameState } from "./benchmark";
-import { runTimeWarpApproximateSettlement, type TimeWarpApproximationReport } from "./offlineApproximation";
+import {
+  runTimeWarpApproximateSettlement,
+  runTimeWarpApproximateSettlementInPlace,
+  type TimeWarpApproximationReport,
+} from "./offlineApproximation";
 import { migrateGame } from "./storage";
 import {
   createTimeWarpComputeGovernor,
@@ -87,7 +91,10 @@ describe("time-warp approximation real-save benchmark", () => {
               ? remainingWallSeconds * simulationSeconds / remainingSimulationSeconds
               : 0;
             const startedAt = performance.now();
-            const result = runTimeWarpApproximateSettlement(state, simulationSeconds, sliceWallSeconds);
+            // Match the production simulation Worker: the first slice creates
+            // an exact-validated rolling certificate, later slices reuse the
+            // same Worker-owned authority in place until its refresh boundary.
+            const result = runTimeWarpApproximateSettlementInPlace(state, simulationSeconds, sliceWallSeconds);
             durations.push(performance.now() - startedAt);
             approximationReports.push(result.report);
             state = result.state;
@@ -123,6 +130,11 @@ describe("time-warp approximation real-save benchmark", () => {
             durationP95Ms: Math.round(percentile(durations, 0.95) * 100) / 100,
             durationMaxMs: Math.round(Math.max(...durations) * 100) / 100,
             approximateSlices,
+            rollingCertificateSlices: approximationReports.filter((report) => report.certificateReused).length,
+            exactCalibrationSeconds: approximationReports.reduce(
+              (sum, report) => sum + report.exactCalibrationSeconds,
+              0,
+            ),
             exactFallbackSlices: durations.length - approximateSlices,
             approximateRatio: durations.length > 0 ? approximateSlices / durations.length : 0,
             maxCriticalTailError: Math.max(0, ...approximationReports.map((report) => report.maxCriticalError)),

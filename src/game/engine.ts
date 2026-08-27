@@ -3611,6 +3611,33 @@ function launchDysonStructure(state: GameState, systemId: StarSystemId, amount: 
   updateDysonSphereGeneration(state);
 }
 
+/**
+ * Closed event-domain entry used by the pure-idle macro engine. Material
+ * ownership is validated and credited by the caller before this function is
+ * invoked; this boundary only commits an already funded integer launch plan
+ * through the same per-system reconciliation as the exact silo path.
+ */
+export function advanceDysonRocketMacroInPlace(
+  state: GameState,
+  launchesBySystem: Readonly<Record<string, number>>,
+): number {
+  const entries = Object.entries(launchesBySystem)
+    .map(([systemId, amount]) => [systemId as StarSystemId, Math.max(0, Math.floor(amount))] as const)
+    .filter(([, amount]) => amount > 0);
+  let total = 0;
+  for (const [systemId, amount] of entries) {
+    const plan = state.dysonPlans[systemId];
+    if (!plan || !Number.isSafeInteger(amount) ||
+      !Number.isSafeInteger(plan.structurePoints + amount)) return 0;
+    total += amount;
+    if (!Number.isSafeInteger(total)) return 0;
+  }
+  if (!Number.isSafeInteger(state.dysonSphere.totalRocketsLaunched + total) ||
+    !Number.isSafeInteger(state.dysonSphere.structurePoints + total)) return 0;
+  for (const [systemId, amount] of entries) launchDysonStructure(state, systemId, amount);
+  return total;
+}
+
 function launchDysonSails(state: GameState, systemId: StarSystemId, orbitId: string, amount: number): void {
   if (amount <= 0) return;
   syncLegacySwarmIntoOrbits(state);

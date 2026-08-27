@@ -1,5 +1,6 @@
 import {
   advanceConstructionAutomationMacroInPlace,
+  advanceDysonRocketMacroInPlace,
   getEffectiveSimulationMultiplier,
   refreshDysonGenerationSnapshot,
   refreshTimeWarpPowerSnapshotInPlace,
@@ -11,9 +12,11 @@ import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
+  applyPureIdleLightweightContractInPlace,
   createPureIdleAffineCalibration,
   createPureIdleLightweightCalibration,
   type PureIdleAffineContract,
+  type PureIdleRocketMacroLedger,
 } from "./offlineApproximation";
 import {
   advanceResearchMacroInPlace,
@@ -23,7 +26,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v6-construction";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v7-event-ledger";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -36,6 +39,8 @@ export const PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS = 30;
 // The default must cover the three-window lightweight calibration. Device
 // classification can raise it further for constrained/low-memory hardware.
 export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 90_000;
+export const PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD = 3_000;
+export const PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD = 6_000;
 
 export type PureIdleMacroMode = "stable" | "extreme";
 export type PureIdleMacroPhase =
@@ -120,6 +125,9 @@ export interface PureIdleMacroSession {
   researchLedger: ResearchMacroLedger;
   researchRemainder: bigint;
   researchInflowRemainders: ResearchMacroApplicationRemainders;
+  rocketLedger?: PureIdleRocketMacroLedger;
+  /** Fractional launch carry for the closed single-system rocket domain. */
+  rocketLaunchRemainder: number;
   baseline: PureIdleTerminalSnapshot;
   baselineResearch: ResearchMacroStatus;
   calibrationRate: PureIdleRateSnapshot;
@@ -149,6 +157,13 @@ export interface PureIdleMacroSession {
   /** Per-item productive horizons for the lightweight sampled contract. */
   conservativeRemainingSimulationSecondsByItem: Record<string, number>;
   /**
+   * Construction is intentionally isolated from the ordinary calibration
+   * contract. A Worker-owned calibration can commit its exact ordinary
+   * prefix immediately, while this counter preserves the historical ordering
+   * by applying construction only at the next authoritative macro boundary.
+   */
+  pendingConstructionSimulationSeconds: number;
+  /**
    * Exact one-shot prefix produced by calibration. It is consumed when the
    * wall clock crosses the calibration boundary and then released.
    */
@@ -165,6 +180,8 @@ export interface PureIdleMacroOperationOptions {
   deadlineAtMs?: number;
   shouldCancel?: () => boolean;
   forceConservativeReason?: string;
+  /** Worker-only: the supplied state is already an isolated structured clone. */
+  consumeCalibrationState?: boolean;
 }
 
 /**
@@ -371,6 +388,7 @@ function calibrate(state: GameState): {
   rate: PureIdleRateSnapshot;
   calibratedState: GameState;
   calibrationWallSeconds: number;
+  rocketLedger?: PureIdleRocketMacroLedger;
 } {
   const multiplier = Math.max(1, getEffectiveSimulationMultiplier(state));
   const result = createPureIdleAffineCalibration(state, PURE_IDLE_MACRO_CALIBRATION_SECONDS / multiplier);
@@ -386,6 +404,7 @@ function calibrate(state: GameState): {
     ),
     calibratedState: result.calibratedState,
     calibrationWallSeconds: result.calibrationWallSeconds,
+    ...(result.rocketLedger ? { rocketLedger: result.rocketLedger } : {}),
   };
 }
 
@@ -443,6 +462,7 @@ export function createConservativePureIdleMacroSession(
   state: GameState,
   mode: PureIdleMacroMode,
   reason: string,
+  options: Pick<PureIdleMacroOperationOptions, "consumeCalibrationState"> = {},
 ): PureIdleMacroSession {
   if (!state.timeWarp.enabled || state.paused) throw new Error("纯挂机保守会话要求已启用且未暂停的时间扭曲状态");
   if (state.speedrun?.enabled) throw new Error("速通工厂必须继续使用独立的精确时间规则");
@@ -475,17 +495,22 @@ export function createConservativePureIdleMacroSession(
     observedUnits: 0n,
     inflowPerWindow: {},
   };
+  let rocketLedger: PureIdleRocketMacroLedger | undefined;
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
   try {
     const calibrated = createPureIdleLightweightCalibration(
       state,
       prefixSeconds / actualMultiplier,
-      { isolateConstructionAutomation: true },
+      {
+        isolateConstructionAutomation: true,
+        consumeState: options.consumeCalibrationState === true,
+      },
     );
     if (!calibrated) throw new Error("30 秒轻量校准没有形成可用样本");
     contract = calibrated.contract;
     researchLedger = calibrated.researchLedger;
+    rocketLedger = calibrated.rocketLedger;
     refreshDysonGenerationSnapshot(calibrated.calibratedState);
     measuredRate = rateBetween(
       baseline,
@@ -498,14 +523,23 @@ export function createConservativePureIdleMacroSession(
       ...emptyRate,
       whiteMatrixProduced: extrapolatesWhiteMatrix ? measuredRate.whiteMatrixProduced : 0,
     };
-    calibrationCheckpoint = {
-      baseWallSeconds: 0,
-      baseSimulationSeconds: 0,
-      wallSeconds: prefixSeconds / actualMultiplier,
-      simulationSeconds: prefixSeconds,
-      candidate: calibrated.calibratedState,
-    };
+    if (options.consumeCalibrationState) {
+      // The Worker request itself is already a structured clone of the
+      // durable checkpoint. Keep only its calibrated form and account for the
+      // exact prefix as elapsed wall time; the Worker waits for this boundary
+      // before publishing the ready response.
+      candidate = calibrated.calibratedState;
+    } else {
+      calibrationCheckpoint = {
+        baseWallSeconds: 0,
+        baseSimulationSeconds: 0,
+        wallSeconds: prefixSeconds / actualMultiplier,
+        simulationSeconds: prefixSeconds,
+        candidate: calibrated.calibratedState,
+      };
+    }
   } catch (error) {
+    if (options.consumeCalibrationState) throw error;
     // A failed calibration must not turn a recoverable fallback into a failed
     // settlement. Keep time-only behavior and expose the reason instead of
     // fabricating a rate from an incomplete sample.
@@ -526,12 +560,18 @@ export function createConservativePureIdleMacroSession(
     researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
+    ...(rocketLedger ? { rocketLedger } : {}),
+    rocketLaunchRemainder: 0,
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
     currentRate,
-    settledWallSeconds: 0,
-    settledSimulationSeconds: 0,
+    settledWallSeconds: options.consumeCalibrationState && !prefixFailure
+      ? prefixSeconds / actualMultiplier
+      : 0,
+    settledSimulationSeconds: options.consumeCalibrationState && !prefixFailure
+      ? prefixSeconds
+      : 0,
     contractVersion: productiveTail ? 1 : 0,
     validationCount: 0,
     validationFailures: prefixFailure ? 1 : 0,
@@ -553,6 +593,9 @@ export function createConservativePureIdleMacroSession(
     conservativeRemainingSimulationSecondsByItem: productiveTail
       ? { ...(contract.maximumSimulationSecondsByItem ?? {}) }
       : {},
+    pendingConstructionSimulationSeconds: options.consumeCalibrationState && !prefixFailure
+      ? prefixSeconds
+      : 0,
     ...(calibrationCheckpoint ? { calibrationCheckpoint } : {}),
   };
 }
@@ -569,13 +612,15 @@ export function createPureIdleMacroSession(
   }
   throwIfMacroInterrupted(options);
   if (options.forceConservativeReason) {
-    return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason);
+    return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason, options);
   }
-  if (state.entities.length >= 3_000 || state.belts.length >= 6_000) {
+  if (state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
+    state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD) {
     return createConservativePureIdleMacroSession(
       state,
       mode,
       `终局规模 ${state.entities.length.toLocaleString("zh-CN")} 实体 / ${state.belts.length.toLocaleString("zh-CN")} 线路，自动使用单影子轻量校准`,
+      options,
     );
   }
   refreshTimeWarpPowerSnapshotInPlace(state);
@@ -591,6 +636,8 @@ export function createPureIdleMacroSession(
     researchLedger: calibrated.researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
+    ...(calibrated.rocketLedger ? { rocketLedger: calibrated.rocketLedger } : {}),
+    rocketLaunchRemainder: 0,
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(calibrated.rate),
@@ -612,6 +659,7 @@ export function createPureIdleMacroSession(
     conservativeDecimalRemainders: {},
     conservativeRemainingSimulationSeconds: null,
     conservativeRemainingSimulationSecondsByItem: {},
+    pendingConstructionSimulationSeconds: 0,
     calibrationCheckpoint: {
       baseWallSeconds: 0,
       baseSimulationSeconds: 0,
@@ -667,6 +715,42 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
   }
 }
 
+function advanceClosedRocketDomainInPlace(
+  session: PureIdleMacroSession,
+  simulationSeconds: number,
+): { launched: number; failure?: string } {
+  const ledger = session.rocketLedger;
+  if (!ledger || simulationSeconds <= 1e-9) return { launched: 0 };
+  const destinations = Object.entries(ledger.launchesBySystemPerWindow)
+    .filter(([, amount]) => amount > 0);
+  if (destinations.length !== 1 || ledger.producedPerWindow < ledger.launchedPerWindow ||
+    ledger.calibrationSeconds <= 0) return { launched: 0, failure: "火箭事件账本不再满足单星系闭合条件" };
+  const raw = ledger.launchedPerWindow * simulationSeconds / ledger.calibrationSeconds +
+    session.rocketLaunchRemainder;
+  const launches = Math.max(0, Math.floor(raw + 1e-9));
+  const nextRemainder = raw - launches;
+  if (!Number.isSafeInteger(launches) || !Number.isFinite(nextRemainder) || nextRemainder < -1e-9 || nextRemainder >= 1) {
+    return { launched: 0, failure: "火箭事件账本缩放超过安全整数" };
+  }
+  if (launches < 1) {
+    session.rocketLaunchRemainder = Math.max(0, nextRemainder);
+    return { launched: 0 };
+  }
+  const producedBefore = Math.max(0, Math.floor(session.candidate.totalProduced.small_carrier_rocket ?? 0));
+  if (!Number.isSafeInteger(producedBefore + launches)) {
+    return { launched: 0, failure: "火箭累计生产接近安全整数上限，终端尾段已冻结" };
+  }
+  const [systemId] = destinations[0];
+  const committed = advanceDysonRocketMacroInPlace(session.candidate, { [systemId]: launches });
+  if (committed !== launches) return { launched: 0, failure: "戴森火箭事件边界拒绝提交" };
+  // Every credited launch is funded by at least one rocket manufactured in
+  // the same stable sample. Credit only the immediately launched amount;
+  // sampled surplus and its stock location remain conservatively frozen.
+  session.candidate.totalProduced.small_carrier_rocket = producedBefore + launches;
+  session.rocketLaunchRemainder = Math.max(0, nextRemainder);
+  return { launched: launches };
+}
+
 export function advancePureIdleMacroSession(
   session: PureIdleMacroSession,
   targetWallSeconds: number,
@@ -676,13 +760,14 @@ export function advancePureIdleMacroSession(
   if (!Number.isFinite(targetWallSeconds) || targetWallSeconds < session.settledWallSeconds) {
     throw new Error("纯挂机目标墙钟时间无效或发生倒退");
   }
-  if (session.settledWallSeconds + 1e-9 < targetWallSeconds) {
+  if (session.settledWallSeconds + 1e-9 < targetWallSeconds ||
+    session.pendingConstructionSimulationSeconds > 1e-9) {
     const operationStartedAt = macroNow();
     // Live orchestration calls this at each 30-second boundary. A tab that
     // slept or reloaded can arrive with days of debt; applying one equivalent
     // affine window keeps recovery cost independent of wall-clock duration.
     let exactSimulationSeconds = 0;
-    let isolatedConstructionPrefixSeconds = 0;
+    let isolatedConstructionPrefixSeconds = session.pendingConstructionSimulationSeconds;
     let macroWallSeconds = targetWallSeconds - session.settledWallSeconds;
     const checkpoint = session.calibrationCheckpoint;
     if (checkpoint && checkpoint.baseWallSeconds <= session.settledWallSeconds + 1e-9) {
@@ -759,13 +844,12 @@ export function advancePureIdleMacroSession(
         })()
       : session.conservativeOnly
         ? session.contract.deltas.length > 0 && conservativeMacroSimulationSeconds > 1e-9
-          ? applyPureIdleAffineContract(
+          ? applyPureIdleLightweightContractInPlace(
             session.candidate,
             session.contract,
             conservativeMacroSimulationSeconds,
             multiplier > 0 ? conservativeMacroSimulationSeconds / multiplier : 0,
             {
-              allowExactFallback: false,
               skipUnsafeIntegerPaths: true,
               integerRemainders: session.conservativeIntegerRemainders,
               decimalRemainders: session.conservativeDecimalRemainders,
@@ -830,6 +914,23 @@ export function advancePureIdleMacroSession(
         } else if (exhaustedItems > 0) {
           session.lastValidationReason = `30 秒样本中 ${exhaustedItems} 类净消耗物料已到边界；相关物料停止外推，其他产线继续`;
         }
+        const rocketSimulationSeconds = Math.min(
+          conservativeMacroSimulationSeconds,
+          Math.max(0, conservativeSimulationSecondsByItem?.small_carrier_rocket ?? conservativeMacroSimulationSeconds),
+        );
+        const rocketDomain = advanceClosedRocketDomainInPlace(session, rocketSimulationSeconds);
+        if (rocketDomain.failure) {
+          session.rocketLedger = undefined;
+          session.boundaryCorrections += 1;
+          session.lastValidationReason = `${rocketDomain.failure}；普通生产与科研合同继续生效`;
+        } else if (rocketDomain.launched > 0) {
+          const rate = rocketDomain.launched / Math.max(1e-9, rocketSimulationSeconds);
+          session.currentRate = {
+            ...session.currentRate,
+            rocketsLaunched: rate,
+            structurePoints: rate,
+          };
+        }
       }
     }
     const macroResearchSeconds = session.conservativeOnly
@@ -853,6 +954,7 @@ export function advancePureIdleMacroSession(
     if (session.conservativeOnly) {
       const constructionSeconds = isolatedConstructionPrefixSeconds + macroSimulationSeconds;
       const construction = advanceConstructionAutomationMacroInPlace(session.candidate, constructionSeconds);
+      session.pendingConstructionSimulationSeconds = 0;
       if (construction.completed > 0) {
         session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；普通产线仍受轻量物料边界保护`;
       }

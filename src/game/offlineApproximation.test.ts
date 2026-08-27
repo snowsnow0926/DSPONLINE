@@ -15,6 +15,8 @@ import {
   runOfflineApproximation,
   runOfflineApproximationAsync,
   runTimeWarpApproximateSettlement,
+  runTimeWarpApproximateSettlementInPlace,
+  invalidateTimeWarpApproximationCertificate,
   TIME_WARP_APPROXIMATION_ALGORITHM_VERSION,
   writeOfflineApproximationEnabled,
 } from "./offlineApproximation";
@@ -232,6 +234,26 @@ describe("offline macro contract experiment", () => {
     expect(result.report.boundaryCorrections ?? 0).toBeGreaterThanOrEqual(0);
   });
 
+  it("treats migration-restored resource anchors without miners as a quiescent topology", () => {
+    const source = createInitialState(undefined, false);
+    source.constructionAutomation.enabled = false;
+    source.paused = false;
+    const reloaded = inspectSave(serializeEnvelope(source, 1_753_000_000_000));
+    expect(reloaded.valid).toBe(true);
+    expect(reloaded.state?.entities.length).toBeGreaterThan(0);
+    expect(reloaded.state?.belts).toHaveLength(0);
+    expect(reloaded.state?.entities.every((entity) => entity.kind === "vein" && entity.minerCount === 0)).toBe(true);
+    if (!reloaded.state) return;
+    const before = hashGameState(reloaded.state);
+
+    const result = runFastOfflineSettlement(reloaded.state, 3_600);
+
+    expect(result.status).toBe("approximate");
+    if (result.status !== "approximate") return;
+    expect(result.state.elapsedSeconds - reloaded.state.elapsedSeconds).toBeCloseTo(3_600, 6);
+    expect(hashGameState(reloaded.state)).toBe(before);
+  });
+
   it("preserves an existing fractional simulation timestamp", () => {
     const source = stableEmptyState();
     source.elapsedSeconds = 123.7572;
@@ -443,6 +465,57 @@ describe("offline macro contract experiment", () => {
     const result = runTimeWarpApproximateSettlement(source, 12, 1);
     expect(result.state.speedrun?.elapsedActiveSeconds).toBe(11);
     expect(source.speedrun.elapsedActiveSeconds).toBe(10);
+  });
+
+  it("reuses an exact-validated rolling certificate only for the same Worker-owned authority", () => {
+    const source = createInitialState(undefined, false);
+    source.paused = false;
+    source.entities.push({
+      id: "rolling-time-warp-device", kind: "machine", planetId: "home", position: { x: 0, y: 0 },
+      interactionLocked: false, buildingId: "time_warp_device", machineCount: 1, minerCount: 0,
+      inputs: {}, outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    }, {
+      id: "rolling-wind", kind: "power", planetId: "home", position: { x: 20, y: 0 },
+      interactionLocked: false, buildingId: "wind_turbine", machineCount: 50_000_000, minerCount: 0,
+      inputs: {}, outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    }, {
+      id: "rolling-smelter", kind: "machine", planetId: "home", position: { x: 40, y: 0 },
+      interactionLocked: false, buildingId: "arc_smelter", recipeId: "iron_ingot", machineCount: 100,
+      minerCount: 0, inputs: { iron_ore: 100_000 }, outputs: {}, progress: 0, routingCursor: 0,
+      utilization: 0, productionRate: 0,
+    });
+    source.timeWarp.controllerEntityId = "rolling-time-warp-device";
+    source.timeWarp.enabled = true;
+    source.timeWarp.requestedMultiplier = 16;
+    source.speedrun = {
+      enabled: true, mode: "speedrun", rulesetVersion: "speedrun-v1", seasonId: "season_01", startedAt: 1,
+      elapsedActiveSeconds: 10, baseline: { completedTechIds: [], rocketsLaunched: 0, whiteMatrixProduced: 0 },
+      milestones: {
+        all_technologies: { completed: false }, dyson_rockets_10000: { completed: false }, white_matrix_1m: { completed: false },
+      },
+      eligible: true, factoryId: "rolling_time_warp_factory",
+    };
+    const authority = structuredClone(source);
+    const beforeElapsed = authority.elapsedSeconds;
+
+    const first = runTimeWarpApproximateSettlementInPlace(authority, 16, 1);
+    const second = runTimeWarpApproximateSettlementInPlace(first.state, 144, 9);
+
+    expect(first.report.certificateReused).not.toBe(true);
+    expect(second.state).toBe(first.state);
+    expect(second.report).toMatchObject({ certificateReused: true, exactCalibrationSeconds: 0 });
+    expect(second.state.elapsedSeconds - beforeElapsed).toBeCloseTo(160, 6);
+    expect(second.state.speedrun?.elapsedActiveSeconds).toBe(20);
+
+    const expired = runTimeWarpApproximateSettlementInPlace(second.state, 16, 1);
+    expect(expired.report.certificateReused).not.toBe(true);
+    expired.state.timeWarp.requestedMultiplier = 12;
+    const configurationChanged = runTimeWarpApproximateSettlementInPlace(expired.state, 12, 1);
+    expect(configurationChanged.report.certificateReused).not.toBe(true);
+
+    invalidateTimeWarpApproximationCertificate(configurationChanged.state);
+    const refreshed = runTimeWarpApproximateSettlementInPlace(configurationChanged.state, 12, 1);
+    expect(refreshed.report.certificateReused).not.toBe(true);
   });
 
   it("rejects a macro slice that already contains uncommitted time-warp debt", () => {

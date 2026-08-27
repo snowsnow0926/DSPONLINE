@@ -15,6 +15,7 @@ import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
 import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
+  applyPureIdleLightweightContractInPlace,
   reconcilePureIdleLightweightMaterialDeltas,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
@@ -483,6 +484,48 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
+  it("applies the closed lightweight contract without cloning the full state", () => {
+    const source = pureIdleState();
+    source.entities[0].inputs.iron_ore = 100;
+    const contract = {
+      calibrationSeconds: 10,
+      calibrationWallSeconds: 10,
+      deltas: [
+        { path: ["entities", 0, "inputs", "iron_ore"], kind: "number", delta: -10, integer: true },
+        { path: ["totalProduced", "iron_ingot"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+    const expected = structuredClone(source);
+    const actual = structuredClone(source);
+
+    expect(applyPureIdleAffineContract(expected, contract, 10, 10)).toMatchObject({ ok: true });
+    expect(applyPureIdleLightweightContractInPlace(actual, contract, 10, 10)).toMatchObject({ ok: true });
+    expect(hashGameState(actual)).toBe(hashGameState(expected));
+  });
+
+  it("rolls back every primitive and remainder when an in-place bucket overflows", () => {
+    const state = pureIdleState();
+    state.entities[0].inputs.iron_ore = 100;
+    state.totalProduced.iron_ingot = Number.MAX_SAFE_INTEGER - 5;
+    const before = hashGameState(state);
+    const integerRemainders = { retained: 0.25 };
+    const contract = {
+      calibrationSeconds: 10,
+      calibrationWallSeconds: 10,
+      deltas: [
+        { path: ["entities", 0, "inputs", "iron_ore"], kind: "number", delta: -10, integer: true },
+        { path: ["totalProduced", "iron_ingot"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleLightweightContractInPlace(state, contract, 10, 10, { integerRemainders });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.failure).toContain("超过安全整数");
+    expect(hashGameState(state)).toBe(before);
+    expect(integerRemainders).toEqual({ retained: 0.25 });
+  });
+
   it("turns an unmatched sampled replenishment into balanced transfer and finite consumption", () => {
     const state = pureIdleState();
     state.tray.coal = 100;
@@ -663,11 +706,44 @@ describe("pure idle macro session", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
+  it("consumes a Worker-owned calibration graph without changing the 60-second result", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addProductiveSmelter(source, 1_000);
+    addRecursiveConstructionCenter(source, 100);
+    const sourceHash = hashGameState(source);
+
+    const retained = createPureIdleMacroSession(structuredClone(source), "stable", {
+      forceConservativeReason: "retained checkpoint reference",
+    });
+    const consumed = createPureIdleMacroSession(structuredClone(source), "stable", {
+      forceConservativeReason: "Worker-owned checkpoint",
+      consumeCalibrationState: true,
+    });
+
+    expect(consumed.calibrationCheckpoint).toBeUndefined();
+    expect(consumed.settledSimulationSeconds).toBe(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS);
+    expect(consumed.settledWallSeconds).toBeCloseTo(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS / 8, 9);
+    expect(consumed.pendingConstructionSimulationSeconds).toBe(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS);
+    expect(hashGameState(consumed.candidate)).toBe(hashGameState(retained.calibrationCheckpoint!.candidate));
+
+    advancePureIdleMacroSession(retained, 60);
+    advancePureIdleMacroSession(consumed, 60);
+
+    expect(hashGameState(consumed.candidate)).toBe(hashGameState(retained.candidate));
+    expect(consumed.pendingConstructionSimulationSeconds).toBe(0);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
   it("does not duplicate prefilled silo launches when low-rate production cannot fund a conservative tail", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 15;
     addRocketConservationFixture(source);
+    const producer = source.entities.find((entity) => entity.id === "slow-rocket-producer")!;
+    producer.machineCount = 0;
+    producer.inputs = {};
     const sourceHash = hashGameState(source);
     const initialRockets = source.entities.find((entity) => entity.id === "prefilled-rocket-silo")!.inputs.small_carrier_rocket ?? 0;
     const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
@@ -685,6 +761,40 @@ describe("pure idle macro session", () => {
     expect(launches).toBe(exactPrefixLaunches);
     expect(launches).toBeLessThanOrEqual(produced + initialRockets - endingRockets);
     expect(validatePureIdleTerminalMaterialConservation(source, finalized)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("continues a stable single-system rocket line only when sampled manufacture funds every launch", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source, 0);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "closed rocket event-domain regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "closed rocket event-domain regression",
+    );
+    const exactPrefixLaunches = single.calibrationCheckpoint!.candidate.dysonSphere.totalRocketsLaunched -
+      source.dysonSphere.totalRocketsLaunched;
+
+    expect(single.rocketLedger).toBeDefined();
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 19);
+    advancePureIdleMacroSession(segmented, 60);
+
+    const launches = single.candidate.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched;
+    const produced = (single.candidate.totalProduced.small_carrier_rocket ?? 0) -
+      (source.totalProduced.small_carrier_rocket ?? 0);
+    expect(launches).toBeGreaterThan(exactPrefixLaunches);
+    expect(produced).toBeGreaterThanOrEqual(launches);
+    expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
     expect(hashGameState(source)).toBe(sourceHash);
   });
 

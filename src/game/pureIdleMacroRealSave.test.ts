@@ -19,7 +19,7 @@ const realSaveDescribe = fixturePath ? describe : describe.skip;
  *
  *   DSP_V120_REAL_PURE_IDLE_FIXTURE=<path> npx vitest run src/game/pureIdleMacroRealSave.test.ts
  */
-realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
+realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
   it("extrapolates ordinary production while keeping terminal tails frozen and reloadable", { timeout: 180_000 }, () => {
     const testStartedAt = performance.now();
     const beforeStat = statSync(fixturePath!);
@@ -43,14 +43,18 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
 
     const calibrationStartedAt = performance.now();
     const session = createPureIdleMacroSession(structuredClone(checkpoint), "extreme", {
-      forceConservativeReason: "1.2.2 real-save lightweight calibration release gate",
+      forceConservativeReason: "1.2.3 real-save event-ledger development gate",
+      // Match the production Worker: the incoming graph is already isolated
+      // by postMessage, so calibration consumes it instead of cloning again.
+      consumeCalibrationState: true,
     });
     const calibrationFinishedAt = performance.now();
-    const calibrated = session.calibrationCheckpoint?.candidate;
-    expect(calibrated).toBeDefined();
-    const calibratedWhiteDelta = (calibrated!.totalProduced.universe_matrix ?? 0) -
+    const calibrated = session.candidate;
+    expect(session.calibrationCheckpoint).toBeUndefined();
+    expect(session.settledSimulationSeconds).toBe(30);
+    const calibratedWhiteDelta = (calibrated.totalProduced.universe_matrix ?? 0) -
       (checkpoint.totalProduced.universe_matrix ?? 0);
-    const calibratedRocketDelta = calibrated!.dysonSphere.totalRocketsLaunched -
+    const calibratedRocketDelta = calibrated.dysonSphere.totalRocketsLaunched -
       checkpoint.dysonSphere.totalRocketsLaunched;
     expect(calibratedWhiteDelta).toBeGreaterThan(0);
     const targetWallSeconds = 10 * 60;
@@ -66,6 +70,15 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
       contractVersion: 1,
       settledWallSeconds: targetWallSeconds,
     });
+    console.info("[pure-idle-v7-event-ledger-real-save-settlement]", JSON.stringify({
+      contractDeltas: session.contract.deltas.length,
+      rocketLedger: session.rocketLedger,
+      finalWhiteDelta,
+      calibratedWhiteDelta,
+      lastValidationReason: result.summary.lastValidationReason,
+      degradedReason: result.summary.degradedReason,
+      boundaryCorrections: result.summary.boundaryCorrections,
+    }));
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
     expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
     expect(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched)
@@ -88,7 +101,7 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
       mtimeMs: afterStat.mtimeMs,
       hash: createHash("sha256").update(afterRaw, "utf8").digest("hex"),
     }).toEqual({ size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, hash: sourceFileHash });
-    console.info("[pure-idle-v5-lite-real-save]", JSON.stringify({
+    console.info("[pure-idle-v7-event-ledger-real-save]", JSON.stringify({
       sourceBytes: beforeStat.size,
       entityCount: checkpoint.entities.length,
       beltCount: checkpoint.belts.length,

@@ -62,7 +62,7 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
     console.log(`REAL_TIME_WARP_PROFILE ${JSON.stringify({ constructionMs, construction, timeWarpMs, report: timeWarp.report })}`);
 
     expect(timeWarp.state.elapsedSeconds - source!.elapsedSeconds).toBeCloseTo(64, 6);
-    expect(timeWarp.report.algorithmVersion).toBe("time-warp-lightweight-v4");
+    expect(timeWarp.report.algorithmVersion).toBe("time-warp-rolling-v5");
     expect(inspectSave(serializeEnvelope(timeWarp.state)).valid).toBe(true);
     expect(createHash("sha256").update(readFileSync(fixturePath!, "utf8")).digest("hex")).toBe(sourceSha256);
   });

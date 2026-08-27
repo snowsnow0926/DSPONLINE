@@ -1,4 +1,5 @@
 import { getRecipe, ITEMS, MATRIX_ITEM_IDS } from "./content";
+import { CAMPAIGN_TASKS } from "./campaign";
 import { GALACTIC_EXPORT_DEFINITIONS } from "./endgame";
 import {
   advanceConstructionAutomationMacroInPlace,
@@ -7,6 +8,7 @@ import {
   createSimulationAdvanceSession,
   getEntityInputCapacity,
   getEntityOutputCapacity,
+  getTechnologyConstructionRewards,
   hasActiveResearch,
   normalizeConstructionAutomationCursor,
   refreshDysonGenerationSnapshot,
@@ -80,11 +82,40 @@ export interface TimeWarpApproximationReport {
   maxCriticalError: number;
   boundaryCorrections: number;
   fallbackReason?: string;
+  /** True when a previously exact-validated rolling certificate was reused. */
+  certificateReused?: boolean;
+  /** Wall-clock age since the last exact certificate refresh. */
+  certificateAgeWallSeconds?: number;
 }
 
 export interface TimeWarpApproximationResult {
   state: GameState;
   report: TimeWarpApproximationReport;
+}
+
+interface TimeWarpRollingCertificate {
+  contract: PureIdleAffineContract;
+  researchLedger: ResearchMacroLedger;
+  researchRemainder: bigint;
+  researchInflowRemainders: Parameters<typeof advanceResearchMacroInPlace>[4];
+  integerRemainders: Record<string, number>;
+  decimalRemainders: Record<string, bigint>;
+  remainingSimulationSecondsByItem: Record<string, number>;
+  ageWallSeconds: number;
+  lastCriticalError: number;
+  entityArray: GameState["entities"];
+  beltArray: GameState["belts"];
+  mode: GameState["mode"];
+  version: number;
+  controllerEntityId?: string;
+  requestedMultiplier: number;
+}
+
+const TIME_WARP_ROLLING_CERTIFICATE_VALIDATION_WALL_SECONDS = 10;
+const timeWarpRollingCertificates = new WeakMap<GameState, TimeWarpRollingCertificate>();
+
+export function invalidateTimeWarpApproximationCertificate(state: GameState): void {
+  timeWarpRollingCertificates.delete(state);
 }
 
 interface NumericMap {
@@ -162,10 +193,10 @@ const FAST_OFFLINE_CALIBRATION_SLICE_SECONDS = 10;
 const FAST_OFFLINE_VALIDATION_SECONDS = 5;
 /** Bounded exact preview used only when no valid calibration candidate exists. */
 export const FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS = 1;
-export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v3-lite";
+export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v4-indexed";
 export const FAST_OFFLINE_DESKTOP_DEADLINE_MS = 30_000;
 export const FAST_OFFLINE_MOBILE_DEADLINE_MS = 60_000;
-export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-lightweight-v4";
+export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-rolling-v5";
 // Realtime slices already repeat continuously. Two independent half-second
 // checkpoints retain a real exact tail verifier while halving the per-slice
 // endgame cost versus the historical 1s + 1s pair.
@@ -667,6 +698,48 @@ function runExact(source: GameState, seconds: number, wallSeconds = seconds): Ga
 }
 
 /**
+ * Run consecutive exact calibration windows while retaining the authoritative
+ * completion boundary after every window.  A completion can replace only the
+ * top-level GameState object (campaign/speedrun synchronization), while the
+ * entity and belt arrays remain authoritative and keep the existing lookup
+ * valid.  Reuse that lookup in the next window; rebuild it only when a real
+ * topology transition replaces either array.
+ *
+ * This deliberately does not collapse the three ten-second samples into one
+ * thirty-second session.  Production history, completed research, campaign
+ * progress and speedrun milestones must still settle at exactly the same
+ * boundaries as the historical implementation.
+ */
+function runExactCalibrationWindows(
+  source: GameState,
+  windowSeconds: number,
+  windowWallSeconds: number,
+  windowCount: number,
+  onWindowCompleted: (state: GameState, windowIndex: number) => void,
+): GameState {
+  let state = source;
+  let lookup: SimulationAdvanceSession["lookup"];
+  for (let index = 0; index < windowCount; index += 1) {
+    const entitiesBefore = state.entities;
+    const beltsBefore = state.belts;
+    const session = createSimulationAdvanceSession(state, windowSeconds, {
+      mutateState: true,
+      wallSeconds: windowWallSeconds,
+      lookup,
+    });
+    while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
+      advanceSimulationSession(session, 256);
+    }
+    state = completeSimulationAdvanceSession(session);
+    lookup = state.entities === entitiesBefore && state.belts === beltsBefore
+      ? session.lookup
+      : undefined;
+    onWindowCompleted(state, index);
+  }
+  return state;
+}
+
+/**
  * Advance a Worker-owned state through a short exact window. Pure-idle keeps
  * this bounded to its 30-second calibration prefix, so crossing a cache or
  * finite-resource boundary does not turn a multi-day settlement into a
@@ -922,6 +995,11 @@ export interface PureIdleConservativeContractOptions {
 function sameStableIds<T extends { id: string }>(before: T[] | undefined, after: T[] | undefined): boolean {
   if (!before || !after || before.length !== after.length) return false;
   return before.every((entry, index) => entry.id === after[index]?.id);
+}
+
+function sameStableIdValues<T extends { id: string }>(beforeIds: readonly string[], after: T[] | undefined): boolean {
+  if (!after || beforeIds.length !== after.length) return false;
+  return beforeIds.every((id, index) => id === after[index]?.id);
 }
 
 /**
@@ -1347,7 +1425,11 @@ function calculatePureIdleLightweightBoundaries(
     const recipe = getRecipe(entity.recipeId);
     if (!recipe || recipe.outputs.length === 0) return [];
     return recipe.outputs
-      .filter((output) => !PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(output.itemId))
+      // Rockets now have a separate closed terminal event ledger. Propagate
+      // their ingredient boundary even though their stores remain excluded
+      // from the ordinary affine contract. Solar sails remain frozen.
+      .filter((output) => output.itemId === "small_carrier_rocket" ||
+        !PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(output.itemId))
       .map((output) => ({
         outputItemId: output.itemId,
         inputItemIds: recipe.inputs.map((input) => input.itemId),
@@ -1468,9 +1550,15 @@ function removeResearchInputDeltas(
   contract: PureIdleAffineContract,
   state: GameState,
 ): PureIdleAffineContract {
-  const researchIndexes = new Set(state.entities
+  return removeResearchInputDeltasAtIndexes(contract, new Set(state.entities
     .map((entity, index) => entity.recipeId === "matrix_research" ? index : -1)
-    .filter((index) => index >= 0));
+    .filter((index) => index >= 0)));
+}
+
+function removeResearchInputDeltasAtIndexes(
+  contract: PureIdleAffineContract,
+  researchIndexes: ReadonlySet<number>,
+): PureIdleAffineContract {
   if (researchIndexes.size === 0) return contract;
   return {
     ...contract,
@@ -1603,10 +1691,21 @@ function applyFastAffineContract(
 export interface PureIdleAffineCalibration {
   contract: PureIdleAffineContract;
   researchLedger: ResearchMacroLedger;
+  /** Optional first closed terminal event domain; absent means freeze. */
+  rocketLedger?: PureIdleRocketMacroLedger;
   /** Temporary shadow result used only to derive diagnostics, then released. */
   calibratedState: GameState;
   calibrationSeconds: number;
   calibrationWallSeconds: number;
+}
+
+export interface PureIdleRocketMacroLedger {
+  calibrationSeconds: number;
+  /** Credited manufacture. This is required to fund every tail launch. */
+  producedPerWindow: number;
+  launchedPerWindow: number;
+  /** Per-system launch weights; their integer sum equals launchedPerWindow. */
+  launchesBySystemPerWindow: Record<string, number>;
 }
 
 export interface PureIdleLightweightCalibrationOptions {
@@ -1617,6 +1716,13 @@ export interface PureIdleLightweightCalibrationOptions {
    * recursive material costs remain one authoritative transaction.
    */
   isolateConstructionAutomation?: boolean;
+  /**
+   * Consume an already isolated Worker-owned state instead of cloning a
+   * second 40-80 MiB object graph.  A caller enabling this must retain the
+   * authoritative checkpoint outside the Worker and must not expose the
+   * candidate until the real calibration wall time has elapsed.
+   */
+  consumeState?: boolean;
 }
 
 export interface PureIdleAffineApplication {
@@ -1780,7 +1886,47 @@ interface AggregateConservationBaseline {
   totals: Map<string, bigint>;
   totalProduced: Map<string, bigint>;
   knownConsumed: Map<string, bigint>;
+  knownGranted: Map<string, bigint>;
   failure?: string;
+}
+
+const CAMPAIGN_TASK_BY_ID = new Map(CAMPAIGN_TASKS.map((task) => [task.id, task]));
+
+/**
+ * Cumulative, replay-safe inventory grants that are intentionally not factory
+ * production. Campaign rewards and technology unlock gifts can cross an exact
+ * calibration boundary, so conservation must credit their audited ledgers
+ * instead of misclassifying a legitimate building/item reward as duplication.
+ */
+function captureKnownMaterialGrants(state: GameState): { totals: Map<string, bigint>; failure?: string } {
+  const totals = new Map<string, bigint>();
+  let failure: string | undefined;
+  const addGrant = (itemId: string, raw: unknown, label: string): void => {
+    const amount = aggregateItemAmount(raw);
+    if (amount === null) failure ??= `${label} 不是非负安全整数`;
+    else addAggregateAmount(totals, itemId, amount);
+  };
+  for (const taskId of state.campaign.rewardedTaskIds) {
+    const task = CAMPAIGN_TASK_BY_ID.get(taskId);
+    if (!task) continue;
+    for (const reward of task.rewards ?? []) {
+      const itemId = reward.constructionId ?? reward.itemId;
+      if (itemId) addGrant(itemId, Math.max(0, Math.floor(reward.amount)), `campaign.${taskId}.rewards.${itemId}`);
+    }
+  }
+  for (const techId of state.research.completedTechIds) {
+    for (const constructionId of getTechnologyConstructionRewards(techId)) {
+      addGrant(constructionId, 2, `research.${techId}.construction.${constructionId}`);
+    }
+    // This one-off unlock is part of completeTechnology but is intentionally
+    // excluded from the ordinary two-building reward list because it is a
+    // megastructure. Crediting the cumulative completed-tech ledger keeps the
+    // before/after delta exact for the completion boundary.
+    if (techId === "universe_matrix") {
+      addGrant("galactic_material_exporter", 1, `research.${techId}.construction.galactic_material_exporter`);
+    }
+  }
+  return { totals, ...(failure ? { failure } : {}) };
 }
 
 function captureKnownMaterialConsumption(state: GameState): { totals: Map<string, bigint>; failure?: string } {
@@ -1831,11 +1977,13 @@ function captureAggregateConservationBaseline(state: GameState): AggregateConser
   }
   const captured = captureAggregateItemStores(state);
   const consumed = captureKnownMaterialConsumption(state);
-  const failure = captured.failure ?? consumed.failure;
+  const granted = captureKnownMaterialGrants(state);
+  const failure = captured.failure ?? consumed.failure ?? granted.failure;
   return {
     totals: captured.totals,
     totalProduced,
     knownConsumed: consumed.totals,
+    knownGranted: granted.totals,
     ...(failure ? { failure } : {}),
   };
 }
@@ -1846,23 +1994,29 @@ function validateAggregateConservation(before: AggregateConservationBaseline, af
   if (capturedAfter.failure) return `物资守恒候选无效：${capturedAfter.failure}`;
   const consumedAfter = captureKnownMaterialConsumption(after);
   if (consumedAfter.failure) return `物资守恒候选无效：${consumedAfter.failure}`;
+  const grantedAfter = captureKnownMaterialGrants(after);
+  if (grantedAfter.failure) return `物资守恒候选无效：${grantedAfter.failure}`;
   const afterTotals = capturedAfter.totals;
   const itemIds = new Set([
     ...before.totals.keys(), ...afterTotals.keys(), ...before.totalProduced.keys(), ...Object.keys(after.totalProduced),
     ...before.knownConsumed.keys(), ...consumedAfter.totals.keys(),
+    ...before.knownGranted.keys(), ...grantedAfter.totals.keys(),
   ]);
   for (const itemId of itemIds) {
     const stockDelta = (afterTotals.get(itemId) ?? 0n) - (before.totals.get(itemId) ?? 0n);
     const producedDelta = BigInt(Math.max(0, Math.floor(finiteNumber(after.totalProduced[itemId as ItemId])))) -
       (before.totalProduced.get(itemId) ?? 0n);
     const consumedDelta = (consumedAfter.totals.get(itemId) ?? 0n) - (before.knownConsumed.get(itemId) ?? 0n);
+    const grantedDelta = (grantedAfter.totals.get(itemId) ?? 0n) - (before.knownGranted.get(itemId) ?? 0n);
     if (producedDelta < 0n) return `物资守恒失败：${itemId} 的累计生产发生回退`;
     if (consumedDelta < 0n) return `物资守恒失败：${itemId} 的累计出口/销毁/交付发生回退`;
-    if (stockDelta > producedDelta) {
-      return `物资守恒失败：${itemId} 库存净增 ${stockDelta.toString()} 超过累计生产增量 ${producedDelta.toString()}`;
+    if (grantedDelta < 0n) return `物资守恒失败：${itemId} 的任务/科技奖励账本发生回退`;
+    const sourcedDelta = producedDelta + grantedDelta;
+    if (stockDelta > sourcedDelta) {
+      return `物资守恒失败：${itemId} 库存净增 ${stockDelta.toString()} 超过生产与奖励增量 ${sourcedDelta.toString()}`;
     }
-    if (consumedDelta > producedDelta - stockDelta) {
-      return `物资守恒失败：${itemId} 出口/销毁/交付 ${consumedDelta.toString()} 超过生产与库存来源 ${(producedDelta - stockDelta).toString()}`;
+    if (consumedDelta > sourcedDelta - stockDelta) {
+      return `物资守恒失败：${itemId} 出口/销毁/交付 ${consumedDelta.toString()} 超过生产、奖励与库存来源 ${(sourcedDelta - stockDelta).toString()}`;
     }
   }
   return null;
@@ -1870,6 +2024,72 @@ function validateAggregateConservation(before: AggregateConservationBaseline, af
 
 const PURE_IDLE_TERMINAL_MATERIALS = ["small_carrier_rocket", "solar_sail"] as const;
 type PureIdleTerminalMaterialId = typeof PURE_IDLE_TERMINAL_MATERIALS[number];
+
+interface PureIdleRocketCalibrationSnapshot {
+  produced: number;
+  launched: number;
+  structurePoints: number;
+  structurePointsBySystem: Record<string, number>;
+}
+
+function capturePureIdleRocketCalibrationSnapshot(state: GameState): PureIdleRocketCalibrationSnapshot {
+  return {
+    produced: Math.max(0, Math.floor(finiteNumber(state.totalProduced.small_carrier_rocket))),
+    launched: Math.max(0, Math.floor(finiteNumber(state.dysonSphere.totalRocketsLaunched))),
+    structurePoints: Math.max(0, Math.floor(finiteNumber(state.dysonSphere.structurePoints))),
+    structurePointsBySystem: Object.fromEntries(Object.entries(state.dysonPlans).map(([systemId, plan]) => [
+      systemId,
+      Math.max(0, Math.floor(finiteNumber(plan.structurePoints))),
+    ])),
+  };
+}
+
+function stableNonNegativeWindowDelta(values: readonly number[]): number | null {
+  if (values.length < 2 || values.some((value) => !Number.isSafeInteger(value) || value < 0)) return null;
+  const deltas = values.slice(1).map((value, index) => value - values[index]);
+  if (deltas.some((delta) => !Number.isSafeInteger(delta) || delta < 0)) return null;
+  const tail = deltas.at(-1) ?? 0;
+  const stableIntegerRate = (left: number, right: number) => Math.abs(left - right) <= 1 || stableRate(left, right);
+  if (deltas.length >= 2 && !stableIntegerRate(deltas.at(-2) ?? tail, tail)) return null;
+  const selected = deltas.length >= 2 && !stableIntegerRate(deltas[0] ?? tail, tail)
+    ? tail * deltas.length
+    : values.at(-1)! - values[0];
+  return Number.isSafeInteger(selected) && selected >= 0 ? selected : null;
+}
+
+function createPureIdleRocketMacroLedger(
+  snapshots: readonly PureIdleRocketCalibrationSnapshot[],
+  calibrationSeconds: number,
+): PureIdleRocketMacroLedger | undefined {
+  const produced = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.produced));
+  const launched = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.launched));
+  const structure = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.structurePoints));
+  if (produced === null || launched === null || structure === null || launched < 1 ||
+    structure !== launched || produced < launched) return undefined;
+  const systemIds = new Set(snapshots.flatMap((snapshot) => Object.keys(snapshot.structurePointsBySystem)));
+  const launchesBySystemPerWindow: Record<string, number> = {};
+  let planned = 0;
+  for (const systemId of [...systemIds].sort()) {
+    const delta = stableNonNegativeWindowDelta(snapshots.map((snapshot) =>
+      snapshot.structurePointsBySystem[systemId] ?? 0));
+    if (delta === null) return undefined;
+    if (delta > 0) launchesBySystemPerWindow[systemId] = delta;
+    planned += delta;
+    if (!Number.isSafeInteger(planned)) return undefined;
+  }
+  const activeSystems = Object.values(launchesBySystemPerWindow).filter((amount) => amount > 0).length;
+  // The first event-domain implementation intentionally accepts one launch
+  // destination only. Multi-system weighted allocation needs its own
+  // monotonic apportionment certificate; freezing it is safer than moving
+  // structure between stars when bucket segmentation changes.
+  if (planned !== launched || activeSystems !== 1) return undefined;
+  return {
+    calibrationSeconds,
+    producedPerWindow: produced,
+    launchedPerWindow: launched,
+    launchesBySystemPerWindow,
+  };
+}
 
 function ledgerCounter(value: unknown, label: string): bigint {
   const parsed = aggregateItemAmount(value);
@@ -2161,12 +2381,17 @@ export function createPureIdleAffineCalibration(
   if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
   const snapshots = [captureAffineSnapshot(state)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
-  let shadow = structuredClone(state);
-  for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-    shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
-    snapshots.push(captureAffineSnapshot(shadow));
-    researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
-  }
+  const windowCount = FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS;
+  const shadow = runExactCalibrationWindows(
+    structuredClone(state),
+    FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+    calibrationWallSeconds / windowCount,
+    windowCount,
+    (candidate) => {
+      snapshots.push(captureAffineSnapshot(candidate));
+      researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
+    },
+  );
   const contract = createFastAffineContractFromSnapshots(
     snapshots,
     FAST_OFFLINE_CALIBRATION_SECONDS,
@@ -2203,17 +2428,31 @@ export function createPureIdleLightweightCalibration(
   const sharedPaths = new Map<string, AffinePath>();
   const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
-  let shadow = structuredClone(state);
+  const rocketSnapshots = [capturePureIdleRocketCalibrationSnapshot(state)];
+  const entityIds = state.entities.map((entity) => entity.id);
+  const beltIds = state.belts.map((belt) => belt.id);
+  const researchIndexes = new Set(state.entities
+    .map((entity, index) => entity.recipeId === "matrix_research" ? index : -1)
+    .filter((index) => index >= 0));
+  const activeFiniteResource = hasActiveFinitePureIdleResource(state);
+  let shadow = options.consumeState ? state : structuredClone(state);
   const constructionAutomationEnabled = shadow.constructionAutomation.enabled;
   if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = false;
   let topologyStable = true;
   try {
-    for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-      shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
-      topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
-      snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
-      researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
-    }
+    const windowCount = FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS;
+    shadow = runExactCalibrationWindows(
+      shadow,
+      FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+      calibrationWallSeconds / windowCount,
+      windowCount,
+      (candidate) => {
+        topologyStable &&= sameStableIdValues(entityIds, candidate.entities) && sameStableIdValues(beltIds, candidate.belts);
+        snapshots.push(capturePureIdleLightweightSnapshot(candidate, sharedPaths));
+        researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
+        rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
+      },
+    );
   } finally {
     if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = constructionAutomationEnabled;
   }
@@ -2233,10 +2472,10 @@ export function createPureIdleLightweightCalibration(
   if (!researchLedger) return null;
 
   const sampledContract: PureIdleAffineContract = sampled
-    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltas({
+    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltasAtIndexes({
       ...sampled,
       deltas: sampled.deltas.filter((delta) => delta.kind === "number" ? Math.abs(Number(delta.delta)) > EPSILON : delta.delta !== 0n),
-    }, state))
+    }, researchIndexes))
     : {
       deltas: [],
       calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
@@ -2246,15 +2485,19 @@ export function createPureIdleLightweightCalibration(
 
   // Finite vein reserves are not represented by the lightweight store sample.
   // Keep the exact prefix but do not copy its mined output past the checkpoint.
-  if (hasActiveFinitePureIdleResource(state) || !topologyStable) {
+  if (activeFiniteResource || !topologyStable) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   } else {
     const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
     if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
   }
+  const rocketLedger = !activeFiniteResource && topologyStable && contract.deltas.length > 0
+    ? createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS)
+    : undefined;
   return {
     contract,
     researchLedger,
+    ...(rocketLedger ? { rocketLedger } : {}),
     calibratedState: shadow,
     calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
     calibrationWallSeconds,
@@ -2271,23 +2514,27 @@ async function createPureIdleLightweightCalibrationAsync(
   const sharedPaths = new Map<string, AffinePath>();
   const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
+  const rocketSnapshots = [capturePureIdleRocketCalibrationSnapshot(state)];
   let shadow = structuredClone(state);
   const constructionAutomationEnabled = shadow.constructionAutomation.enabled;
   if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = false;
   let topologyStable = true;
   try {
-    for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-      shadow = await runExactAsync(
-        shadow,
-        FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
-        asyncOptions,
-        calibrationWallSeconds / 3,
-      );
-      topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
-      snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
-      researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
-      asyncOptions.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, FAST_OFFLINE_CALIBRATION_SECONDS);
-    }
+    const windowCount = FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS;
+    shadow = await runExactCalibrationWindowsAsync(
+      shadow,
+      FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+      calibrationWallSeconds / windowCount,
+      windowCount,
+      asyncOptions,
+      (candidate, index) => {
+        topologyStable &&= sameStableIds(state.entities, candidate.entities) && sameStableIds(state.belts, candidate.belts);
+        snapshots.push(capturePureIdleLightweightSnapshot(candidate, sharedPaths));
+        researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
+        rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
+        asyncOptions.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, FAST_OFFLINE_CALIBRATION_SECONDS);
+      },
+    );
   } finally {
     if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = constructionAutomationEnabled;
   }
@@ -2322,9 +2569,13 @@ async function createPureIdleLightweightCalibrationAsync(
     const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
     if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
   }
+  const rocketLedger = !hasActiveFinitePureIdleResource(state) && topologyStable && contract.deltas.length > 0
+    ? createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS)
+    : undefined;
   return {
     contract,
     researchLedger,
+    ...(rocketLedger ? { rocketLedger } : {}),
     calibratedState: shadow,
     calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
     calibrationWallSeconds,
@@ -2473,6 +2724,149 @@ export function applyPureIdleAffineContract(
   );
   if (result.ok) Object.assign(state, candidate);
   return result;
+}
+
+interface AffinePrimitiveJournalEntry {
+  path: AffinePath;
+  existed: boolean;
+  value: unknown;
+}
+
+function captureAffinePrimitive(root: unknown, path: AffinePath): AffinePrimitiveJournalEntry | null {
+  if (path.length === 0) return null;
+  let current = root;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    if (typeof current !== "object" || current === null) return null;
+    current = (current as Record<string | number, unknown>)[path[index]];
+  }
+  if (typeof current !== "object" || current === null) return null;
+  const key = path.at(-1)!;
+  return {
+    path,
+    existed: Object.prototype.hasOwnProperty.call(current, key),
+    value: (current as Record<string | number, unknown>)[key],
+  };
+}
+
+function restoreAffinePrimitive(root: unknown, entry: AffinePrimitiveJournalEntry): boolean {
+  let current = root;
+  for (let index = 0; index < entry.path.length - 1; index += 1) {
+    if (typeof current !== "object" || current === null) return false;
+    current = (current as Record<string | number, unknown>)[entry.path[index]];
+  }
+  if (typeof current !== "object" || current === null) return false;
+  const record = current as Record<string | number, unknown>;
+  const key = entry.path.at(-1)!;
+  if (entry.existed) record[key] = entry.value;
+  else delete record[key];
+  return true;
+}
+
+function isClosedPureIdleLightweightDelta(delta: AffineDelta): boolean {
+  const itemId = pureIdleLightweightContractItemId(delta.path);
+  if (!itemId || PURE_IDLE_LIGHTWEIGHT_FROZEN_ITEMS.has(itemId as ItemId)) return false;
+  const micros = pureIdleDeltaMicros(delta);
+  if (delta.path[0] === "totalProduced") return micros >= 0n;
+  return isPureIdleLightweightStorePath(delta.path) && micros <= 0n;
+}
+
+function normalizeClosedPureIdleLightweightValue(
+  state: GameState,
+  entry: AffinePrimitiveJournalEntry,
+): { failure?: string; corrections: number } {
+  const value = readAffinePath(state, entry.path);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return { failure: `轻量宏观字段不是有限数值 ${JSON.stringify(entry.path)}=${String(value)}`, corrections: 0 };
+    }
+    if (entry.path[0] === "totalProduced") {
+      if (!Number.isSafeInteger(value) || value < 0 || typeof entry.value === "number" && value < entry.value) {
+        return { failure: `轻量宏观累计产量无效或发生回退 ${JSON.stringify(entry.path)}`, corrections: 0 };
+      }
+      return { corrections: 0 };
+    }
+    // Store deltas are depletion-only. An individual cyclic cache can empty
+    // before the aggregate item horizon even while another cache still owns
+    // the same material. Match the historical normalizer by clamping only
+    // that touched store to zero; this under-consumes and is rechecked by the
+    // aggregate conservation gate below.
+    const normalized = Math.max(0, Math.floor(value + EPSILON));
+    if (!Number.isSafeInteger(normalized)) {
+      return { failure: `轻量宏观库存超过安全整数 ${JSON.stringify(entry.path)}`, corrections: 0 };
+    }
+    if (normalized !== value && !writeAffinePath(state, entry.path, normalized)) {
+      return { failure: `轻量宏观库存无法修正 ${JSON.stringify(entry.path)}`, corrections: 0 };
+    }
+    return { corrections: normalized === value ? 0 : 1 };
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) return { corrections: 0 };
+  return { failure: `轻量宏观字段类型无效 ${JSON.stringify(entry.path)}`, corrections: 0 };
+}
+
+function replaceRecord<T>(target: Record<string, T> | undefined, source: Record<string, T> | undefined): void {
+  if (!target) return;
+  for (const key of Object.keys(target)) delete target[key];
+  if (source) Object.assign(target, source);
+}
+
+/**
+ * Transactional low-memory application for the compact pure-idle contract.
+ *
+ * The generic affine path clones the complete GameState because it may touch
+ * arbitrary fields and normalization can repair the whole graph.  The
+ * lightweight contract has a much smaller, formally closed write set:
+ * monotonic totalProduced counters and depletion-only material stores. Keep a
+ * primitive undo journal for those paths, run the same aggregate conservation
+ * gate, and roll back every value/remainder on failure. This removes the last
+ * full-state clone from an endgame macro bucket without weakening the
+ * transaction boundary.
+ */
+export function applyPureIdleLightweightContractInPlace(
+  state: GameState,
+  contract: PureIdleAffineContract,
+  simulationSeconds: number,
+  wallSeconds: number,
+  options: Pick<PureIdleAffineApplicationOptions,
+    "skipUnsafeIntegerPaths" | "integerRemainders" | "decimalRemainders" | "simulationSecondsByItem"> = {},
+): PureIdleAffineApplication {
+  if (!contract.deltas.every(isClosedPureIdleLightweightDelta)) {
+    return { ok: false, boundaryCorrections: 0, failure: "轻量宏观合同包含闭合账本之外的字段" };
+  }
+  const journal = contract.deltas.map((delta) => captureAffinePrimitive(state, delta.path));
+  if (journal.some((entry) => entry === null)) {
+    return { ok: false, boundaryCorrections: 0, failure: "轻量宏观合同路径无法建立撤销日志" };
+  }
+  const entries = journal as AffinePrimitiveJournalEntry[];
+  const before = captureAggregateConservationBaseline(state);
+  const integerRemainders = options.integerRemainders ? { ...options.integerRemainders } : undefined;
+  const decimalRemainders = options.decimalRemainders ? { ...options.decimalRemainders } : undefined;
+  const rollback = (failure: string, corrections = 0): PureIdleAffineApplication => {
+    for (let index = entries.length - 1; index >= 0; index -= 1) restoreAffinePrimitive(state, entries[index]);
+    replaceRecord(options.integerRemainders, integerRemainders);
+    replaceRecord(options.decimalRemainders, decimalRemainders);
+    return { ok: false, boundaryCorrections: corrections, failure };
+  };
+  const applied = applyFastAffineContract(
+    state,
+    contract,
+    simulationSeconds,
+    wallSeconds,
+    true,
+    options.skipUnsafeIntegerPaths ?? false,
+    options.integerRemainders,
+    options.decimalRemainders,
+    options.simulationSecondsByItem,
+  );
+  if (!applied.ok) return rollback(applied.failure ?? "轻量宏观合同应用失败", applied.corrections ?? 0);
+  let corrections = applied.corrections ?? 0;
+  for (const entry of entries) {
+    const normalized = normalizeClosedPureIdleLightweightValue(state, entry);
+    corrections += normalized.corrections;
+    if (normalized.failure) return rollback(normalized.failure, corrections);
+  }
+  const conservationFailure = validateAggregateConservation(before, state);
+  if (conservationFailure) return rollback(conservationFailure, corrections);
+  return { ok: true, boundaryCorrections: corrections };
 }
 
 function normalizeFastNumberMap(
@@ -2919,6 +3313,133 @@ function conservativeTimeWarpResult(
   };
 }
 
+function timeWarpCertificateMatches(state: GameState, certificate: TimeWarpRollingCertificate): boolean {
+  return certificate.entityArray === state.entities && certificate.beltArray === state.belts &&
+    certificate.mode === state.mode && certificate.version === state.version &&
+    certificate.controllerEntityId === state.timeWarp.controllerEntityId &&
+    certificate.requestedMultiplier === state.timeWarp.requestedMultiplier &&
+    state.timeWarp.enabled && !state.paused;
+}
+
+function storeTimeWarpRollingCertificate(
+  state: GameState,
+  sampledContract: PureIdleAffineContract,
+  researchLedger: ResearchMacroLedger,
+  lastCriticalError: number,
+): void {
+  const closed = freezePureIdleLightweightStoreReplenishment(sampledContract);
+  if (closed.deltas.length === 0 || !closed.deltas.every(isClosedPureIdleLightweightDelta)) return;
+  const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(state, sampledContract);
+  const contract = maximumSimulationSecondsByItem
+    ? { ...closed, maximumSimulationSecondsByItem }
+    : closed;
+  timeWarpRollingCertificates.set(state, {
+    contract,
+    researchLedger,
+    researchRemainder: 0n,
+    researchInflowRemainders: {},
+    integerRemainders: {},
+    decimalRemainders: {},
+    remainingSimulationSecondsByItem: { ...(maximumSimulationSecondsByItem ?? {}) },
+    ageWallSeconds: 0,
+    lastCriticalError,
+    entityArray: state.entities,
+    beltArray: state.belts,
+    mode: state.mode,
+    version: state.version,
+    ...(state.timeWarp.controllerEntityId ? { controllerEntityId: state.timeWarp.controllerEntityId } : {}),
+    requestedMultiplier: state.timeWarp.requestedMultiplier,
+  });
+}
+
+function runTimeWarpRollingCertificateInPlace(
+  state: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+): TimeWarpApproximationResult | null {
+  const certificate = timeWarpRollingCertificates.get(state);
+  if (!certificate || !timeWarpCertificateMatches(state, certificate) ||
+    certificate.ageWallSeconds + wallSeconds >= TIME_WARP_ROLLING_CERTIFICATE_VALIDATION_WALL_SECONDS) {
+    if (certificate) timeWarpRollingCertificates.delete(state);
+    return null;
+  }
+  const desiredSpeedrunElapsed = state.speedrun?.enabled
+    ? Math.round((state.speedrun.elapsedActiveSeconds + Math.min(wallSeconds, 30 * 24 * 60 * 60)) * 1_000_000) / 1_000_000
+    : undefined;
+  if (desiredSpeedrunElapsed !== undefined &&
+    (!Number.isFinite(desiredSpeedrunElapsed) || desiredSpeedrunElapsed < state.speedrun!.elapsedActiveSeconds)) {
+    timeWarpRollingCertificates.delete(state);
+    return null;
+  }
+  const creditedSecondsByItem = Object.fromEntries(Object.entries(certificate.remainingSimulationSecondsByItem).map(
+    ([itemId, remaining]) => [itemId, Math.min(simulationSeconds, Math.max(0, remaining))],
+  ));
+  const applied = applyPureIdleLightweightContractInPlace(
+    state,
+    certificate.contract,
+    simulationSeconds,
+    wallSeconds,
+    {
+      skipUnsafeIntegerPaths: true,
+      integerRemainders: certificate.integerRemainders,
+      decimalRemainders: certificate.decimalRemainders,
+      simulationSecondsByItem: creditedSecondsByItem,
+    },
+  );
+  if (!applied.ok) {
+    timeWarpRollingCertificates.delete(state);
+    return null;
+  }
+  const researchSeconds = MATRIX_ITEM_IDS.reduce((maximum, itemId) => {
+    const itemSeconds = creditedSecondsByItem[itemId];
+    return itemSeconds === undefined ? maximum : Math.min(maximum, itemSeconds);
+  }, simulationSeconds);
+  const research = advanceResearchMacroInPlace(
+    state,
+    certificate.researchLedger,
+    researchSeconds,
+    certificate.researchRemainder,
+    certificate.researchInflowRemainders,
+  );
+  certificate.researchRemainder = research.remainder;
+  certificate.researchInflowRemainders = research.inflowRemainders;
+  for (const [itemId, credited] of Object.entries(creditedSecondsByItem)) {
+    certificate.remainingSimulationSecondsByItem[itemId] = Math.max(
+      0,
+      (certificate.remainingSimulationSecondsByItem[itemId] ?? 0) - credited,
+    );
+  }
+  const construction = advanceConstructionAutomationMacroInPlace(state, simulationSeconds);
+  state.elapsedSeconds += simulationSeconds;
+  if (desiredSpeedrunElapsed !== undefined && state.speedrun?.enabled) {
+    state.speedrun.elapsedActiveSeconds = desiredSpeedrunElapsed;
+  }
+  refreshDysonGenerationSnapshot(state);
+  certificate.ageWallSeconds += wallSeconds;
+  if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
+    // A completed technology can change recipe/power multipliers. Force the
+    // next slice through exact calibration instead of trusting the old rate.
+    certificate.ageWallSeconds = TIME_WARP_ROLLING_CERTIFICATE_VALIDATION_WALL_SECONDS;
+  }
+  return {
+    state,
+    report: {
+      mode: "approximate",
+      algorithmVersion: TIME_WARP_APPROXIMATION_ALGORITHM_VERSION,
+      requestedSimulationSeconds: simulationSeconds,
+      exactCalibrationSeconds: 0,
+      approximatedSeconds: simulationSeconds,
+      maxCriticalError: certificate.lastCriticalError,
+      boundaryCorrections: applied.boundaryCorrections,
+      certificateReused: true,
+      certificateAgeWallSeconds: certificate.ageWallSeconds,
+      ...(construction.completed > 0
+        ? { fallbackReason: `滚动证书有效；建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件` }
+        : {}),
+    },
+  };
+}
+
 function runTimeWarpApproximateSettlementUnsafe(
   state: GameState,
   simulationSeconds: number,
@@ -3069,6 +3590,7 @@ function runTimeWarpApproximateSettlementUnsafe(
   calibrated.elapsedSeconds = state.elapsedSeconds + simulationSeconds;
   const speedrunCorrection = normalizeFastSpeedrunClock(calibrated, state, wallSeconds);
   refreshDysonGenerationSnapshot(calibrated);
+  storeTimeWarpRollingCertificate(calibrated, contract, researchLedger, maxCriticalError);
   return {
     state: calibrated,
     report: {
@@ -3106,6 +3628,47 @@ export function runTimeWarpApproximateSettlement(
   } catch (error) {
     const detail = error instanceof Error && error.message ? `：${error.message.slice(0, 160)}` : "";
     return exactTimeWarpResult(state, simulationSeconds, wallSeconds, `宏观计算异常，已使用精确切片${detail}`);
+  }
+}
+
+/**
+ * Worker-owned realtime entry. The first slice uses the full exact
+ * calibration/tail verifier; subsequent slices may consume the rolling
+ * certificate in place for up to ten wall seconds. UI/tests keep using the
+ * immutable wrapper above.
+ */
+export function runTimeWarpApproximateSettlementInPlace(
+  state: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+): TimeWarpApproximationResult {
+  if (state.timeWarp.pendingSimulationSeconds > EPSILON || state.timeWarp.pendingWallSeconds > EPSILON) {
+    throw new Error("时间扭曲状态仍包含未提交预算，已拒绝宏观切片");
+  }
+  if (!Number.isFinite(simulationSeconds) || simulationSeconds <= 0 ||
+    !Number.isFinite(wallSeconds) || wallSeconds < 0 ||
+    !Number.isSafeInteger(Math.floor(state.elapsedSeconds + simulationSeconds))) {
+    invalidateTimeWarpApproximationCertificate(state);
+    return runTimeWarpApproximateSettlement(state, simulationSeconds, wallSeconds);
+  }
+  try {
+    const rolling = runTimeWarpRollingCertificateInPlace(state, simulationSeconds, wallSeconds);
+    if (rolling) return rolling;
+  } catch (error) {
+    // A rolling bucket is intentionally in-place. If an unexpected exception
+    // happens after its primitive transaction commits, the isolated Worker
+    // authority must be discarded and rebuilt from the durable caller state;
+    // replaying exact work on the possibly advanced object could double-pay.
+    invalidateTimeWarpApproximationCertificate(state);
+    const detail = error instanceof Error && error.message ? `：${error.message.slice(0, 160)}` : "";
+    throw new Error(`滚动证书异常，必须从持久检查点重建${detail}`, { cause: error });
+  }
+  try {
+    return runTimeWarpApproximateSettlementUnsafe(state, simulationSeconds, wallSeconds);
+  } catch (error) {
+    invalidateTimeWarpApproximationCertificate(state);
+    const detail = error instanceof Error && error.message ? `：${error.message.slice(0, 160)}` : "";
+    return exactTimeWarpResult(state, simulationSeconds, wallSeconds, `首次校准异常，已使用精确切片${detail}`);
   }
 }
 
@@ -3226,7 +3789,10 @@ interface FastLightweightPreparedSettlement {
 }
 
 function isFastLightweightQuiescent(state: GameState): boolean {
-  return state.entities.length === 0 && state.belts.length === 0 &&
+  const onlyInertResourceAnchors = state.entities.every((entity) =>
+    entity.kind === "vein" && Number.isFinite(entity.minerCount) && entity.minerCount <= 0,
+  );
+  return state.belts.length === 0 && onlyInertResourceAnchors &&
     !hasActiveResearch(state) && state.handcraftQueue.length === 0 && state.constructionQueue.length === 0 &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
     !Object.values(state.endgame.exportProjects).some((project) => project.enabled) &&
@@ -3645,10 +4211,23 @@ async function runExactAsync(
   options: OfflineApproximationAsyncOptions,
   wallSeconds = seconds,
 ): Promise<GameState> {
-  const session = createSimulationAdvanceSession(source, seconds, { mutateState: true, wallSeconds });
+  const result = await runExactAsyncSession(source, seconds, options, wallSeconds);
+  return result.state;
+}
+
+async function runExactAsyncSession(
+  source: GameState,
+  seconds: number,
+  options: OfflineApproximationAsyncOptions,
+  wallSeconds: number,
+  lookup?: SimulationAdvanceSession["lookup"],
+): Promise<{ state: GameState; lookup?: SimulationAdvanceSession["lookup"] }> {
+  const entitiesBefore = source.entities;
+  const beltsBefore = source.belts;
+  const session = createSimulationAdvanceSession(source, seconds, { mutateState: true, wallSeconds, lookup });
   const yieldAfterMs = Math.max(8, options.yieldAfterMs ?? 40);
   let sliceStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-  while (session.remainingSeconds > EPSILON) {
+  while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
     throwIfApproximationCancelled(options);
     throwIfApproximationDeadlineReached(options);
     // One authoritative step can already be expensive on an 80k-entity /
@@ -3664,7 +4243,38 @@ async function runExactAsync(
   }
   throwIfApproximationCancelled(options);
   throwIfApproximationDeadlineReached(options);
-  return completeSimulationAdvanceSession(session);
+  const state = completeSimulationAdvanceSession(session);
+  return {
+    state,
+    lookup: state.entities === entitiesBefore && state.belts === beltsBefore
+      ? session.lookup
+      : undefined,
+  };
+}
+
+async function runExactCalibrationWindowsAsync(
+  source: GameState,
+  windowSeconds: number,
+  windowWallSeconds: number,
+  windowCount: number,
+  options: OfflineApproximationAsyncOptions,
+  onWindowCompleted: (state: GameState, windowIndex: number) => void,
+): Promise<GameState> {
+  let state = source;
+  let lookup: SimulationAdvanceSession["lookup"];
+  for (let index = 0; index < windowCount; index += 1) {
+    const result = await runExactAsyncSession(
+      state,
+      windowSeconds,
+      options,
+      windowWallSeconds,
+      lookup,
+    );
+    state = result.state;
+    lookup = result.lookup;
+    onWindowCompleted(state, index);
+  }
+  return state;
 }
 
 async function runAffineApproximationAsync(

@@ -10,7 +10,11 @@ import {
   createPureIdleMacroSession,
   finalizePureIdleMacroCandidate,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
+  PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD,
+  PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD,
   PURE_IDLE_MACRO_OPERATION_DEADLINE_MS,
+  PureIdleMacroDeadlineError,
+  summarizePureIdleMacroSession,
   type PureIdleMacroFinalStateOptions,
   type PureIdleMacroPhase,
   type PureIdleMacroSession,
@@ -58,6 +62,20 @@ let queue: Promise<void> = Promise.resolve();
 let activeRequestId: number | null = null;
 const cancelledRequestIds = new Set<number>();
 
+async function waitForCreditedCalibrationWallTime(
+  requestId: number,
+  requestStartedAt: number,
+  creditedWallSeconds: number,
+  deadlineAtMs: number,
+): Promise<void> {
+  const readyAt = requestStartedAt + Math.max(0, creditedWallSeconds) * 1_000;
+  while (performance.now() + 1 < readyAt) {
+    if (cancelledRequestIds.has(requestId)) throw new DOMException("纯挂机计算已取消", "AbortError");
+    if (performance.now() >= deadlineAtMs) throw new PureIdleMacroDeadlineError();
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, readyAt - performance.now()))));
+  }
+}
+
 self.onmessage = (event: MessageEvent<PureIdleMacroWorkerRequest>) => {
   const request = event.data;
   if (request.type === "cancel") {
@@ -100,12 +118,28 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
       sessionContext = null;
       applyContentPackRuntimeSnapshot(request.registry);
       postProgress(request.forceConservativeReason ? "conservative" : "calibrating");
+      const consumeCalibrationState = request.state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
+        request.state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD;
       const initializedSession = createPureIdleMacroSession(request.state, request.mode, {
         deadlineAtMs,
         shouldCancel: interrupted,
         forceConservativeReason: request.forceConservativeReason,
+        // request.state is already the browser's isolated structured clone;
+        // retaining another full endgame graph inside this Worker only raises
+        // peak memory and GC cost. The durable main-thread checkpoint remains
+        // the rollback authority if this operation fails.
+        consumeCalibrationState,
       });
-      const summary = advancePureIdleMacroSession(initializedSession, 0);
+      // A consumed calibration candidate is exactly 30 simulated seconds in
+      // the future. Never publish it before the corresponding real wall time
+      // has elapsed, even on an unusually fast device or a 1x controller.
+      await waitForCreditedCalibrationWallTime(
+        request.id,
+        startedAt,
+        initializedSession.settledWallSeconds,
+        deadlineAtMs,
+      );
+      const summary = summarizePureIdleMacroSession(initializedSession);
       const terminalState = readTerminalState(request);
       sessionContext = {
         session: initializedSession,

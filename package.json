@@ -28,7 +28,9 @@
     "test:e2e:durable": "cross-env VITE_DURABLE_RUNTIME_RECOVERY=true playwright test tests/e2e/v144-runtime-wal-integration.spec.ts",
     "test:e2e:nightly": "playwright test --config=playwright.nightly.config.ts",
     "test:server": "npm --prefix server test && npm --prefix server run test:station",
-    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs desktop/package-hygiene.test.cjs android/security-boundary.test.mjs",
+    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs scripts/export-windows-119-save.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs desktop/package-hygiene.test.cjs android/security-boundary.test.mjs",
+    "test:windows119-export": "node --test scripts/export-windows-119-save.test.mjs",
+    "test:windows119-export:compat": "vitest run src/game/windows119OfflineExport.test.ts",
     "test:native-core": "cargo test --manifest-path native/Cargo.toml --locked",
     "test:backup": "node --test deploy/backup-tools.test.mjs",
     "test:ops": "node --test --test-concurrency=2 deploy/backup-tools.test.mjs deploy/nginx-config.test.mjs deploy/probe-node-health.test.mjs deploy/probe-api-readiness.test.mjs deploy/active-api-environment.test.mjs deploy/direct-invocation-symlink.test.mjs deploy/linux-release-control.test.mjs deploy/api-package-layout.test.mjs",
@@ -64,6 +66,7 @@
     "native:assets": "node scripts/generate-native-assets.mjs",
     "native:build-host": "node scripts/build-native-host.mjs",
     "native:manifests": "node scripts/create-native-update-manifests.mjs",
+    "save:export:windows119": "node scripts/export-windows-119-save.mjs",
     "licenses:generate": "node scripts/generate-third-party-notices.mjs",
     "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
   },

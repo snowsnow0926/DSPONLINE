@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows 1.1.9 离线存档导出工具（2026-08-27，开发完成，未发布）**：开发仓库新增 `npm run save:export:windows119`，可在游戏关闭时从 `%APPDATA%\dsp-idle-network` 的临时副本恢复完整主档或更新且校验有效的分块 sidecar，并写出游戏可导入的 GameState v47 / envelope v2 `.json.gz`。工具不直接打开源 LevelDB、不覆盖输出，合成 IndexedDB 端到端测试证明源目录逐字节不变；本项未读取真实玩家存档，详见 [使用说明](./WINDOWS_119_OFFLINE_SAVE_EXPORT.md)。
+
 > **1.2.3 Windows 原生增量热路径候选（2026-08-27，开发门禁完成，未部署）**：独立工作树 `D:\GameDev\DSPidle2-v123-windows-native-performance` 已在 1.2.2 clean 基线 `e5cf24d395d07bc1f31e948806653b96e08140ad` 上完成活动 revision 脏页保存、失败保留脏状态、闭合唤醒线路队列、稠密全扫描退化、有界原生视口/统计投影、二进制 ACK、流式 v47 导出、压缩流读取、变化线路编码和解析图证明复用。76.9 MB 只读档规范状态与 JavaScript 完全一致、源 SHA 不变；该档正确执行 311,492 次线路方向检查，没有以错误休眠换产量。新鲜门禁为 Vitest 1,614/27、server 384/2 + station 4/4、ops 56/6、native JS 36/36、Rust 24/24、长差分 37/37、Chromium 431/27、durable 7/7、production preview 3/3，均 0 失败；typecheck、fmt/clippy、build、125 个许可证和根/server 0 漏洞通过。Clean Windows Build ID 为 `1.2.3+6cdd86e7675d`，未签名包烟雾测试通过。完整证据见 [1.2.3 开发报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md)。`authorityEligible=false`，权威多核、24 小时多硬件、签名与灰度不冒充完成；GameState v47、envelope v2、cloud schema v8、SQLite layout v3 不变。
 
 > **1.2.2 纯挂机 30 秒轻量采样候选（2026-08-27，开发门禁完成，未部署）**：在 1.2.1 固定基线上将复杂大档的保守纯挂机升级为 `pure-idle-macro-v5-lite`。旧的一秒精确前缀会把 15～24 秒慢配方误判为零；新路径用 3 × 10 个模拟秒形成轻量普通产线合同，只保留累计生产、行星/量子库存及建筑输入输出，并按物料净消耗边界及活动配方依赖停止有限缓存。火箭、太阳帆、戴森结构/壳面、出口、合同与建筑巨构交付仍只获得精确 30 秒前缀，不进入尾段外推。标准/受限/低内存设备保守 Worker 预算提高到 90/120/180 秒，实际完成立即返回。

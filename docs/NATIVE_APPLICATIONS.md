@@ -31,6 +31,10 @@
 - Android 原生 HTTP 桥不能可靠传输浏览器生成的 gzip Blob。1.0.34 起，Android 云存档上传预先发送原始 JSON 字符串并遵守 30 MiB 客户端安全上限；Web/PWA 的流式 gzip 和 `expectedRevision` 冲突保护不变。该兼容只作用于云存档请求，不关闭 CapacitorHttp，也不改变 GameState、envelope 或云 schema。
 - 社区构建默认不连接官方云 API、账号深链或更新源。官方地址只由受保护的发布 CI 显式注入；Electron 会把允许的 API 和更新基址写入包元数据，运行时不依赖玩家机器环境变量。
 
+### 1.1 Windows 1.1.9 离线存档导出
+
+Windows 1.1.9 的本地存档位于 `%APPDATA%\dsp-idle-network\IndexedDB\file__0.indexeddb.leveldb`，不是 `win-unpacked` 安装目录中的独立文件。开发仓库提供 `npm run save:export:windows119`：在游戏完全退出后，它只打开 IndexedDB/Local Storage 的临时副本，校验完整主档和可选分块 sidecar，输出可由游戏导入的 GameState v47 / envelope v2 `.json.gz`，且不覆盖已有文件。完整参数、安全边界和测试见 [Windows 1.1.9 离线存档导出](./WINDOWS_119_OFFLINE_SAVE_EXPORT.md)。
+
 ## 2. 开发环境
 
 共同要求：

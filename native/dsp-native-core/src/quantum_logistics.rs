@@ -122,17 +122,35 @@ fn set_item_amount(
     item_id: &str,
     amount: f64,
 ) -> anyhow::Result<()> {
-    entity
+    let inventory = entity
         .get_mut(record)
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow!("native quantum logistics inventory is missing"))?
-        .insert(
-            item_id.to_owned(),
-            Number::from_f64(amount)
-                .map(Value::Number)
-                .ok_or_else(|| anyhow!("native quantum logistics inventory is non-finite"))?,
-        );
+        .ok_or_else(|| anyhow!("native quantum logistics inventory is missing"))?;
+    let amount = Number::from_f64(amount)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native quantum logistics inventory is non-finite"))?;
+    if let Some(current) = inventory.get_mut(item_id) {
+        *current = amount;
+    } else {
+        inventory.insert(item_id.to_owned(), amount);
+    }
     Ok(())
+}
+
+fn set_biguint_amount(record: &mut BTreeMap<String, BigUint>, item_id: &str, amount: BigUint) {
+    if let Some(current) = record.get_mut(item_id) {
+        *current = amount;
+    } else {
+        record.insert(item_id.to_owned(), amount);
+    }
+}
+
+fn advance_routing_cursor(record: &mut BTreeMap<String, u64>, item_id: &str) {
+    if let Some(cursor) = record.get_mut(item_id) {
+        *cursor += 1;
+    } else {
+        record.insert(item_id.to_owned(), 1);
+    }
 }
 
 fn is_quantum_station(entity: &Map<String, Value>) -> bool {
@@ -601,7 +619,7 @@ fn add_flow(record: &mut BTreeMap<String, BigUint>, item_id: &str, amount: &BigU
         return;
     }
     let next = record.get(item_id).cloned().unwrap_or_default() + amount;
-    record.insert(item_id.to_owned(), saturated(next));
+    set_biguint_amount(record, item_id, saturated(next));
 }
 
 fn allocate_proportionally(budget: &BigUint, requests: &[Request], cursor: u64) -> Allocation {
@@ -677,6 +695,54 @@ fn sorted_requests(requests: &mut [Request]) {
     });
 }
 
+fn upsert_request_in_stable_order(
+    requests: &mut Vec<Request>,
+    positions: &mut HashMap<String, usize>,
+    request: Request,
+) {
+    if let Some(&position) = positions.get(&request.key) {
+        if request.priority > requests[position].priority {
+            requests[position] = request;
+        }
+    } else {
+        positions.insert(request.key.clone(), requests.len());
+        requests.push(request);
+    }
+}
+
+fn synchronize_existing_boundary_uploads(flow: &mut BoundaryFlow, existing: Option<&BoundaryFlow>) {
+    let Some(existing) =
+        existing.filter(|existing| existing.boundary_second == flow.boundary_second)
+    else {
+        return;
+    };
+    // `settle_downloads` writes one clone into the network and returns another
+    // to the caller. Immediate local deliveries append to the network clone
+    // before `settle_uploads` runs. Copy those cumulative values by key: adding
+    // them would count the pre-download prefix twice.
+    for (item_id, amount) in &existing.uploaded {
+        set_biguint_amount(&mut flow.uploaded, item_id, amount.clone());
+    }
+}
+
+fn apply_quantum_download_to_station(
+    station: &mut Map<String, Value>,
+    item_id: &str,
+    amount: f64,
+    seconds: f64,
+) -> anyhow::Result<()> {
+    let current = item_amount(station, "outputs", item_id).floor().max(0.0);
+    set_item_amount(station, "outputs", item_id, current + amount)?;
+    set_number(station, "stationLastTransfer", amount)?;
+    let production_rate = finite_number(station.get("productionRate"))
+        + if seconds > 0.0001 {
+            amount * 60.0 / seconds
+        } else {
+            0.0
+        };
+    set_number(station, "productionRate", production_rate)
+}
+
 fn settle_outputs(
     network: &mut Network,
     requests: &[Request],
@@ -715,11 +781,13 @@ fn settle_outputs(
                     .unwrap_or_default(),
             );
         }
-        network
-            .inventory
-            .insert(item_id.clone(), saturated(available - &allocation.total));
+        set_biguint_amount(
+            &mut network.inventory,
+            item_id,
+            saturated(available - &allocation.total),
+        );
         if allocation.total < planned && !item_requests.is_empty() {
-            *network.routing_cursors.entry(item_id.clone()).or_default() += 1;
+            advance_routing_cursor(&mut network.routing_cursors, item_id);
         }
     }
     values
@@ -774,14 +842,11 @@ fn settle_inputs(
             .iter()
             .fold(BigUint::zero(), |sum, request| sum + &request.amount);
         if accepted < requested && item_requests.len() > 1 {
-            *network
-                .upload_routing_cursors
-                .entry(item_id.clone())
-                .or_default() += 1;
+            advance_routing_cursor(&mut network.upload_routing_cursors, &item_id);
         }
         if !accepted.is_zero() {
             let next = network.inventory.get(&item_id).cloned().unwrap_or_default() + accepted;
-            network.inventory.insert(item_id, saturated(next));
+            set_biguint_amount(&mut network.inventory, &item_id, saturated(next));
         }
     }
     global.values
@@ -847,9 +912,11 @@ fn deposit(network: &mut Network, item_id: &str, requested: &BigUint) -> BigUint
     };
     let accepted = requested.min(&free).clone();
     if !accepted.is_zero() {
-        network
-            .inventory
-            .insert(item_id.to_owned(), saturated(current + &accepted));
+        set_biguint_amount(
+            &mut network.inventory,
+            item_id,
+            saturated(current + &accepted),
+        );
     }
     accepted
 }
@@ -1086,7 +1153,8 @@ pub(crate) fn settle_downloads(
     }
     let mut flow = create_flow(base, entities, &network, boundary_second);
     let cargo = in_flight(entities);
-    let mut by_key = BTreeMap::<String, (usize, Slot)>::new();
+    let mut requests = Vec::new();
+    let mut request_positions = HashMap::new();
     for (entity_index, entity) in entities.iter().enumerate() {
         let station = entity
             .as_object()
@@ -1103,64 +1171,59 @@ pub(crate) fn settle_downloads(
                 continue;
             }
             let key = format!("{station_id}:{item_id}");
-            if by_key
-                .get(&key)
-                .is_none_or(|(_, existing)| slot.priority > existing.priority)
-            {
-                by_key.insert(key, (entity_index, slot));
+            let current = item_amount(station, "outputs", item_id).floor().max(0.0);
+            let local_capacity = station_capacity(state, base, station, &slot)?
+                .floor()
+                .max(0.0);
+            let incoming = cargo
+                .get(&(station_id.to_owned(), item_id.to_owned()))
+                .copied()
+                .unwrap_or(0.0);
+            let local_free = (local_capacity - current - incoming).max(0.0);
+            let direct_through = if current <= local_capacity {
+                crate::belts::output_credit(state, credits, station_id, item_id)
+            } else {
+                0.0
+            };
+            let capacity = floor_u64((local_free + direct_through).min(MAX_SAFE_INTEGER as f64));
+            if capacity < 1 {
+                continue;
             }
+            upsert_request_in_stable_order(
+                &mut requests,
+                &mut request_positions,
+                Request {
+                    key,
+                    entity_index,
+                    item_id: item_id.to_owned(),
+                    amount: BigUint::from(capacity),
+                    priority: slot.priority,
+                },
+            );
         }
-    }
-    let mut requests = Vec::new();
-    for (key, (entity_index, slot)) in by_key {
-        let station = entities[entity_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native quantum demand is invalid"))?;
-        let station_id = string_at(station, "id").unwrap_or_default();
-        let item_id = slot.item_id.as_deref().expect("quantum demand item");
-        let current = item_amount(station, "outputs", item_id).floor().max(0.0);
-        let local_capacity = station_capacity(state, base, station, &slot)?
-            .floor()
-            .max(0.0);
-        let incoming = cargo
-            .get(&(station_id.to_owned(), item_id.to_owned()))
-            .copied()
-            .unwrap_or(0.0);
-        let local_free = (local_capacity - current - incoming).max(0.0);
-        let direct_through = if current <= local_capacity {
-            crate::belts::output_credit(state, credits, station_id, item_id)
-        } else {
-            0.0
-        };
-        let capacity = floor_u64((local_free + direct_through).min(MAX_SAFE_INTEGER as f64));
-        if capacity < 1 {
-            continue;
-        }
-        requests.push(Request {
-            key,
-            entity_index,
-            item_id: item_id.to_owned(),
-            amount: BigUint::from(capacity),
-            priority: slot.priority,
-        });
     }
     let construction_demands = crate::construction::quantum_demands(state, base, entities)?
         .into_iter()
         .map(|demand| (demand.key.clone(), demand))
         .collect::<BTreeMap<_, _>>();
     for demand in construction_demands.values() {
-        requests.push(Request {
-            key: demand.key.clone(),
-            entity_index: usize::MAX,
-            item_id: demand.item_id.clone(),
-            amount: BigUint::from(demand.amount),
-            priority: 1,
-        });
+        upsert_request_in_stable_order(
+            &mut requests,
+            &mut request_positions,
+            Request {
+                key: demand.key.clone(),
+                entity_index: usize::MAX,
+                item_id: demand.item_id.clone(),
+                amount: BigUint::from(demand.amount),
+                priority: 1,
+            },
+        );
     }
-    sorted_requests(&mut requests);
+    let mut allocation_requests = requests.clone();
+    sorted_requests(&mut allocation_requests);
     let delivered = settle_outputs(
         &mut network,
-        &requests,
+        &allocation_requests,
         &boundary_capacity(flow.global_download_per_minute, seconds),
     );
     for request in &requests {
@@ -1187,23 +1250,7 @@ pub(crate) fn settle_downloads(
         let station = entities[request.entity_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native quantum demand is invalid"))?;
-        let current = item_amount(station, "outputs", &request.item_id)
-            .floor()
-            .max(0.0);
-        set_item_amount(
-            station,
-            "outputs",
-            &request.item_id,
-            current + amount_number,
-        )?;
-        set_number(station, "stationLastTransfer", amount_number)?;
-        let production_rate = finite_number(station.get("productionRate"))
-            + if seconds > 0.0001 {
-                amount_number * 60.0 / seconds
-            } else {
-                0.0
-            };
-        set_number(station, "productionRate", production_rate)?;
+        apply_quantum_download_to_station(station, &request.item_id, amount_number, seconds)?;
         add_flow(&mut flow.downloaded, &request.item_id, &amount);
     }
     network.runtime_flow = Some(flow.clone());
@@ -1227,13 +1274,7 @@ pub(crate) fn settle_uploads(
     let mut flow = previous_flow
         .clone()
         .unwrap_or_else(|| create_flow(base, entities, &network, boundary_second));
-    if previous_flow.is_none()
-        && let Some(existing) = &existing_flow
-    {
-        for (item_id, amount) in &existing.uploaded {
-            add_flow(&mut flow.uploaded, item_id, amount);
-        }
-    }
+    synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_ref());
     let (per_minute, tower_stacks, collector_stacks) =
         bandwidth_for_index(base, entities, Some(indexed_endpoint_indices));
     flow.global_upload_per_minute = per_minute;
@@ -1247,34 +1288,41 @@ pub(crate) fn settle_uploads(
     network = parse_network(base)?;
 
     let reserved = reserved_outgoing(entities);
-    let mut by_key = BTreeMap::<String, Request>::new();
+    let mut requests = Vec::new();
+    let mut request_positions = HashMap::new();
     for &entity_index in indexed_endpoint_indices {
         let endpoint = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if is_quantum_collector(endpoint) {
-            let Some(item_id) = string_at(endpoint, "storedItemId") else {
-                continue;
-            };
-            let available = floor_u64(item_amount(endpoint, "outputs", item_id));
-            if available > 0 {
-                let key = format!(
-                    "{}:{item_id}",
-                    string_at(endpoint, "id").unwrap_or_default()
-                );
-                by_key.insert(
-                    key.clone(),
-                    Request {
-                        key,
-                        entity_index,
-                        item_id: item_id.to_owned(),
-                        amount: BigUint::from(available),
-                        priority: 1,
-                    },
-                );
-            }
+        if !is_quantum_collector(endpoint) {
             continue;
         }
+        let Some(item_id) = string_at(endpoint, "storedItemId") else {
+            continue;
+        };
+        let available = floor_u64(item_amount(endpoint, "outputs", item_id));
+        if available > 0 {
+            let key = format!(
+                "{}:{item_id}",
+                string_at(endpoint, "id").unwrap_or_default()
+            );
+            upsert_request_in_stable_order(
+                &mut requests,
+                &mut request_positions,
+                Request {
+                    key,
+                    entity_index,
+                    item_id: item_id.to_owned(),
+                    amount: BigUint::from(available),
+                    priority: 1,
+                },
+            );
+        }
+    }
+    for &entity_index in indexed_endpoint_indices {
+        let endpoint = entities[entity_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
         if !is_quantum_station(endpoint) {
             continue;
         }
@@ -1297,28 +1345,24 @@ pub(crate) fn settle_uploads(
                 continue;
             }
             let key = format!("{station_id}:{item_id}");
-            if by_key
-                .get(&key)
-                .is_none_or(|existing| slot.priority > existing.priority)
-            {
-                by_key.insert(
-                    key.clone(),
-                    Request {
-                        key,
-                        entity_index,
-                        item_id: item_id.to_owned(),
-                        amount: BigUint::from(available),
-                        priority: slot.priority,
-                    },
-                );
-            }
+            upsert_request_in_stable_order(
+                &mut requests,
+                &mut request_positions,
+                Request {
+                    key,
+                    entity_index,
+                    item_id: item_id.to_owned(),
+                    amount: BigUint::from(available),
+                    priority: slot.priority,
+                },
+            );
         }
     }
-    let mut requests = by_key.into_values().collect::<Vec<_>>();
-    sorted_requests(&mut requests);
+    let mut allocation_requests = requests.clone();
+    sorted_requests(&mut allocation_requests);
     let accepted = settle_inputs(
         &mut network,
-        &requests,
+        &allocation_requests,
         &boundary_capacity(flow.global_upload_per_minute, seconds),
     );
     for request in &requests {
@@ -1624,6 +1668,132 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 mod tests {
     use super::*;
 
+    fn legacy_settle_outputs(
+        network: &mut Network,
+        requests: &[Request],
+        cap: &BigUint,
+    ) -> HashMap<String, BigUint> {
+        let global = allocate_with_priority(cap, requests, 0);
+        let mut by_item = BTreeMap::<String, Vec<Request>>::new();
+        for request in requests {
+            let mut request = request.clone();
+            request.amount = global.values.get(&request.key).cloned().unwrap_or_default();
+            by_item
+                .entry(request.item_id.clone())
+                .or_default()
+                .push(request);
+        }
+        let mut values = HashMap::new();
+        for (item_id, item_requests) in &mut by_item {
+            item_requests.sort_by(|left, right| left.key.cmp(&right.key));
+            let available = network.inventory.get(item_id).cloned().unwrap_or_default();
+            let planned = item_requests
+                .iter()
+                .fold(BigUint::zero(), |sum, request| sum + &request.amount);
+            let item_budget = available.clone().min(planned.clone());
+            let allocation = allocate_proportionally(
+                &item_budget,
+                item_requests,
+                network.routing_cursors.get(item_id).copied().unwrap_or(0),
+            );
+            for request in item_requests.iter() {
+                values.insert(
+                    request.key.clone(),
+                    allocation
+                        .values
+                        .get(&request.key)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+            network
+                .inventory
+                .insert(item_id.clone(), saturated(available - &allocation.total));
+            if allocation.total < planned && !item_requests.is_empty() {
+                *network.routing_cursors.entry(item_id.clone()).or_default() += 1;
+            }
+        }
+        values
+    }
+
+    fn legacy_settle_inputs(
+        network: &mut Network,
+        requests: &[Request],
+        cap: &BigUint,
+    ) -> HashMap<String, BigUint> {
+        let mut by_item = BTreeMap::<String, Vec<Request>>::new();
+        for request in requests {
+            by_item
+                .entry(request.item_id.clone())
+                .or_default()
+                .push(request.clone());
+        }
+        let mut feasible = HashMap::<String, BigUint>::new();
+        for (item_id, item_requests) in &by_item {
+            let current = network.inventory.get(item_id).cloned().unwrap_or_default();
+            let capacity = item_capacity(network, item_id);
+            let free = if capacity > current {
+                capacity - current
+            } else {
+                BigUint::zero()
+            };
+            let allocation = allocate_with_priority(
+                &free,
+                item_requests,
+                network
+                    .upload_routing_cursors
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            feasible.extend(allocation.values);
+        }
+        let global_requests = requests
+            .iter()
+            .cloned()
+            .map(|mut request| {
+                request.amount = feasible.get(&request.key).cloned().unwrap_or_default();
+                request
+            })
+            .collect::<Vec<_>>();
+        let global = allocate_with_priority(cap, &global_requests, 0);
+        for (item_id, item_requests) in by_item {
+            let accepted = item_requests.iter().fold(BigUint::zero(), |sum, request| {
+                sum + global.values.get(&request.key).cloned().unwrap_or_default()
+            });
+            let requested = item_requests
+                .iter()
+                .fold(BigUint::zero(), |sum, request| sum + &request.amount);
+            if accepted < requested && item_requests.len() > 1 {
+                *network
+                    .upload_routing_cursors
+                    .entry(item_id.clone())
+                    .or_default() += 1;
+            }
+            if !accepted.is_zero() {
+                let next = network.inventory.get(&item_id).cloned().unwrap_or_default() + accepted;
+                network.inventory.insert(item_id, saturated(next));
+            }
+        }
+        global.values
+    }
+
+    fn string_key_pointer<T>(record: &BTreeMap<String, T>, item_id: &str) -> usize {
+        record
+            .keys()
+            .find(|key| key.as_str() == item_id)
+            .expect("test item key")
+            .as_ptr() as usize
+    }
+
+    fn json_key_pointer(record: &Map<String, Value>, item_id: &str) -> usize {
+        record
+            .keys()
+            .find(|key| key.as_str() == item_id)
+            .expect("test JSON item key")
+            .as_ptr() as usize
+    }
+
     fn request(key: &str, amount: u64) -> Request {
         Request {
             key: key.to_owned(),
@@ -1632,6 +1802,148 @@ mod tests {
             amount: BigUint::from(amount),
             priority: 1,
         }
+    }
+
+    fn item_request(key: &str, item_id: &str, amount: u64, priority: i64) -> Request {
+        Request {
+            key: key.to_owned(),
+            entity_index: 0,
+            item_id: item_id.to_owned(),
+            amount: BigUint::from(amount),
+            priority,
+        }
+    }
+
+    #[test]
+    fn item_amount_updates_reuse_existing_key_and_preserve_error_order() {
+        let item_id = "mod:量子物流/Ω🚀";
+        let mut entity = Map::from_iter([(
+            "inputs".to_owned(),
+            Value::Object(Map::from_iter([
+                ("alpha".to_owned(), Value::from(1)),
+                (item_id.to_owned(), Value::from(2)),
+                ("zeta".to_owned(), Value::from(3)),
+            ])),
+        )]);
+        let before = entity["inputs"].as_object().expect("inputs object");
+        let key_pointer = json_key_pointer(before, item_id);
+        let order = before.keys().cloned().collect::<Vec<_>>();
+
+        set_item_amount(&mut entity, "inputs", item_id, -0.0).unwrap();
+        let after = entity["inputs"].as_object().expect("inputs object");
+        assert_eq!(json_key_pointer(after, item_id), key_pointer);
+        assert_eq!(after.keys().cloned().collect::<Vec<_>>(), order);
+        assert!(after[item_id].as_f64().unwrap().is_sign_negative());
+
+        let snapshot = entity.clone();
+        let error = set_item_amount(&mut entity, "inputs", item_id, f64::NAN).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native quantum logistics inventory is non-finite"
+        );
+        assert_eq!(entity, snapshot);
+
+        let error = set_item_amount(&mut entity, "missing", item_id, f64::NAN).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native quantum logistics inventory is missing"
+        );
+        assert_eq!(entity, snapshot);
+    }
+
+    #[test]
+    fn item_amount_updates_clone_only_missing_unicode_and_mod_keys() {
+        let mut entity = Map::from_iter([("outputs".to_owned(), Value::Object(Map::new()))]);
+        for (item_id, amount) in [
+            ("mod:zeta/量子", 7.0),
+            ("原版:alpha/Ω", 11.0),
+            ("mod:middle/🚀", 13.0),
+        ] {
+            set_item_amount(&mut entity, "outputs", item_id, amount).unwrap();
+        }
+        let outputs = entity["outputs"].as_object().expect("outputs object");
+        assert_eq!(
+            outputs.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["mod:middle/🚀", "mod:zeta/量子", "原版:alpha/Ω"]
+        );
+        assert_eq!(finite_number(outputs.get("mod:middle/🚀")), 13.0);
+    }
+
+    #[test]
+    fn biguint_and_cursor_updates_reuse_existing_keys_and_keep_limits() {
+        let item_id = "mod:量子网络/Ω🚀";
+        let maximum = BigUint::parse_bytes("9".repeat(MAX_INTEGER_DIGITS).as_bytes(), 10).unwrap();
+        let mut amounts = BTreeMap::from([
+            ("alpha".to_owned(), BigUint::from(1_u8)),
+            (item_id.to_owned(), maximum.clone()),
+            ("zeta".to_owned(), BigUint::from(3_u8)),
+        ]);
+        let amount_pointer = string_key_pointer(&amounts, item_id);
+        let order = amounts.keys().cloned().collect::<Vec<_>>();
+        add_flow(&mut amounts, item_id, &BigUint::from(1_u8));
+        assert_eq!(string_key_pointer(&amounts, item_id), amount_pointer);
+        assert_eq!(amounts.keys().cloned().collect::<Vec<_>>(), order);
+        assert_eq!(amounts[item_id], maximum);
+
+        set_biguint_amount(&mut amounts, "mod:missing/新", BigUint::from(5_u8));
+        assert_eq!(amounts["mod:missing/新"], BigUint::from(5_u8));
+        assert_eq!(
+            amounts.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["alpha", "mod:missing/新", "mod:量子网络/Ω🚀", "zeta"]
+        );
+
+        let mut cursors = BTreeMap::from([(item_id.to_owned(), 7_u64)]);
+        let cursor_pointer = string_key_pointer(&cursors, item_id);
+        advance_routing_cursor(&mut cursors, item_id);
+        assert_eq!(string_key_pointer(&cursors, item_id), cursor_pointer);
+        assert_eq!(cursors[item_id], 8);
+        advance_routing_cursor(&mut cursors, "mod:missing/游标");
+        assert_eq!(cursors["mod:missing/游标"], 1);
+    }
+
+    #[test]
+    fn in_place_network_updates_match_clone_reinsert_settlement() {
+        let special = "mod:量子矿石/Ω🚀";
+        let mut optimized = Network {
+            enabled: true,
+            inventory: BTreeMap::from([
+                (special.to_owned(), BigUint::from(13_u8)),
+                ("iron_ore".to_owned(), BigUint::from(9_998_u64)),
+            ]),
+            item_capacities: BTreeMap::from([
+                (special.to_owned(), BigUint::from(10_000_u64)),
+                ("iron_ore".to_owned(), BigUint::from(10_000_u64)),
+                ("mod:new/物料".to_owned(), BigUint::from(10_000_u64)),
+            ]),
+            routing_cursors: BTreeMap::from([(special.to_owned(), 2)]),
+            upload_routing_cursors: BTreeMap::from([("iron_ore".to_owned(), 4)]),
+            ..Network::default()
+        };
+        let mut legacy = optimized.clone();
+        let outputs = vec![
+            item_request("out-b", special, 11, 2),
+            item_request("out-a", special, 7, 2),
+            item_request("out-new", "mod:new/物料", 5, 1),
+        ];
+        let optimized_delivered = settle_outputs(&mut optimized, &outputs, &BigUint::from(23_u8));
+        let legacy_delivered = legacy_settle_outputs(&mut legacy, &outputs, &BigUint::from(23_u8));
+        assert_eq!(optimized_delivered, legacy_delivered);
+
+        let inputs = vec![
+            item_request("in-b", "iron_ore", 9, 2),
+            item_request("in-a", "iron_ore", 5, 2),
+            item_request("in-new", "mod:new/物料", 3, 1),
+        ];
+        let optimized_accepted = settle_inputs(&mut optimized, &inputs, &BigUint::from(7_u8));
+        let legacy_accepted = legacy_settle_inputs(&mut legacy, &inputs, &BigUint::from(7_u8));
+        assert_eq!(optimized_accepted, legacy_accepted);
+        assert_eq!(optimized.inventory, legacy.inventory);
+        assert_eq!(optimized.routing_cursors, legacy.routing_cursors);
+        assert_eq!(
+            optimized.upload_routing_cursors,
+            legacy.upload_routing_cursors
+        );
+        assert_eq!(optimized.item_capacities, legacy.item_capacities);
     }
 
     #[test]
@@ -1662,5 +1974,92 @@ mod tests {
         let accepted = settle_inputs(&mut network, &inputs, &BigUint::from(5_000_u64));
         assert_eq!(accepted["upload"], BigUint::from(2_000_u64));
         assert_eq!(network.inventory["iron_ore"], BigUint::from(10_000_u64));
+    }
+
+    #[test]
+    fn same_boundary_upload_sync_is_idempotent_and_next_boundary_resets() {
+        let mut returned = BoundaryFlow {
+            boundary_second: 5.0,
+            uploaded: BTreeMap::from([
+                ("copper_ore".to_owned(), BigUint::from(2_u8)),
+                ("iron_ore".to_owned(), BigUint::from(3_u8)),
+            ]),
+            ..BoundaryFlow::default()
+        };
+        let existing = BoundaryFlow {
+            boundary_second: 5.0,
+            uploaded: BTreeMap::from([
+                ("coal".to_owned(), BigUint::from(7_u8)),
+                ("iron_ore".to_owned(), BigUint::from(11_u8)),
+            ]),
+            ..BoundaryFlow::default()
+        };
+
+        synchronize_existing_boundary_uploads(&mut returned, Some(&existing));
+        synchronize_existing_boundary_uploads(&mut returned, Some(&existing));
+        assert_eq!(returned.uploaded["copper_ore"], BigUint::from(2_u8));
+        assert_eq!(returned.uploaded["coal"], BigUint::from(7_u8));
+        assert_eq!(returned.uploaded["iron_ore"], BigUint::from(11_u8));
+
+        let mut next_boundary = BoundaryFlow {
+            boundary_second: 10.0,
+            ..BoundaryFlow::default()
+        };
+        synchronize_existing_boundary_uploads(&mut next_boundary, Some(&existing));
+        assert!(next_boundary.uploaded.is_empty());
+    }
+
+    #[test]
+    fn allocation_sort_does_not_change_multi_slot_last_transfer_order() {
+        let mut requests = Vec::new();
+        let mut positions = HashMap::new();
+        for (key, item_id, amount) in [
+            ("station:zinc", "zinc", 3_u64),
+            ("station:aluminum", "aluminum", 7_u64),
+        ] {
+            upsert_request_in_stable_order(
+                &mut requests,
+                &mut positions,
+                Request {
+                    key: key.to_owned(),
+                    entity_index: 0,
+                    item_id: item_id.to_owned(),
+                    amount: BigUint::from(amount),
+                    priority: 1,
+                },
+            );
+        }
+        let mut allocation_requests = requests.clone();
+        sorted_requests(&mut allocation_requests);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zinc", "aluminum"]
+        );
+        assert_eq!(
+            allocation_requests
+                .iter()
+                .map(|request| request.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aluminum", "zinc"]
+        );
+
+        let delivered = HashMap::from([
+            ("station:zinc".to_owned(), BigUint::from(3_u8)),
+            ("station:aluminum".to_owned(), BigUint::from(7_u8)),
+        ]);
+        let mut station = Map::from_iter([
+            ("outputs".to_owned(), Value::Object(Map::new())),
+            ("productionRate".to_owned(), Value::from(0)),
+        ]);
+        for request in &requests {
+            let amount = delivered[&request.key].to_u64().unwrap() as f64;
+            apply_quantum_download_to_station(&mut station, &request.item_id, amount, 5.0).unwrap();
+        }
+        assert_eq!(finite_number(station.get("stationLastTransfer")), 7.0);
+        assert_eq!(item_amount(&station, "outputs", "zinc"), 3.0);
+        assert_eq!(item_amount(&station, "outputs", "aluminum"), 7.0);
     }
 }

@@ -18904,6 +18904,45 @@ select {
   gap: 0;
 }
 
+.settings-native-performance-policy { align-items: start; }
+.settings-native-performance-policy > header { padding-top: 8px; }
+.settings-native-performance-policy > header small { color: var(--cyan); }
+.settings-native-policy-controls {
+  display: grid;
+  min-width: 0;
+  grid-column: 2;
+  gap: 8px;
+}
+.settings-native-policy-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.settings-native-policy-status > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface-soft);
+}
+.settings-native-policy-status small { color: var(--muted); font-size: 8px; }
+.settings-native-policy-status strong { overflow-wrap: anywhere; color: var(--text-soft); font-size: 10px; }
+.settings-native-policy-save {
+  width: fit-content;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid #47766b;
+  border-radius: 3px;
+  background: #193128;
+  color: var(--green);
+}
+.settings-native-policy-save:disabled { opacity: .42; cursor: not-allowed; }
+.settings-native-performance-policy > .settings-warning,
+.settings-native-performance-policy > .settings-buffer-error { grid-column: 2; margin-top: -2px; }
+
 /* Help copy used to create an implicit second grid column in toggle groups.
    That collapsed every setting label to a one-glyph strip at large scales. */
 .settings-toggle-list > .settings-help,
@@ -20366,7 +20405,13 @@ html[data-ui-font-scale="200"] .operations-settings .setting-row > span {
   .settings-belt-lanes,
   .settings-buffer-custom,
   .settings-buffer-error,
-  .settings-production-refresh .production-refresh-options { grid-column: 1; }
+  .settings-production-refresh .production-refresh-options,
+  .settings-native-policy-controls,
+  .settings-native-performance-policy > .settings-warning,
+  .settings-native-performance-policy > .settings-buffer-error { grid-column: 1; }
+
+  .settings-native-policy-status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-native-policy-save { width: 100%; min-height: 44px; }
 
   .settings-buffer-custom label { grid-template-columns: 1fr; gap: 4px; }
 

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dsponline.cn/schemas/windows-shell-ab-v1.json",
+  "title": "DSPidle Windows shell A/B measurement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "shell",
+    "status",
+    "runId",
+    "startedAtUtc",
+    "completedAtUtc",
+    "configuration",
+    "host",
+    "executable",
+    "lab",
+    "processTree"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "dsp-windows-shell-ab-measurement" },
+    "shell": { "enum": ["electron", "tauri", "winui"] },
+    "status": { "enum": ["completed", "failed"] },
+    "runId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "startedAtUtc": { "type": "string", "format": "date-time" },
+    "completedAtUtc": { "type": "string", "format": "date-time" },
+    "configuration": {
+      "type": "object",
+      "required": ["durationSeconds", "instanceCount", "sampleIntervalMilliseconds", "fixtureId"],
+      "properties": {
+        "durationSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+        "instanceCount": { "type": "integer", "minimum": 100, "maximum": 100000 },
+        "sampleIntervalMilliseconds": { "type": "integer", "minimum": 100, "maximum": 5000 },
+        "fixtureId": { "const": "deterministic-canvas-v1" }
+      },
+      "additionalProperties": true
+    },
+    "host": { "type": "object" },
+    "executable": {
+      "type": "object",
+      "required": ["length", "sha256", "version"],
+      "properties": {
+        "length": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "lab": {
+      "type": "object",
+      "required": ["schemaVersion", "kind", "shell", "status"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "kind": { "const": "dsp-windows-shell-lab" },
+        "shell": { "const": "electron" },
+        "status": { "enum": ["renderer-complete", "failed"] }
+      },
+      "additionalProperties": true
+    },
+    "processTree": {
+      "type": "object",
+      "required": ["sampleCount", "peakProcessCount", "peakPrivateBytes", "p50PrivateBytes", "p95PrivateBytes", "roles", "samples"],
+      "properties": {
+        "sampleCount": { "type": "integer", "minimum": 0 },
+        "peakProcessCount": { "type": "integer", "minimum": 0 },
+        "peakPrivateBytes": { "type": "integer", "minimum": 0 },
+        "p50PrivateBytes": { "type": "integer", "minimum": 0 },
+        "p95PrivateBytes": { "type": "integer", "minimum": 0 },
+        "roles": {
+          "type": "object",
+          "required": ["main", "renderer", "gpu", "utility", "native-host", "crashpad", "child"],
+          "additionalProperties": false,
+          "properties": {
+            "main": { "$ref": "#/$defs/processRoleSummary" },
+            "renderer": { "$ref": "#/$defs/processRoleSummary" },
+            "gpu": { "$ref": "#/$defs/processRoleSummary" },
+            "utility": { "$ref": "#/$defs/processRoleSummary" },
+            "native-host": { "$ref": "#/$defs/processRoleSummary" },
+            "crashpad": { "$ref": "#/$defs/processRoleSummary" },
+            "child": { "$ref": "#/$defs/processRoleSummary" }
+          }
+        },
+        "samples": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "error": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "processRoleSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peakCount", "peakPrivateBytes", "p95PrivateBytes", "peakWorkingSetBytes", "p95WorkingSetBytes"],
+      "properties": {
+        "peakCount": { "type": "integer", "minimum": 0 },
+        "peakPrivateBytes": { "type": "integer", "minimum": 0 },
+        "p95PrivateBytes": { "type": "integer", "minimum": 0 },
+        "peakWorkingSetBytes": { "type": "integer", "minimum": 0 },
+        "p95WorkingSetBytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

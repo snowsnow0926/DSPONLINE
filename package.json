@@ -2,6 +2,8 @@
   "name": "dsp-idle-network",
   "private": true,
   "version": "1.2.3",
+  "desktopEditionId": "windows-performance-development-v1",
+  "productName": "DSP极简网络 Windows 性能开发版",
   "releaseChannel": "beta",
   "updateBaseUrl": "",
   "cloudApiBaseUrl": "",
@@ -28,7 +30,7 @@
     "test:e2e:durable": "cross-env VITE_DURABLE_RUNTIME_RECOVERY=true playwright test tests/e2e/v144-runtime-wal-integration.spec.ts",
     "test:e2e:nightly": "playwright test --config=playwright.nightly.config.ts",
     "test:server": "npm --prefix server test && npm --prefix server run test:station",
-    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs desktop/release-channels.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs desktop/package-hygiene.test.cjs android/security-boundary.test.mjs",
+    "test:native": "node --test scripts/native-release-tools.test.mjs scripts/verify-startup-budget.test.mjs scripts/benchmark-native-core-ab.test.mjs scripts/render-native-core-ab-report.test.mjs scripts/stress-native-core-real-save.test.mjs scripts/benchmark-native-core-thread-matrix.test.mjs desktop/release-channels.test.cjs desktop/native-performance-policy.test.cjs desktop/native-core-exact-realtime-experiment.test.cjs desktop/native-core-exact-realtime-orchestrator.test.cjs desktop/native-exact-realtime-host-bridge.test.cjs desktop/native-exact-realtime-startup-guard.test.cjs desktop/shell-runtime-policy.test.cjs desktop/runtime-diagnostics.test.cjs desktop/performance-edition-identity.test.cjs desktop/cloud-transport.test.cjs desktop/message-port-transfer-smoke.test.cjs desktop/native-host.test.cjs desktop/native-host.integration.test.cjs desktop/package-hygiene.test.cjs android/security-boundary.test.mjs",
     "test:native-core": "cargo test --manifest-path native/Cargo.toml --locked",
     "test:backup": "node --test deploy/backup-tools.test.mjs",
     "test:ops": "node --test --test-concurrency=2 deploy/backup-tools.test.mjs deploy/nginx-config.test.mjs deploy/probe-node-health.test.mjs deploy/probe-api-readiness.test.mjs deploy/active-api-environment.test.mjs deploy/direct-invocation-symlink.test.mjs deploy/linux-release-control.test.mjs deploy/api-package-layout.test.mjs",
@@ -44,6 +46,9 @@
     "benchmark:canvas": "node scripts/benchmark-canvas-batch.mjs",
     "benchmark:native-save": "node scripts/benchmark-native-save.mjs",
     "benchmark:native-core": "cross-env DSP_RUN_NATIVE_CORE_BENCHMARK=1 vitest run src/game/nativeCoreRealSaveBenchmark.test.ts --reporter=verbose",
+    "benchmark:native-core-thread-matrix": "node scripts/benchmark-native-core-thread-matrix.mjs",
+    "benchmark:native-core-ab": "node scripts/benchmark-native-core-ab.mjs",
+    "benchmark:native-core-ab:report": "node scripts/render-native-core-ab-report.mjs",
     "server:dev": "node server/index.mjs",
     "typecheck": "tsc -b --pretty false",
     "budget:startup": "node scripts/verify-startup-budget.mjs",
@@ -56,7 +61,7 @@
     "desktop:dev": "cross-env DSP_DESKTOP_DEV_URL=http://127.0.0.1:4318 electron .",
     "desktop:pack": "npm run build:desktop && node desktop/pack.cjs pack",
     "desktop:dist": "npm run build:desktop && node desktop/pack.cjs dist",
-    "desktop:release": "node scripts/verify-desktop-signing-env.mjs && npm run desktop:dist && node scripts/create-native-update-manifests.mjs --desktop-source release",
+    "desktop:release": "node scripts/verify-desktop-signing-env.mjs && npm run desktop:dist && node scripts/create-native-update-manifests.mjs --desktop-source release-performance-edition --output release-performance-edition/update-feed",
     "android:sync": "npm run build:android && cap sync android && node scripts/sync-native-versions.mjs",
     "android:debug": "cross-env DSP_ANDROID_DEBUG=1 npm run android:sync && android\\gradlew.bat -p android assembleDebug",
     "android:release:unsigned": "npm run android:sync && android\\gradlew.bat -p android bundleRelease assembleRelease",
@@ -101,11 +106,11 @@
     "js-yaml": "4.3.1"
   },
   "build": {
-    "appId": "com.dspidle.network",
-    "productName": "DSP极简网络",
+    "appId": "com.dspidle.network.performance",
+    "productName": "DSP极简网络 Windows 性能开发版",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "release-performance-edition"
     },
     "files": [
       "dist/**",
@@ -127,6 +132,7 @@
       }
     ],
     "win": {
+      "executableName": "dsp-idle-performance-edition",
       "target": [
         {
           "target": "nsis",
@@ -135,11 +141,14 @@
           ]
         }
       ],
-      "artifactName": "dsp-idle-${version}-${arch}-setup.${ext}"
+      "artifactName": "dsp-idle-performance-edition-${version}-${arch}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": false,
+      "shortcutName": "DSP极简网络 Windows 性能开发版",
+      "uninstallDisplayName": "DSP极简网络 Windows 性能开发版",
+      "deleteAppDataOnUninstall": false
     },
     "mac": {
       "target": [

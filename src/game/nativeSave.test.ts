@@ -84,6 +84,39 @@ describe("Windows native save transaction", () => {
     expect(desktop.writeNativeSave).toHaveBeenCalledWith({ transactionId: "tx-1", records: [{ key: "base", value: "{}" }] });
   });
 
+  it("surfaces deferred WAL maintenance without rejecting the durable checkpoint", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const desktop = bridge({
+      commitNativeSave: vi.fn(async () => ({
+        slot: "normal-main",
+        generation: 2,
+        revision: 7,
+        rootHash: "b".repeat(64),
+        recordCount: 1,
+        changedRecords: 1,
+        changedBytes: 2,
+        totalUncompressedBytes: 2,
+        walMaintenancePending: true,
+        walBytes: 4096,
+      })),
+    });
+    Object.defineProperty(window, "dspDesktop", { configurable: true, value: desktop });
+    const transaction = await beginWindowsNativeSave({
+      slot: "normal-main",
+      mode: "normal",
+      stateVersion: 47,
+      baseChecksum: "01234567",
+      registryFingerprint: "01234567",
+      revision: 7,
+      savedAtMs: 1,
+    });
+
+    const committed = await transaction!.commit();
+    expect(committed.walMaintenancePending).toBe(true);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("4096 bytes"));
+    warning.mockRestore();
+  });
+
   it("fails closed when the native service is unavailable", async () => {
     Object.defineProperty(window, "dspDesktop", {
       configurable: true,

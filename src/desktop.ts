@@ -10,6 +10,9 @@ export interface DesktopUpdateStatus {
 
 export interface DesktopReleaseInfo {
   isDesktop: true;
+  /** Present in the isolated performance-edition shell; older rollback hosts may omit it. */
+  editionId?: "windows-performance-development-v1";
+  productName?: "DSP极简网络 Windows 性能开发版";
   platform: string;
   channel: "stable" | "beta" | "nightly";
   channelLabel: string;
@@ -22,6 +25,9 @@ export interface DesktopBridge {
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
   getReleaseInfo: () => Promise<DesktopReleaseInfo>;
   getNativePerformanceStatus: () => Promise<DesktopNativePerformanceStatus>;
+  getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
+  getNativePerformancePolicy: () => Promise<DesktopNativePerformancePolicyStatus>;
+  setNativePerformancePolicy: (request: DesktopNativePerformancePolicy) => Promise<DesktopNativePerformancePolicyStatus>;
   beginNativeSave: (request: DesktopNativeSaveBeginRequest) => Promise<DesktopNativeSaveBeginResult>;
   writeNativeSave: (request: DesktopNativeSaveWriteRequest) => Promise<{ acceptedRecords: number }>;
   commitNativeSave: (request: DesktopNativeSaveTransactionRequest) => Promise<DesktopNativeSaveCommitResult>;
@@ -64,6 +70,148 @@ export interface DesktopNativePerformanceStatus {
   nativeFormatVersion?: number;
   hostVersion?: string;
   capabilities: string[];
+  /** Present in desktop hosts with the trusted thread-policy bridge; older test/rollback hosts may omit it. */
+  performancePolicy?: DesktopNativePerformancePolicyStatus;
+}
+
+export interface DesktopShellRuntimePolicy {
+  schemaVersion: 1;
+  hardwareAcceleration: {
+    mode: "chromium-default" | "disabled-experimental";
+    experimentalDisableRequested: boolean;
+    configurationState: "default" | "experimental-opt-in" | "invalid-ignored";
+  };
+  v8Heap: { mode: "chromium-managed"; overrideApplied: false };
+  processPriority: { mode: "os-default"; mutationApplied: false };
+  chromiumCommandLine: { highRiskSwitchesApplied: false };
+}
+
+export interface DesktopRuntimeDiagnostics {
+  schemaVersion: 1;
+  sampledAtMs: number;
+  runtime: {
+    platform: string;
+    architecture: string;
+    electronVersion: string | null;
+    chromeVersion: string | null;
+    nodeVersion: string | null;
+  };
+  policy: DesktopShellRuntimePolicy;
+  gpu: {
+    featureStatus: Record<string, string>;
+    devices: Array<{
+      active?: boolean;
+      vendorId?: number | string;
+      deviceId?: number | string;
+      driverVendor?: string;
+      driverVersion?: string;
+    }>;
+    deviceListTruncated: boolean;
+  };
+  processTree: {
+    scope: "electron-app-metrics";
+    reportedProcessCount: number;
+    scannedProcessCount: number;
+    validProcessCount: number;
+    includedProcessCount: number;
+    truncated: boolean;
+    totalsComplete: boolean;
+    totalsKib: {
+      workingSet: number;
+      peakWorkingSet: number;
+      privateBytes: number;
+    };
+    processes: DesktopRuntimeProcessMetric[];
+  };
+  nativeHost: {
+    state: "running" | "not-running";
+    pid?: number;
+    /** Electron's getAppMetrics does not include this separately spawned process. */
+    includedInElectronProcessTree: false;
+  };
+  memory: {
+    systemKib: {
+      totalKib?: number;
+      freeKib?: number;
+      swapTotalKib?: number;
+      swapFreeKib?: number;
+    } | null;
+    mainProcessKib: {
+      privateKib?: number;
+      residentSetKib?: number;
+      sharedKib?: number;
+    } | null;
+    mainNodeBytes: {
+      rssBytes?: number;
+      heapTotalBytes?: number;
+      heapUsedBytes?: number;
+      externalBytes?: number;
+      arrayBuffersBytes?: number;
+    } | null;
+    mainV8Bytes: {
+      heapSizeLimitBytes?: number;
+      totalHeapSizeBytes?: number;
+      usedHeapSizeBytes?: number;
+      externalMemoryBytes?: number;
+    } | null;
+  };
+  mainProcess: {
+    pid?: number;
+    priority: number | null;
+    uptimeSeconds: number | null;
+    cpu: { userMicros: number; systemMicros: number } | null;
+  };
+  unavailable: Array<
+    | "gpuFeatureStatus"
+    | "gpuInfo"
+    | "electronProcessMetrics"
+    | "systemMemory"
+    | "mainProcessMemory"
+    | "nodeMemory"
+    | "nodeCpu"
+    | "v8Heap"
+  >;
+}
+
+export interface DesktopRuntimeProcessMetric {
+  pid: number;
+  type: string;
+  priority: number | null;
+  name?: string;
+  serviceName?: string;
+  creationTimeMs?: number;
+  sandboxed?: boolean;
+  integrityLevel?: "untrusted" | "low" | "medium" | "high" | "unknown";
+  memoryKib?: {
+    workingSetKib?: number;
+    peakWorkingSetKib?: number;
+    privateBytesKib?: number;
+  };
+  cpu?: {
+    percent: number;
+    idleWakeupsPerSecond: number;
+    cumulativeSeconds?: number;
+  };
+}
+
+export type DesktopNativePerformanceMode = "quiet" | "balanced" | "performance" | "custom";
+export type DesktopNativeCoreThreadSetting = "auto" | 1 | 2 | 4 | 8;
+
+export type DesktopNativePerformancePolicy =
+  | { mode: Exclude<DesktopNativePerformanceMode, "custom"> }
+  | { mode: "custom"; customThreads: DesktopNativeCoreThreadSetting };
+
+export interface DesktopNativePerformancePolicyStatus {
+  schemaVersion: 1;
+  requestedPolicy: DesktopNativePerformancePolicy;
+  effectivePolicy: {
+    mode: DesktopNativePerformanceMode;
+    threadSetting: DesktopNativeCoreThreadSetting;
+  };
+  logicalCpuCount: number;
+  /** The native host is never killed in place; a changed thread setting applies on the next app launch. */
+  restartRequired: boolean;
+  configurationState: "default" | "loaded" | "invalid" | "saved";
 }
 
 export interface DesktopNativeSaveBeginRequest {
@@ -104,6 +252,8 @@ export interface DesktopNativeSaveCommitResult {
   changedRecords: number;
   changedBytes: number;
   totalUncompressedBytes: number;
+  walMaintenancePending?: boolean;
+  walBytes?: number;
 }
 
 export interface DesktopNativeSaveRecoveryResult {
@@ -468,6 +618,9 @@ export interface DesktopNativeBeltSchedulerDiagnostics {
   wakeCount: number;
   sleepCount: number;
   changedBeltRecords: number;
+  writeBackPatchRecords: number;
+  /** Configured deterministic worker width for this write-back; zero means no patches. */
+  writeBackWorkers: number;
 }
 
 export interface DesktopNativeCoreCommitOperationRequest extends DesktopNativeCoreSessionRequest {

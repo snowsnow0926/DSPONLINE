@@ -3,7 +3,18 @@ use serde_json::Value;
 
 use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 
-use crate::core_runtime::CoreCommitOperationRequest;
+use crate::core_runtime::{
+    CoreCheckpointAcknowledgeExactRealtimeRequest, CoreCheckpointExactRealtimeFinalizationRequest,
+    CoreCommitOperationExactRealtimeRequest, CoreCommitOperationRequest,
+};
+use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePutRecord {
+    pub key: String,
+    pub value: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -28,6 +39,10 @@ pub enum ControlRequest {
         transaction_id: String,
         key: String,
         value: Option<String>,
+    },
+    SavePutBatch {
+        transaction_id: String,
+        records: Vec<SavePutRecord>,
     },
     SaveCommit {
         transaction_id: String,
@@ -54,6 +69,9 @@ pub enum ControlRequest {
     Compact {
         slot: String,
         retain_generations: Option<usize>,
+    },
+    ExactRealtimeLease {
+        request: ExactRealtimeLeaseRequest,
     },
     CoreOpen {
         slot: String,
@@ -113,9 +131,21 @@ pub enum ControlRequest {
         session_id: String,
         request: CoreCommitOperationRequest,
     },
+    CoreCommitOperationExactRealtime {
+        session_id: String,
+        request: CoreCommitOperationExactRealtimeRequest,
+    },
     CoreCheckpoint {
         session_id: String,
         saved_at_ms: u64,
+    },
+    CoreCheckpointAcknowledgeExactRealtime {
+        session_id: String,
+        request: CoreCheckpointAcknowledgeExactRealtimeRequest,
+    },
+    CoreCheckpointExactRealtimeFinalization {
+        session_id: String,
+        request: CoreCheckpointExactRealtimeFinalizationRequest,
     },
     CoreExportV47 {
         session_id: String,

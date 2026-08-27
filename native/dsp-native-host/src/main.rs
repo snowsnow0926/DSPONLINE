@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
 use dsp_native_host::core_runtime::CoreRegistry;
+use dsp_native_host::exact_realtime_lease::{
+    EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
+};
 use dsp_native_host::frame::{Frame, FrameKind, read_frame, write_frame};
 use dsp_native_host::protocol::{ControlRequest, ControlResponse, HelloResponse};
 use dsp_native_host::save_store::SaveStore;
@@ -56,6 +59,7 @@ fn handle_request(
                 host_version: env!("CARGO_PKG_VERSION"),
                 capabilities: vec![
                     "native-save-v1",
+                    "native-save-put-batch-v1",
                     "dual-superblock",
                     "content-addressed-chunks",
                     "contiguous-wal",
@@ -69,6 +73,8 @@ fn handle_request(
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
+                    EXACT_REALTIME_LEASE_CAPABILITY,
+                    EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                 ],
             })?
         }
@@ -96,6 +102,17 @@ fn handle_request(
         } => {
             store.put(&transaction_id, &key, value.as_deref())?;
             json!({ "accepted": true })
+        }
+        ControlRequest::SavePutBatch {
+            transaction_id,
+            records,
+        } => {
+            let batch = records
+                .iter()
+                .map(|record| (record.key.as_str(), record.value.as_deref()))
+                .collect::<Vec<_>>();
+            store.put_batch(&transaction_id, &batch)?;
+            json!({ "acceptedRecords": records.len() })
         }
         ControlRequest::SaveCommit { transaction_id } => to_value(store.commit(&transaction_id)?)?,
         ControlRequest::SaveAbort { transaction_id } => {
@@ -134,6 +151,7 @@ fn handle_request(
         } => {
             json!({ "removedGenerations": store.compact(&slot, retain_generations.unwrap_or(2))? })
         }
+        ControlRequest::ExactRealtimeLease { request } => store.exact_realtime_lease(request)?,
         ControlRequest::CoreOpen {
             slot,
             generation,
@@ -209,10 +227,28 @@ fn handle_request(
             session_id,
             request,
         } => to_value(cores.commit_operation(store, &session_id, request)?)?,
+        ControlRequest::CoreCommitOperationExactRealtime {
+            session_id,
+            request,
+        } => to_value(cores.commit_operation_exact_realtime(store, &session_id, request)?)?,
         ControlRequest::CoreCheckpoint {
             session_id,
             saved_at_ms,
         } => to_value(cores.checkpoint(store, &session_id, saved_at_ms)?)?,
+        ControlRequest::CoreCheckpointAcknowledgeExactRealtime {
+            session_id,
+            request,
+        } => to_value(cores.checkpoint_and_acknowledge_exact_realtime(
+            store,
+            &session_id,
+            request,
+        )?)?,
+        ControlRequest::CoreCheckpointExactRealtimeFinalization {
+            session_id,
+            request,
+        } => {
+            to_value(cores.checkpoint_exact_realtime_finalization(store, &session_id, request)?)?
+        }
         ControlRequest::CoreExportV47 {
             session_id,
             export_id,

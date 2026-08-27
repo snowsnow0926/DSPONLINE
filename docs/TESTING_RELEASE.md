@@ -1,6 +1,10 @@
 # 测试与发布基线
 
-> **1.2.3 Windows 原生增量候选门禁（2026-08-27，开发完成，未部署）**：本工作树新鲜执行 typecheck、完整 Vitest、server/station、native JavaScript/工具、Rust format/test/clippy、ops、production build、完整 Chromium、durable WAL、production preview、真实大档原生差分/保存/导出和 Windows 未签名包。结果为 Vitest 196 文件通过/13 跳过、1,614 项通过/27 跳过；server 384/2 + station 4/4；ops 56/6；native JS 36/36；Rust 24/24；长差分 37/37；Chromium 431/27；durable 7/7；production preview 3/3，均 0 失败。活动脏页重试、线路 active/full-scan 严格一致、投影 session/revision/SHA、v47 UTF-16 checksum/重载和 10,000 次故障注入均通过；production build 1,981 modules，startup 总 gzip 179,772 B，125 个许可证及根/server 生产依赖 0 漏洞。Clean Build ID `1.2.3+6cdd86e7675d`，Windows x64 `NotSigned` 诊断包隔离启动通过。完整证据见 [1.2.3 开发报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md)。24 小时、多硬件、Defender/磁盘满、签名和生产灰度仍为独立 Release Agent 阻断项。
+> **Windows 全面性能候选 E18/E1a 新鲜门禁（2026-08-28，开发中，未部署）**：当前 `D:\GameDev\DSPidle2-windows-full-native` 工作树实测为 Rust workspace **192/192**（core 128，host 64）；native JavaScript/工具 **154 通过 / 1 Windows 权限条件跳过 / 0 失败**；Vitest 最终 **1,622 通过 / 27 跳过 / 0 失败**（198 文件通过/13 跳过）；server **388 通过 / 2 跳过 / 0 失败**（main 384/2 + station 4/4）；ops **56 通过 / 6 Linux-only 跳过 / 0 失败**；Chromium 最终 **431 通过 / 27 跳过 / 0 失败**；durable E2E **7/7**。`build:web` 和 startup budget 通过，startup 总 gzip **179,981 B**；typecheck、Rust fmt/check/clippy、长差分 37/37、125 个运行时许可证及根/server 生产依赖审计 0 漏洞也通过。Vitest 首轮曾有 1 个 5 秒超时，定向通过后全量复跑得到上述最终结果；Chromium 首轮也有 1 个短暂动画文本等待超时，定向 **3/3** 和第二轮全量均通过，两份首轮证据都保留。
+
+> **E18 production-preview 口径（2026-08-28）**：必须区分 Web 预览制品与 Electron desktop `dist`。在新鲜 Web 构建后，PWA **1/1**、connection **1/1**，density 独立进程按原门槛 **1/1** 通过；三项组合运行为 **2/3**，其中 density 一次 frame P95 `41.6 ms > 21 ms`，该失败保留且不会被独立复跑抹去。最初误用 Electron desktop `dist` 执行 PWA preview 所得失败是“制品类型不匹配”的诊断，不计作 Web 制品结论，但原始诊断仍保留。因此本轮不得简写为“production preview 3/3 全绿”。完整 E18/E1a 证据见 [开发与实测报告](./releases/windows-performance-development-e18-report-2026-08-28.md)。
+
+> **历史：1.2.3 Windows 原生增量候选门禁（2026-08-27，已由 E18/E1a 继承）**：旧独立工作树当时的 clean Build ID 为 `1.2.3+6cdd86e7675d`，Windows x64 `NotSigned` 诊断包隔离启动通过；它是本轮 public 1.2.3 对照的历史基线，不是当前 E18/E1a 最终包。当时门禁为 Vitest 1,614/27、server 384/2 + station 4/4、ops 56/6、native 36/36、Rust 24/24、长差分 37/37、Chromium 431/27、durable 7/7、production preview 3/3，均 0 失败；production build 1,981 modules，startup 总 gzip 179,772 B。历史证据见 [1.2.3 开发报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md)，不得把这些计数或旧包哈希复用为 E18/E1a 当前结果。
 
 > **1.2.2 纯挂机 30 秒轻量采样候选（2026-08-27，未部署）**：复杂大档的保守纯挂机由一秒样本升级为 3×10 模拟秒轻量样本，普通生产与科研按实测产量和逐物料库存边界外推；火箭、太阳帆、戴森结构/壳面、银河出口、合同和建筑巨构交付仍只提交精确 30 秒前缀。44,167,989 字节 v47 真实玩家档在 15×、10 分钟墙钟专项中，白矩阵由一秒误判的零恢复为 166,367,492,784 增量（约 2.77 亿/真实秒），校准约 30.5 秒、宏观尾段约 2.5 秒、序列化/重载约 2.4 秒，结束 heap used 约 858 MiB；源文件哈希不变。新鲜门禁：Vitest 1,575/62（195 文件通过/14 跳过）、纯挂机/离线 63/63、真实档 1/1、server 384/2 + station 4/4、native JS 33/2、Rust 20/20、ops 56/6、Chromium 431/27、durable 7/7、production preview 3/3，均 0 失败；typecheck、production build、125 个许可证及根/server 生产依赖 0 漏洞通过。完整记录见 [1.2.2 开发与实测报告](./releases/1.2.2-pure-idle-30s-lite-development-report-2026-08-27.md)。
 
@@ -173,6 +177,10 @@ npm run desktop:pack
 # 需要安装包时
 npm run desktop:dist
 ```
+
+`windows-full-native` 独立工作树在进入任何安装包门禁前，必须先通过 `desktop/performance-edition-identity.test.cjs`：版本保持 1.2.3，appId/AppUserModelID、产品名、EXE、setup、快捷方式、卸载项和固定输出目录均不得等于稳定版；Electron ready 与单实例锁前必须显式安装独立 userData/sessionData；默认 API/更新地址为空；目录包必须存在性能版 EXE 且不得混入稳定版 EXE。此测试只证明身份合同，不能替代实际双安装、覆盖升级、卸载保档、签名或启动 smoke。开发候选未完成这些门禁时不得进入稳定发布流程。
+
+实验性原生权威还必须通过 E1a 单写者门禁：有效或损坏的 `normal-main` 租约应阻断普通 save begin/commit、旧事务提交、raw/idempotent WAL、compaction、generic core commit/checkpoint；`speedrun-main` 与缺失租约保持既有行为。允许的 exact 操作只能由 Rust 从 durable pending tick 派生，不能由 renderer 传入 command、revision 或秒数；启动必须在 Host hello 后、普通窗口前检查租约。该门禁通过也不能把 `authorityEligible=false` 改成 true，权威晋升仍需独立 Gate C。
 
 Android 正式签名另加；先只读检查，再只在独立 clean checkout 对精确 runtime SHA 构建：
 

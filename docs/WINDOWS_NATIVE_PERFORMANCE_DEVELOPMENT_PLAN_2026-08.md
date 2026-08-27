@@ -1303,3 +1303,75 @@ Tauri、WebView2、Qt 或纯原生 UI 只能在上述核心优化后重新评估
 - TypeScript、Rust fmt/clippy、production build/startup budget、125 个许可证、根/server 0 漏洞和 `git diff --check` 通过。
 - Windows x64 unpacked 为 75 文件、408,489,149 B；FileVersion 1.2.3、ProductVersion 1.2.3.0、Authenticode `NotSigned`；clean 包隔离启动通过。
 - 详细实现、真实档原始数字、制品 SHA 和残余 Gate 见 [1.2.3 开发与实测报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md) 与 [1.2.3 候选说明](./releases/1.2.3-candidate.md)。
+
+### 20.4 SHELL-RUNTIME-1：Electron 壳层安全基线与诊断（2026-08-27）
+
+本批只处理不改变存档、模拟或云协议的壳层策略与只读诊断，仍是未部署开发候选：
+
+- `desktop/shell-runtime-policy.cjs` 在 `app.ready` 前建立严格策略。默认不调用 `disableHardwareAcceleration()`，不追加 Chromium/V8 开关，不设置 `max-old-space-size`，也不修改进程优先级；因此默认硬件加速继续遵循 Chromium 自身选择，V8 堆继续按 Chromium 多进程模型管理。
+- `DSP_DESKTOP_EXPERIMENTAL_DISABLE_HARDWARE_ACCELERATION=1` 是唯一软件渲染回退入口；它必须显式设置且完整重启才生效。其他非空值按 `invalid-ignored` 处理，不能变成隐蔽的自由格式命令行参数。
+- `desktop/runtime-diagnostics.cjs` 提供 schema v1、5 秒单飞缓存的只读快照。GPU 仅保留固定 feature status 和最多 8 个设备的 vendor/device/driver 字段；Electron 进程最多返回 64 条、最多扫描 256 条，同时报告截断和 totals 是否完整；内存字段全部标明 KiB/bytes，V8 heap limit 只观测不改写。
+- IPC 只接受当前主窗口 `webContents`，renderer 不传查询参数。输出不读取或返回命令行、`execArgv`、环境变量、路径、URL、存档、云 token、GPU machine model、任意 `auxAttributes` 或异常正文；失败只产生固定 unavailable code。
+- Electron `app.getAppMetrics()` 不含单独 `spawn` 的 Rust Host。快照只列 Host PID 并设置 `includedInElectronProcessTree=false`；完整性能 Gate 仍必须用 50 ms 外部进程树采样器记录 Electron、renderer、GPU、utility 和 Rust Host 的 Private Bytes，不能把本接口的 Electron 小计包装成总峰值。
+
+本批明确保持以下 No-Go：
+
+1. 不因“已经是桌面应用”就替换 Electron；只有薄 UI 后 Electron 固定开销仍超过全进程树 15%，或同功能 UI 帧 P95 有实测材料收益，才能启动 WIN-490 原型。
+2. 不让 GPU 参与库存、生产、物流、科研、戴森或排行榜权威；WebGL/WebGPU/wgpu 仍须完成上下文丢失、集显/独显、远程桌面和软件回退矩阵。
+3. 不盲目扩大 V8 heap。提高单个 isolate 上限可能把失败从 V8 OOM 推迟成系统提交失败，并不能减少 renderer、GPU、utility 与 Rust Host 的总内存。
+4. 不使用高/实时进程优先级。没有前后台响应、功耗、音频和系统交互 A/B 前，优先级提升可能造成系统饥饿；本批只通过 `os.getPriority()` 观测。
+5. 不开放 renderer 传递任意 Chromium flags、环境变量、PID、路径或采样频率；所有高风险开关必须有具名、严格、默认关闭的独立合同。
+
+SHELL-RUNTIME-1 落地时没有单独执行安装包构建；后续 E18/E1a 集成后已构建 fallback 预清洁未签名包并完成短时启动冒烟。该中间包的 Build ID 仍带 `.dirty`，必须在最终 clean 提交后重打，不得当作发布制品。本批没有改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3，也没有生产连接、签名或部署。薄壳 A/B、真实 GPU 丢失、三档硬件 24 小时和完整进程树峰值仍是未关闭门禁。
+
+### 20.5 PERFORMANCE-EDITION-IDENTITY-1：可并存性能开发版（2026-08-27）
+
+为避免本工作树的全性能 Windows 候选覆盖稳定版安装或玩家数据，1.2.3 的性能开发包使用一套冻结身份：
+
+| 身份面 | 性能开发版 | 稳定版隔离依据 |
+| --- | --- | --- |
+| appId / AppUserModelID | `com.dspidle.network.performance` | 不等于 `com.dspidle.network`；NSIS GUID 继续由 appId 确定派生 |
+| 产品/快捷方式/卸载项 | `DSP极简网络 Windows 性能开发版` | 安装目录和 Windows UI 名称独立 |
+| EXE / setup | `dsp-idle-performance-edition.exe` / `dsp-idle-performance-edition-${version}-${arch}-setup.${ext}` | 即使文件被放到同一父目录也不复用稳定 EXE 名；包门禁拒绝稳定 EXE 残留 |
+| 构建输出 | `release-performance-edition/` | `desktop/pack.cjs` 不再接受自由输出路径环境变量，不写 `release/` |
+| userData | AppData 下 `DSPidle2-Performance-Edition` | 在 ready、单实例锁及首次 `getPath("userData")` 前显式设置 |
+| sessionData | 上述目录的 `Chromium` 子目录 | IndexedDB、localStorage、Cookie、Cache 和云会话不读取稳定版 profile |
+| 服务默认值 | `cloudApiBaseUrl=""`、`updateBaseUrl=""` | 本地性能测试默认不连接官方云和更新源 |
+
+初始化只取得系统 `appData` 根，创建两个固定目录，再调用 `app.setName()` 与 `app.setPath()`；没有 renderer 参数、自由目录环境变量或稳定版路径探测。目录创建或 `setPath` 失败会中止启动，不能以“兼容”为名回退到稳定版数据。既有存档只能由玩家在稳定版显式导出 JSON/JSON.gz 后，再在性能版导入；本批没有自动复制、移动、删除、降级或迁移工具，卸载也固定不删除性能版应用数据。
+
+源码 package、运行时 main、pack 后 ASAR/EXE 三层分别校验同一身份。单元门禁还直接调用 electron-builder schema 校验，锁定版本仍为 1.2.3，并检查 AppUserModelID 设置发生在窗口创建前。该门禁不能代替真实机器上稳定版+性能版双安装、各自启动、各自导入、卸载一方后另一方保档、签名和覆盖升级测试；这些仍由后续隔离 Release Gate 执行。后续 E18/E1a 已产生 fallback 预清洁包：77 个文件、412,739,247 B，EXE SHA-256 为 `748731b26a1864a0777097059caf6fe0517128da19b8417852c84a9556290458`，12 秒隔离 profile 启动冒烟通过。但它的 Build ID 为 `1.2.3+9778ba4cfe4a.dirty`，只是中间证据；最终 clean 提交后仍必须重打包和重做哈希/冒烟。本批没有连接生产、生成公开更新清单、签名或部署，也不改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3。
+
+### 20.6 E5～E18：大档精确热路径继续收敛（2026-08-28）
+
+本工作树在冻结 1.2.3 Host 之后继续完成以下可由单机差分证明的优化：
+
+1. **E5～E8**：紧凑线路拓扑和稀疏调度工作区、精确行 ID 索引、实体原始记录写回、模拟与规范证明提交融合；
+2. **E9～E12**：普通机器确定性并行、线路原始补丁并行、析构延后但同步闭合、检查点记录所有权转移；
+3. **E13～E15**：机器库存既有键原位更新；规范/领域哈希借用字符串与稀疏 rank；线路动态和物料键不再反复克隆/重插；
+4. **E16～E18**：量子库存/游标原位更新；生产历史以哈希累加后稳定排序；本地物流取消整站 snapshot，复用不可变 peer directory，只在拓扑命令或 5 秒电梯模式边界重建。
+
+所有并行阶段使用固定输入索引私有输出和稳定顺序安装；失败选最小输入索引，候选在完整成功前不替换源状态。已有键原位更新均增加 Unicode、Mod key、插入顺序、缺字段、非有限数和负零回归。普通步骤的 `local-step-directory` 剖析中位为 `0.000 ms`，5 秒边界刷新中位约 `0.175 ms`。
+
+76,898,141 字节真实档（80,674 实体、155,746 线路）的冻结输入 SHA-256 为 `ab869c2b52d5f89e1fcbd8bfcb715daa2f5e7b02b4b7d1bd553f12f566531554`。公开 1.2.3 Host `44a921…` 与 E18 Host `032534…` 的三轮交错 exact A/B：
+
+| 指标 | 公开 1.2.3 中位 | E18 中位 | E18 变化 |
+| --- | ---: | ---: | ---: |
+| 打开 | 9,896.45 ms | 7,521.43 ms | 快 24.00% |
+| 打开峰值 Private Bytes | 2,802,446,336 B | 1,812,520,960 B | 降低 35.32% |
+| 一秒原生精确推进 | 2,631.08 ms | 1,651.42 ms | 快 37.23% |
+| 推进峰值增量 | 1,327,386,624 B | 960,110,592 B | 降低 27.67% |
+
+E17→E18 五轮交错 A/B 单独显示推进 `1,534.84 → 1,431.98 ms`（快 `6.70%`），代价是该轮推进峰值增量中位增加约 33.5 MB（`3.85%`）；因此 E18 是明确的速度/少量常驻目录内存取舍，不隐藏负向指标。线程矩阵 15/15 的中位为 `threads=1: 2,233.16 ms`、`2: 1,804.98 ms`、`4: 1,540.12 ms`、`8: 1,437.49 ms`、`auto: 1,415.05 ms`，全部输出同一规范哈希；auto 相对单线程快 `57.81%`。
+
+公开基线在完整工作流的三次连续 1 秒推进中产生哈希分叉，A/B 工具因此于第一个基线样本 fail-closed，不能声称存在完整工作流对比百分比。E18 自身以三个独立进程完成 full 场景 3/3，覆盖 exact、融合证明、durable WAL、重复幂等、增量检查点和三连推进，全部与 JavaScript 一致且源档未变。该证据只证明当前规则覆盖和本机，不等于 24 小时或跨硬件 Gate C。
+
+### 20.7 E1a：实验性权威单写者安全闭环（2026-08-28）
+
+- Rust `SaveStore` 对 `normal-main` 的普通事务 admission 与 publication 双重检查，覆盖租约创建前已打开的事务；raw/idempotent WAL、compaction、generic core commit 和 checkpoint 同样受栅栏保护。
+- 损坏或未知租约 fail-closed；缺失租约及 `speedrun-main` 不改变既有行为。
+- 私有 exact commit 只接受 `runId + registryFingerprint`。Rust 从 durable pending tick 派生固定 command ID、base/result revision、`simulationSeconds=1`、`wallSeconds=1`、`advanceMode=exact` 与 `command=null`，并在 WAL/检查点发布时再次核对租约快照。
+- activate、tick、recover、finalize 共用一个生命周期 gate；主进程启动在 Host hello 后检查租约，有效/blocked 时在 renderer 创建前退出并显示固定诊断。
+- renderer/preload 没有新增 mutation API，普通 `coreCommitOperation` 即使可达也会被 Rust durable fence 拒绝。
+
+E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owned catalog、public primary writer 与完整 renderer 薄化闭环，因此持续实时权威仍为 No-Go，`authorityEligible=false` 不变。

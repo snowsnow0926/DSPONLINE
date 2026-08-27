@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>DSPidle Windows Shell Lab — Electron</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">ISOLATED PERFORMANCE LAB · NO CLOUD · NO UPDATES</p>
+        <h1>薄 Electron 壳层 A/B 基准</h1>
+      </div>
+      <div class="status-grid" aria-live="polite">
+        <span id="run-status">准备确定性画布</span>
+        <span id="native-status">Rust Host：检查中</span>
+      </div>
+    </header>
+    <main>
+      <canvas id="factory-canvas" role="img" aria-label="一万个确定性生产节点与线路的壳层性能夹具"></canvas>
+      <aside>
+        <h2>当前采样</h2>
+        <dl>
+          <div><dt>节点</dt><dd id="instance-count">—</dd></div>
+          <div><dt>帧</dt><dd id="frame-count">—</dd></div>
+          <div><dt>帧间隔 P95</dt><dd id="frame-p95">—</dd></div>
+          <div><dt>绘制 P95</dt><dd id="draw-p95">—</dd></div>
+          <div><dt>长任务</dt><dd id="long-task-count">—</dd></div>
+        </dl>
+        <p class="boundary">
+          该窗口只读取内置确定性夹具并启动现有受限 Rust sidecar；不加载 GameState、玩家目录、云 API 或更新源。
+        </p>
+      </aside>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

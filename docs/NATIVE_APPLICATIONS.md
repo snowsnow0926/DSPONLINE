@@ -1,5 +1,13 @@
 # 原生应用构建与更新
 
+> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。最终源码闭合后必须从 clean commit 重新打包；若标准 `release-performance-edition/win-unpacked` 被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 生成独立目录包。两者只能有一个被清单选为交付目录，不能把 `.tmp` 当作制品。
+
+> 本工作树的 Windows 包是可与稳定版并存的 1.2.3 **性能开发版**：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
+
+> Windows Electron 壳层默认保留 Chromium 硬件加速，不设置 `--disable-gpu`、`--js-flags`、`max-old-space-size` 或进程优先级。受信桌面 bridge 的 `getRuntimeDiagnostics()` 只读返回有界 GPU、Electron 进程、内存、V8 heap limit 和优先级快照；5 秒内并发请求合并，输出不含参数、环境、路径、URL、存档或异常正文。该快照只覆盖 Electron `getAppMetrics()` 进程，独立 Rust Host 仅列 PID，不能代替发布报告的完整进程树 Private Bytes 采样。
+
+> Windows 原生 Host 的线程数现在有独立设备策略：默认 `balanced/auto`，另有安静、性能和自定义档；性能/自定义档会按当前可用逻辑 CPU 保守下调到 `1/2/4/8`。策略文件位于 Electron `userData`，原子保存且损坏时安全回退。运营中心的设置页只在受信 Windows bridge 存在时显示，会同时返回请求策略、当前进程实际策略、逻辑 CPU 和 `restartRequired`；Web、Android 及旧 bridge 不显示也不调用该面板。为保护活动原生会话及权威 revision，修改后必须完整重启应用才生效，程序不会在运行中重启 Host。
+
 > 1.2.3 Windows 开发候选为活动 revision 增加原生脏页保存，为线路增加带闭合唤醒与稠密全扫描回退的 active queue，并提供有界视口/统计二进制投影和 Rust 流式 v47 导出。该候选不修改公开存档、云协议或 Android 路径；`authorityEligible=false`，未完成 24 小时/多硬件 Gate C、签名和灰度。架构决策见 [ADR-007](./architecture/ADR-007-WINDOWS-NATIVE-INCREMENTAL-RUNTIME.md)，实测见 [1.2.3 开发报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md)。
 
 > 1.2.1 开发候选优化 Windows 76.9 MB 大型存档的原生冷启动、摘要诊断、事务内存和同 revision 重复保存，并为 Electron 包增加 Android Gradle 残留的排除与生成后硬校验。`authorityEligible=false` 和 JavaScript 权威保持不变；本版不是原生核心默认接管，也没有完成 24 小时/多硬件 Gate C。开发实测与残余边界见 [1.2.1 Windows 性能报告](./releases/1.2.1-windows-performance-development-report-2026-08-27.md)。
@@ -9,7 +17,7 @@
 > 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
 > 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
 > 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。
-> Windows 包名：`com.dspidle.network`
+> 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
 > 1.1.5 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；大存档稀疏投影与压缩不改变旧档迁移边界。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
@@ -45,6 +53,19 @@ Windows 目录包：
 ```powershell
 npm run desktop:pack
 ```
+
+该命令只写入固定的 `release-performance-edition/win-unpacked/`，或在 Windows 文件锁命中时写入固定的 `release-performance-edition-fallback/win-unpacked/`。不存在 renderer 可控或环境变量控制的输出路径；包后门禁会核对 editionId、产品名和 `dsp-idle-performance-edition.exe`，并拒绝混入稳定版 EXE。默认 `cloudApiBaseUrl` 与 `updateBaseUrl` 均为空，因此本地性能测试不会自动连接官方云或更新源。当前没有签名、部署或下载页授权，不得把这个目录包描述为稳定发布。
+
+测试目录版时直接运行其中的 `dsp-idle-performance-edition.exe`。首次运行只会创建 AppData 下的 `DSPidle2-Performance-Edition`；不要复制稳定版的 `dsp-idle-network` profile。需要测试真实旧档时，通过稳定版的“导出”取得 JSON/JSON.gz，再在性能版中手动导入。测试完成后也不要用脚本删除 profile；其中可能已包含玩家刚完成的性能版测试进度。
+
+仅在诊断显卡驱动、远程桌面或 GPU 进程异常时，开发者可以显式启动软件回退：
+
+```powershell
+$env:DSP_DESKTOP_EXPERIMENTAL_DISABLE_HARDWARE_ACCELERATION = "1"
+npm run desktop:dev
+```
+
+这不是默认玩家设置，也不会写入存档或云端。必须完整退出应用后再切换；`true`、`yes` 等模糊值不会生效。不要通过该变量推断 GPU 实际启用状态，应读取运行诊断中的 `gpu.featureStatus`。V8 堆继续由 Chromium 管理，进程优先级继续由操作系统管理；在整机提交内存和前后台响应 A/B 证明收益前，不增加通用 heap/priority 参数。
 
 Android 要求 JDK 21、Android SDK 36 和 Build Tools。当前 Wrapper 固定 Gradle 8.14.3，并使用带 SHA-256 校验的腾讯云镜像以避免 GitHub 分发下载超时。
 

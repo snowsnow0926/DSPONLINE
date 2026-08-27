@@ -1,10 +1,28 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { NativeHostClient, NativeSaveSessionRegistry } = require("./native-host.cjs");
+const {
+  NativeExactRealtimeLeaseRegistry,
+  NativeHostClient,
+  NativeSaveSessionRegistry,
+} = require("./native-host.cjs");
+const {
+  NativeCoreExactRealtimeRustLeaseStore,
+} = require("./native-core-exact-realtime-experiment.cjs");
+const {
+  deriveExactTickCommandId,
+} = require("./native-core-exact-realtime-orchestrator.cjs");
+const {
+  inspectNativeExactRealtimeStartup,
+} = require("./native-exact-realtime-startup-guard.cjs");
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
 
 function fnv1a(value) {
   let hash = 0x811c9dc5;
@@ -26,6 +44,140 @@ function fnv1aUtf16(value) {
 
 const binaryPath = path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
 
+async function createSyntheticPureIdleFixture(cacheDir) {
+  const { createServer } = await import("vite");
+  const vite = await createServer({
+    root: path.resolve("."),
+    configFile: false,
+    cacheDir,
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+    optimizeDeps: { noDiscovery: true },
+  });
+  try {
+    const [engine, chunkedSaveJournal, contentPacks, nativeCoreCatalog] = await Promise.all([
+      vite.ssrLoadModule("/src/game/engine.ts"),
+      vite.ssrLoadModule("/src/game/chunkedSaveJournal.ts"),
+      vite.ssrLoadModule("/src/game/contentPacks.ts"),
+      vite.ssrLoadModule("/src/game/nativeCoreCatalog.ts"),
+    ]);
+    const state = engine.createInitialState(0x50a7e1d1);
+    const vein = state.entities.find((entity) => entity.id === "vein_iron");
+    assert.ok(vein, "the anonymous initial state must contain the iron vein");
+    state.entities = [vein];
+    state.belts = [];
+    vein.minerCount = 4;
+    vein.extractorBuildingId = "mining_machine";
+    vein.outputs = { iron_ore: 0 };
+    vein.progress = 0;
+    vein.utilization = 0;
+    vein.productionRate = 0;
+    state.entities.push(
+      {
+        id: "pure_idle_wind",
+        kind: "power",
+        planetId: "home",
+        powerGridId: "grid-a",
+        buildingId: "wind_turbine",
+        machineCount: 100_000_000_000_000,
+        position: { x: 0, y: -180 },
+        inputs: {},
+        outputs: {},
+        progress: 0,
+        utilization: 0,
+        productionRate: 0,
+        powerInputKw: 0,
+        powerOutputKw: 0,
+        routingCursor: 0,
+      },
+      {
+        id: "pure_idle_controller",
+        kind: "machine",
+        planetId: "home",
+        powerGridId: "grid-a",
+        buildingId: "time_warp_device",
+        machineCount: 1,
+        position: { x: 160, y: -180 },
+        inputs: {},
+        outputs: {},
+        progress: 0,
+        utilization: 0,
+        productionRate: 0,
+        powerFactor: 1,
+        powerInputKw: 0,
+        routingCursor: 0,
+      },
+    );
+    state.settings.resourceMode = "infinite";
+    state.settings.simulationSpeed = 1;
+    state.handcraftQueue = [];
+    state.constructionQueue = [];
+    state.constructionAutomation.enabled = false;
+    state.constructionAutomation.jobs = {};
+    state.constructionAutomation.targetStock = {};
+    state.exploration.missions = [];
+    state.systemSpaceStations = {};
+    state.quantumLogisticsNetwork.enabled = false;
+    state.quantumLogisticsNetwork.inventory = {};
+    state.endgame.activeInfiniteResearchId = null;
+    state.endgame.constructionActivity.activityId = null;
+    for (const project of Object.values(state.endgame.exportProjects)) project.enabled = false;
+    state.timeWarp = {
+      ...state.timeWarp,
+      controllerEntityId: "pure_idle_controller",
+      enabled: true,
+      requestedMultiplier: 15,
+      effectiveMultiplier: 15,
+      pendingSimulationSeconds: 0,
+      pendingWallSeconds: 0,
+      requiredPowerKw: 10 ** 16,
+      allocatedPowerKw: 10 ** 16,
+    };
+
+    const runtime = contentPacks.createContentPackRuntimeSnapshot(
+      contentPacks.createContentPackRegistry(),
+    );
+    const journal = chunkedSaveJournal.buildChunkedSaveJournal(state, {
+      mode: "normal",
+      basePrimaryChecksum: "01234567",
+      savedAt: 1,
+      retainAllChunks: true,
+    });
+    const prefix = "dsp-idle-network.internal.v1.chunked.v1.normal.";
+    return {
+      state: JSON.parse(JSON.stringify(state)),
+      registryFingerprint: runtime.fingerprint,
+      catalog: nativeCoreCatalog.createNativeCoreCatalog(runtime),
+      records: [
+        ...[...journal.chunks.entries()].map(([id, value]) => ({
+          key: `${prefix}chunk.${encodeURIComponent(id)}`,
+          value,
+        })),
+        { key: `${prefix}manifest`, value: JSON.stringify(journal.manifest) },
+      ],
+    };
+  } finally {
+    await vite.close();
+  }
+}
+
+async function seedSyntheticCheckpoint(sessions, fixture) {
+  const transaction = await sessions.begin(1, {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: fixture.registryFingerprint,
+    revision: 1,
+    savedAtMs: 1,
+  });
+  for (let index = 0; index < fixture.records.length; index += 8) {
+    await sessions.write(1, transaction.transactionId, fixture.records.slice(index, index + 8));
+  }
+  return sessions.commit(1, transaction.transactionId);
+}
+
 test("Electron client commits, recovers, deduplicates and appends WAL through the real Rust host", {
   skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
   timeout: 30_000,
@@ -39,6 +191,7 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
   const hello = await client.start("integration-test");
   assert.equal(hello.nativeFormatVersion, 1);
   assert.ok(hello.capabilities.includes("native-save-v1"));
+  assert.ok(hello.capabilities.includes("native-save-put-batch-v1"));
   const sessions = new NativeSaveSessionRegistry(client);
   const request = {
     slot: "normal-main",
@@ -49,6 +202,16 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
     revision: 1,
     savedAtMs: 1,
   };
+  const rejected = await sessions.begin(1, { ...request, revision: 0, savedAtMs: 0 });
+  await assert.rejects(
+    () => client.request({
+      operation: "savePutBatch",
+      transactionId: rejected.transactionId,
+      records: Array.from({ length: 9 }, (_, index) => ({ key: `record-${index}`, value: "{}" })),
+    }),
+    /batch size/,
+  );
+  await sessions.abort(1, rejected.transactionId);
   const first = await sessions.begin(1, request);
   await sessions.write(1, first.transactionId, [
     { key: "base", value: "{\"version\":47}" },
@@ -86,6 +249,112 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
     rootHash: recovery.rootHash,
   });
   assert.equal(readback.value, "{\"version\":47}");
+});
+
+test("real Rust lease fences normal-main saves, WAL, and compaction across a flag-off restart", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 30_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-e1-fence-integration-"));
+  let client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 10_000 });
+  t.after(async () => {
+    await client.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const hello = await client.start("exact-realtime-fence-integration");
+  assert.ok(hello.capabilities.includes("native-core-exact-realtime-lease-v2"));
+  let sessions = new NativeSaveSessionRegistry(client);
+  const normalRequest = {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: "builtin:e1-integration",
+    revision: 1,
+    savedAtMs: 1,
+  };
+  const first = await sessions.begin(1, normalRequest);
+  await sessions.write(1, first.transactionId, [{ key: "base", value: "{}" }]);
+  const checkpoint = await sessions.commit(1, first.transactionId);
+  const old = await sessions.begin(1, { ...normalRequest, revision: 2, savedAtMs: 2 });
+  await sessions.write(1, old.transactionId, [{ key: "base", value: "{\"pending\":true}" }]);
+
+  let leaseStore = new NativeCoreExactRealtimeRustLeaseStore({
+    leaseRegistry: new NativeExactRealtimeLeaseRegistry(client),
+  });
+  assert.equal((await inspectNativeExactRealtimeStartup({ leaseStore, environment: {} })).normalWindowAllowed, true);
+  const lease = await leaseStore.prepare({
+    runId: "integration-e1-run",
+    registryFingerprint: normalRequest.registryFingerprint,
+    checkpoint: {
+      generation: checkpoint.generation,
+      rootHash: checkpoint.rootHash,
+      revision: checkpoint.revision,
+    },
+    proof: {
+      revision: checkpoint.revision,
+      canonicalSha256: sha256("integration-entry-canonical"),
+      domainSha256: sha256("integration-entry-domain"),
+    },
+    settledDeadlineMs: 1_000,
+  });
+  assert.equal(lease.phase, "prepared");
+
+  await assert.rejects(
+    sessions.begin(1, { ...normalRequest, revision: 2, savedAtMs: 3 }),
+    /exact realtime lease/i,
+  );
+  await assert.rejects(sessions.commit(1, old.transactionId), /exact realtime lease/i);
+  await assert.rejects(client.request({
+    operation: "walAppend",
+    slot: "normal-main",
+    baseRevision: 1,
+    revision: 2,
+    commandId: "raw-normal-main-wal",
+    payload: { simulationSeconds: 1 },
+  }), /exact realtime lease/i);
+  await assert.rejects(
+    client.request({ operation: "compact", slot: "normal-main", retainGenerations: 2 }),
+    /exact realtime lease/i,
+  );
+
+  const speedrun = await sessions.begin(1, {
+    ...normalRequest,
+    slot: "speedrun-main",
+    mode: "speedrun",
+    registryFingerprint: "builtin:speedrun-integration",
+  });
+  await sessions.write(1, speedrun.transactionId, [{ key: "base", value: "{}" }]);
+  const speedrunCheckpoint = await sessions.commit(1, speedrun.transactionId);
+  const speedrunWal = await client.request({
+    operation: "walAppend",
+    slot: "speedrun-main",
+    baseRevision: speedrunCheckpoint.revision,
+    revision: speedrunCheckpoint.revision + 1,
+    commandId: "speedrun-wal-after-normal-lease",
+    payload: { simulationSeconds: 1 },
+  });
+  assert.equal(speedrunWal.revision, speedrunCheckpoint.revision + 1);
+  assert.equal(
+    (await client.request({ operation: "compact", slot: "speedrun-main", retainGenerations: 2 })).removedGenerations,
+    0,
+  );
+
+  await client.stop();
+  client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 10_000 });
+  await client.start("exact-realtime-fence-restart");
+  sessions = new NativeSaveSessionRegistry(client);
+  leaseStore = new NativeCoreExactRealtimeRustLeaseStore({
+    leaseRegistry: new NativeExactRealtimeLeaseRegistry(client),
+  });
+  const restartedGuard = await inspectNativeExactRealtimeStartup({ leaseStore, environment: {} });
+  assert.equal(restartedGuard.labRequested, false);
+  assert.equal(restartedGuard.leaseState, "valid");
+  assert.equal(restartedGuard.normalWindowAllowed, false);
+  await assert.rejects(
+    sessions.begin(1, { ...normalRequest, revision: 2, savedAtMs: 4 }),
+    /exact realtime lease/i,
+  );
 });
 
 test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow", {
@@ -354,5 +623,369 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(pausedAdvance.supported, true);
   assert.equal(pausedAdvance.changed, false);
   assert.equal(pausedAdvance.revision, 4);
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+});
+
+test("real Rust host permits only the lease-owned pending core commit and exact checkpoint ACK", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 60_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-e1-core-fence-"));
+  const fixture = await createSyntheticPureIdleFixture(path.join(root, "vite-cache"));
+  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
+  t.after(async () => {
+    await client.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const hello = await client.start("exact-realtime-core-fence");
+  assert.ok(hello.capabilities.includes("native-core-exact-realtime-lease-v2"));
+  assert.ok(hello.capabilities.includes("native-core-exact-realtime-writer-fence-v1"));
+  const checkpoint = await seedSyntheticCheckpoint(new NativeSaveSessionRegistry(client), fixture);
+  const opened = await client.request({
+    operation: "coreOpen",
+    slot: "normal-main",
+    generation: checkpoint.generation,
+    rootHash: checkpoint.rootHash,
+    revision: checkpoint.revision,
+    registryFingerprint: fixture.registryFingerprint,
+    catalog: fixture.catalog,
+  });
+  assert.equal(opened.authority, "shadow");
+  assert.equal(opened.summary.coverage.authorityEligible, false);
+  const runId = "integration-e1-core-run";
+  const leaseStore = new NativeCoreExactRealtimeRustLeaseStore({
+    leaseRegistry: new NativeExactRealtimeLeaseRegistry(client),
+  });
+  const prepared = await leaseStore.prepare({
+    runId,
+    registryFingerprint: fixture.registryFingerprint,
+    checkpoint: {
+      generation: checkpoint.generation,
+      rootHash: checkpoint.rootHash,
+      revision: checkpoint.revision,
+    },
+    proof: {
+      revision: opened.summary.revision,
+      canonicalSha256: opened.summary.canonicalSha256,
+      domainSha256: opened.summary.domainSha256,
+    },
+    settledDeadlineMs: 1_000,
+  });
+  await leaseStore.activate({ runId, registryFingerprint: fixture.registryFingerprint });
+
+  const genericCommit = {
+    operation: "coreCommitOperation",
+    sessionId: opened.sessionId,
+    request: {
+      commandId: "generic-commit-during-e1",
+      baseRevision: opened.summary.revision,
+      command: null,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+      advanceMode: "exact",
+      includeDiagnostics: true,
+    },
+  };
+  await assert.rejects(client.request(genericCommit), /exact realtime lease/i);
+  await assert.rejects(client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 2,
+  }), /exact realtime lease/i);
+
+  const sequence = 1;
+  const commandId = deriveExactTickCommandId(runId, sequence);
+  const settledDeadlineMs = 2_000;
+  await leaseStore.stageExactTick({
+    runId,
+    registryFingerprint: fixture.registryFingerprint,
+    sequence,
+    commandId,
+    baseRevision: prepared.acknowledged.revision,
+    expectedRevision: prepared.acknowledged.revision + 1,
+    simulationSeconds: 1,
+    wallSeconds: 1,
+    settledDeadlineMs,
+  });
+  await assert.rejects(client.request({
+    ...genericCommit,
+    request: {
+      ...genericCommit.request,
+      commandId,
+      baseRevision: prepared.acknowledged.revision,
+    },
+  }), /exact realtime lease/i);
+  const exactCommit = await client.request({
+    operation: "coreCommitOperationExactRealtime",
+    sessionId: opened.sessionId,
+    request: {
+      runId,
+      registryFingerprint: fixture.registryFingerprint,
+    },
+  });
+  assert.equal(exactCommit.duplicate, false);
+  assert.equal(exactCommit.revision, prepared.acknowledged.revision + 1);
+  const acknowledged = await client.request({
+    operation: "coreCheckpointAcknowledgeExactRealtime",
+    sessionId: opened.sessionId,
+    request: {
+      runId,
+      registryFingerprint: fixture.registryFingerprint,
+      sequence,
+      commandId,
+      settledDeadlineMs,
+    },
+  });
+  assert.equal(acknowledged.summary.revision, exactCommit.revision);
+  assert.equal(acknowledged.lease.pendingTick, null);
+  assert.equal(acknowledged.lease.acknowledged.revision, exactCommit.revision);
+  await assert.rejects(client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 3,
+  }), /exact realtime lease/i);
+  assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).revision, exactCommit.revision);
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+});
+
+test("pure-idle conservative host operations preserve credit, WAL atomicity and v47 export", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 60_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-pure-idle-host-"));
+  const fixture = await createSyntheticPureIdleFixture(path.join(root, "vite-cache"));
+  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
+  t.after(async () => {
+    await client.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const hello = await client.start("pure-idle-host-contract");
+  assert.ok(hello.capabilities.includes("native-core-shadow-v1"));
+  const sessions = new NativeSaveSessionRegistry(client);
+  const seeded = await seedSyntheticCheckpoint(sessions, fixture);
+  const openCheckpoint = (checkpoint) => client.request({
+    operation: "coreOpen",
+    slot: "normal-main",
+    generation: checkpoint.generation,
+    rootHash: checkpoint.rootHash,
+    revision: checkpoint.revision,
+    registryFingerprint: fixture.registryFingerprint,
+    catalog: fixture.catalog,
+  });
+  const project = (sessionId) => client.request({
+    operation: "coreProjection",
+    sessionId,
+    baseFields: ["elapsedSeconds", "totalProduced", "timeWarp"],
+    entityIds: ["vein_iron"],
+    beltIds: [],
+  });
+
+  let opened = await openCheckpoint(seeded);
+  const beforePrefix = await project(opened.sessionId);
+  assert.equal(beforePrefix.entities[0].outputs.iron_ore, 0);
+  const beforeExactBudgetFailures = await client.request({
+    operation: "coreStatus",
+    sessionId: opened.sessionId,
+  });
+  const recoveryBeforeExactBudgetFailures = await client.request({
+    operation: "saveRecover",
+    slot: "normal-main",
+  });
+  for (const [simulationSeconds, wallSeconds, reason] of [
+    [15, 0, "pure-idle-wall-budget-empty"],
+    [12, 1, "pure-idle-power-multiplier-changed"],
+  ]) {
+    const rejected = await client.request({
+      operation: "coreAdvance",
+      sessionId: opened.sessionId,
+      request: {
+        baseRevision: 1,
+        simulationSeconds,
+        wallSeconds,
+        advanceMode: "pure-idle-conservative-v2",
+        includeDiagnostics: true,
+      },
+    });
+    assert.equal(rejected.supported, false);
+    assert.equal(rejected.reason, reason);
+    assert.equal(rejected.revision, 1);
+  }
+  const afterExactBudgetFailures = await client.request({
+    operation: "coreStatus",
+    sessionId: opened.sessionId,
+  });
+  const recoveryAfterExactBudgetFailures = await client.request({
+    operation: "saveRecover",
+    slot: "normal-main",
+  });
+  assert.equal(afterExactBudgetFailures.revision, beforeExactBudgetFailures.revision);
+  assert.equal(
+    afterExactBudgetFailures.canonicalSha256,
+    beforeExactBudgetFailures.canonicalSha256,
+  );
+  assert.equal(
+    recoveryAfterExactBudgetFailures.walEntryCount,
+    recoveryBeforeExactBudgetFailures.walEntryCount,
+  );
+  assert.equal(
+    recoveryAfterExactBudgetFailures.walLastRevision,
+    recoveryBeforeExactBudgetFailures.walLastRevision,
+  );
+  const prefix = await client.request({
+    operation: "coreAdvance",
+    sessionId: opened.sessionId,
+    request: {
+      baseRevision: 1,
+      simulationSeconds: 15,
+      wallSeconds: 1,
+      advanceMode: "pure-idle-conservative-v2",
+      includeDiagnostics: true,
+    },
+  });
+  assert.equal(prefix.supported, true);
+  assert.equal(prefix.exactScope, "pure-idle-bounded-exact");
+  assert.equal(prefix.exactCalibrationSeconds, 15);
+  assert.equal(prefix.approximatedSeconds, 0);
+  assert.match(prefix.algorithmVersion, /^native-pure-idle-conservative-v4-/);
+  assert.equal(prefix.revision, 2);
+  const afterPrefix = await project(opened.sessionId);
+  assert.ok(afterPrefix.entities[0].outputs.iron_ore > 0);
+  assert.ok(afterPrefix.base.totalProduced.iron_ore > 0);
+  assert.equal(afterPrefix.base.timeWarp.effectiveMultiplier, 15);
+
+  const beforeInvalid = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+  await assert.rejects(
+    client.request({
+      operation: "coreAdvance",
+      sessionId: opened.sessionId,
+      request: {
+        baseRevision: 2,
+        simulationSeconds: 30 * 24 * 60 * 60 + 1,
+        wallSeconds: 1,
+        advanceMode: "pure-idle-conservative-v2",
+        includeDiagnostics: true,
+      },
+    }),
+    /pure-idle advance budget is invalid/,
+  );
+  const afterInvalid = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+  assert.equal(afterInvalid.revision, beforeInvalid.revision);
+  assert.equal(afterInvalid.canonicalSha256, beforeInvalid.canonicalSha256);
+
+  const prefixCheckpoint = await client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 2,
+  });
+  assert.equal(prefixCheckpoint.checkpoint.revision, 2);
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+  opened = await openCheckpoint(prefixCheckpoint.checkpoint);
+  assert.equal(opened.replayedWalEntries, 0);
+  assert.equal(opened.summary.revision, 2);
+  assert.equal(opened.summary.canonicalSha256, beforeInvalid.canonicalSha256);
+  const afterPrefixReopen = await project(opened.sessionId);
+  assert.deepEqual(afterPrefixReopen, afterPrefix);
+
+  const recoveryBeforeFailure = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  const statusBeforeFailure = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+  await assert.rejects(
+    client.request({
+      operation: "coreCommitOperation",
+      sessionId: opened.sessionId,
+      request: {
+        commandId: "pure-idle-invalid-multiplier",
+        baseRevision: 2,
+        command: null,
+        simulationSeconds: 60,
+        wallSeconds: 3,
+        advanceMode: "pure-idle-conservative-v2",
+        includeDiagnostics: true,
+      },
+    }),
+    /unsupported domain: pure-idle-power-multiplier-changed/,
+  );
+  const recoveryAfterFailure = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.equal(recoveryAfterFailure.walEntryCount, recoveryBeforeFailure.walEntryCount);
+  assert.equal(recoveryAfterFailure.walLastRevision, recoveryBeforeFailure.walLastRevision);
+  const statusAfterFailure = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+  assert.equal(statusAfterFailure.revision, statusBeforeFailure.revision);
+  assert.equal(statusAfterFailure.canonicalSha256, statusBeforeFailure.canonicalSha256);
+
+  const beforeDurableOutput = afterPrefixReopen.entities[0].outputs.iron_ore;
+  const durable = await client.request({
+    operation: "coreCommitOperation",
+    sessionId: opened.sessionId,
+    request: {
+      commandId: "pure-idle-final-prefix",
+      baseRevision: 2,
+      command: null,
+      simulationSeconds: 15,
+      wallSeconds: 1,
+      advanceMode: "pure-idle-conservative-v2",
+      includeDiagnostics: true,
+    },
+  });
+  assert.equal(durable.duplicate, false);
+  assert.equal(durable.revision, 3);
+  const afterDurable = await project(opened.sessionId);
+  assert.ok(
+    afterDurable.entities[0].outputs.iron_ore > beforeDurableOutput,
+    "the failed durable candidate must not consume the remaining exact-prefix credit",
+  );
+  const recoveryAfterDurable = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.equal(recoveryAfterDurable.walEntryCount, 1);
+  assert.equal(recoveryAfterDurable.walLastRevision, 3);
+
+  const durableCheckpoint = await client.request({
+    operation: "coreCheckpoint",
+    sessionId: opened.sessionId,
+    savedAtMs: 3,
+  });
+  assert.equal(durableCheckpoint.checkpoint.revision, 3);
+  const durableHash = durable.summary.canonicalSha256;
+  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+  opened = await openCheckpoint(durableCheckpoint.checkpoint);
+  assert.equal(opened.replayedWalEntries, 0);
+  assert.equal(opened.summary.revision, 3);
+  assert.equal(opened.summary.canonicalSha256, durableHash);
+  const afterDurableReopen = await project(opened.sessionId);
+  assert.deepEqual(afterDurableReopen, afterDurable);
+
+  const exported = await client.request({
+    operation: "coreExportV47",
+    sessionId: opened.sessionId,
+    exportId: "pure-idle-v47",
+    savedAtMs: 4,
+  });
+  const exportPath = path.join(root, "exports", "pure-idle-v47.json");
+  const exportRaw = fs.readFileSync(exportPath, "utf8");
+  const envelope = JSON.parse(exportRaw);
+  const exportedVein = envelope.state.entities.find((entity) => entity.id === "vein_iron");
+  assert.equal(exported.result.revision, 3);
+  assert.equal(exported.result.byteLength, Buffer.byteLength(exportRaw));
+  assert.equal(envelope.state.version, 47);
+  assert.equal(envelope.state.elapsedSeconds, afterDurableReopen.base.elapsedSeconds);
+  assert.equal(exportedVein.outputs.iron_ore, afterDurableReopen.entities[0].outputs.iron_ore);
+  assert.equal(Object.hasOwn(envelope.state, "pureIdleSession"), false);
+  const stateStart = exportRaw.indexOf("\"state\":") + "\"state\":".length;
+  const stateEnd = exportRaw.lastIndexOf(",\"checksum\":");
+  const checksumInput = `{\"formatVersion\":2,\"state\":${exportRaw.slice(stateStart, stateEnd)}}`;
+  assert.equal(envelope.checksum, fnv1aUtf16(checksumInput));
+
+  const exhausted = await client.request({
+    operation: "coreAdvance",
+    sessionId: opened.sessionId,
+    request: {
+      baseRevision: 3,
+      simulationSeconds: 15,
+      wallSeconds: 1,
+      advanceMode: "pure-idle-conservative-v2",
+      includeDiagnostics: true,
+    },
+  });
+  assert.equal(exhausted.supported, true);
+  assert.equal(exhausted.exactCalibrationSeconds, 0);
+  assert.equal(exhausted.approximatedSeconds, 15);
+  assert.equal((await project(opened.sessionId)).entities[0].outputs.iron_ore, exportedVein.outputs.iron_ore);
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
 });

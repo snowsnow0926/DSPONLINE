@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::PlanetDefinition;
-use crate::state::CoreState;
+use crate::state::{CoreState, ExactRowIdIndex, SharedArc};
 
 const EPSILON: f64 = 0.0001;
 const SLOT_COUNT: usize = 5;
@@ -48,9 +48,17 @@ struct PlannedPath {
 #[derive(Debug, Default)]
 struct Ledger {
     busy: HashMap<usize, f64>,
+    local_busy: HashMap<usize, f64>,
     reserved: HashMap<(usize, String), f64>,
     in_flight: HashMap<(usize, String), f64>,
     active_vehicle_load: HashMap<usize, f64>,
+    active_progress: HashMap<usize, f64>,
+    active_remote_stations: HashSet<usize>,
+}
+
+#[derive(Debug, Default)]
+struct LocalSupplyDirectory {
+    by_planet_item: HashMap<String, HashMap<String, Vec<usize>>>,
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -298,6 +306,12 @@ fn traditional_remote_disabled(entity: &Map<String, Value>) -> bool {
         || entity
             .get("quantumTransition")
             .is_some_and(|value| !value.is_null())
+}
+
+fn is_legacy_interstellar_station(entity: &Map<String, Value>) -> bool {
+    string_at(entity, "buildingId") == Some("interstellar_logistics_station")
+        && !(finite_number(entity.get("stationTier")).floor() == 2.0
+            && string_at(entity, "stationOperationMode") == Some("elevator"))
 }
 
 pub(crate) fn refill_station_warpers(
@@ -918,8 +932,32 @@ pub(crate) fn run_orbital_collectors(
     Ok(())
 }
 
-fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger {
+trait EntityIndexLookup {
+    fn get(&self, id: &str) -> Option<&usize>;
+}
+
+impl EntityIndexLookup for ExactRowIdIndex {
+    fn get(&self, id: &str) -> Option<&usize> {
+        self.get(id)
+    }
+}
+
+impl EntityIndexLookup for SharedArc<ExactRowIdIndex> {
+    fn get(&self, id: &str) -> Option<&usize> {
+        ExactRowIdIndex::get(self, id)
+    }
+}
+
+#[cfg(test)]
+impl EntityIndexLookup for HashMap<String, usize> {
+    fn get(&self, id: &str) -> Option<&usize> {
+        HashMap::get(self, id)
+    }
+}
+
+fn build_ledger<I: EntityIndexLookup + ?Sized>(entities: &[Value], indexes: &I) -> Ledger {
     let mut ledger = Ledger::default();
+    let mut active_stations = Vec::<usize>::with_capacity(8);
     for (demand_index, demand) in entities
         .iter()
         .enumerate()
@@ -929,15 +967,7 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
             continue;
         };
         for route in routes.iter().filter_map(Value::as_object) {
-            let Some(scope) = string_at(route, "scope") else {
-                continue;
-            };
-            if !matches!(scope, "local" | "remote") {
-                continue;
-            }
-            let vehicles = finite_number(route.get("vehicleCount")).floor().max(0.0);
-            let cargo = finite_number(route.get("cargo")).floor().max(0.0);
-            let item = string_at(route, "itemId").unwrap_or_default().to_owned();
+            let scope = string_at(route, "scope");
             let owner = indexes
                 .get(route_owner_id(demand, route))
                 .copied()
@@ -945,17 +975,15 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
             let supply = string_at(route, "peerId")
                 .and_then(|id| indexes.get(id))
                 .copied();
-            if scope == "remote" {
-                *ledger.busy.entry(owner).or_default() += vehicles;
+            active_stations.clear();
+            active_stations.push(demand_index);
+            if owner != demand_index {
+                active_stations.push(owner);
             }
-            *ledger
-                .in_flight
-                .entry((demand_index, item.clone()))
-                .or_default() += cargo;
-            let mut active_stations = HashSet::from([demand_index, owner]);
-            if let Some(supply) = supply {
-                *ledger.reserved.entry((supply, item)).or_default() += cargo;
-                active_stations.insert(supply);
+            if let Some(supply) = supply
+                && !active_stations.contains(&supply)
+            {
+                active_stations.push(supply);
             }
             for waypoint in route
                 .get("waypointStationIds")
@@ -963,11 +991,40 @@ fn build_ledger(entities: &[Value], indexes: &HashMap<String, usize>) -> Ledger 
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .filter_map(|id| indexes.get(id))
+                .filter_map(|id| indexes.get(id).copied())
             {
-                active_stations.insert(*waypoint);
+                if !active_stations.contains(&waypoint) {
+                    active_stations.push(waypoint);
+                }
             }
-            for station_index in active_stations {
+            let progress = finite_number(route.get("progress"));
+            for &station_index in &active_stations {
+                let active_progress = ledger.active_progress.entry(station_index).or_default();
+                *active_progress = active_progress.max(progress);
+            }
+            if !matches!(scope, Some("local" | "remote")) {
+                continue;
+            }
+            let raw_vehicles = finite_number(route.get("vehicleCount"));
+            let vehicles = raw_vehicles.floor().max(0.0);
+            let cargo = finite_number(route.get("cargo")).floor().max(0.0);
+            let item = string_at(route, "itemId").unwrap_or_default().to_owned();
+            if scope == Some("remote") {
+                *ledger.busy.entry(owner).or_default() += vehicles;
+                ledger
+                    .active_remote_stations
+                    .extend(active_stations.iter().copied());
+            } else {
+                *ledger.local_busy.entry(owner).or_default() += raw_vehicles;
+            }
+            *ledger
+                .in_flight
+                .entry((demand_index, item.clone()))
+                .or_default() += cargo;
+            if let Some(supply) = supply {
+                *ledger.reserved.entry((supply, item)).or_default() += cargo;
+            }
+            for &station_index in &active_stations {
                 *ledger.active_vehicle_load.entry(station_index).or_default() += vehicles;
             }
         }
@@ -1008,7 +1065,7 @@ fn peer_matches(
     };
     let planet_id = string_at(station, "planetId");
     let mut matches = Vec::new();
-    for peer_index in station_indices(entities) {
+    for peer_index in state.factory_topology.station_indices.iter().copied() {
         if peer_index == station_index {
             continue;
         }
@@ -1037,7 +1094,7 @@ fn peer_matches(
             }
             continue;
         }
-        if string_at(peer, "buildingId") != Some("interstellar_logistics_station") {
+        if !is_legacy_interstellar_station(peer) {
             continue;
         }
         for (peer_slot_index, peer_slot) in slots(peer)?.iter().enumerate() {
@@ -1091,47 +1148,6 @@ fn peer_matches(
             .then_with(|| left_slot.cmp(right_slot))
     });
     Ok(matches)
-}
-
-fn route_active_for_station(
-    entities: &[Value],
-    indexes: &HashMap<String, usize>,
-    station_index: usize,
-) -> bool {
-    entities.iter().enumerate().any(|(demand_index, value)| {
-        let Some(demand) = value.as_object() else {
-            return false;
-        };
-        demand
-            .get("stationRoutes")
-            .and_then(Value::as_array)
-            .is_some_and(|routes| {
-                routes.iter().filter_map(Value::as_object).any(|route| {
-                    if string_at(route, "scope") != Some("remote") {
-                        return false;
-                    }
-                    let supply = string_at(route, "peerId")
-                        .and_then(|id| indexes.get(id))
-                        .copied();
-                    let owner = indexes
-                        .get(route_owner_id(demand, route))
-                        .copied()
-                        .unwrap_or(demand_index);
-                    let waypoint = route
-                        .get("waypointStationIds")
-                        .and_then(Value::as_array)
-                        .is_some_and(|ids| {
-                            ids.iter()
-                                .filter_map(Value::as_str)
-                                .any(|id| indexes.get(id).copied() == Some(station_index))
-                        });
-                    demand_index == station_index
-                        || supply == Some(station_index)
-                        || owner == station_index
-                        || waypoint
-                })
-            })
-    })
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -1251,24 +1267,26 @@ pub(crate) fn ready_station_indices(
     base: &Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<HashSet<usize>> {
-    if !entities.iter().filter_map(Value::as_object).any(|station| {
-        string_at(station, "buildingId") == Some("interstellar_logistics_station")
-            && !traditional_remote_disabled(station)
+    let station_indices = &state.factory_topology.station_indices;
+    if !station_indices.iter().copied().any(|index| {
+        entities[index].as_object().is_some_and(|station| {
+            is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
+        })
     }) {
         return Ok(HashSet::new());
     }
-    let indexes = entity_index(entities);
-    let ledger = build_ledger(entities, &indexes);
-    let mut ready = HashSet::new();
-    for station_index in station_indices(entities) {
+    let indexes = &state.entity_index;
+    let ledger = build_ledger(entities, indexes);
+    let mut ready = HashSet::with_capacity(station_indices.len());
+    for station_index in station_indices.iter().copied() {
         let station = entities[station_index].as_object().expect("station object");
-        if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
+        if !is_legacy_interstellar_station(station) {
             continue;
         }
         if traditional_remote_disabled(station) {
             continue;
         }
-        if route_active_for_station(entities, &indexes, station_index) {
+        if ledger.active_remote_stations.contains(&station_index) {
             ready.insert(station_index);
             continue;
         }
@@ -1369,20 +1387,22 @@ pub(crate) fn dispatch(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
 ) -> anyhow::Result<()> {
-    if !entities.iter().filter_map(Value::as_object).any(|station| {
-        string_at(station, "buildingId") == Some("interstellar_logistics_station")
-            && !traditional_remote_disabled(station)
+    let station_indices = &state.factory_topology.station_indices;
+    if !station_indices.iter().copied().any(|index| {
+        entities[index].as_object().is_some_and(|station| {
+            is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
+        })
     }) {
         return Ok(());
     }
-    let indexes = entity_index(entities);
-    let mut ledger = build_ledger(entities, &indexes);
-    for demand_index in station_indices(entities) {
+    let indexes = &state.entity_index;
+    let mut ledger = build_ledger(entities, indexes);
+    for demand_index in station_indices.iter().copied() {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?
             .clone();
-        if string_at(&demand_snapshot, "buildingId") != Some("interstellar_logistics_station") {
+        if !is_legacy_interstellar_station(&demand_snapshot) {
             continue;
         }
         if traditional_remote_disabled(&demand_snapshot) {
@@ -1843,52 +1863,85 @@ pub(crate) fn advance_routes(
     Ok(())
 }
 
+fn build_local_supply_directory(
+    entities: &[Value],
+    station_indices: &[usize],
+) -> LocalSupplyDirectory {
+    let mut directory = LocalSupplyDirectory::default();
+    for &station_index in station_indices {
+        let Some(station) = entities.get(station_index).and_then(Value::as_object) else {
+            continue;
+        };
+        let building = string_at(station, "buildingId");
+        if !matches!(building, Some("interstellar_logistics_station"))
+            || (finite_number(station.get("stationTier")).floor() == 2.0
+                && string_at(station, "stationOperationMode") == Some("elevator"))
+        {
+            continue;
+        }
+        let planet_id = string_at(station, "planetId").unwrap_or_default();
+        for slot in station
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+        {
+            if string_at(slot, "localMode") != Some("supply") {
+                continue;
+            }
+            let Some(item_id) = string_at(slot, "itemId") else {
+                continue;
+            };
+            if !directory.by_planet_item.contains_key(planet_id) {
+                directory
+                    .by_planet_item
+                    .insert(planet_id.to_owned(), HashMap::new());
+            }
+            let items = directory
+                .by_planet_item
+                .get_mut(planet_id)
+                .expect("inserted native local supply planet");
+            if !items.contains_key(item_id) {
+                items.insert(item_id.to_owned(), Vec::new());
+            }
+            let stations = items
+                .get_mut(item_id)
+                .expect("inserted native local supply item");
+            if stations.last().copied() != Some(station_index) {
+                stations.push(station_index);
+            }
+        }
+    }
+    directory
+}
+
 fn local_peer_exists(
+    directory: &LocalSupplyDirectory,
     entities: &[Value],
     station_index: usize,
     slot_index: usize,
 ) -> anyhow::Result<bool> {
     let station = entities[station_index].as_object().expect("station object");
-    let station_slot = slots(station)?[slot_index].clone();
-    let Some(item_id) = station_slot.item_id.as_deref() else {
-        return Ok(false);
-    };
-    let local_mode = station
+    let station_slot = station
         .get("stationSlots")
         .and_then(Value::as_array)
         .and_then(|slots| slots.get(slot_index))
         .and_then(Value::as_object)
-        .and_then(|slot| string_at(slot, "localMode"))
-        .unwrap_or("storage");
+        .ok_or_else(|| anyhow!("native interstellar slot index is invalid"))?;
+    let Some(item_id) = string_at(station_slot, "itemId") else {
+        return Ok(false);
+    };
+    let local_mode = string_at(station_slot, "localMode").unwrap_or("storage");
     if local_mode != "demand" {
         return Ok(false);
     }
-    for peer_index in station_indices(entities) {
-        if peer_index == station_index {
-            continue;
-        }
-        let peer = entities[peer_index].as_object().expect("station object");
-        if string_at(peer, "planetId") != string_at(station, "planetId")
-            || !matches!(
-                string_at(peer, "buildingId"),
-                Some("planetary_logistics_station" | "interstellar_logistics_station")
-            )
-        {
-            continue;
-        }
-        let peer_slots = peer
-            .get("stationSlots")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten();
-        if peer_slots.filter_map(Value::as_object).any(|peer_slot| {
-            string_at(peer_slot, "itemId") == Some(item_id)
-                && string_at(peer_slot, "localMode") == Some("supply")
-        }) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let planet_id = string_at(station, "planetId").unwrap_or_default();
+    Ok(directory
+        .by_planet_item
+        .get(planet_id)
+        .and_then(|items| items.get(item_id))
+        .is_some_and(|stations| stations.iter().any(|&peer| peer != station_index)))
 }
 
 pub(crate) fn update_congestion(
@@ -1896,18 +1949,21 @@ pub(crate) fn update_congestion(
     base: &Map<String, Value>,
     entities: &mut [Value],
 ) -> anyhow::Result<()> {
-    if !entities.iter().filter_map(Value::as_object).any(|station| {
-        string_at(station, "buildingId") == Some("interstellar_logistics_station")
-            && !traditional_remote_disabled(station)
+    let station_indices = &state.factory_topology.station_indices;
+    if !station_indices.iter().copied().any(|index| {
+        entities[index].as_object().is_some_and(|station| {
+            is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
+        })
     }) {
         return Ok(());
     }
-    let indexes = entity_index(entities);
-    let ledger = build_ledger(entities, &indexes);
-    let mut updates = Vec::new();
-    for station_index in station_indices(entities) {
+    let indexes = &state.entity_index;
+    let ledger = build_ledger(entities, indexes);
+    let local_supply_directory = build_local_supply_directory(entities, station_indices);
+    let mut updates = Vec::with_capacity(station_indices.len());
+    for station_index in station_indices.iter().copied() {
         let station = entities[station_index].as_object().expect("station object");
-        if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
+        if !is_legacy_interstellar_station(station) {
             continue;
         }
         if traditional_remote_disabled(station) {
@@ -1921,35 +1977,19 @@ pub(crate) fn update_congestion(
             }
             let remote_waiting = slot.remote_mode == "demand"
                 && !peer_matches(state, base, entities, station_index, slot_index)?.is_empty();
-            if remote_waiting || local_peer_exists(entities, station_index, slot_index)? {
+            if remote_waiting
+                || local_peer_exists(&local_supply_directory, entities, station_index, slot_index)?
+            {
                 waiting += 1.0;
             }
         }
         let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
             + vessel_capacity(station);
-        let mut local_busy = 0.0;
-        for (demand_index, demand) in entities
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
-        {
-            for route in demand
-                .get("stationRoutes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-                .filter(|route| string_at(route, "scope") == Some("local"))
-            {
-                let owner = indexes
-                    .get(route_owner_id(demand, route))
-                    .copied()
-                    .unwrap_or(demand_index);
-                if owner == station_index {
-                    local_busy += finite_number(route.get("vehicleCount"));
-                }
-            }
-        }
+        let local_busy = ledger
+            .local_busy
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0);
         let busy = local_busy + ledger.busy.get(&station_index).copied().unwrap_or(0.0);
         let fleet_load = if installed > 0.0 {
             busy / installed
@@ -1965,43 +2005,11 @@ pub(crate) fn update_congestion(
                 0.0
             })
             .clamp(0.0, 1.0);
-        let mut active_progress = 0.0_f64;
-        for (demand_index, demand) in entities
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
-        {
-            for route in demand
-                .get("stationRoutes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                let supply = string_at(route, "peerId")
-                    .and_then(|id| indexes.get(id))
-                    .copied();
-                let owner = indexes
-                    .get(route_owner_id(demand, route))
-                    .copied()
-                    .unwrap_or(demand_index);
-                let waypoint = route
-                    .get("waypointStationIds")
-                    .and_then(Value::as_array)
-                    .is_some_and(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .any(|id| indexes.get(id).copied() == Some(station_index))
-                    });
-                if demand_index == station_index
-                    || supply == Some(station_index)
-                    || owner == station_index
-                    || waypoint
-                {
-                    active_progress = active_progress.max(finite_number(route.get("progress")));
-                }
-            }
-        }
+        let active_progress = ledger
+            .active_progress
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0);
         updates.push((station_index, rounded(congestion, 3), active_progress));
     }
     for (station_index, congestion, active_progress) in updates {
@@ -2012,4 +2020,415 @@ pub(crate) fn update_congestion(
         set_number(target, "stationProgress", active_progress)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn pick(&mut self, upper: usize) -> usize {
+            (self.next() as usize) % upper
+        }
+    }
+
+    fn random_slot(rng: &mut Lcg, slot_index: usize) -> Value {
+        let item = [None, Some("iron_ingot"), Some("copper_ingot")][rng.pick(3)];
+        let local_mode = ["storage", "supply", "demand"][rng.pick(3)];
+        let remote_mode = ["storage", "supply", "demand"][rng.pick(3)];
+        let minimum_load = [0.1, 0.25, 0.5, 1.0][rng.pick(4)];
+        json!({
+            "itemId": item,
+            "localMode": local_mode,
+            "remoteMode": remote_mode,
+            "minimumLoad": minimum_load,
+            "minStock": rng.pick(8),
+            "maxStock": 1000,
+            "priority": rng.pick(3),
+            "routePolicy": "relay-preferred",
+            "warperBudget": 1,
+            "modSlotPayload": { "slot": slot_index, "unknown": [1, 2, 3] },
+        })
+    }
+
+    fn random_entities(seed: u64) -> Vec<Value> {
+        let mut rng = Lcg(seed ^ 0x9e37_79b9_7f4a_7c15);
+        let station_count = 4 + rng.pick(13);
+        let mut entities = Vec::with_capacity(station_count + 2);
+        for index in 0..station_count {
+            let building = match rng.pick(7) {
+                0 => "orbital_collector",
+                1 => "planetary_logistics_station",
+                _ => "interstellar_logistics_station",
+            };
+            let mut routes = Vec::new();
+            for route_index in 0..rng.pick(5) {
+                let peer = if rng.pick(5) == 0 {
+                    "unknown-peer".to_owned()
+                } else {
+                    format!("station_{}", rng.pick(station_count))
+                };
+                let owner = if rng.pick(4) == 0 {
+                    None
+                } else if rng.pick(5) == 0 {
+                    Some("unknown-owner".to_owned())
+                } else {
+                    Some(format!("station_{}", rng.pick(station_count)))
+                };
+                let scope = [Some("local"), Some("remote"), Some("mod-scope"), None][rng.pick(4)];
+                let item_id = ["", "iron_ingot", "copper_ingot"][rng.pick(3)];
+                let cargo = [0.0, 1.0, 10.75, -2.0][rng.pick(4)];
+                let vehicle_count = [0.0, 1.0, 2.75, -1.0][rng.pick(4)];
+                let progress = [0.0, 0.25, 0.75, 1.0][rng.pick(4)];
+                let mut route = json!({
+                    "id": format!("route_{index}_{route_index}"),
+                    "peerId": peer,
+                    "itemId": item_id,
+                    "cargo": cargo,
+                    "vehicleCount": vehicle_count,
+                    "progress": progress,
+                    "waypointStationIds": [
+                        format!("station_{}", rng.pick(station_count)),
+                        format!("station_{}", rng.pick(station_count)),
+                        "unknown-waypoint",
+                    ],
+                    "modRoutePayload": { "nested": { "value": route_index } },
+                });
+                let route = route.as_object_mut().expect("random route object");
+                if let Some(scope) = scope {
+                    route.insert("scope".to_owned(), Value::from(scope));
+                }
+                if let Some(owner) = owner {
+                    route.insert("vehicleStationId".to_owned(), Value::from(owner));
+                }
+                routes.push(Value::Object(route.clone()));
+            }
+            let slots = (0..SLOT_COUNT)
+                .map(|slot| random_slot(&mut rng, slot))
+                .collect::<Vec<_>>();
+            entities.push(json!({
+                "id": format!("station_{index}"),
+                "kind": "station",
+                "buildingId": building,
+                "planetId": format!("planet_{}", rng.pick(4)),
+                "stationTier": if rng.pick(7) == 0 { 2 } else { 1 },
+                "stationOperationMode": if rng.pick(7) == 0 { "elevator" } else { "legacy" },
+                "stationSlots": slots,
+                "stationRoutes": routes,
+                "modStationPayload": { "preserve": true, "values": [seed, index as u64] },
+            }));
+        }
+        entities.push(json!({
+            "id": "machine_with_mod_route",
+            "kind": "machine",
+            "buildingId": "assembler_mk1",
+            "stationRoutes": [{
+                "scope": "mod-scope",
+                "peerId": "station_0",
+                "progress": 0.875,
+                "waypointStationIds": ["station_1", "station_1"],
+                "modOnly": true,
+            }],
+        }));
+        entities
+    }
+
+    fn indexes(entities: &[Value]) -> HashMap<String, usize> {
+        entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                entity
+                    .as_object()
+                    .and_then(|object| string_at(object, "id"))
+                    .map(|id| (id.to_owned(), index))
+            })
+            .collect()
+    }
+
+    fn route_touches_station(
+        demand_index: usize,
+        demand: &Map<String, Value>,
+        route: &Map<String, Value>,
+        indexes: &HashMap<String, usize>,
+        station_index: usize,
+    ) -> bool {
+        let supply = string_at(route, "peerId")
+            .and_then(|id| indexes.get(id))
+            .copied();
+        let owner = indexes
+            .get(route_owner_id(demand, route))
+            .copied()
+            .unwrap_or(demand_index);
+        let waypoint = route
+            .get("waypointStationIds")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .any(|id| indexes.get(id).copied() == Some(station_index))
+            });
+        demand_index == station_index
+            || supply == Some(station_index)
+            || owner == station_index
+            || waypoint
+    }
+
+    fn legacy_local_peer_exists(
+        entities: &[Value],
+        legacy_station_indices: &[usize],
+        station_index: usize,
+        slot_index: usize,
+    ) -> bool {
+        let station = entities[station_index].as_object().expect("station object");
+        let Some(station_slot) = station
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .and_then(|slots| slots.get(slot_index))
+            .and_then(Value::as_object)
+        else {
+            return false;
+        };
+        let Some(item_id) = string_at(station_slot, "itemId") else {
+            return false;
+        };
+        if string_at(station_slot, "localMode").unwrap_or("storage") != "demand" {
+            return false;
+        }
+        legacy_station_indices.iter().copied().any(|peer_index| {
+            if peer_index == station_index {
+                return false;
+            }
+            let peer = entities[peer_index].as_object().expect("station object");
+            if string_at(peer, "planetId") != string_at(station, "planetId")
+                || !matches!(
+                    string_at(peer, "buildingId"),
+                    Some("planetary_logistics_station" | "interstellar_logistics_station")
+                )
+            {
+                return false;
+            }
+            peer.get("stationSlots")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+                .any(|peer_slot| {
+                    string_at(peer_slot, "itemId") == Some(item_id)
+                        && string_at(peer_slot, "localMode") == Some("supply")
+                })
+        })
+    }
+
+    #[test]
+    fn single_pass_route_ledger_matches_nested_scan_oracle_for_2048_random_states() {
+        for seed in 0..2048_u64 {
+            let entities = random_entities(seed);
+            let original = entities.clone();
+            let indexes = indexes(&entities);
+            let ledger = build_ledger(&entities, &indexes);
+            let items = ["", "iron_ingot", "copper_ingot"];
+            for station_index in 0..entities.len() {
+                let mut expected_remote_busy = 0.0;
+                let mut expected_local_busy = 0.0;
+                let mut expected_active_load = 0.0;
+                let mut expected_progress = 0.0_f64;
+                let mut expected_remote_active = false;
+                for (demand_index, demand) in entities
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
+                {
+                    for route in demand
+                        .get("stationRoutes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_object)
+                    {
+                        if !route_touches_station(
+                            demand_index,
+                            demand,
+                            route,
+                            &indexes,
+                            station_index,
+                        ) {
+                            continue;
+                        }
+                        expected_progress =
+                            expected_progress.max(finite_number(route.get("progress")));
+                        match string_at(route, "scope") {
+                            Some("remote") => {
+                                expected_remote_active = true;
+                                expected_active_load +=
+                                    finite_number(route.get("vehicleCount")).floor().max(0.0);
+                            }
+                            Some("local") => {
+                                expected_active_load +=
+                                    finite_number(route.get("vehicleCount")).floor().max(0.0);
+                            }
+                            _ => {}
+                        }
+                        let owner = indexes
+                            .get(route_owner_id(demand, route))
+                            .copied()
+                            .unwrap_or(demand_index);
+                        if owner == station_index {
+                            match string_at(route, "scope") {
+                                Some("remote") => {
+                                    expected_remote_busy +=
+                                        finite_number(route.get("vehicleCount")).floor().max(0.0);
+                                }
+                                Some("local") => {
+                                    expected_local_busy += finite_number(route.get("vehicleCount"));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    ledger.busy.get(&station_index).copied().unwrap_or(0.0),
+                    expected_remote_busy,
+                    "remote busy mismatch for seed {seed}, station {station_index}"
+                );
+                assert_eq!(
+                    ledger
+                        .local_busy
+                        .get(&station_index)
+                        .copied()
+                        .unwrap_or(0.0),
+                    expected_local_busy,
+                    "local busy mismatch for seed {seed}, station {station_index}"
+                );
+                assert_eq!(
+                    ledger
+                        .active_vehicle_load
+                        .get(&station_index)
+                        .copied()
+                        .unwrap_or(0.0),
+                    expected_active_load,
+                    "active load mismatch for seed {seed}, station {station_index}"
+                );
+                assert_eq!(
+                    ledger
+                        .active_progress
+                        .get(&station_index)
+                        .copied()
+                        .unwrap_or(0.0),
+                    expected_progress,
+                    "active progress mismatch for seed {seed}, station {station_index}"
+                );
+                assert_eq!(
+                    ledger.active_remote_stations.contains(&station_index),
+                    expected_remote_active,
+                    "remote activity mismatch for seed {seed}, station {station_index}"
+                );
+                for item_id in items {
+                    let mut expected_in_flight = 0.0;
+                    let mut expected_reserved = 0.0;
+                    for (demand_index, demand) in
+                        entities.iter().enumerate().filter_map(|(index, value)| {
+                            value.as_object().map(|object| (index, object))
+                        })
+                    {
+                        for route in demand
+                            .get("stationRoutes")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_object)
+                            .filter(|route| {
+                                matches!(string_at(route, "scope"), Some("local" | "remote"))
+                                    && string_at(route, "itemId").unwrap_or_default() == item_id
+                            })
+                        {
+                            let cargo = finite_number(route.get("cargo")).floor().max(0.0);
+                            if demand_index == station_index {
+                                expected_in_flight += cargo;
+                            }
+                            if string_at(route, "peerId")
+                                .and_then(|id| indexes.get(id))
+                                .copied()
+                                == Some(station_index)
+                            {
+                                expected_reserved += cargo;
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        ledger
+                            .in_flight
+                            .get(&(station_index, item_id.to_owned()))
+                            .copied()
+                            .unwrap_or(0.0),
+                        expected_in_flight,
+                        "in-flight mismatch for seed {seed}, station {station_index}, item {item_id}"
+                    );
+                    assert_eq!(
+                        ledger
+                            .reserved
+                            .get(&(station_index, item_id.to_owned()))
+                            .copied()
+                            .unwrap_or(0.0),
+                        expected_reserved,
+                        "reserved mismatch for seed {seed}, station {station_index}, item {item_id}"
+                    );
+                }
+            }
+            assert_eq!(
+                entities, original,
+                "ledger mutated MOD payload for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_local_supply_lookup_matches_legacy_station_scan_for_2048_random_states() {
+        for seed in 0..2048_u64 {
+            let entities = random_entities(seed);
+            let all_station_indices = entities
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entity)| {
+                    entity
+                        .as_object()
+                        .is_some_and(|object| string_at(object, "kind") == Some("station"))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let legacy_station_indices = station_indices(&entities);
+            let directory = build_local_supply_directory(&entities, &all_station_indices);
+            for &station_index in &legacy_station_indices {
+                let station = entities[station_index].as_object().expect("station object");
+                if string_at(station, "buildingId") != Some("interstellar_logistics_station") {
+                    continue;
+                }
+                for slot_index in 0..SLOT_COUNT {
+                    assert_eq!(
+                        local_peer_exists(&directory, &entities, station_index, slot_index)
+                            .expect("indexed local peer lookup"),
+                        legacy_local_peer_exists(
+                            &entities,
+                            &legacy_station_indices,
+                            station_index,
+                            slot_index,
+                        ),
+                        "local peer mismatch for seed {seed}, station {station_index}, slot {slot_index}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -11,7 +11,9 @@ pub mod catalog;
 pub mod command;
 mod construction;
 mod construction_planner;
+mod deterministic_runtime;
 mod dyson;
+mod entity_raw;
 mod galactic_exports;
 mod global_progress;
 mod infinite_research;
@@ -39,7 +41,8 @@ pub use command::{CommandApplyResult, SimulationCommandPatch};
 pub use simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 pub use state::{
     CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage,
-    InternalCheckpointVisitResult, RuntimeMemoryEstimate, V47EnvelopeExportResult,
+    EntityRawWritebackDiagnostics, InternalCheckpointVisitResult, RuntimeMemoryEstimate,
+    V47EnvelopeExportResult,
 };
 
 pub const CORE_PROTOCOL_VERSION: u16 = 1;

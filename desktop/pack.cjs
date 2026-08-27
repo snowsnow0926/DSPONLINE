@@ -4,13 +4,25 @@ const { spawn } = require("node:child_process");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
 const { validatePackagedTransferContract } = require("./package-contract.cjs");
 const { verifyDesktopPackageHygiene } = require("./package-hygiene.cjs");
+const {
+  PERFORMANCE_EDITION_IDENTITY,
+  resolvePerformanceEditionOutputDirectory,
+  validatePerformanceEditionPackageIdentity,
+  verifyPackagedPerformanceEditionIdentity,
+} = require("./performance-edition-identity.cjs");
 const { extractFile } = require("@electron/asar");
 
+const repositoryRoot = path.resolve(__dirname, "..");
+const packageMetadata = require("../package.json");
+validatePerformanceEditionPackageIdentity(packageMetadata, {
+  requireBuildConfiguration: true,
+  requireOfflineDefaults: true,
+});
 const expectedTransferContract = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "cloud-transfer-contract.json"), "utf8"));
 
 const builderEntry = require.resolve("electron-builder/cli");
 const mode = process.argv[2] || "pack";
-const outputDirectory = path.resolve(process.env.DSP_DESKTOP_OUTPUT_DIR || "release");
+const outputDirectory = resolvePerformanceEditionOutputDirectory(repositoryRoot);
 const releaseChannel = resolveReleaseChannel(process.env.DSP_RELEASE_CHANNEL);
 const updateBaseUrl = optionalHttpsUrl(process.env.DSP_UPDATE_BASE_URL, "Desktop update base URL");
 const cloudApiBaseUrl = optionalHttpsUrl(process.env.DSP_DESKTOP_API_BASE_URL, "Desktop cloud API base URL");
@@ -39,8 +51,14 @@ function runBuilder(args) {
 }
 
 function verifyPackagedOutput(outputDirectory) {
-  const asarPath = path.join(outputDirectory, "win-unpacked", "resources", "app.asar");
+  const unpackedDirectory = path.join(outputDirectory, "win-unpacked");
+  const asarPath = path.join(unpackedDirectory, "resources", "app.asar");
   verifyDesktopPackageHygiene(asarPath);
+  verifyPackagedPerformanceEditionIdentity({
+    asarPath,
+    unpackedDirectory,
+    extractAsarFile: extractFile,
+  });
   if (mode !== "dist") return;
   const metadata = JSON.parse(extractFile(asarPath, "package.json").toString("utf8"));
   if (metadata.cloudApiBaseUrl !== cloudApiBaseUrl || metadata.updateBaseUrl !== updateBaseUrl) {
@@ -57,6 +75,8 @@ async function main() {
   if (!["pack", "dist"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
+    `--config.extraMetadata.desktopEditionId=${PERFORMANCE_EDITION_IDENTITY.editionId}`,
+    `--config.extraMetadata.productName=${PERFORMANCE_EDITION_IDENTITY.productName}`,
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
     `--config.directories.output=${outputDirectory}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
@@ -78,6 +98,8 @@ async function main() {
   console.warn("标准目录包被 Windows 文件锁阻塞，使用已解压 Electron 分发重试。", fallbackOutput);
   const fallbackResult = await runBuilder([
     ...(mode === "pack" ? ["--dir"] : []),
+    `--config.extraMetadata.desktopEditionId=${PERFORMANCE_EDITION_IDENTITY.editionId}`,
+    `--config.extraMetadata.productName=${PERFORMANCE_EDITION_IDENTITY.productName}`,
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),

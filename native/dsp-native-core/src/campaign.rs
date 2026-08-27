@@ -364,42 +364,82 @@ fn number_in_record(base: &Map<String, Value>, record: &str, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Default)]
+struct CampaignFactoryMetrics {
+    building_counts: HashMap<String, f64>,
+    station_trips: HashMap<String, f64>,
+    miner_count: f64,
+    belt_counts_by_minimum_tier: HashMap<u8, f64>,
+    spray_coater_installed: bool,
+}
+
+impl CampaignFactoryMetrics {
+    fn collect(state: &CoreState, entities: &[Value]) -> Self {
+        let mut metrics = Self::default();
+        let minimum_belt_tiers = TASKS
+            .iter()
+            .filter_map(|task| match task.metric {
+                Metric::Belt { minimum_tier, .. } => Some(minimum_tier),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        for entity in entities.iter().filter_map(Value::as_object) {
+            metrics.miner_count += finite_number(entity.get("minerCount"));
+            metrics.spray_coater_installed |= entity
+                .get("sprayCoaterInstalled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let Some(building_id) = string_at(entity, "buildingId") else {
+                continue;
+            };
+            let machine_count = finite_number(entity.get("machineCount"));
+            let count = if machine_count != 0.0 {
+                machine_count
+            } else {
+                finite_number(entity.get("minerCount"))
+            };
+            *metrics
+                .building_counts
+                .entry(building_id.to_owned())
+                .or_default() += count.max(1.0);
+            *metrics
+                .station_trips
+                .entry(building_id.to_owned())
+                .or_default() += finite_number(entity.get("stationTrips"));
+        }
+        for &tier in &state.belts.tiers {
+            for &minimum_tier in &minimum_belt_tiers {
+                if minimum_tier == 0 || tier >= minimum_tier {
+                    *metrics
+                        .belt_counts_by_minimum_tier
+                        .entry(minimum_tier)
+                        .or_default() += 1.0;
+                }
+            }
+        }
+        metrics
+    }
+}
+
 fn metric_value(
     base: &Map<String, Value>,
-    entities: &[Value],
-    belts: &[Value],
+    factory: &CampaignFactoryMetrics,
     metric: Metric,
 ) -> f64 {
     match metric {
         Metric::ManualMined(_) => finite_number(base.get("manualMined")),
         Metric::Produced(item_id, _) => number_in_record(base, "totalProduced", item_id),
-        Metric::Building(building_id, _) => entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| string_at(entity, "buildingId") == Some(building_id))
-            .map(|entity| {
-                let machine_count = finite_number(entity.get("machineCount"));
-                let count = if machine_count != 0.0 {
-                    machine_count
-                } else {
-                    finite_number(entity.get("minerCount"))
-                };
-                count.max(1.0)
-            })
-            .sum(),
-        Metric::Miner(_) => entities
-            .iter()
-            .filter_map(Value::as_object)
-            .map(|entity| finite_number(entity.get("minerCount")))
-            .sum(),
-        Metric::Belt { minimum_tier, .. } => belts
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|belt| {
-                minimum_tier == 0
-                    || finite_number(belt.get("tier")).floor() >= f64::from(minimum_tier)
-            })
-            .count() as f64,
+        Metric::Building(building_id, _) => factory
+            .building_counts
+            .get(building_id)
+            .copied()
+            .unwrap_or(0.0),
+        Metric::Miner(_) => factory.miner_count,
+        Metric::Belt { minimum_tier, .. } => factory
+            .belt_counts_by_minimum_tier
+            .get(&minimum_tier)
+            .copied()
+            .unwrap_or(0.0),
         Metric::Exploration(system_id) => base
             .get("exploration")
             .and_then(Value::as_object)
@@ -407,12 +447,11 @@ fn metric_value(
             .and_then(Value::as_array)
             .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(system_id)))
             as u8 as f64,
-        Metric::StationTrips(building_id, _) => entities
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|entity| string_at(entity, "buildingId") == Some(building_id))
-            .map(|entity| finite_number(entity.get("stationTrips")))
-            .sum(),
+        Metric::StationTrips(building_id, _) => factory
+            .station_trips
+            .get(building_id)
+            .copied()
+            .unwrap_or(0.0),
         Metric::Dyson(measure, _) => {
             let (record, key) = match measure {
                 "sails" => ("dysonSwarm", "totalLaunched"),
@@ -435,12 +474,7 @@ fn metric_value(
             .iter()
             .any(|item_id| number_in_record(base, "totalProduced", item_id) >= 1.0)
             as u8 as f64,
-        Metric::SprayCoater => entities.iter().filter_map(Value::as_object).any(|entity| {
-            entity
-                .get("sprayCoaterInstalled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        }) as u8 as f64,
+        Metric::SprayCoater => factory.spray_coater_installed as u8 as f64,
         Metric::Blueprint(_) => base
             .get("blueprints")
             .and_then(Value::as_array)
@@ -608,7 +642,6 @@ pub(crate) fn synchronize(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &[Value],
-    belts: &[Value],
 ) -> anyhow::Result<()> {
     let campaign = base
         .get("campaign")
@@ -635,11 +668,26 @@ pub(crate) fn synchronize(
                 .map(|task| task.chapter.to_owned())
         })
         .unwrap_or_else(|| "foundation".to_owned());
+    // Completed campaign tasks never consult their metric again: the loop
+    // below only applies a previously deferred reward. Endgame factories have
+    // every task completed, so rebuilding topology metrics from every entity
+    // and belt once per simulated second was pure overhead. Keep the existing
+    // scan for any save that still has a pending task, while making the common
+    // completed-campaign path O(number of campaign tasks).
+    let all_tasks_completed = TASKS.iter().all(|task| completed.contains(task.id));
+    let factory_metrics = if all_tasks_completed {
+        CampaignFactoryMetrics::default()
+    } else {
+        CampaignFactoryMetrics::collect(state, entities)
+    };
     let completed_metrics = TASKS
         .iter()
         .map(|task| {
+            if completed.contains(task.id) {
+                return true;
+            }
             let target = metric_target(task.metric).max(1.0);
-            metric_value(base, entities, belts, task.metric)
+            metric_value(base, &factory_metrics, task.metric)
                 .floor()
                 .clamp(0.0, target)
                 >= target

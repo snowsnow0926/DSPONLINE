@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NativeHostClient,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
   crc32,
@@ -14,6 +15,7 @@ const {
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
   normalizeNativeCoreOpen,
+  normalizeNativeHostSpawnEnvironment,
   parseFrames,
 } = require("./native-host.cjs");
 
@@ -86,6 +88,10 @@ test("renderer requests cannot provide paths or oversized batches", () => {
   assert.throws(() => normalizeNativeSaveBegin({ ...valid, slot: "../outside" }), /slot/);
   assert.throws(() => normalizeNativeSaveRecords([{ key: "../outside", value: "x" }]), /key/);
   assert.throws(() => normalizeNativeSaveRecords(new Array(9).fill({ key: "base", value: "x" })), /batch/);
+  assert.throws(() => normalizeNativeSaveRecords([
+    { key: "base", value: "first" },
+    { key: "base", value: "second" },
+  ]), /repeats a record key/);
 });
 
 test("session registry binds transactions to one renderer", async () => {
@@ -113,6 +119,63 @@ test("session registry binds transactions to one renderer", async () => {
   assert.equal((await registry.commit(7, "tx-1")).generation, 1);
   await assert.rejects(() => registry.commit(7, "tx-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), ["saveBegin", "savePut", "saveCommit"]);
+});
+
+test("save session batches bounded records when the Rust host advertises support", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: ["native-save-v1", "native-save-put-batch-v1"] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "saveBegin") return { transactionId: "tx-batch" };
+      if (request.operation === "savePutBatch") return { acceptedRecords: request.records.length };
+      return { generation: 1 };
+    },
+  };
+  const registry = new NativeSaveSessionRegistry(client);
+  await registry.begin(7, {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: "builtin:test",
+    revision: 1,
+    savedAtMs: 1,
+  });
+  const receipt = await registry.write(7, "tx-batch", [
+    { key: "base", value: "{}" },
+    { key: "entities:00000000", value: "[]" },
+  ]);
+  assert.deepEqual(receipt, { acceptedRecords: 2 });
+  assert.deepEqual(calls.map((call) => call.operation), ["saveBegin", "savePutBatch"]);
+  assert.deepEqual(calls[1].records, [
+    { key: "base", value: "{}" },
+    { key: "entities:00000000", value: "[]" },
+  ]);
+});
+
+test("save session rejects an incomplete native batch receipt", async () => {
+  const client = {
+    hello: { capabilities: ["native-save-put-batch-v1"] },
+    async request(request) {
+      if (request.operation === "saveBegin") return { transactionId: "tx-bad-batch" };
+      return { acceptedRecords: 0 };
+    },
+  };
+  const registry = new NativeSaveSessionRegistry(client);
+  await registry.begin(7, {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: "builtin:test",
+    revision: 1,
+    savedAtMs: 1,
+  });
+  await assert.rejects(
+    () => registry.write(7, "tx-bad-batch", [{ key: "base", value: "{}" }]),
+    /invalid save batch receipt/,
+  );
 });
 
 test("core registry validates bounded catalogs and binds shadow sessions to one renderer", async () => {
@@ -169,4 +232,64 @@ test("mock child primitives remain compatible with client event expectations", (
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   assert.equal(typeof child.stdout.on, "function");
+});
+
+test("native host spawn inherits the parent environment and accepts only bounded performance settings", async () => {
+  assert.deepEqual(
+    normalizeNativeHostSpawnEnvironment({
+      DSP_NATIVE_CORE_THREADS: 4,
+      DSP_NATIVE_CORE_SYNC_RECORD_DROP: "1",
+    }),
+    {
+      DSP_NATIVE_CORE_THREADS: "4",
+      DSP_NATIVE_CORE_SYNC_RECORD_DROP: "1",
+    },
+  );
+  assert.throws(() => normalizeNativeHostSpawnEnvironment({ PATH: "C:\\attacker" }), /unsupported field/);
+  assert.throws(() => normalizeNativeHostSpawnEnvironment({ DSP_NATIVE_CORE_THREADS: "16" }), /thread setting/);
+  assert.throws(
+    () => normalizeNativeHostSpawnEnvironment({ DSP_NATIVE_CORE_SYNC_RECORD_DROP: "true" }),
+    /record-drop setting/,
+  );
+
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => child.emit("exit", 0, null);
+  child.stdin.on("data", (chunk) => {
+    const requestFrame = parseFrames(Buffer.from(chunk)).frames[0];
+    const request = JSON.parse(requestFrame.payload.toString("utf8"));
+    const value = request.operation === "hello"
+      ? { protocolVersion: 1, nativeFormatVersion: 1, hostVersion: "test", capabilities: [] }
+      : { stopped: true };
+    child.stdout.write(encodeFrame({
+      requestId: requestFrame.requestId,
+      kind: CONTROL_RESPONSE_KIND,
+      payload: Buffer.from(JSON.stringify({ ok: true, value }), "utf8"),
+    }));
+  });
+  let spawnOptions = null;
+  const client = new NativeHostClient({
+    binaryPath: process.platform === "win32" ? "C:\\test\\dsp-native-host.exe" : "/test/dsp-native-host",
+    rootPath: process.platform === "win32" ? "C:\\test\\native-data" : "/test/native-data",
+    spawnEnvironment: {
+      DSP_NATIVE_CORE_THREADS: "8",
+      DSP_NATIVE_CORE_SYNC_RECORD_DROP: "1",
+    },
+    spawnProcess: (_binaryPath, _arguments, options) => {
+      spawnOptions = options;
+      return child;
+    },
+  });
+  await client.start("test");
+  assert.equal(spawnOptions.shell, false);
+  assert.equal(spawnOptions.windowsHide, true);
+  assert.equal(spawnOptions.env.DSP_NATIVE_CORE_THREADS, "8");
+  assert.equal(spawnOptions.env.DSP_NATIVE_CORE_SYNC_RECORD_DROP, "1");
+  for (const expectedKey of ["systemroot", "comspec", "path"]) {
+    const key = Object.keys(process.env).find((candidate) => candidate.toLowerCase() === expectedKey);
+    if (key) assert.equal(spawnOptions.env[key], process.env[key]);
+  }
+  await client.stop();
 });

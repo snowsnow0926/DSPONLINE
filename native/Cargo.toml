@@ -13,6 +13,7 @@ crc32fast = "1.5.0"
 hex = "0.4.3"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
+rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["float_roundtrip", "raw_value"] }
 ryu-js = "1.0.3"

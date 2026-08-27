@@ -328,20 +328,16 @@ impl CoreState {
         if simple_factory_reason.is_none() {
             let mut prepared =
                 crate::simple_factory::prepare_advance(self, simulation_seconds, wall_seconds)?;
-            self.install_prepared_belt_routes(prepared.belt_routes.clone());
+            let belt_routes = prepared.belt_routes.clone();
+            let local_peer_directory = prepared.local_peer_directory.clone();
             profile_mark!("simulate");
             self.record_production_history_with_records(
                 &mut prepared.base,
                 &prepared.entities,
-                &prepared.belts,
+                Some(prepared.belt_flow),
             )?;
             profile_mark!("production-history");
-            crate::campaign::synchronize(
-                self,
-                &mut prepared.base,
-                &prepared.entities,
-                &prepared.belts,
-            )?;
+            crate::campaign::synchronize(self, &mut prepared.base, &prepared.entities)?;
             crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
             profile_mark!("campaign");
             crate::speedrun::evaluate(self, &mut prepared.base)?;
@@ -353,11 +349,12 @@ impl CoreState {
             let summary = self.commit_simulated_state(
                 prepared.base,
                 prepared.entities,
-                prepared.belts,
-                &prepared.changed_belt_indices,
+                prepared.belt_commit,
                 next_revision,
                 request.include_diagnostics,
             )?;
+            self.install_prepared_belt_routes(belt_routes);
+            self.install_prepared_local_peer_directory(local_peer_directory);
             profile_mark!("commit-state");
             if request.include_diagnostics {
                 profile_last!("summary");

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
-use crate::state::CoreState;
+use crate::state::{CoreState, ExactRowIdIndex};
 
 const EPSILON: f64 = 0.0001;
 const SLOT_COUNT: usize = 5;
@@ -15,21 +15,65 @@ const BASE_TRIP_SECONDS: f64 = 8.0;
 #[derive(Debug, Clone)]
 struct Slot {
     item_id: Option<String>,
-    local_mode: String,
+    local_mode: LocalMode,
     minimum_load: f64,
     min_stock: f64,
     max_stock: f64,
     priority: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalMode {
+    Supply,
+    Demand,
+    Storage,
+}
+
+impl LocalMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "supply" => Ok(Self::Supply),
+            "demand" => Ok(Self::Demand),
+            "storage" => Ok(Self::Storage),
+            _ => bail!("native local station mode is invalid"),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Ledger {
     busy: HashMap<usize, f64>,
-    reserved: HashMap<(usize, String), f64>,
-    in_flight: HashMap<(usize, String), f64>,
+    reserved: HashMap<usize, HashMap<String, f64>>,
+    in_flight: HashMap<usize, HashMap<String, f64>>,
     active_vehicle_load: HashMap<usize, f64>,
     active_local_stations: HashSet<usize>,
     active_local_progress: HashMap<usize, f64>,
+}
+
+fn ledger_item_amount(
+    values: &HashMap<usize, HashMap<String, f64>>,
+    station_index: usize,
+    item_id: &str,
+) -> f64 {
+    values
+        .get(&station_index)
+        .and_then(|items| items.get(item_id))
+        .copied()
+        .unwrap_or(0.0)
+}
+
+fn add_ledger_item_amount(
+    values: &mut HashMap<usize, HashMap<String, f64>>,
+    station_index: usize,
+    item_id: &str,
+    amount: f64,
+) {
+    let items = values.entry(station_index).or_default();
+    if let Some(current) = items.get_mut(item_id) {
+        *current += amount;
+    } else {
+        items.insert(item_id.to_owned(), amount);
+    }
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -75,16 +119,18 @@ fn set_item_amount(
     item_id: &str,
     amount: f64,
 ) -> anyhow::Result<()> {
-    entity
+    let inventory = entity
         .get_mut(record)
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow!("native local logistics inventory is missing"))?
-        .insert(
-            item_id.to_owned(),
-            Number::from_f64(amount)
-                .map(Value::Number)
-                .ok_or_else(|| anyhow!("native local logistics inventory is non-finite"))?,
-        );
+        .ok_or_else(|| anyhow!("native local logistics inventory is missing"))?;
+    let amount = Number::from_f64(amount)
+        .map(Value::Number)
+        .ok_or_else(|| anyhow!("native local logistics inventory is non-finite"))?;
+    if let Some(current) = inventory.get_mut(item_id) {
+        *current = amount;
+    } else {
+        inventory.insert(item_id.to_owned(), amount);
+    }
     Ok(())
 }
 
@@ -125,10 +171,7 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             let slot = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native local station slot is invalid"))?;
-            let local_mode = string_at(slot, "localMode").unwrap_or("storage");
-            if !matches!(local_mode, "supply" | "demand" | "storage") {
-                bail!("native local station mode is invalid");
-            }
+            let local_mode = LocalMode::parse(string_at(slot, "localMode").unwrap_or("storage"))?;
             let minimum_load = finite_number(slot.get("minimumLoad"));
             if ![0.1, 0.25, 0.5, 1.0]
                 .iter()
@@ -138,7 +181,7 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             }
             Ok(Slot {
                 item_id: string_at(slot, "itemId").map(str::to_owned),
-                local_mode: local_mode.to_owned(),
+                local_mode,
                 minimum_load,
                 min_stock: finite_number(slot.get("minStock")).floor().max(0.0),
                 max_stock: finite_number(slot.get("maxStock")).floor().max(0.0),
@@ -176,18 +219,58 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
 #[derive(Debug, Default)]
 pub(crate) struct LocalPeerDirectory {
     station_indices: Vec<usize>,
-    by_key: HashMap<(String, String, String), Vec<(usize, usize)>>,
+    by_planet_item: HashMap<usize, HashMap<String, LocalPeers>>,
     station_slots: HashMap<usize, Vec<Slot>>,
-    station_planets: HashMap<usize, String>,
+    station_planets: HashMap<usize, usize>,
+}
+
+impl LocalPeerDirectory {
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let station_index_bytes = self.station_indices.capacity() * std::mem::size_of::<usize>();
+        let planet_item_bytes = self
+            .by_planet_item
+            .values()
+            .flat_map(HashMap::iter)
+            .map(|(item_id, peers)| {
+                item_id.capacity()
+                    + (peers.supply.capacity() + peers.demand.capacity())
+                        * std::mem::size_of::<(usize, usize)>()
+            })
+            .sum::<usize>();
+        let slot_bytes = self
+            .station_slots
+            .values()
+            .map(|slots| {
+                slots.capacity() * std::mem::size_of::<Slot>()
+                    + slots
+                        .iter()
+                        .filter_map(|slot| slot.item_id.as_ref())
+                        .map(String::capacity)
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        let hash_entry_bytes = self.by_planet_item.capacity()
+            * std::mem::size_of::<(usize, HashMap<String, LocalPeers>)>()
+            + self.station_slots.capacity() * std::mem::size_of::<(usize, Vec<Slot>)>()
+            + self.station_planets.capacity() * std::mem::size_of::<(usize, usize)>();
+        (station_index_bytes + planet_item_bytes + slot_bytes + hash_entry_bytes) as u64
+    }
+}
+
+#[derive(Debug, Default)]
+struct LocalPeers {
+    supply: Vec<(usize, usize)>,
+    demand: Vec<(usize, usize)>,
 }
 
 fn build_peer_directory(
     entities: &[Value],
     station_indices: &[usize],
 ) -> anyhow::Result<LocalPeerDirectory> {
-    let mut by_key = HashMap::<(String, String, String), Vec<(usize, usize)>>::new();
-    let mut station_slots = HashMap::new();
-    let mut station_planets = HashMap::new();
+    let mut by_planet_item = HashMap::<usize, HashMap<String, LocalPeers>>::new();
+    let mut station_slots = HashMap::with_capacity(station_indices.len());
+    let mut station_planets = HashMap::with_capacity(station_indices.len());
+    let mut planet_symbols = HashMap::<String, usize>::new();
     for &station_index in station_indices {
         let station = entities[station_index].as_object().expect("station object");
         if !matches!(
@@ -196,30 +279,39 @@ fn build_peer_directory(
         ) {
             continue;
         }
-        let planet_id = string_at(station, "planetId")
-            .unwrap_or_default()
-            .to_owned();
+        let planet_id = string_at(station, "planetId").unwrap_or_default();
+        let planet_key = if let Some(&key) = planet_symbols.get(planet_id) {
+            key
+        } else {
+            let key = planet_symbols.len();
+            planet_symbols.insert(planet_id.to_owned(), key);
+            key
+        };
         let parsed_slots = slots(station)?;
         for (slot_index, slot) in parsed_slots.iter().enumerate() {
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
-            if slot.local_mode == "storage" {
+            if slot.local_mode == LocalMode::Storage {
                 continue;
             }
-            by_key
-                .entry((
-                    planet_id.clone(),
-                    item_id.to_owned(),
-                    slot.local_mode.clone(),
-                ))
-                .or_default()
-                .push((station_index, slot_index));
+            let items = by_planet_item.entry(planet_key).or_default();
+            if !items.contains_key(item_id) {
+                items.insert(item_id.to_owned(), LocalPeers::default());
+            }
+            let peers = items
+                .get_mut(item_id)
+                .expect("inserted native local peer item");
+            match slot.local_mode {
+                LocalMode::Supply => peers.supply.push((station_index, slot_index)),
+                LocalMode::Demand => peers.demand.push((station_index, slot_index)),
+                LocalMode::Storage => unreachable!("storage slots were filtered"),
+            }
         }
-        station_planets.insert(station_index, planet_id);
+        station_planets.insert(station_index, planet_key);
         station_slots.insert(station_index, parsed_slots);
     }
-    for matches in by_key.values_mut() {
+    let sort_matches = |matches: &mut Vec<(usize, usize)>| {
         matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
             let left = entities[*left_index].as_object().expect("station object");
             let right = entities[*right_index].as_object().expect("station object");
@@ -240,10 +332,14 @@ fn build_peer_directory(
                 })
                 .then_with(|| left_slot.cmp(right_slot))
         });
+    };
+    for peers in by_planet_item.values_mut().flat_map(HashMap::values_mut) {
+        sort_matches(&mut peers.supply);
+        sort_matches(&mut peers.demand);
     }
     Ok(LocalPeerDirectory {
         station_indices: station_indices.to_vec(),
-        by_key,
+        by_planet_item,
         station_slots,
         station_planets,
     })
@@ -304,16 +400,24 @@ fn has_local_route(entities: &[Value], station_indices: &[usize]) -> bool {
 }
 
 fn directory_has_local_pair(directory: &LocalPeerDirectory) -> bool {
-    let has_demand = directory.by_key.keys().any(|(_, _, mode)| mode == "demand");
-    let has_supply = directory.by_key.keys().any(|(_, _, mode)| mode == "supply");
+    let has_demand = directory
+        .by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.demand.is_empty());
+    let has_supply = directory
+        .by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.supply.is_empty());
     has_demand && has_supply
 }
 
 fn station_capacity(
     state: &CoreState,
-    base: &Map<String, Value>,
     entity: &Map<String, Value>,
     slot: &Slot,
+    buffer_limit: f64,
 ) -> anyhow::Result<f64> {
     let building = string_at(entity, "buildingId")
         .and_then(|id| state.catalog.buildings.get(id))
@@ -321,7 +425,7 @@ fn station_capacity(
     let rated = stacked_capacity(
         building.output_capacity,
         finite_number(entity.get("machineCount")),
-        normalized_buffer_limit(base),
+        buffer_limit,
     );
     Ok(if slot.max_stock > 0.0 {
         rated.min(slot.max_stock)
@@ -398,8 +502,8 @@ fn logistics_speed(base: &Map<String, Value>) -> f64 {
     research * (1.0 + logistics_level(base) * 0.05) * difficulty
 }
 
-fn minimum_cargo(base: &Map<String, Value>, slot: &Slot) -> f64 {
-    (cargo_capacity(base) * slot.minimum_load).ceil()
+fn minimum_cargo(cargo_capacity: f64, slot: &Slot) -> f64 {
+    (cargo_capacity * slot.minimum_load).ceil()
 }
 
 fn route_owner_id<'a>(demand: &'a Map<String, Value>, route: &'a Map<String, Value>) -> &'a str {
@@ -409,7 +513,7 @@ fn route_owner_id<'a>(demand: &'a Map<String, Value>, route: &'a Map<String, Val
 
 fn build_ledger(
     entities: &[Value],
-    indexes: &HashMap<String, usize>,
+    indexes: &ExactRowIdIndex,
     station_indices: &[usize],
 ) -> Ledger {
     let mut ledger = Ledger::default();
@@ -427,7 +531,7 @@ fn build_ledger(
             }
             let vehicles = finite_number(route.get("vehicleCount")).floor().max(0.0);
             let cargo = finite_number(route.get("cargo")).floor().max(0.0);
-            let item = string_at(route, "itemId").unwrap_or_default().to_owned();
+            let item = string_at(route, "itemId").unwrap_or_default();
             let owner = indexes
                 .get(route_owner_id(demand, route))
                 .copied()
@@ -438,13 +542,10 @@ fn build_ledger(
             if scope == "local" {
                 *ledger.busy.entry(owner).or_default() += vehicles;
             }
-            *ledger
-                .in_flight
-                .entry((demand_index, item.clone()))
-                .or_default() += cargo;
+            add_ledger_item_amount(&mut ledger.in_flight, demand_index, item, cargo);
             let mut active_stations = HashSet::from([demand_index, owner]);
             if let Some(supply) = supply {
-                *ledger.reserved.entry((supply, item)).or_default() += cargo;
+                add_ledger_item_amount(&mut ledger.reserved, supply, item, cargo);
                 active_stations.insert(supply);
             }
             for waypoint in route
@@ -488,31 +589,29 @@ fn peer_matches(
     let Some(item_id) = slot.item_id.as_deref() else {
         return Ok(Vec::new());
     };
-    if slot.local_mode == "storage" {
+    if slot.local_mode == LocalMode::Storage {
         return Ok(Vec::new());
     }
-    let opposite = if slot.local_mode == "supply" {
-        "demand"
-    } else {
-        "supply"
-    };
-    let planet_id = directory
+    let planet_key = directory
         .station_planets
         .get(&station_index)
-        .map(String::as_str)
+        .copied()
         .unwrap_or_default();
-    Ok(directory
-        .by_key
-        .get(&(
-            planet_id.to_owned(),
-            item_id.to_owned(),
-            opposite.to_owned(),
-        ))
+    let matches = directory
+        .by_planet_item
+        .get(&planet_key)
+        .and_then(|items| items.get(item_id))
+        .map(|peers| match slot.local_mode {
+            LocalMode::Supply => peers.demand.as_slice(),
+            LocalMode::Demand => peers.supply.as_slice(),
+            LocalMode::Storage => &[],
+        })
         .into_iter()
         .flatten()
         .copied()
         .filter(|(peer_index, _)| *peer_index != station_index)
-        .collect())
+        .collect();
+    Ok(matches)
 }
 
 fn has_peer_match(
@@ -529,26 +628,23 @@ fn has_peer_match(
     let Some(item_id) = slot.item_id.as_deref() else {
         return Ok(false);
     };
-    if slot.local_mode == "storage" {
+    if slot.local_mode == LocalMode::Storage {
         return Ok(false);
     }
-    let opposite = if slot.local_mode == "supply" {
-        "demand"
-    } else {
-        "supply"
-    };
-    let planet_id = directory
+    let planet_key = directory
         .station_planets
         .get(&station_index)
-        .map(String::as_str)
+        .copied()
         .unwrap_or_default();
     Ok(directory
-        .by_key
-        .get(&(
-            planet_id.to_owned(),
-            item_id.to_owned(),
-            opposite.to_owned(),
-        ))
+        .by_planet_item
+        .get(&planet_key)
+        .and_then(|items| items.get(item_id))
+        .map(|peers| match slot.local_mode {
+            LocalMode::Supply => peers.demand.as_slice(),
+            LocalMode::Demand => peers.supply.as_slice(),
+            LocalMode::Storage => &[],
+        })
         .is_some_and(|matches| {
             matches
                 .iter()
@@ -643,7 +739,12 @@ pub(crate) fn transfer_buffers(
     entities: &mut [Value],
     directory: &LocalPeerDirectory,
 ) -> anyhow::Result<()> {
+    let buffer_limit = normalized_buffer_limit(base);
     for &station_index in &directory.station_indices {
+        let station_slots = directory
+            .station_slots
+            .get(&station_index)
+            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
         let station = entities[station_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native local station is invalid"))?;
@@ -653,11 +754,11 @@ pub(crate) fn transfer_buffers(
         ) {
             continue;
         }
-        for slot in slots(station)? {
+        for slot in station_slots {
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
-            let capacity = station_capacity(state, base, station, &slot)?;
+            let capacity = station_capacity(state, station, slot, buffer_limit)?;
             let incoming = (item_amount(station, "inputs", item_id) + EPSILON).floor();
             let stored = (item_amount(station, "outputs", item_id) + EPSILON).floor();
             let moved = incoming.min((capacity - stored).max(0.0));
@@ -680,6 +781,8 @@ pub(crate) fn ready_station_indices(
         return Ok(HashSet::new());
     }
     let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
+    let buffer_limit = normalized_buffer_limit(base);
+    let cargo_capacity = cargo_capacity(base);
     let mut ready = HashSet::new();
     for &station_index in &directory.station_indices {
         let station = entities[station_index].as_object().expect("station object");
@@ -701,7 +804,7 @@ pub(crate) fn ready_station_indices(
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
-            if slot.local_mode == "storage" {
+            if slot.local_mode == LocalMode::Storage {
                 continue;
             }
             for (peer_index, peer_slot_index) in peer_matches(directory, station_index, slot_index)?
@@ -711,7 +814,7 @@ pub(crate) fn ready_station_indices(
                     .get(&peer_index)
                     .ok_or_else(|| anyhow!("native local peer slots are missing"))?;
                 let (demand_index, demand_slot, supply_index, supply_slot) =
-                    if slot.local_mode == "demand" {
+                    if slot.local_mode == LocalMode::Demand {
                         (
                             station_index,
                             slot,
@@ -731,13 +834,9 @@ pub(crate) fn ready_station_indices(
                 let available = (item_amount(supply, "outputs", item_id) - supply_slot.min_stock)
                     .max(0.0)
                     .floor();
-                let free = (station_capacity(state, base, demand, demand_slot)?
+                let free = (station_capacity(state, demand, demand_slot, buffer_limit)?
                     - item_amount(demand, "outputs", item_id)
-                    - ledger
-                        .in_flight
-                        .get(&(demand_index, item_id.to_owned()))
-                        .copied()
-                        .unwrap_or(0.0))
+                    - ledger_item_amount(&ledger.in_flight, demand_index, item_id))
                 .max(0.0)
                 .floor();
                 for (owner_index, owner_slot) in
@@ -747,7 +846,7 @@ pub(crate) fn ready_station_indices(
                     let has_vehicle = installed_drones(owner)
                         - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
                         > 0.0;
-                    let minimum = minimum_cargo(base, owner_slot);
+                    let minimum = minimum_cargo(cargo_capacity, owner_slot);
                     if has_vehicle && available >= minimum && free >= minimum {
                         ready.insert(station_index);
                         break 'slots;
@@ -773,7 +872,12 @@ fn add_max_field(
 
 fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     if let Some(entity) = entities[index].as_object_mut() {
-        entity.insert("stationPeerId".to_owned(), Value::from(peer_id));
+        let peer_id = Value::from(peer_id);
+        if let Some(current) = entity.get_mut("stationPeerId") {
+            *current = peer_id;
+        } else {
+            entity.insert("stationPeerId".to_owned(), peer_id);
+        }
     }
 }
 
@@ -791,15 +895,26 @@ pub(crate) fn dispatch(
     }
     let indexes = &state.entity_index;
     let mut ledger = build_ledger(entities, indexes, &directory.station_indices);
+    let buffer_limit = normalized_buffer_limit(base);
+    let cargo_capacity = cargo_capacity(base);
+    let logistics_speed = logistics_speed(base);
     for &demand_index in &directory.station_indices {
-        let demand_snapshot = entities[demand_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native local demand station is invalid"))?
-            .clone();
-        if !matches!(
-            string_at(&demand_snapshot, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) {
+        let (eligible, cursor, demand_id) = {
+            let demand = entities[demand_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native local demand station is invalid"))?;
+            (
+                matches!(
+                    string_at(demand, "buildingId"),
+                    Some("planetary_logistics_station" | "interstellar_logistics_station")
+                ),
+                finite_number(demand.get("stationDispatchCursor"))
+                    .floor()
+                    .max(0.0) as usize,
+                string_at(demand, "id").unwrap_or_default().to_owned(),
+            )
+        };
+        if !eligible {
             continue;
         }
         let demand_slots = directory
@@ -809,8 +924,7 @@ pub(crate) fn dispatch(
         let mut ordered_slots = demand_slots
             .iter()
             .enumerate()
-            .filter(|(_, slot)| slot.item_id.is_some() && slot.local_mode == "demand")
-            .map(|(index, slot)| (index, slot.clone()))
+            .filter(|(_, slot)| slot.item_id.is_some() && slot.local_mode == LocalMode::Demand)
             .collect::<Vec<_>>();
         ordered_slots.sort_by(|(left_index, left), (right_index, right)| {
             right
@@ -821,20 +935,18 @@ pub(crate) fn dispatch(
         if ordered_slots.is_empty() {
             continue;
         }
-        let cursor = finite_number(demand_snapshot.get("stationDispatchCursor"))
-            .floor()
-            .max(0.0) as usize;
         for offset in 0..ordered_slots.len() {
-            let (slot_index, slot) = &ordered_slots[(cursor + offset) % ordered_slots.len()];
+            let (slot_index, slot) = ordered_slots[(cursor + offset) % ordered_slots.len()];
             let item_id = slot.item_id.as_deref().expect("demand item").to_owned();
             let fairness_key = format!("local:{slot_index}");
-            let last_peer_id = demand_snapshot
-                .get("stationLastSupplyPeerBySlot")
+            let last_peer_id = entities[demand_index]
+                .as_object()
+                .and_then(|demand| demand.get("stationLastSupplyPeerBySlot"))
                 .and_then(Value::as_object)
                 .and_then(|values| values.get(&fairness_key))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let mut matches = peer_matches(directory, demand_index, *slot_index)?;
+            let mut matches = peer_matches(directory, demand_index, slot_index)?;
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
@@ -884,13 +996,9 @@ pub(crate) fn dispatch(
                     .then_with(|| left_slot.cmp(right_slot))
             });
             let demand_now = entities[demand_index].as_object().expect("station object");
-            let mut remaining_free = (station_capacity(state, base, demand_now, slot)?
+            let mut remaining_free = (station_capacity(state, demand_now, slot, buffer_limit)?
                 - item_amount(demand_now, "outputs", &item_id)
-                - ledger
-                    .in_flight
-                    .get(&(demand_index, item_id.clone()))
-                    .copied()
-                    .unwrap_or(0.0)
+                - ledger_item_amount(&ledger.in_flight, demand_index, &item_id)
                 + EPSILON)
                 .floor()
                 .max(0.0);
@@ -898,40 +1006,41 @@ pub(crate) fn dispatch(
                 if remaining_free < 1.0 {
                     break;
                 }
-                let supply_snapshot = entities[supply_index]
-                    .as_object()
-                    .expect("station object")
-                    .clone();
                 let supply_slot = directory
                     .station_slots
                     .get(&supply_index)
                     .and_then(|values| values.get(peer_slot_index))
-                    .ok_or_else(|| anyhow!("native local supply slot is missing"))?
-                    .clone();
-                for (owner_index, owner_slot) in [
-                    (demand_index, slot.clone()),
-                    (supply_index, supply_slot.clone()),
-                ] {
-                    let owner = entities[owner_index].as_object().expect("station object");
-                    let free_vehicles = (installed_drones(owner)
-                        - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
-                    .max(0.0);
+                    .ok_or_else(|| anyhow!("native local supply slot is missing"))?;
+                let (supply_output, supply_id) = {
+                    let supply = entities[supply_index].as_object().expect("station object");
+                    (
+                        item_amount(supply, "outputs", &item_id),
+                        string_at(supply, "id").unwrap_or_default().to_owned(),
+                    )
+                };
+                for (owner_index, owner_slot) in [(demand_index, slot), (supply_index, supply_slot)]
+                {
+                    let (free_vehicles, owner_id) = {
+                        let owner = entities[owner_index].as_object().expect("station object");
+                        (
+                            (installed_drones(owner)
+                                - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
+                            .max(0.0),
+                            string_at(owner, "id").unwrap_or_default().to_owned(),
+                        )
+                    };
                     if free_vehicles < 1.0
                         || powers.get(&owner_index).copied().unwrap_or(0.0) <= EPSILON
                     {
                         continue;
                     }
-                    let available = (item_amount(&supply_snapshot, "outputs", &item_id)
+                    let available = (supply_output
                         - supply_slot.min_stock
-                        - ledger
-                            .reserved
-                            .get(&(supply_index, item_id.clone()))
-                            .copied()
-                            .unwrap_or(0.0)
+                        - ledger_item_amount(&ledger.reserved, supply_index, &item_id)
                         + EPSILON)
                         .floor()
                         .max(0.0);
-                    let minimum = minimum_cargo(base, &owner_slot);
+                    let minimum = minimum_cargo(cargo_capacity, owner_slot);
                     let dispatchable = free_vehicles
                         .min((available / minimum).floor())
                         .min((remaining_free / minimum).floor());
@@ -940,7 +1049,7 @@ pub(crate) fn dispatch(
                     }
                     let cargo = available
                         .min(remaining_free)
-                        .min(cargo_capacity(base) * dispatchable);
+                        .min(cargo_capacity * dispatchable);
                     let demand_route_count = entities[demand_index]
                         .as_object()
                         .and_then(|entity| entity.get("stationRoutes"))
@@ -958,26 +1067,16 @@ pub(crate) fn dispatch(
                         0.0
                     };
                     let next_id = finite_number(base.get("nextId")).floor().max(0.0);
-                    let demand_id = string_at(
-                        entities[demand_index].as_object().expect("station object"),
-                        "id",
-                    )
-                    .unwrap_or_default()
-                    .to_owned();
-                    let supply_id = string_at(&supply_snapshot, "id")
-                        .unwrap_or_default()
-                        .to_owned();
-                    let owner_id = string_at(owner, "id").unwrap_or_default().to_owned();
                     let route = json!({
                         "id": format!("route_{}", next_id as u64),
-                        "slotIndex": *slot_index,
+                        "slotIndex": slot_index,
                         "peerId": supply_id,
                         "itemId": item_id,
                         "scope": "local",
                         "cargo": cargo,
                         "vehicleCount": dispatchable,
                         "progress": initial_progress,
-                        "duration": BASE_TRIP_SECONDS / logistics_speed(base),
+                        "duration": BASE_TRIP_SECONDS / logistics_speed,
                         "requiresWarp": false,
                         "waypointStationIds": [],
                         "distanceLy": 0,
@@ -999,14 +1098,8 @@ pub(crate) fn dispatch(
                         .expect("initialized local demand routes")
                         .push(route);
                     *ledger.busy.entry(owner_index).or_default() += dispatchable;
-                    *ledger
-                        .reserved
-                        .entry((supply_index, item_id.clone()))
-                        .or_default() += cargo;
-                    *ledger
-                        .in_flight
-                        .entry((demand_index, item_id.clone()))
-                        .or_default() += cargo;
+                    add_ledger_item_amount(&mut ledger.reserved, supply_index, &item_id, cargo);
+                    add_ledger_item_amount(&mut ledger.in_flight, demand_index, &item_id, cargo);
                     for index in HashSet::from([demand_index, supply_index, owner_index]) {
                         *ledger.active_vehicle_load.entry(index).or_default() += dispatchable;
                     }
@@ -1021,12 +1114,17 @@ pub(crate) fn dispatch(
                             "stationProgress",
                             finite_number(demand.get("stationProgress")).max(initial_progress),
                         )?;
-                        set_number(demand, "stationDispatchCursor", *slot_index as f64 + 1.0)?;
-                        demand
+                        set_number(demand, "stationDispatchCursor", slot_index as f64 + 1.0)?;
+                        let fairness = demand
                             .get_mut("stationLastSupplyPeerBySlot")
                             .and_then(Value::as_object_mut)
-                            .ok_or_else(|| anyhow!("native local fairness record is missing"))?
-                            .insert(fairness_key.clone(), Value::from(supply_id.clone()));
+                            .ok_or_else(|| anyhow!("native local fairness record is missing"))?;
+                        let peer = Value::from(supply_id.clone());
+                        if let Some(current) = fairness.get_mut(&fairness_key) {
+                            *current = peer;
+                        } else {
+                            fairness.insert(fairness_key.clone(), peer);
+                        }
                     }
                     set_peer(entities, demand_index, &supply_id);
                     set_peer(entities, supply_index, &demand_id);
@@ -1060,10 +1158,13 @@ pub(crate) fn advance_routes(
     let indexes = &state.entity_index;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     for &demand_index in &directory.station_indices {
-        let demand_snapshot = entities[demand_index]
+        let demand_id = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local demand is invalid"))?
-            .clone();
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let Some(routes) = entities[demand_index]
             .as_object_mut()
             .and_then(|demand| demand.get_mut("stationRoutes"))
@@ -1087,7 +1188,7 @@ pub(crate) fn advance_routes(
                 .copied()
                 .ok_or_else(|| anyhow!("native local route peer is missing"))?;
             let owner_index = indexes
-                .get(route_owner_id(&demand_snapshot, route))
+                .get(string_at(route, "vehicleStationId").unwrap_or(&demand_id))
                 .copied()
                 .unwrap_or(demand_index);
             let power = powers.get(&owner_index).copied().unwrap_or(0.0);
@@ -1138,9 +1239,9 @@ pub(crate) fn advance_routes(
                 )?;
                 cargo
             };
-            if delivered_cargo < cargo {
+            let retain_route = delivered_cargo < cargo;
+            if retain_route {
                 set_number(route, "cargo", cargo - delivered_cargo)?;
-                remaining.push(route_value.clone());
             }
             let supply_current = item_amount(
                 entities[supply_index].as_object().expect("station object"),
@@ -1162,6 +1263,9 @@ pub(crate) fn advance_routes(
                 set_number(station, "stationLastTransfer", delivered_cargo)?;
             }
             completed_cargo += delivered_cargo;
+            if retain_route {
+                remaining.push(route_value);
+            }
         }
         let demand = entities[demand_index]
             .as_object_mut()
@@ -1223,7 +1327,7 @@ pub(crate) fn update_congestion(
         let mut waiting = 0.0;
         for (slot_index, slot) in station_slots.iter().enumerate() {
             if slot.item_id.is_some()
-                && slot.local_mode == "demand"
+                && slot.local_mode == LocalMode::Demand
                 && has_peer_match(directory, station_index, slot_index)?
             {
                 waiting += 1.0;
@@ -1260,4 +1364,174 @@ pub(crate) fn update_congestion(
         set_number(target, "stationProgress", active_progress)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_key_pointer(record: &Map<String, Value>, key: &str) -> usize {
+        record
+            .keys()
+            .find(|candidate| candidate.as_str() == key)
+            .expect("test JSON key")
+            .as_ptr() as usize
+    }
+
+    fn legacy_set_item_amount(
+        entity: &mut Map<String, Value>,
+        record: &str,
+        item_id: &str,
+        amount: f64,
+    ) -> anyhow::Result<()> {
+        entity
+            .get_mut(record)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native local logistics inventory is missing"))?
+            .insert(
+                item_id.to_owned(),
+                Number::from_f64(amount)
+                    .map(Value::Number)
+                    .ok_or_else(|| anyhow!("native local logistics inventory is non-finite"))?,
+            );
+        Ok(())
+    }
+
+    #[test]
+    fn item_amount_updates_reuse_existing_keys_and_match_legacy_bytes() {
+        let item_id = "mod:本地物流/Ω🚀";
+        let source = Map::from_iter([(
+            "outputs".to_owned(),
+            Value::Object(Map::from_iter([
+                ("alpha".to_owned(), Value::from(1)),
+                (item_id.to_owned(), Value::from(2)),
+                ("zeta".to_owned(), Value::from(3)),
+            ])),
+        )]);
+        let mut actual = source.clone();
+        let mut expected = source;
+        let before = actual["outputs"].as_object().expect("outputs object");
+        let pointer = json_key_pointer(before, item_id);
+        let order = before.keys().cloned().collect::<Vec<_>>();
+
+        set_item_amount(&mut actual, "outputs", item_id, -0.0).unwrap();
+        legacy_set_item_amount(&mut expected, "outputs", item_id, -0.0).unwrap();
+
+        let after = actual["outputs"].as_object().expect("outputs object");
+        assert_eq!(json_key_pointer(after, item_id), pointer);
+        assert_eq!(after.keys().cloned().collect::<Vec<_>>(), order);
+        assert!(after[item_id].as_f64().unwrap().is_sign_negative());
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn item_amount_updates_preserve_missing_insert_and_error_order() {
+        let mut entity = Map::from_iter([("inputs".to_owned(), Value::Object(Map::new()))]);
+        set_item_amount(&mut entity, "inputs", "mod:新物料/β", 7.0).unwrap();
+        assert_eq!(item_amount(&entity, "inputs", "mod:新物料/β"), 7.0);
+
+        let snapshot = entity.clone();
+        let error = set_item_amount(&mut entity, "inputs", "mod:新物料/β", f64::NAN)
+            .expect_err("non-finite amount must fail");
+        assert_eq!(
+            error.to_string(),
+            "native local logistics inventory is non-finite"
+        );
+        assert_eq!(entity, snapshot);
+
+        let error = set_item_amount(&mut entity, "missing", "mod:新物料/β", f64::NAN)
+            .expect_err("missing record must win error order");
+        assert_eq!(
+            error.to_string(),
+            "native local logistics inventory is missing"
+        );
+        assert_eq!(entity, snapshot);
+    }
+
+    #[test]
+    fn peer_updates_reuse_existing_key_and_keep_map_order() {
+        let mut entities = vec![Value::Object(Map::from_iter([
+            ("alpha".to_owned(), Value::from(1)),
+            ("stationPeerId".to_owned(), Value::from("station-old")),
+            ("zeta".to_owned(), Value::from(3)),
+        ]))];
+        let before = entities[0].as_object().expect("station object");
+        let pointer = json_key_pointer(before, "stationPeerId");
+        let order = before.keys().cloned().collect::<Vec<_>>();
+
+        set_peer(&mut entities, 0, "mod:station/新");
+
+        let after = entities[0].as_object().expect("station object");
+        assert_eq!(json_key_pointer(after, "stationPeerId"), pointer);
+        assert_eq!(after.keys().cloned().collect::<Vec<_>>(), order);
+        assert_eq!(after["stationPeerId"], Value::from("mod:station/新"));
+
+        let mut missing = vec![Value::Object(Map::new())];
+        set_peer(&mut missing, 0, "station-first");
+        assert_eq!(missing[0]["stationPeerId"], Value::from("station-first"));
+    }
+
+    fn local_station(id: &str, mode: &str) -> Value {
+        let mut configured = json!({
+            "itemId": "mod:物流物料/Ω",
+            "localMode": mode,
+            "minimumLoad": 0.1,
+            "minStock": 0,
+            "maxStock": 100,
+            "priority": 1
+        });
+        let empty = json!({
+            "itemId": null,
+            "localMode": "storage",
+            "minimumLoad": 0.1,
+            "minStock": 0,
+            "maxStock": 0,
+            "priority": 1
+        });
+        json!({
+            "id": id,
+            "kind": "station",
+            "planetId": "mod:行星/β",
+            "buildingId": "planetary_logistics_station",
+            "machineCount": 1,
+            "stationSlots": [
+                std::mem::take(&mut configured),
+                empty.clone(),
+                empty.clone(),
+                empty.clone(),
+                empty
+            ],
+            "inputs": {},
+            "outputs": { "mod:物流物料/Ω": 10 }
+        })
+    }
+
+    #[test]
+    fn prepared_directory_survives_dynamic_updates_and_rebuilds_for_elevator_mode() {
+        let mut entities = vec![
+            local_station("supply", "supply"),
+            local_station("demand", "demand"),
+        ];
+        let station_indices = vec![0, 1];
+        let cached = prepare_step_directory(&entities, &station_indices).unwrap();
+        assert_eq!(peer_matches(&cached, 1, 0).unwrap(), vec![(0, 0)]);
+
+        entities[0]["outputs"]["mod:物流物料/Ω"] = Value::from(7);
+        entities[1]["stationProgress"] = Value::from(0.75);
+        let rebuilt_dynamic = prepare_step_directory(&entities, &station_indices).unwrap();
+        assert_eq!(
+            peer_matches(&cached, 1, 0).unwrap(),
+            peer_matches(&rebuilt_dynamic, 1, 0).unwrap()
+        );
+
+        entities[0]["buildingId"] = Value::from("interstellar_logistics_station");
+        entities[0]["stationTier"] = Value::from(2);
+        entities[0]["stationOperationMode"] = Value::from("elevator");
+        let rebuilt_boundary = prepare_step_directory(&entities, &station_indices).unwrap();
+        assert!(peer_matches(&rebuilt_boundary, 1, 0).unwrap().is_empty());
+        assert_eq!(rebuilt_boundary.station_indices, vec![1]);
+    }
 }

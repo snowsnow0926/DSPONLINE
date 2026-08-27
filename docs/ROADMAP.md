@@ -1,5 +1,21 @@
 # 公开测试版后续路线图
 
+## Windows Performance Edition（独立开发工作树，未发布）
+
+- [x] 冻结 76.9 MB 极限档的规范哈希、阶段耗时和进程内存口径；基准测试支持绑定指定 Host 二进制 SHA，便于同机交错 A/B。
+- [x] 记录并拒绝“保留第二份完整 JSON DOM”和“只换 Windows 分配器”两条高内存路线。
+- [x] 落地第一批零语义壳层策略与有界运行诊断：默认 Chromium GPU、无隐式 V8/优先级参数、显式软件回退，以及脱敏 GPU/Electron 进程/内存快照。该快照不冒充完整进程树实测。
+- [x] 为 1.2.3 性能开发版冻结独立 appId、AppUserModelID、产品/EXE/setup、安装输出、userData 与 sessionData；默认离线且不自动迁移稳定版数据，可与当前安装并存测试。
+- [x] 完成 COW 原生静态索引/记录容器、确定性 power probe 多核和线路 scratch/稠密调度优化，并通过单步、长窗口与真实档差分。
+- [x] 完成当前 v47 规则覆盖内可安全落地的紧凑线路/实体列、原始记录补丁、流式聚合、编译路由缓存和串行 barrier 固定合并；仍未把所有 Mod/未来规则从通用 JSON 迁出。
+- [x] 完成 30 秒守恒纯挂机、同 revision WAL/检查点恢复、10,000 次故障注入和 1/2/4/8/auto 线程真实档哈希矩阵。
+- [x] 为实验性 exact-realtime 增加 durable `normal-main` 单写者栅栏、启动恢复阻断和主进程内部固定 pending-tick 操作。
+- [ ] 完成玩家可见的唯一原生权威与 renderer 薄投影接管；当前仍为影子/实验链，`authorityEligible=false`。
+- [ ] 完成薄 Electron 壳层 A/B 实验、原生 GPU 画布评估、UI 功能对齐及三档硬件 24 小时门禁。
+- [ ] 完成签名、覆盖升级、回滚、邀请 Beta 和分阶段灰度；这些外部门禁完成前不宣称 stable。
+
+总体目标、工作包、性能预算和 Gate 见 [Windows 全原生高性能桌面版总体重构计划](./WINDOWS_DESKTOP_FULL_NATIVE_REARCHITECTURE_PLAN_2026-08.md)；架构边界、被否决方案和完成证据见 [ADR-008](./architecture/ADR-008-WINDOWS-PERFORMANCE-EDITION.md)。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 保持不变。
+
 ## 1.2.3 Windows 原生增量候选（开发中，未部署）
 
 - [x] 活动 revision 的 base/实体页/线路页/拓扑脏标记与 durable ACK 后清除。

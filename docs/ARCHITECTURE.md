@@ -1,5 +1,15 @@
 # 系统架构
 
+> **Windows 原生权威 E1a 写入栅栏（2026-08-28，开发候选，未启用）**：性能开发版的 `normal-main` 原生存档现在以 Rust 持久租约作为唯一写入栅栏。租约存在或损坏时，普通保存事务的开始与提交、原始/幂等 WAL、压缩、通用核心提交和检查点都会 fail-closed；即使事务先于租约创建，也会在发布边界再次被拒绝。实验性精确推进只能由主进程内部使用独立 capability 调用，调用者只提供租约身份，command ID、base revision、固定 1 秒 exact 预算和空 gameplay command 均由 Rust 从已持久化 pending tick 派生。该操作没有 `ipcMain`/preload/renderer 入口。桌面启动会在 Host hello 后、创建普通窗口前检查租约；有效或无法验证的租约会阻止窗口启动，缺失租约保持既有路径。此门禁解决“双写”风险，但**没有**把实验核心提升为玩家可见权威，`authorityEligible=false` 保持不变。
+
+> **Windows 大档热路径 E5～E18（2026-08-28，开发候选）**：Rust 核心已经把线路拓扑、精确行索引、实体/线路原始记录写回、普通机器批处理、量子与本地物流、生产历史和规范哈希的多处临时 JSON/字符串复制改为紧凑索引、确定性分区、流式聚合或既有键原位更新。不可变线路路由和本地物流 peer directory 在 revision 内缓存，只有命令改变拓扑或 5 秒模式边界时失效。提交仍按稳定输入顺序合并，跨 `1/2/4/8/auto` 线程的状态哈希必须一致；任何错误在安装候选前返回，不能部分提交。
+
+> **Windows 性能开发版安装与数据身份（开发候选，未部署）**：Electron Builder 的 appId/AppUserModelID 固定为 `com.dspidle.network.performance`，产品、快捷方式和卸载项固定为 `DSP极简网络 Windows 性能开发版`，EXE 与 setup 分别使用 `dsp-idle-performance-edition` 前缀，构建输出固定为 `release-performance-edition/`。主进程不依赖 Electron 对 `productName` 的隐式推导，而是在 ready/单实例锁前显式建立 AppData 下独立的 `DSPidle2-Performance-Edition` userData 和其中的 `Chromium` sessionData；目录创建或 `setPath` 失败即停止启动，不回退到稳定版。安装目录选择被关闭、NSIS GUID 继续从独立 appId 确定派生、卸载不删除应用数据，因此性能版的安装、任务栏、快捷方式、IndexedDB/localStorage、原生存档、窗口状态和本机性能策略均不复用稳定版身份。
+
+> **Windows Electron 壳层运行策略（开发候选，未部署）**：主进程在 `app.ready` 前解析一个严格的壳层策略；默认不调用 `disableHardwareAcceleration()`，不追加 Chromium/V8 参数，也不改变操作系统进程优先级。只有精确设置开发环境变量 `DSP_DESKTOP_EXPERIMENTAL_DISABLE_HARDWARE_ACCELERATION=1` 才会在启动早期禁用硬件加速，其他非空值按无效配置忽略。受信 renderer 可以按需读取有界、5 秒缓存的 GPU feature/device、Electron `getAppMetrics()` 进程、系统/主进程内存、主进程 V8 heap limit 和只读优先级诊断；结果不包含命令行、环境变量、文件路径、URL、存档内容或异常文本。独立 Rust Host 只报告 PID，并明确不在 Electron 进程树汇总内；发布性能报告仍必须使用外部采样器统计完整进程树 Private Bytes。
+
+> **Windows 原生线程策略边界（开发候选，未部署）**：Electron 主进程从 `userData/native-performance-policy-v1.json` 读取设备级 `quiet`、`balanced`、`performance` 或 `custom` 策略，并只把它映射为 Rust 已支持的 `DSP_NATIVE_CORE_THREADS=auto/1/2/4/8`。Rust 内部的实体解析、实体编码、电力探针和普通机器探针共用一个进程生命周期的具名 Rayon 线程池；少于 4,096 条记录固定串行，索引结果按输入顺序合并，多个失败固定返回最小输入索引，`threads=1` 不会再由其他阶段另开临时工作线程。配置采用有界严格 schema 和同目录临时文件原子替换；损坏或未知字段回退到 `balanced/auto`。renderer 只能通过校验来源的 IPC 读写策略，不能传环境变量、文件路径或进程参数。运行中修改只设置 `restartRequired`，不会杀死 Host、切换检查点或回退 revision；新策略在下次完整应用启动时生效，不进入 GameState、存档或云协议。
+
 > **1.2.3 Windows 原生增量运行时边界（2026-08-27，开发候选，未部署）**：原生核心为活动 revision 分别维护 base、实体页、线路页和拓扑脏标记，只有完整持久提交回执才能清除；事件驱动线路队列用生产、库存、物流和电力的闭合信号唤醒路由组，活动比例高时自动保持原全扫描。`viewport-v1` 与 `statistics-v1` 通过最多 1 MiB、带 session/revision/sequence/长度/SHA-256 的二进制 MessagePort 块分页返回；v47/envelope v2 由 Rust 直接流式导出并在主进程复核。公开格式和云端 schema 不变，`authorityEligible=false`，24 小时/多硬件 Gate C 前不切换玩家可见权威。详见 [ADR-007](./architecture/ADR-007-WINDOWS-NATIVE-INCREMENTAL-RUNTIME.md) 与 [三层计划书第 20 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md#20-123-独立工作树实施结算2026-08-27)。
 
 > **1.2.2 纯挂机轻量校准边界（2026-08-27，开发候选，未部署）**：`pure-idle-macro-v5-lite` 为复杂大档保留一个 30 模拟秒的隔离权威副本，并在 0/10/20/30 秒采集紧凑物料投影；不再保留历史通用仿射路径的四份完整 GameState、线路诊断或循环相位。普通生产、实体输入输出、行星/量子库存与专用科研账本可以形成尾段合同；逐物料净消耗时间沿活动配方向下游传播。火箭/太阳帆制造与发射、戴森终端、银河出口、合同及巨构交付从紧凑合同排除，只保留精确前缀。候选继续走既有事务守恒、稀疏序列化、`inspectSave()` 与重载校验；没有新增持久字段或协议版本。

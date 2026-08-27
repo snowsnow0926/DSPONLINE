@@ -170,14 +170,17 @@ impl CoreState {
         // Apply to a cloned transactional state. A malformed late patch can
         // never leave the authoritative candidate partially edited.
         let mut next = self.clone();
-        let mut base = Value::Object(next.base_value_mut().clone());
+        // `next` is already disposable on failure. Move its base map into the
+        // patch value instead of retaining two complete copies during every
+        // pause/edit command.
+        let mut base = Value::Object(std::mem::take(next.base_value_mut()));
         for change in &command.top_level_changes {
             apply_value_patch(&mut base, change)?;
         }
-        *next.base_value_mut() = base
-            .as_object()
-            .cloned()
-            .ok_or_else(|| anyhow!("native command replaced the GameState root"))?;
+        *next.base_value_mut() = match base {
+            Value::Object(base) => base,
+            _ => bail!("native command replaced the GameState root"),
+        };
 
         let mut changed_entity_ids = Vec::new();
         for record in &command.changed_entities {
@@ -199,10 +202,7 @@ impl CoreState {
             if removed.len() != command.removed_entity_ids.len() {
                 bail!("native command repeats an entity removal")
             }
-            if removed
-                .iter()
-                .any(|id| !next.entity_index.contains_key(*id))
-            {
+            if removed.iter().any(|id| !next.entity_index.contains_key(id)) {
                 bail!("native command removes a missing entity")
             }
             next.entity_raw_mut_topology().retain(|raw| {
@@ -263,7 +263,7 @@ impl CoreState {
             if removed.len() != command.removed_belt_ids.len() {
                 bail!("native command repeats a belt removal")
             }
-            if removed.iter().any(|id| !next.belt_index.contains_key(*id)) {
+            if removed.iter().any(|id| !next.belt_index.contains_key(id)) {
                 bail!("native command removes a missing belt")
             }
             next.belt_raw_mut_topology().retain(|raw| {

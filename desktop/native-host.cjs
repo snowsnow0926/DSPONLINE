@@ -10,6 +10,39 @@ const CONTROL_RESPONSE_KIND = 2;
 const MAX_FRAME_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
+const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
+  "native-core-exact-realtime-writer-fence-v1";
+const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
+  "DSP_NATIVE_CORE_THREADS",
+  "DSP_NATIVE_CORE_SYNC_RECORD_DROP",
+]);
+const NATIVE_CORE_THREAD_ENVIRONMENT_VALUES = new Set(["auto", "1", "2", "4", "8"]);
+
+function normalizeNativeHostSpawnEnvironment(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("native host spawn environment is invalid");
+  }
+  const keys = Object.keys(value);
+  if (keys.some((key) => !NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS.has(key))) {
+    throw new TypeError("native host spawn environment contains an unsupported field");
+  }
+  const normalized = {};
+  if (Object.hasOwn(value, "DSP_NATIVE_CORE_THREADS")) {
+    const threadSetting = String(value.DSP_NATIVE_CORE_THREADS);
+    if (!NATIVE_CORE_THREAD_ENVIRONMENT_VALUES.has(threadSetting)) {
+      throw new TypeError("native host core thread setting is invalid");
+    }
+    normalized.DSP_NATIVE_CORE_THREADS = threadSetting;
+  }
+  if (Object.hasOwn(value, "DSP_NATIVE_CORE_SYNC_RECORD_DROP")) {
+    if (String(value.DSP_NATIVE_CORE_SYNC_RECORD_DROP) !== "1") {
+      throw new TypeError("native host synchronous record-drop setting is invalid");
+    }
+    normalized.DSP_NATIVE_CORE_SYNC_RECORD_DROP = "1";
+  }
+  return normalized;
+}
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
@@ -112,11 +145,18 @@ class NativeHostError extends Error {
 }
 
 class NativeHostClient {
-  constructor({ binaryPath, rootPath, spawnProcess = spawn, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }) {
+  constructor({
+    binaryPath,
+    rootPath,
+    spawnProcess = spawn,
+    requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    spawnEnvironment = {},
+  }) {
     if (!path.isAbsolute(binaryPath) || !path.isAbsolute(rootPath)) throw new TypeError("native host paths must be absolute");
     this.binaryPath = binaryPath;
     this.rootPath = rootPath;
     this.spawnProcess = spawnProcess;
+    this.spawnEnvironment = normalizeNativeHostSpawnEnvironment(spawnEnvironment);
     this.requestTimeoutMs = Math.max(5_000, Math.min(300_000, requestTimeoutMs));
     this.child = null;
     this.startPromise = null;
@@ -135,6 +175,7 @@ class NativeHostClient {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         shell: false,
+        env: { ...process.env, ...this.spawnEnvironment },
       });
       this.child = child;
       this.exited = false;
@@ -230,6 +271,103 @@ function validLogicalId(value, maximumLength) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
+function exactObjectKeys(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+    Reflect.ownKeys(value).some((key) => typeof key !== "string" || !keys.includes(key)) ||
+    keys.some((key) => !Object.hasOwn(value, key))) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+
+function validSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function normalizeExactRealtimeCheckpoint(value) {
+  exactObjectKeys(value, ["generation", "rootHash", "revision"], "native exact realtime checkpoint");
+  if (!Number.isSafeInteger(value.generation) || value.generation < 1 ||
+    !Number.isSafeInteger(value.revision) || value.revision < 0 || !validSha256(value.rootHash)) {
+    throw new TypeError("native exact realtime checkpoint is invalid");
+  }
+  return { generation: value.generation, rootHash: value.rootHash, revision: value.revision };
+}
+
+function normalizeExactRealtimeProof(value, label = "native exact realtime proof") {
+  exactObjectKeys(value, ["revision", "canonicalSha256", "domainSha256"], label);
+  if (!Number.isSafeInteger(value.revision) || value.revision < 0 ||
+    !validSha256(value.canonicalSha256) || !validSha256(value.domainSha256)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return { ...value };
+}
+
+function requireExactRealtimeIdentity(value, keys) {
+  exactObjectKeys(value, keys, "native exact realtime lease request");
+  if (!validLogicalId(value.runId, 128) || !validLogicalId(value.registryFingerprint, 256)) {
+    throw new TypeError("native exact realtime lease identity is invalid");
+  }
+}
+
+function normalizeNativeExactRealtimeLeaseRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.action !== "string") {
+    throw new TypeError("native exact realtime lease request is invalid");
+  }
+  switch (value.action) {
+    case "inspect":
+      exactObjectKeys(value, ["action"], "native exact realtime inspect request");
+      return { action: "inspect" };
+    case "prepare": {
+      requireExactRealtimeIdentity(value, ["action", "runId", "registryFingerprint", "checkpoint", "proof", "settledDeadlineMs"]);
+      const checkpoint = normalizeExactRealtimeCheckpoint(value.checkpoint);
+      const proof = normalizeExactRealtimeProof(value.proof);
+      if (proof.revision !== checkpoint.revision || !Number.isSafeInteger(value.settledDeadlineMs) || value.settledDeadlineMs < 0) {
+        throw new TypeError("native exact realtime prepare request is invalid");
+      }
+      return { ...value, checkpoint, proof };
+    }
+    case "activate":
+    case "beginFinalizing":
+      requireExactRealtimeIdentity(value, ["action", "runId", "registryFingerprint"]);
+      return { ...value };
+    case "pause":
+      requireExactRealtimeIdentity(value, ["action", "runId", "registryFingerprint", "reasonCode"]);
+      if (!validLogicalId(value.reasonCode, 160)) throw new TypeError("native exact realtime pause reason is invalid");
+      return { ...value };
+    case "stageExactTick":
+      requireExactRealtimeIdentity(value, [
+        "action", "runId", "registryFingerprint", "sequence", "commandId", "baseRevision",
+        "expectedRevision", "simulationSeconds", "wallSeconds", "settledDeadlineMs",
+      ]);
+      if (!Number.isSafeInteger(value.sequence) || value.sequence < 1 || !validLogicalId(value.commandId, 128) ||
+        !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0 ||
+        value.expectedRevision !== value.baseRevision + 1 || value.simulationSeconds !== 1 || value.wallSeconds !== 1 ||
+        !Number.isSafeInteger(value.settledDeadlineMs) || value.settledDeadlineMs < 0) {
+        throw new TypeError("native exact realtime staged tick is invalid");
+      }
+      return { ...value };
+    case "recordPublicPrimaryReadback":
+    case "clearFinalized": {
+      requireExactRealtimeIdentity(value, ["action", "runId", "registryFingerprint", "publicPrimaryReadbackProof"]);
+      const proof = value.publicPrimaryReadbackProof;
+      exactObjectKeys(proof, [
+        "kind", "revision", "canonicalSha256", "domainSha256", "registryFingerprint",
+        "payloadSha256", "baseChecksum", "byteLength", "savedAtMs",
+      ], "native exact realtime public readback proof");
+      if (proof.kind !== "public-primary-readback-v1" || !Number.isSafeInteger(proof.revision) || proof.revision < 0 ||
+        !validSha256(proof.canonicalSha256) || !validSha256(proof.domainSha256) ||
+        proof.registryFingerprint !== value.registryFingerprint || !validSha256(proof.payloadSha256) ||
+        typeof proof.baseChecksum !== "string" || !/^[a-f0-9]{8,128}$/.test(proof.baseChecksum) ||
+        !Number.isSafeInteger(proof.byteLength) || proof.byteLength < 1 ||
+        !Number.isSafeInteger(proof.savedAtMs) || proof.savedAtMs < 0) {
+        throw new TypeError("native exact realtime public readback proof is invalid");
+      }
+      return { ...value, publicPrimaryReadbackProof: { ...proof } };
+    }
+    default:
+      throw new TypeError("native exact realtime lease action is not allowed");
+  }
+}
+
 function normalizeNativeSaveBegin(value) {
   if (!value || typeof value !== "object") throw new TypeError("native save request is invalid");
   if (!validLogicalId(value.slot, 64)) throw new TypeError("native save slot is invalid");
@@ -254,9 +392,12 @@ function normalizeNativeSaveBegin(value) {
 function normalizeNativeSaveRecords(records) {
   if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw new TypeError("native save batch size is invalid");
   let totalBytes = 0;
+  const keys = new Set();
   return records.map((record) => {
     if (!record || typeof record !== "object" || typeof record.key !== "string" || record.key.length < 1 || record.key.length > 512 ||
       record.key.includes("..") || /[\\/\0]/.test(record.key)) throw new TypeError("native save record key is invalid");
+    if (keys.has(record.key)) throw new TypeError("native save batch repeats a record key");
+    keys.add(record.key);
     if (record.value !== null && typeof record.value !== "string") throw new TypeError("native save record value is invalid");
     totalBytes += Buffer.byteLength(record.key, "utf8") + (record.value === null ? 0 : Buffer.byteLength(record.value, "utf8"));
     if (totalBytes > MAX_FRAME_PAYLOAD_BYTES - 16_384) throw new RangeError("native save batch exceeds the bounded IPC limit");
@@ -282,6 +423,17 @@ class NativeSaveSessionRegistry {
   async write(ownerId, transactionId, records) {
     this.assertOwner(ownerId, transactionId);
     const normalized = normalizeNativeSaveRecords(records);
+    if (this.client.hello?.capabilities?.includes("native-save-put-batch-v1")) {
+      const result = await this.client.request({
+        operation: "savePutBatch",
+        transactionId,
+        records: normalized,
+      });
+      if (result?.acceptedRecords !== normalized.length) {
+        throw new NativeHostError("native host returned an invalid save batch receipt", "NATIVE_PROTOCOL_INVALID");
+      }
+      return { acceptedRecords: normalized.length };
+    }
     for (const record of normalized) {
       await this.client.request({ operation: "savePut", transactionId, ...record });
     }
@@ -383,6 +535,25 @@ function normalizeNativeCoreCommitOperation(value) {
     throw new RangeError("native core authoritative operation exceeds the bounded IPC limit");
   }
   return request;
+}
+
+class NativeExactRealtimeLeaseRegistry {
+  constructor(client) {
+    this.client = client;
+  }
+
+  request(request) {
+    if (!this.client.hello?.capabilities?.includes(NATIVE_EXACT_REALTIME_LEASE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the Rust exact realtime lease capability",
+        "NATIVE_CORE_EXACT_REALTIME_RUST_LEASE_UNAVAILABLE",
+      );
+    }
+    return this.client.request({
+      operation: "exactRealtimeLease",
+      request: normalizeNativeExactRealtimeLeaseRequest(request),
+    });
+  }
 }
 
 class NativeCoreSessionRegistry {
@@ -513,6 +684,30 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  commitOperationExactRealtime(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the exact realtime writer fence capability",
+        "NATIVE_CORE_EXACT_REALTIME_WRITER_FENCE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "registryFingerprint",
+    ], "native exact realtime commit request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.registryFingerprint, 256)) {
+      throw new TypeError("native exact realtime commit identity is invalid");
+    }
+    return this.client.request({
+      operation: "coreCommitOperationExactRealtime",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        registryFingerprint: request.registryFingerprint,
+      },
+    }, 300_000);
+  }
+
   checkpoint(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
@@ -523,6 +718,61 @@ class NativeCoreSessionRegistry {
       sessionId: request.sessionId,
       savedAtMs: request.savedAtMs,
     });
+  }
+
+  checkpointAndAcknowledgeExactRealtime(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_EXACT_REALTIME_LEASE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the Rust exact realtime lease capability",
+        "NATIVE_CORE_EXACT_REALTIME_RUST_LEASE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "registryFingerprint", "sequence", "commandId", "settledDeadlineMs",
+    ], "native exact realtime checkpoint ACK request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.registryFingerprint, 256) ||
+      !Number.isSafeInteger(request.sequence) || request.sequence < 1 || !validLogicalId(request.commandId, 128) ||
+      !Number.isSafeInteger(request.settledDeadlineMs) || request.settledDeadlineMs < 0) {
+      throw new TypeError("native exact realtime checkpoint ACK request is invalid");
+    }
+    return this.client.request({
+      operation: "coreCheckpointAcknowledgeExactRealtime",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        registryFingerprint: request.registryFingerprint,
+        sequence: request.sequence,
+        commandId: request.commandId,
+        settledDeadlineMs: request.settledDeadlineMs,
+      },
+    }, 300_000);
+  }
+
+  checkpointExactRealtimeFinalization(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_EXACT_REALTIME_LEASE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the Rust exact realtime lease capability",
+        "NATIVE_CORE_EXACT_REALTIME_RUST_LEASE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "registryFingerprint", "savedAtMs",
+    ], "native exact realtime finalization checkpoint request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.registryFingerprint, 256) ||
+      !Number.isSafeInteger(request.savedAtMs) || request.savedAtMs < 0) {
+      throw new TypeError("native exact realtime finalization checkpoint request is invalid");
+    }
+    return this.client.request({
+      operation: "coreCheckpointExactRealtimeFinalization",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        registryFingerprint: request.registryFingerprint,
+        savedAtMs: request.savedAtMs,
+      },
+    }, 300_000);
   }
 
   exportV47(ownerId, request) {
@@ -582,9 +832,12 @@ module.exports = {
   FRAME_PROTOCOL_VERSION,
   MAX_FRAME_PAYLOAD_BYTES,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
+  NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NativeHostClient,
   NativeHostError,
   NativeCoreSessionRegistry,
+  NativeExactRealtimeLeaseRegistry,
   NativeSaveSessionRegistry,
   crc32,
   encodeNativeProjectionTransfer,
@@ -595,5 +848,7 @@ module.exports = {
   normalizeNativeCoreCommand,
   normalizeNativeCoreCommitOperation,
   normalizeNativeCoreOpen,
+  normalizeNativeExactRealtimeLeaseRequest,
+  normalizeNativeHostSpawnEnvironment,
   parseFrames,
 };

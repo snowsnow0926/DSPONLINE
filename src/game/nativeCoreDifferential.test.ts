@@ -49,7 +49,9 @@ const { NativeHostClient, NativeSaveSessionRegistry } = require("../../desktop/n
   };
 };
 
-const binaryPath = path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
+const binaryPath = process.env.DSP_NATIVE_CORE_HOST_BINARY
+  ? path.resolve(process.env.DSP_NATIVE_CORE_HOST_BINARY)
+  : path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
 
 function canonicalSha256(value: unknown): string {
   value = JSON.parse(JSON.stringify(value));
@@ -1417,7 +1419,6 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     state: GameState,
     revision = 1,
     activeRuntime: ContentPackRuntimeSnapshot = runtime,
-    slotOverride?: string,
   ): Promise<{ slot: string; generation: number; rootHash: string; revision: number }> {
     const journal = buildChunkedSaveJournal(state, {
       mode: state.mode,
@@ -1430,7 +1431,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       ...[...journal.chunks.entries()].map(([id, value]) => ({ key: `${prefix}chunk.${encodeURIComponent(id)}`, value })),
       { key: `${prefix}manifest`, value: JSON.stringify(journal.manifest) },
     ];
-    const slot = slotOverride ?? (state.mode === "speedrun" ? "speedrun-main" : "normal-main");
+    const slot = state.mode === "speedrun" ? "speedrun-main" : "normal-main";
     const transaction = await saves.begin(1, {
       slot, mode: state.mode, stateVersion: 47, baseChecksum: "01234567",
       registryFingerprint: activeRuntime.fingerprint, revision, savedAtMs: 1,
@@ -1899,7 +1900,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         undefined,
         8,
       ).state;
-      const checkpoint = await seed(initial, 187, customRuntime, "normal-content-pack");
+      const checkpoint = await seed(initial, 187, customRuntime);
       for (const seconds of [1, 5, 20]) {
         applyContentPackRuntimeSnapshot(customRuntime);
         const expected = advanceSimulationBudget(initial, seconds, seconds);
@@ -1935,7 +1936,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
 
   it("matches BigInt infinite research levels, automatic continuation, and lab reset order", async () => {
     const initial = infiniteResearchState();
-    const checkpoint = await seed(initial, 185);
+    const checkpoint = await seed(initial, 188);
     for (const seconds of [1, 3, 10, 60, 600]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);

@@ -1,8 +1,10 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs");
+const nodeOs = require("node:os");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
+const nodeV8 = require("node:v8");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
 const {
   contract: cloudTransferContract,
@@ -24,10 +26,39 @@ const {
   encodeNativeProjectionTransfer,
   NativeHostClient,
   NativeCoreSessionRegistry,
+  NativeExactRealtimeLeaseRegistry,
   NativeSaveSessionRegistry,
   nativeHostBinaryPath,
 } = require("./native-host.cjs");
+const {
+  NativeCoreExactRealtimeRustLeaseStore,
+} = require("./native-core-exact-realtime-experiment.cjs");
+const {
+  inspectNativeExactRealtimeStartup,
+  unavailableStartupStatus,
+} = require("./native-exact-realtime-startup-guard.cjs");
+const {
+  NativePerformancePolicyStore,
+  detectLogicalCpuCount,
+} = require("./native-performance-policy.cjs");
+const {
+  PERFORMANCE_EDITION_IDENTITY,
+  initializePerformanceEditionIdentity,
+  validatePerformanceEditionPackageIdentity,
+} = require("./performance-edition-identity.cjs");
+const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
+const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
+
+validatePerformanceEditionPackageIdentity(packageMetadata);
+const performanceEditionRuntimeIdentity = initializePerformanceEditionIdentity({
+  app,
+  fileSystem: fs,
+  pathModule: path,
+});
+// This is deliberately initialized before app readiness. The default path does
+// not mutate Electron; only the exact experimental fallback can disable GPU use.
+const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });
 
 const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
 const channels = createReleaseChannels({
@@ -80,12 +111,36 @@ let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
+let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
+let nativePerformancePolicyStore = null;
+let nativePerformancePolicyStatus = {
+  schemaVersion: 1,
+  requestedPolicy: { mode: "balanced" },
+  effectivePolicy: { mode: "balanced", threadSetting: "auto" },
+  logicalCpuCount: detectLogicalCpuCount(),
+  restartRequired: false,
+  configurationState: "default",
+};
 let nativeHostState = {
   available: false,
   state: process.platform === "win32" ? "starting" : "unsupported",
   message: process.platform === "win32" ? "Windows 原生性能服务尚未启动" : "当前平台不启用 Windows 原生性能服务",
   capabilities: [],
+  performancePolicy: nativePerformancePolicyStatus,
 };
+const runtimeDiagnosticsSampler = new RuntimeDiagnosticsSampler({
+  app,
+  runtimeProcess: process,
+  nodeProcess: process,
+  nodeOs,
+  nodeV8,
+  getContext: () => ({
+    runtimePolicy: shellRuntimePolicy,
+    nativeHost: nativeHostClient && !nativeHostClient.exited
+      ? { pid: nativeHostClient.child?.pid }
+      : null,
+  }),
+});
 let updateState = {
   state: isDevelopment ? "development" : "idle",
   message: isDevelopment ? "开发环境不检查更新" : channel.url ? "尚未检查" : "此构建未配置更新源",
@@ -178,8 +233,18 @@ function validNativeLogicalId(value, maximumLength = 128) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
+function initializeNativePerformancePolicy() {
+  nativePerformancePolicyStore = new NativePerformancePolicyStore({
+    userDataPath: app.getPath("userData"),
+  });
+  nativePerformancePolicyStatus = nativePerformancePolicyStore.initialize();
+  nativeHostState = { ...nativeHostState, performancePolicy: nativePerformancePolicyStatus };
+  return nativePerformancePolicyStatus;
+}
+
 async function initializeNativeHost() {
   if (process.platform !== "win32") return nativeHostState;
+  if (!nativePerformancePolicyStore) initializeNativePerformancePolicy();
   const binaryPath = nativeHostBinaryPath({
     appPath: app.getAppPath(),
     resourcesPath: process.resourcesPath,
@@ -187,10 +252,20 @@ async function initializeNativeHost() {
   });
   const rootPath = path.join(app.getPath("userData"), "native-saves-v1");
   try {
-    nativeHostClient = new NativeHostClient({ binaryPath, rootPath });
+    nativeHostClient = new NativeHostClient({
+      binaryPath,
+      rootPath,
+      spawnEnvironment: nativePerformancePolicyStore.spawnEnvironment(),
+    });
     const hello = await nativeHostClient.start(app.getVersion());
     nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
+    nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
+      leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
+        leaseRegistry: new NativeExactRealtimeLeaseRegistry(nativeHostClient),
+      }),
+      environment: process.env,
+    });
     nativeHostState = {
       available: true,
       state: "ready",
@@ -199,13 +274,18 @@ async function initializeNativeHost() {
       nativeFormatVersion: hello.nativeFormatVersion,
       hostVersion: hello.hostVersion,
       capabilities: Array.isArray(hello.capabilities) ? hello.capabilities : [],
+      exactRealtime: nativeExactRealtimeStartupStatus,
+      performancePolicy: nativePerformancePolicyStatus,
     };
   } catch (error) {
+    nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
     nativeHostState = {
       available: false,
       state: "unavailable",
       message: `Windows 原生性能服务启动失败：${error instanceof Error ? error.message : "未知错误"}`,
       capabilities: [],
+      exactRealtime: nativeExactRealtimeStartupStatus,
+      performancePolicy: nativePerformancePolicyStatus,
     };
     nativeHostClient = null;
     nativeSaveSessions = null;
@@ -401,7 +481,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 680,
     backgroundColor: "#0b100e",
-    title: "DSP极简网络",
+    title: PERFORMANCE_EDITION_IDENTITY.productName,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -429,6 +509,10 @@ function createWindow() {
       message: "游戏界面发生异常，重新打开应用后会从最近一次本地存档恢复。",
       detail: `原因：${details.reason}`,
     }).catch(() => undefined);
+  });
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    mainWindow?.setTitle(PERFORMANCE_EDITION_IDENTITY.productName);
   });
   mainWindow.on("resize", () => {
     scheduleReadableDesktopZoom();
@@ -487,6 +571,8 @@ function configureAutoUpdater() {
 
 ipcMain.handle("desktop:release-info", () => ({
   isDesktop: true,
+  editionId: performanceEditionRuntimeIdentity.editionId,
+  productName: performanceEditionRuntimeIdentity.productName,
   platform: process.platform,
   channel: channelId,
   channelLabel: channel.label,
@@ -502,6 +588,24 @@ ipcMain.handle("desktop:set-font-scale", (_event, requestedScale) => {
 ipcMain.handle("desktop:native-status", (event) => {
   if (!trustedSender(event)) throw new Error("原生性能服务调用来源无效");
   return nativeHostState;
+});
+
+ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
+  if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");
+  return runtimeDiagnosticsSampler.sample();
+});
+
+ipcMain.handle("desktop:native-performance-policy", (event) => {
+  if (!trustedSender(event)) throw new Error("原生性能策略调用来源无效");
+  return nativePerformancePolicyStatus;
+});
+
+ipcMain.handle("desktop:set-native-performance-policy", (event, request) => {
+  if (!trustedSender(event)) throw new Error("原生性能策略调用来源无效");
+  if (!nativePerformancePolicyStore) throw new Error("原生性能策略尚未初始化");
+  nativePerformancePolicyStatus = nativePerformancePolicyStore.save(request);
+  nativeHostState = { ...nativeHostState, performancePolicy: nativePerformancePolicyStatus };
+  return nativePerformancePolicyStatus;
 });
 
 ipcMain.handle("desktop:native-save-begin", async (event, request) => {
@@ -998,10 +1102,16 @@ if (!hasSingleInstanceLock) {
     mainWindow.focus();
   });
   app.whenReady().then(async () => {
-    app.setAppUserModelId("com.dspidle.network");
+    app.setAppUserModelId(PERFORMANCE_EDITION_IDENTITY.appUserModelId);
     Menu.setApplicationMenu(null);
     configureAutoUpdater();
+    initializeNativePerformancePolicy();
     await initializeNativeHost();
+    if (!nativeExactRealtimeStartupStatus.normalWindowAllowed) {
+      dialog.showErrorBox("原生权威恢复需要处理", nativeExactRealtimeStartupStatus.message);
+      app.quit();
+      return;
+    }
     createWindow();
     if (updater) {
       setTimeout(() => void updater.checkForUpdates().catch((error) => {
@@ -1014,7 +1124,7 @@ if (!hasSingleInstanceLock) {
     });
   }).catch((error) => {
     console.error("Desktop startup failed", error);
-    dialog.showErrorBox("启动失败", `DSP极简网络无法启动：${error instanceof Error ? error.message : "未知错误"}`);
+    dialog.showErrorBox("启动失败", `${PERFORMANCE_EDITION_IDENTITY.productName} 无法启动：${error instanceof Error ? error.message : "未知错误"}`);
     app.quit();
   });
 }

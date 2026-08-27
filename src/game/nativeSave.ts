@@ -37,6 +37,11 @@ class DesktopNativeSaveTransaction implements NativeSaveTransaction {
     if (result.revision !== this.request.revision || result.slot !== this.request.slot || !/^[a-f0-9]{64}$/.test(result.rootHash)) {
       throw new Error("Windows 原生存档提交回执与权威 revision 不一致");
     }
+    if (result.walMaintenancePending) {
+      console.warn(
+        `Windows 原生存档已提交，但 WAL 后台收敛仍待重试（${result.walBytes ?? 0} bytes）；当前检查点不会回滚。`,
+      );
+    }
     seededSlots.add(this.request.slot);
     globalThis.setTimeout(() => {
       void getDesktopBridge()?.compactNativeSave({ slot: this.request.slot, retainGenerations: 2 }).catch(() => undefined);

@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,6 +14,8 @@ import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
 const runBenchmark = process.env.DSP_RUN_NATIVE_CORE_BENCHMARK === "1";
+const benchmarkOpenOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1";
+const benchmarkExactOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY === "1";
 const fixturePath = process.env.DSP_NATIVE_CORE_FIXTURE ||
   "C:\\Users\\WINDOWS\\Downloads\\dsp-idle-save-2026-08-24 (1).json\\dsp-idle-save-2026-08-24 (1).json";
 const require = createRequire(import.meta.url);
@@ -81,6 +84,209 @@ function privateBytes(pid: number | undefined): number | null {
   }
 }
 
+interface PrivatePeakSample {
+  phase: "open" | "exact-advance" | "exact-burst-3x1";
+  pid: number | null;
+  samplerPid: number | null;
+  intervalMs: number;
+  baselineBytes: number | null;
+  finalBytes: number | null;
+  peakBytes: number | null;
+  sampleCount: number;
+  readErrors: number;
+  lastReadSucceeded: boolean;
+  intervalSampleCount: number;
+  intervalMinMs: number | null;
+  intervalMeanMs: number | null;
+  intervalP50Ms: number | null;
+  intervalP95Ms: number | null;
+  intervalMaxMs: number | null;
+  samplingCadenceValid: boolean;
+  error: string | null;
+}
+
+async function startPrivatePeakSampler(
+  pid: number | undefined,
+  phase: PrivatePeakSample["phase"],
+  intervalMs = 50,
+): Promise<{ stop: () => Promise<PrivatePeakSample> }> {
+  const baselineBytes = privateBytes(pid);
+  if (process.platform !== "win32" || !Number.isSafeInteger(pid) || !pid) {
+    return {
+      stop: async () => ({
+        phase,
+        pid: Number.isSafeInteger(pid) && pid ? pid : null,
+        samplerPid: null,
+        intervalMs,
+        baselineBytes,
+        finalBytes: baselineBytes,
+        peakBytes: baselineBytes,
+        sampleCount: baselineBytes === null ? 0 : 1,
+        readErrors: baselineBytes === null ? 1 : 0,
+        lastReadSucceeded: baselineBytes !== null,
+        intervalSampleCount: 0,
+        intervalMinMs: null,
+        intervalMeanMs: null,
+        intervalP50Ms: null,
+        intervalP95Ms: null,
+        intervalMaxMs: null,
+        samplingCadenceValid: false,
+        error: process.platform === "win32" ? "native-host-pid-unavailable" : "windows-only",
+      }),
+    };
+  }
+
+  const stopPath = path.join(os.tmpdir(), `dsp-native-private-peak-${process.pid}-${pid}-${crypto.randomUUID()}.stop`);
+  const quotedStopPath = stopPath.replaceAll("'", "''");
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$targetPid=${pid}`,
+    `$stopPath='${quotedStopPath}'`,
+    `$intervalMs=${intervalMs}`,
+    "$samplerProcess=[System.Diagnostics.Process]::GetCurrentProcess()",
+    "try { $samplerProcess.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::High } catch { }",
+    "$targetProcess=[System.Diagnostics.Process]::GetProcessById($targetPid)",
+    "$peak=0L",
+    "$samples=0L",
+    "$readErrors=0L",
+    "$lastReadSucceeded=$false",
+    "$lastSampleAt=0L",
+    "$clockFrequency=[double][System.Diagnostics.Stopwatch]::Frequency",
+    "$intervals=[System.Collections.Generic.List[long]]::new()",
+    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $targetProcess.Refresh(); $value=$targetProcess.PrivateMemorySize64; if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true } catch { $readErrors++; $lastReadSucceeded=$false } }",
+    ". $sample $false",
+    "[Console]::Out.WriteLine('READY')",
+    "[Console]::Out.Flush()",
+    "while (-not [System.IO.File]::Exists($stopPath)) { [System.Threading.Thread]::Sleep($intervalMs); . $sample $true }",
+    ". $sample $false",
+    "$sorted=@($intervals | Sort-Object)",
+    "$intervalCount=$sorted.Count",
+    "$intervalMin=if ($intervalCount -gt 0) { [long]$sorted[0] } else { 0L }",
+    "$intervalMax=if ($intervalCount -gt 0) { [long]$sorted[$intervalCount-1] } else { 0L }",
+    "$intervalMean=if ($intervalCount -gt 0) { [long][Math]::Round((($sorted | Measure-Object -Sum).Sum)/$intervalCount) } else { 0L }",
+    "$p50Index=[int][Math]::Max(0,[Math]::Ceiling($intervalCount*0.50)-1)",
+    "$p95Index=[int][Math]::Max(0,[Math]::Ceiling($intervalCount*0.95)-1)",
+    "$intervalP50=if ($intervalCount -gt 0) { [long]$sorted[$p50Index] } else { 0L }",
+    "$intervalP95=if ($intervalCount -gt 0) { [long]$sorted[$p95Index] } else { 0L }",
+    "[Console]::Out.WriteLine((\"RESULT`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}\" -f $peak,$samples,$readErrors,$lastReadSucceeded,$intervalCount,$intervalMin,$intervalMean,$intervalP50,$intervalP95,$intervalMax))",
+    "[Console]::Out.Flush()",
+  ].join("; ");
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let stdout = "";
+  let stderr = "";
+  let stopped = false;
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  const closePromise = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("private peak sampler did not become ready within 10 seconds")), 10_000);
+    const inspect = () => {
+      if (!stdout.includes("READY")) return;
+      clearTimeout(timeout);
+      child.stdout.off("data", inspect);
+      resolve();
+    };
+    child.stdout.on("data", inspect);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (stdout.includes("READY")) return;
+      clearTimeout(timeout);
+      reject(new Error(`private peak sampler exited before ready (${code}): ${stderr.trim()}`));
+    });
+    inspect();
+  }).catch((error) => {
+    if (!child.killed) child.kill();
+    fs.rmSync(stopPath, { force: true });
+    void closePromise.catch(() => undefined);
+    throw error;
+  });
+
+  return {
+    stop: async () => {
+      if (stopped) throw new Error("private peak sampler was stopped twice");
+      stopped = true;
+      let closed = false;
+      try {
+        fs.writeFileSync(stopPath, "stop", { encoding: "utf8", flag: "wx" });
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const exitCode = await Promise.race([
+          closePromise,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("private peak sampler did not stop within 10 seconds")), 10_000);
+          }),
+        ]).finally(() => {
+          if (timeout) clearTimeout(timeout);
+        });
+        closed = true;
+        const match = stdout.match(/RESULT\t(\d+)\t(\d+)\t(\d+)\t(True|False)\t(\d+)\t(\d+)\t(\d+)\t(\d+)\t(\d+)\t(\d+)/i);
+        const peakBytes = match ? Number(match[1]) : null;
+        const sampleCount = match ? Number(match[2]) : 0;
+        const readErrors = match ? Number(match[3]) : 0;
+        const lastReadSucceeded = match?.[4]?.toLowerCase() === "true";
+        const intervalSampleCount = match ? Number(match[5]) : 0;
+        const intervalMinMs = match ? Number(match[6]) : null;
+        const intervalMeanMs = match ? Number(match[7]) : null;
+        const intervalP50Ms = match ? Number(match[8]) : null;
+        const intervalP95Ms = match ? Number(match[9]) : null;
+        const intervalMaxMs = match ? Number(match[10]) : null;
+        const samplingCadenceValid = intervalSampleCount >= 1
+          && intervalP95Ms !== null && intervalP95Ms <= intervalMs * 2
+          && intervalMaxMs !== null && intervalMaxMs <= intervalMs * 5;
+        const samplerFailures = [
+          exitCode === 0 ? null : `exit=${exitCode}`,
+          peakBytes !== null && sampleCount > 0 ? null : "missing-result",
+          readErrors === 0 ? null : `read-errors=${readErrors}`,
+          lastReadSucceeded ? null : "final-read-failed",
+          samplingCadenceValid ? null : `cadence-invalid(p95=${intervalP95Ms},max=${intervalMaxMs},target=${intervalMs})`,
+          stderr.trim() || null,
+        ].filter((value): value is string => Boolean(value));
+        const error = samplerFailures.length === 0 ? null : samplerFailures.join("; ");
+        return {
+          phase,
+          pid,
+          samplerPid: Number.isSafeInteger(child.pid) ? child.pid ?? null : null,
+          intervalMs,
+          baselineBytes,
+          finalBytes: privateBytes(pid),
+          peakBytes,
+          sampleCount,
+          readErrors,
+          lastReadSucceeded,
+          intervalSampleCount,
+          intervalMinMs,
+          intervalMeanMs,
+          intervalP50Ms,
+          intervalP95Ms,
+          intervalMaxMs,
+          samplingCadenceValid,
+          error,
+        };
+      } finally {
+        fs.rmSync(stopPath, { force: true });
+        if (!closed && child.exitCode === null && !child.killed) {
+          child.kill();
+          await Promise.race([
+            closePromise.catch(() => null),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+          ]);
+        }
+      }
+    },
+  };
+}
+
 function firstDifferences(left: unknown, right: unknown, limit = 40): Array<{ path: string; native: unknown; js: unknown }> {
   const differences: Array<{ path: string; native: unknown; js: unknown }> = [];
   const visit = (native: unknown, js: unknown, path: string) => {
@@ -112,9 +318,19 @@ function firstDifferences(left: unknown, right: unknown, limit = 40): Array<{ pa
   return differences;
 }
 
+function logBenchmarkRecord(label: string, value: Record<string, unknown>): void {
+  console.log(JSON.stringify(value, null, 2));
+  // The compact line is consumed by the interleaved A/B harness. Keeping the
+  // human-readable block above makes one-off diagnosis pleasant while this
+  // stable prefix avoids scraping Vitest formatting or nested pretty JSON.
+  console.log(`DSP_NATIVE_CORE_BENCHMARK\t${label}\t${JSON.stringify(value)}`);
+}
+
 describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-benchmark-"));
-  const binaryPath = path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
+  const binaryPath = process.env.DSP_NATIVE_CORE_HOST_BINARY
+    ? path.resolve(process.env.DSP_NATIVE_CORE_HOST_BINARY)
+    : path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
   const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 300_000 });
   afterAll(async () => {
     await client.stop();
@@ -124,6 +340,12 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
   it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 300_000 }, async () => {
     expect(fs.existsSync(fixturePath)).toBe(true);
     expect(fs.existsSync(binaryPath)).toBe(true);
+    const hostBinaryBytes = (require("node:fs") as { readFileSync(path: string): Uint8Array })
+      .readFileSync(binaryPath);
+    const hostBinarySha256 = (require("node:crypto") as typeof import("node:crypto"))
+      .createHash("sha256")
+      .update(hostBinaryBytes)
+      .digest("hex");
     const sourceBytes = fs.statSync(fixturePath).size;
     const envelope = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Envelope;
     expect(envelope.formatVersion).toBe(2);
@@ -166,17 +388,26 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     }
     const commit = await saves.commit(1, transaction.transactionId);
     const beforePrivateBytes = privateBytes(client.child?.pid);
+    const openPeakSampler = await startPrivatePeakSampler(client.child?.pid, "open");
     const openStartedAt = performance.now();
-    const opened = await client.request({
-      operation: "coreOpen",
-      slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
-      generation: commit.generation,
-      rootHash: commit.rootHash,
-      revision: commit.revision,
-      registryFingerprint: runtime.fingerprint,
-      catalog: createNativeCoreCatalog(runtime),
-    });
-    const openDurationMs = performance.now() - openStartedAt;
+    let openFinishedAt = openStartedAt;
+    let opened: any;
+    let openPeakSample: PrivatePeakSample;
+    try {
+      opened = await client.request({
+        operation: "coreOpen",
+        slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
+        generation: commit.generation,
+        rootHash: commit.rootHash,
+        revision: commit.revision,
+        registryFingerprint: runtime.fingerprint,
+        catalog: createNativeCoreCatalog(runtime),
+      });
+      openFinishedAt = performance.now();
+    } finally {
+      openPeakSample = await openPeakSampler.stop();
+    }
+    const openDurationMs = openFinishedAt - openStartedAt;
     const afterPrivateBytes = privateBytes(client.child?.pid);
     const sourceSha256 = stableCanonicalSha256(migratedState);
     const { entities: sourceEntities, belts: sourceBelts, ...sourceBase } = migratedState;
@@ -188,10 +419,10 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     expect(opened.summary.entityCount).toBe(migratedState.entities.length);
     expect(opened.summary.beltCount).toBe(migratedState.belts.length);
     expect(opened.summary.coverage.authorityEligible).toBe(false);
-    expect(opened.summary.memory.estimatedRuntimeBytes).toBeLessThan(sourceBytes * 3);
-    console.log(JSON.stringify({
+    logBenchmarkRecord("open", {
       fixture: { sourceBytes, entities: migratedState.entities.length, belts: migratedState.belts.length },
       nativeCore: {
+        hostBinarySha256,
         openDurationMs: Number(openDurationMs.toFixed(2)),
         canonicalSha256: opened.summary.canonicalSha256,
         sourceSha256,
@@ -200,13 +431,29 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         exactRoundTrip: opened.summary.canonicalSha256 === sourceSha256,
         estimatedRuntimeBytes: opened.summary.memory.estimatedRuntimeBytes,
         rawRecordBytes: opened.summary.memory.rawRecordBytes,
+        indexedStringBytes: opened.summary.memory.indexedStringBytes,
+        inventoryEntryCount: opened.summary.memory.inventoryEntryCount,
+        topologyIndexBytes: opened.summary.memory.topologyIndexBytes,
         processPrivateBytesBeforeOpen: beforePrivateBytes,
         processPrivateBytesAfterOpen: afterPrivateBytes,
         processPrivateBytesDelta: beforePrivateBytes !== null && afterPrivateBytes !== null ? afterPrivateBytes - beforePrivateBytes : null,
+        processPrivateBytesPeakDuringOpen: openPeakSample.peakBytes,
+        processPrivateBytesPeakDeltaDuringOpen: openPeakSample.peakBytes !== null && openPeakSample.baselineBytes !== null
+          ? openPeakSample.peakBytes - openPeakSample.baselineBytes
+          : null,
+        privatePeakSampler: openPeakSample,
       },
-    }, null, 2));
+    });
+    // Emit the complete immutable open evidence before enforcing the memory
+    // budget so a regression report retains the component breakdown needed to
+    // diagnose the excess without weakening the fail-closed gate.
+    expect(opened.summary.memory.estimatedRuntimeBytes).toBeLessThan(sourceBytes * 3);
     expect(opened.summary.canonicalComponents).toEqual(sourceComponents);
     expect(opened.summary.canonicalSha256).toBe(sourceSha256);
+    if (benchmarkOpenOnly) {
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      return;
+    }
     const commandPrivateBytesBefore = privateBytes(client.child?.pid);
     const commandStartedAt = performance.now();
     const resumed = await client.request({
@@ -222,18 +469,27 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     });
     const commandDurationMs = performance.now() - commandStartedAt;
     const commandPrivateBytesAfter = privateBytes(client.child?.pid);
+    const exactPeakSampler = await startPrivatePeakSampler(client.child?.pid, "exact-advance");
     const coreAdvanceStartedAt = performance.now();
-    const admission = await client.request({
-      operation: "coreAdvance",
-      sessionId: opened.sessionId,
-      request: {
-        baseRevision: resumed.revision,
-        simulationSeconds: 1,
-        wallSeconds: 1,
-        includeDiagnostics: false,
-      },
-    });
-    const coreAdvanceDurationMs = performance.now() - coreAdvanceStartedAt;
+    let coreAdvanceFinishedAt = coreAdvanceStartedAt;
+    let admission: any;
+    let exactPeakSample: PrivatePeakSample;
+    try {
+      admission = await client.request({
+        operation: "coreAdvance",
+        sessionId: opened.sessionId,
+        request: {
+          baseRevision: resumed.revision,
+          simulationSeconds: 1,
+          wallSeconds: 1,
+          includeDiagnostics: false,
+        },
+      });
+      coreAdvanceFinishedAt = performance.now();
+    } finally {
+      exactPeakSample = await exactPeakSampler.stop();
+    }
+    const coreAdvanceDurationMs = coreAdvanceFinishedAt - coreAdvanceStartedAt;
     const diagnosticsStartedAt = performance.now();
     const advancedSummary = await client.request({
       operation: "coreStatus",
@@ -247,7 +503,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     });
     const cachedDiagnosticsDurationMs = performance.now() - cachedDiagnosticsStartedAt;
     expect(cachedAdvancedSummary).toEqual(advancedSummary);
-    console.log(JSON.stringify({
+    logBenchmarkRecord("admission", {
       nativeCoreAdmission: {
         supported: admission.supported,
         exactScope: admission.exactScope,
@@ -257,7 +513,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           ? commandPrivateBytesAfter - commandPrivateBytesBefore
           : null,
       },
-    }, null, 2));
+    });
     if (admission.supported) {
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
@@ -300,27 +556,39 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
             .slice(0, 30);
         })()
         : [];
-      console.log(JSON.stringify({
+      logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
+          canonicalSha256: advancedSummary.canonicalSha256,
+          expectedCanonicalSha256: stableCanonicalSha256(expected),
+          canonicalComponents: advancedSummary.canonicalComponents,
           fieldMismatches,
           mismatchDetails,
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
-        nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
-        deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
-        cachedDiagnosticsDurationMs: Number(cachedDiagnosticsDurationMs.toFixed(2)),
-        nativeBeltScheduler: admission.beltScheduler ?? null,
-        javascriptBeltScheduler: {
-          routeChecks: jsProfiler.beltRouteChecks,
-          stableRoutesSkipped: jsProfiler.beltStableRoutesSkipped,
+          nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
+          processPrivateBytesPeakDuringAdvance: exactPeakSample.peakBytes,
+          processPrivateBytesPeakDeltaDuringAdvance: exactPeakSample.peakBytes !== null && exactPeakSample.baselineBytes !== null
+            ? exactPeakSample.peakBytes - exactPeakSample.baselineBytes
+            : null,
+          privatePeakSampler: exactPeakSample,
+          deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
+          cachedDiagnosticsDurationMs: Number(cachedDiagnosticsDurationMs.toFixed(2)),
+          nativeBeltScheduler: admission.beltScheduler ?? null,
+          javascriptBeltScheduler: {
+            routeChecks: jsProfiler.beltRouteChecks,
+            stableRoutesSkipped: jsProfiler.beltStableRoutesSkipped,
+          },
         },
-      },
-      }, null, 2));
+      });
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);
       expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
+      if (benchmarkExactOnly) {
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+        return;
+      }
       const integratedDiagnosticsStartedAt = performance.now();
       const integratedDiagnostics = await client.request({
         operation: "coreAdvance",
@@ -337,16 +605,167 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       const integratedCachedStartedAt = performance.now();
       const integratedCached = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
       const integratedCachedDurationMs = performance.now() - integratedCachedStartedAt;
-      console.log(JSON.stringify({
+      logBenchmarkRecord("integrated", {
         nativeCoreIntegratedDiagnostics: {
           exactState: integratedDiagnostics.summary?.canonicalSha256 === stableCanonicalSha256(expectedSecond),
           advanceAndProofDurationMs: Number(integratedDiagnosticsDurationMs.toFixed(2)),
           previousAdvanceThenProofDurationMs: Number((coreAdvanceDurationMs + diagnosticsDurationMs).toFixed(2)),
           cachedStatusDurationMs: Number(integratedCachedDurationMs.toFixed(2)),
         },
-      }, null, 2));
+      });
       expect(integratedDiagnostics.summary?.canonicalSha256).toBe(stableCanonicalSha256(expectedSecond));
       expect(integratedCached).toEqual(integratedDiagnostics.summary);
+      // The previous two advances intentionally exercise the non-durable
+      // shadow endpoint. Authority WAL cannot start at that later in-memory
+      // revision because it must continue the durable checkpoint exactly.
+      // Reopen the immutable revision-1 checkpoint and make the resume command
+      // plus first exact second one durable operation instead.
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      opened = await client.request({
+        operation: "coreOpen",
+        slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
+        generation: commit.generation,
+        rootHash: commit.rootHash,
+        revision: commit.revision,
+        registryFingerprint: runtime.fingerprint,
+        catalog: createNativeCoreCatalog(runtime),
+      });
+      const durablePrivateBytesBefore = privateBytes(client.child?.pid);
+      const durableStartedAt = performance.now();
+      const durable = await client.request({
+        operation: "coreCommitOperation",
+        sessionId: opened.sessionId,
+        request: {
+          commandId: "native-core-real-save-benchmark-durable",
+          baseRevision: commit.revision,
+          command: {
+            protocolVersion: 1,
+            baseRevision: commit.revision,
+            topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+            changedEntities: [], addedEntities: [], removedEntityIds: [],
+            changedBelts: [], addedBelts: [], removedBeltIds: [],
+          },
+          simulationSeconds: 1,
+          wallSeconds: 1,
+          includeDiagnostics: true,
+        },
+      });
+      const durableDurationMs = performance.now() - durableStartedAt;
+      const durablePrivateBytesAfter = privateBytes(client.child?.pid);
+      const expectedDurable = expected;
+      const durableRetryStartedAt = performance.now();
+      const durableRetry = await client.request({
+        operation: "coreCommitOperation",
+        sessionId: opened.sessionId,
+        request: {
+          commandId: "native-core-real-save-benchmark-durable",
+          baseRevision: commit.revision,
+          command: {
+            protocolVersion: 1,
+            baseRevision: commit.revision,
+            topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+            changedEntities: [], addedEntities: [], removedEntityIds: [],
+            changedBelts: [], addedBelts: [], removedBeltIds: [],
+          },
+          simulationSeconds: 1,
+          wallSeconds: 1,
+          includeDiagnostics: false,
+        },
+      });
+      const durableRetryDurationMs = performance.now() - durableRetryStartedAt;
+      const checkpointStartedAt = performance.now();
+      const checkpoint = await client.request({
+        operation: "coreCheckpoint",
+        sessionId: opened.sessionId,
+        savedAtMs: 2,
+      });
+      const checkpointDurationMs = performance.now() - checkpointStartedAt;
+      logBenchmarkRecord("durable", {
+        nativeCoreDurableAuthority: {
+          exactState: durable.summary?.canonicalSha256 === stableCanonicalSha256(expectedDurable),
+          durationMs: Number(durableDurationMs.toFixed(2)),
+          privateBytesDelta: durablePrivateBytesBefore !== null && durablePrivateBytesAfter !== null
+            ? durablePrivateBytesAfter - durablePrivateBytesBefore
+            : null,
+          duplicateRetry: durableRetry.duplicate === true,
+          duplicateRetryDurationMs: Number(durableRetryDurationMs.toFixed(2)),
+          walBytes: durable.walBytes ?? null,
+        },
+      });
+      logBenchmarkRecord("checkpoint", {
+        nativeCoreIncrementalCheckpoint: {
+          exactState: checkpoint.summary?.canonicalSha256 === stableCanonicalSha256(expectedDurable),
+          durationMs: Number(checkpointDurationMs.toFixed(2)),
+          changedRecords: checkpoint.checkpoint?.changedRecords ?? null,
+          changedBytes: checkpoint.checkpoint?.changedBytes ?? null,
+          encodedRecords: checkpoint.encodedRecords ?? null,
+          reusedRecords: checkpoint.reusedRecords ?? null,
+        },
+      });
+      expect(durable.duplicate).toBe(false);
+      expect(durable.summary?.canonicalSha256).toBe(stableCanonicalSha256(expectedDurable));
+      expect(durableRetry.duplicate).toBe(true);
+      expect(durableRetry.revision).toBe(durable.revision);
+      expect(checkpoint.summary?.canonicalSha256).toBe(stableCanonicalSha256(expectedDurable));
+
+      // A single operation followed by JavaScript oracle work gives the
+      // deferred Rust record reclaimer ample time to finish. Measure a real
+      // back-to-back burst separately so a second transient Value graph cannot
+      // hide behind the one-step peak number.
+      const burstPeakSampler = await startPrivatePeakSampler(client.child?.pid, "exact-burst-3x1");
+      const burstStartedAt = performance.now();
+      let burstFinishedAt = burstStartedAt;
+      let burstRevision = durable.revision;
+      const burstStepDurationsMs: number[] = [];
+      let burstPeakSample: PrivatePeakSample;
+      try {
+        for (let step = 0; step < 3; step += 1) {
+          const stepStartedAt = performance.now();
+          const advanced = await client.request({
+            operation: "coreAdvance",
+            sessionId: opened.sessionId,
+            request: {
+              baseRevision: burstRevision,
+              simulationSeconds: 1,
+              wallSeconds: 1,
+              includeDiagnostics: false,
+            },
+          });
+          if (advanced.supported !== true || advanced.revision !== burstRevision + 1) {
+            throw new Error(`native burst step ${step + 1} was not an exact contiguous advance`);
+          }
+          burstRevision = advanced.revision;
+          burstStepDurationsMs.push(Number((performance.now() - stepStartedAt).toFixed(2)));
+        }
+        burstFinishedAt = performance.now();
+      } finally {
+        burstPeakSample = await burstPeakSampler.stop();
+      }
+      let expectedBurst = expectedDurable;
+      for (let step = 0; step < 3; step += 1) expectedBurst = advanceSimulationBudget(expectedBurst, 1, 1);
+      const burstSummary = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+      logBenchmarkRecord("burst", {
+        nativeCoreExactBurst: {
+          exactState: burstSummary.canonicalSha256 === stableCanonicalSha256(expectedBurst),
+          canonicalSha256: burstSummary.canonicalSha256,
+          expectedCanonicalSha256: stableCanonicalSha256(expectedBurst),
+          canonicalComponents: burstSummary.canonicalComponents,
+          steps: 3,
+          durationMs: Number((burstFinishedAt - burstStartedAt).toFixed(2)),
+          stepDurationsMs: burstStepDurationsMs,
+          processPrivateBytesPeakDuringBurst: burstPeakSample.peakBytes,
+          processPrivateBytesPeakDeltaDuringBurst: burstPeakSample.peakBytes !== null && burstPeakSample.baselineBytes !== null
+            ? burstPeakSample.peakBytes - burstPeakSample.baselineBytes
+            : null,
+          processPrivateBytesPeakAcrossMeasuredPhases: [
+            openPeakSample.peakBytes,
+            exactPeakSample.peakBytes,
+            burstPeakSample.peakBytes,
+          ].filter((value): value is number => value !== null).reduce((peak, value) => Math.max(peak, value), 0),
+          privatePeakSampler: burstPeakSample,
+        },
+      });
+      expect(burstSummary.canonicalSha256).toBe(stableCanonicalSha256(expectedBurst));
     }
     if (!admission.supported && String(admission.reason ?? "").startsWith("construction-")) {
       const constructionMasked = await client.request({
@@ -420,7 +839,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         entityDifferences.push(...firstDifferences(projection.entities, expectedEntities, 40 - entityDifferences.length)
           .map((difference) => ({ ...difference, path: `entities[${offset}]${difference.path ? `.${difference.path}` : ""}` })));
       }
-      console.log(JSON.stringify({
+      logBenchmarkRecord("construction-mask", {
         nativeCoreDiagnosticAfterConstructionMask: {
           supported: nextDomain.supported,
           exactScope: nextDomain.exactScope,
@@ -430,7 +849,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           detailDifferences,
           entityDifferences,
         },
-      }, null, 2));
+      });
       expect(nextDomain.summary.canonicalFields).toEqual(expectedDiagnosticFields);
       expect(nextDomain.summary.canonicalSha256).toBe(stableCanonicalSha256(expectedDiagnostic));
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());

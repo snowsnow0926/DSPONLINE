@@ -1,0 +1,7 @@
+{
+  "name": "dsp-windows-shell-lab-electron",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Isolated, non-production Electron shell benchmark for DSPidle",
+  "main": "main.cjs"
+}

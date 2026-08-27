@@ -1,9 +1,10 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
+use std::ops::{Deref, DerefMut, Index};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,10 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::{fnv1a_utf8, update_canonical, update_canonical_object};
 use crate::catalog::RuntimeCatalog;
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::entity_raw::encode_entity_records_full;
+#[cfg(test)]
+use crate::entity_raw::json_bitwise_eq;
 
 const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
 const MAX_INTERNAL_RECORDS: usize = 4_096;
@@ -28,6 +33,323 @@ const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
 const NONE_SYMBOL: u32 = u32::MAX;
 const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
 const BELT_CHECKPOINT_CHUNK_SIZE: usize = 2_048;
+pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
+const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
+
+/// A cloneable synchronization cell for the two diagnostic/persistence caches
+/// that are reachable through shared `CoreState` references. Keeping interior
+/// mutability behind a mutex makes the immutable simulation catalog and
+/// topology safe to share with deterministic worker threads; clones receive an
+/// independent snapshot, so transactional candidates cannot mutate the live
+/// session's cache state.
+struct SyncCell<T>(Mutex<T>);
+
+impl<T> SyncCell<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    fn borrow(&self) -> MutexGuard<'_, T> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn borrow_mut(&self) -> MutexGuard<'_, T> {
+        self.borrow()
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        self.0.get_mut().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn replace(&self, value: T) -> T {
+        std::mem::replace(&mut *self.borrow_mut(), value)
+    }
+}
+
+impl<T: Clone> Clone for SyncCell<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.borrow().clone())
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for SyncCell<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SyncCell")
+            .field(&*self.borrow())
+            .finish()
+    }
+}
+
+/// Clone-on-write ownership for immutable factory indexes and scalar columns.
+/// Ordinary simulation revisions share these tables in O(1); topology edits
+/// keep the existing mutation syntax and clone a table only on first write.
+#[derive(Debug)]
+pub(crate) struct SharedArc<T: Clone>(Arc<T>);
+
+impl<T: Clone> SharedArc<T> {
+    fn new(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T: Clone> Clone for SharedArc<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Clone + Default> Default for SharedArc<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Clone> From<T> for SharedArc<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T: Clone> Deref for SharedArc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Clone> DerefMut for SharedArc<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+const EXACT_ROW_ID_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const EXACT_ROW_ID_HASH_PRIME: u64 = 0x100000001b3;
+const EXACT_ROW_ID_MAX_LOAD_NUMERATOR: usize = 3;
+const EXACT_ROW_ID_MAX_LOAD_DENOMINATOR: usize = 4;
+const EXACT_ROW_ID_MAX_PROBE_DISTANCE: usize = 256;
+
+#[derive(Debug, Clone, Copy)]
+struct ExactRowIdEntry {
+    start: u32,
+    len: u32,
+    /// Kept beside the string range so `HashMap::get`-style callers can retain
+    /// their existing `Option<&usize>` contract without a second row array.
+    row_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct ExactRowIdsStorage {
+    text: Box<str>,
+    entries: Box<[ExactRowIdEntry]>,
+}
+
+/// One exact decoded ID arena shared by the scalar columns and row index.
+/// Entries stay 16 bytes on x64, matching the former `Box<str>` column, while
+/// eliminating both the index's owned `String` and one allocation per ID.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExactRowIds(Arc<ExactRowIdsStorage>);
+
+impl ExactRowIds {
+    pub(crate) fn from_boxed(
+        ids: Vec<Box<str>>,
+        record_kind: &'static str,
+    ) -> anyhow::Result<Self> {
+        if ids.len() > u32::MAX as usize {
+            bail!("native core {record_kind} ID row capacity overflow");
+        }
+        let text_bytes = ids.iter().try_fold(0_usize, |total, id| {
+            if id.is_empty() {
+                bail!("native core {record_kind} ID is empty");
+            }
+            total
+                .checked_add(id.len())
+                .ok_or_else(|| anyhow!("native core {record_kind} ID text capacity overflow"))
+        })?;
+        if text_bytes > u32::MAX as usize {
+            bail!("native core {record_kind} ID text capacity overflow");
+        }
+
+        let mut text = String::with_capacity(text_bytes);
+        let mut entries = Vec::with_capacity(ids.len());
+        for (row_index, id) in ids.into_iter().enumerate() {
+            let start = u32::try_from(text.len())
+                .map_err(|_| anyhow!("native core {record_kind} ID text capacity overflow"))?;
+            let len = u32::try_from(id.len())
+                .map_err(|_| anyhow!("native core {record_kind} ID text capacity overflow"))?;
+            text.push_str(&id);
+            entries.push(ExactRowIdEntry {
+                start,
+                len,
+                row_index,
+            });
+        }
+        Ok(Self(Arc::new(ExactRowIdsStorage {
+            text: text.into_boxed_str(),
+            entries: entries.into_boxed_slice(),
+        })))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.entries.is_empty()
+    }
+
+    fn text_bytes(&self) -> usize {
+        self.0.text.len()
+    }
+
+    fn row_index(&self, index: usize) -> &usize {
+        &self.0.entries[index].row_index
+    }
+}
+
+impl Index<usize> for ExactRowIds {
+    type Output = str;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        let entry = self.0.entries[index];
+        let start = entry.start as usize;
+        &self.0.text[start..start + entry.len as usize]
+    }
+}
+
+/// Deterministic bounded-load open-addressed index. Hashes select a probe
+/// start only; every match is proved against the complete decoded ID string.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExactRowIdIndex {
+    ids: ExactRowIds,
+    buckets: Vec<u32>,
+    hash_mask: u64,
+}
+
+impl ExactRowIdIndex {
+    fn from_boxed(ids: Vec<Box<str>>, record_kind: &'static str) -> anyhow::Result<Self> {
+        let ids = ExactRowIds::from_boxed(ids, record_kind)?;
+        Self::from_ids(ids, record_kind, u64::MAX)
+    }
+
+    fn from_ids(
+        ids: ExactRowIds,
+        record_kind: &'static str,
+        hash_mask: u64,
+    ) -> anyhow::Result<Self> {
+        let bucket_capacity = Self::bucket_capacity_for_len(ids.len())?;
+        let mut index = Self {
+            ids,
+            buckets: vec![0; bucket_capacity],
+            hash_mask,
+        };
+        for row_index in 0..index.ids.len() {
+            index.insert_row(row_index, record_kind)?;
+        }
+        Ok(index)
+    }
+
+    fn bucket_capacity_for_len(len: usize) -> anyhow::Result<usize> {
+        if len == 0 {
+            return Ok(0);
+        }
+        if len > MAX_BELT_COUNT || len > u32::MAX as usize {
+            bail!("native core row ID index capacity overflow");
+        }
+        let scaled = len
+            .checked_mul(EXACT_ROW_ID_MAX_LOAD_DENOMINATOR)
+            .and_then(|value| value.checked_add(EXACT_ROW_ID_MAX_LOAD_NUMERATOR - 1))
+            .ok_or_else(|| anyhow!("native core row ID index capacity overflow"))?;
+        let minimum = scaled / EXACT_ROW_ID_MAX_LOAD_NUMERATOR;
+        minimum
+            .checked_next_power_of_two()
+            .ok_or_else(|| anyhow!("native core row ID index capacity overflow"))
+    }
+
+    #[inline]
+    fn hash_with_mask(&self, id: &str) -> u64 {
+        let mut hash = EXACT_ROW_ID_HASH_OFFSET;
+        for byte in id.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(EXACT_ROW_ID_HASH_PRIME);
+        }
+        hash & self.hash_mask
+    }
+
+    fn insert_row(&mut self, row_index: usize, record_kind: &'static str) -> anyhow::Result<()> {
+        let id = &self.ids[row_index];
+        let mask = self.buckets.len() - 1;
+        let start = self.hash_with_mask(id) as usize & mask;
+        let probe_count = self.buckets.len().min(EXACT_ROW_ID_MAX_PROBE_DISTANCE + 1);
+        for distance in 0..probe_count {
+            let bucket_index = start.wrapping_add(distance) & mask;
+            let stored = self.buckets[bucket_index];
+            if stored == 0 {
+                self.buckets[bucket_index] = u32::try_from(row_index + 1)
+                    .map_err(|_| anyhow!("native core {record_kind} ID row capacity overflow"))?;
+                return Ok(());
+            }
+            let stored_row = stored as usize - 1;
+            if &self.ids[stored_row] == id {
+                bail!("native core {record_kind} ID is duplicated: {id}");
+            }
+        }
+        bail!("native core {record_kind} ID index probe limit exceeded")
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Option<&usize> {
+        if self.buckets.is_empty() || id.is_empty() {
+            return None;
+        }
+        let mask = self.buckets.len() - 1;
+        let start = self.hash_with_mask(id) as usize & mask;
+        let probe_count = self.buckets.len().min(EXACT_ROW_ID_MAX_PROBE_DISTANCE + 1);
+        for distance in 0..probe_count {
+            let bucket_index = start.wrapping_add(distance) & mask;
+            let stored = self.buckets[bucket_index];
+            if stored == 0 {
+                return None;
+            }
+            let row_index = stored as usize - 1;
+            if &self.ids[row_index] == id {
+                return Some(self.ids.row_index(row_index));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn contains_key(&self, id: &str) -> bool {
+        self.get(id).is_some()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn ids(&self) -> ExactRowIds {
+        self.ids.clone()
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        (self.buckets.capacity() * size_of::<u32>()) as u64
+    }
+
+    #[cfg(test)]
+    fn from_boxed_with_hash_mask(
+        ids: Vec<Box<str>>,
+        record_kind: &'static str,
+        hash_mask: u64,
+    ) -> anyhow::Result<Self> {
+        let ids = ExactRowIds::from_boxed(ids, record_kind)?;
+        Self::from_ids(ids, record_kind, hash_mask)
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct SaveDirtyPages {
@@ -102,6 +424,36 @@ impl Utf16Fnv1a {
     }
 }
 
+/// Retired JSON graphs must be fully destroyed before an exact-advance ACK.
+/// A detached reclaimer used to let process shutdown or the next large
+/// allocation overlap tens of thousands of frees. The process-lifetime
+/// deterministic pool may destroy large ownership chunks in parallel, but its
+/// joined boundary still makes a successful return mean that no retired object
+/// graph is live.
+fn drop_retired_records_joined(entities: Vec<Value>, belts: Vec<Value>) {
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let started = std::time::Instant::now();
+    let diagnostics = deterministic_runtime().drop_owned_joined(entities, belts);
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\trecord-drop-sync\t{:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\trecord-drop-sync-workers\t{}",
+            diagnostics.worker_count
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\trecord-drop-sync-chunks\t{}",
+            diagnostics.chunk_count
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\trecord-drop-sync-items\t{}",
+            diagnostics.item_count
+        );
+    }
+}
+
 struct DeferredRecordDrop {
     entities: Vec<Value>,
     belts: Vec<Value>,
@@ -110,9 +462,10 @@ struct DeferredRecordDrop {
 fn deferred_record_drop_sender() -> &'static SyncSender<DeferredRecordDrop> {
     static SENDER: OnceLock<SyncSender<DeferredRecordDrop>> = OnceLock::new();
     SENDER.get_or_init(|| {
-        // A zero-capacity channel permits one batch being destroyed while the
-        // next simulation runs, but never allows retired full states to queue
-        // and turn latency optimization into unbounded memory growth.
+        // A zero-capacity handoff allows at most one retired parsed graph to be
+        // reclaimed while the next step runs. If the prior batch is still
+        // being destroyed, the next handoff applies backpressure instead of
+        // growing an unbounded queue of full save graphs.
         let (sender, receiver) = sync_channel::<DeferredRecordDrop>(0);
         if std::thread::Builder::new()
             .name("dsp-native-record-reclaimer".to_owned())
@@ -125,16 +478,41 @@ fn deferred_record_drop_sender() -> &'static SyncSender<DeferredRecordDrop> {
             })
             .is_err()
         {
-            // Disconnecting the receiver makes send return ownership to the
-            // caller, which then falls back to a synchronous drop safely.
+            // A disconnected receiver returns the complete batch to send(),
+            // where it is synchronously destroyed without losing ownership.
         }
         sender
     })
 }
 
-fn defer_record_drop(entities: Vec<Value>, belts: Vec<Value>) {
+fn resolve_sync_record_drop(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
+}
+
+fn sync_record_drop_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let value = std::env::var("DSP_NATIVE_CORE_SYNC_RECORD_DROP").ok();
+        resolve_sync_record_drop(value.as_deref())
+    })
+}
+
+fn retire_record_values(entities: Vec<Value>, belts: Vec<Value>) {
+    if sync_record_drop_enabled() {
+        drop_retired_records_joined(entities, belts);
+        return;
+    }
+
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let started = std::time::Instant::now();
     if let Err(error) = deferred_record_drop_sender().send(DeferredRecordDrop { entities, belts }) {
         drop(error.0);
+    }
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\trecord-drop-deferred-submit\t{:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
     }
 }
 
@@ -163,6 +541,17 @@ pub struct RuntimeMemoryEstimate {
     pub inventory_entry_count: u64,
     pub topology_index_bytes: u64,
     pub estimated_runtime_bytes: u64,
+}
+
+/// Per-commit evidence for deterministic full entity encoding. Every row is
+/// encoded from the final Value; byte-identical rows retain their authoritative
+/// `Arc<str>`, while changed rows become dirty replacement records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityRawWritebackDiagnostics {
+    pub full_encoded_rows: usize,
+    pub shared_rows: usize,
+    pub changed_rows: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -356,6 +745,45 @@ struct ChunkedManifest {
     entity_count: usize,
     belt_count: usize,
     chunks: Vec<ChunkMetadata>,
+    #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
+    pure_idle_session: Option<PureIdleSessionState>,
+}
+
+fn deserialize_present_pure_idle_session<'de, D>(
+    deserializer: D,
+) -> Result<Option<PureIdleSessionState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    PureIdleSessionState::deserialize(deserializer).map(Some)
+}
+
+/// Private native-checkpoint state for one continuous conservative pure-idle
+/// session. This never enters the public v47 GameState or envelope schema.
+///
+/// A revision mismatch means a command or exact/realtime advance committed
+/// after the last pure-idle slice. The next pure-idle request then starts a new
+/// session lazily, without adding hooks to every command/simulation path.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PureIdleSessionState {
+    format_version: u8,
+    exact_simulation_seconds_used: f64,
+    last_committed_revision: u64,
+}
+
+impl PureIdleSessionState {
+    fn validate(self, checkpoint_revision: u64) -> anyhow::Result<Self> {
+        if self.format_version != PURE_IDLE_SESSION_FORMAT_VERSION
+            || !self.exact_simulation_seconds_used.is_finite()
+            || !(0.0..=PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS)
+                .contains(&self.exact_simulation_seconds_used)
+            || self.last_committed_revision != checkpoint_revision
+        {
+            bail!("native core pure-idle session checkpoint is invalid");
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -406,17 +834,67 @@ impl Symbols {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ItemQuantity {
-    pub item: u32,
-    pub amount: f64,
+/// Sparse ordering scratch used only while hashing inventory objects.
+///
+/// The resident symbol table already owns every topology/static string in the
+/// save. The former digest path cloned that whole table (including all entity
+/// and belt endpoint IDs) merely so the few inventory-only extension IDs could
+/// be assigned the same trailing indexes. Keep the resident table borrowed and
+/// own only those genuinely missing strings instead.
+#[derive(Debug)]
+struct DomainSymbolOrder<'a> {
+    base: &'a Symbols,
+    additional_by_value: HashMap<Box<str>, u32>,
+}
+
+impl<'a> DomainSymbolOrder<'a> {
+    fn new(base: &'a Symbols) -> Self {
+        Self {
+            base,
+            additional_by_value: HashMap::new(),
+        }
+    }
+
+    fn rank(&mut self, value: &str) -> u32 {
+        if let Some(index) = self.base.lookup(value) {
+            return index;
+        }
+        if let Some(index) = self.additional_by_value.get(value) {
+            return *index;
+        }
+        // This is byte-for-byte the index the old `Symbols::clone().intern()`
+        // path assigned: base length plus first-seen missing strings.
+        let index = (self.base.values.len() + self.additional_by_value.len()) as u32;
+        self.additional_by_value.insert(value.into(), index);
+        index
+    }
+
+    #[cfg(test)]
+    fn additional_len(&self) -> usize {
+        self.additional_by_value.len()
+    }
+
+    #[cfg(test)]
+    fn additional_text_bytes(&self) -> usize {
+        self.additional_by_value
+            .keys()
+            .map(|value| value.len())
+            .sum()
+    }
+}
+
+#[derive(Debug)]
+struct DomainInventoryEntry<'a> {
+    item: &'a str,
+    rank: u32,
+    amount: f64,
 }
 
 pub(crate) type RawRecord = Arc<str>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntityColumns {
-    pub ids: Vec<Box<str>>,
+    pub ids: ExactRowIds,
     pub kinds: Vec<u32>,
     pub planets: Vec<u32>,
     pub buildings: Vec<u32>,
@@ -429,9 +907,239 @@ pub(crate) struct EntityColumns {
     pub position_y: Vec<f64>,
 }
 
+/// Exact JSON shape retained by the resident entity columns. Raw entity JSON
+/// remains authoritative, but consumers can distinguish an absent field from
+/// an explicit `null`, a finite number, and a malformed/MOD value without
+/// reparsing the record. Two bits are sufficient for every state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ResidentValueKind {
+    Missing = 0,
+    Number = 1,
+    Null = 2,
+    Other = 3,
+}
+
+impl ResidentValueKind {
+    fn classify(value: Option<&Value>) -> (Self, f64) {
+        match value {
+            None => (Self::Missing, 0.0),
+            Some(Value::Null) => (Self::Null, 0.0),
+            Some(Value::Number(number)) => number
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .map_or((Self::Other, 0.0), |number| (Self::Number, number)),
+            Some(_) => (Self::Other, 0.0),
+        }
+    }
+}
+
+/// Shape tag for the `inputs` and `outputs` containers. Object is distinct
+/// from Number even though both tags fit in the same two-bit footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ResidentObjectKind {
+    Missing = 0,
+    Object = 1,
+    Null = 2,
+    Other = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResidentNumber {
+    kind: ResidentValueKind,
+    value: f64,
+}
+
+impl ResidentNumber {
+    pub fn kind(self) -> ResidentValueKind {
+        self.kind
+    }
+
+    /// Returns the exact resident IEEE value only for a JSON number. This
+    /// preserves negative zero; missing, null and malformed values stay
+    /// distinguishable through `kind()` and do not silently become zero.
+    pub fn as_f64(self) -> Option<f64> {
+        (self.kind == ResidentValueKind::Number).then_some(self.value)
+    }
+}
+
+/// The first E1 scalar set is intentionally narrow: these are the fields read
+/// repeatedly by exact simulation/history and the persisted cursor/transfer
+/// signals needed to describe power and delivery state. Adding a field here is
+/// an internal layout change only; public v47 JSON is not changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EntityDynamicField {
+    ProductionRate = 0,
+    Utilization = 1,
+    Progress = 2,
+    PowerFactor = 3,
+    StationProgress = 4,
+    StationLastTransfer = 5,
+    RoutingCursor = 6,
+}
+
+impl EntityDynamicField {
+    #[cfg(test)]
+    const COUNT: usize = 7;
+    #[cfg(test)]
+    const ALL: [Self; Self::COUNT] = [
+        Self::ProductionRate,
+        Self::Utilization,
+        Self::Progress,
+        Self::PowerFactor,
+        Self::StationProgress,
+        Self::StationLastTransfer,
+        Self::RoutingCursor,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::ProductionRate => "productionRate",
+            Self::Utilization => "utilization",
+            Self::Progress => "progress",
+            Self::PowerFactor => "powerFactor",
+            Self::StationProgress => "stationProgress",
+            Self::StationLastTransfer => "stationLastTransfer",
+            Self::RoutingCursor => "routingCursor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityInventorySide {
+    Inputs,
+    Outputs,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EntityDynamicColumns {
+    /// The former 7*f64 + CSR resident mirror had no production consumer.
+    /// Values are decoded lazily from raw rows; this descriptor retains only
+    /// topology and diagnostic inventory cardinality.
+    row_count: usize,
+    inventory_entry_count: usize,
+}
+
+impl Default for EntityDynamicColumns {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
+impl EntityDynamicColumns {
+    fn with_capacity(_rows: usize) -> Self {
+        Self {
+            row_count: 0,
+            inventory_entry_count: 0,
+        }
+    }
+
+    fn push_from_object(&mut self, object: &Map<String, Value>) -> anyhow::Result<()> {
+        self.row_count = self
+            .row_count
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("native entity dynamic row count overflow"))?;
+        let entries = ["inputs", "outputs"]
+            .into_iter()
+            .filter_map(|key| object.get(key).and_then(Value::as_object))
+            .map(Map::len)
+            .sum::<usize>();
+        self.inventory_entry_count = self
+            .inventory_entry_count
+            .checked_add(entries)
+            .ok_or_else(|| anyhow!("native entity inventory entry count overflow"))?;
+        Ok(())
+    }
+
+    fn from_full_encode(row_count: usize, inventory_entry_count: usize) -> Self {
+        Self {
+            row_count,
+            inventory_entry_count,
+        }
+    }
+
+    fn validate(&self, expected_rows: usize) -> anyhow::Result<()> {
+        if self.row_count != expected_rows {
+            bail!("native entity lazy descriptor topology changed");
+        }
+        Ok(())
+    }
+
+    fn bitwise_eq(&self, other: &Self) -> bool {
+        self.row_count == other.row_count
+            && self.inventory_entry_count == other.inventory_entry_count
+    }
+
+    fn inventory_entry_count(&self) -> usize {
+        self.inventory_entry_count
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EntityInventoryEntry<'a> {
+    item_id: &'a str,
+    amount: ResidentNumber,
+}
+
+impl<'a> EntityInventoryEntry<'a> {
+    pub fn item_id(self) -> &'a str {
+        self.item_id
+    }
+
+    pub fn amount(self) -> ResidentNumber {
+        self.amount
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OwnedEntityInventoryEntry {
+    item_id: Box<str>,
+    amount: ResidentNumber,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityInventoryView {
+    container_kind: ResidentObjectKind,
+    entries: Vec<OwnedEntityInventoryEntry>,
+}
+
+impl EntityInventoryView {
+    pub fn container_kind(&self) -> ResidentObjectKind {
+        self.container_kind
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = EntityInventoryEntry<'_>> + '_ {
+        self.entries.iter().map(|entry| EntityInventoryEntry {
+            item_id: &entry.item_id,
+            amount: entry.amount,
+        })
+    }
+
+    pub fn get(&self, item_id: &str) -> Option<ResidentNumber> {
+        self.entries
+            .iter()
+            .find(|entry| entry.item_id.as_ref() == item_id)
+            .map(|entry| entry.amount)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BeltColumns {
-    pub ids: Vec<Box<str>>,
+    pub ids: ExactRowIds,
     pub planets: Vec<u32>,
     pub sources: Vec<u32>,
     pub targets: Vec<u32>,
@@ -440,6 +1148,162 @@ pub(crate) struct BeltColumns {
     pub tiers: Vec<u8>,
     pub stack_sizes: Vec<f64>,
     pub priorities: Vec<u8>,
+}
+
+/// Compact authoritative mirror of the four mutable belt signals. The raw JSON
+/// records remain the persistence/canonical source of truth; these columns are
+/// rebuilt from raw records on load/topology commands and replaced only with a
+/// fully validated simulation candidate. `number_mask` preserves whether each
+/// value was a finite JSON number, while the f64 columns preserve its exact
+/// IEEE bits (including negative zero).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BeltDynamicColumns {
+    pub progress: Vec<f64>,
+    pub total_transferred: Vec<f64>,
+    pub congestion: Vec<f64>,
+    pub last_flow: Vec<f64>,
+    pub number_mask: Vec<u8>,
+}
+
+impl BeltDynamicColumns {
+    pub(crate) const PROGRESS: usize = 0;
+    pub(crate) const TOTAL_TRANSFERRED: usize = 1;
+    pub(crate) const CONGESTION: usize = 2;
+    pub(crate) const LAST_FLOW: usize = 3;
+    const VALID_MASK: u8 = (1 << 4) - 1;
+
+    fn signals_from_object(object: &Map<String, Value>) -> [Option<f64>; 4] {
+        let read = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+        };
+        [
+            read("progress"),
+            read("totalTransferred"),
+            read("congestion"),
+            read("lastFlow"),
+        ]
+    }
+
+    pub(crate) fn push_from_object(&mut self, object: &Map<String, Value>) {
+        self.push_signals(Self::signals_from_object(object));
+    }
+
+    fn push_signals(&mut self, signals: [Option<f64>; 4]) {
+        let mut mask = 0_u8;
+        let mut read = |slot: usize| {
+            signals[slot].map_or(0.0, |value| {
+                mask |= 1 << slot;
+                value
+            })
+        };
+        self.progress.push(read(Self::PROGRESS));
+        self.total_transferred.push(read(Self::TOTAL_TRANSFERRED));
+        self.congestion.push(read(Self::CONGESTION));
+        self.last_flow.push(read(Self::LAST_FLOW));
+        self.number_mask.push(mask);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.progress.len()
+    }
+
+    pub(crate) fn validate(&self, expected: usize) -> anyhow::Result<()> {
+        if self.progress.len() != expected
+            || self.total_transferred.len() != expected
+            || self.congestion.len() != expected
+            || self.last_flow.len() != expected
+            || self.number_mask.len() != expected
+        {
+            bail!("native belt dynamic column topology changed");
+        }
+        for index in 0..expected {
+            if self.number_mask[index] & !Self::VALID_MASK != 0
+                || !self.progress[index].is_finite()
+                || !self.total_transferred[index].is_finite()
+                || !self.congestion[index].is_finite()
+                || !self.last_flow[index].is_finite()
+            {
+                bail!("native belt dynamic column is invalid");
+            }
+            for (slot, value) in [
+                self.progress[index],
+                self.total_transferred[index],
+                self.congestion[index],
+                self.last_flow[index],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if self.number_mask[index] & (1 << slot) == 0
+                    && value.to_bits() != 0.0_f64.to_bits()
+                {
+                    bail!("native belt absent dynamic column is nonzero");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn persisted_number_matches(&self, index: usize, slot: usize, next: f64) -> bool {
+        self.number_mask[index] & (1 << slot) != 0
+            && self.value(index, slot).to_bits() == next.to_bits()
+    }
+
+    #[inline]
+    fn value(&self, index: usize, slot: usize) -> f64 {
+        match slot {
+            Self::PROGRESS => self.progress[index],
+            Self::TOTAL_TRANSFERRED => self.total_transferred[index],
+            Self::CONGESTION => self.congestion[index],
+            Self::LAST_FLOW => self.last_flow[index],
+            _ => unreachable!("bounded native belt dynamic slot"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_bitwise_eq(&self, other: &Self, index: usize) -> bool {
+        self.number_mask[index] == other.number_mask[index]
+            && self.progress[index].to_bits() == other.progress[index].to_bits()
+            && self.total_transferred[index].to_bits() == other.total_transferred[index].to_bits()
+            && self.congestion[index].to_bits() == other.congestion[index].to_bits()
+            && self.last_flow[index].to_bits() == other.last_flow[index].to_bits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bitwise_eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && (0..self.len()).all(|index| self.row_bitwise_eq(other, index))
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        ((self.progress.capacity()
+            + self.total_transferred.capacity()
+            + self.congestion.capacity()
+            + self.last_flow.capacity())
+            * size_of::<f64>()
+            + self.number_mask.capacity() * size_of::<u8>()) as u64
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BeltCommitSource {
+    revision: u64,
+    raw: Arc<Vec<RawRecord>>,
+    topology: Arc<BeltColumns>,
+    dynamics: Arc<BeltDynamicColumns>,
+}
+
+impl BeltCommitSource {
+    pub(crate) fn matches(&self, state: &CoreState) -> bool {
+        self.revision == state.revision
+            && Arc::ptr_eq(&self.raw, &state.belt_raw.0)
+            && Arc::ptr_eq(&self.topology, &state.belts.0)
+            && Arc::ptr_eq(&self.dynamics, &state.belt_dynamics.0)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -497,31 +1361,39 @@ impl FactoryTopology {
 pub struct CoreState {
     pub identity: CoreCheckpointIdentity,
     pub revision: u64,
-    pub catalog: RuntimeCatalog,
+    pub catalog: Arc<RuntimeCatalog>,
     base: Map<String, Value>,
-    entity_raw: Vec<RawRecord>,
-    belt_raw: Vec<RawRecord>,
-    pub(crate) entity_index: HashMap<String, usize>,
-    pub(crate) belt_index: HashMap<String, usize>,
-    pub(crate) symbols: Symbols,
-    pub(crate) entities: EntityColumns,
-    pub(crate) belts: BeltColumns,
+    entity_raw: SharedArc<Vec<RawRecord>>,
+    belt_raw: SharedArc<Vec<RawRecord>>,
+    pub(crate) entity_index: SharedArc<ExactRowIdIndex>,
+    pub(crate) belt_index: SharedArc<ExactRowIdIndex>,
+    pub(crate) symbols: SharedArc<Symbols>,
+    pub(crate) entities: SharedArc<EntityColumns>,
+    entity_dynamics: SharedArc<EntityDynamicColumns>,
+    last_entity_raw_writeback: EntityRawWritebackDiagnostics,
+    pub(crate) belts: SharedArc<BeltColumns>,
+    pub(crate) belt_dynamics: SharedArc<BeltDynamicColumns>,
     pub(crate) factory_topology: Arc<FactoryTopology>,
     coverage: DomainCoverage,
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
     prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
+    prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
     /// Persistence dirtiness is deliberately independent from the simulation
     /// wake queues. A successful checkpoint clears only this structure; belt
     /// or logistics scheduling state is never acknowledged by the saver.
     save_dirty: SaveDirtyPages,
     checkpoint_chunks: Vec<ChunkMetadata>,
-    pending_checkpoint_chunks: RefCell<Option<Vec<ChunkMetadata>>>,
+    pending_checkpoint_chunks: SyncCell<Option<Vec<ChunkMetadata>>>,
+    /// Optional state for the bounded exact prefix shared by all slices in a
+    /// continuous conservative pure-idle session. It is persisted only in the
+    /// private chunk manifest, never in public saves or canonical hashes.
+    pure_idle_session: Option<PureIdleSessionState>,
     /// Canonical diagnostics are intentionally expensive on very large saves.
     /// A revision is immutable from the protocol's point of view, so repeated
     /// status/compare/checkpoint calls can safely reuse the small digest result
     /// instead of reparsing every entity and belt again.
-    summary_cache: RefCell<Option<(u64, CoreStateSummary)>>,
+    summary_cache: SyncCell<Option<(u64, CoreStateSummary)>>,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -556,7 +1428,10 @@ fn retain_statistics_planet(value: &mut Value, planet_id: Option<&str>, item_id:
     }
 }
 
-fn parse_inventory(value: Option<&Value>, symbols: &mut Symbols) -> Vec<ItemQuantity> {
+fn parse_domain_inventory<'a>(
+    value: Option<&'a Value>,
+    symbols: &mut DomainSymbolOrder<'_>,
+) -> Vec<DomainInventoryEntry<'a>> {
     let Some(object) = value.and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -564,113 +1439,115 @@ fn parse_inventory(value: Option<&Value>, symbols: &mut Symbols) -> Vec<ItemQuan
         .iter()
         .filter_map(|(item, amount)| {
             let amount = amount.as_f64()?;
-            amount.is_finite().then(|| ItemQuantity {
-                item: symbols.intern(Some(item)),
+            amount.is_finite().then(|| DomainInventoryEntry {
+                item,
+                rank: symbols.rank(item),
                 amount,
             })
         })
         .collect::<Vec<_>>();
-    values.sort_by_key(|entry| entry.item);
+    values.sort_by_key(|entry| entry.rank);
     values
 }
 
-fn parallel_worker_count(record_count: usize) -> usize {
-    if record_count < 4_096 {
-        return 1;
-    }
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .clamp(1, 8)
-        .min(record_count)
+fn parse_records_with_runtime(
+    runtime: &DeterministicRuntime,
+    records: &[RawRecord],
+    label: &'static str,
+) -> anyhow::Result<Vec<Value>> {
+    runtime.indexed_try_map(records, |index, raw| {
+        serde_json::from_str(raw).with_context(|| format!("decode {label} at index {index}"))
+    })
 }
 
 fn parse_records_parallel(
     records: &[RawRecord],
     label: &'static str,
 ) -> anyhow::Result<Vec<Value>> {
-    let workers = parallel_worker_count(records.len());
-    if workers == 1 {
-        return records
-            .iter()
-            .map(|raw| serde_json::from_str(raw).with_context(|| format!("decode {label}")))
-            .collect();
-    }
-    let chunk_size = records.len().div_ceil(workers);
-    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<Value>)>> {
-        let handles = records
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(part_index, chunk)| {
-                scope.spawn(move || -> anyhow::Result<(usize, Vec<Value>)> {
-                    let values = chunk
-                        .iter()
-                        .map(|raw| {
-                            serde_json::from_str(raw).with_context(|| format!("decode {label}"))
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    Ok((part_index, values))
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| anyhow!("native {label} parser thread panicked"))?
-            })
-            .collect()
-    })?;
-    parts.sort_by_key(|(part_index, _)| *part_index);
-    Ok(parts.into_iter().flat_map(|(_, values)| values).collect())
+    parse_records_with_runtime(deterministic_runtime(), records, label)
 }
 
-fn encode_records_parallel(
-    records: &[Value],
+#[cfg(test)]
+fn encode_serializables_with_runtime<T>(
+    runtime: &DeterministicRuntime,
+    records: &[T],
     label: &'static str,
-) -> anyhow::Result<Vec<RawRecord>> {
-    let workers = parallel_worker_count(records.len());
-    if workers == 1 {
-        return records
-            .iter()
-            .map(|value| {
-                serde_json::to_string(value)
-                    .with_context(|| format!("encode {label}"))
-                    .map(RawRecord::from)
-            })
-            .collect();
+) -> anyhow::Result<Vec<RawRecord>>
+where
+    T: Serialize + Sync,
+{
+    runtime.indexed_try_map(records, |index, value| {
+        serde_json::to_string(value)
+            .with_context(|| format!("encode {label} at index {index}"))
+            .map(RawRecord::from)
+    })
+}
+
+#[cfg(test)]
+mod parallel_record_tests {
+    use super::*;
+    use serde::Serializer;
+    use serde::ser::Error as _;
+
+    struct FallibleRecord {
+        index: usize,
+        fail: bool,
     }
-    let chunk_size = records.len().div_ceil(workers);
-    let mut parts = std::thread::scope(|scope| -> anyhow::Result<Vec<(usize, Vec<RawRecord>)>> {
-        let handles = records
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(part_index, chunk)| {
-                scope.spawn(move || -> anyhow::Result<(usize, Vec<RawRecord>)> {
-                    let values = chunk
-                        .iter()
-                        .map(|value| {
-                            serde_json::to_string(value)
-                                .with_context(|| format!("encode {label}"))
-                                .map(RawRecord::from)
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    Ok((part_index, values))
-                })
+
+    impl Serialize for FallibleRecord {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            if self.fail {
+                return Err(S::Error::custom(format!("encode-failure-{}", self.index)));
+            }
+            serializer.serialize_u64(self.index as u64)
+        }
+    }
+
+    #[test]
+    fn parallel_parse_and_encode_report_the_lowest_input_error() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let mut raw = (0..4_257)
+            .map(|index| RawRecord::from(index.to_string()))
+            .collect::<Vec<_>>();
+        raw[17] = "{".into();
+        raw[4_100] = "[}".into();
+        let parse_error = parse_records_with_runtime(&runtime, &raw, "ordered record")
+            .expect_err("two malformed records must fail");
+        assert!(parse_error.to_string().contains("index 17"));
+
+        let records = (0..4_257)
+            .map(|index| FallibleRecord {
+                index,
+                fail: matches!(index, 17 | 4_100),
             })
             .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| anyhow!("native {label} encoder thread panicked"))?
-            })
-            .collect()
-    })?;
-    parts.sort_by_key(|(part_index, _)| *part_index);
-    Ok(parts.into_iter().flat_map(|(_, values)| values).collect())
+        let encode_error = encode_serializables_with_runtime(&runtime, &records, "ordered record")
+            .expect_err("two failing records must fail");
+        assert!(encode_error.to_string().contains("index 17"));
+    }
+
+    #[test]
+    fn parallel_record_output_preserves_exact_input_byte_order() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let records = (0..4_257)
+            .map(
+                |index| serde_json::json!({ "index": index, "text": format!("record-{index:05}") }),
+            )
+            .collect::<Vec<_>>();
+        let encoded = encode_serializables_with_runtime(&runtime, &records, "ordered record")
+            .expect("parallel record encoding should succeed");
+        assert_eq!(encoded.len(), records.len());
+        for (index, raw) in encoded.iter().enumerate() {
+            assert_eq!(
+                raw.as_ref(),
+                serde_json::to_string(&records[index]).unwrap(),
+                "index={index}"
+            );
+        }
+    }
 }
 
 fn encoded_chunk_id(id: &str) -> String {
@@ -700,11 +1577,11 @@ fn verify_chunk(metadata: &ChunkMetadata, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_manifest(
-    records: &BTreeMap<String, Vec<u8>>,
+fn take_manifest(
+    records: &mut BTreeMap<String, Vec<u8>>,
 ) -> anyhow::Result<(String, ChunkedManifest)> {
     let mut candidates = Vec::new();
-    for (key, bytes) in records {
+    for (key, bytes) in records.iter() {
         if !key.ends_with(INTERNAL_MANIFEST_SUFFIX) {
             continue;
         }
@@ -723,28 +1600,83 @@ fn parse_manifest(
     if candidates.len() != 1 {
         bail!("native core checkpoint must contain exactly one chunk manifest");
     }
-    Ok(candidates.pop().expect("one manifest"))
+    let (manifest_key, manifest) = candidates.pop().expect("one manifest");
+    let manifest_bytes = records
+        .remove(&manifest_key)
+        .ok_or_else(|| anyhow!("native core checkpoint manifest disappeared during open"))?;
+    drop(manifest_bytes);
+    Ok((manifest_key, manifest))
 }
 
-fn chunk_record<'a>(
-    records: &'a BTreeMap<String, Vec<u8>>,
-    manifest_key: &str,
-    id: &str,
-) -> anyhow::Result<&'a [u8]> {
+fn chunk_record_key(manifest_key: &str, id: &str) -> anyhow::Result<String> {
     let prefix = manifest_key
         .strip_suffix(INTERNAL_MANIFEST_SUFFIX)
         .ok_or_else(|| anyhow!("native core manifest key is invalid"))?;
-    let key = format!("{prefix}chunk.{}", encoded_chunk_id(id));
+    Ok(format!("{prefix}chunk.{}", encoded_chunk_id(id)))
+}
+
+enum ChunkRecordBytes<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl AsRef<[u8]> for ChunkRecordBytes<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+fn take_chunk_record<'a>(
+    records: &'a mut BTreeMap<String, Vec<u8>>,
+    manifest_key: &str,
+    id: &str,
+    referenced_again: bool,
+) -> anyhow::Result<ChunkRecordBytes<'a>> {
+    let key = chunk_record_key(manifest_key, id)?;
+    if referenced_again {
+        return records
+            .get(&key)
+            .map(|bytes| ChunkRecordBytes::Borrowed(bytes.as_slice()))
+            .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"));
+    }
     records
-        .get(&key)
-        .map(Vec::as_slice)
+        .remove(&key)
+        .map(ChunkRecordBytes::Owned)
         .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"))
 }
 
+fn has_later_chunk_reference(
+    remaining_references: &mut HashMap<String, usize>,
+    id: &str,
+) -> anyhow::Result<bool> {
+    let remaining = remaining_references
+        .get_mut(id)
+        .ok_or_else(|| anyhow!("native core checkpoint chunk accounting is invalid"))?;
+    *remaining = remaining
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("native core checkpoint chunk accounting is invalid"))?;
+    Ok(*remaining > 0)
+}
+
 impl CoreState {
+    /// Compatibility wrapper for callers that must retain their decoded
+    /// record map. Production checkpoint open should move the map into
+    /// [`Self::from_owned_internal_records`] so chunk bytes can be released as
+    /// soon as each record has been verified and converted.
     pub fn from_internal_records(
         identity: CoreCheckpointIdentity,
         records: &BTreeMap<String, Vec<u8>>,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        Self::from_owned_internal_records(identity, records.clone(), catalog)
+    }
+
+    pub fn from_owned_internal_records(
+        identity: CoreCheckpointIdentity,
+        mut records: BTreeMap<String, Vec<u8>>,
         catalog: RuntimeCatalog,
     ) -> anyhow::Result<Self> {
         if records.is_empty() || records.len() > MAX_INTERNAL_RECORDS {
@@ -765,7 +1697,7 @@ impl CoreState {
         {
             bail!("native core checkpoint identity is invalid");
         }
-        let (manifest_key, manifest) = parse_manifest(records)?;
+        let (manifest_key, manifest) = take_manifest(&mut records)?;
         if manifest.format_version != 1
             || manifest.envelope_format_version != 2
             || manifest.state_version != identity.state_version
@@ -785,6 +1717,10 @@ impl CoreState {
         {
             bail!("native core checkpoint manifest identity is invalid");
         }
+        let pure_idle_session = manifest
+            .pure_idle_session
+            .map(|session| session.validate(identity.revision))
+            .transpose()?;
         let base_metadata = manifest
             .chunks
             .iter()
@@ -793,13 +1729,28 @@ impl CoreState {
         if base_metadata.len() != 1 || base_metadata[0].offset != 0 || base_metadata[0].count != 1 {
             bail!("native core checkpoint base chunk is invalid");
         }
-        let base_bytes = chunk_record(records, &manifest_key, &base_metadata[0].id)?;
-        verify_chunk(base_metadata[0], base_bytes)?;
-        let base = serde_json::from_slice::<Value>(base_bytes)
+        let mut remaining_chunk_references = HashMap::<String, usize>::new();
+        for metadata in &manifest.chunks {
+            *remaining_chunk_references
+                .entry(metadata.id.clone())
+                .or_default() += 1;
+        }
+        let base_referenced_again =
+            has_later_chunk_reference(&mut remaining_chunk_references, &base_metadata[0].id)?;
+        let base_bytes = take_chunk_record(
+            &mut records,
+            &manifest_key,
+            &base_metadata[0].id,
+            base_referenced_again,
+        )?;
+        verify_chunk(base_metadata[0], base_bytes.as_ref())?;
+        let base = match serde_json::from_slice::<Value>(base_bytes.as_ref())
             .context("decode native core base chunk")?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| anyhow!("native core base chunk is not an object"))?;
+        {
+            Value::Object(base) => base,
+            _ => bail!("native core base chunk is not an object"),
+        };
+        drop(base_bytes);
         if base.contains_key("entities") || base.contains_key("belts") {
             bail!("native core base chunk contains an unbounded collection");
         }
@@ -822,13 +1773,16 @@ impl CoreState {
             {
                 bail!("native core checkpoint chunk range is invalid");
             }
-            let bytes = chunk_record(records, &manifest_key, &metadata.id)?;
-            verify_chunk(metadata, bytes)?;
+            let referenced_again =
+                has_later_chunk_reference(&mut remaining_chunk_references, &metadata.id)?;
+            let bytes =
+                take_chunk_record(&mut records, &manifest_key, &metadata.id, referenced_again)?;
+            verify_chunk(metadata, bytes.as_ref())?;
             // Preserve each already-valid JSON record as raw text. Decoding
             // the page into a full `Value` graph and immediately serializing
             // every record again doubled startup parsing and allocation; the
             // index rebuild below performs the required object validation.
-            let values = serde_json::from_slice::<Vec<Box<RawValue>>>(bytes)
+            let values = serde_json::from_slice::<Vec<Box<RawValue>>>(bytes.as_ref())
                 .context("decode native core record chunk")?;
             if values.len() != metadata.count {
                 bail!("native core checkpoint chunk count is invalid");
@@ -839,52 +1793,77 @@ impl CoreState {
                 }
                 target[metadata.offset + index] = Some(RawRecord::from(value.get()));
             }
+            drop(bytes);
         }
+        debug_assert!(
+            remaining_chunk_references
+                .values()
+                .all(|remaining| *remaining == 0)
+        );
+        drop(remaining_chunk_references);
         if entity_raw.iter().any(Option::is_none) || belt_raw.iter().any(Option::is_none) {
             bail!("native core checkpoint record ranges are incomplete");
         }
+        if !records.is_empty() {
+            bail!("native core checkpoint contains unreferenced records");
+        }
+        drop(records);
         let mut state = Self {
             revision: identity.revision,
             identity,
-            catalog,
+            catalog: Arc::new(catalog),
             base,
-            entity_raw: entity_raw.into_iter().map(Option::unwrap).collect(),
-            belt_raw: belt_raw.into_iter().map(Option::unwrap).collect(),
-            entity_index: HashMap::new(),
-            belt_index: HashMap::new(),
-            symbols: Symbols::default(),
-            entities: EntityColumns::default(),
-            belts: BeltColumns::default(),
+            entity_raw: entity_raw
+                .into_iter()
+                .map(Option::unwrap)
+                .collect::<Vec<_>>()
+                .into(),
+            belt_raw: belt_raw
+                .into_iter()
+                .map(Option::unwrap)
+                .collect::<Vec<_>>()
+                .into(),
+            entity_index: ExactRowIdIndex::default().into(),
+            belt_index: ExactRowIdIndex::default().into(),
+            symbols: Symbols::default().into(),
+            entities: EntityColumns::default().into(),
+            entity_dynamics: EntityDynamicColumns::default().into(),
+            last_entity_raw_writeback: EntityRawWritebackDiagnostics::default(),
+            belts: BeltColumns::default().into(),
+            belt_dynamics: BeltDynamicColumns::default().into(),
             factory_topology: Arc::new(FactoryTopology::default()),
             coverage: DomainCoverage::implemented_beta_scope(),
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
+            prepared_local_peer_directory: None,
             save_dirty: SaveDirtyPages::default(),
-            checkpoint_chunks: manifest.chunks.clone(),
-            pending_checkpoint_chunks: RefCell::new(None),
-            summary_cache: RefCell::new(None),
+            checkpoint_chunks: manifest.chunks,
+            pending_checkpoint_chunks: SyncCell::new(None),
+            pure_idle_session,
+            summary_cache: SyncCell::new(None),
         };
-        // Startup needs parsed records both for indexes and prepared belt
-        // routes. Keep one bounded parse graph alive through both consumers
-        // instead of decoding all records twice back-to-back.
+        // Entity records remain shared by startup admission, route preparation
+        // and the canonical proof. Belt records are intentionally decoded one
+        // at a time by each consumer so opening a large save never owns a full
+        // second `Vec<Value>` belt graph.
         let parsed_entities = state.parse_entities_parallel()?;
-        let parsed_belts = state.parse_belts_parallel()?;
-        state.rebuild_indexes_from_parsed(&parsed_entities, &parsed_belts)?;
-        state.refresh_factory_static_admission()?;
+        state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
+        state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
         if state.factory_static_admission_reason.is_none() {
-            state.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes(
+            state.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes_from_state(
                 &state,
                 &parsed_entities,
-                &parsed_belts,
             )?));
+            state.prepared_local_peer_directory =
+                Some(Arc::new(crate::local_logistics::prepare_step_directory(
+                    &parsed_entities,
+                    &state.factory_topology.station_indices,
+                )?));
         }
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
-        // startup graph that index/admission construction already owns rather
-        // than dropping it and immediately decoding 80k entities plus 155k
-        // belts a second time for the first summary.
-        let canonical = state
-            .canonical_digest_bundle_with_parsed(Some(&parsed_entities), Some(&parsed_belts))?;
+        // entity graph while canonicalizing each raw belt independently.
+        let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
         let summary = state.summary_from_digest(canonical);
         state.summary_cache.replace(Some((state.revision, summary)));
         Ok(state)
@@ -994,7 +1973,7 @@ impl CoreState {
             )?;
         }
         let manifest_key = format!("{prefix}manifest");
-        let manifest = serde_json::to_string(&serde_json::json!({
+        let mut manifest_value = serde_json::json!({
             "formatVersion": 1,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
@@ -1007,7 +1986,17 @@ impl CoreState {
             "entityCount": self.entity_raw.len(),
             "beltCount": self.belt_raw.len(),
             "chunks": metadata,
-        }))?;
+        });
+        if let Some(session) = self
+            .pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision)
+        {
+            manifest_value
+                .as_object_mut()
+                .expect("native checkpoint manifest is an object")
+                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+        }
+        let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
         active_keys.push(manifest_key);
         Ok(active_keys)
@@ -1161,7 +2150,7 @@ impl CoreState {
             )?;
         }
         let manifest_key = format!("{prefix}manifest");
-        let manifest = serde_json::to_string(&serde_json::json!({
+        let mut manifest_value = serde_json::json!({
             "formatVersion": 1,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
@@ -1174,7 +2163,17 @@ impl CoreState {
             "entityCount": self.entity_raw.len(),
             "beltCount": self.belt_raw.len(),
             "chunks": metadata,
-        }))?;
+        });
+        if let Some(session) = self
+            .pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision)
+        {
+            manifest_value
+                .as_object_mut()
+                .expect("native checkpoint manifest is an object")
+                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+        }
+        let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
         encoded_records += 1;
         active_keys.push(manifest_key);
@@ -1207,6 +2206,16 @@ impl CoreState {
         Ok(())
     }
 
+    fn refresh_factory_static_admission_with_entities(
+        &mut self,
+        entities: &[Value],
+    ) -> anyhow::Result<()> {
+        self.factory_static_admission_reason =
+            crate::simple_factory::static_admission_reason_with_entities(self, entities)?;
+        self.factory_static_admission_checked = true;
+        Ok(())
+    }
+
     pub(crate) fn factory_static_admission_reason(&self) -> Option<Option<&'static str>> {
         self.factory_static_admission_checked
             .then_some(self.factory_static_admission_reason)
@@ -1229,26 +2238,41 @@ impl CoreState {
         self.prepared_belt_routes = Some(routes);
     }
 
-    pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
-        let entities = self.parse_entities_parallel()?;
-        let belts = self.parse_belts_parallel()?;
-        self.rebuild_indexes_from_parsed(&entities, &belts)
+    pub(crate) fn prepared_local_peer_directory(
+        &self,
+    ) -> Option<Arc<crate::local_logistics::LocalPeerDirectory>> {
+        self.prepared_local_peer_directory.clone()
     }
 
-    fn rebuild_indexes_from_parsed(
+    pub(crate) fn install_prepared_local_peer_directory(
+        &mut self,
+        directory: Arc<crate::local_logistics::LocalPeerDirectory>,
+    ) {
+        self.prepared_local_peer_directory = Some(directory);
+    }
+
+    pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
+        let entities = self.parse_entities_parallel()?;
+        self.rebuild_indexes_from_parsed_entities(&entities)
+    }
+
+    fn rebuild_indexes_from_parsed_entities(
         &mut self,
         entity_values: &[Value],
-        belt_values: &[Value],
     ) -> anyhow::Result<()> {
-        if entity_values.len() != self.entity_raw.len() || belt_values.len() != self.belt_raw.len()
-        {
+        if entity_values.len() != self.entity_raw.len() {
             bail!("native core parsed record count is inconsistent");
         }
-        self.symbols = Symbols::default();
-        self.entities = EntityColumns::default();
-        self.belts = BeltColumns::default();
-        self.entity_index.clear();
-        self.belt_index.clear();
+        self.symbols = Symbols::default().into();
+        self.entities = EntityColumns::default().into();
+        self.entity_dynamics = EntityDynamicColumns::default().into();
+        self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
+        self.belts = BeltColumns::default().into();
+        self.belt_dynamics = BeltDynamicColumns::default().into();
+        self.entity_index = ExactRowIdIndex::default().into();
+        self.belt_index = ExactRowIdIndex::default().into();
+        let mut entity_ids = Vec::<Box<str>>::with_capacity(entity_values.len());
+        let mut belt_ids = Vec::<Box<str>>::with_capacity(self.belt_raw.len());
         let planet_indices = self
             .catalog
             .planets
@@ -1261,16 +2285,14 @@ impl CoreState {
             belts_by_planet: vec![Vec::new(); self.catalog.planets.len()],
             ..FactoryTopology::default()
         };
+        let mut entity_dynamics = EntityDynamicColumns::with_capacity(entity_values.len());
         for (index, value) in entity_values.iter().enumerate() {
             let object = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native core entity is not an object"))?;
             let id = object_string(object, "id")
                 .ok_or_else(|| anyhow!("native core entity ID is missing"))?;
-            if self.entity_index.insert(id.to_owned(), index).is_some() {
-                bail!("native core entity ID is duplicated: {id}");
-            }
-            self.entities.ids.push(id.into());
+            entity_ids.push(id.into());
             self.entities
                 .kinds
                 .push(self.symbols.intern(object_string(object, "kind")));
@@ -1310,6 +2332,7 @@ impl CoreState {
                     .filter(|value| value.is_finite())
                     .unwrap_or(0.0),
             );
+            entity_dynamics.push_from_object(object)?;
 
             let kind = object_string(object, "kind").unwrap_or_default();
             let building = object_string(object, "buildingId").unwrap_or_default();
@@ -1389,16 +2412,18 @@ impl CoreState {
                 },
             );
         }
-        for (index, value) in belt_values.iter().enumerate() {
+        let entity_index = ExactRowIdIndex::from_boxed(entity_ids, "entity")?;
+        self.entities.ids = entity_index.ids();
+        self.entity_index = entity_index.into();
+
+        for index in 0..self.belt_raw.len() {
+            let value = self.parse_belt(index)?;
             let object = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native core belt is not an object"))?;
             let id = object_string(object, "id")
                 .ok_or_else(|| anyhow!("native core belt ID is missing"))?;
-            if self.belt_index.insert(id.to_owned(), index).is_some() {
-                bail!("native core belt ID is duplicated: {id}");
-            }
-            self.belts.ids.push(id.into());
+            belt_ids.push(id.into());
             self.belts
                 .planets
                 .push(self.symbols.intern(object_string(object, "planetId")));
@@ -1411,7 +2436,17 @@ impl CoreState {
             self.belts
                 .items
                 .push(self.symbols.intern(object_string(object, "itemId")));
-            self.belts.lanes.push(object_number(object, "lanes"));
+            self.belts.lanes.push(
+                object
+                    .get("lanes")
+                    .map(|value| {
+                        value
+                            .as_f64()
+                            .filter(|value| value.is_finite())
+                            .unwrap_or(0.0)
+                    })
+                    .unwrap_or(1.0),
+            );
             self.belts.tiers.push(
                 object
                     .get("tier")
@@ -1429,6 +2464,7 @@ impl CoreState {
                     .unwrap_or(1)
                     .min(2) as u8,
             );
+            self.belt_dynamics.push_from_object(object);
             if let Some(planet) = object_string(object, "planetId")
                 .and_then(|id| planet_indices.get(id).copied())
                 .and_then(|planet| factory_topology.belts_by_planet.get_mut(planet))
@@ -1436,7 +2472,17 @@ impl CoreState {
                 planet.push(index);
             }
         }
+        let belt_index = ExactRowIdIndex::from_boxed(belt_ids, "belt")?;
+        self.belts.ids = belt_index.ids();
+        self.belt_index = belt_index.into();
+        entity_dynamics.validate(entity_values.len())?;
+        self.entity_dynamics = entity_dynamics.into();
+        self.belt_dynamics.validate(self.belt_raw.len())?;
         self.factory_topology = Arc::new(factory_topology);
+        // Record commands may alter station slots or elevator mode. The next
+        // admitted advance recompiles this immutable directory from the new
+        // records; keeping the previous one would route against stale topology.
+        self.prepared_local_peer_directory = None;
         Ok(())
     }
 
@@ -1448,10 +2494,99 @@ impl CoreState {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
     }
 
+    pub(crate) fn belt_raw_record(&self, index: usize) -> &RawRecord {
+        &self.belt_raw[index]
+    }
+
+    pub(crate) fn validate_belt_runtime_topology(&self) -> anyhow::Result<usize> {
+        let rows = self.belts.ids.len();
+        if self.belt_raw.len() != rows
+            || self.belts.planets.len() != rows
+            || self.belts.sources.len() != rows
+            || self.belts.targets.len() != rows
+            || self.belts.items.len() != rows
+            || self.belts.lanes.len() != rows
+            || self.belts.tiers.len() != rows
+            || self.belts.stack_sizes.len() != rows
+            || self.belts.priorities.len() != rows
+        {
+            bail!("native belt runtime topology changed");
+        }
+        self.belt_dynamics.validate(rows)?;
+        Ok(rows)
+    }
+
+    pub(crate) fn belt_commit_source(&self) -> BeltCommitSource {
+        BeltCommitSource {
+            revision: self.revision,
+            raw: self.belt_raw.0.clone(),
+            topology: self.belts.0.clone(),
+            dynamics: self.belt_dynamics.0.clone(),
+        }
+    }
+
     pub(crate) fn parse_entities_parallel(&self) -> anyhow::Result<Vec<Value>> {
         parse_records_parallel(&self.entity_raw, "native core entity")
     }
 
+    /// Read-only scalar access over the authoritative raw row. The former dense
+    /// resident mirror exceeded the real-save memory gate and had no production
+    /// consumer; one-row lazy decoding preserves missing/null/MOD/-0 semantics
+    /// without keeping a second inventory graph alive in every CoreState.
+    pub fn entity_dynamic_number(
+        &self,
+        index: usize,
+        field: EntityDynamicField,
+    ) -> Option<ResidentNumber> {
+        let entity: Value = serde_json::from_str(self.entity_raw.get(index)?.as_ref()).ok()?;
+        let object = entity.as_object()?;
+        let (kind, value) = ResidentValueKind::classify(object.get(field.key()));
+        Some(ResidentNumber { kind, value })
+    }
+
+    /// Read-only inventory access decoded from one authoritative raw row. The
+    /// returned view owns only that requested row and never becomes resident
+    /// CoreState memory.
+    pub fn entity_inventory(
+        &self,
+        index: usize,
+        side: EntityInventorySide,
+    ) -> Option<EntityInventoryView> {
+        let entity: Value = serde_json::from_str(self.entity_raw.get(index)?.as_ref()).ok()?;
+        let object = entity.as_object()?;
+        let key = match side {
+            EntityInventorySide::Inputs => "inputs",
+            EntityInventorySide::Outputs => "outputs",
+        };
+        let (container_kind, entries) = match object.get(key) {
+            None => (ResidentObjectKind::Missing, Vec::new()),
+            Some(Value::Null) => (ResidentObjectKind::Null, Vec::new()),
+            Some(Value::Object(values)) => (
+                ResidentObjectKind::Object,
+                values
+                    .iter()
+                    .map(|(item_id, amount)| {
+                        let (kind, value) = ResidentValueKind::classify(Some(amount));
+                        OwnedEntityInventoryEntry {
+                            item_id: item_id.as_str().into(),
+                            amount: ResidentNumber { kind, value },
+                        }
+                    })
+                    .collect(),
+            ),
+            Some(_) => (ResidentObjectKind::Other, Vec::new()),
+        };
+        Some(EntityInventoryView {
+            container_kind,
+            entries,
+        })
+    }
+
+    pub fn entity_raw_writeback_diagnostics(&self) -> EntityRawWritebackDiagnostics {
+        self.last_entity_raw_writeback
+    }
+
+    #[cfg(test)]
     pub(crate) fn parse_belts_parallel(&self) -> anyhow::Result<Vec<Value>> {
         parse_records_parallel(&self.belt_raw, "native core belt")
     }
@@ -1464,8 +2599,36 @@ impl CoreState {
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
     }
+
+    /// Returns progress only when no other committed operation has interrupted
+    /// the conservative session. Commands and exact/realtime advances already
+    /// move `revision`; observing that mismatch is the reset boundary.
+    pub(crate) fn pure_idle_exact_seconds_used(&self) -> f64 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision)
+            .map(|session| session.exact_simulation_seconds_used)
+            .unwrap_or(0.0)
+    }
+
+    /// Installs session progress on a disposable candidate. Callers must do
+    /// this only after every simulation, multiplier and diagnostic check has
+    /// succeeded, immediately before atomically replacing the live state.
+    pub(crate) fn install_pure_idle_session_progress(
+        &mut self,
+        exact_simulation_seconds_used: f64,
+    ) -> anyhow::Result<()> {
+        PureIdleSessionState {
+            format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
+            exact_simulation_seconds_used,
+            last_committed_revision: self.revision,
+        }
+        .validate(self.revision)
+        .map(|session| self.pure_idle_session = Some(session))
+    }
+
     pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
         self.summary_cache.get_mut().take();
+        self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
         self.entity_raw[index] = value;
         self.save_dirty.mark_entity(index);
     }
@@ -1479,6 +2642,7 @@ impl CoreState {
     pub(crate) fn entity_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
         self.summary_cache.get_mut().take();
         self.save_dirty.mark_entity_topology();
+        self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
         &mut self.entity_raw
     }
 
@@ -1492,12 +2656,10 @@ impl CoreState {
         &mut self,
         base: Map<String, Value>,
         entities: Vec<Value>,
-        belts: Vec<Value>,
-        changed_belt_indices: &[usize],
+        belt_commit: crate::belts::BeltCommitBatch,
         next_revision: u64,
         populate_summary_cache: bool,
     ) -> anyhow::Result<Option<CoreStateSummary>> {
-        self.summary_cache.get_mut().take();
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -1524,101 +2686,87 @@ impl CoreState {
             };
         }
         if entities.len() != self.entity_raw.len()
-            || belts.len() != self.belt_raw.len()
             || next_revision != self.revision.saturating_add(1)
         {
             bail!("native simulation changed record topology");
         }
-        for (index, entity) in entities.iter().enumerate() {
-            let object = entity
-                .as_object()
-                .ok_or_else(|| anyhow!("native simulated entity is not an object"))?;
-            if object_string(object, "id") != Some(self.entities.ids[index].as_ref()) {
-                bail!("native simulation changed entity identity");
-            }
-        }
-        for (index, belt) in belts.iter().enumerate() {
-            let object = belt
-                .as_object()
-                .ok_or_else(|| anyhow!("native simulated belt is not an object"))?;
-            if object_string(object, "id") != Some(self.belts.ids[index].as_ref()) {
-                bail!("native simulation changed belt identity");
-            }
-        }
+        // The sealed runtime batch proves that it was derived from this
+        // revision and these Arc-backed columns. Recheck the cheap structural
+        // invariant before any patch index is used so an internally damaged
+        // state fails closed instead of panicking during candidate assembly.
+        self.validate_belt_runtime_topology()?;
+        let belt_commit = belt_commit.unseal(self)?;
+        let (belt_patches, belt_dynamics) = belt_commit.into_parts();
         profile_mark!("identity");
 
-        let mut previous_changed_belt = None;
-        for &index in changed_belt_indices {
-            if index >= belts.len()
-                || previous_changed_belt.is_some_and(|previous| index <= previous)
-            {
-                bail!("native simulated belt dirty index is invalid");
-            }
-            previous_changed_belt = Some(index);
+        let entity_writeback =
+            encode_entity_records_full(&entities, &self.entity_raw, &self.entities.ids)?;
+        let (entity_writeback, inventory_entry_count, shared_rows) = entity_writeback.into_parts();
+        let entity_dynamics =
+            EntityDynamicColumns::from_full_encode(entities.len(), inventory_entry_count);
+        let entity_dynamics_changed = !entity_dynamics.bitwise_eq(&self.entity_dynamics);
+        let writeback_diagnostics = EntityRawWritebackDiagnostics {
+            full_encoded_rows: entity_writeback.len(),
+            shared_rows,
+            changed_rows: entity_writeback.len() - shared_rows,
+        };
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tcommit-entity-raw-full-encode\t{:.3}\tencoded={}\tshared={}\tchanged={}",
+                profile_checkpoint.elapsed().as_secs_f64() * 1_000.0,
+                writeback_diagnostics.full_encoded_rows,
+                writeback_diagnostics.shared_rows,
+                writeback_diagnostics.changed_rows
+            );
+            profile_checkpoint = std::time::Instant::now();
         }
 
-        let mut entity_raw = encode_records_parallel(&entities, "native simulated entity")?;
-        let mut belt_raw = self.belt_raw.clone();
-        if changed_belt_indices.len() > belts.len() / 3 {
-            belt_raw = encode_records_parallel(&belts, "native simulated belt")?;
-        } else {
-            for &index in changed_belt_indices {
-                belt_raw[index] = serde_json::to_string(&belts[index])
-                    .context("encode dirty native simulated belt")?
-                    .into();
+        // All validation and fallible encoding above completed against the
+        // live state. Apply records to a cheap COW candidate; only a fully
+        // valid candidate may replace `self`.
+        let mut candidate = self.clone();
+        candidate.summary_cache.get_mut().take();
+        if candidate.base != base {
+            candidate.save_dirty.base = true;
+        }
+        for (index, row) in entity_writeback.iter().enumerate() {
+            if !Arc::ptr_eq(row, &self.entity_raw[index]) {
+                candidate.save_dirty.mark_entity(index);
             }
         }
-        profile_mark!("encode");
-
-        if self.base != base {
-            self.save_dirty.base = true;
-        }
-        for (index, (previous, next)) in self
-            .entity_raw
-            .iter()
-            .zip(entity_raw.iter_mut())
-            .enumerate()
-        {
-            if previous.as_ref() == next.as_ref() {
-                *next = previous.clone();
-            } else {
-                self.save_dirty.mark_entity(index);
-            }
-        }
-        if changed_belt_indices.len() > belts.len() / 3 {
-            for (index, (previous, next)) in
-                self.belt_raw.iter().zip(belt_raw.iter_mut()).enumerate()
+        for patch in belt_patches {
+            let (index, raw) = patch.into_parts();
+            if !Arc::ptr_eq(&self.belt_raw[index], &raw)
+                && self.belt_raw[index].as_ref() != raw.as_ref()
             {
-                if previous.as_ref() == next.as_ref() {
-                    *next = previous.clone();
-                } else {
-                    self.save_dirty.mark_belt(index);
-                }
-            }
-        } else {
-            for &index in changed_belt_indices {
-                if self.belt_raw[index].as_ref() == belt_raw[index].as_ref() {
-                    belt_raw[index] = self.belt_raw[index].clone();
-                } else {
-                    self.save_dirty.mark_belt(index);
-                }
+                candidate.save_dirty.mark_belt(index);
+                candidate.belt_raw[index] = raw;
             }
         }
-        self.base = base;
-        self.entity_raw = entity_raw;
-        self.belt_raw = belt_raw;
-        self.revision = next_revision;
+        candidate.base = base;
+        if writeback_diagnostics.changed_rows != 0 {
+            candidate.entity_raw = entity_writeback.into();
+        }
+        candidate.last_entity_raw_writeback = writeback_diagnostics;
+        if entity_dynamics_changed {
+            candidate.entity_dynamics = entity_dynamics.into();
+        }
+        if let Some(belt_dynamics) = belt_dynamics {
+            candidate.belt_dynamics = belt_dynamics.into();
+        }
+        candidate.revision = next_revision;
         let summary = if populate_summary_cache {
-            let canonical =
-                self.canonical_digest_bundle_with_parsed(Some(&entities), Some(&belts))?;
-            let summary = self.summary_from_digest(canonical);
-            self.summary_cache
-                .replace(Some((self.revision, summary.clone())));
+            let canonical = candidate.canonical_digest_bundle_with_parsed(Some(&entities), None)?;
+            let summary = candidate.summary_from_digest(canonical);
+            candidate
+                .summary_cache
+                .replace(Some((candidate.revision, summary.clone())));
             Some(summary)
         } else {
             None
         };
-        defer_record_drop(entities, belts);
+        *self = candidate;
+        retire_record_values(entities, Vec::new());
         profile_last!("install");
         Ok(summary)
     }
@@ -1857,7 +3005,7 @@ impl CoreState {
         selected_indices.truncate(entity_limit);
         let selected_ids = selected_indices
             .iter()
-            .map(|&index| self.entities.ids[index].as_ref())
+            .map(|&index| &self.entities.ids[index])
             .collect::<HashSet<_>>();
         let mut selected_belts = self
             .factory_topology
@@ -2109,8 +3257,7 @@ impl CoreState {
         parsed_entities: Option<&[Value]>,
         parsed_belts: Option<&[Value]>,
     ) -> anyhow::Result<CanonicalDigestBundle> {
-        if parsed_entities.is_some() != parsed_belts.is_some()
-            || parsed_entities.is_some_and(|values| values.len() != self.entity_raw.len())
+        if parsed_entities.is_some_and(|values| values.len() != self.entity_raw.len())
             || parsed_belts.is_some_and(|values| values.len() != self.belt_raw.len())
         {
             bail!("native canonical parsed record count is inconsistent");
@@ -2119,8 +3266,11 @@ impl CoreState {
         let mut entities = Sha256::new();
         let mut belts = Sha256::new();
         let mut domain = self.start_domain_hasher();
-        let mut domain_symbols = self.symbols.clone();
-        let mut belt_domain_metrics = Vec::<[f64; 3]>::with_capacity(self.belt_raw.len());
+        let mut domain_symbols = DomainSymbolOrder::new(&self.symbols);
+        let mut belt_domain_columns_match = self.belt_dynamics.progress.len()
+            == self.belt_raw.len()
+            && self.belt_dynamics.total_transferred.len() == self.belt_raw.len()
+            && self.belt_dynamics.last_flow.len() == self.belt_raw.len();
         canonical.update(b"{");
         entities.update(b"[");
         belts.update(b"[");
@@ -2177,11 +3327,14 @@ impl CoreState {
                         let belt = value
                             .as_object()
                             .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
-                        belt_domain_metrics.push([
-                            object_number(belt, "progress"),
-                            object_number(belt, "totalTransferred"),
-                            object_number(belt, "lastFlow"),
-                        ]);
+                        if belt_domain_columns_match {
+                            belt_domain_columns_match &= object_number(belt, "progress").to_bits()
+                                == self.belt_dynamics.progress[index].to_bits()
+                                && object_number(belt, "totalTransferred").to_bits()
+                                    == self.belt_dynamics.total_transferred[index].to_bits()
+                                && object_number(belt, "lastFlow").to_bits()
+                                    == self.belt_dynamics.last_flow[index].to_bits();
+                        }
                     }
                     canonical.update(b"]");
                 }
@@ -2191,11 +3344,50 @@ impl CoreState {
         canonical.update(b"}");
         entities.update(b"]");
         belts.update(b"]");
-        if belt_domain_metrics.len() != self.belts.ids.len() {
+        if self.belt_raw.len() != self.belts.ids.len() {
             bail!("native domain belt metric count is inconsistent");
         }
-        for (index, metrics) in belt_domain_metrics.into_iter().enumerate() {
-            self.update_domain_belt_metrics(&mut domain, index, metrics);
+        // Belt rows and their compact dynamics are installed transactionally
+        // by load, commands and simulation commits. Stream those authoritative
+        // columns only after every entity so the historical domain byte order
+        // remains entities-then-belts without retaining a Vec<[f64; 3]> for
+        // the entire belt table. If a caller supplies a same-length parsed
+        // view with different metrics, or an internal invariant is damaged,
+        // fall back to the historical one-row-at-a-time source semantics.
+        if belt_domain_columns_match {
+            for index in 0..self.belt_raw.len() {
+                self.update_domain_belt_metrics(
+                    &mut domain,
+                    index,
+                    [
+                        self.belt_dynamics.progress[index],
+                        self.belt_dynamics.total_transferred[index],
+                        self.belt_dynamics.last_flow[index],
+                    ],
+                );
+            }
+        } else {
+            for (index, raw) in self.belt_raw.iter().enumerate() {
+                let decoded;
+                let value = if let Some(values) = parsed_belts {
+                    &values[index]
+                } else {
+                    decoded = serde_json::from_str(raw).context("decode native domain belt")?;
+                    &decoded
+                };
+                let belt = value
+                    .as_object()
+                    .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
+                self.update_domain_belt_metrics(
+                    &mut domain,
+                    index,
+                    [
+                        object_number(belt, "progress"),
+                        object_number(belt, "totalTransferred"),
+                        object_number(belt, "lastFlow"),
+                    ],
+                );
+            }
         }
 
         let mut base = Sha256::new();
@@ -2248,7 +3440,7 @@ impl CoreState {
     fn update_domain_entity(
         &self,
         hasher: &mut Sha256,
-        symbols: &mut Symbols,
+        symbols: &mut DomainSymbolOrder<'_>,
         index: usize,
         value: &Value,
     ) -> anyhow::Result<()> {
@@ -2257,21 +3449,13 @@ impl CoreState {
             .ok_or_else(|| anyhow!("native domain entity is not an object"))?;
         hasher.update(self.entities.ids[index].as_bytes());
         hasher.update(b"\0");
-        for entry in parse_inventory(entity.get("inputs"), symbols) {
-            if let Some(item) = self.symbols.resolve(entry.item) {
-                hasher.update(item.as_bytes());
-            } else if let Some(item) = symbols.resolve(entry.item) {
-                hasher.update(item.as_bytes());
-            }
+        for entry in parse_domain_inventory(entity.get("inputs"), symbols) {
+            hasher.update(entry.item.as_bytes());
             hasher.update(entry.amount.to_bits().to_le_bytes());
         }
         hasher.update(b"|");
-        for entry in parse_inventory(entity.get("outputs"), symbols) {
-            if let Some(item) = self.symbols.resolve(entry.item) {
-                hasher.update(item.as_bytes());
-            } else if let Some(item) = symbols.resolve(entry.item) {
-                hasher.update(item.as_bytes());
-            }
+        for entry in parse_domain_inventory(entity.get("outputs"), symbols) {
+            hasher.update(entry.item.as_bytes());
             hasher.update(entry.amount.to_bits().to_le_bytes());
         }
         hasher.update(object_number(entity, "progress").to_bits().to_le_bytes());
@@ -2307,38 +3491,10 @@ impl CoreState {
             }
             hasher.update(b"\0");
         }
-        let mut symbols = self.symbols.clone();
+        let mut symbols = DomainSymbolOrder::new(&self.symbols);
         for (index, raw) in self.entity_raw.iter().enumerate() {
             let value: Value = serde_json::from_str(raw).context("decode native domain entity")?;
-            let entity = value
-                .as_object()
-                .ok_or_else(|| anyhow!("native domain entity is not an object"))?;
-            hasher.update(self.entities.ids[index].as_bytes());
-            hasher.update(b"\0");
-            for entry in parse_inventory(entity.get("inputs"), &mut symbols) {
-                if let Some(item) = self.symbols.resolve(entry.item) {
-                    hasher.update(item.as_bytes());
-                } else if let Some(item) = symbols.resolve(entry.item) {
-                    hasher.update(item.as_bytes());
-                }
-                hasher.update(entry.amount.to_bits().to_le_bytes());
-            }
-            hasher.update(b"|");
-            for entry in parse_inventory(entity.get("outputs"), &mut symbols) {
-                if let Some(item) = self.symbols.resolve(entry.item) {
-                    hasher.update(item.as_bytes());
-                } else if let Some(item) = symbols.resolve(entry.item) {
-                    hasher.update(item.as_bytes());
-                }
-                hasher.update(entry.amount.to_bits().to_le_bytes());
-            }
-            hasher.update(object_number(entity, "progress").to_bits().to_le_bytes());
-            hasher.update(object_number(entity, "utilization").to_bits().to_le_bytes());
-            hasher.update(
-                object_number(entity, "productionRate")
-                    .to_bits()
-                    .to_le_bytes(),
-            );
+            self.update_domain_entity(&mut hasher, &mut symbols, index, &value)?;
         }
         for (index, raw) in self.belt_raw.iter().enumerate() {
             let value: Value = serde_json::from_str(raw).context("decode native domain belt")?;
@@ -2364,21 +3520,14 @@ impl CoreState {
             .chain(self.belt_raw.iter())
             .map(|value| value.len() as u64)
             .sum();
-        // Hot simulation data lives only in the authoritative records. Keeping
-        // a second inventory/progress mirror made every checkpoint retain a
-        // large stale object graph without accelerating the native step.
-        let inventory_entry_count = 0;
+        // Raw records remain authoritative. E1 values are decoded one row at
+        // a time, and full writeback encoding keeps no per-row proof or target
+        // mirror. Inventory cardinality is diagnostic rather than allocating
+        // a second resident JSON/CSR graph.
+        let inventory_entry_count = self.entity_dynamics.inventory_entry_count() as u64;
         let indexed_string_bytes = self.symbols.estimated_bytes()
-            + self
-                .entity_index
-                .keys()
-                .map(|value| value.len() as u64)
-                .sum::<u64>()
-            + self
-                .belt_index
-                .keys()
-                .map(|value| value.len() as u64)
-                .sum::<u64>();
+            + self.entities.ids.text_bytes() as u64
+            + self.belts.ids.text_bytes() as u64;
         let entity_rows = self.entities.ids.len() as u64;
         let belt_rows = self.belts.ids.len() as u64;
         // The pre-1.2.3 estimate accounted for IDs, interned symbols and
@@ -2387,18 +3536,24 @@ impl CoreState {
         // `EntityColumns` so the native memory budget does not under-report
         // the viewport indexes.
         let numeric_columns = entity_rows * 72 + belt_rows * 72;
-        let index_overhead = ((self.entity_index.capacity() + self.belt_index.capacity())
-            * (size_of::<String>() + size_of::<usize>())) as u64;
+        let index_overhead =
+            self.entity_index.estimated_bytes() + self.belt_index.estimated_bytes();
         let topology_index_bytes = self
             .prepared_belt_routes
             .as_ref()
             .map(|routes| routes.estimated_bytes())
             .unwrap_or(0)
+            + self
+                .prepared_local_peer_directory
+                .as_ref()
+                .map(|directory| directory.estimated_bytes())
+                .unwrap_or(0)
             + self.factory_topology.estimated_bytes();
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
-            + inventory_entry_count * size_of::<ItemQuantity>() as u64
             + numeric_columns
+            + self.entity_dynamics.estimated_bytes()
+            + self.belt_dynamics.estimated_bytes()
             + index_overhead
             + topology_index_bytes
             + serde_json::to_vec(&self.base)
@@ -2481,7 +3636,156 @@ mod tests {
         BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
         RuntimeCatalog,
     };
+    use crate::command::{
+        AddedRecord, PathSegment, RecordPatch, SimulationCommandPatch, ValuePatch,
+    };
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn joined_record_drop_finishes_every_destructor_before_return() {
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let records = (0..4_096)
+            .map(|_| DropCounter(Arc::clone(&dropped)))
+            .collect::<Vec<_>>();
+        deterministic_runtime().drop_owned_joined(records, Vec::new());
+        assert_eq!(dropped.load(Ordering::SeqCst), 4_096);
+    }
+
+    #[test]
+    fn synchronous_record_drop_is_only_enabled_by_exact_one() {
+        assert!(resolve_sync_record_drop(Some("1")));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some(" 1 "),
+            Some("2"),
+        ] {
+            assert!(!resolve_sync_record_drop(value));
+        }
+    }
+
+    #[test]
+    fn exact_row_id_index_proves_forced_collisions_with_full_strings() {
+        let index = ExactRowIdIndex::from_boxed_with_hash_mask(
+            ["alpha", "beta", "gamma", "delta"]
+                .into_iter()
+                .map(Box::<str>::from)
+                .collect(),
+            "test",
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(index.len(), 4);
+        assert_eq!(index.get("alpha"), Some(&0));
+        assert_eq!(index.get("beta"), Some(&1));
+        assert_eq!(index.get("gamma"), Some(&2));
+        assert_eq!(index.get("delta"), Some(&3));
+        assert_eq!(index.get("not-present"), None);
+        assert!(!index.contains_key(""));
+        assert_eq!(index.buckets.iter().filter(|&&row| row != 0).count(), 4);
+    }
+
+    #[test]
+    fn exact_row_id_index_rejects_empty_duplicate_and_capacity_overflow() {
+        let empty = ExactRowIdIndex::from_boxed(vec![Box::<str>::from("")], "entity").unwrap_err();
+        assert!(empty.to_string().contains("ID is empty"));
+
+        let duplicate = ExactRowIdIndex::from_boxed_with_hash_mask(
+            vec![Box::<str>::from("same"), Box::<str>::from("same")],
+            "belt",
+            0,
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("ID is duplicated: same"));
+
+        let adversarial_collision = ExactRowIdIndex::from_boxed_with_hash_mask(
+            (0..=EXACT_ROW_ID_MAX_PROBE_DISTANCE + 1)
+                .map(|row| format!("collision-{row}").into_boxed_str())
+                .collect(),
+            "entity",
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            adversarial_collision
+                .to_string()
+                .contains("probe limit exceeded")
+        );
+
+        let overflow = ExactRowIdIndex::bucket_capacity_for_len(MAX_BELT_COUNT + 1).unwrap_err();
+        assert!(overflow.to_string().contains("capacity overflow"));
+    }
+
+    #[test]
+    fn exact_row_id_index_matches_random_hashmap_oracle_and_rebuilds() {
+        let mut seed = 0x4d59_5df4_d0f3_3173_u64;
+        let ids = (0..4_096)
+            .map(|row| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                format!("row-{row:04x}-{seed:016x}").into_boxed_str()
+            })
+            .collect::<Vec<_>>();
+        let oracle = ids
+            .iter()
+            .enumerate()
+            .map(|(row, id)| (id.to_string(), row))
+            .collect::<HashMap<_, _>>();
+        let index = ExactRowIdIndex::from_boxed(ids.clone(), "test").unwrap();
+
+        for (id, expected) in &oracle {
+            assert_eq!(index.get(id).copied(), Some(*expected));
+        }
+        for row in 0..4_096 {
+            assert_eq!(index.get(&format!("missing-{row:04x}")), None);
+        }
+
+        let rebuilt_ids = ids.into_iter().rev().collect::<Vec<_>>();
+        let rebuilt = ExactRowIdIndex::from_boxed(rebuilt_ids.clone(), "test").unwrap();
+        for (row, id) in rebuilt_ids.iter().enumerate() {
+            assert_eq!(rebuilt.get(id).copied(), Some(row));
+        }
+        assert!(Arc::ptr_eq(&rebuilt.ids.0, &rebuilt.ids().0));
+    }
+
+    #[test]
+    fn exact_row_id_index_has_bounded_load_and_expected_memory_cost() {
+        assert_eq!(size_of::<ExactRowIdEntry>(), size_of::<Box<str>>());
+        assert_eq!(
+            ExactRowIdIndex::bucket_capacity_for_len(80_674).unwrap(),
+            131_072
+        );
+        assert_eq!(
+            ExactRowIdIndex::bucket_capacity_for_len(155_746).unwrap(),
+            262_144
+        );
+        assert_eq!((131_072_u64 + 262_144) * size_of::<u32>() as u64, 1_572_864);
+
+        let index = ExactRowIdIndex::from_boxed(
+            ["a", "bb", "ccc"]
+                .into_iter()
+                .map(Box::<str>::from)
+                .collect(),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(index.buckets.len(), 4);
+        assert_eq!(index.estimated_bytes(), 16);
+        assert_eq!(index.ids.text_bytes(), 6);
+    }
 
     fn fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
@@ -2566,6 +3870,321 @@ mod tests {
         ])
     }
 
+    fn replace_fixture_entity_chunk(
+        records: &mut BTreeMap<String, Vec<u8>>,
+        bytes: Vec<u8>,
+        count: usize,
+    ) {
+        let chunk_key = "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000";
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        records.insert(chunk_key.into(), bytes.clone());
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        manifest["entityCount"] = json!(count);
+        let entity_chunk = manifest["chunks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|chunk| chunk["kind"] == "entities")
+            .unwrap();
+        entity_chunk["count"] = json!(count);
+        entity_chunk["checksum"] = json!(fnv1a_utf8(&bytes));
+        entity_chunk["bytes"] = json!(bytes.len());
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+    }
+
+    fn fixture_records_with_entity_json(
+        raw_array: &str,
+        count: usize,
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut records = fixture_records();
+        replace_fixture_entity_chunk(&mut records, raw_array.as_bytes().to_vec(), count);
+        records
+    }
+
+    fn fixture_records_with_belts(belts: Vec<Value>) -> BTreeMap<String, Vec<u8>> {
+        let mut records = fixture_records();
+        let bytes = serde_json::to_vec(&belts).unwrap();
+        replace_fixture_belt_chunk(&mut records, bytes, belts.len());
+        records
+    }
+
+    fn replace_fixture_belt_chunk(
+        records: &mut BTreeMap<String, Vec<u8>>,
+        bytes: Vec<u8>,
+        count: usize,
+    ) {
+        let chunk_key = "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000";
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        records.insert(chunk_key.into(), bytes.clone());
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        manifest["beltCount"] = json!(count);
+        let belt_chunk = manifest["chunks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|chunk| chunk["kind"] == "belts")
+            .unwrap();
+        belt_chunk["count"] = json!(count);
+        belt_chunk["checksum"] = json!(fnv1a_utf8(&bytes));
+        belt_chunk["bytes"] = json!(bytes.len());
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+    }
+
+    fn fixture_records_with_raw_entities_and_belts(
+        entities: &str,
+        entity_count: usize,
+        belts: &str,
+        belt_count: usize,
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut records = fixture_records();
+        replace_fixture_entity_chunk(&mut records, entities.as_bytes().to_vec(), entity_count);
+        replace_fixture_belt_chunk(&mut records, belts.as_bytes().to_vec(), belt_count);
+        records
+    }
+
+    fn legacy_parse_inventory(value: Option<&Value>, symbols: &mut Symbols) -> Vec<(u32, f64)> {
+        let Some(object) = value.and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut values = object
+            .iter()
+            .filter_map(|(item, amount)| {
+                let amount = amount.as_f64()?;
+                amount
+                    .is_finite()
+                    .then(|| (symbols.intern(Some(item)), amount))
+            })
+            .collect::<Vec<_>>();
+        values.sort_by_key(|entry| entry.0);
+        values
+    }
+
+    /// Frozen pre-E14 oracle. Keep this deliberately independent from the new
+    /// sparse ordering helper so a shared implementation cannot mask drift.
+    fn legacy_domain_sha256(state: &CoreState) -> anyhow::Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"dsp-native-domain-v1\0");
+        hasher.update(state.revision.to_le_bytes());
+        for key in [
+            "version",
+            "mode",
+            "activePlanetId",
+            "elapsedSeconds",
+            "paused",
+        ] {
+            if let Some(value) = state.base.get(key) {
+                update_canonical(&mut hasher, value);
+            }
+            hasher.update(b"\0");
+        }
+        let mut symbols = state.symbols.0.as_ref().clone();
+        for (index, raw) in state.entity_raw.iter().enumerate() {
+            let value: Value = serde_json::from_str(raw).context("decode legacy oracle entity")?;
+            let entity = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native domain entity is not an object"))?;
+            hasher.update(state.entities.ids[index].as_bytes());
+            hasher.update(b"\0");
+            for (item, amount) in legacy_parse_inventory(entity.get("inputs"), &mut symbols) {
+                if let Some(item) = state.symbols.resolve(item) {
+                    hasher.update(item.as_bytes());
+                } else if let Some(item) = symbols.resolve(item) {
+                    hasher.update(item.as_bytes());
+                }
+                hasher.update(amount.to_bits().to_le_bytes());
+            }
+            hasher.update(b"|");
+            for (item, amount) in legacy_parse_inventory(entity.get("outputs"), &mut symbols) {
+                if let Some(item) = state.symbols.resolve(item) {
+                    hasher.update(item.as_bytes());
+                } else if let Some(item) = symbols.resolve(item) {
+                    hasher.update(item.as_bytes());
+                }
+                hasher.update(amount.to_bits().to_le_bytes());
+            }
+            hasher.update(object_number(entity, "progress").to_bits().to_le_bytes());
+            hasher.update(object_number(entity, "utilization").to_bits().to_le_bytes());
+            hasher.update(
+                object_number(entity, "productionRate")
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+        }
+        for (index, raw) in state.belt_raw.iter().enumerate() {
+            let value: Value = serde_json::from_str(raw).context("decode legacy oracle belt")?;
+            let belt = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native domain belt is not an object"))?;
+            hasher.update(state.belts.ids[index].as_bytes());
+            hasher.update(object_number(belt, "progress").to_bits().to_le_bytes());
+            hasher.update(
+                object_number(belt, "totalTransferred")
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            hasher.update(object_number(belt, "lastFlow").to_bits().to_le_bytes());
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn fixture_identity(revision: u64) -> CoreCheckpointIdentity {
+        CoreCheckpointIdentity {
+            slot: "normal-main".into(),
+            generation: 1,
+            root_hash: "a".repeat(64),
+            revision,
+            state_version: 47,
+            mode: "normal".into(),
+            registry_fingerprint: "core".into(),
+            base_primary_checksum: "12345678".into(),
+        }
+    }
+
+    fn belt_commit_for_test(state: &CoreState) -> crate::belts::BeltCommitBatch {
+        crate::belts::BeltCommitBatch::unchanged_for_test(state)
+    }
+
+    #[test]
+    fn owned_internal_records_load_valid_checkpoint() {
+        let state = CoreState::from_owned_internal_records(
+            fixture_identity(7),
+            fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+
+        assert_eq!(state.revision, 7);
+        assert_eq!(state.entity_raw.len(), 1);
+        assert_eq!(state.belt_raw.len(), 1);
+        let summary = state.summary().unwrap();
+        assert_eq!(summary.state_version, 47);
+        assert_eq!(summary.canonical_sha256, state.canonical_sha256().unwrap());
+    }
+
+    #[test]
+    fn owned_internal_records_reject_missing_chunk() {
+        let mut records = fixture_records();
+        records.remove("dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000");
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint chunk is missing: entities:00000000")
+        );
+    }
+
+    #[test]
+    fn owned_internal_records_reject_chunk_hash_mismatch() {
+        let mut records = fixture_records();
+        records
+            .get_mut("dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000")
+            .unwrap()
+            .push(b' ');
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint chunk checksum is invalid: entities:00000000")
+        );
+    }
+
+    #[test]
+    fn owned_internal_records_preserve_duplicate_chunk_topology_error() {
+        let mut records = fixture_records();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        let duplicate = manifest["chunks"][1].clone();
+        manifest["chunks"].as_array_mut().unwrap().push(duplicate);
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint record topology is invalid")
+        );
+        assert!(!error.to_string().contains("chunk is missing"));
+    }
+
+    #[test]
+    fn owned_internal_records_preserve_zero_count_duplicate_chunk_compatibility() {
+        let mut records = fixture_records_with_belts(Vec::new());
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        let duplicate = manifest["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chunk| chunk["kind"] == "belts")
+            .unwrap()
+            .clone();
+        manifest["chunks"].as_array_mut().unwrap().push(duplicate);
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+        assert!(state.belt_raw.is_empty());
+    }
+
+    #[test]
+    fn owned_internal_records_reject_incomplete_ranges() {
+        let mut records = fixture_records();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        manifest["entityCount"] = json!(2);
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint record ranges are incomplete")
+        );
+    }
+
+    #[test]
+    fn owned_internal_records_preserve_out_of_range_error() {
+        let mut records = fixture_records();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        manifest["chunks"][1]["offset"] = json!(1);
+        records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint chunk range is invalid")
+        );
+    }
+
+    #[test]
+    fn owned_internal_records_reject_unreferenced_record() {
+        let mut records = fixture_records();
+        records.insert(
+            "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.unreferenced".into(),
+            b"[]".to_vec(),
+        );
+
+        let error =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap_err();
+        assert!(error.to_string().contains("contains unreferenced records"));
+    }
+
     #[test]
     fn loads_exact_chunked_v47_state_into_indexed_columns() {
         let mut state = CoreState::from_internal_records(
@@ -2589,8 +4208,38 @@ mod tests {
         assert_eq!(summary.belt_count, 1);
         assert!(summary.coverage.state_container);
         assert!(!summary.coverage.authority_eligible);
+        let parsed_entities = state.parse_entities_parallel().unwrap();
+        let parsed_belts = state.parse_belts_parallel().unwrap();
+        let fully_parsed = state
+            .canonical_digest_bundle_with_parsed(Some(&parsed_entities), Some(&parsed_belts))
+            .unwrap();
+        let streamed_belts = state
+            .canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)
+            .unwrap();
+        assert_eq!(
+            streamed_belts.canonical_sha256,
+            fully_parsed.canonical_sha256
+        );
+        assert_eq!(
+            streamed_belts.canonical_components,
+            fully_parsed.canonical_components
+        );
+        assert_eq!(
+            streamed_belts.canonical_fields,
+            fully_parsed.canonical_fields
+        );
+        assert_eq!(streamed_belts.domain_sha256, fully_parsed.domain_sha256);
         assert_eq!(state.materialize().unwrap()["entities"][0]["id"], "vein");
-        let transactional_clone = state.clone();
+        let mut transactional_clone = state.clone();
+        assert!(Arc::ptr_eq(&state.catalog, &transactional_clone.catalog));
+        assert!(Arc::ptr_eq(
+            &state.entity_raw.0,
+            &transactional_clone.entity_raw.0
+        ));
+        assert!(Arc::ptr_eq(
+            &state.belt_raw.0,
+            &transactional_clone.belt_raw.0
+        ));
         assert!(Arc::ptr_eq(
             &state.entity_raw[0],
             &transactional_clone.entity_raw[0]
@@ -2599,6 +4248,49 @@ mod tests {
             &state.belt_raw[0],
             &transactional_clone.belt_raw[0]
         ));
+        assert!(Arc::ptr_eq(
+            &state.entity_index.0,
+            &transactional_clone.entity_index.0
+        ));
+        assert!(Arc::ptr_eq(
+            &state.entities.ids.0,
+            &state.entity_index.ids.0
+        ));
+        assert!(Arc::ptr_eq(
+            &state.entity_index.ids.0,
+            &transactional_clone.entity_index.ids.0
+        ));
+        assert!(Arc::ptr_eq(
+            &state.entities.0,
+            &transactional_clone.entities.0
+        ));
+        assert!(Arc::ptr_eq(
+            &state.entity_dynamics.0,
+            &transactional_clone.entity_dynamics.0
+        ));
+        assert_eq!(summary.memory.inventory_entry_count, 1);
+        assert_eq!(state.entity_dynamics.estimated_bytes(), 0);
+        assert_eq!(
+            state.entity_index.estimated_bytes() + state.belt_index.estimated_bytes(),
+            16
+        );
+        assert!(summary.memory.estimated_runtime_bytes >= summary.memory.raw_record_bytes);
+        transactional_clone.entity_index =
+            ExactRowIdIndex::from_boxed(vec!["candidate-only".into()], "entity")
+                .unwrap()
+                .into();
+        assert!(!state.entity_index.contains_key("candidate-only"));
+        assert!(!Arc::ptr_eq(
+            &state.entity_index.0,
+            &transactional_clone.entity_index.0
+        ));
+        assert_eq!(state.entity_index.get("vein"), Some(&0));
+        assert_eq!(
+            transactional_clone.entity_index.get("candidate-only"),
+            Some(&0)
+        );
+        transactional_clone.summary_cache.replace(None);
+        assert!(state.summary_cache.borrow().is_some());
 
         // The fused pass is byte-identical to the independent public oracles,
         // and the cache may only survive while the protocol revision does.
@@ -2617,6 +4309,40 @@ mod tests {
         let advanced = state.summary().unwrap();
         assert_eq!(advanced.elapsed_seconds, 1.0);
         assert_ne!(advanced.canonical_sha256, summary.canonical_sha256);
+    }
+
+    #[test]
+    fn core_state_is_send_sync_and_summary_cache_is_concurrent() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CoreState>();
+
+        let state = Arc::new(
+            CoreState::from_internal_records(
+                CoreCheckpointIdentity {
+                    slot: "normal-main".into(),
+                    generation: 1,
+                    root_hash: "a".repeat(64),
+                    revision: 7,
+                    state_version: 47,
+                    mode: "normal".into(),
+                    registry_fingerprint: "core".into(),
+                    base_primary_checksum: "12345678".into(),
+                },
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap(),
+        );
+        let expected = state.summary().unwrap().canonical_sha256;
+        let workers = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || state.summary().unwrap().canonical_sha256)
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), expected);
+        }
     }
 
     #[test]
@@ -2914,6 +4640,341 @@ mod tests {
     }
 
     #[test]
+    fn entity_columns_preserve_duplicate_missing_null_negative_zero_and_mod_semantics() {
+        let records = fixture_records_with_entity_json(
+            r#"[{
+                "id":"discarded-id","id":"entity-special",
+                "kind":"machine","planetId":"home","buildingId":"mining_machine",
+                "productionRate":1e2,"productionRate":-0.0,
+                "utilization":null,
+                "powerFactor":"mod-power",
+                "stationProgress":1.25e-2,
+                "stationLastTransfer":-0e0,
+                "routingCursor":2E3,
+                "inputs":{"discarded":9},
+                "inputs":{"iron_ore":1e3,"mod-item":null,"other":{"nested":true},"iron_ore":-0.0},
+                "outputs":null,
+                "modPayload":{"progress":999,"inputs":{"iron_ore":777}}
+            }]"#,
+            1,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+
+        assert_eq!(state.entity_index.get("entity-special"), Some(&0));
+        assert!(!state.entity_index.contains_key("discarded-id"));
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::ProductionRate)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Utilization)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Progress)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Missing
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::PowerFactor)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Other
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::StationProgress)
+                .unwrap()
+                .as_f64(),
+            Some(0.0125)
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::StationLastTransfer)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::RoutingCursor)
+                .unwrap()
+                .as_f64(),
+            Some(2_000.0)
+        );
+        assert!(
+            state
+                .entity_dynamic_number(1, EntityDynamicField::Progress)
+                .is_none()
+        );
+
+        let inputs = state
+            .entity_inventory(0, EntityInventorySide::Inputs)
+            .unwrap();
+        assert_eq!(inputs.container_kind(), ResidentObjectKind::Object);
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(
+            inputs.get("iron_ore").unwrap().as_f64().unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            inputs.get("mod-item").unwrap().kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            inputs.get("other").unwrap().kind(),
+            ResidentValueKind::Other
+        );
+        assert!(inputs.get("discarded").is_none());
+        let entries = inputs
+            .entries()
+            .map(|entry| (entry.item_id().to_owned(), entry.amount().kind()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(entries["iron_ore"], ResidentValueKind::Number);
+        assert_eq!(entries["mod-item"], ResidentValueKind::Null);
+        assert_eq!(entries["other"], ResidentValueKind::Other);
+
+        let outputs = state
+            .entity_inventory(0, EntityInventorySide::Outputs)
+            .unwrap();
+        assert_eq!(outputs.container_kind(), ResidentObjectKind::Null);
+        assert!(outputs.is_empty());
+        assert_eq!(state.memory_estimate().inventory_entry_count, 3);
+
+        let parsed = state.parse_entity(0).unwrap();
+        assert_eq!(parsed["id"], "entity-special");
+        assert_eq!(parsed["modPayload"]["progress"], 999);
+        assert_eq!(parsed["modPayload"]["inputs"]["iron_ore"], 777);
+        assert_eq!(
+            parsed["inputs"]["iron_ore"].as_f64().unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn malformed_entity_records_fail_before_installing_resident_columns() {
+        for (raw, expected) in [
+            (r#"[{"id":"truncated""#, "record chunk"),
+            (r#"[["not-an-object"]]"#, "not an object"),
+            (
+                r#"[{"kind":"machine","inputs":{},"outputs":{}}]"#,
+                "ID is missing",
+            ),
+        ] {
+            let records = fixture_records_with_entity_json(raw, 1);
+            let error =
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "raw={raw} error={error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn randomized_entity_columns_match_independent_json_value_reads() {
+        fn next_random(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *seed
+        }
+
+        fn random_scalar(seed: &mut u64, index: usize) -> Option<Value> {
+            match next_random(seed) & 3 {
+                0 => None,
+                1 => Some(Value::Null),
+                2 => Some(if index.is_multiple_of(17) {
+                    Value::from(-0.0)
+                } else {
+                    Value::from(((next_random(seed) >> 11) as f64) / 1_000_000.0)
+                }),
+                _ => Some(json!({"modNested":{"kept":index}})),
+            }
+        }
+
+        fn random_inventory(seed: &mut u64, index: usize) -> Option<Value> {
+            match next_random(seed) & 3 {
+                0 => None,
+                1 => Some(Value::Null),
+                2 => {
+                    let mut values = Map::new();
+                    let entries = (next_random(seed) % 5) as usize;
+                    for entry in 0..entries {
+                        let item_id = if entry == 0 && index.is_multiple_of(3) {
+                            "iron_ore".to_owned()
+                        } else {
+                            format!("mod-item-{index}-{entry}")
+                        };
+                        values.insert(
+                            item_id,
+                            random_scalar(seed, index + entry).unwrap_or(Value::Null),
+                        );
+                    }
+                    Some(Value::Object(values))
+                }
+                _ => Some(json!(["mod", {"nested":index}])),
+            }
+        }
+
+        fn expected_number(value: Option<&Value>) -> (ResidentValueKind, Option<f64>) {
+            match value {
+                None => (ResidentValueKind::Missing, None),
+                Some(Value::Null) => (ResidentValueKind::Null, None),
+                Some(Value::Number(number)) => (ResidentValueKind::Number, number.as_f64()),
+                Some(_) => (ResidentValueKind::Other, None),
+            }
+        }
+
+        let mut seed = 0x5eed_e1c0_1a55_0047_u64;
+        let mut entities = Vec::new();
+        for index in 0..257 {
+            let mut entity = Map::from_iter([
+                ("id".to_owned(), Value::from(format!("random-{index}"))),
+                ("kind".to_owned(), Value::from("mod-entity")),
+                ("planetId".to_owned(), Value::from("home")),
+                (
+                    "modPayload".to_owned(),
+                    json!({"progress":index,"inputs":{"nested":true}}),
+                ),
+            ]);
+            for field in EntityDynamicField::ALL {
+                if let Some(value) = random_scalar(&mut seed, index + field as usize) {
+                    entity.insert(field.key().to_owned(), value);
+                }
+            }
+            if let Some(value) = random_inventory(&mut seed, index) {
+                entity.insert("inputs".to_owned(), value);
+            }
+            if let Some(value) = random_inventory(&mut seed, index + 1_000) {
+                entity.insert("outputs".to_owned(), value);
+            }
+            entities.push(Value::Object(entity));
+        }
+        let bytes = serde_json::to_vec(&entities).unwrap();
+        let mut records = fixture_records();
+        replace_fixture_entity_chunk(&mut records, bytes, entities.len());
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+
+        let mut expected_inventory_entries = 0_u64;
+        for (index, expected) in entities.iter().enumerate() {
+            let object = expected.as_object().unwrap();
+            for field in EntityDynamicField::ALL {
+                let (expected_kind, expected_value) = expected_number(object.get(field.key()));
+                let resident = state.entity_dynamic_number(index, field).unwrap();
+                assert_eq!(
+                    resident.kind(),
+                    expected_kind,
+                    "index={index} field={field:?}"
+                );
+                assert_eq!(
+                    resident.as_f64().map(f64::to_bits),
+                    expected_value.map(f64::to_bits),
+                    "index={index} field={field:?}"
+                );
+            }
+            for (side, key) in [
+                (EntityInventorySide::Inputs, "inputs"),
+                (EntityInventorySide::Outputs, "outputs"),
+            ] {
+                let view = state.entity_inventory(index, side).unwrap();
+                let (expected_kind, expected_entries) = match object.get(key) {
+                    None => (ResidentObjectKind::Missing, None),
+                    Some(Value::Null) => (ResidentObjectKind::Null, None),
+                    Some(Value::Object(entries)) => {
+                        expected_inventory_entries += entries.len() as u64;
+                        (ResidentObjectKind::Object, Some(entries))
+                    }
+                    Some(_) => (ResidentObjectKind::Other, None),
+                };
+                assert_eq!(
+                    view.container_kind(),
+                    expected_kind,
+                    "index={index} side={side:?}"
+                );
+                assert_eq!(view.len(), expected_entries.map_or(0, Map::len));
+                if let Some(entries) = expected_entries {
+                    for (item_id, amount) in entries {
+                        let (expected_kind, expected_value) = expected_number(Some(amount));
+                        let resident = view.get(item_id).unwrap();
+                        assert_eq!(resident.kind(), expected_kind);
+                        assert_eq!(
+                            resident.as_f64().map(f64::to_bits),
+                            expected_value.map(f64::to_bits)
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                state.parse_entity(index).unwrap()["modPayload"],
+                expected["modPayload"]
+            );
+        }
+        assert_eq!(
+            state.memory_estimate().inventory_entry_count,
+            expected_inventory_entries
+        );
+    }
+
+    #[test]
+    fn compact_entity_descriptor_rejects_corrupt_row_topology() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let mut invalid = state.entity_dynamics.0.as_ref().clone();
+        invalid.row_count += 1;
+        assert!(invalid.validate(1).is_err());
+    }
+
+    #[test]
+    fn entity_lazy_descriptor_has_exact_constant_resident_cost() {
+        let rows = 80_674;
+        let mut columns = EntityDynamicColumns::with_capacity(rows);
+        let object = Map::new();
+        for _ in 0..rows {
+            columns.push_from_object(&object).unwrap();
+        }
+        columns.validate(rows).unwrap();
+        assert_eq!(columns.inventory_entry_count(), 0);
+        assert_eq!(columns.estimated_bytes(), 0);
+
+        let mut inventory_heavy = Map::new();
+        for side in ["inputs", "outputs"] {
+            inventory_heavy.insert(
+                side.to_owned(),
+                Value::Object(Map::from_iter(
+                    (0..1_024).map(|index| (format!("mod-item-{index}"), Value::from(index))),
+                )),
+            );
+        }
+        let mut one_row = EntityDynamicColumns::with_capacity(1);
+        one_row.push_from_object(&inventory_heavy).unwrap();
+        assert_eq!(one_row.inventory_entry_count(), 2_048);
+        assert_eq!(one_row.estimated_bytes(), 0);
+    }
+
+    #[test]
     fn duplicate_record_ids_fail_closed() {
         let mut records = fixture_records();
         let key = "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000";
@@ -2946,5 +5007,1144 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("duplicated"));
+    }
+
+    #[test]
+    fn simulated_belt_patch_failures_leave_source_state_byte_exact() {
+        for case in [
+            "out-of-range",
+            "duplicate",
+            "wrong-id",
+            "invalid-json",
+            "non-object",
+            "dynamic-mismatch",
+            "hidden-dynamic-change",
+            "hidden-raw-change",
+        ] {
+            let mut state = CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap();
+            let raw = state.belt_raw[0].clone();
+            let patches = match case {
+                "out-of-range" => vec![(1, raw)],
+                "duplicate" => vec![(0, raw.clone()), (0, raw)],
+                "wrong-id" => vec![(0, r#"{"id":"other"}"#.into())],
+                "invalid-json" => vec![(0, "{".into())],
+                "non-object" => vec![(0, "[]".into())],
+                "dynamic-mismatch" => vec![(0, raw)],
+                "hidden-raw-change" => vec![(
+                    0,
+                    r#"{"id":"belt","planetId":"home","source":"vein","target":"sink","itemId":"iron_ore","lanes":1,"tier":1,"priority":1,"progress":0,"lastFlow":0,"modPayload":{"forged":true}}"#.into(),
+                )],
+                "hidden-dynamic-change" => Vec::new(),
+                _ => unreachable!(),
+            };
+            let canonical_before = state.canonical_sha256().unwrap();
+            let belt_table_before = state.belt_raw.0.clone();
+            let belt_dynamics_before = state.belt_dynamics.0.clone();
+            let dirty_before = format!("{:?}", state.save_dirty);
+            let mut envelope_before = Vec::new();
+            state.write_v47_envelope(42, &mut envelope_before).unwrap();
+            let mut belt_dynamics = state.belt_dynamics.0.as_ref().clone();
+            if matches!(case, "dynamic-mismatch" | "hidden-dynamic-change") {
+                belt_dynamics.progress[0] = 99.0;
+                belt_dynamics.number_mask[0] |= 1 << BeltDynamicColumns::PROGRESS;
+            }
+            let belt_commit =
+                crate::belts::BeltCommitBatch::forged_for_test(&state, patches, belt_dynamics);
+
+            let error = state
+                .commit_simulated_state(
+                    state.base_value().clone(),
+                    state.parse_entities_parallel().unwrap(),
+                    belt_commit,
+                    8,
+                    true,
+                )
+                .unwrap_err();
+            assert!(!error.to_string().is_empty(), "case={case}");
+            assert_eq!(state.revision, 7, "case={case}");
+            assert_eq!(
+                state.canonical_sha256().unwrap(),
+                canonical_before,
+                "case={case}"
+            );
+            assert!(
+                Arc::ptr_eq(&state.belt_raw.0, &belt_table_before),
+                "case={case}"
+            );
+            assert!(
+                Arc::ptr_eq(&state.belt_dynamics.0, &belt_dynamics_before),
+                "case={case}"
+            );
+            assert_eq!(
+                format!("{:?}", state.save_dirty),
+                dirty_before,
+                "case={case}"
+            );
+            let mut envelope_after = Vec::new();
+            state.write_v47_envelope(42, &mut envelope_after).unwrap();
+            assert_eq!(envelope_after, envelope_before, "case={case}");
+        }
+    }
+
+    #[test]
+    fn simulated_belt_patches_apply_once_and_empty_patches_keep_raw_table_shared() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let shared_before = state.belt_raw.0.clone();
+        let dynamic_shared_before = state.belt_dynamics.0.clone();
+        let entity_dynamic_shared_before = state.entity_dynamics.0.clone();
+        let belt_commit = belt_commit_for_test(&state);
+        state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                8,
+                true,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&state.belt_raw.0, &shared_before));
+        assert!(Arc::ptr_eq(&state.belt_dynamics.0, &dynamic_shared_before));
+        assert!(Arc::ptr_eq(
+            &state.entity_dynamics.0,
+            &entity_dynamic_shared_before
+        ));
+
+        let mut belt_dynamics = state.belt_dynamics.0.as_ref().clone();
+        belt_dynamics.progress[0] = 5.0;
+        belt_dynamics.number_mask[0] |= 1 << BeltDynamicColumns::PROGRESS;
+        let belt_commit =
+            crate::belts::BeltCommitBatch::from_dynamics_for_test(&state, belt_dynamics).unwrap();
+        state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                9,
+                true,
+            )
+            .unwrap();
+        assert_eq!(state.revision, 9);
+        assert_eq!(state.parse_belt(0).unwrap()["progress"].as_f64(), Some(5.0));
+        assert_eq!(state.belt_dynamics.progress[0], 5.0);
+        assert!(!Arc::ptr_eq(&state.belt_raw.0, &shared_before));
+        assert!(Arc::ptr_eq(
+            &state.entity_dynamics.0,
+            &entity_dynamic_shared_before
+        ));
+    }
+
+    #[test]
+    fn sparse_domain_digest_matches_legacy_oracle_for_extension_inventories_and_belts() {
+        let entities_a = r#"[
+            {"outputs":{"mod:β":2,"iron_ore":-0.0,"ignored":null,"text":"7"},"inputs":{"新物料":3,"iron_ore":1},"id":"e-α","kind":"storage","planetId":"home","progress":-0.0,"utilization":null,"modPayload":{"z":1,"a":2}},
+            {"planetId":"home","kind":"storage","id":"e-b","inputs":{"另一个":5,"mod:β":4},"outputs":{"新物料":6},"progress":null,"utilization":-0.0,"productionRate":1}
+        ]"#;
+        let belts_a = r#"[
+            {"lastFlow":-0.0,"totalTransferred":null,"priority":1,"tier":1,"lanes":1,"itemId":"iron_ore","target":"e-b","source":"e-α","planetId":"home","id":"belt-0","modPayload":{"z":1,"a":2}},
+            {"id":"belt-1","planetId":"home","source":"e-b","target":"e-α","itemId":"mod:β","lanes":1,"tier":1,"priority":1,"progress":-0.0},
+            {"id":"belt-2","planetId":"home","source":"e-α","target":"e-b","itemId":"新物料","lanes":1,"tier":1,"priority":1,"progress":null,"totalTransferred":3.25,"lastFlow":4}
+        ]"#;
+        // Same semantic JSON with deliberately different object-key order.
+        let entities_b = r#"[
+            {"id":"e-α","kind":"storage","planetId":"home","inputs":{"iron_ore":1,"新物料":3},"outputs":{"text":"7","ignored":null,"iron_ore":-0.0,"mod:β":2},"modPayload":{"a":2,"z":1},"utilization":null,"progress":-0.0},
+            {"productionRate":1,"utilization":-0.0,"progress":null,"outputs":{"新物料":6},"inputs":{"mod:β":4,"另一个":5},"id":"e-b","kind":"storage","planetId":"home"}
+        ]"#;
+        let belts_b = r#"[
+            {"id":"belt-0","planetId":"home","source":"e-α","target":"e-b","itemId":"iron_ore","lanes":1,"tier":1,"priority":1,"totalTransferred":null,"lastFlow":-0.0,"modPayload":{"a":2,"z":1}},
+            {"progress":-0.0,"priority":1,"tier":1,"lanes":1,"itemId":"mod:β","target":"e-α","source":"e-b","planetId":"home","id":"belt-1"},
+            {"lastFlow":4,"totalTransferred":3.25,"progress":null,"priority":1,"tier":1,"lanes":1,"itemId":"新物料","target":"e-b","source":"e-α","planetId":"home","id":"belt-2"}
+        ]"#;
+
+        let load = |entities, belts| {
+            CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records_with_raw_entities_and_belts(entities, 2, belts, 3),
+                fixture_catalog(),
+            )
+            .unwrap()
+        };
+        let state_a = load(entities_a, belts_a);
+        let state_b = load(entities_b, belts_b);
+
+        for state in [&state_a, &state_b] {
+            let parsed_entities = state.parse_entities_parallel().unwrap();
+            let parsed_belts = state.parse_belts_parallel().unwrap();
+            let bundled = state
+                .canonical_digest_bundle_with_parsed(Some(&parsed_entities), Some(&parsed_belts))
+                .unwrap();
+            let legacy_domain = legacy_domain_sha256(state).unwrap();
+            assert_eq!(bundled.domain_sha256, legacy_domain);
+            assert_eq!(state.domain_sha256().unwrap(), legacy_domain);
+            assert_eq!(bundled.canonical_sha256, state.canonical_sha256().unwrap());
+            assert_eq!(
+                bundled.canonical_components,
+                state.canonical_components().unwrap()
+            );
+            assert_eq!(bundled.canonical_fields, state.canonical_fields().unwrap());
+
+            let mut sparse_symbols = DomainSymbolOrder::new(&state.symbols);
+            let mut scratch_hasher = Sha256::new();
+            for (index, entity) in parsed_entities.iter().enumerate() {
+                state
+                    .update_domain_entity(&mut scratch_hasher, &mut sparse_symbols, index, entity)
+                    .unwrap();
+            }
+            // `mod:β` and `新物料` already exist in the resident belt item
+            // symbols; only the inventory-exclusive ID needs scratch storage.
+            assert_eq!(state.symbols.values.len(), 7);
+            assert_eq!(sparse_symbols.additional_len(), 1);
+            assert_eq!(sparse_symbols.additional_text_bytes(), "另一个".len());
+            assert!(
+                state.symbols.estimated_bytes() > sparse_symbols.additional_text_bytes() as u64
+            );
+        }
+
+        assert_eq!(
+            state_a.canonical_sha256().unwrap(),
+            state_b.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            state_a.domain_sha256().unwrap(),
+            state_b.domain_sha256().unwrap()
+        );
+        assert_eq!(
+            state_a.canonical_components().unwrap(),
+            state_b.canonical_components().unwrap()
+        );
+        assert_eq!(
+            state_a.canonical_fields().unwrap(),
+            state_b.canonical_fields().unwrap()
+        );
+
+        // An internally stale compact column must not change the historical
+        // raw-record digest. The allocation-free common path detects the bit
+        // mismatch and falls back to streaming one raw row at a time.
+        let mut stale_columns = state_a.clone();
+        stale_columns.belt_dynamics.progress[0] = 99.0;
+        let parsed_entities = stale_columns.parse_entities_parallel().unwrap();
+        let parsed_belts = stale_columns.parse_belts_parallel().unwrap();
+        let fallback = stale_columns
+            .canonical_digest_bundle_with_parsed(Some(&parsed_entities), Some(&parsed_belts))
+            .unwrap();
+        assert_eq!(
+            fallback.domain_sha256,
+            legacy_domain_sha256(&stale_columns).unwrap()
+        );
+    }
+
+    #[test]
+    fn digest_path_preserves_non_finite_json_rejection() {
+        let records = fixture_records_with_entity_json(
+            r#"[{"id":"vein","kind":"vein","planetId":"home","resourceId":"iron_ore","inputs":{"iron_ore":1e400},"outputs":{}}]"#,
+            1,
+        );
+        let error =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("decode native core entity")
+                || error.to_string().contains("number out of range")
+        );
+    }
+
+    #[test]
+    fn simulated_entity_commit_rebuilds_validated_columns_with_full_encode() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let original_columns = state.entity_dynamics.0.clone();
+        let mut entities = state.parse_entities_parallel().unwrap();
+        let entity = entities[0].as_object_mut().unwrap();
+        entity.insert("productionRate".into(), Value::from(-0.0));
+        entity.insert("utilization".into(), Value::Null);
+        entity.remove("progress");
+        entity.insert("powerFactor".into(), json!({"mod":"kept"}));
+        entity.insert(
+            "inputs".into(),
+            json!({"new-mod-item":-0.0,"malformed":null}),
+        );
+        entity.insert("modPayload".into(), json!({"nested":{"kept":true}}));
+        let belt_commit = belt_commit_for_test(&state);
+        state
+            .commit_simulated_state(state.base_value().clone(), entities, belt_commit, 8, true)
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&state.entity_dynamics.0, &original_columns));
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::ProductionRate)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Utilization)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Progress)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Missing
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::PowerFactor)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Other
+        );
+        let inputs = state
+            .entity_inventory(0, EntityInventorySide::Inputs)
+            .unwrap();
+        assert_eq!(inputs.container_kind(), ResidentObjectKind::Object);
+        assert_eq!(
+            inputs
+                .get("new-mod-item")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            inputs.get("malformed").unwrap().kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            state.parse_entity(0).unwrap()["modPayload"]["nested"]["kept"],
+            true
+        );
+        assert_eq!(
+            state.entity_raw_writeback_diagnostics(),
+            EntityRawWritebackDiagnostics {
+                full_encoded_rows: 1,
+                shared_rows: 0,
+                changed_rows: 1,
+            }
+        );
+
+        let shared_after_change = state.entity_dynamics.0.clone();
+        let belt_commit = belt_commit_for_test(&state);
+        state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                9,
+                false,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&state.entity_dynamics.0, &shared_after_change));
+        assert_eq!(
+            state.entity_raw_writeback_diagnostics(),
+            EntityRawWritebackDiagnostics {
+                full_encoded_rows: 1,
+                shared_rows: 1,
+                changed_rows: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn byte_equal_full_encode_reuses_raw_table_without_entity_dirty() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let raw_table_before = state.entity_raw.0.clone();
+        let row_before = state.entity_raw[0].clone();
+        let dirty_before = format!("{:?}", state.save_dirty);
+        let belt_commit = belt_commit_for_test(&state);
+
+        state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                8,
+                false,
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&state.entity_raw.0, &raw_table_before));
+        assert!(Arc::ptr_eq(&state.entity_raw[0], &row_before));
+        assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
+        assert_eq!(
+            state.entity_raw_writeback_diagnostics(),
+            EntityRawWritebackDiagnostics {
+                full_encoded_rows: 1,
+                shared_rows: 1,
+                changed_rows: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn full_entity_writeback_preserves_values_and_collapses_duplicate_keys() {
+        let records = fixture_records_with_entity_json(
+            r#"[
+              {"id":"vein","kind":"vein","planetId":"home","resourceId":"iron_ore","minerCount":2,"progress":1e0,"utilization":0,"productionRate":0,"routingCursor":0,"inputs":{},"outputs":{"iron_ore":3},"modPayload" : { "rawSpacing" : [ 1, 2 ] }},
+              {"id":"machine-1","kind":"machine","planetId":"home","buildingId":"mining_machine","pro\u0067ress":2e0,"utilization":null,"productionRate":-0.0,"routingCursor":0,"inputs":{"iron_ore":1},"outputs":{},"modPayload" : { "rawSpacing" : [ 3, 4 ] }},
+              {"id":"terminal-1","kind":"station","planetId":"home","buildingId":"orbital_cargo_terminal","progress":0,"stationProgress":1,"stationLastTransfer":null,"inputs":{},"outputs":{},"stationSlots":[{"itemId":"iron_ore","minimumLoad":0.5}],"modPayload":{"nested":{"keep":true}}},
+              {"id":"dup-1","kind":"machine","planetId":"home","progress":1,"pro\u0067ress":2,"utilization":0,"productionRate":0,"inputs":null,"outputs":{},"modPayload":{"unknown":[1,{"keep":true}]}}
+            ]"#,
+            4,
+        );
+        let mut state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let previous_raw = state.entity_raw.iter().cloned().collect::<Vec<_>>();
+        let mut entities = state.parse_entities_parallel().unwrap();
+        entities[1]["progress"] = Value::from(-0.0);
+        entities[1]["inputs"]["iron_ore"] = Value::from(5);
+        entities[2]["stationSlots"][0]["minimumLoad"] = Value::from(0.75);
+        entities[2]["stationLastSupplyPeerBySlot"] = json!(["peer-a", null, "peer-c"]);
+        let expected = entities.clone();
+        let expected_raw = expected
+            .iter()
+            .map(|entity| serde_json::to_string(entity).unwrap())
+            .collect::<Vec<_>>();
+        let expected_shared = previous_raw
+            .iter()
+            .zip(&expected_raw)
+            .filter(|(previous, expected)| previous.as_ref() == expected.as_str())
+            .count();
+        let belt_commit = belt_commit_for_test(&state);
+
+        state
+            .commit_simulated_state(state.base_value().clone(), entities, belt_commit, 8, true)
+            .unwrap();
+
+        assert_eq!(
+            state.entity_raw_writeback_diagnostics(),
+            EntityRawWritebackDiagnostics {
+                full_encoded_rows: 4,
+                shared_rows: expected_shared,
+                changed_rows: 4 - expected_shared,
+            }
+        );
+        for (index, ((actual, previous), expected)) in state
+            .entity_raw
+            .iter()
+            .zip(&previous_raw)
+            .zip(&expected_raw)
+            .enumerate()
+        {
+            assert_eq!(actual.as_ref(), expected, "index={index}");
+            assert_eq!(
+                Arc::ptr_eq(actual, previous),
+                previous.as_ref() == expected.as_str(),
+                "index={index}"
+            );
+        }
+        let actual = state.parse_entities_parallel().unwrap();
+        assert!(json_bitwise_eq(
+            &Value::Array(actual.clone()),
+            &Value::Array(expected)
+        ));
+        assert_eq!(actual[1]["modPayload"]["rawSpacing"], json!([3, 4]));
+        assert_eq!(
+            actual[1]["progress"].as_f64().unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            actual[2]["stationLastSupplyPeerBySlot"],
+            json!(["peer-a", null, "peer-c"])
+        );
+        assert!(state.entity_raw[3].contains(r#""progress":2"#));
+        assert!(!state.entity_raw[3].contains(r#"pro\u0067ress"#));
+        assert_eq!(state.parse_entity(0).unwrap()["id"], "vein");
+        assert_eq!(state.parse_entity(2).unwrap()["id"], "terminal-1");
+    }
+
+    #[test]
+    fn invalid_simulated_entity_full_encode_is_atomic() {
+        for invalid in [json!(["not-an-object"]), json!({"id":"wrong-identity"})] {
+            let mut state = CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap();
+            let mut entities = state.parse_entities_parallel().unwrap();
+            entities[0] = invalid;
+            let raw_table_before = state.entity_raw.0.clone();
+            let dynamic_before = state.entity_dynamics.0.clone();
+            let dirty_before = format!("{:?}", state.save_dirty);
+            let belt_commit = belt_commit_for_test(&state);
+
+            let error = state
+                .commit_simulated_state(state.base_value().clone(), entities, belt_commit, 8, true)
+                .unwrap_err();
+
+            assert!(!error.to_string().is_empty());
+            assert_eq!(state.revision, 7);
+            assert!(Arc::ptr_eq(&state.entity_raw.0, &raw_table_before));
+            assert!(Arc::ptr_eq(&state.entity_dynamics.0, &dynamic_before));
+            assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
+            assert_eq!(
+                state.entity_raw_writeback_diagnostics(),
+                EntityRawWritebackDiagnostics::default()
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_belt_commit_preserves_missing_null_mod_and_negative_zero_semantics() {
+        let records = fixture_records_with_belts(vec![
+            json!({
+                "id":"belt-negative-zero",
+                "planetId":"home",
+                "source":"vein",
+                "target":"sink",
+                "itemId":"iron_ore",
+                "lanes":1,
+                "tier":1,
+                "priority":1,
+                "progress":-0.0,
+                "totalTransferred":null,
+                "congestion":"mod-value",
+                "modPayload":{"large":[1,2,3]}
+            }),
+            json!({
+                "id":"belt-stable",
+                "planetId":"home",
+                "source":"vein",
+                "target":"sink",
+                "itemId":"iron_ore",
+                "lanes":1,
+                "tier":1,
+                "priority":1,
+                "progress":0,
+                "congestion":0,
+                "lastFlow":0,
+                "modPayload":{"preserved":true}
+            }),
+        ]);
+        let mut state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let stable_raw = state.belt_raw[1].clone();
+        let belt_commit = crate::belts::BeltCommitBatch::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        assert_eq!(belt_commit.patch_count(), 2);
+
+        state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                8,
+                true,
+            )
+            .unwrap();
+
+        let first = state.parse_belt(0).unwrap();
+        assert_eq!(
+            first["progress"].as_f64().unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert!(first["totalTransferred"].is_null());
+        assert_eq!(first["congestion"], 0.0);
+        assert_eq!(first["lastFlow"], 0.0);
+        assert_eq!(first["modPayload"]["large"], json!([1, 2, 3]));
+        assert!(Arc::ptr_eq(&state.belt_raw[1], &stable_raw));
+        assert_eq!(
+            state.parse_belt(1).unwrap()["modPayload"]["preserved"],
+            true
+        );
+    }
+
+    #[test]
+    fn sealed_belt_commit_keeps_sparse_delta_and_historical_dense_full_encode() {
+        let belts = (0..6)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":0,
+                    "congestion":0,
+                    "lastFlow":0,
+                    "modPayload":{"row":index}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+
+        for (changed_rows, expected_patches) in [(vec![1_usize], 1_usize), (vec![0, 2, 4], 6)] {
+            let mut state =
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .unwrap();
+            let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+            for &index in &changed_rows {
+                dynamics.progress[index] = index as f64 + 0.5;
+            }
+            let belt_commit =
+                crate::belts::BeltCommitBatch::from_dynamics_for_test(&state, dynamics).unwrap();
+            assert_eq!(belt_commit.patch_count(), expected_patches);
+
+            state
+                .commit_simulated_state(
+                    state.base_value().clone(),
+                    state.parse_entities_parallel().unwrap(),
+                    belt_commit,
+                    8,
+                    true,
+                )
+                .unwrap();
+
+            for index in 0..6 {
+                let expected = if changed_rows.contains(&index) {
+                    index as f64 + 0.5
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    state.parse_belt(index).unwrap()["progress"].as_f64(),
+                    Some(expected),
+                    "index={index} changed_rows={changed_rows:?}"
+                );
+                assert_eq!(state.parse_belt(index).unwrap()["modPayload"]["row"], index);
+            }
+        }
+    }
+
+    #[test]
+    fn belt_runtime_and_commit_seals_reject_stale_sources_and_unmarked_totals() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let runtime = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        state.belt_raw = state.belt_raw.0.as_ref().clone().into();
+        assert!(runtime.into_patches(&state).is_err());
+
+        let belt_commit = crate::belts::BeltCommitBatch::unchanged_for_test(&state);
+        state.belts = state.belts.0.as_ref().clone().into();
+        let hash_before = state.canonical_sha256().unwrap();
+        let dirty_before = format!("{:?}", state.save_dirty);
+        let error = state
+            .commit_simulated_state(
+                state.base_value().clone(),
+                state.parse_entities_parallel().unwrap(),
+                belt_commit,
+                8,
+                true,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("seal"));
+        assert_eq!(state.revision, 7);
+        assert_eq!(state.canonical_sha256().unwrap(), hash_before);
+        assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
+
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+        dynamics.total_transferred[0] = 1.0;
+        dynamics.number_mask[0] |= 1 << BeltDynamicColumns::TOTAL_TRANSFERRED;
+        let mut runtime =
+            crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
+        runtime.clear_total_dirty_for_test(0);
+        let hash_before = state.canonical_sha256().unwrap();
+        let dirty_before = format!("{:?}", state.save_dirty);
+        assert!(runtime.into_patches(&state).is_err());
+        assert_eq!(state.revision, 7);
+        assert_eq!(state.canonical_sha256().unwrap(), hash_before);
+        assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
+    }
+
+    #[test]
+    fn belt_runtime_column_topology_mismatch_fails_without_panicking() {
+        for extra_row in [false, true] {
+            let mut malformed = CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap();
+            if extra_row {
+                let duplicate = malformed.belt_raw[0].clone();
+                malformed.belt_raw.push(duplicate);
+            } else {
+                malformed.belt_raw.pop();
+            }
+            let error = malformed.validate_belt_runtime_topology().unwrap_err();
+            assert!(error.to_string().contains("topology"));
+
+            // Even a seal created from the same internally inconsistent Arc
+            // set must not let commit reach patch indexing or publish a new
+            // revision.
+            let belt_commit = crate::belts::BeltCommitBatch::unchanged_for_test(&malformed);
+            let entities = malformed.parse_entities_parallel().unwrap();
+            let error = malformed
+                .commit_simulated_state(
+                    malformed.base_value().clone(),
+                    entities,
+                    belt_commit,
+                    8,
+                    false,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("topology"));
+            assert_eq!(malformed.revision, 7);
+        }
+
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        for column in [
+            "progress",
+            "totalTransferred",
+            "congestion",
+            "lastFlow",
+            "totalDirty",
+        ] {
+            let mut runtime = crate::belts::BeltRuntime::from_dynamics_for_test(
+                &state,
+                state.belt_dynamics.0.as_ref().clone(),
+            )
+            .unwrap();
+            runtime.truncate_column_for_test(column);
+            let error = runtime.into_patches(&state).unwrap_err();
+            assert!(error.to_string().contains("topology"), "column={column}");
+        }
+    }
+
+    #[test]
+    fn resident_dynamic_columns_refresh_after_command_topology_and_checkpoint_reload() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let result = state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 7,
+                top_level_changes: Vec::new(),
+                changed_entities: vec![RecordPatch {
+                    id: "vein".into(),
+                    changes: vec![
+                        ValuePatch {
+                            path: vec![PathSegment::Key("progress".into())],
+                            operation: "set".into(),
+                            value: Some(Value::from(-0.0)),
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("utilization".into())],
+                            operation: "set".into(),
+                            value: Some(Value::Null),
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("productionRate".into())],
+                            operation: "delete".into(),
+                            value: None,
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("inputs".into())],
+                            operation: "set".into(),
+                            value: Some(json!({"iron_ore":-0.0,"mod-input":null})),
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("modPayload".into())],
+                            operation: "set".into(),
+                            value: Some(json!({"nested":{"kept":true}})),
+                        },
+                    ],
+                }],
+                added_entities: vec![AddedRecord {
+                    index: 1,
+                    value: json!({
+                        "id":"mod-entity","kind":"mod-kind","planetId":"home",
+                        "inputs":null,"outputs":{"unknown-output":1e3},
+                        "progress":"mod-progress","stationLastTransfer":-0.0,
+                        "modPayload":{"alsoKept":[1,2,3]}
+                    }),
+                }],
+                removed_entity_ids: Vec::new(),
+                changed_belts: vec![RecordPatch {
+                    id: "belt".into(),
+                    changes: vec![
+                        ValuePatch {
+                            path: vec![PathSegment::Key("progress".into())],
+                            operation: "set".into(),
+                            value: Some(Value::from(-0.0)),
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("lastFlow".into())],
+                            operation: "delete".into(),
+                            value: None,
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("congestion".into())],
+                            operation: "set".into(),
+                            value: Some(Value::Null),
+                        },
+                        ValuePatch {
+                            path: vec![PathSegment::Key("modSignal".into())],
+                            operation: "set".into(),
+                            value: Some(json!({"kept":[1,2,3]})),
+                        },
+                    ],
+                }],
+                added_belts: vec![AddedRecord {
+                    index: 1,
+                    value: json!({
+                        "id":"belt-missing-fields","planetId":"home","source":"vein",
+                        "target":"sink","itemId":"iron_ore","tier":1,"priority":1,
+                        "modSignal":{"alsoKept":true}
+                    }),
+                }],
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        assert!(result.topology_dirty);
+        assert_eq!(state.entity_dynamics.row_count, 2);
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Progress)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::Utilization)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(0, EntityDynamicField::ProductionRate)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Missing
+        );
+        let first_inputs = state
+            .entity_inventory(0, EntityInventorySide::Inputs)
+            .unwrap();
+        assert_eq!(first_inputs.container_kind(), ResidentObjectKind::Object);
+        assert_eq!(
+            first_inputs
+                .get("iron_ore")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            first_inputs.get("mod-input").unwrap().kind(),
+            ResidentValueKind::Null
+        );
+        assert_eq!(
+            state
+                .entity_inventory(1, EntityInventorySide::Inputs)
+                .unwrap()
+                .container_kind(),
+            ResidentObjectKind::Null
+        );
+        assert_eq!(
+            state
+                .entity_inventory(1, EntityInventorySide::Outputs)
+                .unwrap()
+                .get("unknown-output")
+                .unwrap()
+                .as_f64(),
+            Some(1_000.0)
+        );
+        assert_eq!(
+            state
+                .entity_dynamic_number(1, EntityDynamicField::Progress)
+                .unwrap()
+                .kind(),
+            ResidentValueKind::Other
+        );
+        assert_eq!(
+            state.parse_entity(0).unwrap()["modPayload"]["nested"]["kept"],
+            true
+        );
+        assert_eq!(
+            state.parse_entity(1).unwrap()["modPayload"]["alsoKept"][2],
+            3
+        );
+        assert_eq!(state.belts.lanes, vec![1.0, 1.0]);
+        assert_eq!(state.belt_dynamics.len(), 2);
+        assert_eq!(
+            state.belt_dynamics.progress[0].to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_ne!(
+            state.belt_dynamics.number_mask[0] & (1 << BeltDynamicColumns::PROGRESS),
+            0
+        );
+        assert_eq!(
+            state.belt_dynamics.number_mask[0] & (1 << BeltDynamicColumns::LAST_FLOW),
+            0
+        );
+        assert_eq!(
+            state.belt_dynamics.number_mask[0] & (1 << BeltDynamicColumns::CONGESTION),
+            0
+        );
+        assert_eq!(state.belt_dynamics.number_mask[1], 0);
+        assert_eq!(state.parse_belt(0).unwrap()["modSignal"]["kept"][2], 3);
+        assert_eq!(state.parse_belt(1).unwrap()["modSignal"]["alsoKept"], true);
+
+        let mut records = BTreeMap::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let restored =
+            CoreState::from_internal_records(fixture_identity(8), &records, fixture_catalog())
+                .unwrap();
+        assert!(restored.entity_dynamics.bitwise_eq(&state.entity_dynamics));
+        assert!(restored.belt_dynamics.bitwise_eq(&state.belt_dynamics));
+        assert_eq!(restored.belts.lanes, state.belts.lanes);
+        assert_eq!(
+            restored.canonical_sha256().unwrap(),
+            state.canonical_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_pure_idle_session_keeps_full_credit() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(
+            &streamed["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
+        )
+        .unwrap();
+        assert!(manifest.get("pureIdleSession").is_none());
+    }
+
+    #[test]
+    fn private_pure_idle_session_survives_checkpoint_without_entering_public_v47() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        state.install_pure_idle_session_progress(12.5).unwrap();
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
+        assert_eq!(manifest["pureIdleSession"]["formatVersion"], 1);
+        assert_eq!(
+            manifest["pureIdleSession"]["exactSimulationSecondsUsed"],
+            12.5
+        );
+        assert_eq!(manifest["pureIdleSession"]["lastCommittedRevision"], 7);
+
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &streamed, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 12.5);
+        assert_eq!(restored.canonical_sha256().unwrap(), canonical_before);
+
+        let mut public = Vec::new();
+        restored.write_v47_envelope(42, &mut public).unwrap();
+        let envelope: Value = serde_json::from_slice(&public).unwrap();
+        assert!(envelope["state"].get("pureIdleSession").is_none());
+    }
+
+    #[test]
+    fn private_pure_idle_session_survives_incremental_checkpoint_reload() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.install_pure_idle_session_progress(18.0).unwrap();
+
+        let mut records = fixture_records();
+        state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        state.abort_checkpoint_visit();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 18.0);
+
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 18.0);
+    }
+
+    #[test]
+    fn pure_idle_session_manifest_is_strictly_validated() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let invalid_sessions = [
+            Value::Null,
+            json!({"formatVersion":0,"exactSimulationSecondsUsed":1,"lastCommittedRevision":7}),
+            json!({"formatVersion":1,"exactSimulationSecondsUsed":-1,"lastCommittedRevision":7}),
+            json!({"formatVersion":1,"exactSimulationSecondsUsed":30.0001,"lastCommittedRevision":7}),
+            json!({"formatVersion":1,"exactSimulationSecondsUsed":1,"lastCommittedRevision":6}),
+            json!({"formatVersion":1,"exactSimulationSecondsUsed":1,"lastCommittedRevision":7,"unexpected":true}),
+            json!({"formatVersion":1,"exactSimulationSecondsUsed":"1","lastCommittedRevision":7}),
+        ];
+
+        for session in invalid_sessions {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleSession"] = session;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog(),)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn committed_non_idle_revision_lazily_resets_pure_idle_credit() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.install_pure_idle_session_progress(30.0).unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 30.0);
+
+        // Successful commands and exact/realtime advances both commit a new
+        // revision without updating this private pure-idle marker.
+        state.revision += 1;
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+    }
+
+    #[test]
+    fn successful_command_starts_a_new_pure_idle_session() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.install_pure_idle_session_progress(30.0).unwrap();
+        let result = state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 7,
+                top_level_changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("paused".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::Bool(true)),
+                }],
+                changed_entities: Vec::new(),
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(result.revision, 8);
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(43, |key, value| {
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(
+            &streamed["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
+        )
+        .unwrap();
+        assert!(manifest.get("pureIdleSession").is_none());
+        let restored =
+            CoreState::from_internal_records(fixture_identity(8), &streamed, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
+
+        let mut incremental = fixture_records();
+        state
+            .visit_dirty_internal_checkpoint_records(44, |key, value| {
+                incremental.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let restored =
+            CoreState::from_internal_records(fixture_identity(8), &incremental, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
     }
 }

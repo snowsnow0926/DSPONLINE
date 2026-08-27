@@ -4,8 +4,8 @@
 > 文档角色：Develop / active architecture execution
 > 实施工作树：`D:\GameDev\DSPidle2-windows-full-native`
 > 实施分支：`codex/windows-full-native-next`
-> 基线提交：`9778ba4cfe4af2c9391f8deae35d6a6035295b40`；E18/E1a 最终 clean 提交待生成
-> 当前候选：1.2.3 E18/E1a；fallback 预清洁包已构建，Build ID 为 `1.2.3+9778ba4cfe4a.dirty`，最终 clean 提交后必须重打包；未签名、未部署、`authorityEligible=false`
+> 基线提交：`9778ba4cfe4af2c9391f8deae35d6a6035295b40`；E18/E1a clean 源提交：`460742f8648387f299f31ebd961d2742c5a3ded8`
+> 当前候选：1.2.3 E18/E1a；标准 clean 目录包已构建，Build ID 为 `1.2.3+460742f86483`，75 个文件、412,627,614 B，12 秒启动冒烟通过；未签名、未部署、`authorityEligible=false`
 > 目标平台：Windows 10 1809+ / Windows 11 x64；ARM64 只在 x64 稳定后评估
 > 兼容边界：GameState v47、envelope v2、cloud schema v8、SQLite layout v3 默认保持不变
 
@@ -698,7 +698,7 @@ Gate F：
 - 原三层计划继续保存 1.1.8～1.2.3 的历史目标、实现和结算证据。
 - 本计划把“极限档实时精确模拟”和“新 Windows 原生壳层”提升为独立终态目标。
 - 1.2.3 已完成的脏页保存、线路唤醒、投影、流式导出、WAL 和原生领域代码应复用，不重新从零开发。
-- 本计划的“全原生终态”仍未完成；第 23～24 节只记录已有 E18/E1a 单机实施与实测。fallback 预清洁未签名包已构建并通过短时启动冒烟，但最终 clean 提交、重打包、签名、24 小时门禁和发布仍未完成。
+- 本计划的“全原生终态”仍未完成；第 23～24 节只记录已有 E18/E1a 单机实施与实测。clean 源提交 `460742f86483`、标准未签名目录包、可测 ZIP、12 秒启动冒烟和候选清单已经闭合；签名、24 小时、多硬件、安装/升级/卸载和发布仍未完成。
 
 ## 23. 2026-08-28 单机可闭合实施结算
 

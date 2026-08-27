@@ -1,6 +1,6 @@
 # 原生应用构建与更新
 
-> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。最终源码闭合后必须从 clean commit 重新打包；若标准 `release-performance-edition/win-unpacked` 被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 生成独立目录包。两者只能有一个被清单选为交付目录，不能把 `.tmp` 当作制品。
+> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。clean 源提交 `460742f86483` 已在标准 `release-performance-edition/win-unpacked` 成功生成 Build ID `1.2.3+460742f86483` 的目录包；本轮清单只选择该标准目录，历史 fallback 与 `.tmp` 均不属于最终候选。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；两者仍只能有一个被清单选中。
 
 > 本工作树的 Windows 包是可与稳定版并存的 1.2.3 **性能开发版**：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
 

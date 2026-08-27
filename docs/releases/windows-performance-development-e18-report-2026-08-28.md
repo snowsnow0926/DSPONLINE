@@ -6,7 +6,7 @@
 > 分支：`codex/windows-full-native-next`
 > 产品版本：1.2.3 Windows 性能开发候选
 > 状态：未签名、未部署、未连接生产，`authorityEligible=false`
-> 最终 clean 制品：`FINAL_CLEAN_PACKAGE_PENDING`
+> 最终 clean 源提交：`460742f8648387f299f31ebd961d2742c5a3ded8`；Build ID：`1.2.3+460742f86483`
 
 ## 1. 结论
 
@@ -165,20 +165,22 @@ Production preview 的三项组合运行必须保持 `2/3` 的原始结论：den
 
 该包是用来验证 fallback 打包器、独立身份、打包 Host 和启动路径的中间物。由于 Build ID 带 `.dirty`，它不是最终可交付包，不应发布、上传更新源或放入稳定下载页。
 
-### 7.2 最终 clean 包待回填
+### 7.2 最终 clean 测试包
 
 | 字段 | 最终值 |
 | --- | --- |
-| Clean commit SHA | `FINAL_CLEAN_PACKAGE_PENDING` |
-| Build ID | `FINAL_CLEAN_PACKAGE_PENDING` |
-| unpacked 目录 | `FINAL_CLEAN_PACKAGE_PENDING` |
-| 可测 ZIP | `FINAL_CLEAN_PACKAGE_PENDING` |
-| EXE SHA-256 | `FINAL_CLEAN_PACKAGE_PENDING` |
-| ZIP SHA-256 | `FINAL_CLEAN_PACKAGE_PENDING` |
-| manifest / SHA256SUMS | `FINAL_CLEAN_PACKAGE_PENDING` |
-| clean 包启动冒烟 | `FINAL_CLEAN_PACKAGE_PENDING` |
+| Clean 源提交 SHA | `460742f8648387f299f31ebd961d2742c5a3ded8` |
+| Build ID | `1.2.3+460742f86483` |
+| unpacked 目录 | `release-performance-edition/win-unpacked`；75 文件 / 412,627,614 B |
+| 可测 ZIP | `artifacts/windows/DSPidle2-Windows-Performance-Development-1.2.3-460742f86483-x64-unsigned.zip`；157,603,547 B |
+| EXE SHA-256 | `dff0a8f2acede83572977c8a8e5d5242874f3638cfd25c8be789ddae7af70bf7` |
+| app.asar SHA-256 | `d6b8fedf30bc1112b112a45bebe7fda8fa4e72dc06d1a5a9d9b94cc3ac5a6661` |
+| ZIP SHA-256 | `a0b54f712f993541ff733d943e5aed60972f429896ad80c6757e2568e3fd4bc9` |
+| 包内 Host SHA-256 | `032534d525bc2a01116c4bd644ab376b122eaeebab5b603403251ce9288b4804`；与冻结 E18 相同 |
+| manifest / SHA256SUMS | `artifacts/release-manifests/windows-performance-e18-460742f86483-candidate.json` / `windows-performance-e18-460742f86483-SHA256SUMS.txt` |
+| clean 包启动冒烟 | 12 秒后主进程仍存活；共观测 5 个包内进程；收尾后残留 0 |
 
-上表必须在 clean 提交、Release Host 重建、Windows 重打包、哈希复核和新鲜启动冒烟后由主任务替换；不得把上节的 `.dirty` 哈希复制进来。
+标准打包路径本轮成功，不需要把 fallback 或 `win-unpacked.tmp` 选为最终候选。ZIP 内 75 个条目与目录包关键文件均已核对；该包仍是 `NotSigned` 目录包/ZIP，不是安装器，也没有发布授权。
 
 ## 8. 兼容、数据保护与权威边界
 
@@ -218,9 +220,9 @@ Production preview 的三项组合运行必须保持 `2/3` 的原始结论：den
 - **Required tests：** 第 6 节已完成门禁；clean 包与第 9.2 节外部门禁待闭合
 - **Release target and version：** 未指定；本报告不授权部署或更新公开下载
 - **Known risks / rollback：** 第 9 节；稳定版与性能版并存，只从同 revision 合法检查点恢复
-- **Commit SHA：** `FINAL_CLEAN_PACKAGE_PENDING`
-- **Changed files：** 以最终 clean commit manifest 为准
-- **Artifact paths：** `FINAL_CLEAN_PACKAGE_PENDING`
-- **Manifest and aggregate hash：** `FINAL_CLEAN_PACKAGE_PENDING`
+- **Artifact source commit SHA：** `460742f8648387f299f31ebd961d2742c5a3ded8`
+- **Changed files：** 86 个源码、测试、实验和文档文件；31,821 insertions / 2,551 deletions
+- **Artifact paths：** `release-performance-edition/win-unpacked`；`artifacts/windows/DSPidle2-Windows-Performance-Development-1.2.3-460742f86483-x64-unsigned.zip`
+- **Manifest and aggregate hash：** `artifacts/release-manifests/windows-performance-e18-460742f86483-candidate.json`；包文件清单 SHA-256 `39470f36b14c6a2d3d11f9c7bf69419f1f75031775168a626684100a04f76076`
 - **Tests with exact counts：** 第 6 节；最终制品专项由主任务回填
 - **Unverified gaps：** 第 9 节的外部硬件、签名、灰度和唯一权威门禁

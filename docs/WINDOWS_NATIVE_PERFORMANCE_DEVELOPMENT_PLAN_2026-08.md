@@ -1342,6 +1342,8 @@ SHELL-RUNTIME-1 落地时没有单独执行安装包构建；后续 E18/E1a 集�
 
 源码 package、运行时 main、pack 后 ASAR/EXE 三层分别校验同一身份。单元门禁还直接调用 electron-builder schema 校验，锁定版本仍为 1.2.3，并检查 AppUserModelID 设置发生在窗口创建前。该门禁不能代替真实机器上稳定版+性能版双安装、各自启动、各自导入、卸载一方后另一方保档、签名和覆盖升级测试；这些仍由后续隔离 Release Gate 执行。后续 E18/E1a 已产生 fallback 预清洁包：77 个文件、412,739,247 B，EXE SHA-256 为 `748731b26a1864a0777097059caf6fe0517128da19b8417852c84a9556290458`，12 秒隔离 profile 启动冒烟通过。但它的 Build ID 为 `1.2.3+9778ba4cfe4a.dirty`，只是中间证据；最终 clean 提交后仍必须重打包和重做哈希/冒烟。本批没有连接生产、生成公开更新清单、签名或部署，也不改变 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3。
 
+上述预清洁证据随后已由 clean 源提交 `460742f8648387f299f31ebd961d2742c5a3ded8` 的标准目录包取代：Build ID `1.2.3+460742f86483`，75 个文件、412,627,614 B，EXE SHA-256 `dff0a8f2acede83572977c8a8e5d5242874f3638cfd25c8be789ddae7af70bf7`，可测 ZIP SHA-256 `a0b54f712f993541ff733d943e5aed60972f429896ad80c6757e2568e3fd4bc9`；12 秒冒烟后包内进程残留为 0。它仍未签名且没有 installer、更新源或生产发布授权。
+
 ### 20.6 E5～E18：大档精确热路径继续收敛（2026-08-28）
 
 本工作树在冻结 1.2.3 Host 之后继续完成以下可由单机差分证明的优化：

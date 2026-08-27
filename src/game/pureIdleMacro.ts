@@ -1,4 +1,5 @@
 import {
+  advanceConstructionAutomationMacroInPlace,
   getEffectiveSimulationMultiplier,
   refreshDysonGenerationSnapshot,
   refreshTimeWarpPowerSnapshotInPlace,
@@ -22,7 +23,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v5-lite";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v6-construction";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -480,6 +481,7 @@ export function createConservativePureIdleMacroSession(
     const calibrated = createPureIdleLightweightCalibration(
       state,
       prefixSeconds / actualMultiplier,
+      { isolateConstructionAutomation: true },
     );
     if (!calibrated) throw new Error("30 秒轻量校准没有形成可用样本");
     contract = calibrated.contract;
@@ -514,7 +516,7 @@ export function createConservativePureIdleMacroSession(
   const degradedReason = prefixFailure
     ? `${reason}；30 秒轻量校准未完成：${prefixFailure}`
     : productiveTail
-      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料各自的净消耗边界推进，戴森发射、出口、合同和巨构交付尾段冻结`
+      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进，建筑制造巨构再按真实库存递归结算；戴森发射、出口和合同尾段冻结`
       : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
@@ -568,6 +570,13 @@ export function createPureIdleMacroSession(
   throwIfMacroInterrupted(options);
   if (options.forceConservativeReason) {
     return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason);
+  }
+  if (state.entities.length >= 3_000 || state.belts.length >= 6_000) {
+    return createConservativePureIdleMacroSession(
+      state,
+      mode,
+      `终局规模 ${state.entities.length.toLocaleString("zh-CN")} 实体 / ${state.belts.length.toLocaleString("zh-CN")} 线路，自动使用单影子轻量校准`,
+    );
   }
   refreshTimeWarpPowerSnapshotInPlace(state);
   const baseline = capturePureIdleTerminalSnapshot(state);
@@ -673,6 +682,7 @@ export function advancePureIdleMacroSession(
     // slept or reloaded can arrive with days of debt; applying one equivalent
     // affine window keeps recovery cost independent of wall-clock duration.
     let exactSimulationSeconds = 0;
+    let isolatedConstructionPrefixSeconds = 0;
     let macroWallSeconds = targetWallSeconds - session.settledWallSeconds;
     const checkpoint = session.calibrationCheckpoint;
     if (checkpoint && checkpoint.baseWallSeconds <= session.settledWallSeconds + 1e-9) {
@@ -694,6 +704,7 @@ export function advancePureIdleMacroSession(
             checkpointEndSimulationSeconds - session.settledSimulationSeconds,
           );
           session.candidate = checkpoint.candidate;
+          isolatedConstructionPrefixSeconds = exactSimulationSeconds;
           macroWallSeconds = Math.max(0, targetWallSeconds - checkpointEndWallSeconds);
           session.calibrationCheckpoint = undefined;
         }
@@ -838,6 +849,14 @@ export function advancePureIdleMacroSession(
         completedFiniteTechIds: [], completedInfiniteLevels: [] };
     session.researchRemainder = research.remainder;
     session.researchInflowRemainders = research.inflowRemainders;
+    throwIfMacroInterrupted(options);
+    if (session.conservativeOnly) {
+      const constructionSeconds = isolatedConstructionPrefixSeconds + macroSimulationSeconds;
+      const construction = advanceConstructionAutomationMacroInPlace(session.candidate, constructionSeconds);
+      if (construction.completed > 0) {
+        session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；普通产线仍受轻量物料边界保护`;
+      }
+    }
     throwIfMacroInterrupted(options);
     if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
       session.lastValidationReason = `科研边界完成：有限科技 ${research.completedFiniteTechIds.length} 项，无限科技 ${research.completedInfiniteLevels.length} 级`;

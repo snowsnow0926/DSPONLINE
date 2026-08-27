@@ -118,11 +118,12 @@ export function classifyOfflineWorkload(
     layer.frames.length > 0 || layer.shells.length > 0,
   )).length + (state.dysonSwarm.sailsInOrbit > 0 || state.dysonSphere.totalRocketsLaunched > 0 ? 1 : 0);
   const estimatedSerializedBytes = Math.max(0, Math.floor(options.serializedBytes ?? estimateSerializedBytes(state)));
-  // Structured clone + mutable simulation copy + calibration/validation copies
-  // dominate end-game memory. This is a warning estimate, never an allocator or
-  // a gameplay limit. The multiplier is intentionally conservative.
-  const estimatedPeakBytes = Math.max(estimatedSerializedBytes * 6, Math.floor(
-    state.entities.length * 34_000 + state.belts.length * 18_000 + routeCount * 22_000 + estimatedSerializedBytes * 4,
+  // fast-30s-v3-lite retains the immutable source, one mutable simulation
+  // candidate and compact material/research projections. It no longer keeps
+  // four generic full-state calibration/validation clones. This remains a
+  // conservative warning estimate, never an allocator or gameplay limit.
+  const estimatedPeakBytes = Math.max(estimatedSerializedBytes * 3, Math.floor(
+    state.entities.length * 14_000 + state.belts.length * 6_500 + routeCount * 8_000 + estimatedSerializedBytes * 2,
   ));
 
   let score = 0;
@@ -150,14 +151,14 @@ export function classifyOfflineWorkload(
   let recommendedStrategy: OfflineRecommendedStrategy = secondsSafe <= 30 || state.speedrun?.enabled ? "exact" : "fast";
   const memoryLimitBytes = device.deviceMemoryGb === null ? null : device.deviceMemoryGb * 1024 * MIB;
   const memoryRisk = memoryLimitBytes !== null && estimatedPeakBytes > memoryLimitBytes * 0.72;
-  // A 70+ MiB endgame save can require several GiB while structured cloning,
-  // calibrating and serializing even on a desktop whose coarse deviceMemory
-  // bucket reports 8/16 GiB. Treat that absolute footprint as unsafe instead
-  // of waiting for two Worker crashes before falling back.
-  const absoluteMemoryRisk = estimatedSerializedBytes >= 64 * MIB || estimatedPeakBytes >= 2 * 1024 * MIB;
+  // Truly exceptional saves still need a conservative decision even with the
+  // single-candidate algorithm. Low-memory devices additionally avoid large
+  // payloads whose source + candidate can consume most of a 2 GiB process.
+  const absoluteMemoryRisk = estimatedSerializedBytes >= 128 * MIB || estimatedPeakBytes >= 4 * 1024 * MIB;
   if (recommendedStrategy === "fast" && (
     absoluteMemoryRisk ||
-    device.deviceClass === "low-memory" && (profile === "complex" || memoryRisk)
+    device.deviceClass === "low-memory" &&
+      (profile === "complex" || memoryRisk || estimatedSerializedBytes >= 32 * MIB)
   )) {
     recommendedStrategy = "conservative";
   }
@@ -169,8 +170,11 @@ export function classifyOfflineWorkload(
       // even though the resulting settlement is still constant-time.
       ? device.deviceClass === "standard" ? 90_000
         : device.deviceClass === "constrained" ? 120_000 : 180_000
-      : device.deviceClass === "standard" ? 30_000
-        : device.deviceClass === "constrained" ? 60_000 : 75_000;
+      : profile === "complex" || estimatedSerializedBytes >= 20 * MIB
+        ? device.deviceClass === "standard" ? 90_000
+          : device.deviceClass === "constrained" ? 120_000 : 180_000
+        : device.deviceClass === "standard" ? 30_000
+          : device.deviceClass === "constrained" ? 60_000 : 75_000;
   const reasons: string[] = [];
   if (state.entities.length >= 3_000) reasons.push(`实体 ${state.entities.length.toLocaleString("zh-CN")}`);
   if (state.belts.length >= 6_000) reasons.push(`线路 ${state.belts.length.toLocaleString("zh-CN")}`);

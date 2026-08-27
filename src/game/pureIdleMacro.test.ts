@@ -15,6 +15,7 @@ import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
 import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
+  reconcilePureIdleLightweightMaterialDeltas,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
@@ -82,6 +83,34 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
     machineCount,
     minerCount: 0,
     inputs: { iron_ore: machineCount * 100 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
+function addRecursiveConstructionCenter(state: GameState, target = 100): void {
+  addWindGeneration(state, 50_000_000);
+  if (!state.research.completedTechIds.includes("construction_automation")) {
+    state.research.completedTechIds.push("construction_automation");
+  }
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.targetStock.arc_smelter = target;
+  state.construction.arc_smelter = 0;
+  state.tray = { iron_ore: target * 20, copper_ore: target * 10, stone: target * 10 };
+  state.planetTrays.home = state.tray;
+  state.entities.push({
+    id: "pure-idle-construction-center",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 0, y: 0 },
+    interactionLocked: false,
+    buildingId: "construction_center",
+    machineCount: 1_000,
+    minerCount: 0,
+    inputs: {},
     outputs: {},
     progress: 0,
     routingCursor: 0,
@@ -454,6 +483,27 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
+  it("turns an unmatched sampled replenishment into balanced transfer and finite consumption", () => {
+    const state = pureIdleState();
+    state.tray.coal = 100;
+    state.entities[0].inputs.coal = 100;
+    const contract = reconcilePureIdleLightweightMaterialDeltas({
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["tray", "coal"], kind: "number", delta: 100, integer: true },
+        { path: ["entities", 0, "inputs", "coal"], kind: "number", delta: -40, integer: true },
+      ],
+    });
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(state.tray.coal).toBe(140);
+    expect(state.entities[0].inputs.coal).toBe(60);
+    expect((state.tray.coal ?? 0) + (state.entities[0].inputs.coal ?? 0)).toBe(200);
+  });
+
   it("keeps the 30-second lightweight calibration isolated until wall time reaches its checkpoint", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
@@ -587,6 +637,30 @@ describe("pure idle macro session", () => {
     expect(incremental.conservativeRemainingSimulationSecondsByItem)
       .toEqual(single.conservativeRemainingSimulationSecondsByItem);
     expect(incremental.researchRemainder).toBe(single.researchRemainder);
+  });
+
+  it("settles recursive construction from real inventory after the isolated large-save calibration", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addRecursiveConstructionCenter(source, 100);
+    const sourceHash = hashGameState(source);
+
+    const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "large-save memory guard");
+    expect(single.calibrationCheckpoint!.candidate.construction.arc_smelter).toBe(0);
+    advancePureIdleMacroSession(single, 60);
+
+    const segmented = createConservativePureIdleMacroSession(structuredClone(source), "stable", "large-save memory guard");
+    advancePureIdleMacroSession(segmented, 15);
+    advancePureIdleMacroSession(segmented, 30);
+    advancePureIdleMacroSession(segmented, 60);
+
+    expect(single.candidate.construction.arc_smelter).toBe(100);
+    expect(single.candidate.constructionAutomation.jobs).toEqual({});
+    expect(single.candidate.constructionAutomation.totalCrafted).toBe(100);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(Object.values(single.candidate.tray).every((amount) => (amount ?? 0) >= 0)).toBe(true);
+    expect(hashGameState(source)).toBe(sourceHash);
   });
 
   it("does not duplicate prefilled silo launches when low-rate production cannot fund a conservative tail", () => {

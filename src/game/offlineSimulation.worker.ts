@@ -4,6 +4,7 @@ import { completeSimulationAdvanceSession, createSimulationAdvanceSession } from
 import { applyContentPackRuntimeSnapshot } from "./contentPacks";
 import { advanceOfflineSimulationChunk, buildBackgroundFinalEnvelope, type CloudUploadSummary, type OfflineSimulationWorkerRequest, type OfflineSimulationWorkerResponse } from "./offlineSimulation";
 import {
+  FAST_OFFLINE_ALGORITHM_VERSION,
   FAST_OFFLINE_CALIBRATION_SECONDS,
   FAST_OFFLINE_DESKTOP_DEADLINE_MS,
   runConservativeOfflineSettlement,
@@ -259,7 +260,7 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
             deadlineAtMs: nowMs() + Math.max(1_000, request.deadlineMs ?? FAST_OFFLINE_DESKTOP_DEADLINE_MS),
             shouldCancel: () => activeId !== request.id || cancelled,
             onPhase: () => { currentPhase = "macro"; },
-            onProgress: (completed, total) => postProgress(completed, total, { algorithmVersion: "fast-30s-v2" }),
+            onProgress: (completed, total) => postProgress(completed, total, { algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION }),
           });
           if (experiment.status === "approximate" || experiment.status === "bounded-exact") {
             sourceState = experiment.state;
@@ -352,7 +353,7 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
         "Worker 达到现实时间上限后使用零校准保守宏观";
       currentPhase = "conservative";
       postProgress(0, request.seconds, {
-        algorithmVersion: "fast-30s-v2",
+        algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION,
         degradedReason: conservativeReason,
       });
       const conservative = runConservativeOfflineSettlement(
@@ -392,10 +393,10 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
             : phase === "macro" ? "macro"
               : phase === "validating" ? "validating"
                 : "conservative";
-          postProgress(0, request.seconds, { algorithmVersion: "fast-30s-v2" });
+          postProgress(0, request.seconds, { algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION });
         },
         onProgress: (completedSeconds, totalSeconds) => {
-          postProgress(completedSeconds, totalSeconds, { algorithmVersion: "fast-30s-v2" });
+          postProgress(completedSeconds, totalSeconds, { algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION });
         },
       });
       approximation = experiment.report;

@@ -1,6 +1,7 @@
-import { getRecipe, ITEMS } from "./content";
+import { getRecipe, ITEMS, MATRIX_ITEM_IDS } from "./content";
 import { GALACTIC_EXPORT_DEFINITIONS } from "./endgame";
 import {
+  advanceConstructionAutomationMacroInPlace,
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
@@ -161,12 +162,15 @@ const FAST_OFFLINE_CALIBRATION_SLICE_SECONDS = 10;
 const FAST_OFFLINE_VALIDATION_SECONDS = 5;
 /** Bounded exact preview used only when no valid calibration candidate exists. */
 export const FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS = 1;
-export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v2";
+export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v3-lite";
 export const FAST_OFFLINE_DESKTOP_DEADLINE_MS = 30_000;
 export const FAST_OFFLINE_MOBILE_DEADLINE_MS = 60_000;
-export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-short-calibration-v3";
-export const TIME_WARP_APPROXIMATION_CALIBRATION_SECONDS = 1;
-export const TIME_WARP_APPROXIMATION_VALIDATION_SECONDS = 1;
+export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-lightweight-v4";
+// Realtime slices already repeat continuously. Two independent half-second
+// checkpoints retain a real exact tail verifier while halving the per-slice
+// endgame cost versus the historical 1s + 1s pair.
+export const TIME_WARP_APPROXIMATION_CALIBRATION_SECONDS = 0.5;
+export const TIME_WARP_APPROXIMATION_VALIDATION_SECONDS = 0.5;
 const TIME_WARP_MAX_CRITICAL_ERROR = 1;
 const AFFINE_DECIMAL_KEYS = new Set([
   "cargo", "remainingCargo", "totalDestroyed", "warpers", "warperTarget",
@@ -1077,6 +1081,105 @@ function capturePureIdleLightweightSnapshot(
   return snapshot;
 }
 
+function predictPureIdleLightweightSnapshot(
+  baseline: AffineSnapshot,
+  contract: PureIdleAffineContract,
+  simulationSeconds: number,
+  wallSeconds: number,
+  simulationSecondsByItem?: Record<string, number>,
+): AffineSnapshot | null {
+  const predicted: AffineSnapshot = {
+    entries: new Map(baseline.entries),
+    paths: baseline.paths,
+  };
+  for (const delta of contract.deltas) {
+    const key = pathKey(delta.path);
+    const current = predicted.entries.get(key);
+    const itemId = pureIdleLightweightContractItemId(delta.path);
+    const creditedSeconds = itemId && simulationSecondsByItem?.[itemId] !== undefined
+      ? Math.max(0, Math.min(simulationSeconds, finiteNumber(simulationSecondsByItem[itemId])))
+      : simulationSeconds;
+    const creditedWallSeconds = simulationSeconds > EPSILON
+      ? wallSeconds * creditedSeconds / simulationSeconds
+      : 0;
+    const scaledSeconds = scaleFastSeconds(delta.path, creditedSeconds, creditedWallSeconds);
+    const denominator = pathHasString(delta.path, new Set(["elapsedActiveSeconds"]))
+      ? contract.calibrationWallSeconds
+      : contract.calibrationSeconds;
+    if (!Number.isFinite(denominator) || denominator <= 0) return null;
+    if (delta.kind === "number") {
+      const base = current?.kind === "number"
+        ? current.value
+        : current === undefined && isDynamicMapEntryPath(delta.path) ? 0 : null;
+      if (base === null) return null;
+      const nextRaw = base + Number(delta.delta) * scaledSeconds / denominator;
+      const next = delta.integer ? Math.floor(nextRaw + EPSILON) : nextRaw;
+      if (!Number.isFinite(next) || delta.integer && !Number.isSafeInteger(next)) return null;
+      predicted.entries.set(key, { kind: "number", value: next, integer: Boolean(delta.integer) });
+    } else {
+      const base = current?.kind === "decimal"
+        ? current.value
+        : current === undefined && isDynamicMapEntryPath(delta.path) ? 0n : null;
+      if (base === null) return null;
+      try {
+        const scaled = BigInt(Math.max(0, Math.floor(scaledSeconds))) * (delta.delta as bigint) /
+          BigInt(Math.max(1, Math.floor(denominator)));
+        const next = base + scaled;
+        if (next < 0n) return null;
+        predicted.entries.set(key, { kind: "decimal", value: next });
+      } catch {
+        return null;
+      }
+    }
+  }
+  return predicted;
+}
+
+function comparePureIdleLightweightSnapshots(
+  baseline: AffineSnapshot,
+  expected: AffineSnapshot,
+  actual: AffineSnapshot,
+): FastSnapshotComparison {
+  let maxError = 0;
+  let maxPath: AffinePath | undefined;
+  let maxActual: number | bigint | undefined;
+  let maxExpected: number | bigint | undefined;
+  const keys = new Set([...expected.entries.keys(), ...actual.entries.keys()]);
+  for (const key of keys) {
+    const path = expected.paths.get(key) ?? actual.paths.get(key);
+    if (path && pathHasString(path, FAST_ERROR_IGNORED_KEYS)) continue;
+    const before = baseline.entries.get(key);
+    const expectedEntry = expected.entries.get(key);
+    const actualEntry = actual.entries.get(key);
+    if (!expectedEntry || !actualEntry || expectedEntry.kind !== actualEntry.kind) continue;
+    let error = 0;
+    let expectedValue: number | bigint | undefined;
+    let actualValue: number | bigint | undefined;
+    if (expectedEntry.kind === "number" && actualEntry.kind === "number") {
+      const origin = before?.kind === "number" ? before.value : 0;
+      expectedValue = expectedEntry.value - origin;
+      actualValue = actualEntry.value - origin;
+      if (Math.abs(Number(expectedValue) - Number(actualValue)) > 1) {
+        error = relativeDifference(Number(expectedValue), Number(actualValue));
+      }
+    } else if (expectedEntry.kind === "decimal" && actualEntry.kind === "decimal") {
+      const origin = before?.kind === "decimal" ? before.value : 0n;
+      expectedValue = expectedEntry.value - origin;
+      actualValue = actualEntry.value - origin;
+      const difference = expectedValue >= actualValue ? expectedValue - actualValue : actualValue - expectedValue;
+      const scale = expectedValue >= 0n && expectedValue > actualValue ? expectedValue : actualValue >= 0n ? actualValue : 0n;
+      if (difference > 1n) error = scale > 0n ? Number(difference) / Math.max(1, Number(scale)) : 1;
+    }
+    if (Number.isFinite(error) && error > maxError) {
+      maxError = error;
+      maxPath = path;
+      maxActual = actualValue;
+      maxExpected = expectedValue;
+    }
+  }
+  return { maxError, path: maxPath, actual: maxActual, expected: maxExpected };
+}
+
 function hasActiveFinitePureIdleResource(state: GameState): boolean {
   return state.entities.some((entity) => {
     if (entity.kind !== "vein" || entity.minerCount < 1 || !entity.resourceId) return false;
@@ -1103,6 +1206,110 @@ function pureIdleLightweightStoreItemId(path: AffinePath): string | null {
 function pureIdleLightweightContractItemId(path: AffinePath): string | null {
   if (path[0] === "totalProduced" && typeof path[1] === "string") return path[1];
   return pureIdleLightweightStoreItemId(path);
+}
+
+const PURE_IDLE_DELTA_MICROS_PER_ITEM = 1_000_000n;
+
+function pureIdleDeltaMicros(delta: AffineDelta): bigint {
+  return delta.kind === "decimal"
+    ? (delta.delta as bigint) * PURE_IDLE_DELTA_MICROS_PER_ITEM
+    : BigInt(Math.round(Number(delta.delta) * Number(PURE_IDLE_DELTA_MICROS_PER_ITEM)));
+}
+
+/**
+ * Close every sampled item ledger before it can become a long-window
+ * contract. Busy endgame logistics can make one individual store look stable
+ * while the matching cumulative-production counter crosses a cache boundary
+ * and is sampled at an unstable rate. Copying the store delta without that
+ * counter creates material and correctly trips the aggregate guard later,
+ * but it also collapses the whole pure-idle session to clock-only mode.
+ *
+ * Preserve all sampled consumption (negative store deltas) and scale only
+ * positive store deltas so aggregate stock growth never exceeds the stable
+ * production credit for that item. This keeps internal transfers balanced,
+ * converts omitted replenishment into a finite inventory horizon, and always
+ * underpays rather than inventing material.
+ */
+export function reconcilePureIdleLightweightMaterialDeltas(
+  contract: PureIdleAffineContract,
+): PureIdleAffineContract {
+  const byItem = new Map<string, {
+    produced: bigint;
+    positiveStores: Array<{ index: number; micros: bigint }>;
+    negativeStores: bigint;
+  }>();
+  const itemBucket = (itemId: string) => {
+    let bucket = byItem.get(itemId);
+    if (!bucket) {
+      bucket = { produced: 0n, positiveStores: [], negativeStores: 0n };
+      byItem.set(itemId, bucket);
+    }
+    return bucket;
+  };
+  contract.deltas.forEach((delta, index) => {
+    if (delta.path[0] === "totalProduced" && typeof delta.path[1] === "string") {
+      const micros = pureIdleDeltaMicros(delta);
+      if (micros > 0n) itemBucket(delta.path[1]).produced += micros;
+      return;
+    }
+    if (!isPureIdleLightweightStorePath(delta.path)) return;
+    const itemId = pureIdleLightweightStoreItemId(delta.path);
+    if (!itemId) return;
+    const micros = pureIdleDeltaMicros(delta);
+    const bucket = itemBucket(itemId);
+    if (micros > 0n) bucket.positiveStores.push({ index, micros });
+    else bucket.negativeStores += micros;
+  });
+
+  const replacements = new Map<number, AffineDelta | null>();
+  for (const bucket of byItem.values()) {
+    const positiveTotal = bucket.positiveStores.reduce((total, entry) => total + entry.micros, 0n);
+    if (positiveTotal <= 0n) continue;
+    const allowedPositive = bucket.produced - bucket.negativeStores;
+    if (positiveTotal <= allowedPositive) continue;
+    const boundedPositive = allowedPositive > 0n ? allowedPositive : 0n;
+    for (const entry of bucket.positiveStores) {
+      const original = contract.deltas[entry.index];
+      const adjustedMicros = entry.micros * boundedPositive / positiveTotal;
+      if (adjustedMicros <= 0n) {
+        replacements.set(entry.index, null);
+      } else if (original.kind === "decimal") {
+        const adjustedUnits = adjustedMicros / PURE_IDLE_DELTA_MICROS_PER_ITEM;
+        replacements.set(entry.index, adjustedUnits > 0n ? { ...original, delta: adjustedUnits } : null);
+      } else {
+        replacements.set(entry.index, {
+          ...original,
+          delta: Number(adjustedMicros) / Number(PURE_IDLE_DELTA_MICROS_PER_ITEM),
+        });
+      }
+    }
+  }
+  if (replacements.size === 0) return contract;
+  return {
+    ...contract,
+    deltas: contract.deltas.flatMap((delta, index) => {
+      const replacement = replacements.get(index);
+      return replacement === undefined ? [delta] : replacement ? [replacement] : [];
+    }),
+  };
+}
+
+function freezePureIdleLightweightStoreReplenishment(
+  contract: PureIdleAffineContract,
+): PureIdleAffineContract {
+  return {
+    ...contract,
+    // Endgame station buffers are cyclic and individual paths can cross a
+    // refill boundary immediately after calibration. Persisting their sampled
+    // distribution is neither required for cumulative production/research nor
+    // safe over a multi-day window. Never copy sampled replenishment into a
+    // store. Retain only depletion so finite cached ingredients still stop
+    // their dependent production through the item-level horizons calculated
+    // before this filter. Outputs that are not retained in inventory are
+    // conservatively treated as consumed inside the closed factory flow.
+    deltas: contract.deltas.filter((delta) =>
+      !isPureIdleLightweightStorePath(delta.path) || pureIdleDeltaMicros(delta) < 0n),
+  };
 }
 
 function calculatePureIdleLightweightBoundaries(
@@ -1400,6 +1607,16 @@ export interface PureIdleAffineCalibration {
   calibratedState: GameState;
   calibrationSeconds: number;
   calibrationWallSeconds: number;
+}
+
+export interface PureIdleLightweightCalibrationOptions {
+  /**
+   * Measure ordinary production without construction-center consumption.
+   * Callers that enable this must advance construction separately through
+   * advanceConstructionAutomationMacroInPlace so building outputs and their
+   * recursive material costs remain one authoritative transaction.
+   */
+  isolateConstructionAutomation?: boolean;
 }
 
 export interface PureIdleAffineApplication {
@@ -1980,18 +2197,25 @@ export function createPureIdleAffineCalibration(
 export function createPureIdleLightweightCalibration(
   state: GameState,
   calibrationWallSeconds: number,
+  options: PureIdleLightweightCalibrationOptions = {},
 ): PureIdleAffineCalibration | null {
   if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
   const sharedPaths = new Map<string, AffinePath>();
   const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
   let shadow = structuredClone(state);
+  const constructionAutomationEnabled = shadow.constructionAutomation.enabled;
+  if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = false;
   let topologyStable = true;
-  for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-    shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
-    topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
-    snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
-    researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
+  try {
+    for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
+      shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
+      topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
+      snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
+      researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
+    }
+  } finally {
+    if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = constructionAutomationEnabled;
   }
   const sampled = topologyStable
     ? createFastAffineContractFromSnapshots(
@@ -2008,23 +2232,24 @@ export function createPureIdleLightweightCalibration(
   );
   if (!researchLedger) return null;
 
-  let contract: PureIdleAffineContract = sampled
-    ? removeResearchInputDeltas({
+  const sampledContract: PureIdleAffineContract = sampled
+    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltas({
       ...sampled,
       deltas: sampled.deltas.filter((delta) => delta.kind === "number" ? Math.abs(Number(delta.delta)) > EPSILON : delta.delta !== 0n),
-    }, state)
+    }, state))
     : {
       deltas: [],
       calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
       calibrationWallSeconds,
     };
+  let contract = freezePureIdleLightweightStoreReplenishment(sampledContract);
 
   // Finite vein reserves are not represented by the lightweight store sample.
   // Keep the exact prefix but do not copy its mined output past the checkpoint.
   if (hasActiveFinitePureIdleResource(state) || !topologyStable) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   } else {
-    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, contract);
+    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
     if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
   }
   return {
@@ -2036,17 +2261,91 @@ export function createPureIdleLightweightCalibration(
   };
 }
 
-/** Worker-only mutable application. The caller must discard the candidate on failure. */
-export function applyPureIdleAffineContract(
+async function createPureIdleLightweightCalibrationAsync(
   state: GameState,
+  calibrationWallSeconds: number,
+  asyncOptions: OfflineApproximationAsyncOptions,
+  options: PureIdleLightweightCalibrationOptions = {},
+): Promise<PureIdleAffineCalibration | null> {
+  if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
+  const sharedPaths = new Map<string, AffinePath>();
+  const snapshots = [capturePureIdleLightweightSnapshot(state, sharedPaths)];
+  const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
+  let shadow = structuredClone(state);
+  const constructionAutomationEnabled = shadow.constructionAutomation.enabled;
+  if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = false;
+  let topologyStable = true;
+  try {
+    for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
+      shadow = await runExactAsync(
+        shadow,
+        FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+        asyncOptions,
+        calibrationWallSeconds / 3,
+      );
+      topologyStable &&= sameStableIds(state.entities, shadow.entities) && sameStableIds(state.belts, shadow.belts);
+      snapshots.push(capturePureIdleLightweightSnapshot(shadow, sharedPaths));
+      researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
+      asyncOptions.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, FAST_OFFLINE_CALIBRATION_SECONDS);
+    }
+  } finally {
+    if (options.isolateConstructionAutomation) shadow.constructionAutomation.enabled = constructionAutomationEnabled;
+  }
+  const sampled = topologyStable
+    ? createFastAffineContractFromSnapshots(
+      snapshots,
+      FAST_OFFLINE_CALIBRATION_SECONDS,
+      calibrationWallSeconds,
+      true,
+    )
+    : null;
+  snapshots.length = 0;
+  const researchLedger = createResearchMacroLedgerFromSnapshots(
+    researchSnapshots,
+    FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
+  );
+  if (!researchLedger) return null;
+  const sampledContract: PureIdleAffineContract = sampled
+    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltas({
+      ...sampled,
+      deltas: sampled.deltas.filter((delta) => delta.kind === "number" ? Math.abs(Number(delta.delta)) > EPSILON : delta.delta !== 0n),
+    }, state))
+    : {
+      deltas: [],
+      calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
+      calibrationWallSeconds,
+    };
+  let contract = freezePureIdleLightweightStoreReplenishment(sampledContract);
+  if (hasActiveFinitePureIdleResource(state) || !topologyStable) {
+    contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
+  } else {
+    const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
+    if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
+  }
+  return {
+    contract,
+    researchLedger,
+    calibratedState: shadow,
+    calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
+    calibrationWallSeconds,
+  };
+}
+
+/**
+ * Applies a compact contract directly to an isolated candidate while using a
+ * separate authoritative baseline for every conservation check. The caller
+ * must discard the candidate when this returns false.
+ */
+export function applyPureIdleAffineContractToCandidate(
+  baseline: GameState,
+  candidate: GameState,
   contract: PureIdleAffineContract,
   simulationSeconds: number,
   wallSeconds: number,
   options: PureIdleAffineApplicationOptions = {},
 ): PureIdleAffineApplication {
   const allowExactFallback = options.allowExactFallback ?? true;
-  const before = captureAggregateConservationBaseline(state);
-  const candidate = structuredClone(state);
+  const before = captureAggregateConservationBaseline(baseline);
   const integerRemainders = options.integerRemainders ? { ...options.integerRemainders } : undefined;
   const decimalRemainders = options.decimalRemainders ? { ...options.decimalRemainders } : undefined;
   const commitIntegerRemainders = (next: Record<string, number> | undefined): void => {
@@ -2071,7 +2370,7 @@ export function applyPureIdleAffineContract(
     options.simulationSecondsByItem,
   );
   if (!applied.ok) return { ok: false, boundaryCorrections: 0, failure: applied.failure };
-  const normalized = normalizeFastSettlementState(candidate, state);
+  const normalized = normalizeFastSettlementState(candidate, baseline);
   if (!normalized.ok) {
     return {
       ok: false,
@@ -2079,7 +2378,7 @@ export function applyPureIdleAffineContract(
       failure: normalized.failure ?? "宏观候选状态规范化失败",
     };
   }
-  const reconciliationFailure = reconcilePureIdleFiniteResources(state, candidate);
+  const reconciliationFailure = reconcilePureIdleFiniteResources(baseline, candidate);
   if (reconciliationFailure) {
     // Capacity, transport and depletion boundaries are deterministic gameplay
     // events. Reuse the ordinary simulation for this interval instead of
@@ -2091,8 +2390,8 @@ export function applyPureIdleAffineContract(
         failure: reconciliationFailure,
       };
     }
-    const exact = runExact(structuredClone(state), simulationSeconds, wallSeconds);
-    const exactNormalized = normalizeFastSettlementState(exact, state);
+    const exact = runExact(structuredClone(baseline), simulationSeconds, wallSeconds);
+    const exactNormalized = normalizeFastSettlementState(exact, baseline);
     if (!exactNormalized.ok) {
       return {
         ok: false,
@@ -2100,9 +2399,9 @@ export function applyPureIdleAffineContract(
         failure: exactNormalized.failure ?? reconciliationFailure,
       };
     }
-    const exactResourceFailure = validatePureIdleResourceAccounting(state, exact);
+    const exactResourceFailure = validatePureIdleResourceAccounting(baseline, exact);
     const exactConservationFailure = validateAggregateConservation(before, exact);
-    const exactTerminalFailure = validatePureIdleTerminalMaterialConservation(state, exact);
+    const exactTerminalFailure = validatePureIdleTerminalMaterialConservation(baseline, exact);
     if (exactResourceFailure || exactConservationFailure || exactTerminalFailure) {
       return {
         ok: false,
@@ -2111,7 +2410,7 @@ export function applyPureIdleAffineContract(
       };
     }
     refreshDysonGenerationSnapshot(exact);
-    Object.assign(state, exact);
+    Object.assign(candidate, exact);
     commitIntegerRemainders(undefined);
     commitDecimalRemainders(undefined);
     return {
@@ -2120,7 +2419,7 @@ export function applyPureIdleAffineContract(
       exactSimulationSeconds: simulationSeconds,
     };
   }
-  const resourceFailure = validatePureIdleResourceAccounting(state, candidate);
+  const resourceFailure = validatePureIdleResourceAccounting(baseline, candidate);
   if (resourceFailure) {
     return {
       ok: false,
@@ -2136,7 +2435,7 @@ export function applyPureIdleAffineContract(
       failure: conservationFailure,
     };
   }
-  const terminalFailure = validatePureIdleTerminalMaterialConservation(state, candidate);
+  const terminalFailure = validatePureIdleTerminalMaterialConservation(baseline, candidate);
   if (terminalFailure) {
     return {
       ok: false,
@@ -2149,11 +2448,31 @@ export function applyPureIdleAffineContract(
   refreshDysonGenerationSnapshot(candidate);
   commitIntegerRemainders(integerRemainders);
   commitDecimalRemainders(decimalRemainders);
-  Object.assign(state, candidate);
   return {
     ok: true,
     boundaryCorrections: (applied.corrections ?? 0) + normalized.corrections,
   };
+}
+
+/** Transactional public wrapper. The input state changes only after success. */
+export function applyPureIdleAffineContract(
+  state: GameState,
+  contract: PureIdleAffineContract,
+  simulationSeconds: number,
+  wallSeconds: number,
+  options: PureIdleAffineApplicationOptions = {},
+): PureIdleAffineApplication {
+  const candidate = structuredClone(state);
+  const result = applyPureIdleAffineContractToCandidate(
+    state,
+    candidate,
+    contract,
+    simulationSeconds,
+    wallSeconds,
+    options,
+  );
+  if (result.ok) Object.assign(state, candidate);
+  return result;
 }
 
 function normalizeFastNumberMap(
@@ -2625,99 +2944,133 @@ function runTimeWarpApproximateSettlementUnsafe(
   const wallPerSimulationSecond = simulationSeconds > EPSILON ? wallSeconds / simulationSeconds : 0;
   const calibrationWallSeconds = wallPerSimulationSecond * calibrationSeconds;
   const validationWallSeconds = wallPerSimulationSecond * validationSeconds;
-  const calibrated = runExact(structuredClone(state), calibrationSeconds, calibrationWallSeconds);
-  const contract = createFastAffineContract([state, calibrated], calibrationSeconds, calibrationWallSeconds);
-  const researchLedger = createResearchMacroLedger([state, calibrated], calibrationSeconds);
-  if (!contract || !researchLedger) {
+  const sharedPaths = new Map<string, AffinePath>();
+  const sourceSnapshot = capturePureIdleLightweightSnapshot(state, sharedPaths);
+  const sourceResearch = captureResearchMacroCalibrationSnapshot(state);
+  const calibrated = structuredClone(state);
+  const constructionEnabled = calibrated.constructionAutomation.enabled;
+  calibrated.constructionAutomation.enabled = false;
+  runExact(calibrated, calibrationSeconds, calibrationWallSeconds);
+  calibrated.constructionAutomation.enabled = constructionEnabled;
+  const calibratedSnapshot = capturePureIdleLightweightSnapshot(calibrated, sharedPaths);
+  const researchLedger = createResearchMacroLedgerFromSnapshots(
+    [sourceResearch, captureResearchMacroCalibrationSnapshot(calibrated)],
+    calibrationSeconds,
+  );
+  const sampled = createFastAffineContractFromSnapshots(
+    [sourceSnapshot, calibratedSnapshot],
+    calibrationSeconds,
+    calibrationWallSeconds,
+    true,
+  );
+  let contract: PureIdleAffineContract = sampled
+    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltas(sampled, state))
+    : { deltas: [], calibrationSeconds, calibrationWallSeconds };
+  if (hasActiveFinitePureIdleResource(state)) {
+    contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
+  }
+  if (!researchLedger || contract.maximumSimulationSeconds === 0 ||
+    contract.deltas.length === 0 && !isFastLightweightQuiescent(state)) {
     return conservativeTimeWarpResult(
-      state, calibrated, simulationSeconds, wallSeconds, calibrationSeconds,
-      "短校准没有形成可用的守恒状态增量",
+      state,
+      calibrated,
+      simulationSeconds,
+      wallSeconds,
+      calibrationSeconds,
+      "短校准没有形成可用的轻量守恒增量",
     );
   }
 
   const macroSeconds = simulationSeconds - calibrationSeconds - validationSeconds;
   const macroWallSeconds = Math.max(0, wallSeconds - calibrationWallSeconds - validationWallSeconds);
-  // `calibrated` is already an isolated clone of the authoritative input.
-  // Reuse it as the macro candidate so large pure-idle saves do not pay for a
-  // second full-state clone before every slice.
-  const macro = calibrated;
-  const macroApplication = applyPureIdleAffineContract(
-    macro,
-    contract,
+  const creditedMacroSeconds = Math.min(
     macroSeconds,
-    macroWallSeconds,
-    { allowExactFallback: false },
+    contract.maximumSimulationSeconds === undefined ? macroSeconds : Math.max(0, contract.maximumSimulationSeconds),
+  );
+  const creditedMacroSecondsByItem = pureIdleCreditedSecondsByItem(contract, creditedMacroSeconds);
+  const macroApplication = applyFastAffineContract(
+    calibrated,
+    contract,
+    creditedMacroSeconds,
+    macroSeconds > EPSILON ? macroWallSeconds * creditedMacroSeconds / macroSeconds : 0,
+    true,
+    true,
+    undefined,
+    undefined,
+    creditedMacroSecondsByItem,
   );
   if (!macroApplication.ok) {
     return conservativeTimeWarpResult(
-      state, macro, simulationSeconds, wallSeconds, calibrationSeconds,
-      `宏观切片未通过物料守恒门禁：${macroApplication.failure ?? "未知字段"}`,
+      state,
+      structuredClone(state),
+      simulationSeconds,
+      wallSeconds,
+      0,
+      `轻量宏观切片未通过物料守恒门禁：${macroApplication.failure ?? "未知字段"}`,
     );
   }
-  const macroResearch = advanceResearchMacroInPlace(macro, researchLedger, macroSeconds);
-  const normalizedMacro = normalizeFastSettlementState(macro);
-  if (!normalizedMacro.ok) {
-    return conservativeTimeWarpResult(
-      state, calibrated, simulationSeconds, wallSeconds, calibrationSeconds,
-      `宏观切片未通过结构与数值校验${normalizedMacro.failure ? `：${normalizedMacro.failure}` : ""}`,
-    );
-  }
-
-  const expected = structuredClone(macro);
-  const validationApplication = applyPureIdleAffineContract(
-    expected,
+  const researchSeconds = MATRIX_ITEM_IDS.reduce((maximum, itemId) => {
+    const itemSeconds = creditedMacroSecondsByItem?.[itemId];
+    return itemSeconds === undefined ? maximum : Math.min(maximum, itemSeconds);
+  }, creditedMacroSeconds);
+  advanceResearchMacroInPlace(calibrated, researchLedger, researchSeconds);
+  const validationBaseline = capturePureIdleLightweightSnapshot(calibrated, sharedPaths);
+  const remainingValidationByItem = remainingPureIdleValidationSecondsByItem(contract, creditedMacroSecondsByItem);
+  const expectedValidation = predictPureIdleLightweightSnapshot(
+    validationBaseline,
     contract,
     validationSeconds,
     validationWallSeconds,
-    { allowExactFallback: false },
+    remainingValidationByItem,
   );
-  advanceResearchMacroInPlace(
-    expected,
-    researchLedger,
-    validationSeconds,
-    macroResearch.remainder,
-    macroResearch.inflowRemainders,
-  );
-  const normalizedExpected: FastSettlementNormalizationResult = validationApplication.ok
-    ? normalizeFastSettlementState(expected)
-    : { ok: false, corrections: 0 };
-  if (!validationApplication.ok || !normalizedExpected.ok) {
+  if (!expectedValidation) {
     return conservativeTimeWarpResult(
-      state, macro, simulationSeconds, wallSeconds, calibrationSeconds + macroSeconds,
-      `尾验预测未通过物料守恒门禁：${validationApplication.failure ?? normalizedExpected.failure ?? "状态规范化失败"}`,
-      macroApplication.boundaryCorrections + normalizedMacro.corrections,
+      state,
+      structuredClone(state),
+      simulationSeconds,
+      wallSeconds,
+      0,
+      "轻量尾验预测越过安全整数或库存边界",
     );
   }
-
-  const validationBaseline = captureTimeWarpCriticalSnapshot(macro);
-  // `expected` preserves the prediction branch; the macro candidate can be
-  // advanced in place for the exact tail without touching the source state.
-  const actual = runExact(macro, validationSeconds, validationWallSeconds);
-  const normalizedActual = normalizeFastSettlementState(actual);
-  if (!normalizedActual.ok) {
-    return conservativeTimeWarpResult(
-      state, expected, simulationSeconds, wallSeconds, simulationSeconds,
-      `精确尾验未通过结构与数值校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}，已保留守恒预测`,
-      macroApplication.boundaryCorrections + normalizedMacro.corrections +
-        validationApplication.boundaryCorrections + normalizedExpected.corrections,
-    );
-  }
-  const speedrunCorrection = normalizeFastSpeedrunClock(actual, state, wallSeconds);
-  const maxCriticalError = compareTimeWarpCriticalSnapshots(
+  const criticalBaseline = captureTimeWarpCriticalSnapshot(calibrated);
+  const expectedCritical = criticalSnapshotWithPredictedWhiteMatrix(criticalBaseline, expectedValidation);
+  calibrated.constructionAutomation.enabled = false;
+  runExact(calibrated, validationSeconds, validationWallSeconds);
+  calibrated.constructionAutomation.enabled = constructionEnabled;
+  const normalizedActual = normalizeFastSettlementState(calibrated, state);
+  const comparison = comparePureIdleLightweightSnapshots(
     validationBaseline,
-    captureTimeWarpCriticalSnapshot(expected),
-    captureTimeWarpCriticalSnapshot(actual),
+    expectedValidation,
+    capturePureIdleLightweightSnapshot(calibrated, sharedPaths),
   );
-  if (!Number.isFinite(maxCriticalError) || maxCriticalError > TIME_WARP_MAX_CRITICAL_ERROR) {
+  const maxCriticalError = compareTimeWarpCriticalSnapshots(
+    criticalBaseline,
+    expectedCritical,
+    captureTimeWarpCriticalSnapshot(calibrated),
+  );
+  const aggregateBefore = captureAggregateConservationBaseline(state);
+  const resourceFailure = normalizedActual.ok ? validatePureIdleResourceAccounting(state, calibrated) : undefined;
+  const aggregateFailure = normalizedActual.ok ? validateAggregateConservation(aggregateBefore, calibrated) : undefined;
+  const terminalFailure = normalizedActual.ok ? validatePureIdleTerminalMaterialConservation(state, calibrated) : undefined;
+  if (!normalizedActual.ok || resourceFailure || aggregateFailure || terminalFailure ||
+    !Number.isFinite(maxCriticalError) || maxCriticalError > TIME_WARP_MAX_CRITICAL_ERROR) {
     return conservativeTimeWarpResult(
-      state, actual, simulationSeconds, wallSeconds, simulationSeconds,
-      `白糖或戴森关键指标尾验误差 ${(maxCriticalError * 100).toFixed(2)}% 超过 100%，已保留精确尾验检查点`,
-      macroApplication.boundaryCorrections + normalizedMacro.corrections +
-        validationApplication.boundaryCorrections + normalizedExpected.corrections + normalizedActual.corrections,
+      state,
+      structuredClone(state),
+      simulationSeconds,
+      wallSeconds,
+      0,
+      normalizedActual.failure ?? resourceFailure ?? aggregateFailure ?? terminalFailure ??
+        `白糖或戴森关键指标尾验误差 ${(maxCriticalError * 100).toFixed(2)}% 超过 100%`,
     );
   }
+  const construction = advanceConstructionAutomationMacroInPlace(calibrated, simulationSeconds);
+  calibrated.elapsedSeconds = state.elapsedSeconds + simulationSeconds;
+  const speedrunCorrection = normalizeFastSpeedrunClock(calibrated, state, wallSeconds);
+  refreshDysonGenerationSnapshot(calibrated);
   return {
-    state: actual,
+    state: calibrated,
     report: {
       mode: "approximate",
       algorithmVersion: TIME_WARP_APPROXIMATION_ALGORITHM_VERSION,
@@ -2725,8 +3078,12 @@ function runTimeWarpApproximateSettlementUnsafe(
       exactCalibrationSeconds: calibrationSeconds + validationSeconds,
       approximatedSeconds: macroSeconds,
       maxCriticalError,
-      boundaryCorrections: macroApplication.boundaryCorrections + normalizedMacro.corrections +
-        validationApplication.boundaryCorrections + normalizedExpected.corrections + normalizedActual.corrections + speedrunCorrection,
+      boundaryCorrections: (macroApplication.corrections ?? 0) + normalizedActual.corrections + speedrunCorrection,
+      ...(comparison.maxError > TIME_WARP_MAX_CRITICAL_ERROR
+        ? { fallbackReason: `普通库存尾验最大误差 ${(comparison.maxError * 100).toFixed(2)}%，关键指标仍在门限内` }
+        : construction.completed > 0
+          ? { fallbackReason: `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件` }
+          : {}),
     },
   };
 }
@@ -2852,6 +3209,213 @@ export function runConservativeOfflineSettlement(
   };
 }
 
+interface FastLightweightPreparedSettlement {
+  candidate: GameState;
+  contract: PureIdleAffineContract;
+  researchInvested: bigint;
+  macroSeconds: number;
+  creditedMacroSeconds: number;
+  validationWallSeconds: number;
+  validationSimulationSecondsByItem?: Record<string, number>;
+  validationBaseline: AffineSnapshot;
+  expectedValidation: AffineSnapshot;
+  criticalBaseline: TimeWarpCriticalSnapshot;
+  expectedCritical: TimeWarpCriticalSnapshot;
+  sharedPaths: Map<string, AffinePath>;
+  boundaryCorrections: number;
+}
+
+function isFastLightweightQuiescent(state: GameState): boolean {
+  return state.entities.length === 0 && state.belts.length === 0 &&
+    !hasActiveResearch(state) && state.handcraftQueue.length === 0 && state.constructionQueue.length === 0 &&
+    Object.keys(state.constructionAutomation.jobs).length === 0 &&
+    !Object.values(state.endgame.exportProjects).some((project) => project.enabled) &&
+    !state.endgame.constructionActivity.activityId;
+}
+
+function pureIdleCreditedSecondsByItem(
+  contract: PureIdleAffineContract,
+  requestedSeconds: number,
+): Record<string, number> | undefined {
+  if (!contract.maximumSimulationSecondsByItem) return undefined;
+  return Object.fromEntries(Object.entries(contract.maximumSimulationSecondsByItem).map(([itemId, maximum]) => [
+    itemId,
+    Math.min(requestedSeconds, Math.max(0, finiteNumber(maximum))),
+  ]));
+}
+
+function remainingPureIdleValidationSecondsByItem(
+  contract: PureIdleAffineContract,
+  creditedMacroSecondsByItem: Record<string, number> | undefined,
+): Record<string, number> | undefined {
+  if (!contract.maximumSimulationSecondsByItem) return undefined;
+  return Object.fromEntries(Object.entries(contract.maximumSimulationSecondsByItem).map(([itemId, maximum]) => [
+    itemId,
+    Math.min(
+      FAST_OFFLINE_VALIDATION_SECONDS,
+      Math.max(0, finiteNumber(maximum) - finiteNumber(creditedMacroSecondsByItem?.[itemId])),
+    ),
+  ]));
+}
+
+function criticalSnapshotWithPredictedWhiteMatrix(
+  baseline: TimeWarpCriticalSnapshot,
+  predicted: AffineSnapshot,
+): TimeWarpCriticalSnapshot {
+  const entry = predicted.entries.get(pathKey(["totalProduced", "universe_matrix"]));
+  return {
+    ...baseline,
+    planStructurePoints: { ...baseline.planStructurePoints },
+    planShellSails: { ...baseline.planShellSails },
+    whiteMatrixProduced: entry?.kind === "number" ? finiteNumber(entry.value) : baseline.whiteMatrixProduced,
+  };
+}
+
+function prepareFastLightweightSettlement(
+  source: GameState,
+  seconds: number,
+  wallSeconds: number,
+  calibrated: PureIdleAffineCalibration,
+): FastLightweightPreparedSettlement | { failure: string } {
+  const macroSeconds = seconds - FAST_OFFLINE_CALIBRATION_SECONDS - FAST_OFFLINE_VALIDATION_SECONDS;
+  if (macroSeconds < 1) return { failure: "校准后没有足够的批量外推时间" };
+  const { contract, researchLedger } = calibrated;
+  if ((contract.deltas.length === 0 && !isFastLightweightQuiescent(source)) || contract.maximumSimulationSeconds === 0) {
+    return { failure: "30 秒轻量校准没有形成可持续普通生产合同" };
+  }
+  const creditedMacroSeconds = Math.min(
+    macroSeconds,
+    contract.maximumSimulationSeconds === undefined
+      ? macroSeconds
+      : Math.max(0, finiteNumber(contract.maximumSimulationSeconds)),
+  );
+  if (creditedMacroSeconds <= EPSILON) return { failure: "普通生产合同的全局安全边界已耗尽" };
+  const creditedMacroSecondsByItem = pureIdleCreditedSecondsByItem(contract, creditedMacroSeconds);
+  const macroWallSeconds = wallSeconds * creditedMacroSeconds / seconds;
+  const application = applyPureIdleAffineContractToCandidate(
+    source,
+    calibrated.calibratedState,
+    contract,
+    creditedMacroSeconds,
+    macroWallSeconds,
+    {
+      allowExactFallback: false,
+      skipUnsafeIntegerPaths: true,
+      simulationSecondsByItem: creditedMacroSecondsByItem,
+    },
+  );
+  if (!application.ok) return { failure: application.failure ?? "轻量普通生产合同未通过守恒门禁" };
+  const researchSeconds = MATRIX_ITEM_IDS.reduce((maximum, itemId) => {
+    const itemSeconds = creditedMacroSecondsByItem?.[itemId];
+    return itemSeconds === undefined ? maximum : Math.min(maximum, itemSeconds);
+  }, creditedMacroSeconds);
+  const research = advanceResearchMacroInPlace(calibrated.calibratedState, researchLedger, researchSeconds);
+  const sharedPaths = new Map<string, AffinePath>();
+  const validationBaseline = capturePureIdleLightweightSnapshot(calibrated.calibratedState, sharedPaths);
+  const validationSimulationSecondsByItem = remainingPureIdleValidationSecondsByItem(
+    contract,
+    creditedMacroSecondsByItem,
+  );
+  const validationWallSeconds = wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds;
+  const expectedValidation = predictPureIdleLightweightSnapshot(
+    validationBaseline,
+    contract,
+    FAST_OFFLINE_VALIDATION_SECONDS,
+    validationWallSeconds,
+    validationSimulationSecondsByItem,
+  );
+  if (!expectedValidation) return { failure: "轻量尾验预测越过安全整数或库存边界" };
+  const criticalBaseline = captureTimeWarpCriticalSnapshot(calibrated.calibratedState);
+  return {
+    candidate: calibrated.calibratedState,
+    contract,
+    researchInvested: research.consumed,
+    macroSeconds,
+    creditedMacroSeconds,
+    validationWallSeconds,
+    validationSimulationSecondsByItem,
+    validationBaseline,
+    expectedValidation,
+    criticalBaseline,
+    expectedCritical: criticalSnapshotWithPredictedWhiteMatrix(criticalBaseline, expectedValidation),
+    sharedPaths,
+    boundaryCorrections: application.boundaryCorrections,
+  };
+}
+
+function finalizeFastLightweightSettlement(
+  source: GameState,
+  seconds: number,
+  wallSeconds: number,
+  prepared: FastLightweightPreparedSettlement,
+): OfflineApproximationResult {
+  const actual = prepared.candidate;
+  const normalizedActual = normalizeFastSettlementState(actual, source);
+  if (!normalizedActual.ok) {
+    return runConservativeOfflineSettlement(
+      source,
+      seconds,
+      wallSeconds,
+      `精确尾验未通过结构校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}`,
+    );
+  }
+  const actualValidation = capturePureIdleLightweightSnapshot(actual, prepared.sharedPaths);
+  const comparison = comparePureIdleLightweightSnapshots(
+    prepared.validationBaseline,
+    prepared.expectedValidation,
+    actualValidation,
+  );
+  const maxEstimatedError = compareTimeWarpCriticalSnapshots(
+    prepared.criticalBaseline,
+    prepared.expectedCritical,
+    captureTimeWarpCriticalSnapshot(actual),
+  );
+  if (!Number.isFinite(maxEstimatedError) || maxEstimatedError > FAST_CRITICAL_MAX_ERROR) {
+    return runConservativeOfflineSettlement(
+      source,
+      seconds,
+      wallSeconds,
+      `白糖或戴森尾验误差 ${(maxEstimatedError * 100).toFixed(2)}%，已使用保守宏观结算`,
+    );
+  }
+  // Construction was deliberately excluded from both exact calibration and
+  // validation. Run its authoritative recursive planner once against the
+  // credited final inventories, then advance only the remaining clock.
+  const construction = advanceConstructionAutomationMacroInPlace(actual, seconds);
+  actual.elapsedSeconds = source.elapsedSeconds + seconds;
+  const speedrunCorrection = normalizeFastSpeedrunClock(actual, source, wallSeconds);
+  const normalizedFinal = normalizeFastSettlementState(actual, source);
+  if (!normalizedFinal.ok || !validateFastNumbers(actual)) {
+    return runConservativeOfflineSettlement(
+      source,
+      seconds,
+      wallSeconds,
+      `建筑制造巨构尾段未通过最终存档校验${normalizedFinal.failure ? `：${normalizedFinal.failure}` : ""}`,
+    );
+  }
+  return {
+    status: "approximate",
+    state: actual,
+    report: {
+      mode: "approximate",
+      calibrationWindowSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
+      approximatedSeconds: prepared.macroSeconds,
+      maxEstimatedError,
+      fellBack: false,
+      algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION,
+      boundaryCorrections: prepared.boundaryCorrections + normalizedActual.corrections +
+        normalizedFinal.corrections + speedrunCorrection,
+      validationScope: "leaderboard-critical",
+      maxNonCriticalError: comparison.maxError,
+      settlementStatus: "approximate",
+      researchInvested: prepared.researchInvested.toString(),
+      ...(construction.completed > 0
+        ? { fallbackReason: `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件` }
+        : {}),
+    },
+  };
+}
+
 /**
  * Fast offline settlement: thirty seconds of the real engine calibrate the
  * current factory, then only the remaining interval is applied as a measured
@@ -2871,94 +3435,31 @@ function runFastOfflineSettlementUnsafe(state: GameState, seconds: number, wallS
   }
   if (!validateFastNumbers(state)) return { status: "ineligible", report: fastExactReport(0, "原始状态包含非法数值") };
   const wallCalibration = wallSeconds * FAST_OFFLINE_CALIBRATION_SECONDS / seconds;
-  const slices: GameState[] = [state];
-  let current = structuredClone(state);
-  for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-    current = runExact(current, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, wallCalibration / 3);
-    slices.push(structuredClone(current));
-  }
-  const contract = createFastAffineContract(slices, FAST_OFFLINE_CALIBRATION_SECONDS, wallCalibration);
-  const researchLedger = createResearchMacroLedger(slices, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS);
-  slices.length = 0;
-  if (!researchLedger) {
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      "科研校准账本无效，已冻结科研并使用保守宏观结算", current, FAST_OFFLINE_CALIBRATION_SECONDS);
-  }
-  if (!contract) {
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      "30 秒校准未形成普通合同，已使用保守宏观结算", current, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const macroSeconds = seconds - FAST_OFFLINE_CALIBRATION_SECONDS - FAST_OFFLINE_VALIDATION_SECONDS;
-  if (macroSeconds < 1) return { status: "fallback", report: fastExactReport(FAST_OFFLINE_CALIBRATION_SECONDS, "校准后没有足够的批量外推时间") };
-  const macroWallSeconds = Math.max(0, wallSeconds - wallCalibration - wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds);
-  const macroBase = current;
-  const macro = structuredClone(macroBase);
-  const macroApplication = applyFastAffineContract(macro, contract, macroSeconds, macroWallSeconds);
-  if (!macroApplication.ok) {
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `普通合同越过安全边界：${macroApplication.failure ?? "未知字段"}`, macroBase,
-      FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const macroResearch = advanceResearchMacroInPlace(macro, researchLedger, macroSeconds);
-  const normalizedMacro = normalizeFastSettlementState(macro);
-  if (!normalizedMacro.ok) return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-    `普通合同产生非法库存或大整数${normalizedMacro.failure ? `：${normalizedMacro.failure}` : ""}`,
-    macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  const expected = structuredClone(macro);
-  const validationWallSeconds = wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds;
-  const validationApplication = applyFastAffineContract(expected, contract, FAST_OFFLINE_VALIDATION_SECONDS, validationWallSeconds);
-  if (!validationApplication.ok) {
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `验证预测越过安全边界：${validationApplication.failure ?? "未知字段"}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  advanceResearchMacroInPlace(
-    expected,
-    researchLedger,
-    FAST_OFFLINE_VALIDATION_SECONDS,
-    macroResearch.remainder,
-    macroResearch.inflowRemainders,
+  const calibrated = createPureIdleLightweightCalibration(
+    state,
+    wallCalibration,
+    { isolateConstructionAutomation: true },
   );
-  const normalizedExpected = normalizeFastSettlementState(expected);
-  if (!normalizedExpected.ok) return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-    `验证预测越过容量边界${normalizedExpected.failure ? `：${normalizedExpected.failure}` : ""}`,
-    macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  const validationBaseline = captureTimeWarpCriticalSnapshot(macro);
-  const actual = runExact(macro, FAST_OFFLINE_VALIDATION_SECONDS, validationWallSeconds);
-  const normalizedActual = normalizeFastSettlementState(actual);
-  if (!normalizedActual.ok) return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-    `精确尾验未通过结构校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}`,
-    macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  const speedrunCorrection = normalizeFastSpeedrunClock(actual, state, wallSeconds);
-  const comparison = compareFastNumericSnapshots(actual, expected);
-  const maxEstimatedError = compareTimeWarpCriticalSnapshots(
-    validationBaseline,
-    captureTimeWarpCriticalSnapshot(expected),
-    captureTimeWarpCriticalSnapshot(actual),
-  );
-  if (!Number.isFinite(maxEstimatedError) || maxEstimatedError > FAST_CRITICAL_MAX_ERROR) {
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `白糖或戴森尾验误差 ${(maxEstimatedError * 100).toFixed(2)}%，已使用保守宏观结算`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
+  if (!calibrated) {
+    return runConservativeOfflineSettlement(
+      state,
+      seconds,
+      wallSeconds,
+      "30 秒轻量校准没有形成可用样本，已使用保守宏观结算",
+    );
   }
-  return {
-    status: "approximate",
-    state: actual,
-    report: {
-      mode: "approximate",
-      calibrationWindowSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
-      approximatedSeconds: macroSeconds,
-      maxEstimatedError,
-      fellBack: false,
-      algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION,
-      boundaryCorrections: (macroApplication.corrections ?? 0) + (validationApplication.corrections ?? 0) +
-        normalizedMacro.corrections + normalizedExpected.corrections + normalizedActual.corrections + speedrunCorrection,
-      validationScope: "leaderboard-critical",
-      maxNonCriticalError: comparison.maxError,
-      settlementStatus: "approximate",
-      researchInvested: macroResearch.consumed.toString(),
-    },
-  };
+  const prepared = prepareFastLightweightSettlement(state, seconds, wallSeconds, calibrated);
+  if ("failure" in prepared) {
+    return runConservativeOfflineSettlement(state, seconds, wallSeconds, prepared.failure);
+  }
+  const constructionEnabled = prepared.candidate.constructionAutomation.enabled;
+  prepared.candidate.constructionAutomation.enabled = false;
+  try {
+    runExact(prepared.candidate, FAST_OFFLINE_VALIDATION_SECONDS, prepared.validationWallSeconds);
+  } finally {
+    prepared.candidate.constructionAutomation.enabled = constructionEnabled;
+  }
+  return finalizeFastLightweightSettlement(state, seconds, wallSeconds, prepared);
 }
 
 function fastSettlementExceptionReport(error: unknown): OfflineApproximationReport {
@@ -3012,114 +3513,43 @@ async function runFastOfflineSettlementAsyncUnsafe(
   throwIfApproximationDeadlineReached(options);
   options.onPhase?.("calibrating");
   const wallCalibration = wallSeconds * FAST_OFFLINE_CALIBRATION_SECONDS / seconds;
-  const slices: GameState[] = [state];
-  let current = structuredClone(state);
-  for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
-    current = await runExactAsync(current, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, options, wallCalibration / 3);
-    slices.push(structuredClone(current));
-    options.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, seconds);
-  }
-  const contract = createFastAffineContract(slices, FAST_OFFLINE_CALIBRATION_SECONDS, wallCalibration);
-  const researchLedger = createResearchMacroLedger(slices, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS);
-  slices.length = 0;
-  if (!researchLedger) {
+  const calibrated = await createPureIdleLightweightCalibrationAsync(
+    state,
+    wallCalibration,
+    options,
+    { isolateConstructionAutomation: true },
+  );
+  if (!calibrated) {
     options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      "科研校准账本无效，已冻结科研并使用保守宏观结算", current, FAST_OFFLINE_CALIBRATION_SECONDS);
+    return runConservativeOfflineSettlement(
+      state,
+      seconds,
+      wallSeconds,
+      "30 秒轻量校准没有形成可用样本，已使用保守宏观结算",
+    );
   }
-  if (!contract) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      "30 秒校准未形成普通合同，已使用保守宏观结算", current,
-      FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const macroSeconds = seconds - FAST_OFFLINE_CALIBRATION_SECONDS - FAST_OFFLINE_VALIDATION_SECONDS;
-  if (macroSeconds < 1) return { status: "fallback", report: fastExactReport(FAST_OFFLINE_CALIBRATION_SECONDS, "校准后没有足够的批量外推时间") };
-  const macroWallSeconds = Math.max(0, wallSeconds - wallCalibration - wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds);
   options.onPhase?.("macro");
   throwIfApproximationDeadlineReached(options);
-  const macroBase = current;
-  const macro = structuredClone(macroBase);
-  const macroApplication = applyFastAffineContract(macro, contract, macroSeconds, macroWallSeconds);
-  if (!macroApplication.ok) {
+  const prepared = prepareFastLightweightSettlement(state, seconds, wallSeconds, calibrated);
+  if ("failure" in prepared) {
     options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `普通合同越过安全边界：${macroApplication.failure ?? "未知字段"}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
+    return runConservativeOfflineSettlement(state, seconds, wallSeconds, prepared.failure);
   }
-  const macroResearch = advanceResearchMacroInPlace(macro, researchLedger, macroSeconds);
-  const normalizedMacro = normalizeFastSettlementState(macro);
-  if (!normalizedMacro.ok) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `普通合同产生非法库存或大整数${normalizedMacro.failure ? `：${normalizedMacro.failure}` : ""}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const expected = structuredClone(macro);
-  const validationWallSeconds = wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds;
   options.onPhase?.("validating");
-  const validationApplication = applyFastAffineContract(expected, contract, FAST_OFFLINE_VALIDATION_SECONDS, validationWallSeconds);
-  if (!validationApplication.ok) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `验证预测越过安全边界：${validationApplication.failure ?? "未知字段"}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
+  const constructionEnabled = prepared.candidate.constructionAutomation.enabled;
+  prepared.candidate.constructionAutomation.enabled = false;
+  try {
+    await runExactAsync(
+      prepared.candidate,
+      FAST_OFFLINE_VALIDATION_SECONDS,
+      options,
+      prepared.validationWallSeconds,
+    );
+  } finally {
+    prepared.candidate.constructionAutomation.enabled = constructionEnabled;
   }
-  advanceResearchMacroInPlace(
-    expected,
-    researchLedger,
-    FAST_OFFLINE_VALIDATION_SECONDS,
-    macroResearch.remainder,
-    macroResearch.inflowRemainders,
-  );
-  const normalizedExpected = normalizeFastSettlementState(expected);
-  if (!normalizedExpected.ok) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `验证预测越过容量边界${normalizedExpected.failure ? `：${normalizedExpected.failure}` : ""}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const validationBaseline = captureTimeWarpCriticalSnapshot(macro);
-  const actual = await runExactAsync(macro, FAST_OFFLINE_VALIDATION_SECONDS, options, validationWallSeconds);
-  const normalizedActual = normalizeFastSettlementState(actual);
-  if (!normalizedActual.ok) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `精确尾验未通过结构校验${normalizedActual.failure ? `：${normalizedActual.failure}` : ""}`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  const speedrunCorrection = normalizeFastSpeedrunClock(actual, state, wallSeconds);
-  const comparison = compareFastNumericSnapshots(actual, expected);
-  const maxEstimatedError = compareTimeWarpCriticalSnapshots(
-    validationBaseline,
-    captureTimeWarpCriticalSnapshot(expected),
-    captureTimeWarpCriticalSnapshot(actual),
-  );
   options.onProgress?.(seconds, seconds);
-  if (!Number.isFinite(maxEstimatedError) || maxEstimatedError > FAST_CRITICAL_MAX_ERROR) {
-    options.onPhase?.("conservative");
-    return runConservativeOfflineSettlement(state, seconds, wallSeconds,
-      `白糖或戴森尾验误差 ${(maxEstimatedError * 100).toFixed(2)}%，已使用保守宏观结算`,
-      macroBase, FAST_OFFLINE_CALIBRATION_SECONDS, researchLedger);
-  }
-  return {
-    status: "approximate",
-    state: actual,
-    report: {
-      mode: "approximate",
-      calibrationWindowSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
-      approximatedSeconds: macroSeconds,
-      maxEstimatedError,
-      fellBack: false,
-      algorithmVersion: FAST_OFFLINE_ALGORITHM_VERSION,
-      boundaryCorrections: (macroApplication.corrections ?? 0) + (validationApplication.corrections ?? 0) +
-        normalizedMacro.corrections + normalizedExpected.corrections + normalizedActual.corrections + speedrunCorrection,
-      validationScope: "leaderboard-critical",
-      maxNonCriticalError: comparison.maxError,
-      settlementStatus: "approximate",
-      researchInvested: macroResearch.consumed.toString(),
-    },
-  };
+  return finalizeFastLightweightSettlement(state, seconds, wallSeconds, prepared);
 }
 
 export async function runFastOfflineSettlementAsync(

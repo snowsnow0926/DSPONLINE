@@ -11211,6 +11211,120 @@ function constructionAutomationRequirements(step: ConstructionAutomationStep): A
       : getRecipe(step.recipeId)?.inputs.map((input) => ({ itemId: input.itemId, amount: input.amount * step.batches })) ?? [];
 }
 
+function constructionAutomationCombinedInventory(
+  state: GameState,
+  planetId: PlanetId,
+  job?: ConstructionAutomationJob,
+  entityId?: string,
+): Partial<Record<ItemId, number>> {
+  const combined: Partial<Record<ItemId, number>> = {};
+  const append = (source: Partial<Record<ItemId, number>>) => {
+    for (const [itemId, rawAmount] of Object.entries(source) as Array<[ItemId, number]>) {
+      const amount = Math.max(0, Math.floor(rawAmount ?? 0));
+      if (amount < 1) continue;
+      combined[itemId] = Math.min(Number.MAX_SAFE_INTEGER, Math.floor((combined[itemId] ?? 0) + amount));
+    }
+  };
+  append(trayForPlanet(state, planetId));
+  if (job) append(job.inventory);
+  if (entityId) append(constructionAutomationQuantumBuffer(state, entityId));
+  return combined;
+}
+
+function constructionAutomationMissingRequirement(
+  state: GameState,
+  planetId: PlanetId,
+  job: ConstructionAutomationJob,
+  step: ConstructionAutomationStep,
+  entityId?: string,
+): { itemId: ItemId; amount: number } | null {
+  const inventory = constructionAutomationCombinedInventory(state, planetId, job, entityId);
+  for (const requirement of constructionAutomationRequirements(step)) {
+    const available = Math.max(0, Math.floor(inventory[requirement.itemId] ?? 0));
+    if (available + EPSILON < requirement.amount) {
+      return { itemId: requirement.itemId, amount: Math.max(1, Math.floor(requirement.amount - available)) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Move a step's complete input set into job-owned WIP before any progress is
+ * credited. Other factories and centers can continue using the remaining
+ * tray, but they can no longer consume a material that an active persisted
+ * construction step already depends on.
+ */
+function reserveConstructionAutomationInputs(
+  state: GameState,
+  planetId: PlanetId,
+  job: ConstructionAutomationJob,
+  step: ConstructionAutomationStep,
+  entityId?: string,
+): boolean {
+  const tray = trayForPlanet(state, planetId);
+  const nextTray = { ...tray };
+  const nextInventory = { ...job.inventory };
+  const nextQuantum = entityId ? { ...constructionAutomationQuantumBuffer(state, entityId) } : {};
+  for (const requirement of constructionAutomationRequirements(step)) {
+    const required = Math.max(0, Math.floor(requirement.amount));
+    const alreadyReserved = Math.min(required, Math.max(0, Math.floor(nextInventory[requirement.itemId] ?? 0)));
+    let remaining = required - alreadyReserved;
+    const inTray = Math.max(0, Math.floor(nextTray[requirement.itemId] ?? 0));
+    const fromTray = Math.min(remaining, inTray);
+    nextTray[requirement.itemId] = inTray - fromTray;
+    remaining -= fromTray;
+    const inQuantum = Math.max(0, Math.floor(nextQuantum[requirement.itemId] ?? 0));
+    const fromQuantum = Math.min(remaining, inQuantum);
+    nextQuantum[requirement.itemId] = inQuantum - fromQuantum;
+    remaining -= fromQuantum;
+    if (remaining > 0) return false;
+    nextInventory[requirement.itemId] = Math.floor((nextInventory[requirement.itemId] ?? 0) + fromTray + fromQuantum);
+  }
+  Object.assign(tray, nextTray);
+  job.inventory = nextInventory;
+  if (entityId) setConstructionAutomationQuantumBuffer(state, entityId, nextQuantum);
+  return true;
+}
+
+/**
+ * Repair an old persisted job whose plan assumed an intermediate would remain
+ * in the planet tray. Only material steps are inserted; the original target,
+ * completed prefix and WIP stay authoritative. A true raw/technology blocker
+ * remains blocked and never receives fabricated inventory.
+ */
+function repairConstructionAutomationJob(
+  state: GameState,
+  planetId: PlanetId,
+  job: ConstructionAutomationJob,
+  step: ConstructionAutomationStep,
+  entityId?: string,
+): boolean {
+  const missing = constructionAutomationMissingRequirement(state, planetId, job, step, entityId);
+  if (!missing) return false;
+  const definition = getConstructionAutomationTargetDefinition(job.constructionId);
+  if (!definition) return false;
+  const extraInventory: Partial<Record<ItemId, number>> = { ...job.inventory };
+  if (entityId) {
+    for (const [itemId, rawAmount] of Object.entries(constructionAutomationQuantumBuffer(state, entityId)) as Array<[ItemId, number]>) {
+      const amount = Math.max(0, Math.floor(rawAmount ?? 0));
+      if (amount > 0) extraInventory[itemId] = Math.floor((extraInventory[itemId] ?? 0) + amount);
+    }
+  }
+  const replanned = buildConstructionAutomationPlan(state, definition, planetId, extraInventory);
+  if (replanned.blocker || replanned.steps.length < 1) return false;
+  // Keep the completed prefix for deterministic save/reload history, but
+  // replace every uncommitted step with a fresh plan built from current tray,
+  // WIP and direct quantum material. This avoids consuming WIP that the old
+  // suffix still expected and makes one repair sufficient for the whole job.
+  job.steps.splice(job.stepIndex, job.steps.length - job.stepIndex, ...replanned.steps);
+  job.recipeDecisions = replanned.recipeDecisions;
+  // Inputs are committed only when a step finishes. A legacy job can therefore
+  // safely discard incomplete work when its missing dependency is repaired;
+  // no material or output has yet been consumed or produced.
+  job.elapsedSeconds = 0;
+  return true;
+}
+
 function planConstructionAutomationConsumption(
   inventory: Partial<Record<ItemId, number>>,
   tray: Partial<Record<ItemId, number>>,
@@ -12108,7 +12222,11 @@ function runConstructionCenters(
         continue;
       }
       const duration = constructionAutomationStepDuration(state, step);
-      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) break;
+      if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) {
+        if (repairConstructionAutomationJob(state, entity.planetId, job, step, entity.id)) continue;
+        break;
+      }
+      if (!reserveConstructionAutomationInputs(state, entity.planetId, job, step, entity.id)) break;
       const needed = Math.max(0, duration - job.elapsedSeconds);
       const used = Math.min(remainingWork, needed);
       job.elapsedSeconds = round(job.elapsedSeconds + used, 6);
@@ -12135,6 +12253,79 @@ function runConstructionCenters(
     entity.productionRate = seconds > EPSILON ? round(completed * 60 / seconds, 2) : 0;
     returnUnusedBudget();
   }
+}
+
+export interface ConstructionAutomationMacroResult {
+  completed: number;
+  centersVisited: number;
+}
+
+/**
+ * Advances only the construction-center domain on an already isolated state.
+ *
+ * Offline/pure-idle settlement first credits ordinary production through its
+ * closed material ledger, then calls this function so recursive construction
+ * consumes the resulting real inventories and obeys the ordinary target,
+ * recipe, technology, power and batching rules. No production, logistics,
+ * Dyson, research or elapsed-time subsystem is advanced here.
+ */
+export function advanceConstructionAutomationMacroInPlace(
+  state: GameState,
+  simulationSeconds: number,
+): ConstructionAutomationMacroResult {
+  if (!Number.isFinite(simulationSeconds) || simulationSeconds <= EPSILON ||
+    !state.constructionAutomation.enabled) {
+    return { completed: 0, centersVisited: 0 };
+  }
+  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  if (centers.length === 0) return { completed: 0, centersVisited: 0 };
+  const hasWork = () => Object.keys(state.constructionAutomation.jobs).length > 0 ||
+    getActiveConstructionAutomationTargets(state).some((target) => {
+      const desired = Math.max(0, Math.floor(state.constructionAutomation.targetStock[target.id] ?? 0));
+      return desired > constructionAutomationCurrentStock(state, target.id) + constructionAutomationPending(state, target.id);
+    });
+  const settleIdlePresentation = () => {
+    if (hasWork()) return;
+    for (const center of centers) {
+      center.progress = 0;
+      center.utilization = 0;
+      center.productionRate = 0;
+    }
+  };
+  if (!hasWork()) {
+    settleIdlePresentation();
+    return { completed: 0, centersVisited: centers.length };
+  }
+
+  const lookup = createSimulationLookupContext(state);
+  const reception = calculateDysonReception(state, lookup);
+  const completedBefore = Math.max(0, Math.floor(state.constructionAutomation.totalCrafted));
+  const planetIds = [...new Set(centers.map((entity) => entity.planetId))].sort();
+  for (const planetId of planetIds) {
+    // Power allocation is a point-in-time snapshot. Construction itself does
+    // not burn fuel or mutate storage, so the domain-only tail cannot consume
+    // another subsystem's resources while evaluating its permitted work.
+    const power = combinePowerPlans(POWER_GRID_IDS.map((gridId) =>
+      calculatePower(state, 1, planetId, gridId, reception, lookup)));
+    runConstructionCenters(
+      state,
+      simulationSeconds,
+      power,
+      planetId,
+      lookup.entitiesByPlanet.get(planetId) ?? [],
+      true,
+      undefined,
+      lookup,
+    );
+  }
+  // A large domain-only bucket can satisfy its target early. Persist the
+  // final idle presentation, not an average rate that depends on whether the
+  // same wall interval arrived in one call or several smaller calls.
+  settleIdlePresentation();
+  return {
+    completed: Math.max(0, Math.floor(state.constructionAutomation.totalCrafted) - completedBefore),
+    centersVisited: centers.length,
+  };
 }
 
 function sourceProduces(entity: FactoryEntity, itemId: ItemId): boolean {

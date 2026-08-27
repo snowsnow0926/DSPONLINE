@@ -64,12 +64,14 @@ const TARGET_SLICE_DURATION_SECONDS = 0.35;
 // Approximate slices have a fixed full-state calibration/copy cost. Give each
 // one roughly eight wall seconds of work so large saves do not repeat that
 // cost faster than the device can consume it. Stop still terminates an
-// uncommitted Worker slice and the five-second hard timeout remains unchanged.
+// uncommitted Worker slice immediately. The watchdog allows one 15-second
+// endgame slice because the Worker keeps the UI responsive and the previous
+// five-second limit killed verified 40+ MiB candidates before commit.
 const APPROXIMATE_SLICE_WALL_SECONDS = 8;
 const SLOW_SLICE_DURATION_MS = 700;
 export const TIME_WARP_MAX_EXACT_SLICE_SIMULATION_SECONDS = 12;
 export const TIME_WARP_MAX_SLICE_SIMULATION_SECONDS = 128;
-export const TIME_WARP_WORKER_HARD_TIMEOUT_MS = 5_000;
+export const TIME_WARP_WORKER_HARD_TIMEOUT_MS = 15_000;
 const MIN_PENDING_SLICES = 2.5;
 
 function safeMultiplier(value: number, fallback: number): number {

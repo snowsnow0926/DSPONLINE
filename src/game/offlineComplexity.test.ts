@@ -47,21 +47,21 @@ describe("offline workload classification", () => {
     expect(low.recommendedStrategy).toBe("conservative");
     expect(low.warning).toContain("低内存");
     expect(desktop.recommendedStrategy).toBe("fast");
-    expect(desktop.recommendedDeadlineMs).toBe(30_000);
+    expect(desktop.recommendedDeadlineMs).toBe(90_000);
   });
 
-  it("routes an absolute multi-GiB peak conservatively on a standard desktop", () => {
+  it("uses the single-candidate fast path for a large save on a standard desktop", () => {
     const state = createPlayerInitialState();
     const report = classifyOfflineWorkload(state, 30 * 24 * 60 * 60, {
       serializedBytes: 80 * 1024 * 1024,
       device: { deviceMemoryGb: 16, hardwareConcurrency: 12, coarsePointer: false, workerSupported: true },
     });
-    expect(report.recommendedStrategy).toBe("conservative");
+    expect(report.recommendedStrategy).toBe("fast");
     expect(report.recommendedDeadlineMs).toBe(90_000);
-    expect(report.warning).toContain("内存风险");
+    expect(report.warning).toContain("内存");
   });
 
-  it("gives the three-window conservative calibration enough real-time budget on constrained devices", () => {
+  it("gives large fast calibration enough time while retaining the low-memory conservative boundary", () => {
     const state = createPlayerInitialState();
     const constrained = classifyOfflineWorkload(state, 30 * 24 * 60 * 60, {
       serializedBytes: 80 * 1024 * 1024,
@@ -71,7 +71,7 @@ describe("offline workload classification", () => {
       serializedBytes: 80 * 1024 * 1024,
       device: { deviceMemoryGb: 2, hardwareConcurrency: 2, coarsePointer: true, workerSupported: true },
     });
-    expect(constrained.recommendedStrategy).toBe("conservative");
+    expect(constrained.recommendedStrategy).toBe("fast");
     expect(constrained.recommendedDeadlineMs).toBe(120_000);
     expect(lowMemory.recommendedStrategy).toBe("conservative");
     expect(lowMemory.recommendedDeadlineMs).toBe(180_000);

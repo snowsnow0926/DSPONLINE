@@ -102,7 +102,7 @@ describe("offline macro contract experiment", () => {
     const fast = runFastOfflineSettlement(state, 3_600);
     expect(["approximate", "conservative"]).toContain(fast.status);
     if (fast.status === "approximate" || fast.status === "conservative") {
-      expect(fast.report.algorithmVersion).toBe("fast-30s-v2");
+      expect(fast.report.algorithmVersion).toBe(FAST_OFFLINE_ALGORITHM_VERSION);
       expect(fast.state.research.selectedTechId).toBe("electromagnetic_matrix");
     }
 
@@ -415,8 +415,8 @@ describe("offline macro contract experiment", () => {
       approximatedSeconds: 15,
     });
     expect(first.state.elapsedSeconds).toBe(16);
-    expect(first.report.maxCriticalError).toBe(1);
-    expect(first.report.fallbackReason).toContain("未证明尾段已冻结");
+    expect(first.report.maxCriticalError).toBeLessThanOrEqual(1);
+    expect(first.report.fallbackReason).toBeUndefined();
     expect(hashGameState(first.state)).toBe(hashGameState(second.state));
     expect(hashGameState(source)).toBe(before);
   });

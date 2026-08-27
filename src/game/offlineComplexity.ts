@@ -118,7 +118,7 @@ export function classifyOfflineWorkload(
     layer.frames.length > 0 || layer.shells.length > 0,
   )).length + (state.dysonSwarm.sailsInOrbit > 0 || state.dysonSphere.totalRocketsLaunched > 0 ? 1 : 0);
   const estimatedSerializedBytes = Math.max(0, Math.floor(options.serializedBytes ?? estimateSerializedBytes(state)));
-  // fast-30s-v4-indexed retains the immutable source, one Worker-owned mutable
+  // fast-30s-v5-multisystem-rocket-ledger retains the immutable source, one Worker-owned mutable
   // calibration candidate and compact material/research projections. Lookup
   // indexes are reused while entity/belt array identities remain stable, and
   // four generic full-state calibration/validation clones are no longer kept.

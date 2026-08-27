@@ -1,6 +1,5 @@
 import {
   advanceConstructionAutomationMacroInPlace,
-  advanceDysonRocketMacroInPlace,
   getEffectiveSimulationMultiplier,
   refreshDysonGenerationSnapshot,
   refreshTimeWarpPowerSnapshotInPlace,
@@ -11,6 +10,7 @@ import { MATRIX_ITEM_IDS } from "./content";
 import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
   advanceExactSimulationWindow,
+  advancePureIdleRocketMacroLedgerInPlace,
   applyPureIdleAffineContract,
   applyPureIdleLightweightContractInPlace,
   createPureIdleAffineCalibration,
@@ -26,7 +26,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v7-event-ledger";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v8-multisystem-rocket-ledger";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -126,8 +126,8 @@ export interface PureIdleMacroSession {
   researchRemainder: bigint;
   researchInflowRemainders: ResearchMacroApplicationRemainders;
   rocketLedger?: PureIdleRocketMacroLedger;
-  /** Fractional launch carry for the closed single-system rocket domain. */
-  rocketLaunchRemainder: number;
+  /** Per-system fractional launch carries keep bucket segmentation deterministic. */
+  rocketLaunchRemaindersBySystem: Record<string, number>;
   baseline: PureIdleTerminalSnapshot;
   baselineResearch: ResearchMacroStatus;
   calibrationRate: PureIdleRateSnapshot;
@@ -496,6 +496,7 @@ export function createConservativePureIdleMacroSession(
     inflowPerWindow: {},
   };
   let rocketLedger: PureIdleRocketMacroLedger | undefined;
+  let rocketLedgerRejectionReason: string | undefined;
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
   try {
@@ -511,6 +512,7 @@ export function createConservativePureIdleMacroSession(
     contract = calibrated.contract;
     researchLedger = calibrated.researchLedger;
     rocketLedger = calibrated.rocketLedger;
+    rocketLedgerRejectionReason = calibrated.rocketLedgerRejectionReason;
     refreshDysonGenerationSnapshot(calibrated.calibratedState);
     measuredRate = rateBetween(
       baseline,
@@ -522,6 +524,8 @@ export function createConservativePureIdleMacroSession(
     currentRate = {
       ...emptyRate,
       whiteMatrixProduced: extrapolatesWhiteMatrix ? measuredRate.whiteMatrixProduced : 0,
+      rocketsLaunched: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
+      structurePoints: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
     };
     if (options.consumeCalibrationState) {
       // The Worker request itself is already a structured clone of the
@@ -547,10 +551,13 @@ export function createConservativePureIdleMacroSession(
     candidate = state;
   }
   const productiveTail = !prefixFailure && contract.deltas.length > 0 && contract.maximumSimulationSeconds !== 0;
+  const terminalTailDescription = rocketLedger
+    ? `火箭按 ${Object.keys(rocketLedger.launchesBySystemPerWindow).length} 个恒星系的稳定事件账本推进；太阳帆、出口和合同尾段冻结`
+    : `${rocketLedgerRejectionReason ?? "火箭样本未形成闭合事件账本"}；戴森发射、太阳帆、出口和合同尾段冻结`;
   const degradedReason = prefixFailure
     ? `${reason}；30 秒轻量校准未完成：${prefixFailure}`
     : productiveTail
-      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进，建筑制造巨构再按真实库存递归结算；戴森发射、出口和合同尾段冻结`
+      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进，建筑制造巨构再按真实库存递归结算；${terminalTailDescription}`
       : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
@@ -561,7 +568,7 @@ export function createConservativePureIdleMacroSession(
     researchRemainder: 0n,
     researchInflowRemainders: {},
     ...(rocketLedger ? { rocketLedger } : {}),
-    rocketLaunchRemainder: 0,
+    rocketLaunchRemaindersBySystem: {},
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
@@ -637,7 +644,7 @@ export function createPureIdleMacroSession(
     researchRemainder: 0n,
     researchInflowRemainders: {},
     ...(calibrated.rocketLedger ? { rocketLedger: calibrated.rocketLedger } : {}),
-    rocketLaunchRemainder: 0,
+    rocketLaunchRemaindersBySystem: {},
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(calibrated.rate),
@@ -721,34 +728,15 @@ function advanceClosedRocketDomainInPlace(
 ): { launched: number; failure?: string } {
   const ledger = session.rocketLedger;
   if (!ledger || simulationSeconds <= 1e-9) return { launched: 0 };
-  const destinations = Object.entries(ledger.launchesBySystemPerWindow)
-    .filter(([, amount]) => amount > 0);
-  if (destinations.length !== 1 || ledger.producedPerWindow < ledger.launchedPerWindow ||
-    ledger.calibrationSeconds <= 0) return { launched: 0, failure: "火箭事件账本不再满足单星系闭合条件" };
-  const raw = ledger.launchedPerWindow * simulationSeconds / ledger.calibrationSeconds +
-    session.rocketLaunchRemainder;
-  const launches = Math.max(0, Math.floor(raw + 1e-9));
-  const nextRemainder = raw - launches;
-  if (!Number.isSafeInteger(launches) || !Number.isFinite(nextRemainder) || nextRemainder < -1e-9 || nextRemainder >= 1) {
-    return { launched: 0, failure: "火箭事件账本缩放超过安全整数" };
-  }
-  if (launches < 1) {
-    session.rocketLaunchRemainder = Math.max(0, nextRemainder);
-    return { launched: 0 };
-  }
-  const producedBefore = Math.max(0, Math.floor(session.candidate.totalProduced.small_carrier_rocket ?? 0));
-  if (!Number.isSafeInteger(producedBefore + launches)) {
-    return { launched: 0, failure: "火箭累计生产接近安全整数上限，终端尾段已冻结" };
-  }
-  const [systemId] = destinations[0];
-  const committed = advanceDysonRocketMacroInPlace(session.candidate, { [systemId]: launches });
-  if (committed !== launches) return { launched: 0, failure: "戴森火箭事件边界拒绝提交" };
-  // Every credited launch is funded by at least one rocket manufactured in
-  // the same stable sample. Credit only the immediately launched amount;
-  // sampled surplus and its stock location remain conservatively frozen.
-  session.candidate.totalProduced.small_carrier_rocket = producedBefore + launches;
-  session.rocketLaunchRemainder = Math.max(0, nextRemainder);
-  return { launched: launches };
+  const result = advancePureIdleRocketMacroLedgerInPlace(
+    session.candidate,
+    ledger,
+    simulationSeconds,
+    session.rocketLaunchRemaindersBySystem,
+  );
+  if (result.failure) return { launched: 0, failure: result.failure };
+  session.rocketLaunchRemaindersBySystem = result.remaindersBySystem;
+  return { launched: result.launched };
 }
 
 export function advancePureIdleMacroSession(
@@ -929,6 +917,12 @@ export function advancePureIdleMacroSession(
             ...session.currentRate,
             rocketsLaunched: rate,
             structurePoints: rate,
+          };
+        } else if (session.rocketLedger && rocketSimulationSeconds <= 1e-9) {
+          session.currentRate = {
+            ...session.currentRate,
+            rocketsLaunched: 0,
+            structurePoints: 0,
           };
         }
       }

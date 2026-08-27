@@ -19,8 +19,8 @@ const realSaveDescribe = fixturePath ? describe : describe.skip;
  *
  *   DSP_V120_REAL_PURE_IDLE_FIXTURE=<path> npx vitest run src/game/pureIdleMacroRealSave.test.ts
  */
-realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
-  it("extrapolates ordinary production while keeping terminal tails frozen and reloadable", { timeout: 180_000 }, () => {
+realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () => {
+  it("extrapolates ordinary production and funded multi-system rockets without mutating the source", { timeout: 180_000 }, () => {
     const testStartedAt = performance.now();
     const beforeStat = statSync(fixturePath!);
     const sourceRaw = readFileSync(fixturePath!, "utf8");
@@ -56,6 +56,14 @@ realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
       (checkpoint.totalProduced.universe_matrix ?? 0);
     const calibratedRocketDelta = calibrated.dysonSphere.totalRocketsLaunched -
       checkpoint.dysonSphere.totalRocketsLaunched;
+    const calibratedRocketPlanDeltas = Object.fromEntries(Object.entries(calibrated.dysonPlans)
+      .map(([systemId, plan]) => [
+        systemId,
+        plan.structurePoints - checkpoint.dysonPlans[systemId as keyof typeof checkpoint.dysonPlans].structurePoints,
+      ] as const)
+      .filter(([, delta]) => delta > 0));
+    expect(Object.keys(calibratedRocketPlanDeltas).length).toBeGreaterThan(1);
+    expect(session.rocketLedger).toBeDefined();
     expect(calibratedWhiteDelta).toBeGreaterThan(0);
     const targetWallSeconds = 10 * 60;
     const result = finalizePureIdleMacroCandidate(session, targetWallSeconds);
@@ -70,9 +78,13 @@ realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
       contractVersion: 1,
       settledWallSeconds: targetWallSeconds,
     });
-    console.info("[pure-idle-v7-event-ledger-real-save-settlement]", JSON.stringify({
+    const finalRocketDelta = result.state.dysonSphere.totalRocketsLaunched -
+      checkpoint.dysonSphere.totalRocketsLaunched;
+    console.info("[pure-idle-v8-multisystem-rocket-ledger-real-save-settlement]", JSON.stringify({
       contractDeltas: session.contract.deltas.length,
       rocketLedger: session.rocketLedger,
+      rocketBoundarySeconds: session.contract.maximumSimulationSecondsByItem?.small_carrier_rocket,
+      calibratedRocketPlanDeltas,
       finalWhiteDelta,
       calibratedWhiteDelta,
       lastValidationReason: result.summary.lastValidationReason,
@@ -81,8 +93,11 @@ realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
     }));
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
     expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
-    expect(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched)
-      .toBe(calibratedRocketDelta);
+    expect(finalRocketDelta).toBeGreaterThan(calibratedRocketDelta);
+    for (const systemId of Object.keys(calibratedRocketPlanDeltas) as Array<keyof typeof checkpoint.dysonPlans>) {
+      expect(result.state.dysonPlans[systemId].structurePoints - checkpoint.dysonPlans[systemId].structurePoints)
+        .toBeGreaterThan(calibratedRocketPlanDeltas[systemId]);
+    }
     expect(validatePureIdleTerminalMaterialConservation(checkpoint, result.state)).toBeNull();
     expect(result.state.dysonSphere.structurePoints - checkpoint.dysonSphere.structurePoints)
       .toBe(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched);
@@ -101,7 +116,7 @@ realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
       mtimeMs: afterStat.mtimeMs,
       hash: createHash("sha256").update(afterRaw, "utf8").digest("hex"),
     }).toEqual({ size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, hash: sourceFileHash });
-    console.info("[pure-idle-v7-event-ledger-real-save]", JSON.stringify({
+    console.info("[pure-idle-v8-multisystem-rocket-ledger-real-save]", JSON.stringify({
       sourceBytes: beforeStat.size,
       entityCount: checkpoint.entities.length,
       beltCount: checkpoint.belts.length,
@@ -110,6 +125,7 @@ realSaveDescribe("1.2.3 real-save event-ledger pure-idle gate", () => {
       calibratedWhiteDelta,
       finalWhiteDelta,
       calibratedRocketDelta,
+      finalRocketDelta,
       calibrationMs: Math.round(calibrationFinishedAt - calibrationStartedAt),
       settlementMs: Math.round(settlementFinishedAt - calibrationFinishedAt),
       serializationAndReloadMs: Math.round(serializationFinishedAt - serializationStartedAt),

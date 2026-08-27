@@ -17,6 +17,7 @@ import {
   applyPureIdleAffineContract,
   applyPureIdleLightweightContractInPlace,
   reconcilePureIdleLightweightMaterialDeltas,
+  runFastOfflineSettlement,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
@@ -196,6 +197,41 @@ function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000
     priority: 1,
     totalTransferred: 0,
     lastFlow: 0,
+  });
+}
+
+function addSecondRocketSystemFixture(state: GameState, prefilledRockets = 1_000_000): void {
+  const wind = state.entities.find((entity) => entity.id.startsWith("pure-idle-wind-"));
+  const producer = state.entities.find((entity) => entity.id === "slow-rocket-producer");
+  const silo = state.entities.find((entity) => entity.id === "prefilled-rocket-silo");
+  const feed = state.belts.find((belt) => belt.id === "slow-rocket-feed");
+  if (!wind || !producer || !silo || !feed) throw new Error("primary rocket fixture is incomplete");
+  producer.machineCount = 600;
+  producer.inputs = {
+    dyson_sphere_component: 1_000_000_000,
+    deuteron_fuel_rod: 2_000_000_000,
+    quantum_chip: 1_000_000_000,
+  };
+  state.entities.push({
+    ...structuredClone(wind),
+    id: "borealis-rocket-wind",
+    planetId: "frost",
+  }, {
+    ...structuredClone(producer),
+    id: "borealis-rocket-producer",
+    planetId: "frost",
+  }, {
+    ...structuredClone(silo),
+    id: "borealis-rocket-silo",
+    planetId: "frost",
+    inputs: { small_carrier_rocket: prefilledRockets },
+  });
+  state.belts.push({
+    ...structuredClone(feed),
+    id: "borealis-rocket-feed",
+    planetId: "frost",
+    source: "borealis-rocket-producer",
+    target: "borealis-rocket-silo",
   });
 }
 
@@ -795,6 +831,70 @@ describe("pure idle macro session", () => {
     expect(produced).toBeGreaterThanOrEqual(launches);
     expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
     expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps a stable multi-system rocket ledger deterministic across segmented macro buckets", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source, 0);
+    addSecondRocketSystemFixture(source, 0);
+    advanceExactSimulationWindow(source, 30, 2);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "multi-system closed rocket event-domain regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "multi-system closed rocket event-domain regression",
+    );
+
+    expect(single.rocketLedger, single.degradedReason).toBeDefined();
+    expect(Object.keys(single.rocketLedger?.launchesBySystemPerWindow ?? {}).sort())
+      .toEqual(["borealis", "helios"]);
+    const prefix = single.calibrationCheckpoint!.candidate;
+    const prefixHelios = prefix.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints;
+    const prefixBorealis = prefix.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints;
+
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 7);
+    advancePureIdleMacroSession(segmented, 19);
+    advancePureIdleMacroSession(segmented, 60);
+
+    expect(single.candidate.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints)
+      .toBeGreaterThan(prefixHelios);
+    expect(single.candidate.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints)
+      .toBeGreaterThan(prefixBorealis);
+    expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("uses the same closed multi-system rocket ledger during fast offline settlement", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.enabled = false;
+    source.timeWarp.requestedMultiplier = 1;
+    addRocketConservationFixture(source, 0);
+    addSecondRocketSystemFixture(source, 0);
+    advanceExactSimulationWindow(source, 30, 30);
+    const sourceHash = hashGameState(source);
+
+    const result = runFastOfflineSettlement(source, 10 * 60);
+
+    expect(result.status).toBe("approximate");
+    if (result.status !== "approximate") return;
+    expect(result.state.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched)
+      .toBeGreaterThan(200);
+    expect(result.state.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints)
+      .toBeGreaterThan(0);
+    expect(result.state.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints)
+      .toBeGreaterThan(0);
+    expect(validatePureIdleTerminalMaterialConservation(source, result.state)).toBeNull();
     expect(hashGameState(source)).toBe(sourceHash);
   });
 

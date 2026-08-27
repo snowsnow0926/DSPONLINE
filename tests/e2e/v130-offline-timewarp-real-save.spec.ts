@@ -138,7 +138,10 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
     expect(report.criticalFinite).toBe(true);
     expect(report.committed).toBe(true);
     expect(report.elapsedAdvance).toBeCloseTo(report.seconds, 3);
-    expect(report.approximation).toMatchObject({ mode: "approximate", algorithmVersion: "fast-30s-v4-indexed" });
+    expect(report.approximation).toMatchObject({
+      mode: "approximate",
+      algorithmVersion: "fast-30s-v5-multisystem-rocket-ledger",
+    });
     expect(["approximate", "bounded-exact"]).toContain(report.approximation?.settlementStatus);
     expect(report.workerRoundTripMs).toBeLessThan(120_000);
     expect(report.roundTripMs).toBeLessThan(150_000);

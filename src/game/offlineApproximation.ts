@@ -3,6 +3,7 @@ import { CAMPAIGN_TASKS } from "./campaign";
 import { GALACTIC_EXPORT_DEFINITIONS } from "./endgame";
 import {
   advanceConstructionAutomationMacroInPlace,
+  advanceDysonRocketMacroInPlace,
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
@@ -193,7 +194,7 @@ const FAST_OFFLINE_CALIBRATION_SLICE_SECONDS = 10;
 const FAST_OFFLINE_VALIDATION_SECONDS = 5;
 /** Bounded exact preview used only when no valid calibration candidate exists. */
 export const FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS = 1;
-export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v4-indexed";
+export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v5-multisystem-rocket-ledger";
 export const FAST_OFFLINE_DESKTOP_DEADLINE_MS = 30_000;
 export const FAST_OFFLINE_MOBILE_DEADLINE_MS = 60_000;
 export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-rolling-v5";
@@ -1693,6 +1694,8 @@ export interface PureIdleAffineCalibration {
   researchLedger: ResearchMacroLedger;
   /** Optional first closed terminal event domain; absent means freeze. */
   rocketLedger?: PureIdleRocketMacroLedger;
+  /** Player-facing explanation when the terminal rocket domain must freeze. */
+  rocketLedgerRejectionReason?: string;
   /** Temporary shadow result used only to derive diagnostics, then released. */
   calibratedState: GameState;
   calibrationSeconds: number;
@@ -1706,6 +1709,13 @@ export interface PureIdleRocketMacroLedger {
   launchedPerWindow: number;
   /** Per-system launch weights; their integer sum equals launchedPerWindow. */
   launchesBySystemPerWindow: Record<string, number>;
+}
+
+export interface PureIdleRocketMacroPlan {
+  launched: number;
+  launchesBySystem: Record<string, number>;
+  remaindersBySystem: Record<string, number>;
+  failure?: string;
 }
 
 export interface PureIdleLightweightCalibrationOptions {
@@ -2057,38 +2067,126 @@ function stableNonNegativeWindowDelta(values: readonly number[]): number | null 
   return Number.isSafeInteger(selected) && selected >= 0 ? selected : null;
 }
 
+interface PureIdleRocketMacroLedgerCalibration {
+  ledger?: PureIdleRocketMacroLedger;
+  rejectionReason?: string;
+}
+
 function createPureIdleRocketMacroLedger(
   snapshots: readonly PureIdleRocketCalibrationSnapshot[],
   calibrationSeconds: number,
-): PureIdleRocketMacroLedger | undefined {
+): PureIdleRocketMacroLedgerCalibration {
   const produced = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.produced));
   const launched = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.launched));
   const structure = stableNonNegativeWindowDelta(snapshots.map((snapshot) => snapshot.structurePoints));
-  if (produced === null || launched === null || structure === null || launched < 1 ||
-    structure !== launched || produced < launched) return undefined;
+  if (produced === null) return { rejectionReason: "火箭制造没有形成稳定的 3 × 10 秒窗口" };
+  if (launched === null) return { rejectionReason: "火箭发射没有形成稳定的 3 × 10 秒窗口" };
+  if (structure === null) return { rejectionReason: "戴森结构没有形成稳定的 3 × 10 秒窗口" };
+  if (launched < 1) return { rejectionReason: "校准窗口内没有实际火箭发射" };
+  if (structure !== launched) return { rejectionReason: "结构点增量与火箭发射账本不一致" };
+  if (produced < launched) return { rejectionReason: "校准期火箭制造不足以覆盖发射，不能外推预填库存" };
   const systemIds = new Set(snapshots.flatMap((snapshot) => Object.keys(snapshot.structurePointsBySystem)));
   const launchesBySystemPerWindow: Record<string, number> = {};
   let planned = 0;
   for (const systemId of [...systemIds].sort()) {
     const delta = stableNonNegativeWindowDelta(snapshots.map((snapshot) =>
       snapshot.structurePointsBySystem[systemId] ?? 0));
-    if (delta === null) return undefined;
+    if (delta === null) return { rejectionReason: `恒星系 ${systemId} 的火箭分配没有形成稳定窗口` };
     if (delta > 0) launchesBySystemPerWindow[systemId] = delta;
     planned += delta;
-    if (!Number.isSafeInteger(planned)) return undefined;
+    if (!Number.isSafeInteger(planned)) return { rejectionReason: "多恒星系火箭分配超过安全整数" };
   }
   const activeSystems = Object.values(launchesBySystemPerWindow).filter((amount) => amount > 0).length;
-  // The first event-domain implementation intentionally accepts one launch
-  // destination only. Multi-system weighted allocation needs its own
-  // monotonic apportionment certificate; freezing it is safer than moving
-  // structure between stars when bucket segmentation changes.
-  if (planned !== launched || activeSystems !== 1) return undefined;
+  if (planned !== launched) return { rejectionReason: "各恒星系结构增量无法闭合到全局火箭发射账本" };
+  if (activeSystems < 1) return { rejectionReason: "火箭发射没有合法的目标恒星系" };
   return {
-    calibrationSeconds,
-    producedPerWindow: produced,
-    launchedPerWindow: launched,
-    launchesBySystemPerWindow,
+    ledger: {
+      calibrationSeconds,
+      producedPerWindow: produced,
+      launchedPerWindow: launched,
+      launchesBySystemPerWindow,
+    },
   };
+}
+
+/**
+ * Scale a closed per-system rocket ledger without depending on bucket shape.
+ * Every destination carries its own fractional remainder, so one long call
+ * and any ordered segmentation of the same duration produce the same integer
+ * launch vector. The plan is pure and can be inspected before mutation.
+ */
+export function planPureIdleRocketMacroLedger(
+  ledger: PureIdleRocketMacroLedger,
+  simulationSeconds: number,
+  previousRemainders: Readonly<Record<string, number>> = {},
+): PureIdleRocketMacroPlan {
+  if (!Number.isFinite(simulationSeconds) || simulationSeconds < 0 ||
+    !Number.isFinite(ledger.calibrationSeconds) || ledger.calibrationSeconds <= 0 ||
+    !Number.isSafeInteger(ledger.producedPerWindow) || !Number.isSafeInteger(ledger.launchedPerWindow) ||
+    ledger.producedPerWindow < ledger.launchedPerWindow || ledger.launchedPerWindow < 1) {
+    return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "火箭事件账本参数无效" };
+  }
+  const entries = Object.entries(ledger.launchesBySystemPerWindow)
+    .filter(([, amount]) => amount > 0)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  if (entries.length < 1) {
+    return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "火箭事件账本缺少目标恒星系" };
+  }
+  let plannedPerWindow = 0;
+  let launched = 0;
+  const launchesBySystem: Record<string, number> = {};
+  const remaindersBySystem: Record<string, number> = {};
+  for (const [systemId, amount] of entries) {
+    if (!Number.isSafeInteger(amount) || amount < 1) {
+      return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "恒星系火箭权重不是正安全整数" };
+    }
+    plannedPerWindow += amount;
+    if (!Number.isSafeInteger(plannedPerWindow)) {
+      return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "多恒星系火箭权重超过安全整数" };
+    }
+    const carry = previousRemainders[systemId] ?? 0;
+    if (!Number.isFinite(carry) || carry < 0 || carry >= 1) {
+      return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "恒星系火箭小数余量无效" };
+    }
+    const raw = amount * simulationSeconds / ledger.calibrationSeconds + carry;
+    const integer = Math.max(0, Math.floor(raw + 1e-9));
+    const remainder = raw - integer;
+    if (!Number.isSafeInteger(integer) || !Number.isFinite(remainder) || remainder < -1e-9 || remainder >= 1) {
+      return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "火箭事件账本缩放超过安全整数" };
+    }
+    if (integer > 0) launchesBySystem[systemId] = integer;
+    if (remainder > 1e-12) remaindersBySystem[systemId] = Math.max(0, remainder);
+    launched += integer;
+    if (!Number.isSafeInteger(launched)) {
+      return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "火箭发射总量超过安全整数" };
+    }
+  }
+  if (plannedPerWindow !== ledger.launchedPerWindow) {
+    return { launched: 0, launchesBySystem: {}, remaindersBySystem: {}, failure: "多恒星系火箭权重与全局账本不闭合" };
+  }
+  return { launched, launchesBySystem, remaindersBySystem };
+}
+
+/** Commit an already funded closed rocket event domain atomically. */
+export function advancePureIdleRocketMacroLedgerInPlace(
+  state: GameState,
+  ledger: PureIdleRocketMacroLedger,
+  simulationSeconds: number,
+  previousRemainders: Readonly<Record<string, number>> = {},
+): PureIdleRocketMacroPlan {
+  const plan = planPureIdleRocketMacroLedger(ledger, simulationSeconds, previousRemainders);
+  if (plan.failure || plan.launched < 1) return plan;
+  const producedBefore = Math.max(0, Math.floor(state.totalProduced.small_carrier_rocket ?? 0));
+  if (!Number.isSafeInteger(producedBefore + plan.launched)) {
+    return { ...plan, failure: "火箭累计生产接近安全整数上限，终端尾段已冻结" };
+  }
+  const committed = advanceDysonRocketMacroInPlace(state, plan.launchesBySystem);
+  if (committed !== plan.launched) return { ...plan, failure: "戴森火箭事件边界拒绝提交" };
+  // The compact ordinary contract excludes rocket manufacture and inventory.
+  // Credit exactly the amount immediately consumed by these launches; sampled
+  // surplus and its unknown stock location remain conservatively frozen.
+  state.totalProduced.small_carrier_rocket = producedBefore + plan.launched;
+  return plan;
 }
 
 function ledgerCounter(value: unknown, label: string): bigint {
@@ -2491,13 +2589,20 @@ export function createPureIdleLightweightCalibration(
     const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
     if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
   }
-  const rocketLedger = !activeFiniteResource && topologyStable && contract.deltas.length > 0
-    ? createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS)
-    : undefined;
+  const rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
+    ? { rejectionReason: "存在正在开采的有限矿脉，火箭尾段不能安全外推" }
+    : !topologyStable
+      ? { rejectionReason: "校准期间工厂拓扑发生变化，火箭尾段已冻结" }
+      : contract.deltas.length < 1
+        ? { rejectionReason: "普通生产样本未形成闭合合同，火箭尾段已冻结" }
+        : createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS);
   return {
     contract,
     researchLedger,
-    ...(rocketLedger ? { rocketLedger } : {}),
+    ...(rocketCalibration.ledger ? { rocketLedger: rocketCalibration.ledger } : {}),
+    ...(rocketCalibration.rejectionReason
+      ? { rocketLedgerRejectionReason: rocketCalibration.rejectionReason }
+      : {}),
     calibratedState: shadow,
     calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
     calibrationWallSeconds,
@@ -2563,19 +2668,27 @@ async function createPureIdleLightweightCalibrationAsync(
       calibrationWallSeconds,
     };
   let contract = freezePureIdleLightweightStoreReplenishment(sampledContract);
-  if (hasActiveFinitePureIdleResource(state) || !topologyStable) {
+  const activeFiniteResource = hasActiveFinitePureIdleResource(state);
+  if (activeFiniteResource || !topologyStable) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   } else {
     const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(shadow, sampledContract);
     if (maximumSimulationSecondsByItem !== undefined) contract = { ...contract, maximumSimulationSecondsByItem };
   }
-  const rocketLedger = !hasActiveFinitePureIdleResource(state) && topologyStable && contract.deltas.length > 0
-    ? createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS)
-    : undefined;
+  const rocketCalibration: PureIdleRocketMacroLedgerCalibration = activeFiniteResource
+    ? { rejectionReason: "存在正在开采的有限矿脉，火箭尾段不能安全外推" }
+    : !topologyStable
+      ? { rejectionReason: "校准期间工厂拓扑发生变化，火箭尾段已冻结" }
+      : contract.deltas.length < 1
+        ? { rejectionReason: "普通生产样本未形成闭合合同，火箭尾段已冻结" }
+        : createPureIdleRocketMacroLedger(rocketSnapshots, FAST_OFFLINE_CALIBRATION_SECONDS);
   return {
     contract,
     researchLedger,
-    ...(rocketLedger ? { rocketLedger } : {}),
+    ...(rocketCalibration.ledger ? { rocketLedger: rocketCalibration.ledger } : {}),
+    ...(rocketCalibration.rejectionReason
+      ? { rocketLedgerRejectionReason: rocketCalibration.rejectionReason }
+      : {}),
     calibratedState: shadow,
     calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
     calibrationWallSeconds,
@@ -3784,6 +3897,7 @@ interface FastLightweightPreparedSettlement {
   expectedValidation: AffineSnapshot;
   criticalBaseline: TimeWarpCriticalSnapshot;
   expectedCritical: TimeWarpCriticalSnapshot;
+  rocketValidationPlan?: PureIdleRocketMacroPlan;
   sharedPaths: Map<string, AffinePath>;
   boundaryCorrections: number;
 }
@@ -3827,11 +3941,18 @@ function remainingPureIdleValidationSecondsByItem(
 function criticalSnapshotWithPredictedWhiteMatrix(
   baseline: TimeWarpCriticalSnapshot,
   predicted: AffineSnapshot,
+  rocketPlan?: PureIdleRocketMacroPlan,
 ): TimeWarpCriticalSnapshot {
   const entry = predicted.entries.get(pathKey(["totalProduced", "universe_matrix"]));
+  const planStructurePoints = { ...baseline.planStructurePoints };
+  for (const [systemId, amount] of Object.entries(rocketPlan?.launchesBySystem ?? {})) {
+    planStructurePoints[systemId] = finiteNumber(planStructurePoints[systemId]) + amount;
+  }
   return {
     ...baseline,
-    planStructurePoints: { ...baseline.planStructurePoints },
+    rocketsLaunched: baseline.rocketsLaunched + (rocketPlan?.launched ?? 0),
+    structurePoints: baseline.structurePoints + (rocketPlan?.launched ?? 0),
+    planStructurePoints,
     planShellSails: { ...baseline.planShellSails },
     whiteMatrixProduced: entry?.kind === "number" ? finiteNumber(entry.value) : baseline.whiteMatrixProduced,
   };
@@ -3871,6 +3992,21 @@ function prepareFastLightweightSettlement(
     },
   );
   if (!application.ok) return { failure: application.failure ?? "轻量普通生产合同未通过守恒门禁" };
+  let rocketMacroPlan: PureIdleRocketMacroPlan | undefined;
+  if (calibrated.rocketLedger) {
+    const rocketMacroSeconds = Math.min(
+      creditedMacroSeconds,
+      Math.max(0, creditedMacroSecondsByItem?.small_carrier_rocket ?? creditedMacroSeconds),
+    );
+    rocketMacroPlan = advancePureIdleRocketMacroLedgerInPlace(
+      calibrated.calibratedState,
+      calibrated.rocketLedger,
+      rocketMacroSeconds,
+    );
+    if (rocketMacroPlan.failure) return { failure: rocketMacroPlan.failure };
+    const terminalFailure = validatePureIdleTerminalMaterialConservation(source, calibrated.calibratedState);
+    if (terminalFailure) return { failure: terminalFailure };
+  }
   const researchSeconds = MATRIX_ITEM_IDS.reduce((maximum, itemId) => {
     const itemSeconds = creditedMacroSecondsByItem?.[itemId];
     return itemSeconds === undefined ? maximum : Math.min(maximum, itemSeconds);
@@ -3882,6 +4018,20 @@ function prepareFastLightweightSettlement(
     contract,
     creditedMacroSecondsByItem,
   );
+  const rocketValidationSeconds = calibrated.rocketLedger
+    ? Math.min(
+      FAST_OFFLINE_VALIDATION_SECONDS,
+      Math.max(0, validationSimulationSecondsByItem?.small_carrier_rocket ?? FAST_OFFLINE_VALIDATION_SECONDS),
+    )
+    : 0;
+  const rocketValidationPlan = calibrated.rocketLedger
+    ? planPureIdleRocketMacroLedger(
+      calibrated.rocketLedger,
+      rocketValidationSeconds,
+      rocketMacroPlan?.remaindersBySystem,
+    )
+    : undefined;
+  if (rocketValidationPlan?.failure) return { failure: rocketValidationPlan.failure };
   const validationWallSeconds = wallSeconds * FAST_OFFLINE_VALIDATION_SECONDS / seconds;
   const expectedValidation = predictPureIdleLightweightSnapshot(
     validationBaseline,
@@ -3903,7 +4053,12 @@ function prepareFastLightweightSettlement(
     validationBaseline,
     expectedValidation,
     criticalBaseline,
-    expectedCritical: criticalSnapshotWithPredictedWhiteMatrix(criticalBaseline, expectedValidation),
+    expectedCritical: criticalSnapshotWithPredictedWhiteMatrix(
+      criticalBaseline,
+      expectedValidation,
+      rocketValidationPlan,
+    ),
+    ...(rocketValidationPlan ? { rocketValidationPlan } : {}),
     sharedPaths,
     boundaryCorrections: application.boundaryCorrections,
   };
@@ -3931,10 +4086,14 @@ function finalizeFastLightweightSettlement(
     prepared.expectedValidation,
     actualValidation,
   );
+  const actualCritical = captureTimeWarpCriticalSnapshot(actual);
+  const expectedCritical = prepared.rocketValidationPlan?.launched
+    ? { ...prepared.expectedCritical, dysonGenerationKw: actualCritical.dysonGenerationKw }
+    : prepared.expectedCritical;
   const maxEstimatedError = compareTimeWarpCriticalSnapshots(
     prepared.criticalBaseline,
-    prepared.expectedCritical,
-    captureTimeWarpCriticalSnapshot(actual),
+    expectedCritical,
+    actualCritical,
   );
   if (!Number.isFinite(maxEstimatedError) || maxEstimatedError > FAST_CRITICAL_MAX_ERROR) {
     return runConservativeOfflineSettlement(
@@ -3951,12 +4110,17 @@ function finalizeFastLightweightSettlement(
   actual.elapsedSeconds = source.elapsedSeconds + seconds;
   const speedrunCorrection = normalizeFastSpeedrunClock(actual, source, wallSeconds);
   const normalizedFinal = normalizeFastSettlementState(actual, source);
-  if (!normalizedFinal.ok || !validateFastNumbers(actual)) {
+  const terminalFailure = normalizedFinal.ok
+    ? validatePureIdleTerminalMaterialConservation(source, actual)
+    : undefined;
+  if (!normalizedFinal.ok || terminalFailure || !validateFastNumbers(actual)) {
     return runConservativeOfflineSettlement(
       source,
       seconds,
       wallSeconds,
-      `建筑制造巨构尾段未通过最终存档校验${normalizedFinal.failure ? `：${normalizedFinal.failure}` : ""}`,
+      `建筑制造巨构尾段未通过最终存档校验${normalizedFinal.failure || terminalFailure
+        ? `：${normalizedFinal.failure ?? terminalFailure}`
+        : ""}`,
     );
   }
   return {

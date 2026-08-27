@@ -348,7 +348,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     expect(result.durationMs).toBeLessThan(30_000);
   });
 
-  test("migrates a pure-idle-macro-v2 recovery summary with active research to v5-lite", async ({ page }) => {
+  test("migrates a pure-idle-macro-v2 recovery summary with active research to the current macro engine", async ({ page }) => {
     const result = await page.evaluate(async () => {
       const contentPacks = await import("/src/game/contentPacks.ts");
       const engine = await import("/src/game/engine.ts");
@@ -423,7 +423,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v7-event-ledger");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v8-multisystem-rocket-ledger");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -1053,7 +1053,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v7-event-ledger");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v8-multisystem-rocket-ledger");
     expect(result.complexityStrategy).toBe("fast");
     expect(result.conservativeOnly).toBe(true);
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);

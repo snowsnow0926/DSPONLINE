@@ -10,6 +10,8 @@ use crate::state::CoreState;
 
 const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
 const MAX_PLAYER_BELT_LANES: u64 = 4_096;
+const PLAYER_STATION_SLOT_COUNT: usize = 5;
+const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
 const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
@@ -1186,6 +1188,257 @@ fn validate_entity_power_or_splitter_configuration_command(
     Ok(())
 }
 
+fn validate_station_slot_configuration_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty()
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station slot command shape is invalid")
+    }
+
+    let mut entity_ids = HashSet::new();
+    for record in &command.changed_entities {
+        if !entity_ids.insert(record.id.as_str()) || record.changes.is_empty() {
+            bail!("native player-authority station slot target set is invalid")
+        }
+        let index = *state
+            .entity_index
+            .get(&record.id)
+            .ok_or_else(|| anyhow!("native player-authority station entity is missing"))?;
+        let entity = state.parse_entity(index)?;
+        let object = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority station entity is invalid"))?;
+        let building_id = object
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority station building ID is missing"))?;
+        if object.get("kind").and_then(Value::as_str) != Some("station")
+            || building_id == "orbital_collector"
+            || state
+                .catalog
+                .buildings
+                .get(building_id)
+                .is_none_or(|building| building.kind != "station")
+        {
+            bail!("native player-authority station slot target is not a configurable station")
+        }
+        if let Some(locked) = object.get("interactionLocked")
+            && locked.as_bool() != Some(false)
+        {
+            bail!("native player-authority station slot target is locked or malformed")
+        }
+        let slots = object
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .filter(|slots| slots.len() == PLAYER_STATION_SLOT_COUNT)
+            .ok_or_else(|| anyhow!("native player-authority station slots are invalid"))?;
+        let primary_slot_index = slots.iter().position(|slot| {
+            slot.get("itemId")
+                .and_then(Value::as_str)
+                .is_some_and(|item_id| !item_id.is_empty())
+        });
+
+        let mut seen_slot_fields = HashSet::new();
+        let mut final_limits = BTreeMap::<usize, (u64, u64)>::new();
+        let mut expected_legacy_minimum_load = None;
+        let mut legacy_minimum_load_patch = None;
+        let mut slot_change_count = 0usize;
+        for change in &record.changes {
+            if matches!(
+                change.path.as_slice(),
+                [PathSegment::Key(field)] if field == "stationMinimumLoad"
+            ) {
+                if legacy_minimum_load_patch.is_some() || change.operation != "set" {
+                    bail!("native player-authority station legacy minimum load patch is malformed")
+                }
+                legacy_minimum_load_patch = Some(change.value.as_ref().ok_or_else(|| {
+                    anyhow!("native player-authority station legacy minimum load has no value")
+                })?);
+                continue;
+            }
+            let [
+                PathSegment::Key(root),
+                PathSegment::Index(slot_index),
+                PathSegment::Key(field),
+            ] = change.path.as_slice()
+            else {
+                bail!("native player-authority station slot path is invalid")
+            };
+            if root != "stationSlots"
+                || *slot_index >= PLAYER_STATION_SLOT_COUNT
+                || !seen_slot_fields.insert((*slot_index, field.as_str()))
+                || change.operation != "set"
+            {
+                bail!("native player-authority station slot patch is malformed")
+            }
+            let target = change
+                .value
+                .as_ref()
+                .ok_or_else(|| anyhow!("native player-authority station slot set has no value"))?;
+            let slot = slots[*slot_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native player-authority station slot is invalid"))?;
+            let item_id = slot
+                .get("itemId")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.is_empty())
+                .ok_or_else(|| anyhow!("native player-authority station slot is not configured"))?;
+            if !state.catalog.items.contains_key(item_id) {
+                bail!("native player-authority station slot item is not in the catalog")
+            }
+            let current = slot.get(field).ok_or_else(|| {
+                anyhow!("native player-authority current station slot field is missing")
+            })?;
+            if current == target {
+                bail!("native player-authority station slot target is unchanged")
+            }
+            match field.as_str() {
+                "minimumLoad" => {
+                    let target_number = finite_json_number(Some(target), "station minimum load")?;
+                    if !matches!(target_number, 0.1 | 0.25 | 0.5 | 1.0) {
+                        bail!("native player-authority station minimum load is invalid")
+                    }
+                    let current_number =
+                        finite_json_number(Some(current), "current station minimum load")?;
+                    if !matches!(current_number, 0.1 | 0.25 | 0.5 | 1.0) {
+                        bail!("native player-authority current station minimum load is invalid")
+                    }
+                    if primary_slot_index == Some(*slot_index) {
+                        expected_legacy_minimum_load = Some(target);
+                    }
+                }
+                "minStock" | "maxStock" => {
+                    let target_amount = safe_json_integer(Some(target), "station stock limit")?;
+                    if target_amount > MAX_PLAYER_STATION_STOCK {
+                        bail!("native player-authority station stock limit is too large")
+                    }
+                    let limits = final_limits.entry(*slot_index).or_insert_with(|| {
+                        (
+                            safe_json_integer(
+                                slot.get("minStock"),
+                                "current station minimum stock",
+                            )
+                            .unwrap_or(MAX_PLAYER_STATION_STOCK + 1),
+                            safe_json_integer(
+                                slot.get("maxStock"),
+                                "current station maximum stock",
+                            )
+                            .unwrap_or(MAX_PLAYER_STATION_STOCK + 1),
+                        )
+                    });
+                    if field == "minStock" {
+                        limits.0 = target_amount;
+                    } else {
+                        limits.1 = target_amount;
+                    }
+                }
+                "priority" => {
+                    target
+                        .as_u64()
+                        .filter(|priority| *priority <= 2)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority station priority is invalid")
+                        })?;
+                    current
+                        .as_u64()
+                        .filter(|priority| *priority <= 2)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority current station priority is invalid")
+                        })?;
+                }
+                "routePolicy" => {
+                    if building_id != "interstellar_logistics_station" {
+                        bail!(
+                            "native player-authority station route policy requires an interstellar station"
+                        )
+                    }
+                    target
+                        .as_str()
+                        .filter(|policy| {
+                            matches!(*policy, "direct" | "relay-preferred" | "relay-required")
+                        })
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority station route policy is invalid")
+                        })?;
+                    current
+                        .as_str()
+                        .filter(|policy| {
+                            matches!(*policy, "direct" | "relay-preferred" | "relay-required")
+                        })
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "native player-authority current station route policy is invalid"
+                            )
+                        })?;
+                }
+                "warperBudget" => {
+                    if building_id != "interstellar_logistics_station" {
+                        bail!(
+                            "native player-authority station warper budget requires an interstellar station"
+                        )
+                    }
+                    target
+                        .as_u64()
+                        .filter(|budget| (1..=4).contains(budget))
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority station warper budget is invalid")
+                        })?;
+                    current
+                        .as_u64()
+                        .filter(|budget| (1..=4).contains(budget))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "native player-authority current station warper budget is invalid"
+                            )
+                        })?;
+                }
+                _ => bail!("native player-authority station slot field is not typed"),
+            }
+            slot_change_count += 1;
+        }
+        if slot_change_count == 0 {
+            bail!("native player-authority station slot command has no slot change")
+        }
+        for (minimum, maximum) in final_limits.values() {
+            if *minimum > MAX_PLAYER_STATION_STOCK
+                || *maximum > MAX_PLAYER_STATION_STOCK
+                || (*maximum > 0 && minimum > maximum)
+            {
+                bail!("native player-authority station stock limit pair is invalid")
+            }
+        }
+
+        let current_legacy_minimum_load = object.get("stationMinimumLoad");
+        if let Some(current) = current_legacy_minimum_load {
+            let current = finite_json_number(Some(current), "current legacy station minimum load")?;
+            if !matches!(current, 0.1 | 0.25 | 0.5 | 1.0) {
+                bail!("native player-authority current legacy station minimum load is invalid")
+            }
+        }
+        let legacy_change_required = expected_legacy_minimum_load
+            .is_some_and(|target| current_legacy_minimum_load != Some(target));
+        match (
+            expected_legacy_minimum_load,
+            legacy_minimum_load_patch,
+            legacy_change_required,
+        ) {
+            (Some(expected), Some(actual), true) if expected == actual => {}
+            (Some(_), None, false) => {}
+            (None, None, false) => {}
+            _ => bail!("native player-authority station legacy minimum load is not canonical"),
+        }
+    }
+    Ok(())
+}
+
 struct ValidatedTimeWarpState<'a> {
     value: &'a Map<String, Value>,
     controller_entity_id: Option<&'a str>,
@@ -2213,6 +2466,17 @@ impl CoreState {
         }) {
             return validate_entity_power_or_splitter_configuration_command(self, command);
         }
+        if command.changed_entities.iter().any(|record| {
+            record.changes.iter().any(|change| {
+                matches!(
+                    change.path.first(),
+                    Some(PathSegment::Key(root))
+                        if matches!(root.as_str(), "stationSlots" | "stationMinimumLoad")
+                )
+            })
+        }) {
+            return validate_station_slot_configuration_command(self, command);
+        }
         if !command.changed_entities.is_empty()
             && command.changed_entities.iter().all(|record| {
                 record.changes.iter().all(|change| {
@@ -2729,6 +2993,14 @@ mod tests {
                 {
                     "id": "time_warp_device", "kind": "machine", "speed": 1,
                     "inputCapacity": 0, "outputCapacity": 0
+                },
+                {
+                    "id": "planetary_logistics_station", "kind": "station", "speed": 1,
+                    "inputCapacity": 100000000, "outputCapacity": 100000000
+                },
+                {
+                    "id": "interstellar_logistics_station", "kind": "station", "speed": 1,
+                    "inputCapacity": 100000000, "outputCapacity": 100000000
                 }
             ],
             "recipes": [
@@ -3046,6 +3318,93 @@ mod tests {
         state
     }
 
+    fn station_slots(primary_item_id: Option<&str>) -> Value {
+        Value::Array(
+            (0..PLAYER_STATION_SLOT_COUNT)
+                .map(|slot_index| {
+                    serde_json::json!({
+                        "itemId": if slot_index == 0 { primary_item_id } else { None },
+                        "localMode": if slot_index == 0 { "supply" } else { "storage" },
+                        "remoteMode": if slot_index == 0 { "demand" } else { "storage" },
+                        "minimumLoad": 0.5,
+                        "minStock": 0,
+                        "maxStock": 0,
+                        "priority": 1,
+                        "routePolicy": "relay-preferred",
+                        "warperBudget": 2
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn player_station_configuration_state() -> CoreState {
+        let mut state = player_command_state();
+        let mut addition = empty_player_command(state.revision);
+        addition.added_entities = [
+            (
+                "station-ils",
+                "interstellar_logistics_station",
+                false,
+                station_slots(Some("iron_ore")),
+            ),
+            (
+                "station-pls",
+                "planetary_logistics_station",
+                false,
+                station_slots(Some("iron_ingot")),
+            ),
+            (
+                "station-locked",
+                "interstellar_logistics_station",
+                true,
+                station_slots(Some("iron_ore")),
+            ),
+            (
+                "station-empty",
+                "interstellar_logistics_station",
+                false,
+                station_slots(None),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(offset, (id, building_id, interaction_locked, station_slots))| AddedRecord {
+                index: 3 + offset,
+                value: serde_json::json!({
+                    "id": id,
+                    "kind": "station",
+                    "planetId": "home",
+                    "position": { "x": 10.0 + offset as f64, "y": 3.0 },
+                    "interactionLocked": interaction_locked,
+                    "buildingId": building_id,
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "stationSlots": station_slots,
+                    "storedItemId": "iron_ore",
+                    "stationMode": "demand",
+                    "stationMinimumLoad": 0.5,
+                    "stationProgress": 0,
+                    "stationPeerId": null,
+                    "stationRoutes": [],
+                    "modPayload": { "owner": "pack:test", "revision": 31 + offset }
+                }),
+            },
+        )
+        .collect();
+        state.apply_command(&addition).unwrap();
+        state
+    }
+
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
         SimulationCommandPatch {
             protocol_version: crate::CORE_PROTOCOL_VERSION,
@@ -3160,6 +3519,18 @@ mod tests {
             }],
         }];
         command
+    }
+
+    fn station_slot_leaf(slot_index: usize, field: &str, value: Value) -> ValuePatch {
+        ValuePatch {
+            path: vec![
+                PathSegment::Key("stationSlots".to_owned()),
+                PathSegment::Index(slot_index),
+                PathSegment::Key(field.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(value),
+        }
     }
 
     fn top_level_leaf_command(
@@ -3789,6 +4160,177 @@ mod tests {
             ))
             .unwrap_err();
         assert!(format!("{error:#}").contains("current power grid is invalid"));
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_bounded_station_slot_configuration_atomically() {
+        let mut state = player_station_configuration_state();
+        assert_eq!(state.revision, 10);
+        let mut command = empty_player_command(state.revision);
+        command.changed_entities = vec![RecordPatch {
+            id: "station-ils".to_owned(),
+            changes: vec![
+                station_slot_leaf(0, "minimumLoad", Value::from(0.25)),
+                ValuePatch {
+                    path: vec![PathSegment::Key("stationMinimumLoad".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(0.25)),
+                },
+                station_slot_leaf(0, "minStock", Value::from(100)),
+                station_slot_leaf(0, "maxStock", Value::from(200)),
+                station_slot_leaf(0, "priority", Value::from(2)),
+                station_slot_leaf(0, "routePolicy", Value::from("direct")),
+                station_slot_leaf(0, "warperBudget", Value::from(4)),
+            ],
+        }];
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 10);
+        assert_eq!(applied.revision, 11);
+        assert_eq!(applied.changed_entity_ids, ["station-ils"]);
+        assert!(applied.topology_dirty);
+        let station_index = *state.entity_index.get("station-ils").unwrap();
+        let station = state.parse_entity(station_index).unwrap();
+        assert_eq!(station["stationSlots"][0]["minimumLoad"], 0.25);
+        assert_eq!(station["stationMinimumLoad"], 0.25);
+        assert_eq!(station["stationSlots"][0]["minStock"], 100);
+        assert_eq!(station["stationSlots"][0]["maxStock"], 200);
+        assert_eq!(station["stationSlots"][0]["priority"], 2);
+        assert_eq!(station["stationSlots"][0]["routePolicy"], "direct");
+        assert_eq!(station["stationSlots"][0]["warperBudget"], 4);
+        assert_eq!(
+            station["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 31 })
+        );
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_station_slot_configuration_fails_closed_without_mutation() {
+        let command = |entity_id: &str, changes: Vec<ValuePatch>| {
+            let mut command = empty_player_command(10);
+            command.changed_entities = vec![RecordPatch {
+                id: entity_id.to_owned(),
+                changes,
+            }];
+            command
+        };
+        let legacy_minimum_load = |value: Value| ValuePatch {
+            path: vec![PathSegment::Key("stationMinimumLoad".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(value),
+        };
+        let mut delete_priority = command(
+            "station-ils",
+            vec![station_slot_leaf(0, "priority", Value::from(2))],
+        );
+        delete_priority.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete_priority.changed_entities[0].changes[0].value = None;
+        let mut mixed_top_level = command(
+            "station-ils",
+            vec![station_slot_leaf(0, "priority", Value::from(2))],
+        );
+        mixed_top_level.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let commands = [
+            command(
+                "missing",
+                vec![station_slot_leaf(0, "priority", Value::from(2))],
+            ),
+            command(
+                "station-locked",
+                vec![station_slot_leaf(0, "priority", Value::from(2))],
+            ),
+            command(
+                "station-empty",
+                vec![station_slot_leaf(0, "priority", Value::from(2))],
+            ),
+            command(
+                "station-ils",
+                vec![
+                    station_slot_leaf(0, "minimumLoad", Value::from(0.3)),
+                    legacy_minimum_load(Value::from(0.3)),
+                ],
+            ),
+            command(
+                "station-ils",
+                vec![station_slot_leaf(0, "minimumLoad", Value::from(0.25))],
+            ),
+            command(
+                "station-ils",
+                vec![
+                    station_slot_leaf(0, "minimumLoad", Value::from(0.25)),
+                    legacy_minimum_load(Value::from(1)),
+                ],
+            ),
+            command(
+                "station-ils",
+                vec![
+                    station_slot_leaf(0, "minStock", Value::from(300)),
+                    station_slot_leaf(0, "maxStock", Value::from(200)),
+                ],
+            ),
+            command(
+                "station-pls",
+                vec![station_slot_leaf(0, "routePolicy", Value::from("direct"))],
+            ),
+            command(
+                "station-ils",
+                vec![station_slot_leaf(0, "priority", Value::from(3))],
+            ),
+            command(
+                "station-ils",
+                vec![station_slot_leaf(0, "localMode", Value::from("demand"))],
+            ),
+            command(
+                "station-ils",
+                vec![station_slot_leaf(0, "minStock", Value::from(0))],
+            ),
+            delete_priority,
+            mixed_top_level,
+        ];
+        for command in commands {
+            let mut state = player_station_configuration_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 10);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = player_station_configuration_state();
+        let station_index = *malformed.entity_index.get("station-ils").unwrap();
+        let mut station = malformed.parse_entity(station_index).unwrap();
+        station["stationSlots"][0]["maxStock"] = Value::from("unbounded");
+        let mut corrupt = empty_player_command(malformed.revision);
+        corrupt.changed_entities = vec![RecordPatch {
+            id: "station-ils".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationSlots".to_owned()),
+                    PathSegment::Index(0),
+                ],
+                operation: "set".to_owned(),
+                value: Some(station["stationSlots"][0].clone()),
+            }],
+        }];
+        malformed.apply_command(&corrupt).unwrap();
+        let before = malformed.canonical_sha256().unwrap();
+        let mut malformed_probe = command(
+            "station-ils",
+            vec![station_slot_leaf(0, "minStock", Value::from(1))],
+        );
+        malformed_probe.base_revision = malformed.revision;
+        let error = malformed
+            .apply_player_authority_command(&malformed_probe)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("stock limit pair"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 

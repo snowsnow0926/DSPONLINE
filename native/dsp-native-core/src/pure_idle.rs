@@ -9,7 +9,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-research-rocket-sink-v6";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-research-rocket-sail-product-v7";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -2202,15 +2202,26 @@ fn active_ordinary_recipe_ids(
                 "active recipe {recipe_id} is a research or terminal recipe"
             ));
         }
-        if recipe.inputs.iter().chain(&recipe.outputs).any(|amount| {
-            amount.item_id == TERMINAL_SAIL_ITEM_ID
-                || amount.item_id == TERMINAL_ROCKET_ITEM_ID
+        // A solar sail manufactured as the final output of an ordinary recipe
+        // is just owned material until an ejector consumes it. It is therefore
+        // safe for the closed DAG to deposit the same-window surplus into the
+        // quantum inventory. Any recipe that consumes a sail (including an
+        // active launch terminal) remains excluded unless a separate Dyson
+        // terminal certificate accounts for that consumption.
+        let consumes_sail = recipe
+            .inputs
+            .iter()
+            .any(|input| input.item_id == TERMINAL_SAIL_ITEM_ID);
+        let touches_uncertified_rocket =
+            recipe.inputs.iter().chain(&recipe.outputs).any(|amount| {
+                amount.item_id == TERMINAL_ROCKET_ITEM_ID
                     && (!allow_certified_rocket_terminal
                         || recipe
                             .inputs
                             .iter()
                             .any(|input| input.item_id == TERMINAL_ROCKET_ITEM_ID))
-        }) {
+            });
+        if consumes_sail || touches_uncertified_rocket {
             return Err(format!(
                 "active recipe {recipe_id} touches a Dyson terminal material"
             ));
@@ -4416,6 +4427,7 @@ mod tests {
                     "electromagnetic_matrix",
                     "energy_matrix",
                     "universe_matrix",
+                    "solar_sail",
                     "small_carrier_rocket",
                 ]
                 .into_iter()
@@ -4530,6 +4542,21 @@ mod tests {
                         fuel_item_ids: Vec::new(),
                         fuel_efficiency: 1.0,
                         family: Some("assembler".into()),
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "em_rail_ejector".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
                         accepts: None,
                     },
                     BuildingDefinition {
@@ -4663,6 +4690,23 @@ mod tests {
                         outputs: Vec::new(),
                     },
                     RecipeDefinition {
+                        id: "solar_sail".into(),
+                        name: "solar_sail".into(),
+                        building_id: "assembling_machine_mk1".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "solar_sail".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
                         id: "small_carrier_rocket".into(),
                         name: "small_carrier_rocket".into(),
                         building_id: "assembling_machine_mk1".into(),
@@ -4678,6 +4722,20 @@ mod tests {
                             item_id: "small_carrier_rocket".into(),
                             amount: 1.0,
                         }],
+                    },
+                    RecipeDefinition {
+                        id: "solar_sail_launch".into(),
+                        name: "solar_sail_launch".into(),
+                        building_id: "em_rail_ejector".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "solar_sail".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: Vec::new(),
                     },
                     RecipeDefinition {
                         id: "carrier_rocket_launch".into(),
@@ -5183,7 +5241,12 @@ mod tests {
         state
     }
 
-    fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
+    fn productive_single_recipe_macro_fixture(
+        multiplier: f64,
+        recipe_id: &str,
+        output_item_id: &str,
+        include_sail_launcher: bool,
+    ) -> CoreState {
         let mut base = powered_fixture_base(multiplier, "infinite");
         base["campaign"]["completedTaskIds"] = json!([
             "mine_first_ore",
@@ -5198,76 +5261,103 @@ mod tests {
             "lay_first_belt"
         ]);
         base["quantumLogisticsNetwork"]["enabled"] = json!(true);
-        base["quantumLogisticsNetwork"]["itemCapacities"] =
-            json!({ "iron_ore": "10000000000", "iron_ingot": "10000000000" });
+        base["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000",
+            output_item_id: "10000000000"
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "time_warp_device",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 1,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "vein",
+                "kind": "vein",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "resourceId": "iron_ore",
+                "extractorBuildingId": "mining_machine",
+                "minerCount": 2,
+                "inputs": {},
+                "outputs": { "iron_ore": 0 },
+                "resourceCapacity": 1000000,
+                "resourceRemaining": 1000000,
+                "resourceDepletionRemainder": 0,
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "smelter",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": if recipe_id == "solar_sail" {
+                    "assembling_machine_mk1"
+                } else {
+                    "arc_smelter"
+                },
+                "recipeId": recipe_id,
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 20 },
+                "outputs": { output_item_id: 0 },
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+        ];
+        if include_sail_launcher {
+            entities.push(json!({
+                "id": "sail-ejector",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "em_rail_ejector",
+                "recipeId": "solar_sail_launch",
+                "targetDysonOrbitId": "test-orbit-helios",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "solar_sail": 10_000 },
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "sprayCoaterInstalled": false
+            }));
+        }
         fixture_state_from_parts_with_belts(
             base,
-            vec![
-                json!({
-                    "id": "wind",
-                    "kind": "power",
-                    "planetId": "home",
-                    "powerGridId": "grid-a",
-                    "buildingId": "wind_turbine",
-                    "machineCount": 1,
-                    "minerCount": 0,
-                    "inputs": {},
-                    "outputs": {},
-                    "progress": 0,
-                    "routingCursor": 0,
-                    "utilization": 0,
-                    "productionRate": 0
-                }),
-                json!({
-                    "id": "controller",
-                    "kind": "machine",
-                    "planetId": "home",
-                    "powerGridId": "grid-a",
-                    "buildingId": "time_warp_device",
-                    "machineCount": 1,
-                    "minerCount": 0,
-                    "inputs": {},
-                    "outputs": {},
-                    "progress": 0,
-                    "routingCursor": 0,
-                    "utilization": 1,
-                    "productionRate": 0
-                }),
-                json!({
-                    "id": "vein",
-                    "kind": "vein",
-                    "planetId": "home",
-                    "powerGridId": "grid-a",
-                    "resourceId": "iron_ore",
-                    "extractorBuildingId": "mining_machine",
-                    "minerCount": 2,
-                    "inputs": {},
-                    "outputs": { "iron_ore": 0 },
-                    "resourceCapacity": 1000000,
-                    "resourceRemaining": 1000000,
-                    "resourceDepletionRemainder": 0,
-                    "progress": 0,
-                    "routingCursor": 0,
-                    "utilization": 0,
-                    "productionRate": 0
-                }),
-                json!({
-                    "id": "smelter",
-                    "kind": "machine",
-                    "planetId": "home",
-                    "powerGridId": "grid-a",
-                    "buildingId": "arc_smelter",
-                    "recipeId": "iron_ingot",
-                    "machineCount": 1,
-                    "minerCount": 0,
-                    "inputs": { "iron_ore": 20 },
-                    "outputs": { "iron_ingot": 0 },
-                    "progress": 0,
-                    "routingCursor": 0,
-                    "utilization": 0,
-                    "productionRate": 0
-                }),
-            ],
+            entities,
             vec![json!({
                 "id": "ore-feed",
                 "planetId": "home",
@@ -5282,6 +5372,18 @@ mod tests {
                 "totalTransferred": 0
             })],
         )
+    }
+
+    fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
+        productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false)
+    }
+
+    fn productive_solar_sail_product_macro_fixture(multiplier: f64) -> CoreState {
+        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", false)
+    }
+
+    fn productive_solar_sail_launch_macro_fixture(multiplier: f64) -> CoreState {
+        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", true)
     }
 
     fn productive_rocket_macro_fixture(
@@ -7307,6 +7409,145 @@ mod tests {
                 long.summary().unwrap().canonical_sha256,
                 "multiplier={multiplier}"
             );
+        }
+    }
+
+    #[test]
+    fn macro_v10_certifies_unlaunched_solar_sails_as_owned_terminal_material() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_solar_sail_product_macro_fixture(multiplier);
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+
+            let mut long = initial.clone();
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 60.0, 60.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert!(
+                long_result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("acyclic closed ordinary recipe")),
+                "reason={:?}",
+                long_result.reason
+            );
+            let long_state = long.materialize().unwrap();
+            let prefix_sails = proof_counter(
+                prefix_state["totalProduced"].get(TERMINAL_SAIL_ITEM_ID),
+                "prefix.totalProduced.solar_sail",
+            )
+            .unwrap();
+            let long_sails = proof_counter(
+                long_state["totalProduced"].get(TERMINAL_SAIL_ITEM_ID),
+                "long.totalProduced.solar_sail",
+            )
+            .unwrap();
+            let quantum_sails = proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get(TERMINAL_SAIL_ITEM_ID),
+                "long.quantum.solar_sail",
+            )
+            .unwrap();
+            assert!(long_sails > prefix_sails, "multiplier={multiplier}");
+            assert_eq!(quantum_sails, long_sails - prefix_sails);
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            assert_eq!(long_state["belts"], prefix_state["belts"]);
+            for frozen in [
+                "dysonSwarm",
+                "dysonSphere",
+                "dysonEngineering",
+                "dysonPlans",
+            ] {
+                assert_eq!(
+                    long_state[frozen], prefix_state[frozen],
+                    "multiplier={multiplier} field={frozen}"
+                );
+            }
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 30.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_freezes_an_active_uncertified_solar_sail_launcher_after_exact_prefix() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_solar_sail_launch_macro_fixture(multiplier);
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+            assert!(
+                proof_counter(
+                    prefix_state["dysonSwarm"].get("totalLaunched"),
+                    "prefix.dysonSwarm.totalLaunched",
+                )
+                .unwrap()
+                    > 0,
+                "the exact prefix must exercise the sail terminal"
+            );
+
+            let mut long = initial;
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 600.0, 600.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert!(
+                long_result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("solar-sail")),
+                "reason={:?}",
+                long_result.reason
+            );
+            let long_state = long.materialize().unwrap();
+            for frozen in [
+                "entities",
+                "belts",
+                "totalProduced",
+                "quantumLogisticsNetwork",
+                "dysonSwarm",
+                "dysonSphere",
+                "dysonEngineering",
+                "dysonPlans",
+            ] {
+                assert_eq!(
+                    long_state[frozen], prefix_state[frozen],
+                    "multiplier={multiplier} field={frozen}"
+                );
+            }
+            assert_eq!(number_at(Some(&long_state), &["elapsedSeconds"]), 600.0);
         }
     }
 

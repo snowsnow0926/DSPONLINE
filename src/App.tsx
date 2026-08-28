@@ -12553,7 +12553,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           beltTierMode,
           selectedEntity,
           selectedBelt,
-          selectedCount: selectedEntities.length,
+          selectedCount: factorySelectionToolbarReadModel.selectedCount,
         }}
         factoryActions={{
           onPlacement: (buildingId) => {
@@ -12667,8 +12667,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         placementCount={placementCount}
         continuous={mobileContinuousPlacement}
         connectionLabel={connectionHint?.label ?? (connectionDraft ? `${connectionDraft.itemId ? ITEMS[connectionDraft.itemId].name : "任意物资"}${connectionDraft.handleType === "source" ? "输出" : "输入"}：请选择匹配端口` : null)}
-        selectionCount={selectedEntityIds.length}
-        beltCount={selectedBeltIds.length}
+        selectionCount={factorySelectionToolbarReadModel.selectedCount}
+        beltCount={factorySelectionToolbarReadModel.selectedBeltCount}
         onCountChange={setPlacementCount}
         onContinuousChange={setMobileContinuousPlacement}
         onCancel={() => {
@@ -12720,12 +12720,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         {batchConnectionFailures.length > 0 ? <p className="mobile-batch-connection-actions__error" role="alert">最终复核未通过：{batchConnectionFailures.map((failure) => `第 ${failure.index + 1} 条：${failure.label}`).join("；")}</p> : null}
       </section> : null}
       {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
-        selectedCount={selectedEntityIds.length}
-        beltCount={selectedBeltIds.length}
+        model={factorySelectionToolbarReadModel}
         canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
         canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
-        canLock={selectedEntities.some((entity) => !entity.interactionLocked)}
-        canUnlock={selectedEntities.some((entity) => entity.interactionLocked)}
         onFocus={() => focusEntityIds(selectedEntityIds)}
         onCopy={copySelectionAsBlueprint}
         onUpgrade={() => {

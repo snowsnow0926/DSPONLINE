@@ -1791,7 +1791,8 @@ pub(crate) fn decode_player_authority_command_payload(
         bail!("native player-authority command exceeds its durable payload limit")
     }
     let command = serde_json::from_value::<SimulationCommandPatch>(value.clone())?;
-    let normalized = to_value(&command)?;
+    let mut normalized = to_value(&command)?;
+    align_omitted_delete_values(&mut normalized, value);
     if &normalized != value {
         bail!("native player-authority command payload is not strictly normalized")
     }
@@ -1806,6 +1807,33 @@ pub(crate) fn decode_player_authority_command_payload(
         bail!("native player-authority command payload bounds are invalid")
     }
     Ok(command)
+}
+
+/// Renderer-generated delete patches omit `value`, while the established Rust
+/// command/WAL representation serializes `Option::None` as `value:null`.
+/// Remove only that one canonical field before the strict object comparison;
+/// missing values on `set`, unknown fields and every other shape still fail.
+fn align_omitted_delete_values(normalized: &mut Value, input: &Value) {
+    match (normalized, input) {
+        (Value::Object(normalized), Value::Object(input)) => {
+            if input.get("operation").and_then(Value::as_str) == Some("delete")
+                && !input.contains_key("value")
+            {
+                normalized.remove("value");
+            }
+            for (key, normalized_value) in normalized.iter_mut() {
+                if let Some(input_value) = input.get(key) {
+                    align_omitted_delete_values(normalized_value, input_value);
+                }
+            }
+        }
+        (Value::Array(normalized), Value::Array(input)) => {
+            for (normalized_value, input_value) in normalized.iter_mut().zip(input) {
+                align_omitted_delete_values(normalized_value, input_value);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn player_authority_command_request_sha256(
@@ -2066,6 +2094,55 @@ mod tests {
 
     fn sha(value: &str) -> String {
         hex::encode(Sha256::digest(value.as_bytes()))
+    }
+
+    #[test]
+    fn durable_player_command_normalization_preserves_null_and_delete() {
+        let command = json!({
+            "protocolVersion": 1,
+            "baseRevision": 7,
+            "topLevelChanges": [
+                {
+                    "path": ["nullableProbe"],
+                    "operation": "set",
+                    "value": null
+                },
+                {
+                    "path": ["optionalProbe"],
+                    "operation": "delete"
+                }
+            ],
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        });
+        let decoded = decode_player_authority_command_payload(&command).unwrap();
+        assert_eq!(decoded.top_level_changes[0].value, Some(Value::Null));
+        assert_eq!(decoded.top_level_changes[1].value, None);
+        let mut durable = command.clone();
+        durable["topLevelChanges"][1]["value"] = Value::Null;
+        assert_eq!(to_value(decoded).unwrap(), durable);
+        assert!(decode_player_authority_command_payload(&durable).is_ok());
+        let mut missing_set_value = command.clone();
+        missing_set_value["topLevelChanges"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("value");
+        assert!(
+            decode_player_authority_command_payload(&missing_set_value)
+                .unwrap_err()
+                .to_string()
+                .contains("strictly normalized")
+        );
+        assert_eq!(
+            player_authority_command_request_sha256(RUN_ID, "nullable-delete-command", 7, &durable)
+                .unwrap(),
+            player_authority_command_request_sha256(RUN_ID, "nullable-delete-command", 7, &durable)
+                .unwrap()
+        );
     }
 
     fn publish_checkpoint(store: &mut SaveStore, revision: u64) -> ExactRealtimeCheckpoint {

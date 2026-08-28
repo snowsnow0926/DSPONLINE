@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -17,8 +17,21 @@ pub enum PathSegment {
 pub struct ValuePatch {
     pub path: Vec<PathSegment>,
     pub operation: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_patch_value")]
     pub value: Option<Value>,
+}
+
+/// `Option<Value>` normally decodes an explicit JSON `null` as `None`, which
+/// would make a player command unable to distinguish `set null` from an
+/// omitted value on `delete`. The renderer command protocol deliberately uses
+/// that distinction. Serialization keeps the established durable `value:null`
+/// form for an omitted delete value; the Host accepts the renderer omission
+/// only after proving it is exactly that legacy-compatible form.
+fn deserialize_present_patch_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -509,6 +522,42 @@ impl CoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_json_preserves_explicit_null_and_omitted_delete_value() {
+        let set_null_json = serde_json::json!({
+            "path": ["recipeId"],
+            "operation": "set",
+            "value": null
+        });
+        let set_null: ValuePatch = serde_json::from_value(set_null_json.clone()).unwrap();
+        assert_eq!(set_null.value, Some(Value::Null));
+        assert_eq!(serde_json::to_value(&set_null).unwrap(), set_null_json);
+
+        let delete_json = serde_json::json!({
+            "path": ["targetDysonOrbitId"],
+            "operation": "delete"
+        });
+        let delete: ValuePatch = serde_json::from_value(delete_json.clone()).unwrap();
+        assert_eq!(delete.value, None);
+        assert_eq!(
+            serde_json::to_value(&delete).unwrap(),
+            serde_json::json!({
+                "path": ["targetDysonOrbitId"],
+                "operation": "delete",
+                "value": null
+            })
+        );
+
+        let mut entity = serde_json::json!({
+            "recipeId": "iron_ingot",
+            "targetDysonOrbitId": "orbit-1"
+        });
+        apply_value_patch(&mut entity, &set_null).unwrap();
+        apply_value_patch(&mut entity, &delete).unwrap();
+        assert_eq!(entity["recipeId"], Value::Null);
+        assert!(entity.get("targetDysonOrbitId").is_none());
+    }
 
     fn command_for_path(path: Vec<PathSegment>) -> SimulationCommandPatch {
         SimulationCommandPatch {

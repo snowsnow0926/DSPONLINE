@@ -2925,6 +2925,7 @@ mod tests {
     use super::*;
     use crate::disk_budget::{DiskSpaceProbe, DiskSpaceQuery, MINIMUM_FREE_SPACE_RESERVE_BYTES};
     use sha2::{Digest, Sha256};
+    use std::fs;
     use std::io::Cursor;
     use std::path::Path;
     use std::sync::Arc;
@@ -3446,6 +3447,30 @@ mod tests {
                 "removedBeltIds": []
             }))
             .unwrap(),
+        }
+    }
+
+    fn player_authority_raw_top_level_command(
+        base_revision: u64,
+        command_id: &str,
+        changes: Vec<Value>,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let command = json!({
+            "protocolVersion": 1,
+            "baseRevision": base_revision,
+            "topLevelChanges": changes,
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        });
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: decode_player_authority_command_payload(&command).unwrap(),
         }
     }
 
@@ -3990,6 +4015,162 @@ mod tests {
             committed.changed_belt_ids
         );
         assert_eq!(restarted_duplicate.topology_dirty, committed.topology_dirty);
+    }
+
+    #[test]
+    fn missing_set_value_fails_before_player_command_is_staged() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let summary_before = serde_json::to_value(registry.status(&session_id).unwrap()).unwrap();
+        let checkpoint_before =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let error = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityCommandRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    command_id: "missing-set-value".to_owned(),
+                    base_revision: entry_checkpoint.revision,
+                    command: SimulationCommandPatch {
+                        protocol_version: 1,
+                        base_revision: entry_checkpoint.revision,
+                        top_level_changes: vec![dsp_native_core::command::ValuePatch {
+                            path: vec![dsp_native_core::command::PathSegment::Key(
+                                "nullablePlayerCommandProbe".to_owned(),
+                            )],
+                            operation: "set".to_owned(),
+                            value: None,
+                        }],
+                        changed_entities: Vec::new(),
+                        added_entities: Vec::new(),
+                        removed_entity_ids: Vec::new(),
+                        changed_belts: Vec::new(),
+                        added_belts: Vec::new(),
+                        removed_belt_ids: Vec::new(),
+                    },
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("set patch has no value"));
+        assert_eq!(
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            summary_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            checkpoint_before
+        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
+    }
+
+    #[test]
+    fn nullable_and_delete_player_command_recovers_and_retries_without_drift() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let seeded = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_raw_top_level_command(
+                    entry_checkpoint.revision,
+                    "nullable-delete-seed",
+                    vec![json!({
+                        "path": ["optionalPlayerCommandProbe"],
+                        "operation": "set",
+                        "value": 1
+                    })],
+                ),
+            )
+            .unwrap();
+        let request = || {
+            player_authority_raw_top_level_command(
+                seeded.revision,
+                "nullable-delete-command",
+                vec![
+                    json!({
+                        "path": ["nullablePlayerCommandProbe"],
+                        "operation": "set",
+                        "value": null
+                    }),
+                    json!({
+                        "path": ["optionalPlayerCommandProbe"],
+                        "operation": "delete"
+                    }),
+                ],
+            )
+        };
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let staged = store.require_exact_realtime_lease().unwrap();
+        let staged_command = &staged.pending_command.as_ref().unwrap().command;
+        assert_eq!(
+            staged_command.pointer("/topLevelChanges/0/value"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            staged_command.pointer("/topLevelChanges/1/value"),
+            Some(&Value::Null)
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("staged nullable/delete command must recover");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("nullable-delete-command")
+        );
+        assert_eq!(recovered.command_base_revision, Some(seeded.revision));
+        assert_eq!(recovered.revision, seeded.revision + 1);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "nullable-delete-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(
+            &fs::read(root.path().join("exports/nullable-delete-recovered.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            envelope["state"].get("nullablePlayerCommandProbe"),
+            Some(&Value::Null)
+        );
+        assert!(
+            envelope["state"]
+                .get("optionalPlayerCommandProbe")
+                .is_none()
+        );
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, recovered.revision);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+        assert!(
+            reopened_store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_none()
+        );
     }
 
     #[test]

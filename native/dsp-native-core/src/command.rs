@@ -429,6 +429,155 @@ fn require_exact_set_patch_values(
     Ok(())
 }
 
+fn patch_paths_equal(left: &[PathSegment], right: &[PathSegment]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| match (left, right) {
+                (PathSegment::Key(left), PathSegment::Key(right)) => left == right,
+                (PathSegment::Index(left), PathSegment::Index(right)) => left == right,
+                _ => false,
+            })
+}
+
+fn optional_undefined_station_path(path: &[PathSegment]) -> bool {
+    matches!(
+        path.last(),
+        Some(PathSegment::Key(field)) if field == "stationPeerId"
+    )
+}
+
+fn exact_patch_sets_match(actual: &[ValuePatch], expected: &[ValuePatch]) -> anyhow::Result<()> {
+    if actual.len() != expected.len() {
+        bail!("native player-authority station patch set is incomplete or mixed")
+    }
+    let mut matched = vec![false; expected.len()];
+    for actual_patch in actual {
+        let Some(expected_index) =
+            expected
+                .iter()
+                .enumerate()
+                .find_map(|(index, expected_patch)| {
+                    (!matched[index] && patch_paths_equal(&actual_patch.path, &expected_patch.path))
+                        .then_some(index)
+                })
+        else {
+            bail!("native player-authority station patch path is not canonical")
+        };
+        let expected_patch = &expected[expected_index];
+        let equivalent_optional_delete = expected_patch.operation == "delete"
+            && actual_patch.operation == "set"
+            && actual_patch.value.as_ref().is_none_or(Value::is_null)
+            && optional_undefined_station_path(&actual_patch.path);
+        let equivalent_delete = expected_patch.operation == "delete"
+            && actual_patch.operation == "delete"
+            && actual_patch.value.as_ref().is_none_or(Value::is_null);
+        let equivalent_set = expected_patch.operation == "set"
+            && actual_patch.operation == "set"
+            && actual_patch.value == expected_patch.value;
+        if !equivalent_optional_delete && !equivalent_delete && !equivalent_set {
+            bail!("native player-authority station patch value is not canonical")
+        }
+        matched[expected_index] = true;
+    }
+    if matched.iter().any(|matched| !matched) {
+        bail!("native player-authority station patch set is incomplete")
+    }
+    Ok(())
+}
+
+fn create_expected_value_patches(
+    previous: &Value,
+    current: &Value,
+    path: Vec<PathSegment>,
+    changes: &mut Vec<ValuePatch>,
+) {
+    if previous == current {
+        return;
+    }
+    match (previous, current) {
+        (Value::Array(previous), Value::Array(current)) if previous.len() == current.len() => {
+            for (index, (previous, current)) in previous.iter().zip(current).enumerate() {
+                let mut child_path = path.clone();
+                child_path.push(PathSegment::Index(index));
+                create_expected_value_patches(previous, current, child_path, changes);
+            }
+        }
+        (Value::Object(previous), Value::Object(current)) => {
+            let mut keys = previous
+                .keys()
+                .chain(current.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.dedup();
+            for key in keys {
+                let mut child_path = path.clone();
+                child_path.push(PathSegment::Key(key.clone()));
+                match (previous.get(&key), current.get(&key)) {
+                    (Some(previous), Some(current)) => {
+                        create_expected_value_patches(previous, current, child_path, changes)
+                    }
+                    (Some(_), None) => changes.push(ValuePatch {
+                        path: child_path,
+                        operation: "delete".to_owned(),
+                        value: None,
+                    }),
+                    (None, Some(current)) => changes.push(ValuePatch {
+                        path: child_path,
+                        operation: "set".to_owned(),
+                        value: Some(current.clone()),
+                    }),
+                    (None, None) => unreachable!("a key came from at least one object"),
+                }
+            }
+        }
+        _ => changes.push(ValuePatch {
+            path,
+            operation: "set".to_owned(),
+            value: Some(current.clone()),
+        }),
+    }
+}
+
+fn normalized_nonnegative_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if value.is_null() {
+        return Ok(0);
+    }
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority {label} is invalid"))?
+        .floor()
+        .max(0.0);
+    if value > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority {label} exceeds the safe integer limit")
+    }
+    Ok(value as u64)
+}
+
+fn normalized_nonnegative_inventory(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if value.is_null() {
+        return Ok(0);
+    }
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| anyhow!("native player-authority {label} is invalid"))?
+        .floor();
+    if value > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority {label} exceeds the safe integer limit")
+    }
+    Ok(value as u64)
+}
+
 fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
     value
         .and_then(Value::as_u64)
@@ -616,6 +765,13 @@ fn expected_ordinary_placement_entity(
         .base_value()
         .get("activePlanetId")
         .and_then(Value::as_str)
+        .filter(|planet_id| {
+            state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == *planet_id)
+        })
         .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
     if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id)
         || !state
@@ -1186,6 +1342,568 @@ fn validate_entity_power_or_splitter_configuration_command(
             }
         }
         _ => bail!("native player-authority entity configuration field is not typed"),
+    }
+    Ok(())
+}
+
+fn station_slot_mode_change(change: &ValuePatch) -> Option<(usize, &str)> {
+    match change.path.as_slice() {
+        [
+            PathSegment::Key(root),
+            PathSegment::Index(slot_index),
+            PathSegment::Key(field),
+        ] if root == "stationSlots" && matches!(field.as_str(), "localMode" | "remoteMode") => {
+            Some((*slot_index, field.as_str()))
+        }
+        _ => None,
+    }
+}
+
+fn command_contains_station_slot_mode(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| station_slot_mode_change(change).is_some())
+    })
+}
+
+fn expected_entity_mut<'a>(
+    state: &CoreState,
+    expected: &'a mut BTreeMap<String, (Value, Value)>,
+    entity_id: &str,
+) -> anyhow::Result<&'a mut Value> {
+    if !expected.contains_key(entity_id) {
+        let index = *state
+            .entity_index
+            .get(entity_id)
+            .ok_or_else(|| anyhow!("native player-authority station route entity is missing"))?;
+        let current = state.parse_entity(index)?;
+        expected.insert(entity_id.to_owned(), (current.clone(), current));
+    }
+    Ok(&mut expected
+        .get_mut(entity_id)
+        .expect("expected station entity was inserted")
+        .1)
+}
+
+#[derive(Debug)]
+struct StationRouteWarperRefund {
+    owner_id: Option<String>,
+    fallback_planet_id: String,
+    amount: u64,
+}
+
+fn validate_station_slot_mode_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station mode command shape is invalid")
+    }
+
+    let mut intent = None;
+    for record in &command.changed_entities {
+        for change in &record.changes {
+            let Some((slot_index, field)) = station_slot_mode_change(change) else {
+                continue;
+            };
+            if intent.is_some() || change.operation != "set" {
+                bail!("native player-authority station mode intent is repeated or malformed")
+            }
+            let mode = change
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .filter(|mode| matches!(*mode, "supply" | "demand" | "storage"))
+                .ok_or_else(|| anyhow!("native player-authority station mode target is invalid"))?;
+            intent = Some((
+                record.id.clone(),
+                slot_index,
+                field.to_owned(),
+                mode.to_owned(),
+            ));
+        }
+    }
+    let (target_id, slot_index, mode_field, target_mode) =
+        intent.ok_or_else(|| anyhow!("native player-authority station mode intent is missing"))?;
+    if slot_index >= PLAYER_STATION_SLOT_COUNT {
+        bail!("native player-authority station mode slot is out of range")
+    }
+
+    let target_index = *state
+        .entity_index
+        .get(&target_id)
+        .ok_or_else(|| anyhow!("native player-authority station mode target is missing"))?;
+    let target = state.parse_entity(target_index)?;
+    let target_object = target
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station mode target is invalid"))?;
+    let building_id = target_object
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority station mode building is missing"))?
+        .to_owned();
+    if target_object.get("kind").and_then(Value::as_str) != Some("station")
+        || building_id == "orbital_collector"
+        || state
+            .catalog
+            .buildings
+            .get(&building_id)
+            .is_none_or(|building| building.kind != "station")
+    {
+        bail!("native player-authority station mode target is not configurable")
+    }
+    if let Some(locked) = target_object.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority station mode target is locked or malformed")
+    }
+    let _target_planet_id = target_object
+        .get("planetId")
+        .and_then(Value::as_str)
+        .filter(|planet_id| {
+            state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == *planet_id)
+        })
+        .ok_or_else(|| anyhow!("native player-authority station mode planet is invalid"))?
+        .to_owned();
+    let slots = target_object
+        .get("stationSlots")
+        .and_then(Value::as_array)
+        .filter(|slots| slots.len() == PLAYER_STATION_SLOT_COUNT)
+        .ok_or_else(|| anyhow!("native player-authority station mode slots are invalid"))?;
+    let slot = slots[slot_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station mode slot is invalid"))?;
+    let item_id = slot
+        .get("itemId")
+        .and_then(Value::as_str)
+        .filter(|item_id| state.catalog.items.contains_key(*item_id))
+        .ok_or_else(|| anyhow!("native player-authority station mode slot item is invalid"))?
+        .to_owned();
+    let current_mode = slot
+        .get(&mode_field)
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "supply" | "demand" | "storage"))
+        .ok_or_else(|| anyhow!("native player-authority current station mode is invalid"))?;
+    if current_mode == target_mode {
+        bail!("native player-authority station mode target is unchanged")
+    }
+    let scope = if mode_field == "localMode" {
+        "local"
+    } else {
+        if building_id != "interstellar_logistics_station" {
+            bail!("native player-authority remote mode requires an interstellar station")
+        }
+        "remote"
+    };
+
+    let mut expected_entities = BTreeMap::<String, (Value, Value)>::new();
+    expected_entities.insert(target_id.clone(), (target.clone(), target));
+    let mut refunds = Vec::<StationRouteWarperRefund>::new();
+
+    // Routes are reservations: canceling one releases its cargo in place and
+    // refunds only the warpers already reserved by the owning vessel fleet.
+    // Scan the exact v47 entity directory once and derive every affected
+    // demand/owner record before accepting any renderer-provided leaf.
+    for entity_index in 0..state.entities.kinds.len() {
+        let current = state.parse_entity(entity_index)?;
+        let object = current
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority station route entity is invalid"))?;
+        let Some(routes_value) = object.get("stationRoutes") else {
+            continue;
+        };
+        if routes_value.is_null() {
+            continue;
+        }
+        let routes = routes_value
+            .as_array()
+            .ok_or_else(|| anyhow!("native player-authority station routes are invalid"))?;
+        if routes.is_empty() {
+            continue;
+        }
+        if routes.len() > 65_536 {
+            bail!("native player-authority station route list is too large")
+        }
+        let demand_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| state.entity_index.get(id).copied() == Some(entity_index))
+            .ok_or_else(|| anyhow!("native player-authority station route owner ID is invalid"))?;
+        let demand_building_id = object
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!("native player-authority station route owner building is invalid")
+            })?;
+        if object.get("kind").and_then(Value::as_str) != Some("station")
+            || state
+                .catalog
+                .buildings
+                .get(demand_building_id)
+                .is_none_or(|building| building.kind != "station")
+        {
+            bail!("native player-authority station route owner is not a catalog station")
+        }
+        let demand_planet_id = object
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|planet_id| {
+                state
+                    .catalog
+                    .planets
+                    .iter()
+                    .any(|planet| planet.id == *planet_id)
+            })
+            .ok_or_else(|| anyhow!("native player-authority station route planet is invalid"))?;
+        let mut remaining = Vec::with_capacity(routes.len());
+        let mut canceled_any = false;
+        for route in routes {
+            let route_object = route
+                .as_object()
+                .ok_or_else(|| anyhow!("native player-authority station route is invalid"))?;
+            let route_scope = route_object
+                .get("scope")
+                .and_then(Value::as_str)
+                .filter(|scope| matches!(*scope, "local" | "remote"))
+                .ok_or_else(|| anyhow!("native player-authority station route scope is invalid"))?;
+            let route_slot_index =
+                safe_json_integer(route_object.get("slotIndex"), "station route slot index")?;
+            if route_slot_index >= PLAYER_STATION_SLOT_COUNT as u64 {
+                bail!("native player-authority station route slot is out of range")
+            }
+            let peer_id = route_object
+                .get("peerId")
+                .and_then(Value::as_str)
+                .filter(|peer_id| !peer_id.is_empty())
+                .ok_or_else(|| anyhow!("native player-authority station route peer is invalid"))?;
+            let route_item_id = route_object
+                .get("itemId")
+                .and_then(Value::as_str)
+                .filter(|route_item_id| state.catalog.items.contains_key(*route_item_id))
+                .ok_or_else(|| anyhow!("native player-authority station route item is invalid"))?;
+            safe_json_integer(route_object.get("cargo"), "station route cargo")?;
+            let progress =
+                finite_json_number(route_object.get("progress"), "station route progress")?;
+            if !(0.0..=1.0).contains(&progress) {
+                bail!("native player-authority station route progress is out of range")
+            }
+            let cancel = route_scope == scope
+                && ((demand_id == target_id && route_slot_index as usize == slot_index)
+                    || (peer_id == target_id && route_item_id == item_id));
+            if !cancel {
+                remaining.push(route.clone());
+                continue;
+            }
+            canceled_any = true;
+            let vehicle_count = safe_json_integer(
+                route_object.get("vehicleCount"),
+                "station route vehicle count",
+            )?;
+            let requires_warp = route_object
+                .get("requiresWarp")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route warp state is invalid")
+                })?;
+            let warpers_per_vessel = match route_object.get("warpersPerVessel") {
+                None | Some(Value::Null) => 0,
+                value => safe_json_integer(value, "station route warpers per vessel")?,
+            };
+            let per_vessel = warpers_per_vessel.max(u64::from(requires_warp));
+            let amount = vehicle_count
+                .checked_mul(per_vessel)
+                .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route warper refund overflows")
+                })?;
+            if amount > 0 {
+                let owner_id = match route_object.get("vehicleStationId") {
+                    None | Some(Value::Null) => demand_id.to_owned(),
+                    Some(value) => value
+                        .as_str()
+                        .filter(|owner_id| !owner_id.is_empty())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "native player-authority station route vehicle owner is invalid"
+                            )
+                        })?
+                        .to_owned(),
+                };
+                let compatible_owner = if let Some(index) = state.entity_index.get(&owner_id) {
+                    let owner = state.parse_entity(*index)?;
+                    (owner.get("buildingId").and_then(Value::as_str)
+                        == Some("interstellar_logistics_station"))
+                    .then_some(owner_id)
+                } else {
+                    None
+                };
+                refunds.push(StationRouteWarperRefund {
+                    owner_id: compatible_owner,
+                    fallback_planet_id: demand_planet_id.to_owned(),
+                    amount,
+                });
+            }
+        }
+        let remaining_progress = remaining.iter().try_fold(0.0_f64, |maximum, route| {
+            let progress =
+                finite_json_number(route.get("progress"), "remaining station route progress")?;
+            Ok::<_, anyhow::Error>(maximum.max(progress))
+        })?;
+        let progress_is_current = object
+            .get("stationProgress")
+            .and_then(Value::as_f64)
+            .is_some_and(|current| current.to_bits() == remaining_progress.to_bits());
+        if !canceled_any && progress_is_current {
+            continue;
+        }
+        let expected = expected_entity_mut(state, &mut expected_entities, demand_id)?;
+        let expected_object = expected.as_object_mut().ok_or_else(|| {
+            anyhow!("native player-authority expected station route entity is invalid")
+        })?;
+        expected_object.insert("stationRoutes".to_owned(), Value::Array(remaining));
+        expected_object.insert(
+            "stationProgress".to_owned(),
+            Value::from(remaining_progress),
+        );
+    }
+
+    let mut tray_refunds = BTreeMap::<String, u64>::new();
+    for refund in refunds {
+        let (overflow_planet_id, overflow) = if let Some(owner_id) = refund.owner_id {
+            let owner = expected_entity_mut(state, &mut expected_entities, &owner_id)?;
+            let owner_object = owner.as_object_mut().ok_or_else(|| {
+                anyhow!("native player-authority station route vehicle owner is invalid")
+            })?;
+            if owner_object.get("kind").and_then(Value::as_str) != Some("station")
+                || state
+                    .catalog
+                    .buildings
+                    .get("interstellar_logistics_station")
+                    .is_none_or(|building| building.kind != "station")
+            {
+                bail!("native player-authority station route vehicle owner is incompatible")
+            }
+            let machine_count = safe_json_integer(
+                owner_object.get("machineCount"),
+                "station route vehicle owner stack",
+            )?;
+            let capacity = machine_count
+                .checked_mul(50)
+                .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route warper capacity overflows")
+                })?;
+            let current = normalized_nonnegative_integer(
+                owner_object.get("stationWarpers"),
+                "station route owner warper inventory",
+            )?;
+            let stored = refund.amount.min(capacity.saturating_sub(current));
+            owner_object.insert("stationWarpers".to_owned(), Value::from(current + stored));
+            let overflow = refund.amount - stored;
+            let planet_id = owner_object
+                .get("planetId")
+                .and_then(Value::as_str)
+                .filter(|planet_id| {
+                    state
+                        .catalog
+                        .planets
+                        .iter()
+                        .any(|planet| planet.id == *planet_id)
+                })
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route vehicle owner planet is invalid")
+                })?
+                .to_owned();
+            (planet_id, overflow)
+        } else {
+            (refund.fallback_planet_id, refund.amount)
+        };
+        if overflow > 0 {
+            let total = tray_refunds.entry(overflow_planet_id).or_default();
+            *total = total
+                .checked_add(overflow)
+                .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route tray refund overflows")
+                })?;
+        }
+    }
+
+    // Apply the visible mode and every legacy mirror exactly as
+    // `ensureStationSlots()` does after route cancellation.
+    let expected_target = expected_entity_mut(state, &mut expected_entities, &target_id)?;
+    let expected_target_object = expected_target.as_object_mut().ok_or_else(|| {
+        anyhow!("native player-authority expected station mode target is invalid")
+    })?;
+    let expected_slots = expected_target_object
+        .get_mut("stationSlots")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native player-authority expected station slots are invalid"))?;
+    expected_slots[slot_index]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("native player-authority expected station slot is invalid"))?
+        .insert(mode_field.clone(), Value::from(target_mode));
+    let primary = expected_slots
+        .iter()
+        .find_map(|slot| {
+            let object = slot.as_object()?;
+            let item_id = object.get("itemId")?.as_str()?;
+            Some((
+                item_id.to_owned(),
+                object.get("localMode")?.as_str()?.to_owned(),
+                object.get("remoteMode")?.as_str()?.to_owned(),
+                object.get("minimumLoad")?.clone(),
+            ))
+        })
+        .ok_or_else(|| anyhow!("native player-authority station mode primary slot is missing"))?;
+    if !state.catalog.items.contains_key(&primary.0)
+        || !matches!(primary.1.as_str(), "supply" | "demand" | "storage")
+        || !matches!(primary.2.as_str(), "supply" | "demand" | "storage")
+    {
+        bail!("native player-authority station mode primary slot is invalid")
+    }
+    let minimum_load = finite_json_number(Some(&primary.3), "station mode primary minimum load")?;
+    if !matches!(minimum_load, 0.1 | 0.25 | 0.5 | 1.0) {
+        bail!("native player-authority station mode primary minimum load is invalid")
+    }
+    expected_target_object.insert("storedItemId".to_owned(), Value::from(primary.0));
+    let legacy_mode = if (building_id == "planetary_logistics_station" && primary.1 == "demand")
+        || (building_id == "interstellar_logistics_station" && primary.2 == "demand")
+    {
+        "demand"
+    } else {
+        "supply"
+    };
+    expected_target_object.insert("stationMode".to_owned(), Value::from(legacy_mode));
+    expected_target_object.insert("stationMinimumLoad".to_owned(), primary.3);
+    expected_target_object.insert("stationProgress".to_owned(), Value::from(0));
+    expected_target_object.remove("stationPeerId");
+    if expected_target_object
+        .get("stationRoutes")
+        .is_none_or(Value::is_null)
+    {
+        expected_target_object.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+    }
+
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .filter(|planet_id| {
+            state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == *planet_id)
+        })
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    let base = state.base_value();
+    let mut expected_top_level = Vec::new();
+    for (planet_id, refund) in tray_refunds {
+        if refund == 0 {
+            continue;
+        }
+        if !state.catalog.items.contains_key("space_warper") {
+            bail!("native player-authority space warper is not in the catalog")
+        }
+        if planet_id == active_planet_id {
+            let tray = base
+                .get("tray")
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native player-authority active tray is invalid"))?;
+            let current = normalized_nonnegative_inventory(
+                tray.get("space_warper"),
+                "station route active tray warper inventory",
+            )?;
+            let expected = current
+                .checked_add(refund)
+                .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station route tray refund overflows")
+                })?;
+            expected_top_level.push(ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key("space_warper".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(expected)),
+            });
+        } else {
+            let planet_trays = base
+                .get("planetTrays")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority planet tray directory is invalid")
+                })?;
+            if let Some(tray) = planet_trays.get(&planet_id) {
+                let tray = tray.as_object().ok_or_else(|| {
+                    anyhow!("native player-authority remote planet tray is invalid")
+                })?;
+                let current = normalized_nonnegative_inventory(
+                    tray.get("space_warper"),
+                    "station route remote tray warper inventory",
+                )?;
+                let expected = current
+                    .checked_add(refund)
+                    .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority station route tray refund overflows")
+                    })?;
+                expected_top_level.push(ValuePatch {
+                    path: vec![
+                        PathSegment::Key("planetTrays".to_owned()),
+                        PathSegment::Key(planet_id),
+                        PathSegment::Key("space_warper".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(expected)),
+                });
+            } else {
+                expected_top_level.push(ValuePatch {
+                    path: vec![
+                        PathSegment::Key("planetTrays".to_owned()),
+                        PathSegment::Key(planet_id),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(serde_json::json!({ "space_warper": refund })),
+                });
+            }
+        }
+    }
+    exact_patch_sets_match(&command.top_level_changes, &expected_top_level)?;
+
+    let mut expected_records = BTreeMap::<String, Vec<ValuePatch>>::new();
+    for (entity_id, (current, expected)) in expected_entities {
+        let mut changes = Vec::new();
+        create_expected_value_patches(&current, &expected, Vec::new(), &mut changes);
+        if !changes.is_empty() {
+            expected_records.insert(entity_id, changes);
+        }
+    }
+    if command.changed_entities.len() != expected_records.len() {
+        bail!("native player-authority station mode entity set is incomplete or mixed")
+    }
+    let mut seen_entities = HashSet::new();
+    for record in &command.changed_entities {
+        if !seen_entities.insert(record.id.as_str()) {
+            bail!("native player-authority station mode entity is repeated")
+        }
+        let expected = expected_records.get(&record.id).ok_or_else(|| {
+            anyhow!("native player-authority station mode changed an unrelated entity")
+        })?;
+        exact_patch_sets_match(&record.changes, expected)?;
     }
     Ok(())
 }
@@ -3170,6 +3888,9 @@ impl CoreState {
                 )
             })
         }) {
+            if command_contains_station_slot_mode(command) {
+                return validate_station_slot_mode_command(self, command);
+            }
             return validate_station_slot_configuration_command(self, command);
         }
         if command.changed_entities.iter().any(|record| {
@@ -3267,7 +3988,32 @@ impl CoreState {
         command: &SimulationCommandPatch,
     ) -> anyhow::Result<CommandApplyResult> {
         self.validate_player_authority_command(command)?;
-        self.apply_command(command)
+        if !command_contains_station_slot_mode(command) {
+            return self.apply_command(command);
+        }
+
+        // `createSimulationCommandPatch()` observes optional JavaScript
+        // members before the renderer's durable JSON boundary. Assigning
+        // `undefined` to the peer therefore arrives either as a `set` without
+        // a value or, after its first WAL serialization, a `set` with null.
+        // The station-mode validator above has proved the complete command and
+        // that this is its only optional deletion. Normalize only that typed
+        // player path, keeping generic simulation/replay patch semantics exact.
+        let mut normalized = command.clone();
+        for record in &mut normalized.changed_entities {
+            for change in &mut record.changes {
+                if matches!(
+                    change.path.last(),
+                    Some(PathSegment::Key(field)) if field == "stationPeerId"
+                ) && change.operation == "set"
+                    && change.value.as_ref().is_none_or(Value::is_null)
+                {
+                    change.operation = "delete".to_owned();
+                    change.value = None;
+                }
+            }
+        }
+        self.apply_command(&normalized)
     }
 
     pub fn apply_command(
@@ -4172,6 +4918,224 @@ mod tests {
         .collect();
         state.apply_command(&addition).unwrap();
         state
+    }
+
+    fn station_route(
+        id: &str,
+        peer_id: &str,
+        item_id: &str,
+        scope: &str,
+        progress: f64,
+        vehicle_station_id: &str,
+        warp: (bool, u64),
+    ) -> Value {
+        serde_json::json!({
+            "id": id,
+            "slotIndex": 0,
+            "peerId": peer_id,
+            "itemId": item_id,
+            "scope": scope,
+            "cargo": 100,
+            "vehicleCount": 1,
+            "progress": progress,
+            "duration": 10,
+            "requiresWarp": warp.0,
+            "warpersPerVessel": warp.1,
+            "vehicleStationId": vehicle_station_id,
+            "modPayload": { "owner": "pack:route", "revision": id }
+        })
+    }
+
+    fn player_station_route_mode_state() -> CoreState {
+        let mut state = player_station_configuration_state();
+        let target_routes = serde_json::json!([
+            station_route(
+                "cancel-owned-target",
+                "station-remote",
+                "iron_ore",
+                "remote",
+                0.8,
+                "station-ils",
+                (true, 2),
+            ),
+            station_route(
+                "keep-local-target",
+                "station-pls",
+                "iron_ore",
+                "local",
+                0.4,
+                "station-ils",
+                (false, 0),
+            )
+        ]);
+        let peer_routes = serde_json::json!([
+            station_route(
+                "cancel-owned-peer",
+                "station-ils",
+                "iron_ore",
+                "remote",
+                0.9,
+                "station-remote",
+                (true, 1),
+            ),
+            station_route(
+                "keep-other-item-peer",
+                "station-pls",
+                "iron_ingot",
+                "remote",
+                0.7,
+                "station-remote",
+                (false, 0),
+            )
+        ]);
+        let mut setup = empty_player_command(state.revision);
+        setup.changed_entities = vec![
+            RecordPatch {
+                id: "station-ils".to_owned(),
+                changes: vec![
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationRoutes".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(target_routes),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationProgress".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(0.8)),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationWarpers".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(49)),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationPeerId".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from("station-remote")),
+                    },
+                ],
+            },
+            RecordPatch {
+                id: "station-remote".to_owned(),
+                changes: vec![
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationRoutes".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(peer_routes),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationProgress".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(0.9)),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationWarpers".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(50)),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationPeerId".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from("station-ils")),
+                    },
+                ],
+            },
+        ];
+        state.apply_command(&setup).unwrap();
+        state
+    }
+
+    fn station_remote_mode_with_route_cancellation_command(
+        state: &CoreState,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(state.revision);
+        command.top_level_changes = vec![
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key("space_warper".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(11)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("planetTrays".to_owned()),
+                    PathSegment::Key("ashen".to_owned()),
+                    PathSegment::Key("space_warper".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(8)),
+            },
+        ];
+        command.changed_entities = vec![
+            RecordPatch {
+                id: "station-ils".to_owned(),
+                changes: vec![
+                    station_slot_leaf(0, "remoteMode", Value::from("storage")),
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationMode".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from("supply")),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationProgress".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(0)),
+                    },
+                    // Durable JSON omits the `undefined` value emitted by the
+                    // TypeScript command differ. The typed core persists its
+                    // exact JSON meaning: remove the optional peer field.
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationPeerId".to_owned())],
+                        operation: "set".to_owned(),
+                        value: None,
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationRoutes".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(serde_json::json!([station_route(
+                            "keep-local-target",
+                            "station-pls",
+                            "iron_ore",
+                            "local",
+                            0.4,
+                            "station-ils",
+                            (false, 0),
+                        )])),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationWarpers".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(50)),
+                    },
+                ],
+            },
+            RecordPatch {
+                id: "station-remote".to_owned(),
+                changes: vec![
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationRoutes".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(serde_json::json!([station_route(
+                            "keep-other-item-peer",
+                            "station-pls",
+                            "iron_ingot",
+                            "remote",
+                            0.7,
+                            "station-remote",
+                            (false, 0),
+                        )])),
+                    },
+                    ValuePatch {
+                        path: vec![PathSegment::Key("stationProgress".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(0.7)),
+                    },
+                ],
+            },
+        ];
+        command
     }
 
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
@@ -5202,6 +6166,244 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("stock limit pair"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_switches_station_mode_with_exact_route_and_warper_refunds() {
+        let mut state = player_station_route_mode_state();
+        let previous_revision = state.revision;
+        let command = station_remote_mode_with_route_cancellation_command(&state);
+        let durable_command: SimulationCommandPatch =
+            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
+        assert_eq!(
+            durable_command.changed_entities[0]
+                .changes
+                .iter()
+                .find(|change| path_matches(&change.path, &["stationPeerId"]))
+                .and_then(|change| change.value.as_ref()),
+            Some(&Value::Null)
+        );
+        let applied = state
+            .apply_player_authority_command(&durable_command)
+            .unwrap();
+
+        assert_eq!(applied.previous_revision, previous_revision);
+        assert_eq!(applied.revision, previous_revision + 1);
+        assert_eq!(
+            applied.changed_entity_ids,
+            ["station-ils", "station-remote"]
+        );
+        assert!(applied.topology_dirty);
+        let target = state
+            .parse_entity(*state.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert_eq!(target["stationSlots"][0]["remoteMode"], "storage");
+        assert_eq!(target["stationMode"], "supply");
+        assert_eq!(target["stationProgress"], 0);
+        assert!(target.get("stationPeerId").is_none());
+        assert_eq!(target["stationWarpers"], 50);
+        assert_eq!(target["stationRoutes"][0]["id"], "keep-local-target");
+        assert_eq!(target["stationRoutes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            target["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 31 })
+        );
+
+        let peer = state
+            .parse_entity(*state.entity_index.get("station-remote").unwrap())
+            .unwrap();
+        assert_eq!(peer["stationRoutes"].as_array().unwrap().len(), 1);
+        assert_eq!(peer["stationRoutes"][0]["id"], "keep-other-item-peer");
+        assert_eq!(peer["stationProgress"], 0.7);
+        assert_eq!(peer["stationWarpers"], 50);
+        assert_eq!(peer["stationPeerId"], "station-ils");
+        assert_eq!(state.base_value()["tray"]["space_warper"], 11);
+        assert_eq!(
+            state.base_value()["planetTrays"]["ashen"]["space_warper"],
+            8
+        );
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let error = state
+            .apply_player_authority_command(&durable_command)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn generic_command_preserves_explicit_null_station_peer() {
+        let mut state = player_station_route_mode_state();
+        let mut command = empty_player_command(state.revision);
+        command.changed_entities = vec![RecordPatch {
+            id: "station-ils".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("stationPeerId".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::Null),
+            }],
+        }];
+
+        state.apply_command(&command).unwrap();
+        let station = state
+            .parse_entity(*state.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert_eq!(station.get("stationPeerId"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn player_authority_switches_local_station_mode_and_synchronizes_legacy_item() {
+        let mut state = player_station_configuration_state();
+        let mut command = empty_player_command(state.revision);
+        command.changed_entities = vec![RecordPatch {
+            id: "station-pls".to_owned(),
+            changes: vec![
+                station_slot_leaf(0, "localMode", Value::from("demand")),
+                ValuePatch {
+                    path: vec![PathSegment::Key("storedItemId".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from("iron_ingot")),
+                },
+                ValuePatch {
+                    path: vec![PathSegment::Key("stationPeerId".to_owned())],
+                    operation: "set".to_owned(),
+                    value: None,
+                },
+            ],
+        }];
+
+        state.apply_player_authority_command(&command).unwrap();
+        let station = state
+            .parse_entity(*state.entity_index.get("station-pls").unwrap())
+            .unwrap();
+        assert_eq!(station["stationSlots"][0]["localMode"], "demand");
+        assert_eq!(station["storedItemId"], "iron_ingot");
+        assert_eq!(station["stationMode"], "demand");
+        assert!(station.get("stationPeerId").is_none());
+        assert_eq!(
+            station["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 32 })
+        );
+    }
+
+    #[test]
+    fn player_authority_station_mode_fails_closed_on_forged_or_incomplete_accounting() {
+        let baseline = player_station_route_mode_state();
+        let canonical = station_remote_mode_with_route_cancellation_command(&baseline);
+        let mut forged_tray = canonical.clone();
+        forged_tray.top_level_changes[0].value = Some(Value::from(12));
+        let mut missing_remote_refund = canonical.clone();
+        missing_remote_refund.top_level_changes.pop();
+        let mut missing_route_cancellation = canonical.clone();
+        missing_route_cancellation.changed_entities.pop();
+        let mut forged_owner_inventory = canonical.clone();
+        let owner_patch = forged_owner_inventory.changed_entities[0]
+            .changes
+            .iter_mut()
+            .find(|change| path_matches(&change.path, &["stationWarpers"]))
+            .unwrap();
+        owner_patch.value = Some(Value::from(49));
+        let mut forged_legacy_mode = canonical.clone();
+        let legacy_patch = forged_legacy_mode.changed_entities[0]
+            .changes
+            .iter_mut()
+            .find(|change| path_matches(&change.path, &["stationMode"]))
+            .unwrap();
+        legacy_patch.value = Some(Value::from("demand"));
+        let mut kept_peer = canonical.clone();
+        let peer_patch = kept_peer.changed_entities[0]
+            .changes
+            .iter_mut()
+            .find(|change| path_matches(&change.path, &["stationPeerId"]))
+            .unwrap();
+        peer_patch.operation = "set".to_owned();
+        peer_patch.value = Some(Value::from("station-remote"));
+        let mut mixed_belt = canonical.clone();
+        mixed_belt.removed_belt_ids.push("belt-priority".to_owned());
+        let mut duplicate_intent = canonical.clone();
+        duplicate_intent.changed_entities[0]
+            .changes
+            .push(station_slot_leaf(1, "localMode", Value::from("demand")));
+        let mut unchanged_mode = canonical.clone();
+        unchanged_mode.changed_entities[0].changes[0].value = Some(Value::from("demand"));
+        let mut invalid_mode = canonical.clone();
+        invalid_mode.changed_entities[0].changes[0].value = Some(Value::from("automatic"));
+        let mut empty_slot = canonical.clone();
+        empty_slot.changed_entities[0].changes[0].path = vec![
+            PathSegment::Key("stationSlots".to_owned()),
+            PathSegment::Index(1),
+            PathSegment::Key("remoteMode".to_owned()),
+        ];
+        let mut planetary_remote = canonical.clone();
+        planetary_remote.changed_entities[0].id = "station-pls".to_owned();
+
+        for command in [
+            forged_tray,
+            missing_remote_refund,
+            missing_route_cancellation,
+            forged_owner_inventory,
+            forged_legacy_mode,
+            kept_peer,
+            mixed_belt,
+            duplicate_intent,
+            unchanged_mode,
+            invalid_mode,
+            empty_slot,
+            planetary_remote,
+        ] {
+            let mut state = baseline.clone();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, baseline.revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut locked = baseline.clone();
+        let target_index = *locked.entity_index.get("station-ils").unwrap();
+        let mut target = locked.parse_entity(target_index).unwrap();
+        target["interactionLocked"] = Value::from(true);
+        locked.replace_entity_raw(target_index, serde_json::to_string(&target).unwrap().into());
+        locked.rebuild_indexes().unwrap();
+        let before = locked.canonical_sha256().unwrap();
+        let error = locked
+            .apply_player_authority_command(&station_remote_mode_with_route_cancellation_command(
+                &locked,
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("locked or malformed"));
+        assert_eq!(locked.canonical_sha256().unwrap(), before);
+
+        let mut malformed_route = baseline.clone();
+        let peer_index = *malformed_route.entity_index.get("station-remote").unwrap();
+        let mut peer = malformed_route.parse_entity(peer_index).unwrap();
+        peer["stationRoutes"][0]["cargo"] = Value::from(-1);
+        malformed_route
+            .replace_entity_raw(peer_index, serde_json::to_string(&peer).unwrap().into());
+        malformed_route.rebuild_indexes().unwrap();
+        let before = malformed_route.canonical_sha256().unwrap();
+        let error = malformed_route
+            .apply_player_authority_command(&station_remote_mode_with_route_cancellation_command(
+                &malformed_route,
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("route cargo"));
+        assert_eq!(malformed_route.canonical_sha256().unwrap(), before);
+
+        let mut malformed_owner = baseline.clone();
+        let peer_index = *malformed_owner.entity_index.get("station-remote").unwrap();
+        let mut peer = malformed_owner.parse_entity(peer_index).unwrap();
+        peer["kind"] = Value::from("machine");
+        malformed_owner
+            .replace_entity_raw(peer_index, serde_json::to_string(&peer).unwrap().into());
+        malformed_owner.rebuild_indexes().unwrap();
+        let before = malformed_owner.canonical_sha256().unwrap();
+        let error = malformed_owner
+            .apply_player_authority_command(&station_remote_mode_with_route_cancellation_command(
+                &malformed_owner,
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not a catalog station"));
+        assert_eq!(malformed_owner.canonical_sha256().unwrap(), before);
     }
 
     #[test]

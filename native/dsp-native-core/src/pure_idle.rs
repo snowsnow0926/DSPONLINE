@@ -9,9 +9,10 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-research-sink-v5";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-research-rocket-sink-v6";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
+const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
 const DEFAULT_QUANTUM_ITEM_CAPACITY: i128 = 10_000_000_000;
 const MAX_ADVANCE_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 const EPSILON: f64 = 0.000_001;
@@ -35,6 +36,7 @@ struct DysonTerminalSnapshot {
     orbit_sails_by_system: MaterialTotals,
     orbit_launched_by_system: MaterialTotals,
     orbit_expired_by_system: MaterialTotals,
+    launch_energy_micro_mj: i128,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -106,6 +108,17 @@ struct ResearchSinkCertificate {
     expected: ResearchProofSnapshot,
 }
 
+/// A material-funded terminal receipt for the only Dyson event currently
+/// admitted by the native macro tail. Each rate is a whole rocket per
+/// simulated second and is observed identically in three adjacent exact
+/// windows. Solar-sail state remains entirely frozen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DysonRocketSinkCertificate {
+    launches_per_second: i128,
+    launches_per_second_by_system: MaterialTotals,
+    expected: DysonTerminalSnapshot,
+}
+
 /// A deliberately narrow productive contract. Every admitted item is an
 /// exclusive infinite-vein output whose aggregate owned-stock increase equals
 /// its cumulative production increase in each of three adjacent ten-second
@@ -130,6 +143,10 @@ struct OrdinaryFlowCertificate {
     /// current finite technology or infinite-research level and never crosses
     /// the completion/reward/switch boundary represented by this certificate.
     research: Option<ResearchSinkCertificate>,
+    /// Optional closed rocket terminal. Its launch rate is charged as
+    /// ordinary consumption of `small_carrier_rocket`; no starting inventory
+    /// or launcher cache is credited as a renewable tail source.
+    dyson_rocket: Option<DysonRocketSinkCertificate>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -521,6 +538,7 @@ fn capture_dyson_terminal(
 
     let sphere = base.get("dysonSphere");
     let swarm = base.get("dysonSwarm");
+    let engineering = base.get("dysonEngineering");
     let mut snapshot = DysonTerminalSnapshot {
         rockets_launched: counter_at(
             sphere,
@@ -537,6 +555,12 @@ fn capture_dyson_terminal(
             "dysonSphere.totalSailsAbsorbed",
         )?,
         shell_sails: counter_at(sphere, "shellSails", "dysonSphere.shellSails")?,
+        launch_energy_micro_mj: proof_fixed_micros(
+            engineering
+                .and_then(Value::as_object)
+                .and_then(|object| object.get("launchEnergySpentMj")),
+            "dysonEngineering.launchEnergySpentMj",
+        )?,
         ..DysonTerminalSnapshot::default()
     };
 
@@ -2083,7 +2107,10 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
     None
 }
 
-fn active_ordinary_recipe_ids(state: &CoreState) -> Result<Vec<String>, String> {
+fn active_ordinary_recipe_ids(
+    state: &CoreState,
+    allow_certified_rocket_terminal: bool,
+) -> Result<Vec<String>, String> {
     if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
         return Err(format!("ordinary recipe tail is excluded while {reason}"));
     }
@@ -2158,16 +2185,31 @@ fn active_ordinary_recipe_ids(state: &CoreState) -> Result<Vec<String>, String> 
             }
             continue;
         }
+        if recipe_id == "carrier_rocket_launch" {
+            if allow_certified_rocket_terminal {
+                // The launcher is validated as a terminal event domain by
+                // `build_dyson_rocket_sink_certificate`; it is deliberately
+                // not inserted into the ordinary recipe DAG because it has no
+                // material output.
+                continue;
+            }
+            return Err(
+                "active carrier_rocket_launch has no certified Dyson rocket sink".to_owned(),
+            );
+        }
         if recipe.inputs.is_empty() || recipe.outputs.is_empty() {
             return Err(format!(
                 "active recipe {recipe_id} is a research or terminal recipe"
             ));
         }
         if recipe.inputs.iter().chain(&recipe.outputs).any(|amount| {
-            matches!(
-                amount.item_id.as_str(),
-                TERMINAL_ROCKET_ITEM_ID | TERMINAL_SAIL_ITEM_ID
-            )
+            amount.item_id == TERMINAL_SAIL_ITEM_ID
+                || amount.item_id == TERMINAL_ROCKET_ITEM_ID
+                    && (!allow_certified_rocket_terminal
+                        || recipe
+                            .inputs
+                            .iter()
+                            .any(|input| input.item_id == TERMINAL_ROCKET_ITEM_ID))
         }) {
             return Err(format!(
                 "active recipe {recipe_id} touches a Dyson terminal material"
@@ -2215,8 +2257,9 @@ struct OrdinaryWindowFlow {
 fn capture_ordinary_window_flow(
     before: &SettlementProofSnapshot,
     after: &SettlementProofSnapshot,
+    allow_certified_rocket_terminal: bool,
 ) -> Result<OrdinaryWindowFlow, String> {
-    if before.dyson != after.dyson {
+    if !allow_certified_rocket_terminal && before.dyson != after.dyson {
         return Err("Dyson rocket, sail or structure state changed during calibration".to_owned());
     }
     if before.construction_outputs != after.construction_outputs
@@ -2425,6 +2468,248 @@ fn stable_window_rate(deltas: &[i128], label: &str) -> Result<i128, String> {
         ));
     }
     Ok(deltas[0] / window_seconds)
+}
+
+fn dyson_sail_state_unchanged(
+    before: &DysonTerminalSnapshot,
+    after: &DysonTerminalSnapshot,
+) -> bool {
+    before.sails_launched == after.sails_launched
+        && before.sails_expired == after.sails_expired
+        && before.sails_in_orbit == after.sails_in_orbit
+        && before.sails_absorbed == after.sails_absorbed
+        && before.shell_sails == after.shell_sails
+        && before.shell_by_system == after.shell_by_system
+        && before.orbit_sails_by_system == after.orbit_sails_by_system
+        && before.orbit_launched_by_system == after.orbit_launched_by_system
+        && before.orbit_expired_by_system == after.orbit_expired_by_system
+}
+
+fn validate_certified_rocket_launcher_domain(state: &CoreState) -> Result<(), String> {
+    let recipe = state
+        .catalog
+        .recipes
+        .get("carrier_rocket_launch")
+        .ok_or_else(|| "carrier_rocket_launch recipe is absent from the catalog".to_owned())?;
+    if recipe.building_id != "vertical_launching_silo"
+        || !recipe.outputs.is_empty()
+        || recipe.inputs.len() != 1
+        || recipe.inputs[0].item_id != TERMINAL_ROCKET_ITEM_ID
+        || recipe.inputs[0].amount != 1.0
+    {
+        return Err(
+            "carrier_rocket_launch is not the canonical one-rocket terminal sink".to_owned(),
+        );
+    }
+    if crate::dyson::launch_factor(state.base_value(), "carrier_rocket_launch") <= EPSILON {
+        return Err("Dyson rocket launch is disabled or throttled to zero".to_owned());
+    }
+
+    let mut active_launchers = 0_usize;
+    for entity_index in 0..state.entity_index.len() {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("Dyson launcher decode failed: {error:#}"))?;
+        if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
+            continue;
+        }
+        match entity.get("recipeId").and_then(Value::as_str) {
+            Some("solar_sail_launch") => {
+                return Err(
+                    "solar-sail launch is active; the native rocket certificate freezes every sail domain"
+                        .to_owned(),
+                );
+            }
+            Some("carrier_rocket_launch") => {}
+            _ => continue,
+        }
+        if entity.get("buildingId").and_then(Value::as_str) != Some("vertical_launching_silo") {
+            return Err(
+                "carrier_rocket_launch is installed in an incompatible building".to_owned(),
+            );
+        }
+        if entity.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true) {
+            return Err(
+                "rocket launcher uses proliferator without a closed launch-bonus ledger".to_owned(),
+            );
+        }
+        let inputs = entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .map(|inputs| inputs.keys().map(String::as_str).collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        let outputs = entity
+            .get("outputs")
+            .and_then(Value::as_object)
+            .map(|outputs| outputs.keys().map(String::as_str).collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        if inputs != BTreeSet::from([TERMINAL_ROCKET_ITEM_ID]) || !outputs.is_empty() {
+            return Err(
+                "rocket launcher slots do not match the canonical terminal ledger".to_owned(),
+            );
+        }
+        let planet_id = entity
+            .get("planetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "rocket launcher has no planet".to_owned())?;
+        let system_id = state
+            .catalog
+            .planets
+            .iter()
+            .find(|planet| planet.id == planet_id)
+            .map(|planet| planet.system_id.as_str())
+            .ok_or_else(|| format!("rocket launcher planet {planet_id} is absent from catalog"))?;
+        if state
+            .base_value()
+            .get("dysonPlans")
+            .and_then(Value::as_object)
+            .is_none_or(|plans| plans.get(system_id).and_then(Value::as_object).is_none())
+        {
+            return Err(format!(
+                "rocket launcher target system {system_id} has no Dyson plan"
+            ));
+        }
+        active_launchers = active_launchers
+            .checked_add(1)
+            .ok_or_else(|| "rocket launcher count overflowed".to_owned())?;
+    }
+    if active_launchers == 0 {
+        return Err("calibrated rocket launches have no active vertical silo".to_owned());
+    }
+    Ok(())
+}
+
+fn build_dyson_rocket_sink_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<DysonRocketSinkCertificate>, String> {
+    if snapshots.len() != 4 {
+        return Err("Dyson rocket calibration requires four snapshots".to_owned());
+    }
+    if snapshots
+        .windows(2)
+        .all(|window| window[0].dyson == window[1].dyson)
+    {
+        return Ok(None);
+    }
+    let current = capture_dyson_terminal(state.base_value())
+        .map_err(|error| format!("current Dyson terminal state is invalid: {error:#}"))?;
+    if current != snapshots[0].dyson && current != snapshots[3].dyson {
+        return Err("current Dyson state is not a calibration endpoint".to_owned());
+    }
+
+    let mut launch_deltas = Vec::with_capacity(3);
+    let mut structure_deltas = Vec::with_capacity(3);
+    let mut system_deltas = BTreeMap::<String, Vec<i128>>::new();
+    let system_ids = snapshots
+        .iter()
+        .flat_map(|snapshot| snapshot.dyson.structure_by_system.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    for window in snapshots.windows(2) {
+        let before = &window[0].dyson;
+        let after = &window[1].dyson;
+        if !dyson_sail_state_unchanged(before, after) {
+            return Err(
+                "solar-sail launch, orbit, expiry, absorption or shell state changed during rocket calibration"
+                    .to_owned(),
+            );
+        }
+        let launched = checked_terminal_delta(
+            after.rockets_launched,
+            before.rockets_launched,
+            "Dyson rocket launch",
+        )?;
+        let structure = checked_terminal_delta(
+            after.structure_points,
+            before.structure_points,
+            "Dyson structure point",
+        )?;
+        if launched != structure {
+            return Err(format!(
+                "Dyson rocket delta {launched} does not equal structure delta {structure}"
+            ));
+        }
+        let energy = checked_terminal_delta(
+            after.launch_energy_micro_mj,
+            before.launch_energy_micro_mj,
+            "Dyson launch-energy",
+        )?;
+        let expected_energy = launched
+            .checked_mul(DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ)
+            .ok_or_else(|| "Dyson rocket energy calibration overflowed".to_owned())?;
+        if energy != expected_energy {
+            return Err(format!(
+                "Dyson rocket energy delta {energy} does not match {launched} launch event(s)"
+            ));
+        }
+
+        let mut system_sum = 0_i128;
+        for system_id in &system_ids {
+            let delta = checked_material_delta(
+                &before.structure_by_system,
+                &after.structure_by_system,
+                system_id,
+                "dysonPlans.structurePoints",
+            )?;
+            if delta < 0 {
+                return Err(format!(
+                    "dysonPlans.{system_id}.structurePoints regressed during calibration"
+                ));
+            }
+            system_sum = system_sum
+                .checked_add(delta)
+                .ok_or_else(|| "per-system Dyson structure calibration overflowed".to_owned())?;
+            system_deltas
+                .entry(system_id.clone())
+                .or_default()
+                .push(delta);
+        }
+        if system_sum != structure {
+            return Err(format!(
+                "per-system structure delta {system_sum} does not equal global structure delta {structure}"
+            ));
+        }
+        launch_deltas.push(launched);
+        structure_deltas.push(structure);
+    }
+
+    let launches_per_second = stable_window_rate(&launch_deltas, "Dyson rocket launch")?;
+    let structure_per_second = stable_window_rate(&structure_deltas, "Dyson structure point")?;
+    if launches_per_second != structure_per_second {
+        return Err("stable rocket and structure rates diverged".to_owned());
+    }
+    if launches_per_second == 0 {
+        if snapshots
+            .windows(2)
+            .any(|window| window[0].dyson != window[1].dyson)
+        {
+            return Err("Dyson state changed without a rocket launch".to_owned());
+        }
+        return Ok(None);
+    }
+
+    validate_certified_rocket_launcher_domain(state)?;
+    let mut launches_per_second_by_system = MaterialTotals::new();
+    let mut system_rate_sum = 0_i128;
+    for (system_id, deltas) in system_deltas {
+        let rate = stable_window_rate(&deltas, &format!("dysonPlans.{system_id}.structurePoints"))?;
+        if rate > 0 {
+            launches_per_second_by_system.insert(system_id, rate);
+            system_rate_sum = system_rate_sum
+                .checked_add(rate)
+                .ok_or_else(|| "per-system rocket rate sum overflowed".to_owned())?;
+        }
+    }
+    if launches_per_second_by_system.is_empty() || system_rate_sum != launches_per_second {
+        return Err(format!(
+            "per-system rocket rate {system_rate_sum}/s does not close to global rate {launches_per_second}/s"
+        ));
+    }
+    Ok(Some(DysonRocketSinkCertificate {
+        launches_per_second,
+        launches_per_second_by_system,
+        expected: current,
+    }))
 }
 
 fn build_research_sink_certificate(
@@ -2664,10 +2949,13 @@ fn build_closed_recipe_certificate(
     sources: &BTreeSet<String>,
     flow: &OrdinaryWindowFlow,
     research: Option<ResearchSinkCertificate>,
+    dyson_rocket: Option<DysonRocketSinkCertificate>,
 ) -> Result<OrdinaryFlowCertificate, String> {
-    let recipe_ids = active_ordinary_recipe_ids(state)?;
-    if recipe_ids.is_empty() && research.is_none() {
-        return Err("no active ordinary recipe or research sink is available".to_owned());
+    let recipe_ids = active_ordinary_recipe_ids(state, dyson_rocket.is_some())?;
+    if recipe_ids.is_empty() && research.is_none() && dyson_rocket.is_none() {
+        return Err(
+            "no active ordinary recipe, research sink or Dyson rocket sink is available".to_owned(),
+        );
     }
 
     // Recipe IDs are retained in first-seen entity order. The topological
@@ -2786,6 +3074,18 @@ fn build_closed_recipe_certificate(
             allowed_consumption.insert(item_id.clone());
         }
     }
+    if let Some(rocket) = &dyson_rocket {
+        if !output_producer.contains_key(TERMINAL_ROCKET_ITEM_ID) {
+            return Err(
+                "Dyson rocket sink has no active certified small-carrier-rocket producer"
+                    .to_owned(),
+            );
+        }
+        allowed_consumption.insert(TERMINAL_ROCKET_ITEM_ID.to_owned());
+        if rocket.launches_per_second <= 0 {
+            return Err("Dyson rocket sink has a non-positive launch rate".to_owned());
+        }
+    }
     for item_id in flow.produced_per_second.keys() {
         if !allowed_production.contains(item_id) {
             return Err(format!(
@@ -2839,6 +3139,18 @@ fn build_closed_recipe_certificate(
         .as_ref()
         .map(|research| research.consumed_units_per_second.clone())
         .unwrap_or_default();
+    if let Some(rocket) = &dyson_rocket {
+        let current = expected_consumption
+            .get(TERMINAL_ROCKET_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        expected_consumption.insert(
+            TERMINAL_ROCKET_ITEM_ID.to_owned(),
+            current
+                .checked_add(rocket.launches_per_second)
+                .ok_or_else(|| "Dyson rocket consumption rate overflowed".to_owned())?,
+        );
+    }
     for (recipe_index, inputs) in recipe_inputs.iter().enumerate() {
         for (item_id, input_amount) in inputs {
             let consumed = input_amount
@@ -2865,7 +3177,7 @@ fn build_closed_recipe_certificate(
         &flow.net_owned_per_second,
         &expected_consumption,
     ]);
-    let mut has_terminal_product = research.is_some();
+    let mut has_terminal_product = research.is_some() || dyson_rocket.is_some();
     for item_id in ledger_items {
         if !allowed_production.contains(&item_id) && !allowed_consumption.contains(&item_id) {
             return Err(format!(
@@ -2904,6 +3216,7 @@ fn build_closed_recipe_certificate(
         consumed_units_per_second: flow.consumed_per_second.clone(),
         recipe_ids,
         research,
+        dyson_rocket,
     })
 }
 
@@ -2943,10 +3256,15 @@ fn build_ordinary_flow_certificate(
 
     let sources = exclusive_infinite_vein_sources(state)?;
     let research = build_research_sink_certificate(state, snapshots)?;
+    let dyson_rocket = build_dyson_rocket_sink_certificate(state, snapshots)?;
     let recipe_rejection = (|| {
         let mut windows = Vec::with_capacity(3);
         for window in snapshots.windows(2) {
-            windows.push(capture_ordinary_window_flow(&window[0], &window[1])?);
+            windows.push(capture_ordinary_window_flow(
+                &window[0],
+                &window[1],
+                dyson_rocket.is_some(),
+            )?);
         }
         let flow = windows
             .first()
@@ -2955,7 +3273,13 @@ fn build_ordinary_flow_certificate(
         if windows.iter().skip(1).any(|window| window != &flow) {
             return Err("ordinary production/consumption/ownership rates were unstable across the three calibration windows".to_owned());
         }
-        build_closed_recipe_certificate(state, &sources, &flow, research.clone())
+        build_closed_recipe_certificate(
+            state,
+            &sources,
+            &flow,
+            research.clone(),
+            dyson_rocket.clone(),
+        )
     })();
     if let Ok(certificate) = recipe_rejection {
         return Ok(certificate);
@@ -2965,7 +3289,10 @@ fn build_ordinary_flow_certificate(
     // Source-only is a strict subset, not a recovery path for a malformed or
     // unclosed active recipe domain. Otherwise a blocked/cyclic factory could
     // still receive extrapolated mining while its material consumers freeze.
-    if !active_ordinary_recipe_ids(state)?.is_empty() || research.is_some() {
+    if !active_ordinary_recipe_ids(state, dyson_rocket.is_some())?.is_empty()
+        || research.is_some()
+        || dyson_rocket.is_some()
+    {
         return Err(recipe_rejection);
     }
 
@@ -3041,6 +3368,7 @@ fn build_ordinary_flow_certificate(
         consumed_units_per_second: MaterialTotals::new(),
         recipe_ids: Vec::new(),
         research: None,
+        dyson_rocket: None,
     })
 }
 
@@ -3113,6 +3441,8 @@ struct OrdinaryFlowApplication {
     consumed_units: i128,
     recipe_certified: bool,
     research_certified: bool,
+    rocket_certified: bool,
+    rockets_launched: i128,
     capacity_limited: bool,
 }
 
@@ -3124,6 +3454,7 @@ fn apply_source_only_flow_certificate(
 ) -> Result<OrdinaryFlowApplication, String> {
     if certificate.produced_units_per_second != certificate.units_per_second
         || !certificate.consumed_units_per_second.is_empty()
+        || certificate.dyson_rocket.is_some()
     {
         return Err("source-only certificate has an invalid closed-flow identity".to_owned());
     }
@@ -3247,7 +3578,10 @@ fn apply_ordinary_flow_certificate(
     elapsed_before: f64,
     elapsed_after: f64,
 ) -> Result<OrdinaryFlowApplication, String> {
-    if certificate.recipe_ids.is_empty() && certificate.research.is_none() {
+    if certificate.recipe_ids.is_empty()
+        && certificate.research.is_none()
+        && certificate.dyson_rocket.is_none()
+    {
         return apply_source_only_flow_certificate(
             state,
             certificate,
@@ -3336,11 +3670,37 @@ fn apply_ordinary_flow_certificate(
         .ok_or_else(|| "totalProduced is malformed".to_owned())?;
 
     let research = certificate.research.clone();
+    let dyson_rocket = certificate.dyson_rocket.clone();
     if let Some(research) = &research {
         let current = capture_research_proof_snapshot(state)
             .map_err(|error| format!("research sink state is invalid: {error:#}"))?;
         if current != research.expected {
             return Err("research sink state diverged from its certified endpoint".to_owned());
+        }
+    }
+    if let Some(rocket) = &dyson_rocket {
+        let current = capture_dyson_terminal(state.base_value())
+            .map_err(|error| format!("Dyson rocket sink state is invalid: {error:#}"))?;
+        if current != rocket.expected {
+            return Err("Dyson rocket sink state diverged from its certified endpoint".to_owned());
+        }
+        let material_consumption = certificate
+            .consumed_units_per_second
+            .get(TERMINAL_ROCKET_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        let material_production = certificate
+            .produced_units_per_second
+            .get(TERMINAL_ROCKET_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        if material_consumption != rocket.launches_per_second
+            || material_production < rocket.launches_per_second
+        {
+            return Err(
+                "Dyson rocket sink is no longer funded by the closed ordinary-flow ledger"
+                    .to_owned(),
+            );
         }
     }
 
@@ -3391,6 +3751,14 @@ fn apply_ordinary_flow_certificate(
                     accepted_seconds.min(level_cost.saturating_sub(progress.progress) / rate);
             }
         }
+    }
+    if let Some(rocket) = &dyson_rocket {
+        let dyson_horizon = crate::dyson::certified_rocket_launch_capacity_seconds(
+            state.base_value(),
+            &rocket.launches_per_second_by_system,
+        )
+        .map_err(|error| format!("Dyson rocket capacity proof failed: {error:#}"))?;
+        accepted_seconds = accepted_seconds.min(dyson_horizon);
     }
     let mut inventory_baselines = MaterialTotals::new();
     for (item_id, rate) in &certificate.units_per_second {
@@ -3443,6 +3811,7 @@ fn apply_ordinary_flow_certificate(
         certified_items: certified_ids.len(),
         recipe_certified: !certificate.recipe_ids.is_empty(),
         research_certified: research.is_some(),
+        rocket_certified: dyson_rocket.is_some(),
         capacity_limited: accepted_seconds < scheduled_seconds,
         ..OrdinaryFlowApplication::default()
     };
@@ -3573,6 +3942,39 @@ fn apply_ordinary_flow_certificate(
             .expect("cloned research certificate remains installed")
             .expected = next;
     }
+    if let Some(rocket) = dyson_rocket {
+        let mut launches_by_system = MaterialTotals::new();
+        for (system_id, rate) in &rocket.launches_per_second_by_system {
+            let launched = rate
+                .checked_mul(accepted_seconds)
+                .ok_or_else(|| format!("dysonPlans.{system_id} rocket schedule overflowed"))?;
+            if launched > 0 {
+                launches_by_system.insert(system_id.clone(), launched);
+            }
+        }
+        let launched = crate::dyson::apply_certified_rocket_launches(
+            state.base_value_mut(),
+            &launches_by_system,
+        )
+        .map_err(|error| format!("Dyson rocket commit failed: {error:#}"))?;
+        let expected_launches = rocket
+            .launches_per_second
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| "Dyson rocket schedule overflowed".to_owned())?;
+        if launched != expected_launches {
+            return Err(format!(
+                "Dyson rocket commit launched {launched} instead of {expected_launches}"
+            ));
+        }
+        application.rockets_launched = launched;
+        let next = capture_dyson_terminal(state.base_value())
+            .map_err(|error| format!("committed Dyson rocket state is invalid: {error:#}"))?;
+        certificate
+            .dyson_rocket
+            .as_mut()
+            .expect("cloned Dyson rocket certificate remains installed")
+            .expected = next;
+    }
     Ok(application)
 }
 
@@ -3621,8 +4023,12 @@ fn prove_internal_exact_settlement_candidate(
 /// quantum inventory while crediting gross `totalProduced` from the runtime
 /// produced/consumed ledger. A separately proven matrix-lab sink may advance
 /// only the currently selected finite technology or infinite-research level,
-/// clipped before completion, rewards or switching. Finite resources,
-/// stored/fuel energy, construction and every other terminal remain frozen.
+/// clipped before completion, rewards or switching. A separately proven
+/// carrier-rocket sink may launch only the same-window manufactured whole
+/// rockets, update the matching per-system plans and rederive Dyson power;
+/// starting silo inventory and every solar-sail field remain frozen. Finite
+/// resources, stored/fuel energy, construction and every other terminal remain
+/// frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -3632,8 +4038,8 @@ pub(crate) fn advance(
 
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
 /// calibration boundary and can settle only the source or closed recipe-DAG
-/// ordinary flow authorized by `OrdinaryFlowCertificate`; all other tail
-/// domains freeze.
+/// ordinary flow plus its explicitly closed research/rocket sinks authorized
+/// by `OrdinaryFlowCertificate`; all other tail domains freeze.
 pub(crate) fn advance_macro_v10(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -3838,43 +4244,55 @@ fn advance_bounded(
                         );
                     }
                 };
-                tail_reason = Some(if ordinary_application.deposited_units > 0 {
-                    let scope = if ordinary_application.recipe_certified {
-                        "acyclic closed ordinary recipe"
-                    } else {
-                        "source-only ordinary"
-                    };
-                    let research_scope = if ordinary_application.research_certified {
-                        " the certified current-level research sink advanced without crossing its reward/switch boundary;"
-                    } else {
-                        " research remained frozen;"
-                    };
-                    format!(
-                        "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{research_scope} construction and other terminal tails remained frozen{}",
-                        ordinary_application.certified_items,
-                        ordinary_application.deposited_units,
-                        ordinary_application.produced_units,
-                        ordinary_application.consumed_units,
-                        if ordinary_application.capacity_limited {
-                            " at the proven capacity horizon"
+                tail_reason = Some(
+                    if ordinary_application.deposited_units > 0
+                        || ordinary_application.rockets_launched > 0
+                    {
+                        let scope = if ordinary_application.recipe_certified {
+                            "acyclic closed ordinary recipe"
                         } else {
-                            ""
-                        }
-                    )
-                } else if ordinary_application.research_certified
-                    && ordinary_application.produced_units > 0
-                {
-                    format!(
-                        "certified current-level research sink consumed closed ordinary production without net quantum deposit; it stopped before completion, rewards or switching{}",
-                        if ordinary_application.capacity_limited {
-                            " at the proven research/capacity horizon"
+                            "source-only ordinary"
+                        };
+                        let research_scope = if ordinary_application.research_certified {
+                            " the certified current-level research sink advanced without crossing its reward/switch boundary;"
                         } else {
-                            ""
-                        }
-                    )
-                } else {
-                    "certified ordinary flow reached its closed quantum/production capacity horizon; every material-bearing tail remained frozen".to_owned()
-                });
+                            " research remained frozen;"
+                        };
+                        let rocket_scope = if ordinary_application.rocket_certified {
+                            format!(
+                                " {} material-funded rocket(s) launched into certified per-system Dyson plans;",
+                                ordinary_application.rockets_launched
+                            )
+                        } else {
+                            " Dyson rocket and sail terminals remained frozen;".to_owned()
+                        };
+                        format!(
+                            "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{rocket_scope}{research_scope} construction and other terminal tails remained frozen{}",
+                            ordinary_application.certified_items,
+                            ordinary_application.deposited_units,
+                            ordinary_application.produced_units,
+                            ordinary_application.consumed_units,
+                            if ordinary_application.capacity_limited {
+                                " at the proven capacity horizon"
+                            } else {
+                                ""
+                            }
+                        )
+                    } else if ordinary_application.research_certified
+                        && ordinary_application.produced_units > 0
+                    {
+                        format!(
+                            "certified current-level research sink consumed closed ordinary production without net quantum deposit; it stopped before completion, rewards or switching{}",
+                            if ordinary_application.capacity_limited {
+                                " at the proven research/capacity horizon"
+                            } else {
+                                ""
+                            }
+                        )
+                    } else {
+                        "certified ordinary flow reached its closed quantum/production capacity horizon; every material-bearing tail remained frozen".to_owned()
+                    },
+                );
             } else {
                 tail_reason = Some(format!(
                     "ordinary-flow tail froze because no closed three-window certificate was available: {}",
@@ -3998,6 +4416,7 @@ mod tests {
                     "electromagnetic_matrix",
                     "energy_matrix",
                     "universe_matrix",
+                    "small_carrier_rocket",
                 ]
                 .into_iter()
                 .map(|id| ItemDefinition {
@@ -4085,6 +4504,36 @@ mod tests {
                     },
                     BuildingDefinition {
                         id: "matrix_lab".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "assembling_machine_mk1".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 1_000_000.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: Some("assembler".into()),
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "vertical_launching_silo".into(),
                         kind: "machine".into(),
                         speed: 1.0,
                         input_capacity: 1_000_000.0,
@@ -4213,6 +4662,37 @@ mod tests {
                         inputs: Vec::new(),
                         outputs: Vec::new(),
                     },
+                    RecipeDefinition {
+                        id: "small_carrier_rocket".into(),
+                        name: "small_carrier_rocket".into(),
+                        building_id: "assembling_machine_mk1".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "small_carrier_rocket".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "carrier_rocket_launch".into(),
+                        name: "carrier_rocket_launch".into(),
+                        building_id: "vertical_launching_silo".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "small_carrier_rocket".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: Vec::new(),
+                    },
                 ],
                 constructions: vec![
                     ConstructionDefinition {
@@ -4283,6 +4763,20 @@ mod tests {
             "pure-idle-test",
         )
         .unwrap()
+    }
+
+    fn fixture_catalog_with_outpost() -> RuntimeCatalog {
+        let mut snapshot = fixture_catalog().snapshot;
+        snapshot.planets.push(PlanetDefinition {
+            id: "outpost".into(),
+            name: "outpost".into(),
+            system_id: "borealis".into(),
+            kind: "terrestrial".into(),
+            orbit_index: 1,
+            simulation_order: 1,
+            orbital_yields: HashMap::new(),
+        });
+        RuntimeCatalog::validate(snapshot, "pure-idle-test").unwrap()
     }
 
     fn powered_fixture_base(multiplier: f64, resource_mode: &str) -> Value {
@@ -4540,6 +5034,15 @@ mod tests {
         entities: Vec<Value>,
         belts: Vec<Value>,
     ) -> CoreState {
+        fixture_state_from_parts_with_belts_and_catalog(base, entities, belts, fixture_catalog())
+    }
+
+    fn fixture_state_from_parts_with_belts_and_catalog(
+        base: Value,
+        entities: Vec<Value>,
+        belts: Vec<Value>,
+        catalog: RuntimeCatalog,
+    ) -> CoreState {
         let base = serde_json::to_vec(&base).unwrap();
         let entity_count = entities.len();
         let entities = serde_json::to_vec(&entities).unwrap();
@@ -4607,7 +5110,7 @@ mod tests {
                 base_primary_checksum: "12345678".into(),
             },
             &records,
-            fixture_catalog(),
+            catalog,
         )
         .unwrap()
     }
@@ -4779,6 +5282,130 @@ mod tests {
                 "totalTransferred": 0
             })],
         )
+    }
+
+    fn productive_rocket_macro_fixture(
+        multiplier: f64,
+        resource_mode: &str,
+        systems: usize,
+        rocket_producer_count: i64,
+        prefilled_rockets_per_silo: i64,
+    ) -> CoreState {
+        assert!((1..=2).contains(&systems));
+        let mut base = powered_fixture_base(multiplier, resource_mode);
+        base["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["campaign"]["rewardedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        base["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000",
+            "small_carrier_rocket": "10000000000"
+        });
+        if systems == 2 {
+            base["planetTrays"]["outpost"] = json!({});
+            base["planetTrayItemLimits"]["outpost"] = json!(1_000_000);
+            base["planetMetrics"]["outpost"] = json!({});
+            base["powerGridMetrics"]["outpost"] = json!({});
+            base["exploration"]["colonizedPlanetIds"] = json!(["home", "outpost"]);
+            base["exploration"]["unlockedSystemIds"] = json!(["helios", "borealis"]);
+            base["exploration"]["surveyProgressBySystem"]["borealis"] = json!(1);
+            base["galaxy"]["profiles"]["outpost"] = json!({
+                "windMultiplier": 1,
+                "solarMultiplier": 1,
+                "geothermalMultiplier": 1,
+                "miningMultiplier": 1,
+                "productionSpeedMultiplier": 1,
+                "specialization": "balanced",
+                "oceanType": "none"
+            });
+        }
+
+        let mut entities = vec![
+            json!({
+                "id": "wind", "kind": "power", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "time_warp_device",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 1,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "vein", "kind": "vein", "planetId": "home",
+                "powerGridId": "grid-a", "resourceId": "iron_ore",
+                "extractorBuildingId": "mining_machine",
+                "minerCount": rocket_producer_count * 2,
+                "inputs": {}, "outputs": { "iron_ore": 0 },
+                "resourceCapacity": 1_000_000, "resourceRemaining": 1_000_000,
+                "resourceDepletionRemainder": 0, "progress": 0,
+                "routingCursor": 0, "utilization": 0, "productionRate": 0
+            }),
+            json!({
+                "id": "rocket-assembler", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "assembling_machine_mk1",
+                "recipeId": "small_carrier_rocket",
+                "machineCount": rocket_producer_count, "minerCount": 0,
+                "inputs": { "iron_ore": 100_000 },
+                "outputs": { "small_carrier_rocket": 0 },
+                "progress": 0, "routingCursor": 0, "utilization": 0,
+                "productionRate": 0, "sprayCoaterInstalled": false
+            }),
+            json!({
+                "id": "helios-silo", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "vertical_launching_silo",
+                "recipeId": "carrier_rocket_launch", "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "small_carrier_rocket": prefilled_rockets_per_silo },
+                "outputs": {}, "progress": 0, "routingCursor": 0,
+                "utilization": 0, "productionRate": 0,
+                "sprayCoaterInstalled": false
+            }),
+        ];
+        if systems == 2 {
+            entities.extend([
+                json!({
+                    "id": "outpost-wind", "kind": "power", "planetId": "outpost",
+                    "powerGridId": "grid-b", "buildingId": "wind_turbine",
+                    "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                    "progress": 0, "routingCursor": 0, "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "borealis-silo", "kind": "machine", "planetId": "outpost",
+                    "powerGridId": "grid-b", "buildingId": "vertical_launching_silo",
+                    "recipeId": "carrier_rocket_launch", "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "small_carrier_rocket": prefilled_rockets_per_silo },
+                    "outputs": {}, "progress": 0, "routingCursor": 0,
+                    "utilization": 0, "productionRate": 0,
+                    "sprayCoaterInstalled": false
+                }),
+            ]);
+        }
+        if systems == 2 {
+            fixture_state_from_parts_with_belts_and_catalog(
+                base,
+                entities,
+                Vec::new(),
+                fixture_catalog_with_outpost(),
+            )
+        } else {
+            fixture_state_from_parts(base, entities)
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -6088,6 +6715,501 @@ mod tests {
     }
 
     #[test]
+    fn macro_v10_certifies_material_funded_single_and_multi_system_rocket_sinks() {
+        for (systems, producer_count, expected_rate) in [(1, 1, 1_i64), (2, 2, 2_i64)] {
+            let mut state =
+                productive_rocket_macro_fixture(15.0, "infinite", systems, producer_count, 1_000);
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 600.0, 40.0))
+                    .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(
+                state.base_value()["totalProduced"]["small_carrier_rocket"],
+                json!(expected_rate * 600)
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonSphere"].get("totalRocketsLaunched"),
+                    "rockets",
+                )
+                .unwrap(),
+                i128::from(expected_rate * 600)
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonSphere"].get("structurePoints"),
+                    "structure",
+                )
+                .unwrap(),
+                i128::from(expected_rate * 600)
+            );
+            assert_eq!(
+                number_at(
+                    state.base_value().get("dysonEngineering"),
+                    &["launchEnergySpentMj"],
+                ),
+                (expected_rate * 600 * 108) as f64
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonPlans"]["helios"].get("structurePoints"),
+                    "helios structure",
+                )
+                .unwrap(),
+                600
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonPlans"]["borealis"].get("structurePoints"),
+                    "borealis structure",
+                )
+                .unwrap(),
+                if systems == 2 { 600 } else { 0 }
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonSwarm"].get("totalLaunched"),
+                    "sails launched",
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                proof_counter(
+                    state.base_value()["dysonSphere"].get("shellSails"),
+                    "shell sails",
+                )
+                .unwrap(),
+                0
+            );
+            let after = capture_settlement_snapshot(&state).unwrap();
+            let before_state =
+                productive_rocket_macro_fixture(15.0, "infinite", systems, producer_count, 1_000);
+            let before = capture_settlement_snapshot(&before_state).unwrap();
+            assert!(dyson_sail_state_unchanged(&before.dyson, &after.dyson));
+            validate_settlement_proof(&before, &after, &state.catalog, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn macro_v10_rocket_sink_never_replays_prefilled_launcher_inventory() {
+        let mut underfunded = productive_rocket_macro_fixture(15.0, "infinite", 2, 1, 10_000);
+        let revision = underfunded.revision;
+        let result = advance_macro_v10(
+            &mut underfunded,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        // The exact prefix may spend old silo inventory. The 570-second tail
+        // is frozen because manufacturing covered only half the launch rate.
+        assert_eq!(
+            proof_counter(
+                underfunded.base_value()["totalProduced"].get("small_carrier_rocket"),
+                "underfunded rocket production",
+            )
+            .unwrap(),
+            30
+        );
+        assert_eq!(
+            capture_dyson_terminal(underfunded.base_value())
+                .unwrap()
+                .rockets_launched,
+            60
+        );
+        assert!(
+            result.reason.as_deref().is_some_and(|reason| {
+                reason.contains("depleted owned inventory")
+                    || reason.contains("same-window certified production")
+            }),
+            "reason={:?}",
+            result.reason
+        );
+
+        let mut no_production = productive_rocket_macro_fixture(15.0, "infinite", 1, 0, 10_000);
+        let revision = no_production.revision;
+        let result = advance_macro_v10(
+            &mut no_production,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_dyson_terminal(no_production.base_value())
+                .unwrap()
+                .rockets_launched,
+            30
+        );
+        assert_eq!(
+            proof_counter(
+                no_production.base_value()["totalProduced"].get("small_carrier_rocket"),
+                "stopped rocket production",
+            )
+            .unwrap(),
+            0
+        );
+
+        let mut blocked = productive_rocket_macro_fixture(15.0, "infinite", 1, 1, 10_000);
+        let mut assembler = blocked.parse_entity(3).unwrap();
+        assembler["outputs"]["small_carrier_rocket"] = json!(1_000_000);
+        blocked.replace_entity_raw(3, serde_json::to_string(&assembler).unwrap().into());
+        blocked.rebuild_indexes().unwrap();
+        let revision = blocked.revision;
+        let result = advance_macro_v10(
+            &mut blocked,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_dyson_terminal(blocked.base_value())
+                .unwrap()
+                .rockets_launched,
+            30
+        );
+        assert_eq!(
+            proof_counter(
+                blocked.base_value()["totalProduced"].get("small_carrier_rocket"),
+                "blocked rocket production",
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn macro_v10_rocket_sink_is_segment_invariant_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_rocket_macro_fixture(multiplier, "infinite", 2, 2, 2_000);
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "multiplier={multiplier} reason={:?}",
+                result.reason
+            );
+
+            let mut segmented = initial;
+            for seconds in [30.0, 111.0, 59.0, 400.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "multiplier={multiplier} seconds={seconds} reason={:?}",
+                    result.reason
+                );
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_rocket_sink_freezes_finite_exhausted_unpowered_and_stopped_domains() {
+        let mut finite = productive_rocket_macro_fixture(15.0, "finite", 1, 1, 1_000);
+        let revision = finite.revision;
+        let result =
+            advance_macro_v10(&mut finite, &pure_idle_macro_request(revision, 600.0, 40.0))
+                .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_dyson_terminal(finite.base_value())
+                .unwrap()
+                .rockets_launched,
+            30
+        );
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("finite"))
+        );
+
+        let mut exhausted = productive_rocket_macro_fixture(15.0, "infinite", 1, 1, 15);
+        let revision = exhausted.revision;
+        let result = advance_macro_v10(
+            &mut exhausted,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_dyson_terminal(exhausted.base_value())
+                .unwrap()
+                .rockets_launched,
+            15
+        );
+
+        for stopped_by_power in [false, true] {
+            let mut stopped = productive_rocket_macro_fixture(15.0, "infinite", 1, 1, 1_000);
+            if stopped_by_power {
+                stopped.base_value_mut()["dysonEngineering"]["launchEnabled"] = json!(false);
+            } else {
+                let mut silo = stopped.parse_entity(4).unwrap();
+                silo["machineCount"] = json!(0);
+                stopped.replace_entity_raw(4, serde_json::to_string(&silo).unwrap().into());
+                stopped.rebuild_indexes().unwrap();
+            }
+            let revision = stopped.revision;
+            let result = advance_macro_v10(
+                &mut stopped,
+                &pure_idle_macro_request(revision, 600.0, 40.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(
+                capture_dyson_terminal(stopped.base_value())
+                    .unwrap()
+                    .rockets_launched,
+                0
+            );
+        }
+
+        let mut unpowered = productive_rocket_macro_fixture(15.0, "infinite", 1, 1, 1_000);
+        let mut wind = unpowered.parse_entity(0).unwrap();
+        wind["machineCount"] = json!(0);
+        unpowered.replace_entity_raw(0, serde_json::to_string(&wind).unwrap().into());
+        unpowered.rebuild_indexes().unwrap();
+        let before_hash = unpowered.summary().unwrap().canonical_sha256;
+        let before_revision = unpowered.revision;
+        let result = advance_macro_v10(
+            &mut unpowered,
+            &pure_idle_macro_request(before_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(unpowered.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(unpowered.revision, before_revision);
+    }
+
+    #[test]
+    fn macro_v10_rocket_sink_failure_is_atomic_and_checkpoint_reload_is_deterministic() {
+        let mut calibrated = productive_rocket_macro_fixture(15.0, "infinite", 2, 2, 2_000);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut corrupted = calibrated.clone();
+        corrupted
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .and_then(|certificate| certificate.dyson_rocket.as_mut())
+            .expect("rocket certificate")
+            .expected
+            .rockets_launched += 1;
+        let before_hash = corrupted.summary().unwrap().canonical_sha256;
+        let before_revision = corrupted.revision;
+        let before_credit = corrupted.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut corrupted,
+            &pure_idle_macro_request(before_revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(corrupted.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(corrupted.revision, before_revision);
+        assert_eq!(
+            corrupted.pure_idle_macro_exact_seconds_used(),
+            before_credit
+        );
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut restored =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert!(restored.pure_idle_macro_runtime.is_none());
+        for state in [&mut calibrated, &mut restored] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 570.0, 38.0)).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            restored.summary().unwrap().canonical_sha256,
+            calibrated.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn certified_rocket_helper_stops_at_the_safe_generation_horizon_atomically() {
+        let mut value = powered_fixture_base(15.0, "infinite");
+        let base = value.as_object_mut().unwrap();
+        let near_generation_limit = MAX_SAFE_INTEGER as i128 / 960 - 2;
+        base.get_mut("dysonPlans")
+            .and_then(Value::as_object_mut)
+            .and_then(|plans| plans.get_mut("helios"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "structurePoints".to_owned(),
+                json!(near_generation_limit as f64),
+            );
+        base.get_mut("dysonSphere")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "structurePoints".to_owned(),
+                json!(near_generation_limit as f64),
+            );
+        base.get_mut("dysonSphere")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "totalRocketsLaunched".to_owned(),
+                json!(near_generation_limit as f64),
+            );
+        base.get_mut("dysonEngineering")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "launchEnergySpentMj".to_owned(),
+                json!((near_generation_limit * 108) as f64),
+            );
+        crate::dyson::finalize(base).unwrap();
+
+        let one_per_second = BTreeMap::from([("helios".to_owned(), 1_i128)]);
+        assert_eq!(
+            crate::dyson::certified_rocket_launch_capacity_seconds(base, &one_per_second).unwrap(),
+            2
+        );
+        assert_eq!(
+            crate::dyson::apply_certified_rocket_launches(
+                base,
+                &BTreeMap::from([("helios".to_owned(), 2_i128)]),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(
+            number_at(
+                Some(&Value::Object(base.clone())),
+                &["dysonSphere", "generationKw"]
+            ) <= MAX_SAFE_INTEGER
+        );
+        assert_eq!(
+            crate::dyson::certified_rocket_launch_capacity_seconds(base, &one_per_second).unwrap(),
+            0
+        );
+        let before = serde_json::to_vec(base).unwrap();
+        assert!(crate::dyson::apply_certified_rocket_launches(base, &one_per_second).is_err());
+        assert_eq!(serde_json::to_vec(base).unwrap(), before);
+    }
+
+    #[test]
+    fn certified_rocket_helper_accepts_exact_safe_boundary_then_rejects_one_more_atomically() {
+        let mut value = powered_fixture_base(15.0, "infinite");
+        let base = value.as_object_mut().unwrap();
+        base.get_mut("dysonSphere")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "totalRocketsLaunched".to_owned(),
+                json!(MAX_SAFE_INTEGER - 1.0),
+            );
+        base.get_mut("dysonEngineering")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "launchEnergySpentMj".to_owned(),
+                json!(MAX_SAFE_INTEGER - 108.0),
+            );
+        crate::dyson::finalize(base).unwrap();
+
+        let one = BTreeMap::from([("helios".to_owned(), 1_i128)]);
+        assert_eq!(
+            crate::dyson::certified_rocket_launch_capacity_seconds(base, &one).unwrap(),
+            1
+        );
+        assert_eq!(
+            crate::dyson::apply_certified_rocket_launches(base, &one).unwrap(),
+            1
+        );
+        assert_eq!(
+            number_at(
+                Some(&Value::Object(base.clone())),
+                &["dysonSphere", "totalRocketsLaunched"]
+            ),
+            MAX_SAFE_INTEGER
+        );
+        assert_eq!(
+            number_at(
+                Some(&Value::Object(base.clone())),
+                &["dysonEngineering", "launchEnergySpentMj"]
+            ),
+            MAX_SAFE_INTEGER
+        );
+
+        let before = serde_json::to_vec(base).unwrap();
+        assert_eq!(
+            crate::dyson::certified_rocket_launch_capacity_seconds(base, &one).unwrap(),
+            0
+        );
+        assert!(crate::dyson::apply_certified_rocket_launches(base, &one).is_err());
+        assert_eq!(serde_json::to_vec(base).unwrap(), before);
+    }
+
+    #[test]
+    fn macro_v10_rocket_exact_prefix_is_unchanged() {
+        let initial = productive_rocket_macro_fixture(15.0, "infinite", 2, 2, 1_000);
+        let mut exact = initial.clone();
+        let exact_revision = exact.revision;
+        let result = exact
+            .advance_exact(&exact_request(exact_revision, 20.0, 20.0 / 15.0))
+            .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut macro_prefix = initial;
+        let macro_revision = macro_prefix.revision;
+        let result = advance_macro_v10(
+            &mut macro_prefix,
+            &pure_idle_macro_request(macro_revision, 20.0, 20.0 / 15.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_settlement_snapshot(&macro_prefix).unwrap(),
+            capture_settlement_snapshot(&exact).unwrap()
+        );
+        let macro_state = macro_prefix.materialize().unwrap();
+        let exact_state = exact.materialize().unwrap();
+        for field in [
+            "entities",
+            "totalProduced",
+            "dysonSphere",
+            "dysonEngineering",
+            "dysonPlans",
+        ] {
+            assert_eq!(macro_state[field], exact_state[field], "field={field}");
+        }
+    }
+
+    #[test]
     fn macro_v10_certifies_one_closed_recipe_at_supported_multipliers() {
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
             let initial = productive_closed_recipe_macro_fixture(multiplier);
@@ -6401,7 +7523,7 @@ mod tests {
         let snapshots = exact_three_window_probe(&state, &request).unwrap();
         let flows = snapshots
             .windows(2)
-            .map(|window| capture_ordinary_window_flow(&window[0], &window[1]).unwrap())
+            .map(|window| capture_ordinary_window_flow(&window[0], &window[1], false).unwrap())
             .collect::<Vec<_>>();
         assert!(flows.iter().skip(1).all(|flow| flow == &flows[0]));
         let mut cycle = state.clone();
@@ -6420,7 +7542,8 @@ mod tests {
         let cycle_hash = cycle.summary().unwrap().canonical_sha256;
         let cycle_sources = exclusive_infinite_vein_sources(&cycle).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None).unwrap_err();
+            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None, None)
+                .unwrap_err();
         assert!(rejection.contains("dependency cycle"), "{rejection}");
         assert_eq!(cycle.summary().unwrap().canonical_sha256, cycle_hash);
 
@@ -6440,7 +7563,7 @@ mod tests {
         let alternate_hash = alternate.summary().unwrap().canonical_sha256;
         let alternate_sources = exclusive_infinite_vein_sources(&alternate).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0], None)
+            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0], None, None)
                 .unwrap_err();
         assert!(
             rejection.contains("alternate active producers"),
@@ -6458,9 +7581,14 @@ mod tests {
         hidden_producer.rebuild_indexes().unwrap();
         let hidden_hash = hidden_producer.summary().unwrap().canonical_sha256;
         let hidden_sources = exclusive_infinite_vein_sources(&hidden_producer).unwrap();
-        let rejection =
-            build_closed_recipe_certificate(&hidden_producer, &hidden_sources, &flows[0], None)
-                .unwrap_err();
+        let rejection = build_closed_recipe_certificate(
+            &hidden_producer,
+            &hidden_sources,
+            &flows[0],
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             rejection.contains("alternate unmodelled producer"),
             "{rejection}"
@@ -6477,7 +7605,7 @@ mod tests {
         sprayed.rebuild_indexes().unwrap();
         let sprayed_sources = exclusive_infinite_vein_sources(&sprayed).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0], None)
+            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0], None, None)
                 .unwrap_err();
         assert!(rejection.contains("proliferator"), "{rejection}");
     }
@@ -7037,6 +8165,7 @@ mod tests {
                 consumed_units_per_second: MaterialTotals::new(),
                 recipe_ids: Vec::new(),
                 research: None,
+                dyson_rocket: None,
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

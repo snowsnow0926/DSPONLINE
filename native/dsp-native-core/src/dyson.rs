@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -16,6 +16,7 @@ const DYSON_SHELL_CAPACITY_PER_STRUCTURE: f64 = 40.0;
 const DYSON_SAIL_ABSORPTION_PER_STRUCTURE_PER_SECOND: f64 = 0.1;
 const DYSON_SAIL_LAUNCH_ENERGY_MJ: f64 = 21.6;
 const DYSON_ROCKET_LAUNCH_ENERGY_MJ: f64 = 108.0;
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const SYSTEM_IDS: [&str; 8] = [
     "helios",
     "borealis",
@@ -106,6 +107,25 @@ fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow:
         object.insert(key.to_owned(), value);
     }
     Ok(())
+}
+
+fn strict_non_negative_number(
+    object: &Map<String, Value>,
+    key: &str,
+    label: &str,
+    require_integer: bool,
+) -> anyhow::Result<f64> {
+    let value = object.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    if !value.is_finite()
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&value)
+        || require_integer && value.fract().abs() > f64::EPSILON
+    {
+        bail!(
+            "{label} is not a non-negative safe {}",
+            if require_integer { "integer" } else { "number" }
+        );
+    }
+    Ok(value)
 }
 
 fn load(base: &Map<String, Value>) -> anyhow::Result<DysonState> {
@@ -542,23 +562,9 @@ fn plan_shell_capacity(plan: &Map<String, Value>) -> f64 {
     }
 }
 
-fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyhow::Result<()> {
-    sync_swarm(base, state)?;
-    sync_sphere(state)?;
-    let structure = state
-        .plans
-        .values()
-        .filter_map(Value::as_object)
-        .map(|plan| finite(plan.get("structurePoints")))
-        .sum::<f64>();
-    let shell_sails = state
-        .plans
-        .values()
-        .filter_map(Value::as_object)
-        .map(|plan| finite(plan.get("shellSails")))
-        .sum::<f64>();
+fn derived_sphere_generation(base: &Map<String, Value>, state: &DysonState) -> f64 {
     let multiplier = power_multiplier(base);
-    let generation = SYSTEM_IDS
+    SYSTEM_IDS
         .iter()
         .filter_map(|system_id| {
             state
@@ -573,10 +579,35 @@ fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyho
                 })
         })
         .sum::<f64>()
-        .floor();
+        .floor()
+}
+
+fn update_sphere_generation(
+    base: &Map<String, Value>,
+    state: &mut DysonState,
+) -> anyhow::Result<()> {
+    sync_sphere(state)?;
+    let structure = state
+        .plans
+        .values()
+        .filter_map(Value::as_object)
+        .map(|plan| finite(plan.get("structurePoints")))
+        .sum::<f64>();
+    let shell_sails = state
+        .plans
+        .values()
+        .filter_map(Value::as_object)
+        .map(|plan| finite(plan.get("shellSails")))
+        .sum::<f64>();
+    let generation = derived_sphere_generation(base, state);
     set_number(&mut state.sphere, "structurePoints", structure)?;
     set_number(&mut state.sphere, "shellSails", shell_sails)?;
     set_number(&mut state.sphere, "generationKw", generation)
+}
+
+fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyhow::Result<()> {
+    sync_swarm(base, state)?;
+    update_sphere_generation(base, state)
 }
 
 fn consume_orbit_sails(
@@ -1065,6 +1096,267 @@ pub(crate) fn launch(
     )?;
     save(base, dyson);
     Ok(())
+}
+
+/// Returns the largest whole-second horizon for a stable per-system rocket
+/// rate without crossing any public JavaScript safe-integer counter. This is
+/// intentionally narrower than ordinary `launch`: it neither consumes entity
+/// caches nor infers production, and is callable only after `pure_idle` has
+/// proved the matching material sink.
+pub(crate) fn certified_rocket_launch_capacity_seconds(
+    base: &Map<String, Value>,
+    launches_per_second_by_system: &BTreeMap<String, i128>,
+) -> anyhow::Result<i128> {
+    if launches_per_second_by_system.is_empty() {
+        bail!("certified rocket rate has no target system");
+    }
+    let dyson = load(base)?;
+    let max_safe = MAX_SAFE_INTEGER as i128;
+    let global_structure = strict_non_negative_number(
+        &dyson.sphere,
+        "structurePoints",
+        "dysonSphere.structurePoints",
+        true,
+    )? as i128;
+    let global_shell =
+        strict_non_negative_number(&dyson.sphere, "shellSails", "dysonSphere.shellSails", true)?
+            as i128;
+    let rockets_launched = strict_non_negative_number(
+        &dyson.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )? as i128;
+    let launch_energy = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+
+    let mut planned_structure = 0_i128;
+    let mut planned_shell = 0_i128;
+    for (system_id, plan) in &dyson.plans {
+        let plan = plan
+            .as_object()
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} is not an object"))?;
+        planned_structure = planned_structure
+            .checked_add(strict_non_negative_number(
+                plan,
+                "structurePoints",
+                &format!("dysonPlans.{system_id}.structurePoints"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned structure total overflowed"))?;
+        planned_shell = planned_shell
+            .checked_add(strict_non_negative_number(
+                plan,
+                "shellSails",
+                &format!("dysonPlans.{system_id}.shellSails"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned shell total overflowed"))?;
+    }
+    if planned_structure != global_structure || planned_shell != global_shell {
+        bail!("global Dyson sphere counters are not derived from the current per-system plans");
+    }
+    let current_generation = strict_non_negative_number(
+        &dyson.sphere,
+        "generationKw",
+        "dysonSphere.generationKw",
+        true,
+    )?;
+    let derived_generation = derived_sphere_generation(base, &dyson);
+    if !derived_generation.is_finite()
+        || derived_generation > MAX_SAFE_INTEGER
+        || (current_generation - derived_generation).abs() > EPSILON
+    {
+        bail!("Dyson generation is not the safe derived value for current plans");
+    }
+
+    let mut horizon = max_safe;
+    let mut total_rate = 0_i128;
+    let mut generation_rate = 0.0_f64;
+    for (system_id, rate) in launches_per_second_by_system {
+        if *rate <= 0 || *rate > max_safe {
+            bail!("dysonPlans.{system_id} has an invalid certified rocket rate");
+        }
+        if !SYSTEM_IDS.contains(&system_id.as_str()) {
+            bail!("dysonPlans.{system_id} is not a supported Dyson target system");
+        }
+        let plan = dyson
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "structurePoints",
+            &format!("dysonPlans.{system_id}.structurePoints"),
+            true,
+        )? as i128;
+        horizon = horizon.min(max_safe.saturating_sub(current) / rate);
+        total_rate = total_rate
+            .checked_add(*rate)
+            .ok_or_else(|| anyhow!("certified rocket rate sum overflowed"))?;
+        generation_rate += *rate as f64
+            * DYSON_STRUCTURE_POWER_KW
+            * power_multiplier(base)
+            * luminosity(base, system_id);
+    }
+    if total_rate <= 0 || total_rate > max_safe {
+        bail!("certified rocket rate sum is invalid");
+    }
+    horizon = horizon
+        .min(max_safe.saturating_sub(global_structure) / total_rate)
+        .min(max_safe.saturating_sub(rockets_launched) / total_rate);
+
+    let launch_energy_rate = total_rate as f64 * DYSON_ROCKET_LAUNCH_ENERGY_MJ;
+    if !launch_energy_rate.is_finite() || launch_energy_rate <= 0.0 {
+        bail!("certified rocket launch-energy rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - launch_energy) / launch_energy_rate).floor() as i128);
+    if !generation_rate.is_finite() || generation_rate <= 0.0 {
+        bail!("certified rocket generation rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - derived_generation) / generation_rate).floor() as i128);
+    Ok(horizon.max(0))
+}
+
+fn validate_certified_rocket_commit(
+    base: &Map<String, Value>,
+    state: &DysonState,
+) -> anyhow::Result<()> {
+    let global_structure = strict_non_negative_number(
+        &state.sphere,
+        "structurePoints",
+        "dysonSphere.structurePoints",
+        true,
+    )? as i128;
+    let global_shell =
+        strict_non_negative_number(&state.sphere, "shellSails", "dysonSphere.shellSails", true)?
+            as i128;
+    strict_non_negative_number(
+        &state.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )?;
+    strict_non_negative_number(
+        &state.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+
+    let mut planned_structure = 0_i128;
+    let mut planned_shell = 0_i128;
+    for (system_id, plan) in &state.plans {
+        let plan = plan
+            .as_object()
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} is not an object"))?;
+        planned_structure = planned_structure
+            .checked_add(strict_non_negative_number(
+                plan,
+                "structurePoints",
+                &format!("dysonPlans.{system_id}.structurePoints"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned structure total overflowed"))?;
+        planned_shell = planned_shell
+            .checked_add(strict_non_negative_number(
+                plan,
+                "shellSails",
+                &format!("dysonPlans.{system_id}.shellSails"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned shell total overflowed"))?;
+    }
+    if planned_structure != global_structure || planned_shell != global_shell {
+        bail!("certified Dyson commit counters are not derived from the per-system plans");
+    }
+
+    let generation = strict_non_negative_number(
+        &state.sphere,
+        "generationKw",
+        "dysonSphere.generationKw",
+        true,
+    )?;
+    let derived_generation = derived_sphere_generation(base, state);
+    if !derived_generation.is_finite()
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&derived_generation)
+        || (generation - derived_generation).abs() > EPSILON
+    {
+        bail!("certified Dyson commit generation is not the safe derived value");
+    }
+    Ok(())
+}
+
+/// Atomically commits an already funded whole-rocket vector. All mutable
+/// Dyson data stays in a private clone until plan reconciliation and derived
+/// power succeed; the caller's map is unchanged on error.
+pub(crate) fn apply_certified_rocket_launches(
+    base: &mut Map<String, Value>,
+    launches_by_system: &BTreeMap<String, i128>,
+) -> anyhow::Result<i128> {
+    if launches_by_system.is_empty() {
+        return Ok(0);
+    }
+    if certified_rocket_launch_capacity_seconds(base, launches_by_system)? < 1 {
+        bail!("certified rocket launch vector exceeds a safe Dyson counter boundary");
+    }
+    let mut dyson = load(base)?;
+    let mut total = 0_i128;
+    for (system_id, amount) in launches_by_system {
+        let plan = dyson
+            .plans
+            .get_mut(system_id)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared before commit"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "structurePoints",
+            &format!("dysonPlans.{system_id}.structurePoints"),
+            true,
+        )? as i128;
+        let next = current
+            .checked_add(*amount)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.structurePoints overflowed"))?;
+        set_number(plan, "structurePoints", next as f64)?;
+        total = total
+            .checked_add(*amount)
+            .ok_or_else(|| anyhow!("certified rocket launch total overflowed"))?;
+    }
+    let launched = strict_non_negative_number(
+        &dyson.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )? as i128;
+    set_number(
+        &mut dyson.sphere,
+        "totalRocketsLaunched",
+        launched
+            .checked_add(total)
+            .ok_or_else(|| anyhow!("dysonSphere.totalRocketsLaunched overflowed"))? as f64,
+    )?;
+    let spent = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+    set_number(
+        &mut dyson.engineering,
+        "launchEnergySpentMj",
+        rounded(spent + total as f64 * DYSON_ROCKET_LAUNCH_ENERGY_MJ, 3),
+    )?;
+    update_sphere_generation(base, &mut dyson)?;
+    validate_certified_rocket_commit(base, &dyson)?;
+    save(base, dyson);
+    Ok(total)
 }
 
 pub(crate) fn finalize(base: &mut Map<String, Value>) -> anyhow::Result<()> {

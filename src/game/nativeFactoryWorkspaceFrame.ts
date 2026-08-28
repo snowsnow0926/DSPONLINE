@@ -5,6 +5,7 @@ import {
   type FactoryConstructionHeadlineReadModel,
   type FactoryConstructionWorkspaceReadModel,
   type FactoryRunStatusReadModel,
+  type FactoryTimeWarpReadModel,
   type PlanetNavigationReadModel,
   type PlanetNavigationRowReadModel,
 } from "./factoryReadModels";
@@ -15,9 +16,21 @@ export interface NativeAuthoritativeFactoryWorkspaceFrame {
   readonly sessionId: string;
   readonly revision: number;
   readonly runStatus: FactoryRunStatusReadModel;
+  readonly timeWarp: FactoryTimeWarpReadModel;
   readonly constructionHeadline: FactoryConstructionHeadlineReadModel;
   readonly constructionWorkspace: FactoryConstructionWorkspaceReadModel;
   readonly planetNavigation: PlanetNavigationReadModel;
+}
+
+function validTimeWarp(value: FactoryTimeWarpReadModel | undefined, simulationSpeed: number): value is FactoryTimeWarpReadModel {
+  return Boolean(value) &&
+    (value!.controllerEntityId === null || isOpaqueId(value!.controllerEntityId)) &&
+    typeof value!.enabled === "boolean" &&
+    Number.isSafeInteger(value!.requestedMultiplier) && value!.requestedMultiplier >= simulationSpeed &&
+    Number.isSafeInteger(value!.effectiveMultiplier) && value!.effectiveMultiplier >= simulationSpeed &&
+    Number.isFinite(value!.requiredPowerKw) && value!.requiredPowerKw >= 0 &&
+    Number.isFinite(value!.allocatedPowerKw) && value!.allocatedPowerKw >= 0 &&
+    value!.allocatedPowerKw <= value!.requiredPowerKw;
 }
 
 export interface NativeAuthoritativeFactoryWorkspaceBinding {
@@ -103,6 +116,8 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
     !factory || factory.schemaVersion !== 1 || factory.projectionType !== "factory-read-model-v1" ||
     factory.revision !== binding.expectedRevision || !shell || shell.schema !== FACTORY_READ_MODEL_SCHEMA ||
     shell.source !== "native-core" || shell.stateVersion !== 47 || shell.mode !== "normal" ||
+    !Number.isSafeInteger(shell.simulationSpeed) || shell.simulationSpeed < 1 ||
+    !validTimeWarp(shell.timeWarp, shell.simulationSpeed) ||
     shell.activePlanetId !== binding.activePlanetId || !navigation || !construction ||
     construction.activePlanetId !== binding.activePlanetId ||
     shell.constructionQueueCount !== construction.queue.totalCount ||
@@ -125,6 +140,7 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
       activePlanetId: binding.activePlanetId,
       paused: shell.paused,
     }),
+    timeWarp: Object.freeze({ ...shell.timeWarp }),
     constructionHeadline: Object.freeze({
       schema: FACTORY_READ_MODEL_SCHEMA,
       source: "native-core",

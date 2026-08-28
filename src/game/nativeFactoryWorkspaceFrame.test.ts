@@ -22,6 +22,14 @@ function factory(revision = 17): DesktopNativeCoreFactoryReadModelResult {
       paused: false,
       elapsedSeconds: 120,
       simulationSpeed: 1,
+      timeWarp: {
+        controllerEntityId: "time-warp-1",
+        enabled: true,
+        requestedMultiplier: 15,
+        effectiveMultiplier: 12,
+        requiredPowerKw: 1e13,
+        allocatedPowerKw: 1e13,
+      },
       entityCount: 4,
       beltCount: 3,
       activePlanetEntityCount: 4,
@@ -139,6 +147,7 @@ describe("native authoritative factory workspace frame", () => {
       sessionId: "authority-1",
       revision: 17,
       runStatus: { source: "native-core", paused: false },
+      timeWarp: { enabled: true, requestedMultiplier: 15, effectiveMultiplier: 12 },
       constructionHeadline: { activePlanetDisplayName: "家园星", constructionQueueCount: 1 },
       constructionWorkspace: { source: "native-core", revision: 17 },
       planetNavigation: { activePlanetId: "home" },
@@ -176,6 +185,17 @@ describe("native authoritative factory workspace frame", () => {
     };
     expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({
       frame: { ...snapshot().frame!, factory: mismatchedFactory },
+    }), binding)).toBeNull();
+
+    const invalidTimeWarpFactory = {
+      ...completeFactory,
+      shell: {
+        ...completeFactory.shell,
+        timeWarp: { ...completeFactory.shell.timeWarp!, allocatedPowerKw: 1e14 },
+      },
+    };
+    expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({
+      frame: { ...snapshot().frame!, factory: invalidTimeWarpFactory },
     }), binding)).toBeNull();
 
     const missingActiveFactory = {

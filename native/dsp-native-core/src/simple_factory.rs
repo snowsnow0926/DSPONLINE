@@ -3561,6 +3561,8 @@ fn simulate_step(
         local_step_runtime,
         interstellar_route_activity.as_ref(),
     );
+    let interstellar_peer_directory =
+        crate::interstellar_logistics::InterstellarPeerDirectory::build(state, base, entities);
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -3580,6 +3582,7 @@ fn simulate_step(
         state,
         base,
         entities,
+        &interstellar_peer_directory,
         &step_route_ledger,
     )?);
     profile_mark!("interstellar-ready-stations");
@@ -4475,14 +4478,27 @@ fn simulate_step(
     )?;
     profile_mark!("local-dispatch");
     let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
-    crate::interstellar_logistics::dispatch(
+    let interstellar_dispatch_scan = crate::interstellar_logistics::dispatch(
         state,
         base,
         entities,
         &station_powers,
         interstellar_step_runtime,
+        &interstellar_peer_directory,
         &mut step_route_ledger,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tinterstellar-dispatch-active\t{}/{}\tprobed={}\tdense={}\tpeer-candidates={}\tfull-scan-rows={}\tdirectory-fallback={}",
+            interstellar_dispatch_scan.selected_demands,
+            interstellar_dispatch_scan.total_demand_rows,
+            interstellar_dispatch_scan.demand_rows_probed,
+            interstellar_dispatch_scan.dense_fallback,
+            interstellar_dispatch_scan.peer_candidate_rows_visited,
+            interstellar_dispatch_scan.peer_full_scan_rows_visited,
+            interstellar_dispatch_scan.directory_fallback,
+        );
+    }
     drop(step_route_ledger);
     profile_mark!("interstellar-dispatch");
     crate::local_logistics::advance_routes(
@@ -4529,6 +4545,7 @@ fn simulate_step(
         state,
         base,
         entities,
+        &interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
     drop(congestion_route_ledger);

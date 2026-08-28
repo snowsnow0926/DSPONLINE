@@ -19,6 +19,8 @@ const WARPER_CAPACITY_PER_BUILDING: f64 = 50.0;
 const DEFAULT_WARPER_TARGET: f64 = WARPER_CAPACITY_PER_BUILDING;
 const REMOTE_ROUTE_DENSE_NUMERATOR: usize = 3;
 const REMOTE_ROUTE_DENSE_DENOMINATOR: usize = 4;
+const REMOTE_DISPATCH_DENSE_NUMERATOR: usize = 3;
+const REMOTE_DISPATCH_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -220,6 +222,46 @@ impl InterstellarDispatchLedger for StationRouteLedger {
 #[derive(Debug, Default)]
 struct LocalSupplyDirectory {
     by_planet_item: HashMap<String, HashMap<String, Vec<usize>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PeerSlotRef {
+    station_index: usize,
+    slot_index: usize,
+    planet_index: usize,
+    system_unlocked: bool,
+}
+
+/// Immutable, candidate-local reverse lookup for traditional interstellar
+/// peers. Rows retain topology station order followed by persisted slot order.
+/// Invalid or unsupported topology never produces a partial index: the whole
+/// directory switches to the legacy full-scan oracle for the current step.
+#[derive(Debug, Default)]
+pub(crate) struct InterstellarPeerDirectory {
+    supply_by_item: HashMap<String, Vec<PeerSlotRef>>,
+    demand_by_item: HashMap<String, Vec<PeerSlotRef>>,
+    demand_station_indices: Vec<usize>,
+    hub_station_indices: Vec<usize>,
+    total_station_rows: usize,
+    fallback_full_scan: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PeerLookupScan {
+    candidate_rows_visited: usize,
+    full_scan_rows_visited: usize,
+    used_full_scan: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct InterstellarDispatchScan {
+    pub selected_demands: usize,
+    pub total_demand_rows: usize,
+    pub demand_rows_probed: usize,
+    pub dense_fallback: bool,
+    pub peer_candidate_rows_visited: usize,
+    pub peer_full_scan_rows_visited: usize,
+    pub directory_fallback: bool,
 }
 
 /// Runtime-only wake set for demand stations that own at least one remote
@@ -433,6 +475,140 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
             })
         })
         .collect()
+}
+
+impl InterstellarPeerDirectory {
+    pub(crate) fn build(state: &CoreState, base: &Map<String, Value>, entities: &[Value]) -> Self {
+        let station_rows: &[usize] = &state.factory_topology.station_indices;
+        let mut directory = Self {
+            total_station_rows: station_rows.len(),
+            ..Self::default()
+        };
+        let mut hub_by_system = HashMap::<String, usize>::new();
+
+        for &station_index in station_rows {
+            let Some(station) = entities.get(station_index).and_then(Value::as_object) else {
+                directory.fallback_full_scan = true;
+                return directory;
+            };
+            let building_id = string_at(station, "buildingId");
+            let Some(station_planet) = planet(state, station) else {
+                directory.fallback_full_scan = true;
+                return directory;
+            };
+            let station_planet_index = state
+                .factory_topology
+                .entity_planet_indices
+                .get(station_index)
+                .copied()
+                .filter(|index| *index < state.catalog.planets.len());
+            let Some(station_planet_index) = station_planet_index else {
+                directory.fallback_full_scan = true;
+                return directory;
+            };
+            let station_system_unlocked = system_unlocked(base, &station_planet.system_id);
+            let add_peer = |target: &mut HashMap<String, Vec<PeerSlotRef>>,
+                            item_id: &str,
+                            slot_index: usize| {
+                target
+                    .entry(item_id.to_owned())
+                    .or_default()
+                    .push(PeerSlotRef {
+                        station_index,
+                        slot_index,
+                        planet_index: station_planet_index,
+                        system_unlocked: station_system_unlocked,
+                    });
+            };
+
+            if is_legacy_interstellar_station(station)
+                && station
+                    .get("stationHubEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                && station_system_unlocked
+            {
+                let replace =
+                    hub_by_system
+                        .get(&station_planet.system_id)
+                        .is_none_or(|previous_index| {
+                            let previous = entities[*previous_index]
+                                .as_object()
+                                .expect("station object");
+                            let priority = finite_number(station.get("stationHubPriority"));
+                            let previous_priority =
+                                finite_number(previous.get("stationHubPriority"));
+                            priority > previous_priority
+                                || (priority == previous_priority
+                                    && string_at(station, "id").unwrap_or_default()
+                                        < string_at(previous, "id").unwrap_or_default())
+                        });
+                if replace {
+                    hub_by_system.insert(station_planet.system_id.clone(), station_index);
+                }
+            }
+
+            if building_id == Some("orbital_collector") {
+                if !traditional_remote_disabled(station)
+                    && let Some(item_id) = string_at(station, "storedItemId")
+                {
+                    add_peer(&mut directory.supply_by_item, item_id, 0);
+                }
+                continue;
+            }
+            if !is_legacy_interstellar_station(station) || traditional_remote_disabled(station) {
+                continue;
+            }
+            let station_slots = match slots(station) {
+                Ok(slots) => slots,
+                Err(_) => {
+                    directory.fallback_full_scan = true;
+                    return directory;
+                }
+            };
+            let mut has_demand = false;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                match slot.remote_mode.as_str() {
+                    "supply" => add_peer(&mut directory.supply_by_item, item_id, slot_index),
+                    "demand" => {
+                        add_peer(&mut directory.demand_by_item, item_id, slot_index);
+                        has_demand = true;
+                    }
+                    "storage" => {}
+                    _ => unreachable!("validated native interstellar slot mode"),
+                }
+            }
+            if has_demand {
+                directory.demand_station_indices.push(station_index);
+            }
+        }
+
+        // The route planner historically selected one best relay in each
+        // unlocked system, then sorted those relays by station id. Materialize
+        // that stable system bucket once instead of rescanning every entity for
+        // every supply/demand pair.
+        directory.hub_station_indices = hub_by_system.into_values().collect::<Vec<_>>();
+        directory.hub_station_indices.sort_by(|left, right| {
+            let left = entities[*left].as_object().expect("station object");
+            let right = entities[*right].as_object().expect("station object");
+            string_at(left, "id")
+                .unwrap_or_default()
+                .cmp(string_at(right, "id").unwrap_or_default())
+        });
+        directory
+    }
+
+    fn peer_candidates(&self, item_id: &str, opposite_mode: &str) -> &[PeerSlotRef] {
+        let values = if opposite_mode == "supply" {
+            self.supply_by_item.get(item_id)
+        } else {
+            self.demand_by_item.get(item_id)
+        };
+        values.map(Vec::as_slice).unwrap_or_default()
+    }
 }
 
 fn route_activity_station_indices(entities: &[Value]) -> Vec<usize> {
@@ -1005,6 +1181,7 @@ fn plan_path(
     supply_index: usize,
     demand_index: usize,
     demand_slot: &Slot,
+    indexed_hubs: Option<&[usize]>,
 ) -> anyhow::Result<Option<PlannedPath>> {
     let supply = entities[supply_index].as_object().expect("station object");
     let demand = entities[demand_index].as_object().expect("station object");
@@ -1014,52 +1191,67 @@ fn plan_path(
     let demand_system = &planet(state, demand)
         .ok_or_else(|| anyhow!("native interstellar demand planet is missing"))?
         .system_id;
-    let mut hub_by_system = HashMap::<String, usize>::new();
-    for index in station_indices(entities) {
-        if index == supply_index || index == demand_index {
-            continue;
+    let hubs = if let Some(indexed_hubs) = indexed_hubs {
+        indexed_hubs
+            .iter()
+            .copied()
+            .filter(|index| {
+                let station = entities[*index].as_object().expect("station object");
+                planet(state, station).is_some_and(|planet| {
+                    planet.system_id != *supply_system && planet.system_id != *demand_system
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let mut hub_by_system = HashMap::<String, usize>::new();
+        for index in station_indices(entities) {
+            if index == supply_index || index == demand_index {
+                continue;
+            }
+            let station = entities[index].as_object().expect("station object");
+            if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+                || !station
+                    .get("stationHubEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(system_id) = planet(state, station).map(|planet| planet.system_id.as_str())
+            else {
+                continue;
+            };
+            if system_id == supply_system
+                || system_id == demand_system
+                || !system_unlocked(base, system_id)
+            {
+                continue;
+            }
+            let replace = hub_by_system.get(system_id).is_none_or(|previous_index| {
+                let previous = entities[*previous_index]
+                    .as_object()
+                    .expect("station object");
+                let priority = finite_number(station.get("stationHubPriority"));
+                let previous_priority = finite_number(previous.get("stationHubPriority"));
+                priority > previous_priority
+                    || (priority == previous_priority
+                        && string_at(station, "id").unwrap_or_default()
+                            < string_at(previous, "id").unwrap_or_default())
+            });
+            if replace {
+                hub_by_system.insert(system_id.to_owned(), index);
+            }
         }
-        let station = entities[index].as_object().expect("station object");
-        if string_at(station, "buildingId") != Some("interstellar_logistics_station")
-            || !station
-                .get("stationHubEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(system_id) = planet(state, station).map(|planet| planet.system_id.as_str()) else {
-            continue;
-        };
-        if system_id == supply_system
-            || system_id == demand_system
-            || !system_unlocked(base, system_id)
-        {
-            continue;
-        }
-        let replace = hub_by_system.get(system_id).is_none_or(|previous_index| {
-            let previous = entities[*previous_index]
-                .as_object()
-                .expect("station object");
-            let priority = finite_number(station.get("stationHubPriority"));
-            let previous_priority = finite_number(previous.get("stationHubPriority"));
-            priority > previous_priority
-                || (priority == previous_priority
-                    && string_at(station, "id").unwrap_or_default()
-                        < string_at(previous, "id").unwrap_or_default())
+        let mut hubs = hub_by_system.into_values().collect::<Vec<_>>();
+        hubs.sort_by(|left, right| {
+            let left = entities[*left].as_object().expect("station object");
+            let right = entities[*right].as_object().expect("station object");
+            string_at(left, "id")
+                .unwrap_or_default()
+                .cmp(string_at(right, "id").unwrap_or_default())
         });
-        if replace {
-            hub_by_system.insert(system_id.to_owned(), index);
-        }
-    }
-    let mut hubs = hub_by_system.into_values().collect::<Vec<_>>();
-    hubs.sort_by(|left, right| {
-        let left = entities[*left].as_object().expect("station object");
-        let right = entities[*right].as_object().expect("station object");
-        string_at(left, "id")
-            .unwrap_or_default()
-            .cmp(string_at(right, "id").unwrap_or_default())
-    });
+        hubs
+    };
     let mut candidates = Vec::new();
     visit_paths(
         state,
@@ -1103,6 +1295,7 @@ fn route_economics(
     supply_index: usize,
     demand_index: usize,
     demand_slot: &Slot,
+    indexed_hubs: Option<&[usize]>,
 ) -> anyhow::Result<Option<RouteEconomics>> {
     let supply = entities[supply_index].as_object().expect("station object");
     let demand = entities[demand_index].as_object().expect("station object");
@@ -1136,6 +1329,7 @@ fn route_economics(
         supply_index,
         demand_index,
         demand_slot,
+        indexed_hubs,
     )?
     else {
         return Ok(None);
@@ -1378,7 +1572,38 @@ fn build_ledger<I: EntityIndexLookup + ?Sized>(entities: &[Value], indexes: &I) 
     ledger
 }
 
-fn peer_matches(
+fn sort_peer_matches(entities: &[Value], matches: &mut [(usize, usize)]) {
+    matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
+        let left = entities[*left_index].as_object().expect("station object");
+        let right = entities[*right_index].as_object().expect("station object");
+        let left_priority = if string_at(left, "buildingId") == Some("orbital_collector") {
+            1
+        } else {
+            slots(left)
+                .ok()
+                .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
+                .unwrap_or(1)
+        };
+        let right_priority = if string_at(right, "buildingId") == Some("orbital_collector") {
+            1
+        } else {
+            slots(right)
+                .ok()
+                .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
+                .unwrap_or(1)
+        };
+        right_priority
+            .cmp(&left_priority)
+            .then_with(|| {
+                string_at(left, "id")
+                    .unwrap_or_default()
+                    .cmp(string_at(right, "id").unwrap_or_default())
+            })
+            .then_with(|| left_slot.cmp(right_slot))
+    });
+}
+
+fn peer_matches_full_scan(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
@@ -1432,6 +1657,7 @@ fn peer_matches(
                     supply_index,
                     demand_index,
                     demand_slot,
+                    None,
                 )?
                 .is_some()
                 {
@@ -1457,6 +1683,7 @@ fn peer_matches(
                     supply_index,
                     demand_index,
                     demand_slot,
+                    None,
                 )?
                 .is_some()
                 {
@@ -1465,35 +1692,139 @@ fn peer_matches(
             }
         }
     }
-    matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
-        let left = entities[*left_index].as_object().expect("station object");
-        let right = entities[*right_index].as_object().expect("station object");
-        let left_priority = if string_at(left, "buildingId") == Some("orbital_collector") {
-            1
-        } else {
-            slots(left)
-                .ok()
-                .and_then(|values| values.get(*left_slot).map(|slot| slot.priority))
-                .unwrap_or(1)
-        };
-        let right_priority = if string_at(right, "buildingId") == Some("orbital_collector") {
-            1
-        } else {
-            slots(right)
-                .ok()
-                .and_then(|values| values.get(*right_slot).map(|slot| slot.priority))
-                .unwrap_or(1)
-        };
-        right_priority
-            .cmp(&left_priority)
-            .then_with(|| {
-                string_at(left, "id")
-                    .unwrap_or_default()
-                    .cmp(string_at(right, "id").unwrap_or_default())
-            })
-            .then_with(|| left_slot.cmp(right_slot))
-    });
+    sort_peer_matches(entities, &mut matches);
     Ok(matches)
+}
+
+fn peer_matches_indexed(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    station_index: usize,
+    slot_index: usize,
+    directory: &InterstellarPeerDirectory,
+) -> anyhow::Result<(Vec<(usize, usize)>, PeerLookupScan)> {
+    if directory.fallback_full_scan {
+        return Ok((
+            peer_matches_full_scan(state, base, entities, station_index, slot_index)?,
+            PeerLookupScan {
+                full_scan_rows_visited: directory.total_station_rows,
+                used_full_scan: true,
+                ..PeerLookupScan::default()
+            },
+        ));
+    }
+    let station = entities[station_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native interstellar station is invalid"))?;
+    if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+        || traditional_remote_disabled(station)
+    {
+        return Ok((Vec::new(), PeerLookupScan::default()));
+    }
+    let station_slots = slots(station)?;
+    let slot = station_slots
+        .get(slot_index)
+        .ok_or_else(|| anyhow!("native interstellar slot index is invalid"))?;
+    let Some(item_id) = slot.item_id.as_deref() else {
+        return Ok((Vec::new(), PeerLookupScan::default()));
+    };
+    if slot.remote_mode == "storage" {
+        return Ok((Vec::new(), PeerLookupScan::default()));
+    }
+    let opposite = if slot.remote_mode == "supply" {
+        "demand"
+    } else {
+        "supply"
+    };
+    let station_planet_index = state
+        .factory_topology
+        .entity_planet_indices
+        .get(station_index)
+        .copied()
+        .unwrap_or(usize::MAX);
+    let candidates = directory.peer_candidates(item_id, opposite);
+    let mut matches = Vec::new();
+    for candidate in candidates {
+        if candidate.station_index == station_index
+            || candidate.planet_index == station_planet_index
+            || !candidate.system_unlocked
+        {
+            continue;
+        }
+        let peer = entities[candidate.station_index]
+            .as_object()
+            .expect("station object");
+        if traditional_remote_disabled(peer) {
+            continue;
+        }
+        let peer_slot = if string_at(peer, "buildingId") == Some("orbital_collector") {
+            orbital_slot(peer)
+        } else {
+            slots(peer)?
+                .get(candidate.slot_index)
+                .cloned()
+                .ok_or_else(|| anyhow!("native interstellar slot index is invalid"))?
+        };
+        if peer_slot.item_id.as_deref() != Some(item_id) || peer_slot.remote_mode != opposite {
+            return Ok((
+                peer_matches_full_scan(state, base, entities, station_index, slot_index)?,
+                PeerLookupScan {
+                    full_scan_rows_visited: directory.total_station_rows,
+                    used_full_scan: true,
+                    ..PeerLookupScan::default()
+                },
+            ));
+        }
+        let (supply_index, demand_index, demand_slot) = if slot.remote_mode == "demand" {
+            (candidate.station_index, station_index, slot)
+        } else {
+            (station_index, candidate.station_index, &peer_slot)
+        };
+        if route_economics(
+            state,
+            base,
+            entities,
+            supply_index,
+            demand_index,
+            demand_slot,
+            Some(&directory.hub_station_indices),
+        )?
+        .is_some()
+        {
+            matches.push((candidate.station_index, candidate.slot_index));
+        }
+    }
+    sort_peer_matches(entities, &mut matches);
+    Ok((
+        matches,
+        PeerLookupScan {
+            candidate_rows_visited: candidates.len(),
+            ..PeerLookupScan::default()
+        },
+    ))
+}
+
+fn lookup_peer_matches(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    station_index: usize,
+    slot_index: usize,
+    directory: Option<&InterstellarPeerDirectory>,
+) -> anyhow::Result<(Vec<(usize, usize)>, PeerLookupScan)> {
+    if let Some(directory) = directory {
+        peer_matches_indexed(state, base, entities, station_index, slot_index, directory)
+    } else {
+        Ok((
+            peer_matches_full_scan(state, base, entities, station_index, slot_index)?,
+            PeerLookupScan {
+                full_scan_rows_visited: state.factory_topology.station_indices.len(),
+                used_full_scan: true,
+                ..PeerLookupScan::default()
+            },
+        ))
+    }
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -1732,6 +2063,7 @@ pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
+    peer_directory: &InterstellarPeerDirectory,
     route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<HashSet<usize>> {
     let station_indices = &state.factory_topology.station_indices;
@@ -1750,7 +2082,19 @@ pub(crate) fn ready_station_indices(
         route_ledger,
         ReadyProbeEnvironment {
             peer_matches: |station_index, slot_index| {
-                peer_matches(state, base, entities, station_index, slot_index)
+                if peer_directory.fallback_full_scan {
+                    peer_matches_full_scan(state, base, entities, station_index, slot_index)
+                } else {
+                    peer_matches_indexed(
+                        state,
+                        base,
+                        entities,
+                        station_index,
+                        slot_index,
+                        peer_directory,
+                    )
+                    .map(|(matches, _)| matches)
+                }
             },
             route_economics: |supply_index, demand_index, demand_slot: &Slot| {
                 route_economics(
@@ -1760,6 +2104,8 @@ pub(crate) fn ready_station_indices(
                     supply_index,
                     demand_index,
                     demand_slot,
+                    (!peer_directory.fallback_full_scan)
+                        .then_some(peer_directory.hub_station_indices.as_slice()),
                 )
             },
             station_capacity: |_, demand: &Map<String, Value>, demand_slot: &Slot| {
@@ -1776,25 +2122,265 @@ fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     }
 }
 
-fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
+#[derive(Debug, Clone, Copy)]
+struct DispatchDemandProbe {
+    station_index: usize,
+    dispatchable: bool,
+    peer_candidate_rows_visited: usize,
+    peer_full_scan_rows_visited: usize,
+    directory_fallback: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_dispatch_demand<L: InterstellarDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    powers: &HashMap<usize, f64>,
+    demand_index: usize,
+    peer_directory: &InterstellarPeerDirectory,
+    ledger: &L,
+) -> anyhow::Result<DispatchDemandProbe> {
+    let mut probe = DispatchDemandProbe {
+        station_index: demand_index,
+        dispatchable: false,
+        peer_candidate_rows_visited: 0,
+        peer_full_scan_rows_visited: 0,
+        directory_fallback: false,
+    };
+    let demand = entities[demand_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?;
+    if !is_legacy_interstellar_station(demand) || traditional_remote_disabled(demand) {
+        return Ok(probe);
+    }
+    let mut ordered_slots = slots(demand)?
+        .into_iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.item_id.is_some() && slot.remote_mode == "demand")
+        .collect::<Vec<_>>();
+    ordered_slots.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    for (slot_index, slot) in ordered_slots {
+        let item_id = slot.item_id.as_deref().expect("demand item");
+        let remaining_free = (station_capacity(state, base, demand, &slot)?
+            - item_amount(demand, "outputs", item_id)
+            - ledger.in_flight(demand_index, item_id)
+            + EPSILON)
+            .floor()
+            .max(0.0);
+        if remaining_free < 1.0 {
+            continue;
+        }
+        let (matches, scan) = lookup_peer_matches(
+            state,
+            base,
+            entities,
+            demand_index,
+            slot_index,
+            Some(peer_directory),
+        )?;
+        probe.peer_candidate_rows_visited += scan.candidate_rows_visited;
+        probe.peer_full_scan_rows_visited += scan.full_scan_rows_visited;
+        probe.directory_fallback |= scan.used_full_scan;
+        for (supply_index, peer_slot_index) in matches {
+            let supply = entities[supply_index].as_object().expect("station object");
+            let supply_is_orbital = string_at(supply, "buildingId") == Some("orbital_collector");
+            let supply_slot = if supply_is_orbital {
+                orbital_slot(supply)
+            } else {
+                slots(supply)?
+                    .get(peer_slot_index)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("native interstellar slot index is invalid"))?
+            };
+            let Some(economics) = route_economics(
+                state,
+                base,
+                entities,
+                supply_index,
+                demand_index,
+                &slot,
+                (!scan.used_full_scan).then_some(peer_directory.hub_station_indices.as_slice()),
+            )?
+            else {
+                continue;
+            };
+            if economics.requires_warp && !completed_tech(base, "space_warp") {
+                continue;
+            }
+            let source_power = if supply_is_orbital {
+                1.0
+            } else {
+                powers.get(&supply_index).copied().unwrap_or(0.0)
+            };
+            let target_power = powers.get(&demand_index).copied().unwrap_or(0.0);
+            let hub_power = economics
+                .waypoint_station_ids
+                .iter()
+                .filter_map(|id| state.entity_index.get(id))
+                .fold(1.0_f64, |factor, index| {
+                    factor.min(powers.get(index).copied().unwrap_or(0.0))
+                });
+            if source_power.min(target_power).min(hub_power) <= EPSILON {
+                continue;
+            }
+            let available = (item_amount(supply, "outputs", item_id)
+                - supply_slot.min_stock
+                - ledger.reserved(supply_index, item_id)
+                + EPSILON)
+                .floor()
+                .max(0.0);
+            for (owner_index, owner_slot) in [(demand_index, &slot), (supply_index, &supply_slot)] {
+                if supply_is_orbital && owner_index == supply_index {
+                    continue;
+                }
+                let owner = entities[owner_index].as_object().expect("station object");
+                let free_vehicles =
+                    (installed_vessels(owner) - ledger.remote_busy(owner_index)).max(0.0);
+                let warp_available = finite_number(owner.get("stationWarpers")).floor().max(0.0);
+                if free_vehicles < 1.0
+                    || (economics.requires_warp
+                        && (!owner
+                            .get("stationWarpEnabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            || warp_available < economics.warpers_per_vessel))
+                {
+                    continue;
+                }
+                let minimum = minimum_cargo(base, owner_slot);
+                let mut dispatchable = free_vehicles
+                    .min((available / minimum).floor())
+                    .min((remaining_free / minimum).floor());
+                if economics.requires_warp {
+                    dispatchable = dispatchable
+                        .min((warp_available / economics.warpers_per_vessel.max(1.0)).floor());
+                }
+                if dispatchable >= 1.0 {
+                    probe.dispatchable = true;
+                    return Ok(probe);
+                }
+            }
+        }
+    }
+    Ok(probe)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_dispatch_demand_indices_with<L: InterstellarDispatchLedger + ?Sized>(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    powers: &HashMap<usize, f64>,
+    peer_directory: &InterstellarPeerDirectory,
+    ledger: &L,
+) -> anyhow::Result<(Vec<usize>, InterstellarDispatchScan)> {
+    let demand_rows: &[usize] = if peer_directory.fallback_full_scan {
+        &state.factory_topology.station_indices
+    } else {
+        &peer_directory.demand_station_indices
+    };
+    let probes = runtime.indexed_try_map(demand_rows, |_, demand_index| {
+        probe_dispatch_demand(
+            state,
+            base,
+            entities,
+            powers,
+            *demand_index,
+            peer_directory,
+            ledger,
+        )
+    })?;
+    let peer_candidate_rows_visited = probes
+        .iter()
+        .map(|probe| probe.peer_candidate_rows_visited)
+        .sum();
+    let peer_full_scan_rows_visited = probes
+        .iter()
+        .map(|probe| probe.peer_full_scan_rows_visited)
+        .sum();
+    let directory_fallback = probes.iter().any(|probe| probe.directory_fallback);
+    let mut selected = probes
+        .into_iter()
+        .filter_map(|probe| probe.dispatchable.then_some(probe.station_index))
+        .collect::<Vec<_>>();
+    let total_demand_rows = peer_directory.total_station_rows;
+    let demand_rows_probed = demand_rows.len();
+    let dense_fallback = !selected.is_empty()
+        && selected
+            .len()
+            .saturating_mul(REMOTE_DISPATCH_DENSE_DENOMINATOR)
+            >= total_demand_rows.saturating_mul(REMOTE_DISPATCH_DENSE_NUMERATOR);
+    if dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(&state.factory_topology.station_indices);
+    }
+    let selected_demands = selected.len();
+    Ok((
+        selected,
+        InterstellarDispatchScan {
+            selected_demands,
+            total_demand_rows,
+            demand_rows_probed,
+            dense_fallback,
+            peer_candidate_rows_visited,
+            peer_full_scan_rows_visited,
+            directory_fallback,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
+    runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
     route_activity: &mut InterstellarRouteActivity,
+    peer_directory: &InterstellarPeerDirectory,
     ledger: &mut L,
-) -> anyhow::Result<()> {
+    force_full_scan: bool,
+) -> anyhow::Result<InterstellarDispatchScan> {
     let station_indices = &state.factory_topology.station_indices;
     if !station_indices.iter().copied().any(|index| {
         entities[index].as_object().is_some_and(|station| {
             is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
         })
     }) {
-        return Ok(());
+        return Ok(InterstellarDispatchScan::default());
     }
+    let (dispatch_demand_indices, mut dispatch_scan) = if force_full_scan {
+        (
+            station_indices.to_vec(),
+            InterstellarDispatchScan {
+                selected_demands: station_indices.len(),
+                total_demand_rows: station_indices.len(),
+                demand_rows_probed: station_indices.len(),
+                directory_fallback: true,
+                ..InterstellarDispatchScan::default()
+            },
+        )
+    } else {
+        plan_dispatch_demand_indices_with(
+            runtime,
+            state,
+            base,
+            entities,
+            powers,
+            peer_directory,
+            ledger,
+        )?
+    };
     let indexes = &state.entity_index;
     let mut activated_remote_demands = Vec::new();
-    for demand_index in station_indices.iter().copied() {
+    for demand_index in dispatch_demand_indices {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?
@@ -1834,7 +2420,17 @@ fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
                 .and_then(|values| values.get(&fairness_key))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let mut matches = peer_matches(state, base, entities, demand_index, *slot_index)?;
+            let (mut matches, peer_scan) = lookup_peer_matches(
+                state,
+                base,
+                entities,
+                demand_index,
+                *slot_index,
+                (!force_full_scan).then_some(peer_directory),
+            )?;
+            dispatch_scan.peer_candidate_rows_visited += peer_scan.candidate_rows_visited;
+            dispatch_scan.peer_full_scan_rows_visited += peer_scan.full_scan_rows_visited;
+            dispatch_scan.directory_fallback |= peer_scan.used_full_scan;
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
@@ -1903,8 +2499,16 @@ fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
                 } else {
                     slots(&supply_snapshot)?[peer_slot_index].clone()
                 };
-                let Some(economics) =
-                    route_economics(state, base, entities, supply_index, demand_index, slot)?
+                let Some(economics) = route_economics(
+                    state,
+                    base,
+                    entities,
+                    supply_index,
+                    demand_index,
+                    slot,
+                    (!force_full_scan && !peer_scan.used_full_scan)
+                        .then_some(peer_directory.hub_station_indices.as_slice()),
+                )?
                 else {
                     continue;
                 };
@@ -2079,7 +2683,52 @@ fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
     for demand_index in activated_remote_demands {
         route_activity.update_remote_demand(demand_index, true);
     }
-    Ok(())
+    Ok(dispatch_scan)
+}
+
+fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    route_activity: &mut InterstellarRouteActivity,
+    peer_directory: &InterstellarPeerDirectory,
+    ledger: &mut L,
+) -> anyhow::Result<InterstellarDispatchScan> {
+    dispatch_with_ledger_mode(
+        deterministic_runtime(),
+        state,
+        base,
+        entities,
+        powers,
+        route_activity,
+        peer_directory,
+        ledger,
+        false,
+    )
+}
+
+#[cfg(test)]
+fn dispatch_full_scan_oracle<L: InterstellarDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    route_activity: &mut InterstellarRouteActivity,
+    peer_directory: &InterstellarPeerDirectory,
+    ledger: &mut L,
+) -> anyhow::Result<InterstellarDispatchScan> {
+    dispatch_with_ledger_mode(
+        deterministic_runtime(),
+        state,
+        base,
+        entities,
+        powers,
+        route_activity,
+        peer_directory,
+        ledger,
+        true,
+    )
 }
 
 pub(crate) fn dispatch(
@@ -2088,9 +2737,18 @@ pub(crate) fn dispatch(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
     route_activity: &mut InterstellarRouteActivity,
+    peer_directory: &InterstellarPeerDirectory,
     route_ledger: &mut StationRouteLedger,
-) -> anyhow::Result<()> {
-    dispatch_with_ledger(state, base, entities, powers, route_activity, route_ledger)
+) -> anyhow::Result<InterstellarDispatchScan> {
+    dispatch_with_ledger(
+        state,
+        base,
+        entities,
+        powers,
+        route_activity,
+        peer_directory,
+        route_ledger,
+    )
 }
 
 fn add_max_field(
@@ -2462,6 +3120,7 @@ pub(crate) fn update_congestion(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
+    peer_directory: &InterstellarPeerDirectory,
     route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<()> {
     let station_indices = &state.factory_topology.station_indices;
@@ -2480,7 +3139,16 @@ pub(crate) fn update_congestion(
         route_ledger,
         &local_supply_directory,
         |station_index, slot_index, _| {
-            Ok(!peer_matches(state, base, entities, station_index, slot_index)?.is_empty())
+            Ok(!peer_matches_indexed(
+                state,
+                base,
+                entities,
+                station_index,
+                slot_index,
+                peer_directory,
+            )?
+            .0
+            .is_empty())
         },
     )?;
     apply_congestion_updates(entities, updates)
@@ -3381,6 +4049,24 @@ mod tests {
                         simulation_order: 1,
                         orbital_yields: HashMap::new(),
                     },
+                    PlanetDefinition {
+                        id: "relay_planet".to_owned(),
+                        name: "relay".to_owned(),
+                        system_id: "relay_system".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 1,
+                        simulation_order: 2,
+                        orbital_yields: HashMap::new(),
+                    },
+                    PlanetDefinition {
+                        id: "locked_planet".to_owned(),
+                        name: "locked".to_owned(),
+                        system_id: "locked_system".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 1,
+                        simulation_order: 3,
+                        orbital_yields: HashMap::new(),
+                    },
                 ],
                 items: vec![
                     ItemDefinition {
@@ -3436,24 +4122,36 @@ mod tests {
             "research": { "completedTechIds": ["space_warp"] },
             "handcraftQueue": [],
             "exploration": {
-                "unlockedSystemIds": ["source_system", "demand_system"],
-                "colonizedPlanetIds": ["source_planet", "demand_planet"],
-                "surveyProgressBySystem": { "source_system": 1.0, "demand_system": 1.0 },
+                "unlockedSystemIds": ["source_system", "demand_system", "relay_system"],
+                "colonizedPlanetIds": ["source_planet", "demand_planet", "relay_planet"],
+                "surveyProgressBySystem": {
+                    "source_system": 1.0,
+                    "demand_system": 1.0,
+                    "relay_system": 1.0
+                },
                 "missions": []
             },
             "galaxy": {
                 "profiles": {
                     "source_planet": { "travelTimeMultiplier": 1.0 },
-                    "demand_planet": { "travelTimeMultiplier": 1.0 }
+                    "demand_planet": { "travelTimeMultiplier": 1.0 },
+                    "relay_planet": { "travelTimeMultiplier": 1.0 },
+                    "locked_planet": { "travelTimeMultiplier": 1.0 }
                 },
                 "systemProfiles": {
                     "source_system": { "positionX": 0.0, "positionY": 0.0 },
-                    "demand_system": { "positionX": 4.0, "positionY": 0.0 }
+                    "demand_system": { "positionX": 4.0, "positionY": 0.0 },
+                    "relay_system": { "positionX": 2.0, "positionY": 0.0 },
+                    "locked_system": { "positionX": 6.0, "positionY": 0.0 }
                 }
             },
             "endgame": { "infiniteResearch": { "galactic_logistics": { "level": 0 } } },
             "tray": {},
-            "planetTrays": { "source_planet": {}, "demand_planet": {} },
+            "planetTrays": {
+                "source_planet": {},
+                "demand_planet": {},
+                "relay_planet": {}
+            },
             "totalProduced": {},
             "mod:base/opaque": { "signedZero": -0.0, "text": "保持原样" }
         })
@@ -3834,7 +4532,8 @@ mod tests {
     fn assert_interstellar_dispatch_shared_ledger_matches_full_scan(
         source: &[Value],
         power_factor: f64,
-        expected_selected_demands: usize,
+        expected_ledger_demands: usize,
+        expected_dispatch_demands: usize,
         label: &str,
     ) {
         let state = dispatch_fixture_state(source);
@@ -3845,12 +4544,18 @@ mod tests {
         let mut legacy_entities = source.to_vec();
         let mut legacy_activity = prepare_route_activity(&legacy_entities);
         let mut legacy_ledger = build_ledger(&legacy_entities, &state.entity_index);
-        dispatch_with_ledger(
+        let legacy_peer_directory = InterstellarPeerDirectory::build(
+            &state,
+            legacy_base.as_object().unwrap(),
+            &legacy_entities,
+        );
+        dispatch_full_scan_oracle(
             &state,
             legacy_base.as_object_mut().unwrap(),
             &mut legacy_entities,
             &powers,
             &mut legacy_activity,
+            &legacy_peer_directory,
             &mut legacy_ledger,
         )
         .unwrap();
@@ -3858,6 +4563,11 @@ mod tests {
         let mut shared_base = dispatch_fixture_base();
         let mut shared_entities = source.to_vec();
         let mut shared_activity = prepare_route_activity(&shared_entities);
+        let shared_peer_directory = InterstellarPeerDirectory::build(
+            &state,
+            shared_base.as_object().unwrap(),
+            &shared_entities,
+        );
         let mut shared_local_directory = crate::local_logistics::prepare_step_directory(
             &shared_entities,
             &state.factory_topology.station_indices,
@@ -3871,19 +4581,24 @@ mod tests {
         );
         assert_eq!(
             shared_ledger.scan().selected_demands,
-            expected_selected_demands,
+            expected_ledger_demands,
             "selected demand diagnostic diverged for {label}"
         );
         assert!(!shared_ledger.scan().dense_fallback, "{label}");
-        dispatch_with_ledger(
+        let dispatch_scan = dispatch_with_ledger(
             &state,
             shared_base.as_object_mut().unwrap(),
             &mut shared_entities,
             &powers,
             &mut shared_activity,
+            &shared_peer_directory,
             &mut shared_ledger,
         )
         .unwrap();
+        assert_eq!(
+            dispatch_scan.selected_demands, expected_dispatch_demands,
+            "dispatch wake diagnostic diverged for {label}"
+        );
 
         assert_eq!(
             serde_json::to_vec(&(&shared_base, &shared_entities)).unwrap(),
@@ -3993,22 +4708,538 @@ mod tests {
             "mod:payload": { "signedZero": -0.0, "text": "保持原样" }
         }]);
 
-        for (source, power_factor, selected, label) in [
-            (&normal, 1.0, 0, "normal inventory and warper wake"),
-            (&source_empty, 1.0, 0, "source empty"),
-            (&target_full, 1.0, 0, "target full"),
-            (&normal, 0.0, 0, "power limited"),
-            (&warper_empty, 1.0, 0, "warper empty"),
-            (&preexisting_route, 1.0, 1, "route already active"),
-            (&opaque_mod_route, 1.0, 1, "opaque MOD route"),
+        for (source, power_factor, ledger_selected, dispatch_selected, label) in [
+            (&normal, 1.0, 0, 1, "normal inventory and warper wake"),
+            (&source_empty, 1.0, 0, 0, "source empty"),
+            (&target_full, 1.0, 0, 0, "target full"),
+            (&normal, 0.0, 0, 0, "power limited"),
+            (&warper_empty, 1.0, 0, 0, "warper empty"),
+            (&preexisting_route, 1.0, 1, 1, "route already active"),
+            (&opaque_mod_route, 1.0, 1, 1, "opaque MOD route"),
         ] {
             assert_interstellar_dispatch_shared_ledger_matches_full_scan(
                 source,
                 power_factor,
-                selected,
+                ledger_selected,
+                dispatch_selected,
                 label,
             );
         }
+    }
+
+    #[test]
+    fn sparse_planner_does_not_prevalidate_a_later_demand_exhausted_by_fair_order() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        let mut later = route_activity_station(2);
+        later["planetId"] = Value::from("demand_planet");
+        later["stationSlots"][0]["remoteMode"] = Value::from("demand");
+        later["stationSlots"][0]["routePolicy"] = Value::from("direct");
+        later["stationSlots"][0]["warperBudget"] = Value::from(1);
+        later["stationWarpers"] = Value::from(1.0);
+        later["stationLastSupplyPeerBySlot"] = Value::Null;
+        entities.push(later);
+
+        // The first persisted demand reserves the only 100 items. Legacy
+        // dispatch therefore never reaches the later demand's malformed
+        // fairness write. Candidate selection may be a conservative superset,
+        // but it must not eagerly validate and reject that unreachable write.
+        assert_interstellar_dispatch_shared_ledger_matches_full_scan(
+            &entities,
+            1.0,
+            0,
+            2,
+            "fair-order source exhaustion before later malformed fairness",
+        );
+    }
+
+    fn indexed_dispatch_matrix(count: usize, active_demands: &[usize]) -> Vec<Value> {
+        let active_demands = active_demands.iter().copied().collect::<HashSet<_>>();
+        (0..count)
+            .map(|index| {
+                let mut station = route_activity_station(index);
+                station["planetId"] = Value::from(if index == 0 {
+                    "source_planet"
+                } else {
+                    "demand_planet"
+                });
+                station["stationSlots"][0]["routePolicy"] = Value::from("direct");
+                if index == 0 {
+                    station["stationSlots"][0]["remoteMode"] = Value::from("supply");
+                    station["outputs"]["iron_ore"] = Value::from(1_000_000_000.0);
+                    station["stationWarpers"] = Value::from(100.0);
+                } else {
+                    station["stationSlots"][0]["remoteMode"] = Value::from("demand");
+                    station["outputs"]["iron_ore"] =
+                        Value::from(if active_demands.contains(&index) {
+                            0.0
+                        } else {
+                            1_000_000.0
+                        });
+                    station["stationWarpers"] = Value::from(1.0);
+                }
+                station
+            })
+            .collect()
+    }
+
+    fn run_indexed_dispatch_at_workers(
+        source: &[Value],
+        workers: usize,
+    ) -> (Vec<u8>, InterstellarDispatchScan) {
+        let state = dispatch_fixture_state(source);
+        let source_hash = state.canonical_sha256().unwrap();
+        let mut base = dispatch_fixture_base();
+        let mut entities = source.to_vec();
+        let powers = route_activity_powers(entities.len(), 1.0);
+        let mut activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut route_ledger =
+            StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let peer_directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let scan = dispatch_with_ledger_mode(
+            &DeterministicRuntime::for_test(workers),
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut activity,
+            &peer_directory,
+            &mut route_ledger,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        (
+            serde_json::to_vec(&json!({
+                "base": base,
+                "entities": entities,
+                "active": activity.active_demand_indices,
+            }))
+            .unwrap(),
+            scan,
+        )
+    }
+
+    #[test]
+    fn sparse_dispatch_mutates_only_selected_demands_and_indexes_peers_at_all_worker_limits() {
+        let source = indexed_dispatch_matrix(256, &[7, 113, 251]);
+        let oracle = run_indexed_dispatch_at_workers(&source, 1);
+        assert_eq!(oracle.1.selected_demands, 3);
+        assert_eq!(oracle.1.total_demand_rows, 256);
+        assert_eq!(oracle.1.demand_rows_probed, 255);
+        assert!(!oracle.1.dense_fallback);
+        assert!(!oracle.1.directory_fallback);
+        assert_eq!(oracle.1.peer_candidate_rows_visited, 6);
+        assert_eq!(oracle.1.peer_full_scan_rows_visited, 0);
+
+        for workers in [2, 4, 8] {
+            let actual = run_indexed_dispatch_at_workers(&source, workers);
+            assert_eq!(
+                actual.0, oracle.0,
+                "dispatch hash diverged at {workers} workers"
+            );
+            assert_eq!(
+                actual.1, oracle.1,
+                "dispatch scan diverged at {workers} workers"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_dense_fallback_activates_at_exactly_three_quarters() {
+        let source = indexed_dispatch_matrix(8, &[1, 2, 3, 4, 5, 6]);
+        let (_, scan) = run_indexed_dispatch_at_workers(&source, 4);
+        assert_eq!(scan.total_demand_rows, 8);
+        assert_eq!(scan.demand_rows_probed, 7);
+        assert_eq!(scan.selected_demands, 8);
+        assert!(scan.dense_fallback);
+        assert!(!scan.directory_fallback);
+        assert_eq!(scan.peer_full_scan_rows_visited, 0);
+    }
+
+    #[test]
+    fn indexed_peer_lookup_matches_full_scan_and_rebuilds_after_topology_change() {
+        let mut entities = indexed_dispatch_matrix(128, &[127]);
+        for station in entities.iter_mut().take(127).skip(1) {
+            station["stationSlots"][0]["remoteMode"] = Value::from("storage");
+            station["stationSlots"][0]["itemId"] = Value::Null;
+        }
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let indexed = peer_matches_indexed(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            127,
+            0,
+            &directory,
+        )
+        .unwrap();
+        let full =
+            peer_matches_full_scan(&state, base.as_object().unwrap(), &entities, 127, 0).unwrap();
+        assert_eq!(indexed.0, full);
+        assert_eq!(indexed.1.candidate_rows_visited, 1);
+        assert_eq!(indexed.1.full_scan_rows_visited, 0);
+
+        entities[0]["stationSlots"][0]["remoteMode"] = Value::from("storage");
+        let stale = peer_matches_indexed(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            127,
+            0,
+            &directory,
+        )
+        .unwrap();
+        assert!(stale.1.used_full_scan);
+        assert!(stale.0.is_empty());
+
+        entities[0]["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        let rebuilt =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        assert_eq!(
+            peer_matches_indexed(
+                &state,
+                base.as_object().unwrap(),
+                &entities,
+                127,
+                0,
+                &rebuilt,
+            )
+            .unwrap()
+            .0,
+            full
+        );
+    }
+
+    #[test]
+    fn invalid_peer_topology_falls_back_to_the_exact_full_scan_error() {
+        let mut entities = indexed_dispatch_matrix(3, &[1]);
+        entities[2]["planetId"] = Value::from("relay_planet");
+        entities[2]["stationSlots"] = Value::Array(Vec::new());
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        assert!(directory.fallback_full_scan);
+
+        let indexed_error = peer_matches_indexed(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            1,
+            0,
+            &directory,
+        )
+        .unwrap_err();
+        let full_error =
+            peer_matches_full_scan(&state, base.as_object().unwrap(), &entities, 1, 0).unwrap_err();
+        assert_eq!(indexed_error.to_string(), full_error.to_string());
+        assert_eq!(
+            indexed_error.to_string(),
+            "native interstellar slot count is invalid"
+        );
+    }
+
+    #[test]
+    fn indexed_relay_directory_preserves_system_policy_and_best_hub_order() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationSlots"][0]["routePolicy"] = Value::from("relay-required");
+        entities[1]["stationSlots"][0]["warperBudget"] = Value::from(2);
+        entities[1]["stationWarpers"] = Value::from(2.0);
+
+        let mut lower_priority_hub = route_activity_station(2);
+        lower_priority_hub["planetId"] = Value::from("relay_planet");
+        lower_priority_hub["stationSlots"][0] = route_activity_slot("storage");
+        lower_priority_hub["stationHubEnabled"] = Value::from(true);
+        lower_priority_hub["stationHubPriority"] = Value::from(1.0);
+        let mut selected_hub = route_activity_station(3);
+        selected_hub["planetId"] = Value::from("relay_planet");
+        selected_hub["stationSlots"][0] = route_activity_slot("storage");
+        selected_hub["stationHubEnabled"] = Value::from(true);
+        selected_hub["stationHubPriority"] = Value::from(2.0);
+        let mut same_planet_supply = route_activity_station(4);
+        same_planet_supply["planetId"] = Value::from("demand_planet");
+        same_planet_supply["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        same_planet_supply["outputs"]["iron_ore"] = Value::from(1_000_000.0);
+        let mut locked_system_supply = route_activity_station(5);
+        locked_system_supply["planetId"] = Value::from("locked_planet");
+        locked_system_supply["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        locked_system_supply["outputs"]["iron_ore"] = Value::from(1_000_000.0);
+        entities.extend([
+            lower_priority_hub,
+            selected_hub,
+            same_planet_supply,
+            locked_system_supply,
+        ]);
+
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        assert!(!directory.fallback_full_scan);
+        assert_eq!(directory.hub_station_indices, vec![3]);
+        let indexed = peer_matches_indexed(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            1,
+            0,
+            &directory,
+        )
+        .unwrap();
+        let full =
+            peer_matches_full_scan(&state, base.as_object().unwrap(), &entities, 1, 0).unwrap();
+        assert_eq!(indexed.0, full);
+        assert_eq!(indexed.0, vec![(0, 0)]);
+        assert_eq!(indexed.1.candidate_rows_visited, 3);
+        assert_eq!(indexed.1.full_scan_rows_visited, 0);
+
+        assert_interstellar_dispatch_shared_ledger_matches_full_scan(
+            &entities,
+            1.0,
+            0,
+            1,
+            "relay-required route and stable best hub",
+        );
+
+        let (serialized, scan) = run_indexed_dispatch_at_workers(&entities, 4);
+        assert_eq!(scan.selected_demands, 1);
+        let settled: Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            settled["entities"][1]["stationRoutes"][0]["waypointStationIds"],
+            json!(["remote-station/00003/Ω"])
+        );
+    }
+
+    #[test]
+    fn inventory_power_capacity_and_warper_changes_reprobe_the_same_directory() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let runtime = DeterministicRuntime::for_test(4);
+        let powered = route_activity_powers(entities.len(), 1.0);
+        let unpowered = route_activity_powers(entities.len(), 0.0);
+        let selected = |entities: &[Value], powers: &HashMap<usize, f64>| {
+            plan_dispatch_demand_indices_with(
+                &runtime,
+                &state,
+                base.as_object().unwrap(),
+                entities,
+                powers,
+                &directory,
+                &ledger,
+            )
+            .unwrap()
+            .1
+            .selected_demands
+        };
+
+        assert_eq!(selected(&entities, &powered), 0, "source empty");
+        entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        assert_eq!(selected(&entities, &powered), 1, "inventory arrival");
+        assert_eq!(selected(&entities, &unpowered), 0, "power loss");
+        entities[1]["outputs"]["iron_ore"] = Value::from(1_000_000.0);
+        assert_eq!(selected(&entities, &powered), 0, "target full");
+        entities[1]["outputs"]["iron_ore"] = Value::from(0.0);
+        entities[1]["stationWarpers"] = Value::from(0.0);
+        assert_eq!(selected(&entities, &powered), 0, "warper empty");
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        assert_eq!(selected(&entities, &powered), 1, "warper arrival");
+    }
+
+    #[test]
+    fn indexed_directory_preserves_ready_and_congestion_full_scan_oracles() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        let activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let runtime = DeterministicRuntime::for_test(4);
+
+        let indexed_ready =
+            ready_station_indices(&state, base, &entities, &directory, &ledger).unwrap();
+        let full_ready = replay_ready_station_indices(
+            plan_ready_station_indices_with(
+                &runtime,
+                base,
+                &entities,
+                &state.factory_topology.station_indices,
+                &ledger,
+                ReadyProbeEnvironment {
+                    peer_matches: |station_index, slot_index| {
+                        peer_matches_full_scan(&state, base, &entities, station_index, slot_index)
+                    },
+                    route_economics: |supply_index, demand_index, demand_slot: &Slot| {
+                        route_economics(
+                            &state,
+                            base,
+                            &entities,
+                            supply_index,
+                            demand_index,
+                            demand_slot,
+                            None,
+                        )
+                    },
+                    station_capacity: |_, demand: &Map<String, Value>, slot: &Slot| {
+                        station_capacity(&state, base, demand, slot)
+                    },
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(indexed_ready, full_ready);
+
+        let local_supply =
+            build_local_supply_directory(&entities, &state.factory_topology.station_indices);
+        let full_updates = plan_congestion_updates_with(
+            &runtime,
+            &entities,
+            &state.factory_topology.station_indices,
+            &ledger,
+            &local_supply,
+            |station_index, slot_index, _| {
+                Ok(
+                    !peer_matches_full_scan(&state, base, &entities, station_index, slot_index)?
+                        .is_empty(),
+                )
+            },
+        )
+        .unwrap();
+        let mut expected = entities.clone();
+        apply_congestion_updates(&mut expected, full_updates).unwrap();
+        update_congestion(&state, base, &mut entities, &directory, &ledger).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn rebuilt_directory_wakes_player_slot_and_quantum_mode_changes() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        entities[1]["stationSlots"][0]["remoteMode"] = Value::from("storage");
+        entities[1]["quantumMode"] = Value::from("quantum");
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let stale_directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        assert!(stale_directory.demand_station_indices.is_empty());
+
+        // Command and mode-transition changes occur between simulation calls.
+        // The step entry point rebuilds this candidate-local directory before
+        // readiness/dispatch, so the new demand is never omitted in production.
+        entities[1]["stationSlots"][0]["remoteMode"] = Value::from("demand");
+        entities[1]["quantumMode"] = Value::from("legacy");
+        let rebuilt =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        assert_eq!(rebuilt.demand_station_indices, vec![1]);
+
+        let activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let (_, scan) = plan_dispatch_demand_indices_with(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &route_activity_powers(entities.len(), 1.0),
+            &rebuilt,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_demands, 1);
+        assert!(!scan.directory_fallback);
+    }
+
+    #[test]
+    fn completed_routes_release_vessels_and_wake_dispatch_without_topology_rebuild() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        let mut demand_owned = route_activity_remote_route(10, 1, 0.99, 1.0, true, &[]);
+        demand_owned["vehicleCount"] = Value::from(10.0);
+        let mut supply_owned = route_activity_remote_route(11, 1, 0.99, 1.0, true, &[]);
+        supply_owned["vehicleCount"] = Value::from(10.0);
+        supply_owned["vehicleStationId"] = Value::from("remote-station/00000/Ω");
+        entities[1]["stationRoutes"] = Value::Array(vec![demand_owned, supply_owned]);
+
+        let state = dispatch_fixture_state(&entities);
+        let mut base = dispatch_fixture_base();
+        let powers = route_activity_powers(entities.len(), 1.0);
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let mut activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let (_, blocked) = plan_dispatch_demand_indices_with(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &powers,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(blocked.selected_demands, 0);
+
+        advance_routes(&state, &mut entities, 1.0, &powers, &mut activity).unwrap();
+        assert!(entities[1]["stationRoutes"].as_array().unwrap().is_empty());
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let scan = dispatch_with_ledger(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut activity,
+            &directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_demands, 1);
+        assert_eq!(entities[1]["stationRoutes"].as_array().unwrap().len(), 1);
+        assert_eq!(activity.active_demand_indices, vec![1]);
     }
 
     #[test]
@@ -4025,6 +5256,8 @@ mod tests {
         .unwrap();
         let mut route_ledger =
             StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let peer_directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
 
         dispatch(
             &state,
@@ -4032,6 +5265,7 @@ mod tests {
             &mut entities,
             &powers,
             &mut activity,
+            &peer_directory,
             &mut route_ledger,
         )
         .unwrap();
@@ -4056,6 +5290,7 @@ mod tests {
             &mut entities,
             &powers,
             &mut activity,
+            &peer_directory,
             &mut route_ledger,
         )
         .unwrap();
@@ -4085,7 +5320,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_dispatch_does_not_install_partial_route_activity_or_mutate_source() {
+    fn failed_dispatch_candidate_does_not_install_activity_or_mutate_source_clone() {
         let source = dispatch_fixture_entities();
         let state = dispatch_fixture_state(&source);
         let source_json = serde_json::to_vec(&source).unwrap();
@@ -4105,6 +5340,8 @@ mod tests {
         .unwrap();
         let mut route_ledger =
             StationRouteLedger::build(&state, &candidate, &local_directory, candidate_runtime);
+        let peer_directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &candidate);
 
         let error = dispatch(
             &state,
@@ -4112,6 +5349,7 @@ mod tests {
             &mut candidate,
             &powers,
             candidate_runtime,
+            &peer_directory,
             &mut route_ledger,
         )
         .unwrap_err();
@@ -4122,7 +5360,11 @@ mod tests {
         assert!(source_activity.active_demand_indices.is_empty());
         assert!(candidate_activity.active_demand_indices.is_empty());
         assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
-        assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+        assert_ne!(
+            serde_json::to_vec(&candidate).unwrap(),
+            candidate_before,
+            "the failed candidate may be partially mutated before its outer transaction discards it"
+        );
     }
 
     #[test]
@@ -4140,12 +5382,15 @@ mod tests {
         .unwrap();
         let mut route_ledger =
             StationRouteLedger::build(&dispatch_state, &entities, &local_directory, &activity);
+        let peer_directory =
+            InterstellarPeerDirectory::build(&dispatch_state, base.as_object().unwrap(), &entities);
         dispatch(
             &dispatch_state,
             base.as_object_mut().unwrap(),
             &mut entities,
             &powers,
             &mut activity,
+            &peer_directory,
             &mut route_ledger,
         )
         .unwrap();

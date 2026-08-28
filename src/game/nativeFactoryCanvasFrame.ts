@@ -81,6 +81,8 @@ export interface NativeAuthoritativeFactoryCanvasFrame {
   readonly entities: readonly FactoryEntity[];
   /** Only endpoint-closed rows are renderable; cross-boundary rows remain represented by viewportTotals. */
   readonly belts: readonly BeltConnection[];
+  /** Every projected row, including pinned and cross-boundary belts, for bounded inspectors/connection reads. */
+  readonly projectedBelts: readonly BeltConnection[];
   readonly entityById: ReadonlyMap<string, FactoryEntity>;
   readonly beltById: ReadonlyMap<string, BeltConnection>;
   readonly omittedCrossBoundaryBeltCount: number;
@@ -285,7 +287,6 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
 
   const belts = [...projectedBeltById.values()].filter((belt) =>
     entityById.has(belt.source) && entityById.has(belt.target));
-  const beltById = new Map(belts.map((belt) => [belt.id, belt] as const));
   const viewportReadModel: FactoryViewportReadModel = Object.freeze({
     schema: "factory-viewport-read-model-v1",
     source: "native-core",
@@ -331,8 +332,9 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     viewportTotals: Object.freeze({ ...viewport.viewportTotals }),
     entities: Object.freeze([...entityById.values()]),
     belts: Object.freeze(belts),
+    projectedBelts: Object.freeze([...projectedBeltById.values()]),
     entityById,
-    beltById,
+    beltById: projectedBeltById,
     omittedCrossBoundaryBeltCount: projectedBeltById.size - belts.length,
     viewportReadModel,
   });

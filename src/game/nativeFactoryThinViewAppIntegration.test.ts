@@ -99,7 +99,8 @@ describe("factory thin-view App consumption", () => {
       workspace.indexOf("export function BlueprintPlacementCursor"),
     );
 
-    expect(app).toMatch(/createWebFactorySelectionToolbarReadModel\(game, selectedEntityIds, selectedBeltIds\)/);
+    expect(app).toMatch(/selectFactoryInteractionRows\([\s\S]*?nativeAuthoritativeFactoryInteractionRows[\s\S]*?createWebFactoryInteractionRows\(game/);
+    expect(app).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.selectionToolbarReadModel/);
     expect(app).toMatch(/selectFactorySelectionToolbarReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
     expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
@@ -120,16 +121,19 @@ describe("factory thin-view App consumption", () => {
     const sheets = readFileSync(resolve("src/components/mobile/MobileSheets.tsx"), "utf8");
     const panels = readFileSync(resolve("src/components/mobile/MobileFactoryPanels.tsx"), "utf8");
 
-    expect(app).toMatch(/createWebFactoryInspectorSummaryReadModel\(game, selectedEntity, selectedBelt\)/);
+    expect(app).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.inspectorSummaryReadModel/);
     expect(app).toMatch(/selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/inspectorReadModel:\s*factoryInspectorSummaryReadModel/);
+    expect(app).toMatch(/<MobileGameShell[\s\S]*?factoryGame=\{factorySelectionReadGame\}/);
     expect(sheets).toMatch(/readModel=\{factory\.inspectorReadModel\}/);
+    expect(sheets).toMatch(/<MobileInspectorSheet game=\{factoryGame\}/);
     expect(panels).toMatch(/data-factory-read-model-source=\{displaySource\}/);
     expect(panels).toMatch(/displayEntity\.inputItems\.rows/);
     expect(panels).toMatch(/displayBelt\?\.lastFlow/);
 
-    // The read model supplies display-only fields. Mutations and eligibility
-    // still use the full GameState entity/belt and the original callbacks.
+    // The read model and selected rows may come from the bounded native atom.
+    // Mutations and eligibility remain stable-ID commands through the original
+    // callbacks; they are never exposed as renderer authority controls.
     expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);
     expect(panels).toMatch(/onUpgradeEntity\(entity\.id\)/);
     expect(panels).toMatch(/getBeltLaneAdjustmentCheck\(game, belt\.id/);
@@ -144,7 +148,7 @@ describe("factory thin-view App consumption", () => {
       panels.indexOf("function EjectorOrbitTargetControl"),
     );
 
-    expect(app).toMatch(/const factoryInspectorSummaryReadModel = useMemo\([\s\S]*?selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/const factoryInspectorSummaryReadModel = useMemo\([\s\S]*?factoryInteractionRows\.source === "native-authoritative"[\s\S]*?selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
     expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
     expect(app).toMatch(/<StableInspectorPanel[\s\S]*?inspectorReadModel=\{factoryInspectorSummaryReadModel\}/);
@@ -157,7 +161,10 @@ describe("factory thin-view App consumption", () => {
     expect(summary).not.toMatch(/onClick=|onChange=|canUpgrade|commitGame/);
 
     // Native rows remain display-only. Every specialized control and command
-    // still receives the original full-state entity/belt records.
+    // still receives stable entity/belt IDs through the existing callbacks.
+    expect(app).toMatch(/const factorySelectionReadGame = useMemo\([\s\S]*?entities: factoryInteractionRows\.projectionEntities[\s\S]*?belts: factoryInteractionRows\.projectionBelts/);
+    expect(app).toMatch(/const factoryInspectorGame = inspectorTab === "inspect" \? factorySelectionReadGame : panelGame/);
+    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?game=\{factoryInspectorGame\}/);
     expect(panels).toMatch(/<EntityInspector game=\{props\.game\} entity=\{props\.selectedEntity\}/);
     expect(panels).toMatch(/<BeltInspector game=\{props\.game\} belt=\{props\.selectedBelt\}/);
     expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);
@@ -172,18 +179,18 @@ describe("factory thin-view App consumption", () => {
       panels.indexOf("function EjectorOrbitTargetControl"),
     );
 
-    expect(app).toMatch(/createWebFactoryMultiSelectionSummaryReadModel\([\s\S]*?factoryThinViewAllSelectedEntityIds[\s\S]*?factoryThinViewAllSelectedBeltIds/);
+    expect(app).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.multiSelectionSummaryReadModel/);
     expect(app).toMatch(/selectFactoryMultiSelectionSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/requestTruncated:[\s\S]*?selectedEntityRows[\s\S]*?selectedBeltRows/);
-    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?multiSelectionReadModel=\{factoryMultiSelectionSummaryReadModel\}[\s\S]*?multiSelectedBelts=\{selectedBeltsForMultiSummary\}/);
+    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?multiSelectionReadModel=\{factoryMultiSelectionSummaryReadModel\}[\s\S]*?multiSelectedBelts=\{selectedBeltsForMultiSummary as BeltConnection\[\]\}/);
     expect(panels).toMatch(/<DesktopMultiSelectionLiveSummary game=\{game\} entities=\{entities\} belts=\{belts\} readModel=\{readModel\} \/>/);
     expect(summary).toMatch(/data-factory-read-model-source=\{source\}/);
     expect(summary).toMatch(/readModel\.entityRows\.rows/);
     expect(summary).toMatch(/readModel\.beltRows\.rows/);
     expect(summary).not.toMatch(/onClick=|onChange=|canUpgrade|commitGame/);
 
-    // Existing batch controls and their eligibility still use GameState and
-    // original entity IDs, never the renderer-only projection rows.
+    // Existing batch controls still issue stable-ID commands through the
+    // original handlers; native projection rows remain read-only inputs.
     expect(panels).toMatch(/getRecipesForBuilding\(machines\[0\]\.buildingId!/);
     expect(panels).toMatch(/isTechnologyCompleted\(game, "proliferator_1"\)/);
     expect(panels).toMatch(/onRecipeChange\(machines\.map\(\(entity\) => entity\.id\)/);

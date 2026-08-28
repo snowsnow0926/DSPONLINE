@@ -389,6 +389,14 @@ import {
   selectFactoryCanvasRows,
   selectNativeAuthoritativeFactoryCanvasFrame,
 } from "./game/nativeFactoryCanvasFrame";
+import {
+  createNativeFactoryInteractionPinRequest,
+  createWebFactoryInteractionRows,
+  selectFactoryConnectionReadState,
+  selectFactoryInteractionRows,
+  selectNativeAuthoritativeFactoryInteractionRows,
+  selectNativeFactorySelectionRelatedEntityIds,
+} from "./game/nativeFactoryInteractionFrame";
 import { FACTORY_READ_MODEL_LIMITS, type FactoryViewportBoundsReadModel } from "./game/factoryReadModels";
 import {
   factoryViewportProvesWholePlanet,
@@ -411,10 +419,7 @@ import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
-  createWebFactoryInspectorSummaryReadModel,
-  createWebFactoryMultiSelectionSummaryReadModel,
   createWebFactoryRunStatusReadModel,
-  createWebFactorySelectionToolbarReadModel,
   createWebFactoryViewportReadModel,
 } from "./game/webFactoryReadModelAdapter";
 import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
@@ -1977,11 +1982,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => factoryThinViewAllSelectedBeltIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedBeltRows),
     [factoryThinViewAllSelectedBeltIds],
   );
-  const factoryViewportPinnedEntityIds = useMemo(
-    () => factoryThinViewAllSelectedEntityIds.slice(0, 32),
-    [factoryThinViewAllSelectedEntityIds],
+  const factoryThinViewRelatedEntityIds = useMemo(
+    () => selectNativeFactorySelectionRelatedEntityIds(nativeFactoryThinViewSnapshot, {
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      revision: factoryThinViewExpectedRevision,
+      planetId: game.activePlanetId,
+      selectedEntityIds: factoryThinViewSelectedEntityIds,
+      selectedBeltIds: factoryThinViewSelectedBeltIds,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      game.activePlanetId,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
   );
-  const factoryViewportPinnedBeltIds = factoryThinViewSelectedBeltIds;
+  const factoryInteractionConnectionEntityIds = useMemo(
+    () => [...new Set([connectionDraft?.nodeId, connectionCandidateNodeId].filter((id): id is string => Boolean(id)))],
+    [connectionCandidateNodeId, connectionDraft?.nodeId],
+  );
+  const factoryInteractionPinRequest = useMemo(
+    () => createNativeFactoryInteractionPinRequest({
+      selectedEntityIds: factoryThinViewAllSelectedEntityIds,
+      selectedBeltIds,
+      primarySelectedBeltId: selectedBeltId,
+      connectionEntityIds: factoryInteractionConnectionEntityIds,
+      relatedEntityIds: factoryThinViewRelatedEntityIds,
+    }),
+    [
+      factoryInteractionConnectionEntityIds,
+      factoryThinViewAllSelectedEntityIds,
+      factoryThinViewRelatedEntityIds,
+      selectedBeltId,
+      selectedBeltIds,
+    ],
+  );
+  const factoryViewportPinnedEntityIds = factoryInteractionPinRequest.entityIds;
+  const factoryViewportPinnedBeltIds = factoryInteractionPinRequest.beltIds;
   const nativeFactoryViewportBounds = useMemo(
     () => getNativeFactoryViewportBounds(canvasVisibleRectangle, viewportZoom),
     [
@@ -2002,13 +2041,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
       requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
       requestTruncated:
-        factoryThinViewAllSelectedEntityIds.length > 32 ||
-        factoryThinViewAllSelectedBeltIds.length > 64,
+        factoryInteractionPinRequest.truncated ||
+        factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+        factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
     }),
     [
       factoryThinViewAllSelectedBeltIds.length,
       factoryThinViewAllSelectedEntityIds.length,
       factoryThinViewExpectedRevision,
+      factoryInteractionPinRequest.truncated,
       factoryViewportPinnedBeltIds,
       factoryViewportPinnedEntityIds,
       game.activePlanetId,
@@ -2016,6 +2057,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryThinViewSnapshot,
       nativeFactoryViewportBounds,
       nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const nativeAuthoritativeFactoryCanvasFrameRef = useRef(nativeAuthoritativeFactoryCanvasFrame);
+  nativeAuthoritativeFactoryCanvasFrameRef.current = nativeAuthoritativeFactoryCanvasFrame;
+  const nativeAuthoritativeFactoryInteractionRows = useMemo(
+    () => selectNativeAuthoritativeFactoryInteractionRows(nativeAuthoritativeFactoryCanvasFrame, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      revision: factoryThinViewExpectedRevision,
+      planetId: game.activePlanetId,
+      selectedEntityIds,
+      selectedBeltIds,
+      primarySelectedBeltId: selectedBeltId,
+      connectionEntityIds: factoryInteractionConnectionEntityIds,
+      requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+      requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+      requestTruncated: factoryInteractionPinRequest.truncated,
+    }),
+    [
+      factoryInteractionConnectionEntityIds,
+      factoryInteractionPinRequest.truncated,
+      factoryThinViewExpectedRevision,
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      game.activePlanetId,
+      nativeAuthoritativeFactoryCanvasFrame,
+      nativeFactoryThinViewMode,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+      selectedBeltId,
+      selectedBeltIds,
+      selectedEntityIds,
     ],
   );
   const webFactoryRunStatusReadModel = useMemo(
@@ -2066,37 +2138,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
   );
-  const webFactorySelectionToolbarReadModel = useMemo(
-    () => createWebFactorySelectionToolbarReadModel(game, selectedEntityIds, selectedBeltIds),
-    [game.activePlanetId, game.belts, game.entities, selectedBeltIds, selectedEntityIds],
-  );
-  const factorySelectionToolbarReadModel = useMemo(
-    () => selectFactorySelectionToolbarReadModel(
-      webFactorySelectionToolbarReadModel,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-      {
-        requestedEntityIds: factoryThinViewSelectedEntityIds,
-        requestedBeltIds: factoryThinViewSelectedBeltIds,
-        requestTruncated:
-          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
-          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
-        selectedEntityIds,
-        selectedBeltIds,
-      },
-    ),
-    [
-      factoryThinViewExpectedRevision,
-      factoryThinViewAllSelectedBeltIds.length,
-      factoryThinViewAllSelectedEntityIds.length,
-      factoryThinViewSelectedBeltIds,
-      factoryThinViewSelectedEntityIds,
-      nativeFactoryThinViewSnapshot,
-      selectedBeltIds,
-      selectedEntityIds,
-      webFactorySelectionToolbarReadModel,
-    ],
-  );
   const factoryActivePlanetNavigationRow = useMemo(
     () => factoryPlanetNavigationReadModel.planets.rows.find(
       (row) => row.planetId === factoryPlanetNavigationReadModel.activePlanetId,
@@ -2133,14 +2174,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
         projectionEnabled: nativeFactoryThinViewActive,
         requestTruncated:
-          factoryThinViewAllSelectedEntityIds.length > 32 ||
-          factoryThinViewAllSelectedBeltIds.length > 64,
+          factoryInteractionPinRequest.truncated ||
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
       },
     ),
     [
       factoryThinViewAllSelectedBeltIds.length,
       factoryThinViewAllSelectedEntityIds.length,
       factoryThinViewExpectedRevision,
+      factoryInteractionPinRequest.truncated,
       factoryViewportPinnedBeltIds,
       factoryViewportPinnedEntityIds,
       nativeFactoryThinViewSnapshot,
@@ -2197,8 +2240,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         entityLimit: 256,
         beltCursor: 0,
         beltLimit: 512,
-        pinnedEntityIds: factoryViewportPinnedEntityIds,
-        pinnedBeltIds: factoryViewportPinnedBeltIds,
+        pinnedEntityIds: [...factoryViewportPinnedEntityIds],
+        pinnedBeltIds: [...factoryViewportPinnedBeltIds],
       },
     }).catch(() => undefined);
   }, [
@@ -10649,12 +10692,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     });
   }, [activePlanetBelts.length, canvasBatchRendererEnabled, canvasRenderSnapshot.runtimeRevision, canvasRenderSnapshot.topologyRevision, edges, endgameExtremeMode, nodes, performanceMonitor.recordCanvas, performanceMonitor.snapshot.active, productionRefreshIntervalMs, projectionFeatureActive]);
 
+  const getFactoryConnectionReadState = useCallback((
+    sourceEntityId: string | null | undefined,
+    targetEntityId: string | null | undefined,
+  ) => selectFactoryConnectionReadState(
+    gameRef.current,
+    nativeAuthoritativeFactoryCanvasFrameRef.current,
+    {
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      revision: factoryThinViewExpectedRevision,
+      planetId: game.activePlanetId,
+    },
+    sourceEntityId,
+    targetEntityId,
+  ), [factoryThinViewExpectedRevision, game.activePlanetId, nativePlayerAuthorityActiveFrame?.sessionId]);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || connection.source === connection.target ||
       !sourceItem || (!isUniversalInputHandle(connection.targetHandle) && sourceItem !== targetItem)) return false;
-    const state = gameRef.current;
+    const state = getFactoryConnectionReadState(connection.source, connection.target);
     const source = state.entities.find((entity) => entity.id === connection.source);
     const target = state.entities.find((entity) => entity.id === connection.target);
     const draft = connectionDraftRef.current;
@@ -10667,13 +10724,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       (!existing || existing.tier === tier) &&
       canConnectBelt(state, connection.source, connection.target, sourceItem, tier, parseTargetPortIndex(connection.targetHandle), requestedLanes) &&
       (state.construction[constructionId] ?? 0) >= requestedLanes);
-  }, [beltTier, beltTierMode]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState]);
 
   const beginConnectionDraft = useCallback((params: OnConnectStartParams): ConnectionDraft | null => {
     const itemId = parseHandleItem(params.handleId);
     const universalPort = parseTargetPortIndex(params.handleId);
     if (!params.nodeId || !params.handleType || !params.handleId || (!itemId && universalPort === undefined)) return null;
-    const tier = resolveConnectionBeltTier(gameRef.current, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
+    const readState = getFactoryConnectionReadState(params.nodeId, params.nodeId);
+    const tier = resolveConnectionBeltTier(readState, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
     const draft = { nodeId: params.nodeId, handleId: params.handleId, itemId, handleType: params.handleType, tier } satisfies ConnectionDraft;
     updateConnectionDraft(draft);
     const universalLabel = params.handleId.startsWith("in:delivery:")
@@ -10686,7 +10744,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       tone: "ready",
     });
     return draft;
-  }, [beltTier, beltTierMode, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState, updateConnectionDraft]);
 
   const onConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
     if (clickConnectionPreviewRef.current) return;
@@ -10911,7 +10969,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return reject("该目标接口已在预览列表中，未重复加入");
     }
     const current = gameRef.current;
-    const check = getBeltConnectionCheck(current, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    const check = getBeltConnectionCheck(readState, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
     if (!check.ok) return reject(check.label);
     if (!isValidConnection(connection)) return reject("当前端口、线路等级或并联设置不兼容");
     const request = {
@@ -10959,7 +11018,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setBatchConnectionFeedback(null);
     setConnectionHint({ label: `${ITEMS[itemId].name} · 已选 ${next.length} 个下游；继续点选，Enter 或“确认连接”提交`, tone: "ready" });
     return true;
-  }, [isValidConnection]);
+  }, [getFactoryConnectionReadState, isValidConnection]);
 
   const handleCanvasPointerPosition = useCallback((point: { x: number; y: number }) => {
     pointerRef.current = point;
@@ -10996,21 +11055,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setClickConnectionSnapPoint((current) => current && Math.abs(current.x - snapPoint.x) < 0.5 && Math.abs(current.y - snapPoint.y) < 0.5 ? current : snapPoint);
     const connection = connectionFromDraft(preview.draft, handle);
     const connectionItem = parseHandleItem(connection.sourceHandle) ?? preview.draft.itemId;
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
     if (tone !== "valid" || !connection.source || !connection.target) {
       const check = connection.source && connection.target && connectionItem
-        ? getBeltConnectionCheck(gameRef.current, connection.source, connection.target, connectionItem, preview.draft.tier,
+        ? getBeltConnectionCheck(readState, connection.source, connection.target, connectionItem, preview.draft.tier,
           parseTargetPortIndex(connection.targetHandle), defaultBeltLanesRef.current)
         : null;
       setConnectionHint({ label: check && !check.ok ? check.label : "当前端口不可连接", tone: "blocked" });
       return;
     }
     if (!connectionItem) return;
-    const forecast = predictBeltConnection(gameRef.current, connection.source, connection.target, connectionItem, preview.draft.tier, defaultBeltLanesRef.current);
+    const forecast = predictBeltConnection(readState, connection.source, connection.target, connectionItem, preview.draft.tier, defaultBeltLanesRef.current);
     setConnectionHint({
       label: forecast ? `${ITEMS[connectionItem].name} · ${forecast.label}` : `${ITEMS[connectionItem].name} · 可以连接`,
       tone: forecast?.tone === "capacity" || forecast?.tone === "starved" ? "blocked" : "ready",
     });
-  }, [connectionHitRadius, isValidConnection, updateConnectionCandidateNode]);
+  }, [connectionHitRadius, getFactoryConnectionReadState, isValidConnection, updateConnectionCandidateNode]);
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
     const endPoint = getEventPoint(event);
@@ -11059,9 +11119,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const sourceId = fromType === "source" ? fromNodeId : toNodeId;
     const targetId = fromType === "target" ? fromNodeId : toNodeId;
     const current = gameRef.current;
-    const lockedTier = draft?.tier ?? resolveConnectionBeltTier(current, beltTierMode, beltTier, fromNodeId, fromItem ?? undefined);
-    const source = sourceId ? current.entities.find((entity) => entity.id === sourceId) : undefined;
-    const target = targetId ? current.entities.find((entity) => entity.id === targetId) : undefined;
+    const readState = getFactoryConnectionReadState(sourceId, targetId);
+    const lockedTier = draft?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, fromNodeId, fromItem ?? undefined);
+    const source = sourceId ? readState.entities.find((entity) => entity.id === sourceId) : undefined;
+    const target = targetId ? readState.entities.find((entity) => entity.id === targetId) : undefined;
     let label = "请释放到设备的同色输入端口";
     if (state.toNode && state.fromNode?.id === state.toNode.id) label = "设备不能连接到自身";
     else if (state.toHandle && !isUniversalInputHandle(state.toHandle.id) && fromItem !== toItem) label = `物品不兼容：需要${fromItem ? ITEMS[fromItem].name : "同一种物品"}`;
@@ -11071,10 +11132,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else if (source.planetId !== target.planetId) label = "两端必须位于同一行星";
     else if (!fromItem || !getProducedOutputs(source).includes(fromItem)) label = `${fromItem ? ITEMS[fromItem].name : "该物品"}不是当前输出`;
     else {
-      const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === fromItem);
+      const existing = readState.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === fromItem);
       if (existing && existing.tier !== lockedTier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
       else {
-        const check = getBeltConnectionCheck(current, source.id, target.id, fromItem, lockedTier, parseTargetPortIndex(state.toHandle?.id), defaultBeltLanesRef.current);
+        const check = getBeltConnectionCheck(readState, source.id, target.id, fromItem, lockedTier, parseTargetPortIndex(state.toHandle?.id), defaultBeltLanesRef.current);
         if (!check.ok) label = check.label;
       }
     }
@@ -11082,7 +11143,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [beltTier, beltTierMode, coarsePointer, connectionDraft, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, coarsePointer, connectionDraft, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onClickConnectEnd = useCallback((event: MouseEvent | TouchEvent) => {
     const preview = clickConnectionPreviewRef.current;
@@ -11138,8 +11199,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
     const current = gameRef.current;
     const sourceItem = parseHandleItem(connection?.sourceHandle) ?? preview.draft.itemId;
-    const source = connection?.source ? current.entities.find((entity) => entity.id === connection.source) : undefined;
-    const target = connection?.target ? current.entities.find((entity) => entity.id === connection.target) : undefined;
+    const readState = getFactoryConnectionReadState(connection?.source, connection?.target);
+    const source = connection?.source ? readState.entities.find((entity) => entity.id === connection.source) : undefined;
+    const target = connection?.target ? readState.entities.find((entity) => entity.id === connection.target) : undefined;
     let label = "请选择设备的高亮端口";
     if (targetHandle?.handleType === preview.draft.handleType) label = "输出端口必须连接输入端口";
     else if (connection?.source === connection?.target) label = "设备不能连接到自身";
@@ -11150,11 +11212,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else if (!sourceItem || !getProducedOutputs(source).includes(sourceItem)) label = `${sourceItem ? ITEMS[sourceItem].name : "该物品"}不是当前输出`;
     else {
       const targetPortIndex = parseTargetPortIndex(connection?.targetHandle);
-      const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === sourceItem &&
+      const existing = readState.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === sourceItem &&
         belt.targetPortIndex === targetPortIndex);
       if (existing && existing.tier !== preview.draft.tier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
       else {
-        const check = getBeltConnectionCheck(current, source.id, target.id, sourceItem!, preview.draft.tier, targetPortIndex, defaultBeltLanesRef.current);
+        const check = getBeltConnectionCheck(readState, source.id, target.id, sourceItem!, preview.draft.tier, targetPortIndex, defaultBeltLanesRef.current);
         if (!check.ok) label = check.label;
       }
     }
@@ -11162,7 +11224,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [activateBatchConnectionMode, addBatchConnection, coarsePointer, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [activateBatchConnectionMode, addBatchConnection, coarsePointer, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onConnect = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
     const sourceItem = parseHandleItem(connection.sourceHandle);
@@ -11172,7 +11234,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice("运输线两端必须使用同一种物品");
       return false;
     }
-    const activeTier = lockedTier ?? connectionDraftRef.current?.tier ?? resolveConnectionBeltTier(gameRef.current, beltTierMode, beltTier, connection.source, sourceItem);
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    const activeTier = lockedTier ?? connectionDraftRef.current?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, connection.source, sourceItem);
     const constructionId = getBeltConstructionId(activeTier);
     const tierName = activeTier === 3 ? "III" : activeTier === 2 ? "II" : "I";
     const requestedLanes = defaultBeltLanesRef.current;
@@ -11183,7 +11246,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return false;
     }
     const targetPortIndex = parseTargetPortIndex(connection.targetHandle);
-    const matchingEndpoint = gameRef.current.belts.find((belt) =>
+    const matchingEndpoint = readState.belts.find((belt) =>
       belt.source === connection.source && belt.target === connection.target && belt.itemId === sourceItem &&
       belt.targetPortIndex === targetPortIndex);
     if (matchingEndpoint && matchingEndpoint.tier !== activeTier) {
@@ -11226,7 +11289,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
     playTone("connect");
     return true;
-  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, mobileNavigation.openSheet, nextMobileShell, playTone, spawnInteractionBurst]);
+  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, spawnInteractionBurst]);
 
   useEffect(() => { connectRequestRef.current = onConnect; }, [onConnect]);
 
@@ -11735,7 +11798,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         : null;
       if (!canvasBatchRendererEnabled) {
         const nodeById = new Map(nodes.map((node) => [node.id, node]));
-        for (const belt of gameRef.current.belts.filter((candidate) => candidate.planetId === gameRef.current.activePlanetId)) {
+        for (const belt of activePlanetBelts) {
           const source = nodeById.get(belt.source);
           const target = nodeById.get(belt.target);
           if (!source || !target) continue;
@@ -11821,7 +11884,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -11841,36 +11904,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setPlacement(null);
   }, [commitGame, placementCount, playTone, screenToFlowPosition]);
 
-  const selectedEntities = useMemo(() => selectedEntityIds.length === 0
-    ? []
-    : game.entities.filter((entity) => selectedEntityIdSet.has(entity.id) && entity.planetId === game.activePlanetId),
-  [game.activePlanetId, game.entities, selectedEntityIdSet, selectedEntityIds.length]);
-  const selectedEntity = selectedEntities.length === 1 ? selectedEntities[0] : null;
-  const selectedBeltsForMultiSummary = useMemo(() => {
-    if (selectedEntities.length <= 1 || factoryThinViewAllSelectedBeltIds.length === 0) return [];
-    const selectedIds = new Set(factoryThinViewAllSelectedBeltIds);
-    return game.belts.filter((belt) => selectedIds.has(belt.id) && belt.planetId === game.activePlanetId);
-  }, [factoryThinViewAllSelectedBeltIds, game.activePlanetId, game.belts, selectedEntities.length]);
-  const webFactoryMultiSelectionSummaryReadModel = useMemo(
-    () => createWebFactoryMultiSelectionSummaryReadModel(
-      game,
-      selectedEntities,
-      selectedBeltsForMultiSummary,
-      {
-        selectedEntityIds: factoryThinViewAllSelectedEntityIds,
-        selectedBeltIds: factoryThinViewAllSelectedBeltIds,
-      },
+  const factoryInteractionRows = useMemo(
+    () => selectFactoryInteractionRows(
+      nativeAuthoritativeFactoryInteractionRows,
+      () => createWebFactoryInteractionRows(game, {
+        selectedEntityIds,
+        selectedBeltIds,
+        primarySelectedBeltId: selectedBeltId,
+      }),
     ),
     [
-      factoryThinViewAllSelectedBeltIds,
-      factoryThinViewAllSelectedEntityIds,
       game.activePlanetId,
-      selectedBeltsForMultiSummary,
-      selectedEntities,
+      game.belts,
+      game.entities,
+      nativeAuthoritativeFactoryInteractionRows,
+      selectedBeltId,
+      selectedBeltIds,
+      selectedEntityIds,
     ],
   );
+  const selectedEntities = factoryInteractionRows.selectedEntities;
+  const selectedEntity = factoryInteractionRows.selectedEntity;
+  const selectedBeltsForMultiSummary = factoryInteractionRows.multiSelectedBelts;
+  const webFactoryMultiSelectionSummaryReadModel = factoryInteractionRows.multiSelectionSummaryReadModel;
   const factoryMultiSelectionSummaryReadModel = useMemo(
-    () => selectFactoryMultiSelectionSummaryReadModel(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.multiSelectionSummaryReadModel
+      : selectFactoryMultiSelectionSummaryReadModel(
       webFactoryMultiSelectionSummaryReadModel,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
@@ -11880,8 +11940,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         requestTruncated:
           factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
           factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
-      },
-    ),
+      }),
     [
       factoryThinViewAllSelectedBeltIds.length,
       factoryThinViewAllSelectedEntityIds.length,
@@ -11889,19 +11948,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewSelectedBeltIds,
       factoryThinViewSelectedEntityIds,
       nativeFactoryThinViewSnapshot,
+      factoryInteractionRows.source,
+      factoryInteractionRows.multiSelectionSummaryReadModel,
       webFactoryMultiSelectionSummaryReadModel,
     ],
   );
-  const selectedBelt = useMemo(() => selectedBeltId
-    ? canvasGame.belts.find((belt) => belt.id === selectedBeltId && belt.planetId === canvasGame.activePlanetId) ?? null
-    : null,
-  [canvasGame.activePlanetId, canvasGame.belts, selectedBeltId]);
-  const webFactoryInspectorSummaryReadModel = useMemo(
-    () => createWebFactoryInspectorSummaryReadModel(game, selectedEntity, selectedBelt),
-    [game.activePlanetId, selectedBelt, selectedEntity],
-  );
+  const selectedBelt = factoryInteractionRows.selectedBelt;
+  const webFactoryInspectorSummaryReadModel = factoryInteractionRows.inspectorSummaryReadModel;
   const factoryInspectorSummaryReadModel = useMemo(
-    () => selectFactoryInspectorSummaryReadModel(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.inspectorSummaryReadModel
+      : selectFactoryInspectorSummaryReadModel(
       webFactoryInspectorSummaryReadModel,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
@@ -11911,8 +11968,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         requestTruncated:
           factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
           factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
-      },
-    ),
+      }),
     [
       factoryThinViewAllSelectedBeltIds.length,
       factoryThinViewAllSelectedEntityIds.length,
@@ -11920,14 +11976,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewSelectedBeltIds,
       factoryThinViewSelectedEntityIds,
       nativeFactoryThinViewSnapshot,
+      factoryInteractionRows.source,
+      factoryInteractionRows.inspectorSummaryReadModel,
       webFactoryInspectorSummaryReadModel,
     ],
   );
-  const selectedBelts = useMemo(() => {
-    if (selectedBeltIds.length === 0) return [];
-    const selectedIds = new Set(selectedBeltIds);
-    return game.belts.filter((belt) => selectedIds.has(belt.id) && belt.planetId === game.activePlanetId);
-  }, [game.activePlanetId, game.belts, selectedBeltIds]);
+  const factorySelectionToolbarReadModel = useMemo(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.selectionToolbarReadModel
+      : selectFactorySelectionToolbarReadModel(
+          factoryInteractionRows.selectionToolbarReadModel,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+          {
+            requestedEntityIds: factoryThinViewSelectedEntityIds,
+            requestedBeltIds: factoryThinViewSelectedBeltIds,
+            requestTruncated:
+              factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+              factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+            selectedEntityIds,
+            selectedBeltIds,
+          },
+        ),
+    [
+      factoryInteractionRows.source,
+      factoryInteractionRows.selectionToolbarReadModel,
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      selectedBeltIds,
+      selectedEntityIds,
+    ],
+  );
+  const selectedBelts = factoryInteractionRows.selectedBelts;
+  const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative" &&
+    (selectedEntities.length > 0 || selectedBelt !== null)
+    ? {
+        ...panelGame,
+        entities: factoryInteractionRows.projectionEntities as FactoryEntity[],
+        belts: factoryInteractionRows.projectionBelts as BeltConnection[],
+      }
+    : panelGame,
+  [factoryInteractionRows, panelGame, selectedBelt, selectedEntities.length]);
+  const factoryInspectorGame = inspectorTab === "inspect" ? factorySelectionReadGame : panelGame;
   const dockBeltTier = resolveConnectionBeltTier(game, beltTierMode, beltTier);
   const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
     ? []
@@ -12767,6 +12861,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         enabled={nextMobileShell}
         layout={compactLayout}
         game={game}
+        factoryGame={factorySelectionReadGame}
         alertCount={alertCount}
         planetAlertCounts={planetAlertCounts}
         route={mobileNavigation.route}
@@ -13512,12 +13607,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         </RuntimeRenderProfile>
         <RuntimeRenderProfile id="inspector">
         <StableInspectorPanel
-          game={panelGame}
+          game={factoryInspectorGame}
           inspectorReadModel={factoryInspectorSummaryReadModel}
           multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
-          multiSelectedBelts={selectedBeltsForMultiSummary}
+          multiSelectedBelts={selectedBeltsForMultiSummary as BeltConnection[]}
           fabricatorFocusItemId={fabricatorFocusItemId}
-          selectedEntities={selectedEntities}
+          selectedEntities={selectedEntities as FactoryEntity[]}
           selectedEntity={selectedEntity}
           selectedBelt={selectedBelt}
           onEntityLockChange={(entityId, locked) => {

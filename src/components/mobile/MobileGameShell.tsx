@@ -10,10 +10,12 @@ import { MobileSheets, type MobileCanvasToolActions, type MobileCanvasToolState,
 import { MobileTopBar } from "./MobileTopBar";
 import { MobileWorkspaceHub } from "./MobileWorkspaceHub";
 
-export function MobileGameShell({ enabled, layout, game, alertCount, planetAlertCounts, route, overlay, tools, toolActions, factory, factoryActions, hasConstructionCenter, onFactory, onOpenHub, onOpenSheet, onSheetSnap, onOpenWorkspace, onOpenOrbitalStation, onOpenStatistics, onOpenOperations, onOpenGalaxy, onOpenCommandPalette, onBack, onTogglePause, onPlanetChange, onConfirmExit, onDismissExit, onRequestExit, onSwitchLegacy }: {
+export function MobileGameShell({ enabled, layout, game, factoryGame, alertCount, planetAlertCounts, route, overlay, tools, toolActions, factory, factoryActions, hasConstructionCenter, onFactory, onOpenHub, onOpenSheet, onSheetSnap, onOpenWorkspace, onOpenOrbitalStation, onOpenStatistics, onOpenOperations, onOpenGalaxy, onOpenCommandPalette, onBack, onTogglePause, onPlanetChange, onConfirmExit, onDismissExit, onRequestExit, onSwitchLegacy }: {
   enabled: boolean;
   layout: CompactLayoutSnapshot;
   game: GameState;
+  /** Same-revision bounded row universe for the selected factory inspector. */
+  factoryGame: GameState;
   alertCount: number;
   planetAlertCounts: Partial<Record<PlanetId, number>>;
   route: MobileRoute;
@@ -70,7 +72,7 @@ export function MobileGameShell({ enabled, layout, game, alertCount, planetAlert
       <MobileTopBar game={game} route={route} alertCount={alertCount} onBack={onBack} onOpenPlanet={() => openSheet("planet")} onTogglePause={onTogglePause} onOpenAlerts={() => openOperations("alerts")} />
       {route.kind === "hub" ? <MobileWorkspaceHub hasConstructionCenter={hasConstructionCenter} onOpenWorkspace={openWorkspace} onOpenOrbitalStation={onOpenOrbitalStation} onOpenStatistics={openStatistics} onOpenOperations={openOperations} onOpenGalaxy={openGalaxy} onOpenCommandPalette={onOpenCommandPalette} onSwitchLegacy={onSwitchLegacy} onRequestExit={onRequestExit} onClose={onBack} /> : null}
       {route.kind === "factory" && !overlay ? <button className="mobile-next-tools-command" type="button" onClick={() => openSheet("tools")} title="画布工具" aria-label="打开画布工具"><Wrench size={22} /></button> : null}
-      <MobileSheets game={game} planetAlertCounts={planetAlertCounts} overlay={overlay} tools={tools} toolActions={toolActions} factory={factory} factoryActions={factoryActions} onSheetSnap={onSheetSnap} onClose={close} onPlanetChange={onPlanetChange} onOpenStarMap={() => openWorkspace("star-map")} onConfirmExit={onConfirmExit} onDismissExit={onDismissExit} />
+      <MobileSheets game={game} factoryGame={factoryGame} planetAlertCounts={planetAlertCounts} overlay={overlay} tools={tools} toolActions={toolActions} factory={factory} factoryActions={factoryActions} onSheetSnap={onSheetSnap} onClose={close} onPlanetChange={onPlanetChange} onOpenStarMap={() => openWorkspace("star-map")} onConfirmExit={onConfirmExit} onDismissExit={onDismissExit} />
       <MobileBottomNav
         route={route}
         overlay={overlay}

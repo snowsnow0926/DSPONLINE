@@ -200,6 +200,8 @@ describe("native authoritative factory canvas frame", () => {
 
     expect(frame).toMatchObject({ omittedCrossBoundaryBeltCount: 1 });
     expect(frame?.belts).toEqual([]);
+    expect(frame?.projectedBelts.map((row) => row.id)).toEqual(["belt-cross"]);
+    expect(frame?.beltById.get("belt-cross")?.target).toBe("offscreen");
     expect(frame?.viewportTotals.belts).toBe(1);
   });
 

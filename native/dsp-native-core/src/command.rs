@@ -4158,6 +4158,76 @@ fn validate_dyson_orbit_geometry_command(
     Ok(())
 }
 
+fn validate_active_dyson_layer_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority active Dyson layer command shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    let system_id = match change.path.as_slice() {
+        [
+            PathSegment::Key(root),
+            PathSegment::Key(system_id),
+            PathSegment::Key(field),
+        ] if root == "dysonPlans" && field == "activeLayerId" => system_id.as_str(),
+        _ => bail!("native player-authority active Dyson layer path is not canonical"),
+    };
+    let target = change
+        .value
+        .as_ref()
+        .filter(|_| change.operation == "set")
+        .and_then(Value::as_str)
+        .filter(|layer_id| !layer_id.is_empty() && layer_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+        .ok_or_else(|| anyhow!("native player-authority active Dyson layer ID is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.system_id == system_id)
+    {
+        bail!("native player-authority active Dyson layer system is unknown")
+    }
+    let plan = state
+        .base_value()
+        .get("dysonPlans")
+        .and_then(Value::as_object)
+        .and_then(|plans| plans.get(system_id))
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson plan is missing"))?;
+    let current = match plan.get("activeLayerId") {
+        Some(Value::Null) => None,
+        Some(Value::String(layer_id))
+            if !layer_id.is_empty() && layer_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES =>
+        {
+            Some(layer_id.as_str())
+        }
+        _ => bail!("native player-authority current active Dyson layer is invalid"),
+    };
+    if current == Some(target) {
+        bail!("native player-authority active Dyson layer is unchanged")
+    }
+    let layers = plan
+        .get("layers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority Dyson layer directory is invalid"))?;
+    if !layers
+        .iter()
+        .any(|layer| layer.get("id").and_then(Value::as_str) == Some(target))
+    {
+        bail!("native player-authority active Dyson layer is outside its stellar system")
+    }
+    Ok(())
+}
+
 fn validate_recipe_focus_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -5014,6 +5084,11 @@ impl CoreState {
             return validate_dyson_launch_configuration_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "dysonPlans")
+        }) {
+            return validate_active_dyson_layer_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "activePlanetId")
         }) {
             return validate_active_planet_command(self, command);
@@ -5687,6 +5762,19 @@ mod tests {
                 "home": { "generationKw": 1, "demandKw": 2, "powerFactor": 0.5 },
                 "ashen": { "generationKw": 3, "demandKw": 4, "powerFactor": 0.75 },
                 "giant": { "generationKw": 0, "demandKw": 0, "powerFactor": 1 }
+            },
+            "dysonPlans": {
+                "helios": {
+                    "activeLayerId": "dyson-layer-old",
+                    "layers": [
+                        { "id": "dyson-layer-old", "modPayload": { "owner": "pack:test" } },
+                        { "id": "dyson-layer-new", "modPayload": { "owner": "pack:test" } }
+                    ]
+                },
+                "sigma": {
+                    "activeLayerId": "dyson-layer-foreign",
+                    "layers": [{ "id": "dyson-layer-foreign" }]
+                }
             },
             "dysonEngineering": {
                 "launchMode": "balanced",
@@ -8925,7 +9013,22 @@ mod tests {
         assert_eq!(orbit["radius"], 24_000);
         assert_eq!(orbit["inclination"], -12);
         assert_eq!(orbit["longitude"], 359.9);
-        assert_eq!(state.revision, 14);
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["dysonPlans", "helios", "activeLayerId"],
+                Value::from("dyson-layer-new"),
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["activeLayerId"],
+            "dyson-layer-new"
+        );
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["layers"][1]["modPayload"],
+            serde_json::json!({ "owner": "pack:test" })
+        );
+        assert_eq!(state.revision, 15);
 
         let committed_hash = state.canonical_sha256().unwrap();
         let retry_error = state.apply_player_authority_command(&mode).unwrap_err();
@@ -8964,6 +9067,23 @@ mod tests {
             dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(22_000))]);
         delete_geometry.top_level_changes[0].operation = "delete".to_owned();
         delete_geometry.top_level_changes[0].value = None;
+        let mut delete_active_layer = top_level_leaf_command(
+            9,
+            &["dysonPlans", "helios", "activeLayerId"],
+            Value::from("dyson-layer-new"),
+        );
+        delete_active_layer.top_level_changes[0].operation = "delete".to_owned();
+        delete_active_layer.top_level_changes[0].value = None;
+        let mut mixed_active_layer = top_level_leaf_command(
+            9,
+            &["dysonPlans", "helios", "activeLayerId"],
+            Value::from("dyson-layer-new"),
+        );
+        mixed_active_layer.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
         let commands = [
             dyson_launch_command(9, "launchMode", Value::from("balanced")),
             dyson_launch_command(9, "launchMode", Value::from("unlimited")),
@@ -8999,10 +9119,32 @@ mod tests {
             dyson_orbit_geometry_command(9, "helios", 0, &[("longitude", Value::from(12.34))]),
             dyson_orbit_geometry_command(9, "missing", 0, &[("radius", Value::from(22_000))]),
             dyson_orbit_geometry_command(9, "helios", 99, &[("radius", Value::from(22_000))]),
+            top_level_leaf_command(
+                9,
+                &["dysonPlans", "helios", "activeLayerId"],
+                Value::from("dyson-layer-old"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonPlans", "helios", "activeLayerId"],
+                Value::from("dyson-layer-foreign"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonPlans", "missing", "activeLayerId"],
+                Value::from("dyson-layer-new"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonPlans", "helios", "layers"],
+                serde_json::json!([]),
+            ),
             cross_orbit,
             delete_geometry,
+            delete_active_layer,
             delete_mode,
             mixed,
+            mixed_active_layer,
             entity_mixed,
         ];
         for command in commands {
@@ -9026,6 +9168,40 @@ mod tests {
                 .is_err()
         );
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+
+        let mut malformed_plan = player_command_state();
+        malformed_plan.base_value_mut()["dysonPlans"]["helios"]["activeLayerId"] = Value::from("");
+        let before = malformed_plan.canonical_sha256().unwrap();
+        assert!(
+            malformed_plan
+                .apply_player_authority_command(&top_level_leaf_command(
+                    malformed_plan.revision,
+                    &["dysonPlans", "helios", "activeLayerId"],
+                    Value::from("dyson-layer-new"),
+                ))
+                .is_err()
+        );
+        assert_eq!(malformed_plan.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_selects_first_dyson_layer_from_an_unset_plan() {
+        let mut state = player_command_state();
+        state.base_value_mut()["dysonPlans"]["helios"]["activeLayerId"] = Value::Null;
+
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["dysonPlans", "helios", "activeLayerId"],
+                Value::from("dyson-layer-new"),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["activeLayerId"],
+            "dyson-layer-new"
+        );
+        assert_eq!(state.revision, 10);
     }
 
     #[test]

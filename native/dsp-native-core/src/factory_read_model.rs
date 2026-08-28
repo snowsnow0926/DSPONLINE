@@ -290,7 +290,7 @@ impl CoreState {
             "entityCount": self.entities.ids.len(),
             "beltCount": self.belts.ids.len(),
             "activePlanetEntityCount": self.factory_topology.entities_by_planet[active_planet_index].len(),
-            "activePlanetBeltCount": self.factory_topology.belts_by_planet[active_planet_index].len(),
+            "activePlanetBeltCount": self.factory_topology.belt_counts_by_planet[active_planet_index],
             "constructionQueueCount": queue_count,
         });
 
@@ -354,7 +354,7 @@ impl CoreState {
                     "role": optional_string(roles.and_then(|value| value.get(&planet.id))),
                     "entityCount": self.factory_topology.entities_by_planet[index].len(),
                     "deviceCount": self.factory_topology.device_counts_by_planet[index],
-                    "beltCount": self.factory_topology.belts_by_planet[index].len(),
+                    "beltCount": self.factory_topology.belt_counts_by_planet[index],
                     "constructionQueueCount": queue_for_planet,
                     "powerFactor": base
                         .get("planetMetrics")

@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
@@ -2075,8 +2077,8 @@ impl ViewportWorldBounds {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ViewportCellKey {
-    x: i64,
-    y: i64,
+    x: i32,
+    y: i32,
 }
 
 fn viewport_cell_coordinate(value: f64) -> i64 {
@@ -2090,32 +2092,65 @@ fn viewport_cell_coordinate(value: f64) -> i64 {
     }
 }
 
+#[inline]
+fn compact_topology_index(value: usize, label: &'static str) -> anyhow::Result<u32> {
+    u32::try_from(value)
+        .with_context(|| format!("native {label} exceeds the compact topology limit"))
+}
+
+#[inline]
+fn expand_topology_index(value: u32) -> usize {
+    usize::try_from(value).expect("validated compact topology index must fit usize")
+}
+
 /// Immutable per-planet spatial index. Cell members are persisted entity row
 /// indexes, and every query re-sorts only the touched rows by that index. This
 /// keeps viewport order independent from grid-cell traversal order.
 #[derive(Debug, Clone, Default)]
 struct PlanetViewportIndex {
     cell_keys: Vec<ViewportCellKey>,
-    cell_offsets: Vec<usize>,
-    entity_indices: Vec<usize>,
+    cell_offsets: Vec<u32>,
+    entity_indices: Vec<u32>,
     world_bounds: ViewportWorldBounds,
+    broad_fallback_only: bool,
 }
 
 impl PlanetViewportIndex {
-    fn build(entity_indices: &[usize], entities: &EntityColumns) -> Self {
-        let mut cells = BTreeMap::<ViewportCellKey, Vec<usize>>::new();
+    fn build(entity_indices: &[u32], entities: &EntityColumns) -> anyhow::Result<Self> {
+        let mut cells = BTreeMap::<ViewportCellKey, Vec<u32>>::new();
         let mut world_bounds = ViewportWorldBounds::default();
-        for (ordinal, &entity_index) in entity_indices.iter().enumerate() {
+        let mut broad_fallback_only = false;
+        for (ordinal, &compact_entity_index) in entity_indices.iter().enumerate() {
+            let entity_index = expand_topology_index(compact_entity_index);
             let x = entities.position_x[entity_index];
             let y = entities.position_y[entity_index];
             world_bounds.include(x, y, ordinal == 0);
+            let (Ok(cell_x), Ok(cell_y)) = (
+                i32::try_from(viewport_cell_coordinate(x)),
+                i32::try_from(viewport_cell_coordinate(y)),
+            ) else {
+                broad_fallback_only = true;
+                continue;
+            };
             cells
                 .entry(ViewportCellKey {
-                    x: viewport_cell_coordinate(x),
-                    y: viewport_cell_coordinate(y),
+                    x: cell_x,
+                    y: cell_y,
                 })
                 .or_default()
-                .push(entity_index);
+                .push(compact_entity_index);
+        }
+
+        // One out-of-range MOD coordinate makes the grid incomplete. Retain
+        // exact world bounds, but release every partial cell so all queries
+        // deterministically use the persisted-order broad scan instead of
+        // silently omitting the outlier.
+        if broad_fallback_only {
+            return Ok(Self {
+                world_bounds,
+                broad_fallback_only: true,
+                ..Self::default()
+            });
         }
 
         let mut cell_keys = Vec::with_capacity(cells.len());
@@ -2125,22 +2160,26 @@ impl PlanetViewportIndex {
         for (key, indices) in cells {
             cell_keys.push(key);
             flattened.extend(indices);
-            cell_offsets.push(flattened.len());
+            cell_offsets.push(compact_topology_index(
+                flattened.len(),
+                "viewport cell offset",
+            )?);
         }
         cell_keys.shrink_to_fit();
         cell_offsets.shrink_to_fit();
         flattened.shrink_to_fit();
-        Self {
+        Ok(Self {
             cell_keys,
             cell_offsets,
             entity_indices: flattened,
             world_bounds,
-        }
+            broad_fallback_only: false,
+        })
     }
 
     fn query(
         &self,
-        planet_entities: &[usize],
+        planet_entities: &[u32],
         entities: &EntityColumns,
         min_x: f64,
         min_y: f64,
@@ -2157,14 +2196,36 @@ impl PlanetViewportIndex {
             .checked_mul(span_y)
             .filter(|value| *value >= 0)
             .and_then(|value| u64::try_from(value).ok());
-        let broad_fallback = cell_probes.is_none_or(|count| {
-            count > MAX_VIEWPORT_GRID_CELL_PROBES || count > self.cell_keys.len() as u64 * 16 + 64
-        });
+        let compact_bounds = (
+            i32::try_from(min_cell_x),
+            i32::try_from(min_cell_y),
+            i32::try_from(max_cell_x),
+            i32::try_from(max_cell_y),
+        );
+        let broad_fallback = self.broad_fallback_only
+            || compact_bounds.0.is_err()
+            || compact_bounds.1.is_err()
+            || compact_bounds.2.is_err()
+            || compact_bounds.3.is_err()
+            || cell_probes.is_none_or(|count| {
+                count > MAX_VIEWPORT_GRID_CELL_PROBES
+                    || count > self.cell_keys.len() as u64 * 16 + 64
+            });
 
         let mut candidates = if broad_fallback {
-            planet_entities.to_vec()
+            planet_entities
+                .iter()
+                .copied()
+                .map(expand_topology_index)
+                .collect()
         } else {
             let mut candidates = Vec::new();
+            let (min_cell_x, min_cell_y, max_cell_x, max_cell_y) = (
+                compact_bounds.0.expect("validated compact viewport bound"),
+                compact_bounds.1.expect("validated compact viewport bound"),
+                compact_bounds.2.expect("validated compact viewport bound"),
+                compact_bounds.3.expect("validated compact viewport bound"),
+            );
             for cell_x in min_cell_x..=max_cell_x {
                 for cell_y in min_cell_y..=max_cell_y {
                     let key = ViewportCellKey {
@@ -2172,9 +2233,13 @@ impl PlanetViewportIndex {
                         y: cell_y,
                     };
                     if let Ok(index) = self.cell_keys.binary_search(&key) {
-                        candidates.extend_from_slice(
-                            &self.entity_indices
-                                [self.cell_offsets[index]..self.cell_offsets[index + 1]],
+                        let start = expand_topology_index(self.cell_offsets[index]);
+                        let end = expand_topology_index(self.cell_offsets[index + 1]);
+                        candidates.extend(
+                            self.entity_indices[start..end]
+                                .iter()
+                                .copied()
+                                .map(expand_topology_index),
                         );
                     }
                 }
@@ -2192,8 +2257,8 @@ impl PlanetViewportIndex {
 
     fn estimated_bytes(&self) -> u64 {
         (self.cell_keys.capacity() * size_of::<ViewportCellKey>()
-            + self.cell_offsets.capacity() * size_of::<usize>()
-            + self.entity_indices.capacity() * size_of::<usize>()) as u64
+            + self.cell_offsets.capacity() * size_of::<u32>()
+            + self.entity_indices.capacity() * size_of::<u32>()) as u64
     }
 }
 
@@ -2201,12 +2266,12 @@ impl PlanetViewportIndex {
 /// belt rows. It is rebuilt only with topology and is never serialized.
 #[derive(Debug, Clone, Default)]
 struct EntityBeltAdjacency {
-    offsets: Vec<usize>,
-    belt_indices: Vec<usize>,
+    offsets: Vec<u32>,
+    belt_indices: Vec<u32>,
 }
 
 impl EntityBeltAdjacency {
-    fn from_rows(mut rows: Vec<Vec<usize>>) -> Self {
+    fn from_rows(mut rows: Vec<Vec<u32>>) -> anyhow::Result<Self> {
         let edge_count = rows.iter().map(Vec::len).sum();
         let mut offsets = Vec::with_capacity(rows.len().saturating_add(1));
         let mut belt_indices = Vec::with_capacity(edge_count);
@@ -2215,25 +2280,30 @@ impl EntityBeltAdjacency {
             row.sort_unstable();
             row.dedup();
             belt_indices.extend_from_slice(row);
-            offsets.push(belt_indices.len());
+            offsets.push(compact_topology_index(
+                belt_indices.len(),
+                "entity belt adjacency offset",
+            )?);
         }
         offsets.shrink_to_fit();
         belt_indices.shrink_to_fit();
-        Self {
+        Ok(Self {
             offsets,
             belt_indices,
-        }
+        })
     }
 
-    fn incident(&self, entity_index: usize) -> &[usize] {
+    fn incident(&self, entity_index: usize) -> &[u32] {
         self.offsets
             .get(entity_index..=entity_index.saturating_add(1))
             .filter(|range| range.len() == 2)
-            .map_or(&[], |range| &self.belt_indices[range[0]..range[1]])
+            .map_or(&[], |range| {
+                &self.belt_indices[expand_topology_index(range[0])..expand_topology_index(range[1])]
+            })
     }
 
     fn estimated_bytes(&self) -> u64 {
-        ((self.offsets.capacity() + self.belt_indices.capacity()) * size_of::<usize>()) as u64
+        ((self.offsets.capacity() + self.belt_indices.capacity()) * size_of::<u32>()) as u64
     }
 }
 
@@ -2278,8 +2348,11 @@ pub(crate) struct FactoryTopology {
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
     pub entity_grid_indices: Vec<usize>,
-    pub entities_by_planet: Vec<Vec<usize>>,
-    pub belts_by_planet: Vec<Vec<usize>>,
+    pub entities_by_planet: Vec<Vec<u32>>,
+    /// Exact per-planet persisted belt counts. Incident belt lookup reuses the
+    /// compact entity adjacency below, so retaining another full belt-row list
+    /// would duplicate hundreds of KiB in large sessions.
+    pub belt_counts_by_planet: Vec<u32>,
     /// Sum of machine/miner stacks per planet for bounded UI projections.
     /// Counts are rebuilt with the immutable topology columns, so reading the
     /// planet navigator never scans every entity on a simulation revision.
@@ -2310,15 +2383,11 @@ impl FactoryTopology {
         self.research_entity_indices.shrink_to_fit();
         self.entity_planet_indices.shrink_to_fit();
         self.entity_grid_indices.shrink_to_fit();
-        for indices in self
-            .entities_by_planet
-            .iter_mut()
-            .chain(self.belts_by_planet.iter_mut())
-        {
+        for indices in self.entities_by_planet.iter_mut() {
             indices.shrink_to_fit();
         }
         self.entities_by_planet.shrink_to_fit();
-        self.belts_by_planet.shrink_to_fit();
+        self.belt_counts_by_planet.shrink_to_fit();
         self.device_counts_by_planet.shrink_to_fit();
         self.planet_viewport_indexes.shrink_to_fit();
     }
@@ -2346,10 +2415,11 @@ impl FactoryTopology {
         let planet_index_capacity = self
             .entities_by_planet
             .iter()
-            .chain(self.belts_by_planet.iter())
             .map(Vec::capacity)
             .sum::<usize>();
-        ((index_capacity + planet_index_capacity) * size_of::<usize>()) as u64
+        (index_capacity * size_of::<usize>()) as u64
+            + (planet_index_capacity * size_of::<u32>()) as u64
+            + (self.belt_counts_by_planet.capacity() * size_of::<u32>()) as u64
             + (self.device_counts_by_planet.capacity() * size_of::<f64>()) as u64
             + (self.planet_viewport_indexes.capacity() * size_of::<PlanetViewportIndex>()) as u64
             + self
@@ -3522,7 +3592,7 @@ impl CoreState {
             .collect::<HashMap<_, _>>();
         let mut factory_topology = FactoryTopology {
             entities_by_planet: vec![Vec::new(); self.catalog.planets.len()],
-            belts_by_planet: vec![Vec::new(); self.catalog.planets.len()],
+            belt_counts_by_planet: vec![0; self.catalog.planets.len()],
             device_counts_by_planet: vec![0.0; self.catalog.planets.len()],
             ..FactoryTopology::default()
         };
@@ -3652,7 +3722,7 @@ impl CoreState {
                 .unwrap_or(usize::MAX);
             factory_topology.entity_planet_indices.push(entity_planet);
             if let Some(indices) = factory_topology.entities_by_planet.get_mut(entity_planet) {
-                indices.push(index);
+                indices.push(compact_topology_index(index, "planet entity row")?);
             }
             if let Some(device_count) = factory_topology
                 .device_counts_by_planet
@@ -3673,7 +3743,7 @@ impl CoreState {
         let entity_index = ExactRowIdIndex::from_boxed(entity_ids, "entity")?;
         self.entities.ids = entity_index.ids();
         self.entity_index = entity_index.into();
-        let mut entity_belt_rows = vec![Vec::<usize>::new(); entity_values.len()];
+        let mut entity_belt_rows = vec![Vec::<u32>::new(); entity_values.len()];
 
         for index in 0..self.belt_raw.len() {
             let value = self.parse_belt(index)?;
@@ -3722,15 +3792,18 @@ impl CoreState {
                     .min(2) as u8,
             );
             self.belt_dynamics.push_from_object(object)?;
-            if let Some(planet) = object_string(object, "planetId")
+            if let Some(count) = object_string(object, "planetId")
                 .and_then(|id| planet_indices.get(id).copied())
-                .and_then(|planet| factory_topology.belts_by_planet.get_mut(planet))
+                .and_then(|planet| factory_topology.belt_counts_by_planet.get_mut(planet))
             {
-                planet.push(index);
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("native planet belt count exceeds the compact limit"))?;
             }
             for endpoint_id in [source_id, target_id].into_iter().flatten() {
                 if let Some(&entity_index) = self.entity_index.get(endpoint_id) {
-                    entity_belt_rows[entity_index].push(index);
+                    entity_belt_rows[entity_index]
+                        .push(compact_topology_index(index, "entity belt row")?);
                 }
             }
         }
@@ -3745,8 +3818,8 @@ impl CoreState {
             .entities_by_planet
             .iter()
             .map(|indices| PlanetViewportIndex::build(indices, &self.entities))
-            .collect();
-        factory_topology.entity_belt_adjacency = EntityBeltAdjacency::from_rows(entity_belt_rows);
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        factory_topology.entity_belt_adjacency = EntityBeltAdjacency::from_rows(entity_belt_rows)?;
         if !factory_topology.production_history_rate_indices.is_empty()
             && factory_topology
                 .production_history_rate_indices
@@ -4388,34 +4461,37 @@ impl CoreState {
             .entities_by_planet
             .get(planet_index)
             .ok_or_else(|| anyhow!("native viewport projection planet index is invalid"))?;
-        let matching = candidates.iter().copied().filter(|&index| {
-            let x = self.entities.position_x[index];
-            let y = self.entities.position_y[index];
-            x >= min_x && x <= max_x && y >= min_y && y <= max_y
-        });
+        let matching = candidates
+            .iter()
+            .copied()
+            .map(expand_topology_index)
+            .filter(|&index| {
+                let x = self.entities.position_x[index];
+                let y = self.entities.position_y[index];
+                x >= min_x && x <= max_x && y >= min_y && y <= max_y
+            });
         let mut selected_indices = matching
             .skip(entity_cursor)
             .take(entity_limit.saturating_add(1))
             .collect::<Vec<_>>();
         let has_more_entities = selected_indices.len() > entity_limit;
         selected_indices.truncate(entity_limit);
-        let selected_ids = selected_indices
+        let mut incident_belts = selected_indices
             .iter()
-            .map(|&index| &self.entities.ids[index])
-            .collect::<HashSet<_>>();
-        let mut selected_belts = self
-            .factory_topology
-            .belts_by_planet
-            .get(planet_index)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|&index| {
-                let source = self.symbols.resolve(self.belts.sources[index]);
-                let target = self.symbols.resolve(self.belts.targets[index]);
-                source.is_some_and(|id| selected_ids.contains(id))
-                    || target.is_some_and(|id| selected_ids.contains(id))
+            .flat_map(|&entity_index| {
+                self.factory_topology
+                    .entity_belt_adjacency
+                    .incident(entity_index)
+                    .iter()
+                    .copied()
+                    .map(expand_topology_index)
             })
+            .collect::<Vec<_>>();
+        incident_belts.sort_unstable();
+        incident_belts.dedup();
+        let mut selected_belts = incident_belts
+            .into_iter()
+            .filter(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id))
             .take(belt_limit.saturating_add(1))
             .collect::<Vec<_>>();
         let has_more_belts = selected_belts.len() > belt_limit;
@@ -4533,10 +4609,11 @@ impl CoreState {
             .entities_by_planet
             .get(planet_index)
             .ok_or_else(|| anyhow!("native viewport v2 planet index is invalid"))?;
-        let planet_belts = self
+        let planet_belt_count = self
             .factory_topology
-            .belts_by_planet
+            .belt_counts_by_planet
             .get(planet_index)
+            .copied()
             .ok_or_else(|| anyhow!("native viewport v2 belt planet index is invalid"))?;
         let spatial = self
             .factory_topology
@@ -4574,10 +4651,13 @@ impl CoreState {
         belt_source_entities.dedup();
         let mut visible_belt_indices = Vec::new();
         for entity_index in belt_source_entities {
-            visible_belt_indices.extend_from_slice(
+            visible_belt_indices.extend(
                 self.factory_topology
                     .entity_belt_adjacency
-                    .incident(entity_index),
+                    .incident(entity_index)
+                    .iter()
+                    .copied()
+                    .map(expand_topology_index),
             );
         }
         visible_belt_indices.sort_unstable();
@@ -4647,7 +4727,7 @@ impl CoreState {
             "nextBeltCursor": next_belt_cursor,
             "planetTotals": {
                 "entities": planet_entities.len(),
-                "belts": planet_belts.len(),
+                "belts": planet_belt_count,
             },
             "viewportTotals": {
                 "entities": visible_entity_indices.len(),
@@ -4657,7 +4737,7 @@ impl CoreState {
             "minimap": {
                 "bounds": spatial.world_bounds.as_json(),
                 "entityCount": planet_entities.len(),
-                "beltCount": planet_belts.len(),
+                "beltCount": planet_belt_count,
                 "occupiedCellCount": spatial.cell_keys.len(),
                 "cellSize": VIEWPORT_SPATIAL_CELL_SIZE,
             },
@@ -6317,9 +6397,11 @@ mod tests {
                 + state.factory_topology.production_history_rate_indices.len()
                 + state.factory_topology.non_station_indices.len()
                 + state.factory_topology.entity_planet_indices.len()
-                + state.factory_topology.entity_grid_indices.len()
-                + state.factory_topology.entities_by_planet[0].len()) as u64
+                + state.factory_topology.entity_grid_indices.len()) as u64
                 * size_of::<usize>() as u64
+                + (state.factory_topology.entities_by_planet[0].len() * size_of::<u32>()) as u64
+                + (state.factory_topology.belt_counts_by_planet.capacity() * size_of::<u32>())
+                    as u64
                 + (state.factory_topology.device_counts_by_planet.capacity() * size_of::<f64>())
                     as u64
                 + (state.factory_topology.planet_viewport_indexes.capacity()
@@ -6344,6 +6426,56 @@ mod tests {
                     .map(|directory| directory.estimated_bytes())
                     .unwrap_or(0)
         );
+    }
+
+    #[test]
+    fn viewport_topology_uses_checked_compact_rows_and_counts_belts_once() {
+        assert_eq!(size_of::<ViewportCellKey>(), 2 * size_of::<i32>());
+        if let Some(overflow) = (u32::MAX as usize).checked_add(1) {
+            assert!(compact_topology_index(overflow, "test row").is_err());
+        }
+
+        let entities = json!([
+            {"id":"left","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{}},
+            {"id":"right","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":900,"y":0},"inputs":{},"outputs":{}}
+        ]);
+        let belts = json!([
+            {"id":"line","planetId":"home","source":"left","target":"right","itemId":"iron_ore","lanes":1,"tier":1,"priority":1}
+        ]);
+        let records = fixture_records_with_raw_entities_and_belts(
+            &entities.to_string(),
+            2,
+            &belts.to_string(),
+            1,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+
+        assert_eq!(state.factory_topology.entities_by_planet[0], [0_u32, 1]);
+        assert_eq!(state.factory_topology.belt_counts_by_planet[0], 1);
+        assert_eq!(
+            state.factory_topology.entity_belt_adjacency.incident(0),
+            [0_u32]
+        );
+        assert_eq!(
+            state.factory_topology.entity_belt_adjacency.incident(1),
+            [0_u32]
+        );
+        assert_eq!(
+            state
+                .factory_topology
+                .entity_belt_adjacency
+                .estimated_bytes(),
+            5 * size_of::<u32>() as u64,
+            "three CSR offsets plus two endpoint references stay compact"
+        );
+        let legacy_projection = state
+            .viewport_projection(&[], "home", -1.0, -1.0, 1_000.0, 1.0, 0, 2, 2)
+            .unwrap();
+        assert_eq!(legacy_projection["entities"].as_array().unwrap().len(), 2);
+        assert_eq!(legacy_projection["belts"].as_array().unwrap().len(), 1);
+        assert_eq!(legacy_projection["belts"][0]["id"], "line");
     }
 
     #[test]
@@ -6696,6 +6828,51 @@ mod tests {
         assert_eq!(projection["viewportTotals"]["belts"], 1);
         assert_eq!(projection["worldBounds"]["minX"], 0.0);
         assert_eq!(projection["worldBounds"]["maxX"], 3000.0);
+    }
+
+    #[test]
+    fn viewport_v2_out_of_compact_cell_range_falls_back_without_omitting_rows() {
+        let outside_compact_grid = (f64::from(i32::MAX) + 4.0) * VIEWPORT_SPATIAL_CELL_SIZE;
+        let entities = json!([
+            {"id":"origin","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{}},
+            {"id":"far-mod-row","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":outside_compact_grid,"y":outside_compact_grid},"inputs":{},"outputs":{}}
+        ]);
+        let records =
+            fixture_records_with_raw_entities_and_belts(&entities.to_string(), 2, "[]", 0);
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let spatial = &state.factory_topology.planet_viewport_indexes[0];
+        assert!(spatial.broad_fallback_only);
+        assert!(spatial.cell_keys.is_empty());
+        assert!(spatial.cell_offsets.is_empty());
+        assert!(spatial.entity_indices.is_empty());
+
+        let projection = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                outside_compact_grid - 1.0,
+                outside_compact_grid - 1.0,
+                outside_compact_grid + 1.0,
+                outside_compact_grid + 1.0,
+                0,
+                2,
+                0,
+                1,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(projection["broadQueryFallback"], true);
+        assert_eq!(projection["planetTotals"]["entities"], 2);
+        assert_eq!(projection["entities"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["entities"][0]["id"], "far-mod-row");
+        assert_eq!(projection["worldBounds"]["minX"], 0.0);
+        assert_eq!(
+            projection["worldBounds"]["maxX"].as_f64(),
+            Some(outside_compact_grid)
+        );
     }
 
     #[test]

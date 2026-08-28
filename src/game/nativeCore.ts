@@ -24,6 +24,8 @@ import {
   type DesktopNativeCoreStarMapOverviewProjectionResult,
   type DesktopNativeCoreStellarIndustryProjectionRequest,
   type DesktopNativeCoreStellarIndustryProjectionResult,
+  type DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+  type DesktopNativeCoreStellarIndustryV2ProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -43,10 +45,11 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreTechnologyProjectionResult
   | DesktopNativeCoreRecipeWorkspaceProjectionResult
   | DesktopNativeCoreStarMapOverviewProjectionResult
-  | DesktopNativeCoreStellarIndustryProjectionResult;
+  | DesktopNativeCoreStellarIndustryProjectionResult
+  | DesktopNativeCoreStellarIndustryV2ProjectionResult;
 
 function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
-  return projectionType === "viewport-v2" ? 2 : 1;
+  return projectionType === "viewport-v2" || projectionType === "stellar-industry-v2" ? 2 : 1;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -93,6 +96,7 @@ export interface WindowsNativeCoreShadow {
   recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
   starMapOverviewProjection(request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
   stellarIndustryProjection(request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
+  stellarIndustryV2Projection(request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -436,6 +440,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生恒星工业投影不可用");
     }
     return desktop.getNativeCoreStellarIndustryProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async stellarIndustryV2Projection(
+    request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v2",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStellarIndustryV2ProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v2",
+      });
+    }
+    if (typeof desktop.getNativeCoreStellarIndustryV2Projection !== "function") {
+      throw new Error("Windows 原生恒星工业 v2 投影不可用");
+    }
+    return desktop.getNativeCoreStellarIndustryV2Projection({ sessionId: this.sessionId, ...request });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

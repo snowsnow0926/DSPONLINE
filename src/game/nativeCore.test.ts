@@ -236,6 +236,24 @@ describe("native core transferable projections", () => {
     },
   );
 
+  it("verifies a schema-v2 stellar industry route page without accepting the v1 body schema", async () => {
+    const value = {
+      schemaVersion: 2,
+      projectionType: "stellar-industry-v2",
+      revision: 16,
+      registryFingerprint: "builtin:test",
+      stateVersion: 47,
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "stellar-industry-v2",
+    })).resolves.toEqual(value);
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor({ ...value, schemaVersion: 1 }), {
+      sessionId: "core-1",
+      projectionType: "stellar-industry-v2",
+    })).rejects.toThrow(/正文身份无效/);
+  });
+
   it("rejects a corrupted payload before installing it", async () => {
     const transfer = await transferFor({
       schemaVersion: 1,

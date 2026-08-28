@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type {
   DesktopNativeCoreCommitOperationResult,
   DesktopNativeCoreDomainCoverage,
+  DesktopNativeCoreStellarIndustryV2ProjectionResult,
   DesktopNativeCoreSummary,
   DesktopNativeSaveCommitResult,
 } from "../desktop";
@@ -113,10 +114,17 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   stellarIndustryProjectionFingerprint = FINGERPRINT;
   stellarIndustryProjectionError: Error | null = null;
   stellarIndustryProjectionBarrier: Promise<void> | null = null;
+  stellarIndustryV2ProjectionCalls = 0;
+  stellarIndustryV2ProjectionRevisionOffset = 0;
+  stellarIndustryV2ProjectionFingerprint = FINGERPRINT;
+  stellarIndustryV2ProjectionEchoQuery: string | null = null;
+  stellarIndustryV2ProjectionError: Error | null = null;
+  stellarIndustryV2ProjectionBarrier: Promise<void> | null = null;
   commitBarrier: Promise<void> | null = null;
   lastStatisticsProjectionRequest: Parameters<WindowsNativeCoreShadow["statisticsProjection"]>[0] | null = null;
   lastStarMapOverviewProjectionRequest: Parameters<WindowsNativeCoreShadow["starMapOverviewProjection"]>[0] | null = null;
   lastStellarIndustryProjectionRequest: Parameters<WindowsNativeCoreShadow["stellarIndustryProjection"]>[0] | null = null;
+  lastStellarIndustryV2ProjectionRequest: Parameters<WindowsNativeCoreShadow["stellarIndustryV2Projection"]>[0] | null = null;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
 
@@ -378,6 +386,71 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     };
   }
 
+  async stellarIndustryV2Projection(
+    request: Parameters<WindowsNativeCoreShadow["stellarIndustryV2Projection"]>[0],
+  ): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult> {
+    this.stellarIndustryV2ProjectionCalls += 1;
+    this.lastStellarIndustryV2ProjectionRequest = structuredClone(request);
+    if (this.stellarIndustryV2ProjectionBarrier) await this.stellarIndustryV2ProjectionBarrier;
+    if (this.stellarIndustryV2ProjectionError) throw this.stellarIndustryV2ProjectionError;
+    const echoedRequest = structuredClone(request);
+    if (this.stellarIndustryV2ProjectionEchoQuery !== null) {
+      echoedRequest.query = this.stellarIndustryV2ProjectionEchoQuery;
+    }
+    return {
+      schemaVersion: 2,
+      projectionType: "stellar-industry-v2",
+      revision: this.current.revision + this.stellarIndustryV2ProjectionRevisionOffset,
+      registryFingerprint: this.stellarIndustryV2ProjectionFingerprint,
+      stateVersion: 47,
+      limits: {
+        requestBytes: 32768,
+        projectionBytes: 1048576,
+        pageRows: 64,
+        labelBytes: 512,
+        queryBytes: 512,
+        pathVisits: 200000,
+      },
+      request: echoedRequest,
+      activePlanetId: "home",
+      activeSystemId: "helios",
+      scopeSystemId: request.systemId,
+      scopePlanetId: request.planetId,
+      truncated: false,
+      planets: {
+        cursor: request.planetCursor,
+        limit: request.planetLimit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+      stations: {
+        cursor: request.stationCursor,
+        limit: request.stationLimit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+      routeSummary: {
+        scopeTotalCount: 0,
+        filteredCount: 0,
+        activeCount: 0,
+        blockedCount: 0,
+        remoteCount: 0,
+        routePlanningIncompleteCount: 0,
+        powerUnprovenCount: 0,
+        statusCounts: {},
+      },
+      routes: {
+        cursor: request.routeCursor,
+        limit: request.routeLimit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+    };
+  }
+
   async applyCommand(_command: SimulationCommandPatch) {
     return { revision: this.current.revision, topologyDirty: false };
   }
@@ -488,6 +561,21 @@ async function gatedController(session: FakeNativeSession) {
     processTreeMemoryImprovementRatio: 0.3,
   });
   return controller;
+}
+
+function stellarIndustryV2Request() {
+  return {
+    systemId: "helios",
+    planetId: "home",
+    planetCursor: 0,
+    planetLimit: 32,
+    stationCursor: 0,
+    stationLimit: 32,
+    routeCursor: 0,
+    routeLimit: 24,
+    routeFilter: "issues" as const,
+    query: "deuterium",
+  };
 }
 
 describe("Windows native core invitation-Beta controller", () => {
@@ -671,6 +759,90 @@ describe("Windows native core invitation-Beta controller", () => {
     });
   });
 
+  it("serves only the exact echoed stellar industry v2 route page from the current proof", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    const request = {
+      ...stellarIndustryV2Request(),
+      expectedRevision: 999,
+      expectedRegistryFingerprint: "renderer:forged",
+    } as Parameters<WindowsNativeCoreBetaController["readVerifiedStellarIndustryV2Projection"]>[0];
+    await expect(controller.readVerifiedStellarIndustryV2Projection(request, 1)).resolves.toMatchObject({
+      schemaVersion: 2,
+      projectionType: "stellar-industry-v2",
+      revision: 1,
+      registryFingerprint: FINGERPRINT,
+      scopeSystemId: "helios",
+      scopePlanetId: "home",
+      request: {
+        routeCursor: 0,
+        routeLimit: 24,
+        routeFilter: "issues",
+        query: "deuterium",
+        expectedRevision: 1,
+        expectedRegistryFingerprint: FINGERPRINT,
+      },
+    });
+    expect(session.lastStellarIndustryV2ProjectionRequest).toEqual({
+      ...stellarIndustryV2Request(),
+      expectedRevision: 1,
+      expectedRegistryFingerprint: FINGERPRINT,
+    });
+    expect(session.stellarIndustryV2ProjectionCalls).toBe(1);
+    expect(session.stellarIndustryProjectionCalls).toBe(0);
+  });
+
+  it("fails closed on mismatched v2 revision, fingerprint, or echoed route request", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    const authorityBefore = controller.snapshot().authority;
+    const request = stellarIndustryV2Request();
+
+    session.stellarIndustryV2ProjectionRevisionOffset = 1;
+    await expect(controller.readVerifiedStellarIndustryV2Projection(request, 1)).resolves.toBeNull();
+    session.stellarIndustryV2ProjectionRevisionOffset = 0;
+    session.stellarIndustryV2ProjectionFingerprint = "pack:other";
+    await expect(controller.readVerifiedStellarIndustryV2Projection(request, 1)).resolves.toBeNull();
+    session.stellarIndustryV2ProjectionFingerprint = FINGERPRINT;
+    session.stellarIndustryV2ProjectionEchoQuery = "forged-query";
+    await expect(controller.readVerifiedStellarIndustryV2Projection(request, 1)).resolves.toBeNull();
+
+    expect(session.stellarIndustryV2ProjectionCalls).toBe(3);
+    expect(session.stellarIndustryProjectionCalls).toBe(0);
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+  });
+
+  it("drops an in-flight stellar industry v2 page when the verified session identity changes", async () => {
+    const first = new FakeNativeSession("stellar-v2-session-1");
+    const second = new FakeNativeSession("stellar-v2-session-2");
+    const gate = deferred();
+    first.stellarIndustryV2ProjectionBarrier = gate.promise;
+    let opens = 0;
+    const controller = new WindowsNativeCoreBetaController(
+      async () => opens++ === 0 ? first : second,
+      () => 1_000,
+    );
+    await controller.openShadow({ mode: "normal", checkpoint, runtime, javascriptProof: proof(1) });
+    const pending = controller.readVerifiedStellarIndustryV2Projection(stellarIndustryV2Request(), 1);
+    expect(first.stellarIndustryV2ProjectionCalls).toBe(1);
+    await controller.openShadow({ mode: "normal", checkpoint, runtime, javascriptProof: proof(1) });
+    gate.resolve();
+    await expect(pending).resolves.toBeNull();
+    expect(second.stellarIndustryV2ProjectionCalls).toBe(0);
+  });
+
+  it("does not fall back to v1 when the stellar industry v2 reader fails", async () => {
+    const session = new FakeNativeSession();
+    session.stellarIndustryV2ProjectionError = new Error("v2 reader unavailable");
+    const controller = await openController(session);
+    const authorityBefore = controller.snapshot().authority;
+    await expect(controller.readVerifiedStellarIndustryV2Projection(stellarIndustryV2Request(), 1))
+      .resolves.toBeNull();
+    expect(session.stellarIndustryV2ProjectionCalls).toBe(1);
+    expect(session.stellarIndustryProjectionCalls).toBe(0);
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+  });
+
   it("does not dispatch stellar reads while the latest proof is stale", async () => {
     const session = new FakeNativeSession();
     const controller = await openController(session);
@@ -695,8 +867,11 @@ describe("Windows native core invitation-Beta controller", () => {
       stationCursor: 0,
       stationLimit: 32,
     }, 2)).resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryV2Projection(stellarIndustryV2Request(), 2))
+      .resolves.toBeNull();
     expect(session.starMapOverviewProjectionCalls).toBe(0);
     expect(session.stellarIndustryProjectionCalls).toBe(0);
+    expect(session.stellarIndustryV2ProjectionCalls).toBe(0);
   });
 
   it("rejects stellar responses from another revision without changing authority", async () => {

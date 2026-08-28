@@ -9,6 +9,8 @@ import type {
   DesktopNativeCoreStarMapOverviewProjectionResult,
   DesktopNativeCoreStellarIndustryProjectionRequest,
   DesktopNativeCoreStellarIndustryProjectionResult,
+  DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+  DesktopNativeCoreStellarIndustryV2ProjectionResult,
   DesktopNativeCoreTechnologyProjectionRequest,
   DesktopNativeCoreTechnologyProjectionResult,
   DesktopNativeCoreViewportProjectionV2Request,
@@ -685,6 +687,41 @@ export class WindowsNativeCoreBetaController {
         projection.request.systemId !== request.systemId || projection.request.planetId !== request.planetId ||
         projection.request.planetCursor !== request.planetCursor || projection.request.planetLimit !== request.planetLimit ||
         projection.request.stationCursor !== request.stationCursor || projection.request.stationLimit !== request.stationLimit) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  async readVerifiedStellarIndustryV2Projection(
+    request: Omit<
+      DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+    >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.stellarIndustryV2Projection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 2 || projection.projectionType !== "stellar-industry-v2" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.systemId !== request.systemId || projection.request.planetId !== request.planetId ||
+        projection.request.planetCursor !== request.planetCursor || projection.request.planetLimit !== request.planetLimit ||
+        projection.request.stationCursor !== request.stationCursor || projection.request.stationLimit !== request.stationLimit ||
+        projection.request.routeCursor !== request.routeCursor || projection.request.routeLimit !== request.routeLimit ||
+        projection.request.routeFilter !== request.routeFilter || projection.request.query !== request.query ||
+        projection.scopeSystemId !== request.systemId || projection.scopePlanetId !== request.planetId) {
         return null;
       }
       return projection;

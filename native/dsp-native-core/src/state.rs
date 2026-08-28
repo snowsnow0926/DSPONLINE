@@ -1886,6 +1886,10 @@ pub struct CoreState {
     /// continuous conservative pure-idle session. It is persisted only in the
     /// private chunk manifest, never in public saves or canonical hashes.
     pure_idle_session: Option<PureIdleSessionState>,
+    /// Runtime-only macro-v10 calibration snapshots and ordinary-flow proof.
+    /// A checkpoint reload deliberately drops this cache; pure-idle rebuilds
+    /// it with a disposable exact probe before authorizing any productive tail.
+    pub(crate) pure_idle_macro_runtime: Option<crate::pure_idle::PureIdleMacroRuntimeCache>,
     /// Canonical diagnostics are intentionally expensive on very large saves.
     /// A revision is immutable from the protocol's point of view, so repeated
     /// status/compare/checkpoint calls can safely reuse the small digest result
@@ -2522,6 +2526,7 @@ impl CoreState {
             checkpoint_chunks,
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
+            pure_idle_macro_runtime: None,
             summary_cache: SyncCell::new(None),
             production_history_tiers: production_history_tiers.into(),
         };

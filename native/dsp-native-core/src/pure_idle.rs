@@ -9,8 +9,10 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-strict-freeze-v1";
+    "native-pure-idle-macro-v10-three-window-quantum-source-v2";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
+const MICROS_PER_SECOND: i128 = 1_000_000;
+const DEFAULT_QUANTUM_ITEM_CAPACITY: i128 = 10_000_000_000;
 const MAX_ADVANCE_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 const EPSILON: f64 = 0.000_001;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -49,6 +51,52 @@ struct SettlementProofSnapshot {
     portable_fleet: MaterialTotals,
     construction_crafted: i128,
     dyson: DysonTerminalSnapshot,
+}
+
+/// A deliberately narrow productive contract. Every admitted item is an
+/// exclusive infinite-vein output whose aggregate owned-stock increase equals
+/// its cumulative production increase in each of three adjacent ten-second
+/// exact windows. Rates are whole units per simulated second, so applying them
+/// over the absolute microsecond clock is deterministic across request splits
+/// without a persisted fractional remainder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OrdinaryFlowCertificate {
+    units_per_second: MaterialTotals,
+}
+
+/// Runtime acceleration for a continuous macro-v10 session. This cache never
+/// enters GameState v47, the private checkpoint manifest, or canonical hashes.
+/// A missing cache is safe: the tail rebuilds the same certificate with a
+/// disposable three-window probe before authorizing material changes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PureIdleMacroRuntimeCache {
+    last_committed_revision: u64,
+    calibration_snapshots: Vec<SettlementProofSnapshot>,
+    certificate: Option<OrdinaryFlowCertificate>,
+    rejection_reason: Option<String>,
+}
+
+impl PureIdleMacroRuntimeCache {
+    fn starts_at(revision: u64, snapshot: SettlementProofSnapshot) -> Self {
+        Self {
+            last_committed_revision: revision,
+            calibration_snapshots: vec![snapshot],
+            certificate: None,
+            rejection_reason: None,
+        }
+    }
+
+    fn missing_prefix(revision: u64) -> Self {
+        Self {
+            last_committed_revision: revision,
+            calibration_snapshots: Vec::new(),
+            certificate: None,
+            rejection_reason: Some(
+                "runtime calibration cache was unavailable; a disposable three-window probe is required"
+                    .to_owned(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1596,6 +1644,413 @@ fn validate_settlement_proof(
     Ok(())
 }
 
+fn validate_internal_exact_snapshots(
+    before: &SettlementProofSnapshot,
+    after: &SettlementProofSnapshot,
+    catalog: &crate::catalog::RuntimeCatalog,
+) -> Result<(), String> {
+    let construction = capture_construction_conversion_ledger(before, after)?;
+    validate_construction_recipe_conversion(&construction, catalog, None, true)?;
+    let receipt = ConstructionRecipeReceipt {
+        outputs: construction.transformations.clone(),
+        crafted: construction.crafted,
+    };
+    validate_settlement_proof(before, after, catalog, Some(&receipt))
+}
+
+fn checked_material_delta(
+    before: &MaterialTotals,
+    after: &MaterialTotals,
+    item_id: &str,
+    label: &str,
+) -> Result<i128, String> {
+    after
+        .get(item_id)
+        .copied()
+        .unwrap_or(0)
+        .checked_sub(before.get(item_id).copied().unwrap_or(0))
+        .ok_or_else(|| format!("{label}.{item_id} delta overflowed"))
+}
+
+fn exclusive_infinite_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String> {
+    if state
+        .base_value()
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("resourceMode"))
+        .and_then(Value::as_str)
+        != Some("infinite")
+    {
+        return Err(
+            "finite resources have no native depletion horizon certificate; ordinary-flow tail is frozen"
+                .to_owned(),
+        );
+    }
+
+    // Material-fuel generators and charge/discharge stores can make a short
+    // window productive by spending a finite cache. Their energy budget is not
+    // represented in the material snapshot, so none may back this certificate.
+    for &entity_index in &state.factory_topology.power_source_indices {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("power source decode failed: {error:#}"))?;
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "power source has no building ID".to_owned())?;
+        let building = state
+            .catalog
+            .buildings
+            .get(building_id)
+            .ok_or_else(|| format!("power source {building_id} is absent from the catalog"))?;
+        if !building.fuel_item_ids.is_empty()
+            || building.energy_capacity_mj > EPSILON
+            || building.power_charge_kw > EPSILON
+        {
+            return Err(format!(
+                "power source {building_id} depends on fuel or stored energy without a closed tail ledger"
+            ));
+        }
+    }
+
+    let vein_indices = state
+        .factory_topology
+        .vein_indices
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut sources = BTreeSet::new();
+    for &entity_index in &state.factory_topology.vein_indices {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("vein decode failed: {error:#}"))?;
+        if number_at(Some(&entity), &["minerCount"]) <= EPSILON {
+            continue;
+        }
+        let item_id = entity
+            .get("resourceId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "active vein has no resource ID".to_owned())?;
+        if item_id != TERMINAL_ROCKET_ITEM_ID && item_id != TERMINAL_SAIL_ITEM_ID {
+            sources.insert(item_id.to_owned());
+        }
+    }
+
+    // A source ID must be exclusive to veins. If a machine can also emit the
+    // same ID, aggregate totalProduced cannot distinguish mined material from
+    // a recipe transformation and is not a sufficient source receipt.
+    for entity_index in 0..state.entity_index.len() {
+        if vein_indices.contains(&entity_index) {
+            continue;
+        }
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("ordinary entity decode failed: {error:#}"))?;
+        if let Some(outputs) = entity.get("outputs").and_then(Value::as_object) {
+            for item_id in outputs.keys() {
+                sources.remove(item_id);
+            }
+        }
+    }
+    if sources.is_empty() {
+        return Err("no exclusive active infinite-vein source is available".to_owned());
+    }
+    Ok(sources)
+}
+
+fn build_ordinary_flow_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<OrdinaryFlowCertificate, String> {
+    if snapshots.len() != 4 {
+        return Err(format!(
+            "three-window calibration requires four snapshots, observed {}",
+            snapshots.len()
+        ));
+    }
+    for window in snapshots.windows(2) {
+        validate_internal_exact_snapshots(&window[0], &window[1], &state.catalog)
+            .map_err(|reason| format!("calibration window settlement proof rejected: {reason}"))?;
+    }
+    let quantum = state
+        .base_value()
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum logistics network is missing".to_owned())?;
+    if quantum.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err("quantum logistics network is disabled".to_owned());
+    }
+    if quantum
+        .get("inventory")
+        .and_then(Value::as_object)
+        .is_none()
+        || quantum
+            .get("itemCapacities")
+            .and_then(Value::as_object)
+            .is_none()
+    {
+        return Err("quantum inventory or capacity ledger is malformed".to_owned());
+    }
+
+    let sources = exclusive_infinite_vein_sources(state)?;
+    let mut rates = MaterialTotals::new();
+    let mut first_rejection = None;
+    for item_id in sources {
+        let mut stable_production = None;
+        let mut rejected = None;
+        for window in snapshots.windows(2) {
+            let owned =
+                checked_material_delta(&window[0].owned, &window[1].owned, &item_id, "owned")?;
+            let produced = checked_material_delta(
+                &window[0].produced,
+                &window[1].produced,
+                &item_id,
+                "produced",
+            )?;
+            let consumed = checked_material_delta(
+                &window[0].consumed,
+                &window[1].consumed,
+                &item_id,
+                "consumed",
+            )?;
+            let granted = checked_material_delta(
+                &window[0].granted,
+                &window[1].granted,
+                &item_id,
+                "granted",
+            )?;
+            if produced <= 0 {
+                rejected = Some("did not produce in every calibration window".to_owned());
+                break;
+            }
+            if owned != produced || consumed != 0 || granted != 0 {
+                rejected = Some(format!(
+                    "is not a source-only closed flow (owned={owned}, produced={produced}, consumed={consumed}, granted={granted})"
+                ));
+                break;
+            }
+            if produced % (MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128) != 0 {
+                rejected = Some(format!(
+                    "has a fractional per-second rate over the ten-second window ({produced})"
+                ));
+                break;
+            }
+            match stable_production {
+                None => stable_production = Some(produced),
+                Some(expected) if expected == produced => {}
+                Some(expected) => {
+                    rejected = Some(format!(
+                        "is unstable across calibration windows ({expected} versus {produced})"
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = rejected {
+            first_rejection.get_or_insert_with(|| format!("{item_id} {reason}"));
+            continue;
+        }
+        let produced = stable_production.unwrap_or(0);
+        let rate = produced / (MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128);
+        if rate > 0 {
+            rates.insert(item_id, rate);
+        }
+    }
+    if rates.is_empty() {
+        return Err(first_rejection.unwrap_or_else(|| {
+            "no source-only material passed the three-window certificate".to_owned()
+        }));
+    }
+    Ok(OrdinaryFlowCertificate {
+        units_per_second: rates,
+    })
+}
+
+fn exact_three_window_probe(
+    state: &CoreState,
+    request: &CoreAdvanceRequest,
+) -> Result<Vec<SettlementProofSnapshot>, String> {
+    let multiplier = finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
+        .filter(|value| *value > 0.0)
+        .ok_or_else(|| "probe multiplier is invalid".to_owned())?;
+    let mut probe = state.clone();
+    // The probe is disposable and must not inherit a stale runtime proof as an
+    // input to the exact engine. Clearing it also keeps the clone compact.
+    probe.pure_idle_macro_runtime = None;
+    let mut snapshots = vec![
+        capture_settlement_snapshot(&probe)
+            .map_err(|error| format!("probe baseline snapshot failed: {error:#}"))?,
+    ];
+    for _ in 0..3 {
+        let mut result = probe
+            .advance_exact(&exact_request(
+                probe.revision,
+                MACRO_V10_CALIBRATION_WINDOW_SECONDS,
+                MACRO_V10_CALIBRATION_WINDOW_SECONDS / multiplier,
+            ))
+            .map_err(|error| format!("probe exact window failed: {error:#}"))?;
+        if !result.supported {
+            return Err(result
+                .reason
+                .take()
+                .unwrap_or_else(|| "probe exact window is unsupported".to_owned()));
+        }
+        let after = capture_settlement_snapshot(&probe)
+            .map_err(|error| format!("probe settlement snapshot failed: {error:#}"))?;
+        validate_internal_exact_snapshots(
+            snapshots.last().expect("probe always has a baseline"),
+            &after,
+            &probe.catalog,
+        )
+        .map_err(|reason| format!("probe settlement proof rejected: {reason}"))?;
+        snapshots.push(after);
+    }
+    if let Some(reason) = budget_attestation_reason(&probe, request) {
+        return Err(format!("probe power boundary changed: {reason}"));
+    }
+    Ok(snapshots)
+}
+
+fn elapsed_micros(value: f64) -> Result<i128, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("elapsed clock is not a finite non-negative number".to_owned());
+    }
+    let scaled = value * MICROS_PER_SECOND as f64;
+    if !scaled.is_finite() || scaled > i128::MAX as f64 {
+        return Err("elapsed microsecond clock overflowed".to_owned());
+    }
+    let rounded = scaled.round();
+    let tolerance = EPSILON * scaled.abs().max(1.0);
+    if (scaled - rounded).abs() > tolerance {
+        return Err("elapsed clock is not representable at microsecond precision".to_owned());
+    }
+    Ok(rounded as i128)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OrdinaryFlowApplication {
+    certified_items: usize,
+    deposited_units: i128,
+    capacity_limited: bool,
+}
+
+fn apply_ordinary_flow_certificate(
+    state: &mut CoreState,
+    certificate: &OrdinaryFlowCertificate,
+    elapsed_before: f64,
+    elapsed_after: f64,
+) -> Result<OrdinaryFlowApplication, String> {
+    let before_micros = elapsed_micros(elapsed_before)?;
+    let after_micros = elapsed_micros(elapsed_after)?;
+    if after_micros < before_micros {
+        return Err("elapsed clock regressed during ordinary-flow settlement".to_owned());
+    }
+
+    let base = state.base_value();
+    let quantum = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum logistics network is missing".to_owned())?;
+    if quantum.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err("quantum logistics network became disabled".to_owned());
+    }
+    let inventory = quantum
+        .get("inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum inventory is malformed".to_owned())?;
+    let capacities = quantum
+        .get("itemCapacities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum capacity ledger is malformed".to_owned())?;
+    let produced = base
+        .get("totalProduced")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "totalProduced is malformed".to_owned())?;
+
+    let mut updates = Vec::with_capacity(certificate.units_per_second.len());
+    let mut application = OrdinaryFlowApplication {
+        certified_items: certificate.units_per_second.len(),
+        ..OrdinaryFlowApplication::default()
+    };
+    for (item_id, rate) in &certificate.units_per_second {
+        let target_before = rate
+            .checked_mul(before_micros)
+            .and_then(|value| value.checked_div(MICROS_PER_SECOND))
+            .ok_or_else(|| format!("{item_id} source schedule overflowed"))?;
+        let target_after = rate
+            .checked_mul(after_micros)
+            .and_then(|value| value.checked_div(MICROS_PER_SECOND))
+            .ok_or_else(|| format!("{item_id} source schedule overflowed"))?;
+        let scheduled = target_after
+            .checked_sub(target_before)
+            .ok_or_else(|| format!("{item_id} source schedule regressed"))?;
+        let current_inventory = proof_counter(
+            inventory.get(item_id),
+            &format!("quantumLogisticsNetwork.inventory.{item_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let capacity = match capacities.get(item_id) {
+            Some(value) => proof_counter(
+                Some(value),
+                &format!("quantumLogisticsNetwork.itemCapacities.{item_id}"),
+            )
+            .map_err(|error| error.to_string())?,
+            None => DEFAULT_QUANTUM_ITEM_CAPACITY,
+        };
+        if !(10_000..=DEFAULT_QUANTUM_ITEM_CAPACITY).contains(&capacity) {
+            return Err(format!(
+                "{item_id} quantum capacity is outside the supported range"
+            ));
+        }
+        let current_produced =
+            proof_counter(produced.get(item_id), &format!("totalProduced.{item_id}"))
+                .map_err(|error| error.to_string())?;
+        if current_produced > MAX_SAFE_INTEGER as i128 {
+            return Err(format!(
+                "totalProduced.{item_id} exceeds the safe integer range"
+            ));
+        }
+        let inventory_room = capacity.saturating_sub(current_inventory);
+        let production_room = (MAX_SAFE_INTEGER as i128).saturating_sub(current_produced);
+        let accepted = scheduled.min(inventory_room).min(production_room).max(0);
+        application.capacity_limited |= accepted < scheduled;
+        application.deposited_units = application
+            .deposited_units
+            .checked_add(accepted)
+            .ok_or_else(|| "ordinary-flow deposited-unit total overflowed".to_owned())?;
+        updates.push((
+            item_id.clone(),
+            current_inventory
+                .checked_add(accepted)
+                .ok_or_else(|| format!("{item_id} quantum inventory overflowed"))?,
+            current_produced
+                .checked_add(accepted)
+                .ok_or_else(|| format!("totalProduced.{item_id} overflowed"))?,
+        ));
+    }
+
+    let base = state.base_value_mut();
+    let inventory = base
+        .get_mut("quantumLogisticsNetwork")
+        .and_then(Value::as_object_mut)
+        .and_then(|network| network.get_mut("inventory"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "quantum inventory disappeared before commit".to_owned())?;
+    for (item_id, next_inventory, _) in &updates {
+        inventory.insert(item_id.clone(), Value::String(next_inventory.to_string()));
+    }
+    let produced = base
+        .get_mut("totalProduced")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "totalProduced disappeared before commit".to_owned())?;
+    for (item_id, _, next_produced) in updates {
+        let next_produced = i64::try_from(next_produced)
+            .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
+        produced.insert(item_id, Value::Number(Number::from(next_produced)));
+    }
+    Ok(application)
+}
+
 /// Consumes a disposable candidate only after every material and terminal
 /// identity closes. On failure the candidate is dropped and the caller's live
 /// state remains byte-for-byte untouched.
@@ -1619,13 +2074,7 @@ fn prove_internal_exact_settlement_candidate(
 ) -> Result<CoreState, String> {
     let after = capture_settlement_snapshot(&candidate)
         .map_err(|error| format!("candidate snapshot invalid: {error:#}"))?;
-    let construction = capture_construction_conversion_ledger(before, &after)?;
-    validate_construction_recipe_conversion(&construction, &candidate.catalog, None, true)?;
-    let receipt = ConstructionRecipeReceipt {
-        outputs: construction.transformations.clone(),
-        crafted: construction.crafted,
-    };
-    validate_settlement_proof(before, &after, &candidate.catalog, Some(&receipt))?;
+    validate_internal_exact_snapshots(before, &after, &candidate.catalog)?;
     Ok(candidate)
 }
 
@@ -1637,23 +2086,14 @@ fn prove_internal_exact_settlement_candidate(
 /// under-production policy: without a closed material ledger, extrapolating a
 /// terminal result could duplicate prefilled rockets or sails.
 ///
-/// The compact settlement proof below now closes aggregate ownership,
-/// production, audited grants/consumption and Dyson terminal deltas before an
-/// exact candidate commits. That is a rejection gate, not yet a productive
-/// affine certificate. A productive tail still cannot be authorized here:
-///
-/// - two adjacent snapshots do not prove a stable rate across three windows;
-/// - recipe dependencies, material-fuel power, finite veins and topology
-///   boundaries are not yet represented as a native steady-flow certificate;
-/// - research, integer terminal allocation and per-item fractional remainders
-///   do not yet survive segmented native macro calls; and
-/// - construction needs a separately accounted consumable flow budget before
-///   certified production can fund a long macro tail.
-///
-/// Copying only the visible production counters or entity stores would
-/// therefore reopen the exact conservation bug this mode exists to prevent.
-/// Until those rate and remainder proofs exist, the larger exact prefix is the
-/// only non-zero settlement committed here.
+/// The compact settlement proof closes aggregate ownership, production,
+/// audited grants/consumption and Dyson terminal deltas before any candidate
+/// commits. Macro-v10 additionally admits a narrow three-window certificate
+/// for exclusive infinite-vein source flow backed only by non-fuel power. Its
+/// tail writes accepted source material into the bounded quantum inventory and
+/// increments only the matching cumulative production counter. Recipe flows,
+/// finite resources, stored/fuel energy, research, construction and every
+/// terminal subsystem remain frozen until they gain their own closed ledgers.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -1661,11 +2101,9 @@ pub(crate) fn advance(
     advance_bounded(state, request, false)
 }
 
-/// New wire-distinct macro mode. This prerequisite slice deliberately ships
-/// only the settlement proof and deterministic 3x10-second calibration
-/// boundary. Until a productive ordinary-flow contract is independently
-/// proven, every material-bearing tail remains frozen instead of inheriting
-/// the legacy one-shot calibration semantics under a misleading mode name.
+/// New wire-distinct macro mode. It retains the deterministic 3x10-second
+/// calibration boundary and can settle only the source-only ordinary flow
+/// authorized by `OrdinaryFlowCertificate`; all other tail domains freeze.
 pub(crate) fn advance_macro_v10(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -1712,6 +2150,20 @@ fn advance_bounded(
     } else {
         state.pure_idle_exact_seconds_used()
     };
+    let mut macro_runtime = macro_v10.then(|| {
+        state
+            .pure_idle_macro_runtime
+            .as_ref()
+            .filter(|runtime| runtime.last_committed_revision == state.revision)
+            .cloned()
+            .unwrap_or_else(|| {
+                if exact_seconds_used_before <= EPSILON {
+                    PureIdleMacroRuntimeCache::starts_at(state.revision, settlement_before.clone())
+                } else {
+                    PureIdleMacroRuntimeCache::missing_prefix(state.revision)
+                }
+            })
+    });
     let exact_seconds_remaining =
         (PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS - exact_seconds_used_before).max(0.0);
     let budget = prefix_budget(
@@ -1765,6 +2217,36 @@ fn advance_bounded(
             }
             remaining_exact = (remaining_exact - slice_seconds).max(0.0);
             calibrated_before += slice_seconds;
+            if macro_v10 {
+                let boundary = (calibrated_before / MACRO_V10_CALIBRATION_WINDOW_SECONDS).round();
+                let at_boundary =
+                    (calibrated_before - boundary * MACRO_V10_CALIBRATION_WINDOW_SECONDS).abs()
+                        <= EPSILON;
+                let boundary = boundary.max(0.0) as usize;
+                if at_boundary && (1..=3).contains(&boundary) {
+                    let snapshot = match capture_settlement_snapshot(&candidate) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("pure-idle-calibration-snapshot-invalid: {error:#}"),
+                            );
+                        }
+                    };
+                    if let Some(runtime) = macro_runtime.as_mut() {
+                        if runtime.calibration_snapshots.len() == boundary {
+                            runtime.calibration_snapshots.push(snapshot);
+                        } else if runtime.calibration_snapshots.len() != boundary + 1 {
+                            runtime.calibration_snapshots.clear();
+                            runtime.rejection_reason = Some(
+                                "calibration snapshot sequence was interrupted; a disposable probe is required"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     if let Some(reason) = budget_attestation_reason(&candidate, request) {
@@ -1775,7 +2257,33 @@ fn advance_bounded(
         return unsupported(state, request, reason);
     }
 
+    let exact_progress =
+        (exact_seconds_used_before + exact_seconds).min(PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS);
+    if let Some(runtime) = macro_runtime.as_mut()
+        && exact_progress + EPSILON >= PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS
+        && runtime.certificate.is_none()
+    {
+        let snapshots = if runtime.calibration_snapshots.len() == 4 {
+            Ok(runtime.calibration_snapshots.clone())
+        } else {
+            exact_three_window_probe(&candidate, request)
+        };
+        match snapshots
+            .and_then(|snapshots| build_ordinary_flow_certificate(&candidate, &snapshots))
+        {
+            Ok(certificate) => {
+                runtime.certificate = Some(certificate);
+                runtime.rejection_reason = None;
+            }
+            Err(reason) => {
+                runtime.certificate = None;
+                runtime.rejection_reason = Some(reason);
+            }
+        }
+    }
+
     let tail_seconds = budget.frozen_tail_seconds;
+    let mut tail_reason = None;
     if tail_seconds > EPSILON {
         let current_elapsed = candidate
             .base_value()
@@ -1783,6 +2291,47 @@ fn advance_bounded(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
+        if let Some(runtime) = macro_runtime.as_ref() {
+            if let Some(certificate) = runtime.certificate.as_ref() {
+                let ordinary_application = match apply_ordinary_flow_certificate(
+                    &mut candidate,
+                    certificate,
+                    current_elapsed,
+                    elapsed,
+                ) {
+                    Ok(application) => application,
+                    Err(reason) => {
+                        return unsupported(
+                            state,
+                            request,
+                            format!("pure-idle-ordinary-flow-rejected: {reason}"),
+                        );
+                    }
+                };
+                tail_reason = Some(if ordinary_application.deposited_units > 0 {
+                    format!(
+                        "certified {} source-only ordinary item(s) deposited {} unit(s) into bounded quantum inventory; recipe, research, construction and terminal tails remained frozen{}",
+                        ordinary_application.certified_items,
+                        ordinary_application.deposited_units,
+                        if ordinary_application.capacity_limited {
+                            " at the proven capacity horizon"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    "certified ordinary source flow reached its quantum/production capacity horizon; every material-bearing tail remained frozen".to_owned()
+                });
+            } else {
+                tail_reason = Some(format!(
+                    "ordinary-flow tail froze because no closed three-window certificate was available: {}",
+                    runtime
+                        .rejection_reason
+                        .as_deref()
+                        .unwrap_or("calibration was incomplete")
+                ));
+            }
+        }
         candidate.base_value_mut().insert(
             "elapsedSeconds".to_owned(),
             Value::Number(
@@ -1814,13 +2363,18 @@ fn advance_bounded(
         // The exact debit and its new revision live only on this disposable
         // candidate. Every possible failure below leaves the source session
         // and its full/remaining credit untouched.
-        let exact_progress =
-            (exact_seconds_used_before + exact_seconds).min(PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS);
         if macro_v10 {
             candidate.install_pure_idle_macro_session_progress(exact_progress)?;
         } else {
             candidate.install_pure_idle_session_progress(exact_progress)?;
         }
+    }
+
+    if let Some(mut runtime) = macro_runtime {
+        runtime.last_committed_revision = candidate.revision;
+        candidate.pure_idle_macro_runtime = Some(runtime);
+    } else if !macro_v10 {
+        candidate.pure_idle_macro_runtime = None;
     }
 
     let previous_revision = state.revision;
@@ -1843,7 +2397,9 @@ fn advance_bounded(
         previous_revision,
         revision,
         reason: (tail_seconds > EPSILON).then(|| {
-            "unproven pure-idle tail froze material-bearing systems after the session's bounded 30-second exact credit".to_owned()
+            tail_reason.unwrap_or_else(|| {
+                "unproven pure-idle tail froze material-bearing systems after the session's bounded 30-second exact credit".to_owned()
+            })
         }),
         algorithm_version: Some(algorithm_version(request.advance_mode)),
         exact_calibration_seconds: Some(exact_seconds),
@@ -2360,6 +2916,14 @@ mod tests {
                 }),
             ],
         )
+    }
+
+    fn productive_quantum_macro_fixture(multiplier: f64, resource_mode: &str) -> CoreState {
+        let mut state = productive_powered_fixture(multiplier, resource_mode);
+        state.base_value_mut()["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
+            json!({ "iron_ore": "10000000000" });
+        state
     }
 
     fn construction_powered_fixture() -> CoreState {
@@ -3056,6 +3620,273 @@ mod tests {
             );
             assert_eq!(segmented.pure_idle_macro_exact_seconds_used(), 30.0);
         }
+    }
+
+    #[test]
+    fn macro_v10_certifies_infinite_renewable_source_flow_into_quantum() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_quantum_macro_fixture(multiplier, "infinite");
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+            let prefix_produced = proof_counter(
+                prefix_state["totalProduced"].get("iron_ore"),
+                "prefix.totalProduced.iron_ore",
+            )
+            .unwrap();
+
+            let mut long = initial.clone();
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 60.0, 60.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert!(
+                long_result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("source-only ordinary")),
+                "reason={:?}",
+                long_result.reason
+            );
+            let long_state = long.materialize().unwrap();
+            let deposited = proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ore"),
+                "long.quantum.iron_ore",
+            )
+            .unwrap();
+            let long_produced = proof_counter(
+                long_state["totalProduced"].get("iron_ore"),
+                "long.totalProduced.iron_ore",
+            )
+            .unwrap();
+            assert!(deposited > 0, "multiplier={multiplier}");
+            assert_eq!(long_produced - prefix_produced, deposited);
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            for frozen in [
+                "research",
+                "construction",
+                "constructionAutomation",
+                "dysonSwarm",
+                "dysonSphere",
+                "dysonEngineering",
+                "dysonPlans",
+                "endgame",
+            ] {
+                assert_eq!(
+                    long_state[frozen], prefix_state[frozen],
+                    "multiplier={multiplier} field={frozen}"
+                );
+            }
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 30.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_rejects_finite_source_and_fuel_backed_power_certificates() {
+        let mut finite = productive_quantum_macro_fixture(15.0, "finite");
+        let finite_revision = finite.revision;
+        let finite_result = advance_macro_v10(
+            &mut finite,
+            &pure_idle_macro_request(finite_revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(finite_result.supported);
+        assert!(
+            finite_result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("finite resources")),
+            "reason={:?}",
+            finite_result.reason
+        );
+        assert!(
+            finite.base_value()["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut fuel_backed = productive_quantum_macro_fixture(15.0, "infinite");
+        std::sync::Arc::make_mut(&mut fuel_backed.catalog)
+            .buildings
+            .get_mut("wind_turbine")
+            .unwrap()
+            .fuel_item_ids = vec!["iron_ore".to_owned()];
+        let fuel_revision = fuel_backed.revision;
+        let fuel_result = advance_macro_v10(
+            &mut fuel_backed,
+            &pure_idle_macro_request(fuel_revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(fuel_result.supported);
+        assert!(
+            fuel_result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("fuel or stored energy")),
+            "reason={:?}",
+            fuel_result.reason
+        );
+        assert!(
+            fuel_backed.base_value()["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn macro_v10_certificate_rejects_negative_or_unstable_source_vectors() {
+        let state = productive_quantum_macro_fixture(15.0, "infinite");
+        let negative = (0..4)
+            .map(|window| SettlementProofSnapshot {
+                owned: BTreeMap::from([("iron_ore".to_owned(), 100 - window * 10)]),
+                produced: BTreeMap::from([("iron_ore".to_owned(), window * 20)]),
+                ..SettlementProofSnapshot::default()
+            })
+            .collect::<Vec<_>>();
+        let rejection = build_ordinary_flow_certificate(&state, &negative).unwrap_err();
+        assert!(rejection.contains("source-only closed flow"), "{rejection}");
+
+        let mut produced = 0_i128;
+        let unstable = [0_i128, 20, 30, 20]
+            .into_iter()
+            .map(|delta| {
+                produced += delta;
+                SettlementProofSnapshot {
+                    owned: BTreeMap::from([("iron_ore".to_owned(), produced)]),
+                    produced: BTreeMap::from([("iron_ore".to_owned(), produced)]),
+                    ..SettlementProofSnapshot::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        let rejection = build_ordinary_flow_certificate(&state, &unstable).unwrap_err();
+        assert!(rejection.contains("unstable"), "{rejection}");
+    }
+
+    #[test]
+    fn macro_v10_rebuilds_missing_runtime_certificate_deterministically() {
+        let mut calibrated = productive_quantum_macro_fixture(15.0, "infinite");
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut cached = calibrated.clone();
+        let mut rebuilt = calibrated;
+        rebuilt.pure_idle_macro_runtime = None;
+        for state in [&mut cached, &mut rebuilt] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            rebuilt.summary().unwrap().canonical_sha256,
+            cached.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_quantum_capacity_horizon_is_segment_invariant() {
+        let mut initial = productive_quantum_macro_fixture(15.0, "infinite");
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"] =
+            json!("10000");
+        let mut long = initial.clone();
+        let long_revision = long.revision;
+        let long_result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 6030.0, 402.0),
+        )
+        .unwrap();
+        assert!(long_result.supported, "reason={:?}", long_result.reason);
+        assert!(
+            long_result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capacity horizon")),
+            "reason={:?}",
+            long_result.reason
+        );
+        assert_eq!(
+            long.base_value()["quantumLogisticsNetwork"]["inventory"]["iron_ore"],
+            json!("10000")
+        );
+
+        let mut segmented = initial;
+        for seconds in [30.0, 2000.0, 2000.0, 2000.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_application_failure_preserves_source_hash_revision_and_credit() {
+        let mut state = productive_quantum_macro_fixture(15.0, "infinite");
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        state.pure_idle_macro_runtime.as_mut().unwrap().certificate =
+            Some(OrdinaryFlowCertificate {
+                units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
+            });
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("source schedule overflowed")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
     }
 
     #[test]

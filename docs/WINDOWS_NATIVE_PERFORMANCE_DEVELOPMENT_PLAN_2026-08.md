@@ -6,6 +6,7 @@
 > 适用基线：1.1.8 内存优化候选、GameState v47、save envelope v2、cloud schema v8、SQLite layout v3。
 > 目标平台：Windows 10/11 x64 为主要性能目标；Web/PWA 与 Android 保持功能和存档兼容。
 > 2026-08-27 补充说明：第 19 节记录基于 1.2.1 Windows 开发候选观察得到的下一阶段优化包。1.2.1 的 Rust 核心仍是影子校验，不能把双重计算或单项原生基准误报为玩家可见的完整性能提升。
+> 2026-08-28 实施说明：第 20～22 节记录 develop 角色在独立工作树中的实际落地与验证；它们不会把原计划预算、外部硬件 Gate 或 No-Go 自动改写为“完成”。当前最终开发包仍为 `authorityEligible=false`，未签名、未部署、未连接生产。
 
 ## 1. 执行摘要
 
@@ -1431,3 +1432,56 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 44,167,989 字节、45,904 实体、91,955 线路的只读 v47 玩家档在 15×、10 分钟墙钟纯挂机中，30 秒校准白矩阵增加 1,141,066,480，最终候选增加 335,450,292,523；火箭校准增加 23,804,542，最终按 8 个恒星系账本增加 7,007,145,985；建筑制造完成 13,076,629 件。三个窗口的全宇宙稳态因子精确为 `0.981143945`，最低效率为 `0.979864957`，最终供电边界重校准为 `0` 次。原始 e503、初次 E18 + e503 整合和当前最终算法的“总专项/宏观尾段”分别为 `39.728/1.094 s`、`114.899/74.138 s`、`40.639/1.266 s`：当前相对初次整合总耗时降低 `64.631%`、尾段降低 `98.292%`，相对原始 e503 总耗时增加 `2.293%`、尾段增加 `15.722%`。这组数据只证明已消除重复重校准回退并量化新增守恒门成本，不能包装成相对原始方案的性能提升。施工专项 64 秒完成 12,950,502 件约用 376.701 ms；8×、64 模拟秒时间扭曲使用 v6 并在约 6.084 秒内完成，储能只授权有界精确前缀且没有伪造宏观尾段。测试前后原文件大小、mtime 和 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 均不变。
 
 这些是当前整合源码与 clean Windows 诊断包的新鲜开发证据，已经覆盖完整 Vitest、server/ops、production build、完整 E2E、目录包、ZIP 哈希和启动冒烟，但不代替 24 小时多硬件、Defender/磁盘故障、签名、覆盖升级、真实云往返或灰度门禁。该包仍为 `NotSigned` 且没有 installer，不能作为稳定版发布。
+
+## 22. 1.2.3 Windows 三层计划本地高价值收口（2026-08-28）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 最终运行时/打包提交：`be80af000295a34208bdbee2a73cd42795eec999`
+>
+> 状态：本地开发候选；`authorityEligible=false`；未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变。
+
+### 22.1 本轮继续落地的实现
+
+1. **私有检查点 v2 与失败关闭恢复**：base 拆成 core、logistics、Dyson、statistics、unknown-mod 五个域，实体页和线路页继续分别分块；v2 对全部 chunk 强制 SHA-256，v1 可读并在首次 v2 检查点惰性升级。只有 durable commit ACK 才清除脏标记；superblock 已替换但 ACK 丢失时允许同 session 对账，无法确认时阻止后续命令、推进和普通/精确提交，避免产生无法检查点化的新 revision。当前五个 base 域仍会在每次检查点先序列化并哈希再比较，不是完整 per-domain dirty bitset。
+2. **线路稀疏热循环**：线路选择统一为 `All / Dense / Mask`；稀疏路径只对活动路由执行时钟、传输、后处理和重置，并按本步触及槽位清理，输出额度改为 O(1) 查找；活动路由达到 75% 时退化为稳定顺序的稠密全扫描。选择阶段仍遍历全部 route group，因此这不是完整 O(active) 反向唤醒网络。
+3. **私有 24 小时分层生产历史**：原生 session 在不改变公开 v47 `productionHistory` 字节的前提下维护 1 秒、1 分钟、10 分钟和 1 小时层级，保留目标 24 小时；切桶使用前一库存，不读取未来库存。任意 base/命令修改会使缓存失效并安全重建或回退公开历史。该缓存不持久化，进程重启后只能从公开约一小时历史重新建立，采样边界仍需扫描权威记录。
+4. **严格 `.json.gz` 原生导入**：在既有 `.json` current-v47 流式导入上增加单 gzip member 解码，压缩输入和解码正文均受 256 MiB 上限约束；损坏、截断、尾随数据、第二 member、校验错误、reparse/symlink 和打开期间身份变化均失败关闭。SHA-256 与字节数针对解码后的 JSON 证明，renderer 仍不接收路径或正文。旧版迁移和实际云文件句柄上传没有因此完成。
+5. **推进语义与镜像一致性**：`advanceMode` 在分段请求、Beta 镜像、durable intent 和幂等重试中完整传播；保守纯挂机明确发送 `pure-idle-conservative-v2`，精确路径保持缺省 exact，避免影子核心把近似推进误记为精确推进。
+6. **常驻容量收紧与 Beta 包通道**：实体/线路 SoA、动态列、拓扑索引、路线组和本地物流目录在建成后移除几何增长余量。最终 `desktop:pack` 在没有显式覆盖时继承 package 的 `beta`，不会把性能开发版静默标成 stable。
+
+### 22.2 真实档内存门禁与确定性证据
+
+只读夹具 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json` 为 44,167,989 字节、45,904 个实体、91,955 条线路，文件 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8`。全部测试前后 bytes、mtime 和 SHA-256 不变。
+
+当前内存硬门禁为正文大小的 3 倍，即 132,503,967 B。冻结旧 Host 的三次打开都得到精确往返哈希，但估算常驻量 133,730,449 B，超过门禁 1,226,482 B，因此三个进程都按设计在 open 阶段失败，后续 exact/durable/checkpoint/burst 没有执行。不得把这份失败证据写成完整 A/B。最终包内 Host 的三次 full stress 为 3/3，通过估算 130,413,884 B，低于门禁 2,090,083 B；相对旧值减少 3,316,565 B（2.480%）。同口径打开后 Private Bytes 中位从 180,060,160 B 降到 168,476,672 B（6.433%），拓扑索引从 23,824,603 B 降到 21,798,899 B（8.503%）；打开峰值中位只降低 0.508%，打开耗时中位反而由 4,201.25 ms 增至 4,253.92 ms（慢 1.254%），负向指标不隐藏。
+
+最终包内三轮 full stress 的一秒原生 exact 中位为 1,260.54 ms，同轮 JavaScript 中位 1,901.04 ms，约为 1.508 倍吞吐；三轮 exact 状态均为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`，三连推进均为 `69a8da6798a1ead4797fd3b55fa9bf14fff2aa789b3c398f02a8643913aba1dd`。最终包的 `1/2/4/8/auto × 3` 线程矩阵 15/15 产生相同 exact 哈希，证明本机确定性；其中 auto 样本出现明显抖动，中位 2,413.04 ms，因此这批 packaged matrix 只作为确定性证据，不用来宣传固定多核加速。较早的 `db763d3` 隔离矩阵中位依次为 1,706.71 / 1,439.52 / 1,314.38 / 1,278.88 / 1,275.27 ms，auto 相对单线程约 1.338 倍；它不是跨硬件结论。
+
+### 22.3 最终本地自动化与包
+
+- 最终 `be80af0` source 新跑 TypeScript、Vitest、server/station、Ops、native、Rust、build、完整 Chromium 和 durable E2E：Vitest 201 文件通过/14 条件跳过，1,696 项通过/29 跳过/0 失败；server 384/2 加 station 4/4；Ops 56/6；Windows native/desktop 179 通过/1 个 symlink 权限条件跳过/0 失败；Rust workspace 244/244（core 166、Host 78），fmt、clippy `-D warnings` 通过；125 个运行时许可证及根/server 生产依赖审计 0 漏洞。
+- Chromium 为 431 通过/27 条件跳过/0 失败（458 总项、0 flaky、0 retry，381,422.982 ms）；durable E2E 为 7/0/0（45,963.117 ms），两项均为最终 source 直接通过，没有首次失败复跑。
+- production build 为 1,982 modules；startup 总 gzip 179,916 B、JavaScript 86,749 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,542 B、forbidden 0。
+- Build ID `1.2.3+be80af000295` 的固定目录包为 75 文件、413,466,490 B；包内 `releaseChannel=beta`，EXE SHA-256 `7e3d9be2239ffbb9b157beb1b9dc73abdc970ea23202baf27f76d0804960f704`，ASAR SHA-256 `2b7c81cd296034e6c27067a6f382868d061f1593f51eeff1e2608f00ae051af1`，Host SHA-256 `6a9760dff92023b7a63bc76aa4b52e0365cd229dbfbfdca1666e6f2cf47b42d9`，75 文件聚合 SHA-256 `b7c1fcd3030b394d815310f085e1508a77e92bd20e3ca129111af83ba78ff26e`。
+- unsigned ZIP 为 157,875,293 B，SHA-256 `cd625a80f3d4a94b153c907c25d5c1461ca845859a9a7b23bb4d305f85651d7f`。Authenticode 为 `NotSigned`，没有 installer、正式 API、更新源或下载页发布。
+- 12 秒启动冒烟中，最终目录包主进程存活且可响应，原生 Host 可见，精确清理进程树后残留 0；但进程级临时 `APPDATA/LOCALAPPDATA` 没有改变 Electron `app.getPath("appData")`，程序使用既有专用性能版 profile `C:/Users/WINDOWS/AppData/Roaming/DSPidle2-Performance-Edition`。它没有触及 stable profile，但 `temporary-profile-isolation=false`，故 overall smoke 为失败；不得写成隔离启动通过，也不移动既有 profile 强行复测。
+
+### 22.4 工作包最终诚实状态
+
+| 工作包 | 1.2.3 本地结算 | 仍未关闭 |
+| --- | --- | --- |
+| WIN-400 原生权威/薄 UI | 部分完成，继续 No-Go | renderer/Worker 仍持有完整 GameState；原生 pure-idle/offline/time-warp 未覆盖；`authorityEligible=false` |
+| WIN-410 活动脏块保存 | v2 SHA、域/页复用、ACK 对账和失败关闭完成 | base 域仍先全序列化/哈希；空闲 compaction、磁盘水位、Defender/磁盘故障与 24 小时未闭合 |
+| WIN-420 事件驱动线路 | 稀疏热循环与 75% 稠密退化完成 | selection 仍扫描全部 route group；无完整反向依赖与真正 O(active) 队列 |
+| WIN-430 确定性原生多核 | 本机热阶段 1/2/4/8/auto 哈希一致 | 非全领域权威并行；无多 CPU、Windows 10/11、跨调度 24 小时矩阵 |
+| WIN-440 有界增量投影 | 协议与校验已有 | App UI 未消费；MessagePort 是有界二进制 clone，不是共享内存零拷贝 |
+| WIN-450 GPU/Canvas | 继承既有候选，部分完成 | 无新 WebGL/WebGPU 权威路径、GPU 丢失/RDP/多硬件矩阵 |
+| WIN-460 原生统计/诊断 | session 私有 24 小时分层缓存完成 | 重启不持久；采样仍扫描记录；非全领域事件桶 |
+| WIN-470 流式 v47/云准备 | `.json`/严格 `.json.gz` 本地导入和流式导出完成 | 旧版适配、完整普通入口、实际云文件句柄上传和生产往返未闭合 |
+| WIN-480 紧凑布局/分配 | Arc/SoA、变化写回、容量收紧完成 | 无 mmap/LRU 冷页预算与 24 小时全进程内存斜率 |
+| WIN-490 外壳替换 | No-Go | 薄 UI 后 Electron 固定成本占比没有达到有证据的启动条件 |
+
+本地可安全自动化闭合的高价值实现已经完成，但“Windows 三层计划全部完成”为 false。剩余 24 小时、多硬件、签名、覆盖升级、真实薄 UI、mmap/LRU、生产云文件句柄和灰度都需要独立环境、发布授权或更大架构阶段，不能由本工作树冒充通过。

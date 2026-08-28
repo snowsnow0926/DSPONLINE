@@ -433,7 +433,7 @@ fn route_references_station(entities: &[Value], station_id: &str) -> bool {
         })
 }
 
-pub(crate) fn settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<()> {
+pub(crate) fn settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<bool> {
     let transitions = entities
         .iter()
         .enumerate()
@@ -444,6 +444,7 @@ pub(crate) fn settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<
             Some((index, id, transition.to_owned()))
         })
         .collect::<Vec<_>>();
+    let mut changed = false;
     for (index, station_id, transition) in transitions {
         if route_references_station(entities, &station_id) {
             continue;
@@ -460,8 +461,9 @@ pub(crate) fn settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<
             }),
         );
         station.insert("stationModeTransition".to_owned(), Value::Null);
+        changed = true;
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn allocate_budget(
@@ -1194,4 +1196,55 @@ pub(crate) fn settle_hubs(
 
 pub(crate) fn boundary_seconds() -> f64 {
     SETTLEMENT_SECONDS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mode_transition_reports_only_an_actual_topology_change() {
+        let mut entities = vec![json!({
+            "id": "station-a",
+            "kind": "station",
+            "stationOperationMode": "legacy",
+            "stationModeTransition": null
+        })];
+        let before = serde_json::to_vec(&entities).unwrap();
+        assert!(!settle_mode_transitions(&mut entities).unwrap());
+        assert_eq!(serde_json::to_vec(&entities).unwrap(), before);
+
+        entities[0]["stationModeTransition"] = Value::from("to-elevator");
+        assert!(settle_mode_transitions(&mut entities).unwrap());
+        assert_eq!(entities[0]["stationOperationMode"], Value::from("elevator"));
+        assert!(entities[0]["stationModeTransition"].is_null());
+        assert!(!settle_mode_transitions(&mut entities).unwrap());
+    }
+
+    #[test]
+    fn referenced_mode_transition_stays_pending_and_reports_no_change() {
+        let mut entities = vec![
+            json!({
+                "id": "station-a",
+                "kind": "station",
+                "stationOperationMode": "legacy",
+                "stationModeTransition": "to-elevator"
+            }),
+            json!({
+                "id": "station-b",
+                "kind": "station",
+                "stationRoutes": [{ "peerId": "station-a" }]
+            }),
+        ];
+        assert!(!settle_mode_transitions(&mut entities).unwrap());
+        assert_eq!(
+            entities[0]["stationModeTransition"],
+            Value::from("to-elevator")
+        );
+
+        entities[1]["stationRoutes"] = Value::Array(Vec::new());
+        assert!(settle_mode_transitions(&mut entities).unwrap());
+        assert!(entities[0]["stationModeTransition"].is_null());
+    }
 }

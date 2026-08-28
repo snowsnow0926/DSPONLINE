@@ -2341,6 +2341,24 @@ fn queue_target_source_wake(
     }
 }
 
+#[inline]
+fn record_material_movement(
+    changed_entity_indices: &mut Vec<usize>,
+    source_index: usize,
+    target_index: usize,
+    moved: f64,
+) {
+    if moved > 0.0 {
+        changed_entity_indices.push(source_index);
+        changed_entity_indices.push(target_index);
+    }
+}
+
+fn finalize_material_movement_evidence(changed_entity_indices: &mut Vec<usize>) {
+    changed_entity_indices.sort_unstable();
+    changed_entity_indices.dedup();
+}
+
 fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str) -> bool {
     if crate::system_space_station::is_elevator(source) {
         return source
@@ -2956,7 +2974,9 @@ pub(crate) fn transfer(
     defer_source_depletion_reset: bool,
     reservation: Option<&BeltStepReservation>,
     flow_window_seconds: f64,
+    changed_entity_indices: &mut Vec<usize>,
 ) -> anyhow::Result<()> {
+    changed_entity_indices.clear();
     if belt_runtime.progress.is_empty() {
         return Ok(());
     }
@@ -3159,6 +3179,12 @@ pub(crate) fn transfer(
             };
             let available = (group.available - moved).max(0.0);
             if moved > 0.0 {
+                record_material_movement(
+                    changed_entity_indices,
+                    expand_compact_index(prepared_group.source_index),
+                    route.target_index(),
+                    moved,
+                );
                 target_free[target_slot] -= moved;
                 queue_target_source_wake(
                     prepared_routes,
@@ -3255,6 +3281,12 @@ pub(crate) fn transfer(
                     if moved <= 0.0 {
                         continue;
                     }
+                    record_material_movement(
+                        changed_entity_indices,
+                        expand_compact_index(prepared_group.source_index),
+                        route.target_index(),
+                        moved,
+                    );
                     target_free[target_slot] -= moved;
                     queue_target_source_wake(
                         prepared_routes,
@@ -3332,6 +3364,12 @@ pub(crate) fn transfer(
                     if moved <= 0.0 {
                         continue;
                     }
+                    record_material_movement(
+                        changed_entity_indices,
+                        expand_compact_index(prepared_group.source_index),
+                        route.target_index(),
+                        moved,
+                    );
                     target_free[target_slot] -= moved;
                     queue_target_source_wake(
                         prepared_routes,
@@ -3420,6 +3458,11 @@ pub(crate) fn transfer(
         &mut belt_runtime.workspace.selected_group_indices,
         &mut belt_runtime.workspace.selected_route_indices,
     );
+    // Each successful route contributes at most two indices, so temporary
+    // evidence is bounded by twice the prepared route count. Canonicalizing
+    // here gives downstream wake caches stable topology order and excludes
+    // probes that did not actually move material.
+    finalize_material_movement_evidence(changed_entity_indices);
     Ok(())
 }
 
@@ -3571,6 +3614,23 @@ pub(crate) fn aggregate_flow_from_state(state: &CoreState) -> anyhow::Result<Bel
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn material_movement_evidence_requires_real_flow_and_is_sorted_deduplicated() {
+        let mut changed = Vec::new();
+        record_material_movement(&mut changed, 9, 3, 0.0);
+        record_material_movement(&mut changed, 8, 2, -1.0);
+        assert!(
+            changed.is_empty(),
+            "queries and blocked routes are not wake evidence"
+        );
+
+        record_material_movement(&mut changed, 9, 3, 4.0);
+        record_material_movement(&mut changed, 3, 7, 2.0);
+        record_material_movement(&mut changed, 9, 3, 1.0);
+        finalize_material_movement_evidence(&mut changed);
+        assert_eq!(changed, vec![3, 7, 9]);
+    }
 
     fn materialize_rewrite(raw: &str, patch: BeltDynamicRawPatch) -> String {
         rewrite_belt_dynamic_raw(raw, patch)

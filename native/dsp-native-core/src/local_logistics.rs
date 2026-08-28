@@ -228,12 +228,16 @@ pub(crate) struct LocalPeerDirectory {
     station_slots: Arc<HashMap<usize, Vec<Slot>>>,
     station_planets: Arc<HashMap<usize, usize>>,
     local_route_demand_indices: Vec<usize>,
+    buffer_active_station_indices: Vec<usize>,
+    buffer_activity_initialized: bool,
 }
 
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
-            + self.local_route_demand_indices.capacity() * std::mem::size_of::<usize>();
+            + (self.local_route_demand_indices.capacity()
+                + self.buffer_active_station_indices.capacity())
+                * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
             .values()
@@ -281,6 +285,22 @@ impl LocalPeerDirectory {
         }
     }
 
+    fn buffer_scan_indices(&self) -> (Vec<usize>, bool) {
+        if !self.buffer_activity_initialized {
+            return (self.station_indices.to_vec(), true);
+        }
+        let active = self.buffer_active_station_indices.len();
+        let total = self.station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+                >= total.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+        if dense {
+            (self.station_indices.to_vec(), true)
+        } else {
+            (self.buffer_active_station_indices.clone(), false)
+        }
+    }
+
     fn update_local_route_demand(&mut self, station_index: usize, active: bool) {
         let Some(rank) = self.station_ranks.get(&station_index).copied() else {
             return;
@@ -304,6 +324,41 @@ impl LocalPeerDirectory {
             }
             (Ok(_), true) | (Err(_), false) => {}
         }
+    }
+
+    fn update_buffer_station(&mut self, station_index: usize, active: bool) {
+        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+            return;
+        };
+        match (
+            self.buffer_active_station_indices
+                .binary_search_by_key(&rank, |candidate| {
+                    self.station_ranks
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                }),
+            active,
+        ) {
+            (Ok(position), false) => {
+                self.buffer_active_station_indices.remove(position);
+            }
+            (Err(position), true) => {
+                self.buffer_active_station_indices
+                    .insert(position, station_index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    fn replace_scanned_buffer_activity(&mut self, updates: &[(usize, bool)]) {
+        self.buffer_active_station_indices.clear();
+        self.buffer_active_station_indices.extend(
+            updates
+                .iter()
+                .filter_map(|(station_index, active)| active.then_some(*station_index)),
+        );
+        self.buffer_activity_initialized = true;
     }
 
     fn replace_scanned_local_route_activity(&mut self, updates: &[(usize, bool)]) {
@@ -435,6 +490,8 @@ fn build_peer_directory(
         station_slots: Arc::new(station_slots),
         station_planets: Arc::new(station_planets),
         local_route_demand_indices,
+        buffer_active_station_indices: Vec::new(),
+        buffer_activity_initialized: false,
     })
 }
 
@@ -809,14 +866,49 @@ pub(crate) fn reset_runtime_for_indices(
     Ok(())
 }
 
-pub(crate) fn transfer_buffers(
+fn station_has_pending_buffer_input(
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    station_index: usize,
+) -> anyhow::Result<bool> {
+    let station_slots = directory
+        .station_slots
+        .get(&station_index)
+        .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+    let station = entities[station_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native local station is invalid"))?;
+    Ok(station_slots.iter().any(|slot| {
+        slot.item_id.as_deref().is_some_and(|item_id| {
+            (item_amount(station, "inputs", item_id) + EPSILON).floor() >= 1.0
+        })
+    }))
+}
+
+fn plan_buffer_activity(
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    station_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
+    station_indices
+        .iter()
+        .copied()
+        .map(|station_index| {
+            station_has_pending_buffer_input(entities, directory, station_index)
+                .map(|active| (station_index, active))
+        })
+        .collect()
+}
+
+fn transfer_buffers_for_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
     directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
+    station_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
     let buffer_limit = normalized_buffer_limit(base);
-    for &station_index in directory.station_indices.iter() {
+    for &station_index in station_indices {
         let station_slots = directory
             .station_slots
             .get(&station_index)
@@ -841,6 +933,51 @@ pub(crate) fn transfer_buffers(
             set_item_amount(station, "inputs", item_id, incoming - moved)?;
             set_item_amount(station, "outputs", item_id, stored + moved)?;
         }
+    }
+    plan_buffer_activity(entities, directory, station_indices)
+}
+
+pub(crate) fn transfer_buffers(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<()> {
+    let (station_indices, _dense_fallback) = directory.buffer_scan_indices();
+    let updates = transfer_buffers_for_indices(state, base, entities, directory, &station_indices)?;
+    directory.replace_scanned_buffer_activity(&updates);
+    Ok(())
+}
+
+/// Installs exact wake evidence produced by inventory-moving subsystems. The
+/// caller supplies sorted, de-duplicated entity indices and only invokes this
+/// after the candidate inventory mutation succeeded. Non-local-station rows
+/// are ignored through the immutable topology rank map.
+pub(crate) fn wake_transfer_buffers_from_changed_entities(
+    entities: &[Value],
+    changed_entity_indices: &[usize],
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<()> {
+    let station_indices = changed_entity_indices
+        .iter()
+        .copied()
+        .filter(|station_index| directory.station_ranks.contains_key(station_index))
+        .collect::<Vec<_>>();
+    let updates = plan_buffer_activity(entities, directory, &station_indices)?;
+    for (station_index, active) in updates {
+        directory.update_buffer_station(station_index, active);
+    }
+    Ok(())
+}
+
+pub(crate) fn refresh_step_directory_after_topology_change(
+    entities: &[Value],
+    station_indices: &[usize],
+    topology_changed: bool,
+    directory: &mut Arc<LocalPeerDirectory>,
+) -> anyhow::Result<()> {
+    if topology_changed {
+        *directory = Arc::new(prepare_step_directory(entities, station_indices)?);
     }
     Ok(())
 }
@@ -1423,7 +1560,14 @@ pub(crate) fn advance_routes(
     let (route_scan_indices, _dense_fallback) = directory.route_scan_indices();
     let activity_updates =
         advance_routes_for_indices(state, base, entities, seconds, powers, &route_scan_indices)?;
+    // A quantum-supply demand can retain completed local cargo in its station
+    // input buffer. Derive that wake only from the successfully mutated
+    // demand rows; ordinary route completions add outputs and remain dormant.
+    let buffer_updates = plan_buffer_activity(entities, directory, &route_scan_indices)?;
     directory.replace_scanned_local_route_activity(&activity_updates);
+    for (station_index, active) in buffer_updates {
+        directory.update_buffer_station(station_index, active);
+    }
     Ok(())
 }
 
@@ -1730,8 +1874,13 @@ mod tests {
                     kind: "solid".to_owned(),
                     fuel_energy_mj: 0.0,
                 }],
-                buildings: vec![BuildingDefinition {
-                    id: "planetary_logistics_station".to_owned(),
+                buildings: [
+                    "planetary_logistics_station",
+                    "interstellar_logistics_station",
+                ]
+                .into_iter()
+                .map(|id| BuildingDefinition {
+                    id: id.to_owned(),
                     kind: "station".to_owned(),
                     speed: 1.0,
                     input_capacity: 100_000.0,
@@ -1744,7 +1893,8 @@ mod tests {
                     fuel_efficiency: 1.0,
                     family: None,
                     accepts: None,
-                }],
+                })
+                .collect(),
                 recipes: Vec::new(),
                 constructions: Vec::new(),
                 belts: vec![BeltDefinition {
@@ -1954,6 +2104,261 @@ mod tests {
         let rebuilt_boundary = prepare_step_directory(&entities, &station_indices).unwrap();
         assert!(peer_matches(&rebuilt_boundary, 1, 0).unwrap().is_empty());
         assert_eq!(rebuilt_boundary.station_indices.as_ref(), &[1]);
+    }
+
+    fn run_buffer_activity_steps(
+        source: &[Value],
+        iterations: usize,
+        force_full_scan: bool,
+    ) -> (Vec<Value>, LocalPeerDirectory, Vec<(usize, bool)>) {
+        let state = route_fixture_state(source);
+        let base = route_fixture_base();
+        let base = base.as_object().expect("buffer fixture base");
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        transfer_buffers(&state, base, &mut entities, &mut directory).unwrap();
+        assert!(directory.buffer_activity_initialized);
+
+        let active = [7, source.len() / 2, source.len() - 1];
+        let changed = [0, active[0], active[1], active[2]];
+        let mut scans = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            for station_index in active {
+                let station = entities[station_index]
+                    .as_object_mut()
+                    .expect("buffer fixture station");
+                let current = item_amount(station, "inputs", "iron_ore");
+                set_item_amount(station, "inputs", "iron_ore", current + 1.0).unwrap();
+            }
+            wake_transfer_buffers_from_changed_entities(&entities, &changed, &mut directory)
+                .unwrap();
+            let (scheduled, dense) = directory.buffer_scan_indices();
+            scans.push((scheduled.len(), dense));
+            if force_full_scan {
+                let full_indices = directory.station_indices.to_vec();
+                let updates = transfer_buffers_for_indices(
+                    &state,
+                    base,
+                    &mut entities,
+                    &directory,
+                    &full_indices,
+                )
+                .unwrap();
+                directory.replace_scanned_buffer_activity(&updates);
+            } else {
+                transfer_buffers(&state, base, &mut entities, &mut directory).unwrap();
+            }
+        }
+        (entities, directory, scans)
+    }
+
+    #[test]
+    fn sparse_buffer_activity_matches_full_oracle_for_1_5_60_steps() {
+        let count = PARALLEL_MIN_ITEMS + 113;
+        let source = route_matrix(count, &[], 0.0, 1.0);
+        let state = route_fixture_state(&source);
+        let source_hash = state.canonical_sha256().unwrap();
+
+        for iterations in [1, 5, 60] {
+            let scheduled = run_buffer_activity_steps(&source, iterations, false);
+            let oracle = run_buffer_activity_steps(&source, iterations, true);
+            assert!(scheduled.2.iter().all(|scan| *scan == (3, false)));
+            assert_eq!(
+                serde_json::to_vec(&scheduled.0).unwrap(),
+                serde_json::to_vec(&oracle.0).unwrap(),
+                "sparse buffer replay diverged at {iterations} steps"
+            );
+            assert_eq!(
+                scheduled.1.buffer_active_station_indices,
+                oracle.1.buffer_active_station_indices
+            );
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn dense_buffer_activity_falls_back_at_exact_three_quarters() {
+        let count = 100;
+        let state_source = route_matrix(count, &[], 0.0, 1.0);
+        let state = route_fixture_state(&state_source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let mut scheduled_entities = state_source.clone();
+        let mut scheduled =
+            prepare_step_directory(&scheduled_entities, &state.factory_topology.station_indices)
+                .unwrap();
+        transfer_buffers(&state, base, &mut scheduled_entities, &mut scheduled).unwrap();
+        for entity in scheduled_entities.iter_mut().take(75) {
+            set_item_amount(entity.as_object_mut().unwrap(), "inputs", "iron_ore", 1.0).unwrap();
+        }
+        let changed = (0..75).collect::<Vec<_>>();
+        wake_transfer_buffers_from_changed_entities(&scheduled_entities, &changed, &mut scheduled)
+            .unwrap();
+        let (scan_indices, dense) = scheduled.buffer_scan_indices();
+        assert!(dense);
+        assert_eq!(scan_indices, scheduled.station_indices.as_ref());
+
+        let mut oracle_entities = scheduled_entities.clone();
+        let mut oracle = scheduled.clone();
+        transfer_buffers(&state, base, &mut scheduled_entities, &mut scheduled).unwrap();
+        let full_indices = oracle.station_indices.to_vec();
+        let updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &oracle,
+            &full_indices,
+        )
+        .unwrap();
+        oracle.replace_scanned_buffer_activity(&updates);
+        assert_eq!(
+            serde_json::to_vec(&scheduled_entities).unwrap(),
+            serde_json::to_vec(&oracle_entities).unwrap()
+        );
+        assert_eq!(
+            scheduled.buffer_active_station_indices,
+            oracle.buffer_active_station_indices
+        );
+    }
+
+    #[test]
+    fn blocked_buffer_stays_awake_then_drain_completion_removes_it() {
+        let mut entities = route_matrix(32, &[], 0.0, 1.0);
+        entities[7]["outputs"]["iron_ore"] = Value::from(100_000.0);
+        entities[7]["inputs"]["iron_ore"] = Value::from(9.0);
+        let state = route_fixture_state(&entities);
+        let base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(directory.buffer_active_station_indices, vec![7]);
+        assert_eq!(entities[7]["inputs"]["iron_ore"], Value::from(9.0));
+
+        entities[7]["outputs"]["iron_ore"] = Value::from(0.0);
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(directory.buffer_active_station_indices.is_empty());
+        assert_eq!(entities[7]["inputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(9.0));
+    }
+
+    #[test]
+    fn external_input_arrival_wakes_buffer_and_empty_evidence_does_not() {
+        let mut entities = route_matrix(32, &[], 0.0, 1.0);
+        let state = route_fixture_state(&entities);
+        let base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        wake_transfer_buffers_from_changed_entities(&entities, &[], &mut directory).unwrap();
+        assert!(directory.buffer_active_station_indices.is_empty());
+
+        entities[11]["inputs"]["iron_ore"] = Value::from(4.0);
+        wake_transfer_buffers_from_changed_entities(&entities, &[0, 11], &mut directory).unwrap();
+        assert_eq!(directory.buffer_active_station_indices, vec![11]);
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(entities[11]["outputs"]["iron_ore"], Value::from(4.0));
+        assert!(directory.buffer_active_station_indices.is_empty());
+    }
+
+    #[test]
+    fn topology_refresh_reuses_arc_without_transition_and_rebuilds_on_change() {
+        let mut entities = vec![
+            local_station("supply", "supply"),
+            local_station("demand", "demand"),
+        ];
+        let station_indices = vec![0, 1];
+        let mut directory = Arc::new(prepare_step_directory(&entities, &station_indices).unwrap());
+        let shared = Arc::clone(&directory);
+        refresh_step_directory_after_topology_change(
+            &entities,
+            &station_indices,
+            false,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&directory, &shared));
+
+        entities[0]["buildingId"] = Value::from("interstellar_logistics_station");
+        entities[0]["stationTier"] = Value::from(2);
+        entities[0]["stationOperationMode"] = Value::from("elevator");
+        refresh_step_directory_after_topology_change(
+            &entities,
+            &station_indices,
+            true,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(&directory, &shared));
+        assert_eq!(directory.station_indices.as_ref(), &[1]);
+        assert!(!directory.buffer_activity_initialized);
+    }
+
+    #[test]
+    fn failed_buffer_candidate_keeps_source_cache_and_json_atomic() {
+        let mut source = route_matrix(128, &[], 0.0, 1.0);
+        source[7]["inputs"]["iron_ore"] = Value::from(3.0);
+        source[83]["inputs"]["iron_ore"] = Value::from(5.0);
+        source[83]["outputs"] = Value::Null;
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_directory = Arc::new(
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap(),
+        );
+        let source_activity = source_directory.buffer_active_station_indices.clone();
+        let mut candidate_directory = Arc::clone(&source_directory);
+        let candidate_runtime = Arc::make_mut(&mut candidate_directory);
+        let mut candidate = source.clone();
+        let error = transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut candidate,
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native local logistics inventory is missing"
+        );
+        assert_eq!(
+            source_directory.buffer_active_station_indices,
+            source_activity
+        );
+        assert_eq!(
+            candidate_directory.buffer_active_station_indices,
+            source_activity
+        );
+        assert!(!source_directory.buffer_activity_initialized);
+        assert!(!candidate_directory.buffer_activity_initialized);
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
     }
 
     fn local_congestion_matrix(count: usize) -> (Vec<Value>, LocalPeerDirectory, Ledger) {
@@ -2302,6 +2707,57 @@ mod tests {
             + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
         assert_eq!(material_after, material_before);
         assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(11.0));
+    }
+
+    #[test]
+    fn quantum_local_route_completion_wakes_retained_station_input() {
+        let mut entities = route_matrix(2, &[1], 0.0, 1.0);
+        entities[1]["buildingId"] = Value::from("interstellar_logistics_station");
+        entities[1]["quantumMode"] = Value::from("quantum");
+        entities[1]["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        entities[1]["stationSlots"][0]["minStock"] = Value::from(100);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        base["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": {},
+            "itemCapacities": { "iron_ore": "1000000" },
+            "routingCursors": {},
+            "uploadRoutingCursors": {}
+        });
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        let powers = route_powers(entities.len(), 1.0);
+
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            1.0,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(entities[1]["inputs"]["iron_ore"], Value::from(11.0));
+        assert_eq!(directory.buffer_active_station_indices, vec![1]);
+
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(entities[1]["inputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[1]["outputs"]["iron_ore"], Value::from(11.0));
+        assert!(directory.buffer_active_station_indices.is_empty());
     }
 
     #[test]

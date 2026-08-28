@@ -3464,11 +3464,15 @@ fn simulate_step(
         &state.factory_topology.logistics_buffer_indices,
     )?;
     profile_mark!("ordinary-logistics-buffers");
-    crate::local_logistics::transfer_buffers(state, base, entities, local_step_directory)?;
+    // Only candidate-local wake vectors are mutable. Arc::make_mut preserves
+    // the source revision's runtime cache if any later simulation stage fails.
+    let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
+    crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
     profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
     profile_mark!("quantum-supply-buffers");
     profile_mark!("belt-route-index");
+    let mut belt_changed_entity_indices = Vec::new();
     crate::belts::transfer(
         state,
         base,
@@ -3479,6 +3483,12 @@ fn simulate_step(
         true,
         None,
         seconds,
+        &mut belt_changed_entity_indices,
+    )?;
+    crate::local_logistics::wake_transfer_buffers_from_changed_entities(
+        entities,
+        &belt_changed_entity_indices,
+        local_step_runtime,
     )?;
     profile_mark!("belt-input-transfer");
     let belt_reservation = crate::belts::reserve(state, base, entities, belt_runtime, belt_routes)?;
@@ -3542,7 +3552,7 @@ fn simulate_step(
     profile_mark!("power-source-index");
 
     let mut ready_stations =
-        crate::local_logistics::ready_station_indices(state, base, entities, local_step_directory)?;
+        crate::local_logistics::ready_station_indices(state, base, entities, local_step_runtime)?;
     profile_mark!("local-ready-stations");
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
         state, base, entities,
@@ -4382,6 +4392,12 @@ fn simulate_step(
         false,
         Some(&belt_reservation),
         seconds,
+        &mut belt_changed_entity_indices,
+    )?;
+    crate::local_logistics::wake_transfer_buffers_from_changed_entities(
+        entities,
+        &belt_changed_entity_indices,
+        local_step_runtime,
     )?;
     drain_material_delivery_hubs(
         state,
@@ -4417,10 +4433,6 @@ fn simulate_step(
         })
         .collect::<HashMap<_, _>>();
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    // The peer topology is shared across committed revisions, while route
-    // activity is candidate-local. Clone-on-write duplicates only the compact
-    // activity vector; a failed candidate can never mutate the source cache.
-    let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
     crate::local_logistics::dispatch(state, base, entities, &station_powers, local_step_runtime)?;
     profile_mark!("local-dispatch");
     let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
@@ -4556,9 +4568,11 @@ fn simulate_step(
 
     let elapsed = projected_elapsed;
     set_number(base, "elapsedSeconds", elapsed)?;
+    let mut station_mode_topology_changed = false;
     if crossed_quantum_boundary {
         for boundary in first_quantum_boundary..=last_quantum_boundary {
-            crate::system_space_station::settle_mode_transitions(entities)?;
+            station_mode_topology_changed |=
+                crate::system_space_station::settle_mode_transitions(entities)?;
             crate::quantum_logistics::settle_transitions(base, entities)?;
             crate::system_space_station::settle_construction(state, base, entities)?;
             crate::system_space_station::settle_hubs(
@@ -4576,15 +4590,15 @@ fn simulate_step(
                 &indexed_quantum_endpoint_indices,
             )?;
         }
-        // Elevator-mode transitions are settled at this boundary. Recompile
-        // the immutable local peer directory once after the boundary so the
-        // next exact step observes the same station membership as the legacy
-        // per-step rebuild without paying that allocation cost every second.
-        *local_step_directory =
-            std::sync::Arc::new(crate::local_logistics::prepare_step_directory(
-                entities,
-                &state.factory_topology.station_indices,
-            )?);
+        // Elevator-mode transitions are the only boundary event that changes
+        // local peer membership. Stable five-second settlements retain the
+        // cross-revision wake cache; an actual transition rebuilds once.
+        crate::local_logistics::refresh_step_directory_after_topology_change(
+            entities,
+            &state.factory_topology.station_indices,
+            station_mode_topology_changed,
+            local_step_directory,
+        )?;
     }
     profile_mark!("local-directory-boundary-refresh");
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {

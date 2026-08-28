@@ -1300,6 +1300,42 @@ fn validate_player_position_command(
     Ok(())
 }
 
+fn validate_belt_priority_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_belts.len() != 1
+        || command.changed_belts[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority belt priority command shape is invalid")
+    }
+    let record = &command.changed_belts[0];
+    let belt_index = *state
+        .belt_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority belt priority target is missing"))?;
+    let belt = state.parse_belt(belt_index)?;
+    let current = belt
+        .get("priority")
+        .and_then(Value::as_u64)
+        .filter(|priority| *priority <= 2)
+        .ok_or_else(|| anyhow!("native player-authority current belt priority is invalid"))?;
+    let target = require_exact_set_patch(&record.changes, &["priority"])?
+        .as_u64()
+        .filter(|priority| *priority <= 2)
+        .ok_or_else(|| anyhow!("native player-authority belt priority target is invalid"))?;
+    if target == current {
+        bail!("native player-authority belt priority command is unchanged")
+    }
+    Ok(())
+}
+
 impl SimulationCommandPatch {
     /// Derives the renderer invalidation receipt solely from a command that
     /// has already passed authoritative command validation. This makes the
@@ -1467,6 +1503,14 @@ impl CoreState {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "planetViewports")
         }) {
             return validate_planet_viewport_command(self, command);
+        }
+        if command.changed_belts.iter().any(|record| {
+            record
+                .changes
+                .iter()
+                .any(|change| path_matches(&change.path, &["priority"]))
+        }) {
+            return validate_belt_priority_command(self, command);
         }
         if !command.top_level_changes.is_empty() {
             return validate_player_pause_command(self, command);
@@ -1757,6 +1801,9 @@ mod tests {
                 PathSegment::Key("x".to_owned()),
             ])
         ));
+        assert!(!command_requires_production_history_rebuild(
+            &belt_priority_command(1, "belt-priority", Value::from(2))
+        ));
         assert!(command_requires_production_history_rebuild(
             &command_for_path(vec![PathSegment::Key("futureUnknownField".to_owned())])
         ));
@@ -1894,6 +1941,11 @@ mod tests {
                 .unwrap()
                 .topology_dirty
         );
+
+        let belt_priority = belt_priority_command(1, "belt-priority", Value::from(2));
+        let belt_priority_result = belt_priority.deterministic_apply_result(1, 2).unwrap();
+        assert_eq!(belt_priority_result.changed_belt_ids, ["belt-priority"]);
+        assert!(belt_priority_result.topology_dirty);
     }
 
     fn player_command_catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
@@ -1979,6 +2031,24 @@ mod tests {
         entity.to_string()
     }
 
+    fn player_command_belt() -> String {
+        serde_json::json!({
+            "id": "belt-priority",
+            "planetId": "home",
+            "source": "ejector-a",
+            "target": "ejector-b",
+            "itemId": "solar_sail",
+            "lanes": 1,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 1,
+            "lastFlow": 0,
+            "modPayload": { "owner": "pack:test", "revision": 7 }
+        })
+        .to_string()
+    }
+
     fn player_command_state_for_registry(registry_fingerprint: &str) -> CoreState {
         let base = serde_json::json!({
             "version": 47,
@@ -2030,7 +2100,7 @@ mod tests {
                 player_command_entity("ejector-a", "em_rail_ejector", 3.0, Some("orbit-home-old")),
                 player_command_entity("ejector-b", "em_rail_ejector", 5.0, Some("orbit-home-old")),
             ],
-            Vec::new(),
+            vec![player_command_belt()],
             player_command_catalog_for_registry(registry_fingerprint),
         )
         .unwrap()
@@ -2169,6 +2239,23 @@ mod tests {
                 value: Some(value.clone()),
             })
             .collect();
+        command
+    }
+
+    fn belt_priority_command(
+        revision: u64,
+        belt_id: &str,
+        priority: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_belts = vec![RecordPatch {
+            id: belt_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("priority".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(priority),
+            }],
+        }];
         command
     }
 
@@ -2480,6 +2567,180 @@ mod tests {
         assert!(format!("{error:#}").contains("current planet viewport zoom"));
         assert_eq!(malformed.revision, 9);
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_only_canonical_belt_priority_command() {
+        let mut state = player_command_state();
+        let command = belt_priority_command(state.revision, "belt-priority", Value::from(2));
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert!(applied.changed_entity_ids.is_empty());
+        assert_eq!(applied.changed_belt_ids, ["belt-priority"]);
+        assert!(applied.topology_dirty);
+        let belt = state.parse_belt(0).unwrap();
+        assert_eq!(belt["priority"], 2);
+        assert_eq!(
+            belt["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 7 })
+        );
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+
+        let mut modded = player_command_state_for_registry("modded-belt-priority-test");
+        let modded_command =
+            belt_priority_command(modded.revision, "belt-priority", Value::from(0));
+        let modded_applied = modded
+            .apply_player_authority_command(&modded_command)
+            .unwrap();
+        assert!(modded_applied.topology_dirty);
+        let modded_belt = modded.parse_belt(0).unwrap();
+        assert_eq!(modded_belt["priority"], 0);
+        assert_eq!(
+            modded_belt["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 7 })
+        );
+    }
+
+    #[test]
+    fn player_authority_belt_priority_rejects_invalid_mixed_or_malformed_commands() {
+        let mut delete = belt_priority_command(9, "belt-priority", Value::from(2));
+        delete.changed_belts[0].changes[0].operation = "delete".to_owned();
+        delete.changed_belts[0].changes[0].value = None;
+
+        let mut duplicate_leaf = belt_priority_command(9, "belt-priority", Value::from(2));
+        let repeated_priority = duplicate_leaf.changed_belts[0].changes[0].clone();
+        duplicate_leaf.changed_belts[0]
+            .changes
+            .push(repeated_priority);
+
+        let mut other_belt_field = belt_priority_command(9, "belt-priority", Value::from(2));
+        other_belt_field.changed_belts[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("routeMode".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from("supply")),
+        });
+
+        let mut mixed_mod_payload = belt_priority_command(9, "belt-priority", Value::from(2));
+        mixed_mod_payload.changed_belts[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("modPayload".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({ "owner": "forged" })),
+        });
+
+        let mut mixed_top_level = belt_priority_command(9, "belt-priority", Value::from(2));
+        mixed_top_level.top_level_changes = vec![ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        }];
+
+        let mut mixed_entity = belt_priority_command(9, "belt-priority", Value::from(2));
+        mixed_entity.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("position".to_owned()),
+                    PathSegment::Key("x".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(12)),
+            }],
+        }];
+
+        let mut added_belt = belt_priority_command(9, "belt-priority", Value::from(2));
+        added_belt.added_belts = vec![AddedRecord {
+            index: 1,
+            value: serde_json::json!({
+                "id": "forged-belt",
+                "planetId": "home",
+                "source": "ejector-a",
+                "target": "ejector-b",
+                "itemId": "solar_sail",
+                "lanes": 1,
+                "tier": 1,
+                "priority": 1
+            }),
+        }];
+
+        let mut duplicate_record = belt_priority_command(9, "belt-priority", Value::from(2));
+        let repeated_record = duplicate_record.changed_belts[0].clone();
+        duplicate_record.changed_belts.push(repeated_record);
+
+        let mut nested_priority = belt_priority_command(9, "belt-priority", Value::from(2));
+        nested_priority.changed_belts[0].changes[0]
+            .path
+            .push(PathSegment::Key("level".to_owned()));
+
+        let commands = [
+            belt_priority_command(9, "missing-belt", Value::from(2)),
+            belt_priority_command(9, "belt-priority", Value::from(3)),
+            belt_priority_command(9, "belt-priority", Value::from(-1)),
+            belt_priority_command(9, "belt-priority", Value::from(2.0)),
+            belt_priority_command(9, "belt-priority", Value::from("high")),
+            belt_priority_command(9, "belt-priority", Value::from(1)),
+            delete,
+            duplicate_leaf,
+            other_belt_field,
+            mixed_mod_payload,
+            mixed_top_level,
+            mixed_entity,
+            added_belt,
+            duplicate_record,
+            nested_priority,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for current in [
+            Value::from(9),
+            Value::from(-1),
+            Value::from(1.0),
+            Value::from("high"),
+            Value::Null,
+        ] {
+            let mut malformed = player_command_state();
+            malformed
+                .apply_command(&belt_priority_command(9, "belt-priority", current))
+                .unwrap();
+            let before = malformed.canonical_sha256().unwrap();
+            let error = malformed
+                .apply_player_authority_command(&belt_priority_command(
+                    10,
+                    "belt-priority",
+                    Value::from(2),
+                ))
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("current belt priority"));
+            assert_eq!(malformed.revision, 10);
+            assert_eq!(malformed.canonical_sha256().unwrap(), before);
+        }
+
+        let mut missing_current = player_command_state();
+        let mut delete_current = belt_priority_command(9, "belt-priority", Value::from(2));
+        delete_current.changed_belts[0].changes[0].operation = "delete".to_owned();
+        delete_current.changed_belts[0].changes[0].value = None;
+        missing_current.apply_command(&delete_current).unwrap();
+        let before = missing_current.canonical_sha256().unwrap();
+        let error = missing_current
+            .apply_player_authority_command(&belt_priority_command(
+                10,
+                "belt-priority",
+                Value::from(2),
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("current belt priority"));
+        assert_eq!(missing_current.revision, 10);
+        assert_eq!(missing_current.canonical_sha256().unwrap(), before);
     }
 
     #[test]

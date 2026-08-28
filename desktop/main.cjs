@@ -67,6 +67,14 @@ const performanceEditionRuntimeIdentity = initializePerformanceEditionIdentity({
   app,
   fileSystem: fs,
   pathModule: path,
+  smokeIsolation: process.env.DSP_PERFORMANCE_SMOKE_ISOLATION === "1"
+    ? {
+        enabled: true,
+        releaseChannel: packageMetadata.releaseChannel,
+        appDataRoot: process.env.DSP_PERFORMANCE_SMOKE_APP_DATA_ROOT,
+        temporaryRootPath: nodeOs.tmpdir(),
+      }
+    : null,
 });
 // This is deliberately initialized before app readiness. The default path does
 // not mutate Electron; only the exact experimental fallback can disable GPU use.

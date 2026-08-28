@@ -142,3 +142,14 @@ test("static download page generator validates manifests and renders current pac
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("Windows performance package smoke uses an explicit bounded temporary profile and exact process IDs", async () => {
+  const source = await readFile(path.join(root, "scripts", "smoke-windows-performance-package.ps1"), "utf8");
+  assert.match(source, /DSP_PERFORMANCE_SMOKE_ISOLATION/);
+  assert.match(source, /DSP_PERFORMANCE_SMOKE_APP_DATA_ROOT/);
+  assert.match(source, /dspidle-performance-smoke-/);
+  assert.match(source, /Start-Process[^\n]+-WindowStyle Hidden[^\n]+-PassThru/);
+  assert.match(source, /Stop-Process -Id/);
+  assert.match(source, /Remove-Item -LiteralPath \$FinalSmokeRoot -Recurse -Force/);
+  assert.doesNotMatch(source, /taskkill|Stop-Process\s+-(?:Name|ProcessName)|Remove-Item\s+[^\n]*\*/i);
+});

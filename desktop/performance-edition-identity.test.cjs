@@ -134,6 +134,7 @@ test("runtime identity creates only fixed performance-edition userData and Chrom
   const expectedSessionData = path.win32.join(expectedUserData, PERFORMANCE_EDITION_IDENTITY.sessionDataDirectoryName);
   assert.equal(result.userDataPath, expectedUserData);
   assert.equal(result.sessionDataPath, expectedSessionData);
+  assert.equal(result.smokeIsolated, false);
   assert.notEqual(result.userDataPath, path.win32.join(appDataPath, STABLE_IDENTITY.productName));
   assert.deepEqual(operations.filter(([operation]) => operation === "mkdirSync"), [
     ["mkdirSync", expectedUserData],
@@ -145,6 +146,69 @@ test("runtime identity creates only fixed performance-edition userData and Chrom
     ["setPath", "sessionData", expectedSessionData],
   ]);
   assert.ok(operations.filter(([operation]) => operation === "lstatSync").length >= 8);
+});
+
+test("beta packaged smoke can use one explicit direct temporary AppData root", (t) => {
+  const temporaryRootPath = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-performance-smoke-parent-"));
+  // The production contract deliberately requires the selected root to be a
+  // direct child of the configured system temporary directory. Use this test's
+  // temporary parent as that configured root so cleanup stays self-contained.
+  const appDataPath = path.join(temporaryRootPath, "dspidle-performance-smoke-isolated-profile");
+  fs.mkdirSync(appDataPath);
+  t.after(() => fs.rmSync(temporaryRootPath, { recursive: true, force: true }));
+  const calls = [];
+  const app = runtimeApp("C:\\Users\\player\\AppData\\Roaming", calls);
+  const result = initializePerformanceEditionIdentity({
+    app,
+    smokeIsolation: {
+      enabled: true,
+      releaseChannel: "beta",
+      appDataRoot: appDataPath,
+      temporaryRootPath,
+    },
+  });
+  assert.equal(result.userDataPath, path.join(appDataPath, PERFORMANCE_EDITION_IDENTITY.userDataDirectoryName));
+  assert.equal(result.sessionDataPath, path.join(result.userDataPath, PERFORMANCE_EDITION_IDENTITY.sessionDataDirectoryName));
+  assert.equal(result.smokeIsolated, true);
+  assert.equal(calls.some(([operation]) => operation === "getPath"), false);
+  assert.deepEqual(calls.slice(-3), [
+    ["setName", PERFORMANCE_EDITION_IDENTITY.productName],
+    ["setPath", "userData", result.userDataPath],
+    ["setPath", "sessionData", result.sessionDataPath],
+  ]);
+});
+
+test("smoke isolation rejects stable channel, missing roots, redirects, and paths outside the temporary parent", (t) => {
+  const temporaryRootPath = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-performance-smoke-policy-"));
+  const validRoot = path.join(temporaryRootPath, "dspidle-performance-smoke-valid");
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dspidle-performance-smoke-outside-"));
+  fs.mkdirSync(validRoot);
+  t.after(() => {
+    fs.rmSync(temporaryRootPath, { recursive: true, force: true });
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
+  });
+  const invoke = (overrides) => initializePerformanceEditionIdentity({
+    app: runtimeApp("C:\\Users\\player\\AppData\\Roaming", []),
+    smokeIsolation: {
+      enabled: true,
+      releaseChannel: "beta",
+      appDataRoot: validRoot,
+      temporaryRootPath,
+      ...overrides,
+    },
+  });
+  assert.throws(() => invoke({ releaseChannel: "stable" }), /smoke 隔离配置无效/);
+  assert.throws(() => invoke({ appDataRoot: path.join(temporaryRootPath, "dspidle-performance-smoke-missing") }), /必须预先创建/);
+  assert.throws(() => invoke({ appDataRoot: outsideRoot }), /直属测试目录/);
+
+  const redirectedRoot = path.join(temporaryRootPath, "dspidle-performance-smoke-redirect");
+  try {
+    fs.symlinkSync(outsideRoot, redirectedRoot, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (error && ["EACCES", "EPERM", "ENOTSUP"].includes(error.code)) return;
+    throw error;
+  }
+  assert.throws(() => invoke({ appDataRoot: redirectedRoot }), /符号链接|reparse point/);
 });
 
 test("identity initialization fails closed instead of falling back to Electron stable defaults", () => {
@@ -267,6 +331,8 @@ test("main applies isolated data identity before locks or userData reads and bin
   assert.ok(userDataOffset > initializeOffset);
   assert.ok(lockOffset > initializeOffset);
   assert.ok(readyOffset > initializeOffset);
+  assert.match(source, /DSP_PERFORMANCE_SMOKE_ISOLATION/);
+  assert.match(source, /releaseChannel: packageMetadata\.releaseChannel/);
   assert.match(source, /app\.setAppUserModelId\(PERFORMANCE_EDITION_IDENTITY\.appUserModelId\)/);
   assert.match(source, /window\.on\("page-title-updated"/);
   assert.match(source, /if \(!window\.isDestroyed\(\)\) window\.setTitle\(PERFORMANCE_EDITION_IDENTITY\.productName\)/);

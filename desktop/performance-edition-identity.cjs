@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const PERFORMANCE_EDITION_IDENTITY = Object.freeze({
@@ -131,11 +132,41 @@ function initializePerformanceEditionIdentity({
   app,
   fileSystem = fs,
   pathModule = path,
+  smokeIsolation = null,
 } = {}) {
   if (!app || typeof app.getPath !== "function" || typeof app.setPath !== "function" || typeof app.setName !== "function") {
     throw new TypeError("Windows 性能开发版需要完整 Electron app identity API");
   }
-  const appDataPath = app.getPath("appData");
+  let appDataPath;
+  let smokeIsolated = false;
+  if (smokeIsolation !== null) {
+    if (
+      !smokeIsolation
+      || smokeIsolation.enabled !== true
+      || !["beta", "nightly"].includes(smokeIsolation.releaseChannel)
+      || typeof smokeIsolation.appDataRoot !== "string"
+      || !pathModule.isAbsolute(smokeIsolation.appDataRoot)
+    ) {
+      throw new Error("Windows 性能开发版 smoke 隔离配置无效");
+    }
+    const temporaryRootPath = pathModule.resolve(smokeIsolation.temporaryRootPath ?? os.tmpdir());
+    appDataPath = pathModule.resolve(smokeIsolation.appDataRoot);
+    if (
+      pathModule.dirname(appDataPath) !== temporaryRootPath
+      || !pathModule.basename(appDataPath).startsWith("dspidle-performance-smoke-")
+    ) {
+      throw new Error("Windows 性能开发版 smoke AppData 必须是系统临时目录的直属测试目录");
+    }
+    if (!readDirectDirectory(fileSystem, temporaryRootPath, "smoke 临时目录")) {
+      throw new Error("Windows 性能开发版 smoke 临时目录不存在");
+    }
+    if (!readDirectDirectory(fileSystem, appDataPath, "smoke AppData")) {
+      throw new Error("Windows 性能开发版 smoke AppData 必须预先创建");
+    }
+    smokeIsolated = true;
+  } else {
+    appDataPath = app.getPath("appData");
+  }
   if (typeof appDataPath !== "string" || !pathModule.isAbsolute(appDataPath)) {
     throw new Error("Windows 性能开发版无法取得独立 AppData 根目录");
   }
@@ -174,6 +205,7 @@ function initializePerformanceEditionIdentity({
     ...PERFORMANCE_EDITION_IDENTITY,
     userDataPath,
     sessionDataPath,
+    smokeIsolated,
   });
 }
 

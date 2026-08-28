@@ -77,6 +77,10 @@ function fixture(overrides = {}) {
   const timers = [];
   const calls = [];
   const checkpoint = { generation: 3, rootHash: HASH_A, revision: 7 };
+  let macroCheckpoint = checkpoint;
+  let macroSequence = 0;
+  let macroSettledDeadlineMs = 10_000;
+  let macroSessionId = null;
   const registry = {
     async preparePlayerAuthority(ownerId, request) {
       calls.push(["prepare", ownerId, request]);
@@ -110,6 +114,57 @@ function fixture(overrides = {}) {
         ...changeReceipt(),
         checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
         summary: summary(revision),
+      };
+    },
+    async commitPlayerAuthorityMacroAdvance(ownerId, request) {
+      calls.push(["macro-advance", ownerId, request]);
+      const revision = request.baseRevision + 2;
+      macroSequence += 2;
+      macroSettledDeadlineMs += request.wallMilliseconds;
+      macroSessionId = request.macroSessionId;
+      macroCheckpoint = {
+        generation: macroCheckpoint.generation + 1,
+        rootHash: HASH_A,
+        revision,
+      };
+      return {
+        acknowledgedSequence: macroSequence,
+        macroSessionId: request.macroSessionId,
+        operationId: request.operationId,
+        baseRevision: request.baseRevision,
+        revision,
+        simulationMilliseconds: request.simulationMilliseconds,
+        wallMilliseconds: request.wallMilliseconds,
+        algorithmVersion: "native-pure-idle-macro-v10",
+        settledDeadlineMs: macroSettledDeadlineMs,
+        checkpoint: macroCheckpoint,
+        summary: summary(revision),
+        duplicate: false,
+      };
+    },
+    async finishPlayerAuthorityMacroSession(ownerId, request) {
+      calls.push(["macro-finish", ownerId, request]);
+      return {
+        lease: {
+          kind: "native-core-exact-realtime-player-authority-lease-v1",
+          phase: "active",
+          runId: request.runId,
+          mode: "normal",
+          slot: "normal-main",
+          checkpoint: macroCheckpoint,
+          acknowledged: {
+            sequence: macroSequence,
+            revision: macroCheckpoint.revision,
+            checkpoint: macroCheckpoint,
+            settledDeadlineMs: macroSettledDeadlineMs,
+          },
+          pendingTick: null,
+          pendingCommand: null,
+          pendingAdvance: null,
+          macroSession: null,
+          lastFinishedMacroSessionId: macroSessionId,
+        },
+        summary: summary(macroCheckpoint.revision),
       };
     },
     async recoverPlayerAuthorityCommand() {
@@ -426,6 +481,218 @@ test("an uncertain first command rejects every non-durable queued command", asyn
     value.calls.filter(([operation]) => operation === "command").map((call) => call[2].commandId),
     ["first-uncertain"],
   );
+});
+
+test("macro advances suspend exact ticks, preserve one session, and resume only after finish", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const firstTimer = value.timers[0];
+  const first = await value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-session-1",
+    operationId: "macro-operation-1",
+    baseRevision: 7,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+  });
+  assert.equal(first.phase, "macro-active");
+  assert.equal(first.revision, 9);
+  assert.equal(first.acknowledgedSequence, 2);
+  assert.equal(first.nextSequence, 3);
+  assert.equal(first.nextDeadlineMs, 15_000);
+  assert.equal(first.macroSessionId, "macro-session-1");
+  assert.equal(first.macroAlgorithmVersion, "native-pure-idle-macro-v10");
+  assert.equal(firstTimer.cancelled, true);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+  value.setNow(30_000);
+  const suspended = await value.runtime.settleDue();
+  assert.equal(suspended.phase, "macro-active");
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+  await assert.rejects(
+    value.runtime.commitCommand(playerCommand(9, "command-during-macro", 1)),
+    /not accepting commands/,
+  );
+
+  const second = await value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-session-1",
+    operationId: "macro-operation-2",
+    baseRevision: 9,
+    simulationMilliseconds: 30_000,
+    wallMilliseconds: 2_000,
+  });
+  assert.equal(second.revision, 11);
+  assert.equal(second.acknowledgedSequence, 4);
+  assert.equal(second.nextDeadlineMs, 17_000);
+  await assert.rejects(value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-session-other",
+    operationId: "macro-operation-forged",
+    baseRevision: 11,
+    simulationMilliseconds: 1_000,
+    wallMilliseconds: 1_000,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_SESSION_CONFLICT");
+
+  const finished = await value.runtime.finishMacroSession({ macroSessionId: "macro-session-1" });
+  assert.equal(finished.phase, "active");
+  assert.equal(finished.macroSessionId, null);
+  assert.equal(finished.revision, 11);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 2);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 1);
+  assert.equal(value.timers.at(-1).delay, 1);
+});
+
+test("lost macro responses retry the exact durable operation without advancing twice", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityMacroAdvance(ownerId, request) {
+        value.calls.push(["macro-advance", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw new Error("lost macro ACK response");
+        return {
+          acknowledgedSequence: 2,
+          macroSessionId: request.macroSessionId,
+          operationId: request.operationId,
+          baseRevision: request.baseRevision,
+          revision: 9,
+          simulationMilliseconds: request.simulationMilliseconds,
+          wallMilliseconds: request.wallMilliseconds,
+          algorithmVersion: "native-pure-idle-macro-v10",
+          settledDeadlineMs: 14_000,
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 9 },
+          summary: summary(9),
+          duplicate: true,
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const request = {
+    macroSessionId: "macro-session-retry",
+    operationId: "macro-operation-retry",
+    baseRevision: 7,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+  };
+  await assert.rejects(value.runtime.commitMacroAdvance(request), (error) => {
+    assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN");
+    return true;
+  });
+  assert.equal(value.runtime.snapshot().phase, "macro-uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  await assert.rejects(value.runtime.commitMacroAdvance({ ...request, operationId: "different" }), (error) => {
+    assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN");
+    return true;
+  });
+  const recovered = await value.runtime.retryUncertain();
+  assert.equal(recovered.phase, "macro-active");
+  assert.equal(recovered.revision, 9);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "macro-advance")
+      .map((call) => call[2].operationId),
+    ["macro-operation-retry", "macro-operation-retry"],
+  );
+});
+
+test("lost macro finish response remains suspended and retries the same session", async () => {
+  let finishAttempts = 0;
+  const value = fixture({
+    registry: {
+      async finishPlayerAuthorityMacroSession(ownerId, request) {
+        value.calls.push(["macro-finish", ownerId, request]);
+        finishAttempts += 1;
+        if (finishAttempts === 1) throw new Error("lost macro finish response");
+        const checkpoint = { generation: 4, rootHash: HASH_A, revision: 9 };
+        return {
+          lease: {
+            kind: "native-core-exact-realtime-player-authority-lease-v1",
+            phase: "active",
+            runId: request.runId,
+            mode: "normal",
+            slot: "normal-main",
+            checkpoint,
+            acknowledged: {
+              sequence: 2,
+              revision: 9,
+              checkpoint,
+              settledDeadlineMs: 14_000,
+            },
+            pendingTick: null,
+            pendingCommand: null,
+            pendingAdvance: null,
+            macroSession: null,
+            lastFinishedMacroSessionId: request.macroSessionId,
+          },
+          summary: summary(9),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-session-finish-retry",
+    operationId: "macro-operation-before-finish",
+    baseRevision: 7,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+  });
+  await assert.rejects(
+    value.runtime.finishMacroSession({ macroSessionId: "macro-session-finish-retry" }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+  );
+  assert.equal(value.runtime.snapshot().phase, "macro-uncertain");
+  assert.equal(value.runtime.snapshot().macroSessionId, "macro-session-finish-retry");
+  const recovered = await value.runtime.retryUncertain();
+  assert.equal(recovered.phase, "active");
+  assert.equal(recovered.macroSessionId, null);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "macro-finish")
+      .map((call) => call[2].macroSessionId),
+    ["macro-session-finish-retry", "macro-session-finish-retry"],
+  );
+});
+
+test("startup macro recovery remains suspended and rejects partial macro identity", () => {
+  const value = fixture();
+  const receipt = {
+    schemaVersion: 1,
+    kind: "native-core-player-authority-startup-recovery-v1",
+    ownerId: "main-player-authority",
+    sessionId: "core-restarted-macro",
+    runId: "player-run-1",
+    registryFingerprint: "builtin:test",
+    revision: 9,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 9 },
+    acknowledgedSequence: 2,
+    nextSequence: 3,
+    settledDeadlineMs: 14_000,
+    nextDeadlineMs: 15_000,
+    commandId: null,
+    commandBaseRevision: null,
+    ...changeReceipt({ topologyDirty: false }),
+    macroSessionId: "macro-session-recovered",
+    recoveredMacroOperationId: "macro-operation-recovered",
+    macroAlgorithmVersion: "native-pure-idle-macro-v10",
+    macroSimulationMilliseconds: 60_000,
+    macroWallMilliseconds: 4_000,
+    summary: { ...summary(9), registryFingerprint: "builtin:test" },
+  };
+  const resumed = value.runtime.resumeFromStartupRecovery(receipt);
+  assert.equal(resumed.phase, "macro-active");
+  assert.equal(resumed.macroSessionId, "macro-session-recovered");
+  assert.equal(resumed.nextSequence, 3);
+  assert.equal(value.timers.length, 0);
+  assert.throws(() => fixture().runtime.resumeFromStartupRecovery({
+    ...receipt,
+    macroWallMilliseconds: undefined,
+  }), /macroWallMilliseconds is invalid/);
 });
 
 test("malformed Host change IDs fault the command without advancing runtime context", async () => {

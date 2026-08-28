@@ -16,6 +16,7 @@ const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const TICK_MILLISECONDS = 1_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const MAX_DURABLE_COMMAND_BYTES = 1_750_000;
+const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const COMMAND_KEYS = Object.freeze([
   "protocolVersion", "baseRevision", "topLevelChanges", "changedEntities", "addedEntities",
   "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
@@ -137,7 +138,8 @@ function validateLeaseReceipt(value, phase, expected) {
   const lease = value.lease;
   if (lease.phase !== phase || lease.kind !== "native-core-exact-realtime-player-authority-lease-v1" ||
       lease.runId !== expected.runId || lease.mode !== "normal" || lease.slot !== "normal-main" ||
-      lease.pendingTick !== null || lease.pendingCommand != null || !isRecord(lease.acknowledged)) {
+      lease.pendingTick !== null || lease.pendingCommand != null || lease.pendingAdvance != null ||
+      lease.macroSession != null || !isRecord(lease.acknowledged)) {
     throw runtimeError(`native ${phase} lease identity is invalid`);
   }
   const checkpoint = normalizeCheckpoint(lease.checkpoint, `native ${phase} lease checkpoint`);
@@ -250,13 +252,20 @@ function validateRecoveryReceipt(value, sessionId) {
 }
 
 function validateStartupRecoveryReceipt(value, ownerId) {
-  const keys = [
+  const baseKeys = [
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
     "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
     "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
   ];
-  if (!hasExactKeys(value, keys) || value.schemaVersion !== 1 ||
+  const macroKeys = [
+    "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
+    "macroSimulationMilliseconds", "macroWallMilliseconds",
+  ];
+  if (!isRecord(value) || baseKeys.some((key) => !Object.hasOwn(value, key)) ||
+      Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
+        !baseKeys.includes(key) && !macroKeys.includes(key)) ||
+      value.schemaVersion !== 1 ||
       value.kind !== "native-core-player-authority-startup-recovery-v1" ||
       value.ownerId !== ownerId) {
     throw runtimeError(
@@ -323,7 +332,151 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     }
     lastCommand = Object.freeze({ commandId, baseRevision, revision, checkpoint, ...changes });
   }
-  return { sessionId, runId, revision, checkpoint, nextSequence, nextDeadlineMs, lastCommand };
+  const presentMacroKeys = macroKeys.filter((key) => Object.hasOwn(value, key));
+  let macroSession = null;
+  if (presentMacroKeys.length > 0) {
+    if (presentMacroKeys.length !== macroKeys.length || lastCommand !== null ||
+        changes.changedEntityIds.length !== 0 || changes.changedBeltIds.length !== 0 || changes.topologyDirty) {
+      throw runtimeError(
+        "native player-authority startup macro receipt is incomplete",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+    const macroSessionId = requireLogicalId(value.macroSessionId, "startup recovery macroSessionId");
+    const operationId = requireLogicalId(
+      value.recoveredMacroOperationId,
+      "startup recovery recoveredMacroOperationId",
+    );
+    const algorithmVersion = requireLogicalId(
+      value.macroAlgorithmVersion,
+      "startup recovery macroAlgorithmVersion",
+    );
+    const simulationMilliseconds = requireSafeInteger(
+      value.macroSimulationMilliseconds,
+      1,
+      "startup recovery macroSimulationMilliseconds",
+    );
+    const wallMilliseconds = requireSafeInteger(
+      value.macroWallMilliseconds,
+      1,
+      "startup recovery macroWallMilliseconds",
+    );
+    if (simulationMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS ||
+        wallMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS) {
+      throw runtimeError(
+        "native player-authority startup macro budget is invalid",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+    macroSession = Object.freeze({
+      macroSessionId,
+      algorithmVersion,
+      lastOperation: Object.freeze({
+        operationId,
+        revision,
+        simulationMilliseconds,
+        wallMilliseconds,
+      }),
+    });
+  }
+  return { sessionId, runId, revision, checkpoint, nextSequence, nextDeadlineMs, lastCommand, macroSession };
+}
+
+function normalizeMacroAdvanceRequest(value) {
+  const keys = [
+    "macroSessionId", "operationId", "baseRevision", "simulationMilliseconds", "wallMilliseconds",
+  ];
+  if (!hasExactKeys(value, keys)) {
+    throw runtimeError("native player-authority macro request is invalid");
+  }
+  const request = {
+    macroSessionId: requireLogicalId(value.macroSessionId, "macroSessionId"),
+    operationId: requireLogicalId(value.operationId, "operationId"),
+    baseRevision: requireSafeInteger(value.baseRevision, 0, "baseRevision"),
+    simulationMilliseconds: requireSafeInteger(
+      value.simulationMilliseconds,
+      1,
+      "simulationMilliseconds",
+    ),
+    wallMilliseconds: requireSafeInteger(value.wallMilliseconds, 1, "wallMilliseconds"),
+  };
+  if (request.simulationMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS ||
+      request.wallMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS) {
+    throw runtimeError("native player-authority macro budget is invalid");
+  }
+  return Object.freeze(request);
+}
+
+function validateMacroAdvanceReceipt(value, context, request) {
+  const keys = [
+    "acknowledgedSequence", "macroSessionId", "operationId", "baseRevision", "revision",
+    "simulationMilliseconds", "wallMilliseconds", "algorithmVersion", "settledDeadlineMs",
+    "checkpoint", "summary", "duplicate",
+  ];
+  if (!hasExactKeys(value, keys) || value.macroSessionId !== request.macroSessionId ||
+      value.operationId !== request.operationId || value.baseRevision !== request.baseRevision ||
+      value.simulationMilliseconds !== request.simulationMilliseconds ||
+      value.wallMilliseconds !== request.wallMilliseconds || typeof value.duplicate !== "boolean") {
+    throw runtimeError(
+      "native player-authority macro receipt does not match the request",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
+    );
+  }
+  const revision = requireSafeInteger(value.revision, request.baseRevision + 1, "macro revision");
+  const acknowledgedSequence = requireSafeInteger(
+    value.acknowledgedSequence,
+    context.nextSequence,
+    "macro acknowledgedSequence",
+  );
+  const revisionDelta = revision - request.baseRevision;
+  const sequenceDelta = acknowledgedSequence - (context.nextSequence - 1);
+  const expectedSettledDeadlineMs = context.nextDeadlineMs - TICK_MILLISECONDS + request.wallMilliseconds;
+  if (request.baseRevision !== context.revision || revisionDelta !== sequenceDelta ||
+      revisionDelta < 1 || revisionDelta > 64 ||
+      value.settledDeadlineMs !== expectedSettledDeadlineMs) {
+    throw runtimeError(
+      "native player-authority macro receipt is not contiguous",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
+    );
+  }
+  const algorithmVersion = requireLogicalId(value.algorithmVersion, "macro algorithmVersion");
+  const checkpoint = normalizeCheckpoint(value.checkpoint, "native player-authority macro checkpoint");
+  if (checkpoint.revision !== revision || checkpoint.generation < context.checkpoint.generation) {
+    throw runtimeError(
+      "native player-authority macro checkpoint regressed",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
+    );
+  }
+  validateSummary(value.summary, revision, "native player-authority macro summary");
+  return { revision, acknowledgedSequence, algorithmVersion, checkpoint, summary: value.summary };
+}
+
+function validateMacroFinishReceipt(value, context, macroSessionId) {
+  if (!isRecord(value) || !isRecord(value.lease)) {
+    throw runtimeError("native player-authority macro finish receipt is invalid");
+  }
+  const lease = value.lease;
+  const checkpoint = normalizeCheckpoint(lease.checkpoint, "native macro finish checkpoint");
+  const acknowledgedCheckpoint = normalizeCheckpoint(
+    lease.acknowledged?.checkpoint,
+    "native macro finish acknowledged checkpoint",
+  );
+  if (lease.phase !== "active" || lease.kind !== "native-core-exact-realtime-player-authority-lease-v1" ||
+      lease.runId !== context.runId || lease.mode !== "normal" || lease.slot !== "normal-main" ||
+      lease.pendingTick !== null || lease.pendingCommand != null || lease.pendingAdvance != null ||
+      lease.macroSession != null || lease.lastFinishedMacroSessionId !== macroSessionId ||
+      lease.acknowledged?.sequence !== context.nextSequence - 1 ||
+      lease.acknowledged?.revision !== context.revision ||
+      lease.acknowledged?.settledDeadlineMs !== context.nextDeadlineMs - TICK_MILLISECONDS ||
+      !sameCheckpoint(checkpoint, context.checkpoint) ||
+      !sameCheckpoint(acknowledgedCheckpoint, context.checkpoint)) {
+    throw runtimeError(
+      "native player-authority macro finish identity conflicts",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_FINISH_INVALID",
+    );
+  }
+  validateSummary(value.summary, context.revision, "native player-authority macro finish summary");
+  return value.summary;
 }
 
 function validateCommandReceipt(value, context, command, replay) {
@@ -384,6 +537,8 @@ function frozenSnapshot(runtime) {
     inFlight: runtime.inFlight !== null,
     currentOperation: runtime.currentOperation,
     queuedCommands: runtime.commandQueue.length,
+    macroSessionId: context?.macroSession?.macroSessionId ?? null,
+    macroAlgorithmVersion: context?.macroSession?.algorithmVersion ?? null,
     lastErrorCode: runtime.lastError?.code ?? null,
   });
 }
@@ -418,6 +573,7 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = null;
     this.commandQueue = [];
     this.activeCommand = null;
+    this.pendingMacroAction = null;
     this.shutdownRequested = false;
     this.lastError = null;
   }
@@ -514,6 +670,7 @@ class NativePlayerAuthorityRuntime {
             checkpoint: recovered.checkpoint,
             ...recovered.changes,
           }),
+          macroSession: null,
         };
         recoveredCommand = this.context.lastCommand;
         this.transition("active");
@@ -566,8 +723,8 @@ class NativePlayerAuthorityRuntime {
         );
       }
       this.context = recovered;
-      const snapshot = this.transition("active");
-      this.pump();
+      const snapshot = this.transition(recovered.macroSession ? "macro-active" : "active");
+      if (!recovered.macroSession) this.pump();
       return recovered.lastCommand ? Object.freeze({
         ...snapshot,
         previousRevision: recovered.lastCommand.baseRevision,
@@ -614,6 +771,7 @@ class NativePlayerAuthorityRuntime {
         nextSequence,
         nextDeadlineMs,
         lastCommand: null,
+        macroSession: null,
       };
       this.transition("active");
     } catch (cause) {
@@ -667,6 +825,195 @@ class NativePlayerAuthorityRuntime {
     this.commandQueue.push({ request, replay, promise, resolve: resolveCommand, reject: rejectCommand });
     this.pump();
     return promise;
+  }
+
+  commitMacroAdvance(rawRequest) {
+    if (!this.context || !["active", "macro-active", "macro-uncertain"].includes(this.phase) ||
+        this.inFlight || this.activeCommand || this.commandQueue.length > 0 ||
+        typeof this.registry.commitPlayerAuthorityMacroAdvance !== "function") {
+      return Promise.reject(runtimeError("native player-authority runtime cannot start a macro advance"));
+    }
+    let request;
+    try {
+      request = normalizeMacroAdvanceRequest(rawRequest);
+      const currentMacro = this.context.macroSession;
+      if (currentMacro && currentMacro.macroSessionId !== request.macroSessionId) {
+        throw runtimeError(
+          "native player-authority macro session identity conflicts",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_SESSION_CONFLICT",
+        );
+      }
+      if (request.baseRevision !== this.context.revision) {
+        throw runtimeError(
+          "native player-authority macro base revision is stale",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_REVISION_MISMATCH",
+        );
+      }
+      if (this.phase === "macro-uncertain") {
+        const pending = this.pendingMacroAction;
+        if (!pending || pending.kind !== "advance" ||
+            JSON.stringify(pending.request) !== JSON.stringify(request)) {
+          throw runtimeError(
+            "native player-authority macro has a different uncertain operation",
+            "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+          );
+        }
+      } else {
+        this.pendingMacroAction = Object.freeze({ kind: "advance", request });
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    return this.executeMacroAdvance();
+  }
+
+  executeMacroAdvance() {
+    const context = this.context;
+    const pending = this.pendingMacroAction;
+    if (!context || !pending || pending.kind !== "advance" || this.inFlight) {
+      return Promise.reject(runtimeError("native player-authority macro advance is not pending"));
+    }
+    const request = pending.request;
+    this.currentOperation = "macro-advance";
+    this.transition("macro-committing");
+    let operation;
+    operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityMacroAdvance(this.ownerId, {
+      sessionId: context.sessionId,
+      runId: context.runId,
+      ...request,
+    })).then((receipt) => {
+      if (this.shutdownRequested) {
+        throw runtimeError(
+          "native player-authority runtime shut down during a macro advance",
+          "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN",
+        );
+      }
+      const validated = validateMacroAdvanceReceipt(receipt, context, request);
+      if (context.macroSession && context.macroSession.algorithmVersion !== validated.algorithmVersion) {
+        throw runtimeError(
+          "native player-authority macro algorithm changed inside one session",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
+        );
+      }
+      const nextSequence = validated.acknowledgedSequence + 1;
+      const nextDeadlineMs = receipt.settledDeadlineMs + TICK_MILLISECONDS;
+      if (!Number.isSafeInteger(nextSequence) || !Number.isSafeInteger(nextDeadlineMs)) {
+        throw runtimeError("native player-authority macro clock exceeds the safe integer range");
+      }
+      context.revision = validated.revision;
+      context.checkpoint = validated.checkpoint;
+      context.nextSequence = nextSequence;
+      context.nextDeadlineMs = nextDeadlineMs;
+      context.lastCommand = null;
+      context.macroSession = Object.freeze({
+        macroSessionId: request.macroSessionId,
+        algorithmVersion: validated.algorithmVersion,
+        lastOperation: Object.freeze({
+          operationId: request.operationId,
+          revision: validated.revision,
+          simulationMilliseconds: request.simulationMilliseconds,
+          wallMilliseconds: request.wallMilliseconds,
+        }),
+      });
+      this.pendingMacroAction = null;
+      this.transition("macro-active");
+      return this.snapshot();
+    }).catch((cause) => {
+      const error = cause instanceof NativePlayerAuthorityRuntimeError
+        ? cause
+        : runtimeError(
+          "native player-authority macro outcome is uncertain",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+          cause,
+        );
+      if (!this.shutdownRequested) this.transition("macro-uncertain", error);
+      throw error;
+    }).finally(() => {
+      if (this.inFlight === operation) this.inFlight = null;
+      this.currentOperation = null;
+    });
+    this.inFlight = operation;
+    return operation;
+  }
+
+  finishMacroSession(rawRequest) {
+    if (!this.context || !["macro-active", "macro-uncertain"].includes(this.phase) ||
+        this.inFlight || typeof this.registry.finishPlayerAuthorityMacroSession !== "function") {
+      return Promise.reject(runtimeError("native player-authority macro session cannot finish"));
+    }
+    let macroSessionId;
+    try {
+      if (!hasExactKeys(rawRequest, ["macroSessionId"])) {
+        throw runtimeError("native player-authority macro finish request is invalid");
+      }
+      macroSessionId = requireLogicalId(rawRequest.macroSessionId, "macroSessionId");
+      if (this.context.macroSession?.macroSessionId !== macroSessionId) {
+        throw runtimeError(
+          "native player-authority macro finish session is stale",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_SESSION_CONFLICT",
+        );
+      }
+      if (this.phase === "macro-uncertain") {
+        const pending = this.pendingMacroAction;
+        if (!pending || pending.kind !== "finish" || pending.macroSessionId !== macroSessionId) {
+          throw runtimeError(
+            "native player-authority macro has a different uncertain operation",
+            "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+          );
+        }
+      } else {
+        this.pendingMacroAction = Object.freeze({ kind: "finish", macroSessionId });
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.executeMacroFinish();
+  }
+
+  executeMacroFinish() {
+    const context = this.context;
+    const pending = this.pendingMacroAction;
+    if (!context || !pending || pending.kind !== "finish" || this.inFlight) {
+      return Promise.reject(runtimeError("native player-authority macro finish is not pending"));
+    }
+    this.currentOperation = "macro-finish";
+    this.transition("macro-finishing");
+    let operation;
+    operation = Promise.resolve().then(() => this.registry.finishPlayerAuthorityMacroSession(this.ownerId, {
+      sessionId: context.sessionId,
+      runId: context.runId,
+      macroSessionId: pending.macroSessionId,
+    })).then((receipt) => {
+      if (this.shutdownRequested) {
+        throw runtimeError(
+          "native player-authority runtime shut down while finishing a macro session",
+          "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN",
+        );
+      }
+      validateMacroFinishReceipt(receipt, context, pending.macroSessionId);
+      context.macroSession = null;
+      this.pendingMacroAction = null;
+      this.transition("active");
+      return this.snapshot();
+    }).catch((cause) => {
+      const error = cause instanceof NativePlayerAuthorityRuntimeError
+        ? cause
+        : runtimeError(
+          "native player-authority macro finish outcome is uncertain",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+          cause,
+        );
+      if (!this.shutdownRequested) this.transition("macro-uncertain", error);
+      throw error;
+    }).finally(() => {
+      if (this.inFlight === operation) this.inFlight = null;
+      this.currentOperation = null;
+      if (this.phase === "active") this.pump();
+    });
+    this.inFlight = operation;
+    return operation;
   }
 
   pump() {
@@ -788,6 +1135,11 @@ class NativePlayerAuthorityRuntime {
   }
 
   retryUncertain() {
+    if (this.phase === "macro-uncertain" && this.context && !this.inFlight) {
+      if (this.pendingMacroAction?.kind === "advance") return this.executeMacroAdvance();
+      if (this.pendingMacroAction?.kind === "finish") return this.executeMacroFinish();
+      return Promise.reject(runtimeError("native player-authority runtime has no uncertain macro operation"));
+    }
     if (this.phase !== "uncertain" || !this.context || this.inFlight) {
       return Promise.reject(runtimeError("native player-authority runtime has no uncertain tick to retry"));
     }

@@ -635,6 +635,7 @@ export interface DesktopNativeCoreFactoryReadModelResult extends FactoryReadMode
 }
 
 export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
   minElapsedSeconds: number;
   maxElapsedSeconds: number;
   cursor?: number;

@@ -39,6 +39,9 @@ const {
 } = require("./native-core-exact-realtime-experiment.cjs");
 const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
 const {
+  NativePlayerAuthorityProjectionBroker,
+} = require("./native-player-authority-projection-broker.cjs");
+const {
   inspectNativeExactRealtimeStartup,
   inspectNativeExactRealtimeStartupWithoutHost,
   resolveFixedNativeSaveRootPath,
@@ -132,6 +135,7 @@ let nativeHostClient = null;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
+let nativePlayerAuthorityProjectionBroker = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -303,8 +307,18 @@ async function initializeNativeHost() {
     // Main-owned only. There is deliberately no renderer IPC that can call
     // activate/tick; player cutover remains blocked by Rust domain coverage
     // and by the future public-primary handoff coordinator.
+    const playerAuthorityOwnerId = "main-player-authority";
     nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
       registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+    });
+    nativePlayerAuthorityProjectionBroker = new NativePlayerAuthorityProjectionBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
     });
     nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
@@ -349,6 +363,7 @@ async function initializeNativeHost() {
     nativeCoreSessions = null;
     nativePlayerAuthorityRuntime?.shutdownForProcessExit();
     nativePlayerAuthorityRuntime = null;
+    nativePlayerAuthorityProjectionBroker = null;
   }
   return nativeHostState;
 }
@@ -963,6 +978,9 @@ ipcMain.handle("desktop:native-core-viewport-projection-v2", async (event, reque
     resultContext: nativeViewportProjectionV2ResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "viewport-v2", request);
+    }
     return await nativeCoreSessions.viewportProjectionV2(ownerId, request);
   });
 });
@@ -974,6 +992,9 @@ ipcMain.handle("desktop:native-core-factory-read-model", async (event, request) 
     resultContext: nativeFactoryReadModelResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "factory-read-model-v1", request);
+    }
     return await nativeCoreSessions.factoryReadModelProjection(ownerId, request);
   });
 });
@@ -985,6 +1006,9 @@ ipcMain.handle("desktop:native-core-statistics-projection", async (event, reques
     resultContext: nativeStatisticsProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "statistics-v1", request);
+    }
     return await nativeCoreSessions.statisticsProjection(ownerId, request);
   });
 });
@@ -1003,13 +1027,22 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       throw new Error("原生投影二进制请求无效");
     }
     const normalizedRequest = { ...request.payload, sessionId: request.sessionId };
-    const rawResult = request.projectionType === "viewport-v1"
-      ? await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest)
-      : request.projectionType === "viewport-v2"
-        ? await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest)
-        : request.projectionType === "factory-read-model-v1"
-          ? await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest)
-          : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    let rawResult;
+    if (request.projectionType === "viewport-v1") {
+      rawResult = await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest);
+    } else if (nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+      rawResult = await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        request.projectionType,
+        normalizedRequest,
+      );
+    } else if (request.projectionType === "viewport-v2") {
+      rawResult = await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest);
+    } else if (request.projectionType === "factory-read-model-v1") {
+      rawResult = await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest);
+    } else {
+      rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    }
     const result = normalizeRendererNativeResult(
       request.projectionType === "viewport-v1"
         ? "coreViewportProjection"

@@ -93,6 +93,7 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   viewportProjectionV2RevisionOffset = 0;
   statisticsProjectionCalls = 0;
   statisticsProjectionRevisionOffset = 0;
+  lastStatisticsProjectionRequest: Parameters<WindowsNativeCoreShadow["statisticsProjection"]>[0] | null = null;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
 
@@ -230,8 +231,9 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     };
   }
 
-  async statisticsProjection(request: { minElapsedSeconds: number; maxElapsedSeconds: number }) {
+  async statisticsProjection(request: Parameters<WindowsNativeCoreShadow["statisticsProjection"]>[0]) {
     this.statisticsProjectionCalls += 1;
+    this.lastStatisticsProjectionRequest = request;
     return {
       schemaVersion: 1 as const,
       projectionType: "statistics-v1" as const,
@@ -436,6 +438,7 @@ describe("Windows native core invitation-Beta controller", () => {
     }, 1);
     expect(verified).toMatchObject({ projectionType: "statistics-v1", revision: 1 });
     expect(session.statisticsProjectionCalls).toBe(1);
+    expect(session.lastStatisticsProjectionRequest?.expectedRevision).toBe(1);
 
     await controller.mirrorJavaScriptOperationUnverified({
       commandId: "statistics-unverified",

@@ -556,7 +556,7 @@ export class WindowsNativeCoreBetaController {
    * verified proof identify the exact revision requested by the caller.
    */
   async readVerifiedStatisticsProjection(
-    request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">,
+    request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId" | "expectedRevision">,
     expectedRevision: number,
   ): Promise<DesktopNativeCoreStatisticsProjectionResult | null> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
@@ -568,7 +568,7 @@ export class WindowsNativeCoreBetaController {
       return null;
     }
     try {
-      const projection = await session.statisticsProjection(request);
+      const projection = await session.statisticsProjection({ ...request, expectedRevision });
       const current = this.authorityState;
       if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
         !["shadow", "native-ready"].includes(current.phase) ||

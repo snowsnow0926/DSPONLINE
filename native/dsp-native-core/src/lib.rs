@@ -48,6 +48,7 @@ pub use state::{
 pub use v47_import::{
     MAX_V47_IMPORT_BYTES, ParsedV47Envelope, V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE,
     V47ImportJavascriptCompatibilityRequired, V47ImportProof, parse_v47_envelope,
+    parse_v47_envelope_stream,
 };
 
 pub const CORE_PROTOCOL_VERSION: u16 = 1;

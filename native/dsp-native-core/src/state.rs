@@ -7,6 +7,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -33,6 +34,8 @@ const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
 const NONE_SYMBOL: u32 = u32::MAX;
 const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
 const BELT_CHECKPOINT_CHUNK_SIZE: usize = 2_048;
+const LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
+const DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 2;
 pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
 const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
 
@@ -353,7 +356,6 @@ impl ExactRowIdIndex {
 
 #[derive(Debug, Clone, Default)]
 struct SaveDirtyPages {
-    base: bool,
     entity_pages: BTreeSet<usize>,
     belt_pages: BTreeSet<usize>,
     entity_topology: bool,
@@ -731,6 +733,190 @@ struct ChunkMetadata {
     count: usize,
     checksum: String,
     bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseCheckpointDomain {
+    Core,
+    Logistics,
+    Dyson,
+    Statistics,
+    Unknown,
+}
+
+const BASE_CHECKPOINT_DOMAINS: [BaseCheckpointDomain; 5] = [
+    BaseCheckpointDomain::Core,
+    BaseCheckpointDomain::Logistics,
+    BaseCheckpointDomain::Dyson,
+    BaseCheckpointDomain::Statistics,
+    BaseCheckpointDomain::Unknown,
+];
+
+impl BaseCheckpointDomain {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Core => "base:core",
+            Self::Logistics => "base:logistics",
+            Self::Dyson => "base:dyson",
+            Self::Statistics => "base:statistics",
+            Self::Unknown => "base:unknown-mod",
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Core => "base-core",
+            Self::Logistics => "base-logistics",
+            Self::Dyson => "base-dyson",
+            Self::Statistics => "base-statistics",
+            Self::Unknown => "base-unknown-mod",
+        }
+    }
+}
+
+fn classify_base_checkpoint_key(key: &str) -> BaseCheckpointDomain {
+    match key {
+        "cargo"
+        | "tray"
+        | "planetTrays"
+        | "planetTrayItemLimits"
+        | "portableFleet"
+        | "systemSpaceStations"
+        | "galacticHubNetwork"
+        | "quantumLogisticsNetwork"
+        | "orbitalStation" => BaseCheckpointDomain::Logistics,
+        "dysonSwarm" | "dysonSphere" | "dysonEngineering" | "dysonPlans" => {
+            BaseCheckpointDomain::Dyson
+        }
+        "manualMined" | "totalProduced" | "productionHistory" | "historyRecordedAt" | "metrics"
+        | "planetMetrics" | "powerGridMetrics" => BaseCheckpointDomain::Statistics,
+        "version"
+        | "mode"
+        | "nextId"
+        | "activePlanetId"
+        | "construction"
+        | "constructionAutomation"
+        | "research"
+        | "exploration"
+        | "galaxy"
+        | "recipeFocus"
+        | "settings"
+        | "contentPacks"
+        | "achievements"
+        | "campaign"
+        | "planetViewports"
+        | "canvasBookmarks"
+        | "canvasRegions"
+        | "blueprints"
+        | "blueprintVersions"
+        | "constructionQueue"
+        | "handcraftQueue"
+        | "productionPlans"
+        | "idleSettlement"
+        | "speedrun"
+        | "elapsedSeconds"
+        | "timeWarp"
+        | "endgame"
+        | "paused" => BaseCheckpointDomain::Core,
+        _ => BaseCheckpointDomain::Unknown,
+    }
+}
+
+struct BaseCheckpointDomainView<'a> {
+    base: &'a Map<String, Value>,
+    domain: BaseCheckpointDomain,
+}
+
+impl BaseCheckpointDomainView<'_> {
+    fn field_count(&self) -> usize {
+        self.base
+            .keys()
+            .filter(|key| classify_base_checkpoint_key(key) == self.domain)
+            .count()
+    }
+}
+
+impl Serialize for BaseCheckpointDomainView<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut output = serializer.serialize_map(Some(self.field_count()))?;
+        for (key, value) in self.base {
+            if classify_base_checkpoint_key(key) == self.domain {
+                output.serialize_entry(key, value)?;
+            }
+        }
+        output.end()
+    }
+}
+
+fn encode_base_checkpoint_domain(
+    base: &Map<String, Value>,
+    domain: BaseCheckpointDomain,
+) -> anyhow::Result<(String, usize)> {
+    if base.contains_key("entities") || base.contains_key("belts") {
+        bail!("native core base contains an unbounded collection");
+    }
+    let view = BaseCheckpointDomainView { base, domain };
+    let count = view.field_count();
+    Ok((serde_json::to_string(&view)?, count))
+}
+
+fn checkpoint_chunk_metadata(
+    id: impl Into<String>,
+    kind: impl Into<String>,
+    offset: usize,
+    count: usize,
+    text: &str,
+) -> ChunkMetadata {
+    ChunkMetadata {
+        id: id.into(),
+        kind: kind.into(),
+        offset,
+        count,
+        checksum: fnv1a_utf8(text.as_bytes()),
+        bytes: text.len(),
+        sha256: Some(hex::encode(Sha256::digest(text.as_bytes()))),
+    }
+}
+
+fn checkpoint_chunk_content_matches(left: &ChunkMetadata, right: &ChunkMetadata) -> bool {
+    left.id == right.id
+        && left.kind == right.kind
+        && left.offset == right.offset
+        && left.count == right.count
+        && left.checksum == right.checksum
+        && left.bytes == right.bytes
+        && left.sha256.is_some()
+        && left.sha256 == right.sha256
+}
+
+fn checkpoint_chunk_has_valid_sha256_metadata(metadata: &ChunkMetadata) -> bool {
+    metadata.sha256.as_ref().is_some_and(|expected| {
+        expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn checkpoint_root_material(metadata: &[ChunkMetadata]) -> anyhow::Result<String> {
+    let mut material = String::new();
+    for chunk in metadata {
+        use std::fmt::Write as _;
+        write!(
+            material,
+            "{}:{}:{}:{}:{}:{}:{};",
+            chunk.id,
+            chunk.kind,
+            chunk.offset,
+            chunk.count,
+            chunk.checksum,
+            chunk.bytes,
+            chunk.sha256.as_deref().unwrap_or("-")
+        )?;
+    }
+    Ok(material)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1394,6 +1580,11 @@ pub struct CoreState {
     /// status/compare/checkpoint calls can safely reuse the small digest result
     /// instead of reparsing every entity and belt again.
     summary_cache: SyncCell<Option<(u64, CoreStateSummary)>>,
+    /// Runtime-only four-level production-history index. This cache is never
+    /// serialized and never participates in the public v47 canonical hash.
+    /// The established JS-authority `base.productionHistory` remains byte-for-
+    /// byte unchanged for differential and cloud compatibility.
+    production_history_tiers: SharedArc<crate::production_history::TieredProductionHistory>,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -1574,6 +1765,16 @@ fn verify_chunk(metadata: &ChunkMetadata, bytes: &[u8]) -> anyhow::Result<()> {
             metadata.id
         );
     }
+    if let Some(expected) = metadata.sha256.as_deref()
+        && (expected.len() != 64
+            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || hex::encode(Sha256::digest(bytes)) != expected)
+    {
+        bail!(
+            "native core checkpoint chunk sha256 is invalid: {}",
+            metadata.id
+        );
+    }
     Ok(())
 }
 
@@ -1588,8 +1789,10 @@ fn take_manifest(
         let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
             continue;
         };
-        if value.get("formatVersion").and_then(Value::as_u64) != Some(1)
-            || value.get("chunks").and_then(Value::as_array).is_none()
+        if !matches!(
+            value.get("formatVersion").and_then(Value::as_u64),
+            Some(1 | 2)
+        ) || value.get("chunks").and_then(Value::as_array).is_none()
         {
             continue;
         }
@@ -1661,6 +1864,92 @@ fn has_later_chunk_reference(
     Ok(*remaining > 0)
 }
 
+fn load_checkpoint_base(
+    records: &mut BTreeMap<String, Vec<u8>>,
+    manifest_key: &str,
+    manifest: &ChunkedManifest,
+    remaining_chunk_references: &mut HashMap<String, usize>,
+) -> anyhow::Result<Map<String, Value>> {
+    if manifest.format_version == LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION {
+        let base_metadata = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == "base")
+            .collect::<Vec<_>>();
+        if base_metadata.len() != 1 || base_metadata[0].offset != 0 || base_metadata[0].count != 1 {
+            bail!("native core checkpoint base chunk is invalid");
+        }
+        let metadata = base_metadata[0];
+        let referenced_again = has_later_chunk_reference(remaining_chunk_references, &metadata.id)?;
+        let bytes = take_chunk_record(records, manifest_key, &metadata.id, referenced_again)?;
+        verify_chunk(metadata, bytes.as_ref())?;
+        let base = match serde_json::from_slice::<Value>(bytes.as_ref())
+            .context("decode native core base chunk")?
+        {
+            Value::Object(base) => base,
+            _ => bail!("native core base chunk is not an object"),
+        };
+        if base.contains_key("entities") || base.contains_key("belts") {
+            bail!("native core base chunk contains an unbounded collection");
+        }
+        return Ok(base);
+    }
+
+    let mut base = Map::<String, Value>::new();
+    for domain in BASE_CHECKPOINT_DOMAINS {
+        let candidates = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == domain.kind())
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            bail!(
+                "native core checkpoint base domain chunk is invalid: {}",
+                domain.id()
+            );
+        }
+        let metadata = candidates[0];
+        if metadata.id != domain.id() || metadata.offset != 0 || metadata.sha256.is_none() {
+            bail!(
+                "native core checkpoint base domain metadata is invalid: {}",
+                domain.id()
+            );
+        }
+        let referenced_again = has_later_chunk_reference(remaining_chunk_references, &metadata.id)?;
+        let bytes = take_chunk_record(records, manifest_key, &metadata.id, referenced_again)?;
+        verify_chunk(metadata, bytes.as_ref())?;
+        let fields = match serde_json::from_slice::<Value>(bytes.as_ref())
+            .with_context(|| format!("decode native core base domain chunk: {}", domain.id()))?
+        {
+            Value::Object(fields) => fields,
+            _ => bail!(
+                "native core base domain chunk is not an object: {}",
+                domain.id()
+            ),
+        };
+        if fields.len() != metadata.count {
+            bail!(
+                "native core checkpoint base domain count is invalid: {}",
+                domain.id()
+            );
+        }
+        for (key, value) in fields {
+            if matches!(key.as_str(), "entities" | "belts")
+                || classify_base_checkpoint_key(&key) != domain
+            {
+                bail!(
+                    "native core checkpoint base domain ownership is invalid: {}",
+                    domain.id()
+                );
+            }
+            if base.insert(key, value).is_some() {
+                bail!("native core checkpoint base domains overlap");
+            }
+        }
+    }
+    Ok(base)
+}
+
 impl CoreState {
     /// Compatibility wrapper for callers that must retain their decoded
     /// record map. Production checkpoint open should move the map into
@@ -1698,8 +1987,10 @@ impl CoreState {
             bail!("native core checkpoint identity is invalid");
         }
         let (manifest_key, manifest) = take_manifest(&mut records)?;
-        if manifest.format_version != 1
-            || manifest.envelope_format_version != 2
+        if !matches!(
+            manifest.format_version,
+            LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION | DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        ) || manifest.envelope_format_version != 2
             || manifest.state_version != identity.state_version
             || manifest.mode != identity.mode
             || manifest.entity_count > MAX_ENTITY_COUNT
@@ -1717,48 +2008,47 @@ impl CoreState {
         {
             bail!("native core checkpoint manifest identity is invalid");
         }
+        if manifest.format_version == DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION {
+            if let Some(metadata) = manifest
+                .chunks
+                .iter()
+                .find(|metadata| !checkpoint_chunk_has_valid_sha256_metadata(metadata))
+            {
+                bail!(
+                    "native core v2 checkpoint chunk requires sha256: {}",
+                    metadata.id
+                );
+            }
+            let root_material = checkpoint_root_material(&manifest.chunks)?;
+            if fnv1a_utf8(root_material.as_bytes()) != manifest.chunk_root_checksum {
+                bail!("native core checkpoint manifest chunk root is invalid");
+            }
+        }
         let pure_idle_session = manifest
             .pure_idle_session
             .map(|session| session.validate(identity.revision))
             .transpose()?;
-        let base_metadata = manifest
-            .chunks
-            .iter()
-            .filter(|chunk| chunk.kind == "base")
-            .collect::<Vec<_>>();
-        if base_metadata.len() != 1 || base_metadata[0].offset != 0 || base_metadata[0].count != 1 {
-            bail!("native core checkpoint base chunk is invalid");
-        }
         let mut remaining_chunk_references = HashMap::<String, usize>::new();
         for metadata in &manifest.chunks {
             *remaining_chunk_references
                 .entry(metadata.id.clone())
                 .or_default() += 1;
         }
-        let base_referenced_again =
-            has_later_chunk_reference(&mut remaining_chunk_references, &base_metadata[0].id)?;
-        let base_bytes = take_chunk_record(
+        let base = load_checkpoint_base(
             &mut records,
             &manifest_key,
-            &base_metadata[0].id,
-            base_referenced_again,
+            &manifest,
+            &mut remaining_chunk_references,
         )?;
-        verify_chunk(base_metadata[0], base_bytes.as_ref())?;
-        let base = match serde_json::from_slice::<Value>(base_bytes.as_ref())
-            .context("decode native core base chunk")?
-        {
-            Value::Object(base) => base,
-            _ => bail!("native core base chunk is not an object"),
-        };
-        drop(base_bytes);
-        if base.contains_key("entities") || base.contains_key("belts") {
-            bail!("native core base chunk contains an unbounded collection");
-        }
 
         let mut entity_raw = vec![None; manifest.entity_count];
         let mut belt_raw = vec![None; manifest.belt_count];
         for metadata in &manifest.chunks {
-            if metadata.kind == "base" {
+            if metadata.kind == "base"
+                || BASE_CHECKPOINT_DOMAINS
+                    .iter()
+                    .any(|domain| metadata.kind == domain.kind())
+            {
                 continue;
             }
             let target = match metadata.kind.as_str() {
@@ -1863,7 +2153,6 @@ impl CoreState {
             Vec::new(),
             None,
             SaveDirtyPages {
-                base: true,
                 entity_topology: true,
                 belt_topology: true,
                 ..SaveDirtyPages::default()
@@ -1882,6 +2171,8 @@ impl CoreState {
         pure_idle_session: Option<PureIdleSessionState>,
         save_dirty: SaveDirtyPages,
     ) -> anyhow::Result<Self> {
+        let production_history_tiers =
+            crate::production_history::TieredProductionHistory::from_base(&base);
         let mut state = Self {
             revision: identity.revision,
             identity,
@@ -1908,6 +2199,7 @@ impl CoreState {
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
             summary_cache: SyncCell::new(None),
+            production_history_tiers: production_history_tiers.into(),
         };
         // Entity records remain shared by startup admission, route preparation
         // and the canonical proof. Belt records are intentionally decoded one
@@ -1958,14 +2250,13 @@ impl CoreState {
                         text: String|
          -> anyhow::Result<()> {
             let bytes = text.len();
-            metadata.push(ChunkMetadata {
-                id: id.clone(),
-                kind: kind.to_owned(),
+            metadata.push(checkpoint_chunk_metadata(
+                id.clone(),
+                kind,
                 offset,
                 count,
-                checksum: fnv1a_utf8(text.as_bytes()),
-                bytes,
-            });
+                &text,
+            ));
             total_bytes = total_bytes.saturating_add(bytes);
             let key = format!("{prefix}chunk.{}", encoded_chunk_id(&id));
             visit(&key, &text)?;
@@ -1973,13 +2264,10 @@ impl CoreState {
             Ok(())
         };
 
-        emit(
-            "base".to_owned(),
-            "base",
-            0,
-            1,
-            serde_json::to_string(&Value::Object(self.base.clone()))?,
-        )?;
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            let (text, count) = encode_base_checkpoint_domain(&self.base, domain)?;
+            emit(domain.id().to_owned(), domain.kind(), 0, count, text)?;
+        }
         #[allow(clippy::type_complexity)]
         let emit_raw_ranges =
             |values: &[RawRecord],
@@ -2029,18 +2317,10 @@ impl CoreState {
             &mut emit,
         )?;
 
-        let mut root_material = String::new();
-        for chunk in &metadata {
-            use std::fmt::Write as _;
-            write!(
-                root_material,
-                "{}:{}:{}:{}:{}:{};",
-                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
-            )?;
-        }
+        let root_material = checkpoint_root_material(&metadata)?;
         let manifest_key = format!("{prefix}manifest");
         let mut manifest_value = serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
             "slot": "main",
@@ -2106,38 +2386,21 @@ impl CoreState {
             Ok(())
         };
 
-        let base_text = self
-            .save_dirty
-            .base
-            .then(|| serde_json::to_string(&Value::Object(self.base.clone())))
-            .transpose()?;
-        if let Some(text) = base_text {
-            install(
-                ChunkMetadata {
-                    id: "base".to_owned(),
-                    kind: "base".to_owned(),
-                    offset: 0,
-                    count: 1,
-                    checksum: fnv1a_utf8(text.as_bytes()),
-                    bytes: text.len(),
-                },
-                Some(text),
-            )?;
-        } else if let Some(chunk) = previous.get("base") {
-            install(chunk.clone(), None)?;
-        } else {
-            let text = serde_json::to_string(&Value::Object(self.base.clone()))?;
-            install(
-                ChunkMetadata {
-                    id: "base".to_owned(),
-                    kind: "base".to_owned(),
-                    offset: 0,
-                    count: 1,
-                    checksum: fnv1a_utf8(text.as_bytes()),
-                    bytes: text.len(),
-                },
-                Some(text),
-            )?;
+        // Base domains intentionally do not depend on manually maintained
+        // dirty bits. Exact serialized content is compared with the last
+        // durable generation, so an unmarked mutation is still detected while
+        // unrelated systems remain reusable.
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            let (text, count) = encode_base_checkpoint_domain(&self.base, domain)?;
+            let candidate = checkpoint_chunk_metadata(domain.id(), domain.kind(), 0, count, &text);
+            if let Some(cached) = previous
+                .get(domain.id())
+                .filter(|cached| checkpoint_chunk_content_matches(cached, &candidate))
+            {
+                install(cached.clone(), None)?;
+            } else {
+                install(candidate, Some(text))?;
+            }
         }
 
         let mut install_pages = |values: &[RawRecord],
@@ -2153,7 +2416,10 @@ impl CoreState {
                 let count = end.saturating_sub(offset);
                 let id = format!("{kind}:{offset:08}");
                 let cached = previous.get(&id).filter(|chunk| {
-                    chunk.kind == kind && chunk.offset == offset && chunk.count == count
+                    chunk.kind == kind
+                        && chunk.offset == offset
+                        && chunk.count == count
+                        && checkpoint_chunk_has_valid_sha256_metadata(chunk)
                 });
                 if !topology_dirty
                     && !dirty_pages.contains(&page)
@@ -2176,17 +2442,8 @@ impl CoreState {
                     text.push_str(raw);
                 }
                 text.push(']');
-                install(
-                    ChunkMetadata {
-                        id,
-                        kind: kind.to_owned(),
-                        offset,
-                        count,
-                        checksum: fnv1a_utf8(text.as_bytes()),
-                        bytes: text.len(),
-                    },
-                    Some(text),
-                )?;
+                let metadata = checkpoint_chunk_metadata(id, kind, offset, count, &text);
+                install(metadata, Some(text))?;
             }
             Ok(())
         };
@@ -2206,18 +2463,10 @@ impl CoreState {
         )?;
 
         let total_bytes = metadata.iter().map(|chunk| chunk.bytes).sum::<usize>();
-        let mut root_material = String::new();
-        for chunk in &metadata {
-            use std::fmt::Write as _;
-            write!(
-                root_material,
-                "{}:{}:{}:{}:{}:{};",
-                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
-            )?;
-        }
+        let root_material = checkpoint_root_material(&metadata)?;
         let manifest_key = format!("{prefix}manifest");
         let mut manifest_value = serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
             "slot": "main",
@@ -2659,11 +2908,20 @@ impl CoreState {
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
         self.summary_cache.get_mut().take();
-        self.save_dirty.base = true;
+        self.production_history_tiers.invalidate();
         &mut self.base
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
+    }
+
+    pub(crate) fn refresh_production_history_tiers(&mut self) {
+        self.production_history_tiers
+            .refresh_after_internal_sample(&self.base);
+    }
+
+    pub(crate) fn rebuild_production_history_tiers(&mut self) {
+        self.production_history_tiers.refresh_from_base(&self.base);
     }
 
     /// Returns progress only when no other committed operation has interrupted
@@ -2792,9 +3050,6 @@ impl CoreState {
         // valid candidate may replace `self`.
         let mut candidate = self.clone();
         candidate.summary_cache.get_mut().take();
-        if candidate.base != base {
-            candidate.save_dirty.base = true;
-        }
         for (index, row) in entity_writeback.iter().enumerate() {
             if !Arc::ptr_eq(row, &self.entity_raw[index]) {
                 candidate.save_dirty.mark_entity(index);
@@ -2832,6 +3087,7 @@ impl CoreState {
             None
         };
         *self = candidate;
+        self.refresh_production_history_tiers();
         retire_record_values(entities, Vec::new());
         profile_last!("install");
         Ok(summary)
@@ -3172,11 +3428,8 @@ impl CoreState {
             bail!("native statistics projection item is missing");
         }
         let history = self
-            .base
-            .get("productionHistory")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .production_history_tiers
+            .samples_if_current(&self.base)?;
         let matching = history.iter().filter(|sample| {
             sample
                 .get("elapsedSeconds")
@@ -3936,6 +4189,16 @@ mod tests {
         ])
     }
 
+    fn apply_checkpoint_delta(
+        records: &mut BTreeMap<String, Vec<u8>>,
+        visit: &InternalCheckpointVisitResult,
+        delta: BTreeMap<String, Vec<u8>>,
+    ) {
+        let active_keys = visit.active_keys.iter().cloned().collect::<HashSet<_>>();
+        records.retain(|key, _| active_keys.contains(key));
+        records.extend(delta);
+    }
+
     fn replace_fixture_entity_chunk(
         records: &mut BTreeMap<String, Vec<u8>>,
         bytes: Vec<u8>,
@@ -4111,13 +4374,22 @@ mod tests {
     }
 
     #[test]
-    fn owned_internal_records_load_valid_checkpoint() {
-        let state = CoreState::from_owned_internal_records(
-            fixture_identity(7),
-            fixture_records(),
-            fixture_catalog(),
+    fn owned_internal_records_load_legacy_v1_checkpoint_without_sha256() {
+        let records = fixture_records();
+        let manifest: Value = serde_json::from_slice(
+            &records["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
         )
         .unwrap();
+        assert!(
+            manifest["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chunk| chunk.get("sha256").is_none())
+        );
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
 
         assert_eq!(state.revision, 7);
         assert_eq!(state.entity_raw.len(), 1);
@@ -4125,6 +4397,48 @@ mod tests {
         let summary = state.summary().unwrap();
         assert_eq!(summary.state_version, 47);
         assert_eq!(summary.canonical_sha256, state.canonical_sha256().unwrap());
+    }
+
+    #[test]
+    fn owned_internal_records_reject_v2_chunk_without_sha256() {
+        let state = CoreState::from_owned_internal_records(
+            fixture_identity(7),
+            fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+
+        for index in 0..manifest["chunks"].as_array().unwrap().len() {
+            let mut candidate_records = records.clone();
+            let mut candidate_manifest = manifest.clone();
+            let chunk = candidate_manifest["chunks"][index].as_object_mut().unwrap();
+            let id = chunk["id"].as_str().unwrap().to_owned();
+            assert!(chunk.remove("sha256").is_some());
+            candidate_records.insert(
+                manifest_key.to_owned(),
+                serde_json::to_vec(&candidate_manifest).unwrap(),
+            );
+
+            let error = CoreState::from_owned_internal_records(
+                fixture_identity(7),
+                candidate_records,
+                fixture_catalog(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("native core v2 checkpoint chunk requires sha256: {id}")
+            );
+        }
     }
 
     #[test]
@@ -4436,6 +4750,12 @@ mod tests {
                 {"elapsedSeconds":3,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":180},"consumptionPerMinute":{},"inventory":{"iron_ore":8},"planetProductionPerMinute":{"home":{"iron_ore":180}},"planetConsumptionPerMinute":{"home":{}}}
             ]),
         );
+        let canonical_before_private_refresh = state.canonical_sha256().unwrap();
+        state.refresh_production_history_tiers();
+        assert_eq!(
+            state.canonical_sha256().unwrap(),
+            canonical_before_private_refresh
+        );
         let first = state
             .statistics_projection(1.0, 3.0, 0, 2, Some("home"), Some("iron_ore"))
             .unwrap();
@@ -4454,6 +4774,79 @@ mod tests {
         assert!(second["nextCursor"].is_null());
         assert_eq!(state.entity_raw.len(), 1);
         assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    #[test]
+    fn statistics_projection_refreshes_after_command_rewrites_or_clears_public_history() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.base.insert(
+            "productionHistory".into(),
+            json!([
+                {"elapsedSeconds":1,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60},"consumptionPerMinute":{},"inventory":{"iron_ore":1}},
+                {"elapsedSeconds":2,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70},"consumptionPerMinute":{},"inventory":{"iron_ore":2}}
+            ]),
+        );
+        state
+            .base
+            .insert("historyRecordedAt".into(), Value::from(2));
+        state.rebuild_production_history_tiers();
+
+        state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 7,
+                top_level_changes: vec![ValuePatch {
+                    path: vec![
+                        PathSegment::Key("productionHistory".into()),
+                        PathSegment::Index(0),
+                        PathSegment::Key("productionPerMinute".into()),
+                        PathSegment::Key("iron_ore".into()),
+                    ],
+                    operation: "set".into(),
+                    value: Some(Value::from(777)),
+                }],
+                changed_entities: Vec::new(),
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        let projection = state
+            .statistics_projection(1.0, 2.0, 0, 10, None, Some("iron_ore"))
+            .unwrap();
+        assert_eq!(
+            projection["samples"][0]["productionPerMinute"]["iron_ore"],
+            777
+        );
+
+        state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 8,
+                top_level_changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("productionHistory".into())],
+                    operation: "set".into(),
+                    value: Some(Value::Array(Vec::new())),
+                }],
+                changed_entities: Vec::new(),
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        let projection = state
+            .statistics_projection(0.0, 2.0, 0, 10, None, Some("iron_ore"))
+            .unwrap();
+        assert_eq!(projection["samples"], Value::Array(Vec::new()));
     }
 
     #[test]
@@ -4493,6 +4886,152 @@ mod tests {
         let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
         assert_eq!(manifest["savedAt"], 42);
         assert_eq!(manifest["basePrimaryChecksum"], "12345678");
+    }
+
+    #[test]
+    fn v2_domain_checkpoint_preserves_mod_data_and_reuses_content_until_durable_ack() {
+        let identity = fixture_identity(7);
+        let mut legacy = CoreState::from_internal_records(
+            identity.clone(),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        legacy.base_value_mut().insert(
+            "quantumLogisticsNetwork".to_owned(),
+            json!({"inventory":{"iron_ore":"123"},"modSlot":{"keep":true}}),
+        );
+        legacy.base_value_mut().insert(
+            "dysonSphere".to_owned(),
+            json!({"structurePoints":7,"modShell":{"keep":[1,2,3]}}),
+        );
+        legacy
+            .base_value_mut()
+            .insert("totalProduced".to_owned(), json!({"iron_ore":11}));
+        legacy.base_value_mut().insert(
+            "mod:opaque-domain".to_owned(),
+            json!({"signedZero":-0.0,"nested":{"keep":[1,null,"three"]}}),
+        );
+        let expected = legacy.materialize().unwrap();
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        legacy
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        assert_eq!(
+            manifest["formatVersion"],
+            DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        );
+        let kinds = manifest["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["kind"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            assert!(kinds.contains(domain.kind()));
+        }
+        assert!(manifest["chunks"].as_array().unwrap().iter().all(|chunk| {
+            chunk["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        }));
+
+        let mut state =
+            CoreState::from_internal_records(identity.clone(), &records, fixture_catalog())
+                .unwrap();
+        assert!(json_bitwise_eq(&state.materialize().unwrap(), &expected));
+        assert_eq!(
+            state.base["mod:opaque-domain"]["signedZero"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        state
+            .base_value_mut()
+            .insert("elapsedSeconds".to_owned(), Value::from(1));
+        let mut first_delta = BTreeMap::new();
+        let first = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                first_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(first.encoded_records, 2);
+        assert_eq!(first.reused_records, 6);
+        assert!(
+            first_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Acore"))
+        );
+        assert!(first_delta.keys().any(|key| key.ends_with("manifest")));
+        assert_eq!(first_delta.len(), 2);
+
+        // Aborting the filesystem transaction must leave the changed domain
+        // pending. The exact same domain is emitted again on retry.
+        state.abort_checkpoint_visit();
+        let mut retry_delta = BTreeMap::new();
+        let retry = state
+            .visit_dirty_internal_checkpoint_records(44, |key, value| {
+                retry_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(retry.encoded_records, 2);
+        assert_eq!(retry.reused_records, 6);
+        apply_checkpoint_delta(&mut records, &retry, retry_delta);
+        state.install_checkpoint_identity(2, "b".repeat(64));
+
+        let clean = state
+            .visit_dirty_internal_checkpoint_records(45, |_key, _value| Ok(()))
+            .unwrap();
+        assert_eq!(clean.encoded_records, 1);
+        assert_eq!(clean.reused_records, 7);
+        state.abort_checkpoint_visit();
+
+        // Content validation is authoritative even if a future call site
+        // mutates an owned domain without setting the coarse base dirty bit.
+        state
+            .base
+            .insert("dysonSphere".to_owned(), json!({"structurePoints":8}));
+        let mut unmarked_delta = BTreeMap::new();
+        let unmarked = state
+            .visit_dirty_internal_checkpoint_records(46, |key, value| {
+                unmarked_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(unmarked.encoded_records, 2);
+        assert_eq!(unmarked.reused_records, 6);
+        assert!(
+            unmarked_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Adyson"))
+        );
+        state.abort_checkpoint_visit();
+
+        let restored = CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                generation: 2,
+                root_hash: "b".repeat(64),
+                ..identity
+            },
+            &records,
+            fixture_catalog(),
+        )
+        .unwrap();
+        assert_eq!(restored.base["elapsedSeconds"], 1);
+        assert_eq!(
+            restored.base["mod:opaque-domain"]["nested"]["keep"][2],
+            "three"
+        );
     }
 
     #[test]
@@ -4555,10 +5094,36 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(first.encoded_records, 1);
-        assert_eq!(first.reused_records, 3);
-        assert_eq!(first_delta.len(), 1);
-        assert!(first_delta.keys().all(|key| key.ends_with("manifest")));
+        // A legacy v1 checkpoint cannot lend its SHA-less entity/belt pages to
+        // a v2 manifest. The first upgrade therefore rewrites all seven data
+        // chunks and publishes the v2 manifest last.
+        assert_eq!(first.encoded_records, 8);
+        assert_eq!(first.reused_records, 0);
+        assert_eq!(first_delta.len(), 8);
+        let first_manifest: Value = serde_json::from_slice(
+            &first_delta["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
+        )
+        .unwrap();
+        assert_eq!(
+            first_manifest["formatVersion"],
+            DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        );
+        assert!(
+            first_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Aunknown-mod"))
+        );
+        assert!(
+            first_manifest["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chunk| {
+                    chunk["sha256"]
+                        .as_str()
+                        .is_some_and(|hash| hash.len() == 64)
+                })
+        );
 
         // A failed filesystem transaction must not acknowledge a later dirty
         // base/page. The next attempt has to emit them again.
@@ -4584,9 +5149,13 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(retry.encoded_records, 3);
-        assert_eq!(retry.reused_records, 1);
-        assert!(retry_delta.keys().any(|key| key.ends_with("chunk.base")));
+        assert_eq!(retry.encoded_records, 8);
+        assert_eq!(retry.reused_records, 0);
+        assert!(
+            retry_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Acore"))
+        );
         assert!(
             retry_delta
                 .keys()
@@ -4598,7 +5167,7 @@ mod tests {
             .visit_dirty_internal_checkpoint_records(45, |_key, _value| Ok(()))
             .unwrap();
         assert_eq!(clean.encoded_records, 1);
-        assert_eq!(clean.reused_records, 3);
+        assert_eq!(clean.reused_records, 7);
     }
 
     #[test]
@@ -4670,6 +5239,18 @@ mod tests {
         let mut state =
             CoreState::from_internal_records(identity.clone(), &records, fixture_catalog())
                 .unwrap();
+        let mut upgrade_delta = BTreeMap::new();
+        let upgrade = state
+            .visit_dirty_internal_checkpoint_records(1, |key, value| {
+                upgrade_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(upgrade.encoded_records, 9);
+        assert_eq!(upgrade.reused_records, 0);
+        apply_checkpoint_delta(&mut records, &upgrade, upgrade_delta);
+        state.install_checkpoint_identity(2, "b".repeat(64));
+
         let mut changed = state.parse_entity(1_024).unwrap();
         changed["outputs"]["iron_ore"] = Value::from(9);
         state.replace_entity_raw(
@@ -4684,7 +5265,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(visit.encoded_records, 2);
-        assert_eq!(visit.reused_records, 3);
+        assert_eq!(visit.reused_records, 7);
         assert!(
             delta
                 .keys()
@@ -4696,7 +5277,7 @@ mod tests {
                 .any(|key| key.ends_with("chunk.entities%3A00000000"))
         );
 
-        records.extend(delta);
+        apply_checkpoint_delta(&mut records, &visit, delta);
         let restored =
             CoreState::from_internal_records(identity, &records, fixture_catalog()).unwrap();
         assert_eq!(
@@ -6098,12 +6679,14 @@ mod tests {
         state.install_pure_idle_session_progress(18.0).unwrap();
 
         let mut records = fixture_records();
-        state
+        let mut delta = BTreeMap::new();
+        let visit = state
             .visit_dirty_internal_checkpoint_records(43, |key, value| {
-                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
                 Ok(())
             })
             .unwrap();
+        apply_checkpoint_delta(&mut records, &visit, delta);
         state.abort_checkpoint_visit();
         assert_eq!(state.pure_idle_exact_seconds_used(), 18.0);
 
@@ -6202,12 +6785,14 @@ mod tests {
         assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
 
         let mut incremental = fixture_records();
-        state
+        let mut delta = BTreeMap::new();
+        let visit = state
             .visit_dirty_internal_checkpoint_records(44, |key, value| {
-                incremental.insert(key.to_owned(), value.as_bytes().to_vec());
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
                 Ok(())
             })
             .unwrap();
+        apply_checkpoint_delta(&mut incremental, &visit, delta);
         let restored =
             CoreState::from_internal_records(fixture_identity(8), &incremental, fixture_catalog())
                 .unwrap();

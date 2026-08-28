@@ -832,7 +832,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
     const selection = await dialog.showOpenDialog(mainWindow, {
       title: "导入 DSP极简网络 v47 存档到 Windows 原生核心",
       buttonLabel: "验证并导入",
-      filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
+      filters: [{ name: "DSP极简网络存档", extensions: ["json", "gz"] }],
       properties: ["openFile", "dontAddToRecent"],
     });
     if (selection.canceled || selection.filePaths.length !== 1) {
@@ -845,8 +845,11 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
       });
     }
     const sourcePath = path.resolve(selection.filePaths[0]);
+    const sourceFileName = path.basename(sourcePath).toLowerCase();
+    const supportedSourceName = sourceFileName.endsWith(".json") ||
+      sourceFileName.endsWith(".json.gz");
     const sourceStat = await fs.promises.lstat(sourcePath);
-    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size < 1 ||
+    if (!supportedSourceName || !sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size < 1 ||
       sourceStat.size > MAX_NATIVE_V47_IMPORT_BYTES) {
       throw Object.assign(new Error("unsupported native v47 import selection"), {
         code: "NATIVE_CORE_V47_IMPORT_FILE_INVALID",

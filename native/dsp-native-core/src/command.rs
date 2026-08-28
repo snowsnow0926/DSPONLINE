@@ -332,6 +332,7 @@ impl CoreState {
         if !only_pause_changed {
             next.invalidate_factory_static_admission();
         }
+        next.rebuild_production_history_tiers();
         let previous_revision = self.revision;
         *self = next;
         Ok(CommandApplyResult {

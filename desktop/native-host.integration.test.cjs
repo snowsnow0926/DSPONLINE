@@ -600,9 +600,15 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.doesNotThrow(() => normalizeRendererNativeResult("coreCheckpoint", nativeCheckpoint));
   assert.equal(nativeCheckpoint.checkpoint.generation, 2);
   assert.equal(nativeCheckpoint.checkpoint.revision, 3);
-  assert.equal(nativeCheckpoint.checkpoint.changedRecords, 2);
-  assert.equal(nativeCheckpoint.encodedRecords, 2);
-  assert.equal(nativeCheckpoint.reusedRecords, 2);
+  // The first checkpoint after opening the legacy v1 fixture performs the
+  // private manifest-v2 upgrade: five bounded base domains, entity/belt pages,
+  // and the manifest are written with SHA-256 metadata; the legacy monolithic
+  // base record is removed. Legacy v1 pages cannot be reused because they had
+  // no per-page SHA proof.
+  assert.equal(nativeCheckpoint.checkpoint.recordCount, 8);
+  assert.equal(nativeCheckpoint.checkpoint.changedRecords, 7);
+  assert.equal(nativeCheckpoint.encodedRecords, 8);
+  assert.equal(nativeCheckpoint.reusedRecords, 0);
   assert.equal(nativeCheckpoint.summary.revision, 3);
   const metadataOnlyCheckpoint = await client.request({
     operation: "coreCheckpoint",
@@ -611,9 +617,10 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   });
   assert.equal(metadataOnlyCheckpoint.checkpoint.generation, 3);
   assert.equal(metadataOnlyCheckpoint.checkpoint.revision, 3);
+  assert.equal(metadataOnlyCheckpoint.checkpoint.recordCount, 8);
   assert.equal(metadataOnlyCheckpoint.checkpoint.changedRecords, 1);
   assert.equal(metadataOnlyCheckpoint.encodedRecords, 1);
-  assert.equal(metadataOnlyCheckpoint.reusedRecords, 3);
+  assert.equal(metadataOnlyCheckpoint.reusedRecords, 7);
   const exported = await client.request({
     operation: "coreExportV47",
     sessionId: opened.sessionId,

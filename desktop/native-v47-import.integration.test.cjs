@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { gzipSync } = require("node:zlib");
 
 const { NativeHostClient } = require("./native-host.cjs");
 const { normalizeRendererNativeResult } = require("./native-renderer-boundary.cjs");
@@ -138,4 +139,73 @@ test("native host streams a main-selected v47 file and preserves the old checkpo
   assert.equal(afterCompatibilityFallback.generation, published.generation);
   assert.equal(afterCompatibilityFallback.rootHash, published.rootHash);
   assert.equal(afterCompatibilityFallback.revision, published.revision);
+
+  const gzipPath = path.join(temporary, "selected-save.json.gz");
+  const gzipBytes = gzipSync(bytes);
+  fs.writeFileSync(gzipPath, gzipBytes);
+  const importedGzip = await client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreImport", importedGzip));
+  assert.equal(importedGzip.import.sourceSha256, sourceSha256);
+  assert.equal(importedGzip.import.sourceByteLength, bytes.byteLength);
+  assert.equal(importedGzip.checkpoint.generation, 2);
+  assert.deepEqual(fs.readFileSync(gzipPath), gzipBytes);
+  const gzipPublished = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.equal(gzipPublished.generation, importedGzip.checkpoint.generation);
+  assert.equal(gzipPublished.rootHash, importedGzip.checkpoint.rootHash);
+
+  const corruptGzipEnvelope = JSON.parse(bytes.toString("utf8"));
+  corruptGzipEnvelope.state.elapsedSeconds = 3;
+  fs.writeFileSync(gzipPath, gzipSync(Buffer.from(JSON.stringify(corruptGzipEnvelope), "utf8")));
+  await assert.rejects(client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000), /checksum/i);
+
+  const corruptGzip = Buffer.from(gzipBytes);
+  corruptGzip[corruptGzip.length - 1] ^= 0xff;
+  fs.writeFileSync(gzipPath, corruptGzip);
+  await assert.rejects(client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000), /gzip|checksum|corrupt|stream/i);
+
+  fs.writeFileSync(gzipPath, Buffer.concat([gzipBytes, Buffer.from("trailing")]));
+  await assert.rejects(client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000), /trailing data or multiple members/i);
+
+  fs.writeFileSync(gzipPath, Buffer.concat([gzipBytes, gzipBytes]));
+  await assert.rejects(client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000), /trailing data or multiple members/i);
+
+  fs.writeFileSync(gzipPath, gzipSync(loneSurrogateBytes));
+  await assert.rejects(client.request({
+    operation: "coreImportV47",
+    sourcePath: gzipPath,
+    registryFingerprint: "builtin:test",
+    catalog: catalog(),
+  }, 30_000), (error) => {
+    assert.equal(error.code, "NATIVE_V47_IMPORT_JS_COMPATIBILITY_REQUIRED");
+    return true;
+  });
+  const afterGzipFailures = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.equal(afterGzipFailures.generation, gzipPublished.generation);
+  assert.equal(afterGzipFailures.rootHash, gzipPublished.rootHash);
+  assert.equal(afterGzipFailures.revision, gzipPublished.revision);
 });

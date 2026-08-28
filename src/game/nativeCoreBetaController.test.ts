@@ -88,6 +88,7 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   alwaysFail = false;
   closed = false;
   projectionCalls = 0;
+  readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
 
   constructor(sessionId = "native-test-session", sourceCheckpoint: DesktopNativeSaveCommitResult = checkpoint) {
@@ -158,10 +159,10 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     };
   }
 
-  async commitOperation(request: {
-    commandId: string;
-    baseRevision: number;
-  }): Promise<DesktopNativeCoreCommitOperationResult> {
+  async commitOperation(
+    request: Parameters<WindowsNativeCoreShadow["commitOperation"]>[0],
+  ): Promise<DesktopNativeCoreCommitOperationResult> {
+    this.commitRequests.push(structuredClone(request));
     if (this.alwaysFail) throw new Error("native host unavailable");
     const existing = this.receipts.get(request.commandId);
     if (existing) return { ...existing, duplicate: true, summary: await this.status() };
@@ -261,10 +262,12 @@ describe("Windows native core invitation-Beta controller", () => {
       baseRevision: 1,
       simulationSeconds: 1,
       wallSeconds: 1,
+      advanceMode: "pure-idle-conservative-v2",
       javascriptProof: proof(2),
       compatibleFallback: proof(2),
     });
     expect(mirrored).toMatchObject({ mirrored: true, state: { phase: "shadow", authority: "javascript", comparisonCount: 2 } });
+    expect(session.commitRequests[0]?.advanceMode).toBe("pure-idle-conservative-v2");
   });
 
   it("replays without claiming equality, then verifies and reseeds without resetting the 24h window", async () => {
@@ -280,8 +283,10 @@ describe("Windows native core invitation-Beta controller", () => {
       resultRevision: 2,
       simulationSeconds: 1,
       wallSeconds: 1,
+      advanceMode: "pure-idle-conservative-v2",
     });
     expect(replayed).toMatchObject({ mirrored: true, state: { shadowRevision: 2, comparisonCount: 1 } });
+    expect(first.commitRequests[0]?.advanceMode).toBe("pure-idle-conservative-v2");
     expect(() => controller.recordGateMeasurement({
       observedAtMs: 1_000 + 24 * 60 * 60 * 1_000,
       netThroughputRatio: 2,
@@ -333,6 +338,41 @@ describe("Windows native core invitation-Beta controller", () => {
     expect(result.state).toMatchObject({ phase: "native-authoritative", authority: "native", latestVerifiedProof: { revision: 3 } });
     expect(result.state.exactCompatibleFallback).toEqual(proof(2));
     expect(session.projectionCalls).toBe(1);
+  });
+
+  it("preserves the pure-idle mode when retrying an uncertain authoritative commit", async () => {
+    const session = new FakeNativeSession();
+    const controller = await readyController(session);
+    session.uncertainOnce = true;
+
+    const result = await controller.commitAuthoritativeOperation({
+      commandId: "authority-pure-idle-retry",
+      baseRevision: 2,
+      simulationSeconds: 600,
+      wallSeconds: 40,
+      advanceMode: "pure-idle-conservative-v2",
+    });
+
+    expect(result.commit).toMatchObject({ revision: 3, duplicate: true });
+    const retryRequests = session.commitRequests.filter((request) =>
+      request.commandId === "authority-pure-idle-retry");
+    expect(retryRequests).toHaveLength(2);
+    expect(retryRequests.map((request) => ({
+      commandId: request.commandId,
+      baseRevision: request.baseRevision,
+      advanceMode: request.advanceMode,
+    }))).toEqual([
+      {
+        commandId: "authority-pure-idle-retry",
+        baseRevision: 2,
+        advanceMode: "pure-idle-conservative-v2",
+      },
+      {
+        commandId: "authority-pure-idle-retry",
+        baseRevision: 2,
+        advanceMode: "pure-idle-conservative-v2",
+      },
+    ]);
   });
 
   it("pauses on an unconfirmed native failure and never silently installs the older JavaScript checkpoint", async () => {

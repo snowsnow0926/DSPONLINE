@@ -4216,7 +4216,7 @@ fn simulate_step(
         belt_routes,
         0.0,
         false,
-        Some(&belt_reservation.allowance_by_belt),
+        Some(&belt_reservation),
         seconds,
     )?;
     drain_material_delivery_hubs(

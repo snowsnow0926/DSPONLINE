@@ -629,6 +629,21 @@ pub fn parse_v47_envelope<R: Read>(
     if expected_byte_length == 0 || expected_byte_length > MAX_V47_IMPORT_BYTES {
         bail!("native v47 import file size is invalid");
     }
+    parse_v47_envelope_with_length(reader, Some(expected_byte_length))
+}
+
+/// Parses a decoded v47 JSON stream whose final byte length is not known in
+/// advance. This is used for compressed file containers; the proof still
+/// hashes and counts the decoded JSON bytes, and `BoundedHashReader` enforces
+/// the same 256 MiB ceiling as an uncompressed import.
+pub fn parse_v47_envelope_stream<R: Read>(reader: R) -> anyhow::Result<ParsedV47Envelope> {
+    parse_v47_envelope_with_length(reader, None)
+}
+
+fn parse_v47_envelope_with_length<R: Read>(
+    reader: R,
+    expected_byte_length: Option<u64>,
+) -> anyhow::Result<ParsedV47Envelope> {
     let mut reader = BoundedHashReader::new(reader);
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
     let envelope_result = Envelope::deserialize(&mut deserializer);
@@ -646,7 +661,10 @@ pub fn parse_v47_envelope<R: Read>(
         result.context("native v47 envelope contains trailing data")?;
     }
     let (source_byte_length, source_sha256) = reader.finish();
-    if source_byte_length != expected_byte_length {
+    if source_byte_length == 0 {
+        bail!("native v47 import decoded stream is empty");
+    }
+    if expected_byte_length.is_some_and(|expected| source_byte_length != expected) {
         bail!("native v47 import file identity changed while reading");
     }
     let _ = envelope.reason;
@@ -759,6 +777,29 @@ mod tests {
             parsed.proof().source_sha256,
             hex::encode(Sha256::digest(&bytes))
         );
+    }
+
+    #[test]
+    fn parses_a_bounded_stream_without_a_predeclared_length() {
+        let bytes = fixture(true);
+        let parsed = parse_v47_envelope_stream(bytes.as_slice()).unwrap();
+        assert_eq!(parsed.proof().source_byte_length, bytes.len() as u64);
+        assert_eq!(
+            parsed.proof().source_sha256,
+            hex::encode(Sha256::digest(&bytes))
+        );
+    }
+
+    #[test]
+    fn decoded_stream_reader_rejects_the_byte_after_the_256_mib_limit() {
+        let mut reader = BoundedHashReader {
+            inner: b"ab".as_slice(),
+            digest: Sha256::new(),
+            bytes_read: MAX_V47_IMPORT_BYTES - 1,
+            utf16_compatibility: JavascriptUtf16CompatibilityScanner::default(),
+        };
+        let error = reader.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("bounded file limit"));
     }
 
     #[test]

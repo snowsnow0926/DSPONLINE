@@ -7,7 +7,7 @@ use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
     CommandApplyResult, CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult,
     CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
-    V47EnvelopeExportResult, V47ImportProof, parse_v47_envelope,
+    V47EnvelopeExportResult, V47ImportProof, parse_v47_envelope, parse_v47_envelope_stream,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -385,6 +385,13 @@ pub struct CoreImportV47Result {
 pub struct CoreRegistry {
     next_session_id: u64,
     sessions: HashMap<String, CoreState>,
+    uncertain_checkpoint_transactions: HashMap<String, UncertainCoreCheckpoint>,
+}
+
+#[derive(Clone, Debug)]
+struct UncertainCoreCheckpoint {
+    transaction_id: String,
+    revision: u64,
 }
 
 impl Default for CoreRegistry {
@@ -392,6 +399,7 @@ impl Default for CoreRegistry {
         Self {
             next_session_id: 1,
             sessions: HashMap::new(),
+            uncertain_checkpoint_transactions: HashMap::new(),
         }
     }
 }
@@ -463,16 +471,34 @@ impl CoreRegistry {
         registry_fingerprint: &str,
         catalog_value: Value,
     ) -> anyhow::Result<CoreImportV47Result> {
-        self.import_v47_with_commit(
+        self.import_v47_with_commit_mode(
             store,
             reader,
-            expected_byte_length,
+            Some(expected_byte_length),
             registry_fingerprint,
             catalog_value,
             |store, transaction_id| store.commit(transaction_id),
         )
     }
 
+    pub fn import_v47_stream<R: Read>(
+        &mut self,
+        store: &mut SaveStore,
+        reader: R,
+        registry_fingerprint: &str,
+        catalog_value: Value,
+    ) -> anyhow::Result<CoreImportV47Result> {
+        self.import_v47_with_commit_mode(
+            store,
+            reader,
+            None,
+            registry_fingerprint,
+            catalog_value,
+            |store, transaction_id| store.commit(transaction_id),
+        )
+    }
+
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn import_v47_with_commit<R: Read>(
         &mut self,
@@ -483,11 +509,34 @@ impl CoreRegistry {
         catalog_value: Value,
         commit: impl FnOnce(&mut SaveStore, &str) -> anyhow::Result<SaveCommitResult>,
     ) -> anyhow::Result<CoreImportV47Result> {
+        self.import_v47_with_commit_mode(
+            store,
+            reader,
+            Some(expected_byte_length),
+            registry_fingerprint,
+            catalog_value,
+            commit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn import_v47_with_commit_mode<R: Read>(
+        &mut self,
+        store: &mut SaveStore,
+        reader: R,
+        expected_byte_length: Option<u64>,
+        registry_fingerprint: &str,
+        catalog_value: Value,
+        commit: impl FnOnce(&mut SaveStore, &str) -> anyhow::Result<SaveCommitResult>,
+    ) -> anyhow::Result<CoreImportV47Result> {
         if self.sessions.len() >= MAX_CORE_SESSIONS {
             bail!("native core session limit has been reached");
         }
         let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
-        let parsed = parse_v47_envelope(reader, expected_byte_length)?;
+        let parsed = match expected_byte_length {
+            Some(expected) => parse_v47_envelope(reader, expected)?,
+            None => parse_v47_envelope_stream(reader)?,
+        };
         let slot = match parsed.proof().mode.as_str() {
             "normal" => "normal-main",
             "speedrun" => "speedrun-main",
@@ -641,6 +690,7 @@ impl CoreRegistry {
         session_id: &str,
         command: &SimulationCommandPatch,
     ) -> anyhow::Result<CommandApplyResult> {
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
         self.session_mut(session_id)?.apply_command(command)
     }
 
@@ -649,6 +699,7 @@ impl CoreRegistry {
         session_id: &str,
         request: &CoreAdvanceRequest,
     ) -> anyhow::Result<CoreAdvanceResult> {
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
         self.session_mut(session_id)?.advance(request)
     }
 
@@ -664,6 +715,7 @@ impl CoreRegistry {
         request: CoreCommitOperationRequest,
     ) -> anyhow::Result<CoreCommitOperationResult> {
         validate_session_id(session_id)?;
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
         let slot = self.session(session_id)?.identity.slot.clone();
         store.require_generic_mutation_unfenced(&slot)?;
         self.commit_operation_internal(store, session_id, request, None)
@@ -680,6 +732,7 @@ impl CoreRegistry {
         request: CoreCommitOperationExactRealtimeRequest,
     ) -> anyhow::Result<CoreCommitOperationResult> {
         validate_session_id(session_id)?;
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
         let lease = store.require_exact_realtime_lease()?;
         let operation = {
             let state = self.session(session_id)?;
@@ -885,10 +938,45 @@ impl CoreRegistry {
         saved_at_ms: u64,
         exact_realtime_lease: Option<&ExactRealtimeLease>,
     ) -> anyhow::Result<CoreCheckpointResult> {
+        self.checkpoint_internal_with_commit(
+            store,
+            session_id,
+            saved_at_ms,
+            exact_realtime_lease,
+            |store, transaction_id| store.commit(transaction_id),
+        )
+    }
+
+    #[cfg(test)]
+    fn checkpoint_with_fault(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        saved_at_ms: u64,
+        fault: crate::save_store::CommitFaultPoint,
+    ) -> anyhow::Result<CoreCheckpointResult> {
+        self.checkpoint_internal_with_commit(
+            store,
+            session_id,
+            saved_at_ms,
+            None,
+            |store, transaction_id| store.commit_with_fault(transaction_id, fault),
+        )
+    }
+
+    fn checkpoint_internal_with_commit(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        saved_at_ms: u64,
+        exact_realtime_lease: Option<&ExactRealtimeLease>,
+        commit: impl FnOnce(&mut SaveStore, &str) -> anyhow::Result<SaveCommitResult>,
+    ) -> anyhow::Result<CoreCheckpointResult> {
         validate_session_id(session_id)?;
         if saved_at_ms > MAX_SAFE_INTEGER {
             bail!("native core checkpoint timestamp is invalid");
         }
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
         let (
             slot,
             mode,
@@ -972,11 +1060,25 @@ impl CoreRegistry {
                 return Err(error.context("remove stale native core checkpoint record"));
             }
         }
-        let checkpoint = match store.commit(&transaction_id) {
+        let checkpoint = match commit(store, &transaction_id) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
-                self.session(session_id)?.abort_checkpoint_visit();
                 store.abort(&transaction_id);
+                self.uncertain_checkpoint_transactions.insert(
+                    session_id.to_owned(),
+                    UncertainCoreCheckpoint {
+                        transaction_id: transaction_id.clone(),
+                        revision,
+                    },
+                );
+                if let Err(reconcile_error) =
+                    self.reconcile_uncertain_checkpoint_publication(store, session_id)
+                {
+                    return Err(error.context(format!(
+                        "publish native core checkpoint; publication reconciliation failed: {reconcile_error:#}"
+                    )));
+                }
+                self.session(session_id)?.abort_checkpoint_visit();
                 return Err(error.context("publish native core checkpoint"));
             }
         };
@@ -988,6 +1090,68 @@ impl CoreRegistry {
             encoded_records: visit_result.encoded_records,
             reused_records: visit_result.reused_records,
         })
+    }
+
+    fn reconcile_uncertain_checkpoint_publication(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(pending) = self
+            .uncertain_checkpoint_transactions
+            .get(session_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+
+        // The original visit metadata remains live until the exact transaction
+        // is either proved or ruled out. Never reconcile after this session
+        // has advanced: installing the older checkpoint would clear newer
+        // dirty domains.
+        if self.session(session_id)?.revision != pending.revision {
+            bail!("native core advanced before uncertain checkpoint reconciliation");
+        }
+
+        let published = match store.reconcile_uncertain_publication(&pending.transaction_id) {
+            Ok(Some(published)) => published,
+            Ok(None) => {
+                self.session(session_id)?.abort_checkpoint_visit();
+                self.uncertain_checkpoint_transactions.remove(session_id);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error.context("verify uncertain native checkpoint publication"));
+            }
+        };
+        let state = self.session(session_id)?;
+        if published.slot != state.identity.slot
+            || published.mode != state.identity.mode
+            || published.state_version != state.identity.state_version
+            || published.registry_fingerprint != state.identity.registry_fingerprint
+            || published.revision != state.revision
+        {
+            self.session(session_id)?.abort_checkpoint_visit();
+            bail!("uncertain native checkpoint does not match the active core session");
+        }
+        let state = self.session_mut(session_id)?;
+        state.install_checkpoint_identity(published.generation, published.root_hash);
+        self.uncertain_checkpoint_transactions.remove(session_id);
+        Ok(())
+    }
+
+    fn require_checkpoint_reconciliation_before_mutation(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        self.session(session_id)?;
+        if self
+            .uncertain_checkpoint_transactions
+            .contains_key(session_id)
+        {
+            bail!("native core checkpoint publication must be reconciled before mutation");
+        }
+        Ok(())
     }
 
     /// Atomically closes the trust gap between an exact-tick WAL commit and
@@ -1308,10 +1472,12 @@ impl CoreRegistry {
 
     pub fn close(&mut self, session_id: &str) -> anyhow::Result<bool> {
         validate_session_id(session_id)?;
+        self.uncertain_checkpoint_transactions.remove(session_id);
         Ok(self.sessions.remove(session_id).is_some())
     }
 
     pub fn close_all(&mut self) {
+        self.uncertain_checkpoint_transactions.clear();
         self.sessions.clear();
     }
 
@@ -1345,6 +1511,7 @@ fn validate_session_id(value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::io::Cursor;
     use tempfile::tempdir;
 
@@ -1515,6 +1682,269 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.root_hash, before.root_hash);
         assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn published_checkpoint_with_lost_ack_reconciles_same_session_before_retry() {
+        use crate::save_store::CommitFaultPoint;
+
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+
+        let error = registry
+            .checkpoint_with_fault(
+                &mut store,
+                &imported.session_id,
+                43,
+                CommitFaultPoint::AfterSuperblockPublish,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("publish native core checkpoint"));
+        let published_after_lost_ack = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(published_after_lost_ack.generation, 2);
+        assert_eq!(
+            registry
+                .session(&imported.session_id)
+                .unwrap()
+                .identity
+                .generation,
+            published_after_lost_ack.generation,
+            "the active session must reconcile the exact transaction that reached its superblock"
+        );
+
+        let retry = registry
+            .checkpoint(&mut store, &imported.session_id, 44)
+            .unwrap();
+        assert_eq!(retry.checkpoint.generation, 3);
+        assert_eq!(
+            store.recover("normal-main").unwrap().unwrap().generation,
+            retry.checkpoint.generation
+        );
+    }
+
+    #[test]
+    fn transient_readback_error_reconciles_at_next_same_session_checkpoint() {
+        use crate::save_store::CommitFaultPoint;
+
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+
+        let error = registry
+            .checkpoint_with_fault(
+                &mut store,
+                &imported.session_id,
+                43,
+                CommitFaultPoint::TransientReconciliationReadbackFailure,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("publication reconciliation failed"));
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().generation, 2);
+        assert_eq!(
+            registry
+                .session(&imported.session_id)
+                .unwrap()
+                .identity
+                .generation,
+            1,
+            "a failed readback must not be acknowledged before it is proved"
+        );
+        let before_blocked_mutations = registry.status(&imported.session_id).unwrap();
+        let advance_error = registry
+            .advance(
+                &imported.session_id,
+                &CoreAdvanceRequest {
+                    base_revision: before_blocked_mutations.revision,
+                    simulation_seconds: 1.0,
+                    wall_seconds: 1.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            advance_error
+                .to_string()
+                .contains("must be reconciled before mutation")
+        );
+        let command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": before_blocked_mutations.revision,
+            "topLevelChanges": [{
+                "path": ["paused"],
+                "operation": "set",
+                "value": true,
+            }],
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": [],
+        }))
+        .unwrap();
+        let command_error = registry
+            .apply_command(&imported.session_id, &command)
+            .unwrap_err();
+        assert!(
+            command_error
+                .to_string()
+                .contains("must be reconciled before mutation")
+        );
+        let commit_error = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "blocked-before-reconcile".to_owned(),
+                    base_revision: before_blocked_mutations.revision,
+                    command: None,
+                    simulation_seconds: 1.0,
+                    wall_seconds: 1.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            commit_error
+                .to_string()
+                .contains("must be reconciled before mutation")
+        );
+        let after_blocked_mutations = registry.status(&imported.session_id).unwrap();
+        assert_eq!(
+            after_blocked_mutations.canonical_sha256,
+            before_blocked_mutations.canonical_sha256
+        );
+        assert_eq!(
+            after_blocked_mutations.revision,
+            before_blocked_mutations.revision
+        );
+
+        let retry = registry
+            .checkpoint(&mut store, &imported.session_id, 44)
+            .unwrap();
+        assert_eq!(retry.checkpoint.generation, 3);
+        assert_eq!(
+            registry
+                .session(&imported.session_id)
+                .unwrap()
+                .identity
+                .generation,
+            retry.checkpoint.generation
+        );
+        assert_eq!(
+            store.recover("normal-main").unwrap().unwrap().generation,
+            retry.checkpoint.generation
+        );
+    }
+
+    #[test]
+    fn unpublished_checkpoint_failure_is_not_reconciled_as_success() {
+        use crate::save_store::CommitFaultPoint;
+
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+
+        assert!(
+            registry
+                .checkpoint_with_fault(
+                    &mut store,
+                    &imported.session_id,
+                    43,
+                    CommitFaultPoint::BeforeSuperblockPublish,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            registry
+                .session(&imported.session_id)
+                .unwrap()
+                .identity
+                .generation,
+            1
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().generation, 1);
+
+        let retry = registry
+            .checkpoint(&mut store, &imported.session_id, 44)
+            .unwrap();
+        assert!(retry.checkpoint.generation > 1);
+        assert_eq!(
+            store.recover("normal-main").unwrap().unwrap().generation,
+            retry.checkpoint.generation
+        );
+    }
+
+    #[test]
+    fn v47_decoded_stream_is_proved_and_validation_failure_publishes_nothing() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let truncated = bytes[..bytes.len() - 1].to_vec();
+
+        assert!(
+            registry
+                .import_v47_stream(
+                    &mut store,
+                    Cursor::new(truncated),
+                    "builtin:test",
+                    import_catalog(),
+                )
+                .is_err()
+        );
+        assert!(registry.sessions.is_empty());
+        assert_eq!(registry.next_session_id, 1);
+        assert!(store.recover("normal-main").unwrap().is_none());
+
+        let imported = registry
+            .import_v47_stream(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(imported.import.source_byte_length, bytes.len() as u64);
+        assert_eq!(
+            imported.import.source_sha256,
+            hex::encode(Sha256::digest(&bytes))
+        );
+        assert_eq!(registry.sessions.len(), 1);
+        assert!(store.recover("normal-main").unwrap().is_some());
     }
 
     #[test]

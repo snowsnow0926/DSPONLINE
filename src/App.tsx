@@ -1953,6 +1953,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
   }) => {
     if (!windowsNativeCoreBetaEnabledRef.current) return;
     const generation = windowsNativeCoreBetaGenerationRef.current;
@@ -5963,6 +5964,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               command: submission.durableIntent!.command,
               simulationSeconds: submission.durableIntent!.simulationSeconds,
               wallSeconds: submission.durableIntent!.wallSeconds,
+              ...(submission.durableIntent!.approximate
+                ? { advanceMode: "pure-idle-conservative-v2" as const }
+                : {}),
             });
           }
           durableRecoveryHeadRef.current = advanceSimulationRuntimeDurableAppHead(
@@ -6291,6 +6295,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               command: submission.command,
               simulationSeconds: submission.simulationSeconds,
               wallSeconds: submission.wallSeconds,
+              ...(submission.approximate
+                ? { advanceMode: "pure-idle-conservative-v2" as const }
+                : {}),
             });
           } catch (error) {
             // The JS authority and compatible v47 save remain exact. Native

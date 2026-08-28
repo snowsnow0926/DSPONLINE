@@ -313,6 +313,8 @@ pub enum CommitFaultPoint {
     #[cfg(test)]
     CorruptManifestBeforeReadback,
     #[cfg(test)]
+    TransientReconciliationReadbackFailure,
+    #[cfg(test)]
     WalMaintenanceIoFailure,
     #[cfg(test)]
     MutateWalAfterSuperblockPublish,
@@ -323,6 +325,11 @@ struct InvalidPublishedGeneration {
     generation: u64,
     revision: u64,
     reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct UncertainPublication {
+    identity: PublishedCheckpointIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,6 +348,9 @@ pub struct SaveStore {
     temporary_namespace: String,
     transactions: HashMap<String, SaveTransaction>,
     verified_manifests: RefCell<HashMap<String, SaveManifest>>,
+    uncertain_publications: HashMap<String, UncertainPublication>,
+    #[cfg(test)]
+    transient_reconciliation_failures: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -404,6 +414,9 @@ impl SaveStore {
             temporary_namespace: format!("{}-{opened_at:032x}", std::process::id()),
             transactions: HashMap::new(),
             verified_manifests: RefCell::new(HashMap::new()),
+            uncertain_publications: HashMap::new(),
+            #[cfg(test)]
+            transient_reconciliation_failures: HashSet::new(),
         })
     }
 
@@ -761,6 +774,15 @@ impl SaveStore {
             &superblock_bytes,
             &self.next_temporary_name()?,
         )?;
+        // Keep the exact transaction-to-manifest binding across any error
+        // after pointer replacement. Core reconciliation may consume it only
+        // after a fresh disk scan proves this complete manifest is current.
+        self.uncertain_publications.insert(
+            transaction.id.clone(),
+            UncertainPublication {
+                identity: PublishedCheckpointIdentity::from(&manifest),
+            },
+        );
         // From this point on the on-disk authority may be newer than the
         // in-process cache, even if a following durability or readback step
         // reports an error. Never allow a retry to observe the old cached
@@ -771,6 +793,13 @@ impl SaveStore {
         sync_directory(&self.slot_dir(&transaction.slot)?)?;
         if fault == CommitFaultPoint::AfterSuperblockPublish {
             bail!("injected failure after superblock publish");
+        }
+
+        #[cfg(test)]
+        if fault == CommitFaultPoint::TransientReconciliationReadbackFailure {
+            self.transient_reconciliation_failures
+                .insert(transaction.id.clone());
+            bail!("injected transient checkpoint readback failure");
         }
 
         #[cfg(test)]
@@ -844,6 +873,7 @@ impl SaveStore {
         self.verified_manifests
             .borrow_mut()
             .insert(transaction.slot.clone(), manifest.clone());
+        self.uncertain_publications.remove(transaction_id);
         let total_uncompressed_bytes = manifest
             .records
             .values()
@@ -861,6 +891,39 @@ impl SaveStore {
             wal_maintenance_pending: wal_maintenance.pending,
             wal_bytes: wal_maintenance.bytes,
         })
+    }
+
+    /// Reconciles a response lost after superblock replacement. Transactions
+    /// without a post-publication marker are never upgraded to success. A
+    /// marked transaction is accepted only when a fresh scan proves its full
+    /// manifest is still the latest authenticated publication.
+    pub(crate) fn reconcile_uncertain_publication(
+        &mut self,
+        transaction_id: &str,
+    ) -> anyhow::Result<Option<PublishedCheckpointIdentity>> {
+        let Some(expected) = self.uncertain_publications.get(transaction_id).cloned() else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if self
+            .transient_reconciliation_failures
+            .remove(transaction_id)
+        {
+            bail!("injected transient uncertain checkpoint reconciliation failure");
+        }
+        let actual = self
+            .scan_published_manifests(&expected.identity.slot)?
+            .pop()
+            .ok_or_else(|| anyhow!("uncertain native checkpoint publication is missing"))?;
+        let actual_identity = PublishedCheckpointIdentity::from(&actual);
+        if actual_identity != expected.identity {
+            bail!("uncertain native checkpoint publication identity changed");
+        }
+        self.verified_manifests
+            .borrow_mut()
+            .insert(actual.slot.clone(), actual.clone());
+        self.uncertain_publications.remove(transaction_id);
+        Ok(Some(actual_identity))
     }
 
     pub fn recover(&self, slot: &str) -> anyhow::Result<Option<SaveRecoveryResult>> {

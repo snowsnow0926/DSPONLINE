@@ -21,6 +21,8 @@ import type { SaveMode } from "./types";
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 
+export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2";
+
 type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult
   | DesktopNativeCoreStatisticsProjectionResult;
@@ -67,7 +69,7 @@ export interface WindowsNativeCoreShadow {
     baseRevision: number;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<{ supported: boolean; revision: number; reason?: string }>;
   advanceSegmented(request: NativeCoreSegmentedAdvanceRequest): Promise<NativeCoreSegmentedAdvanceResult>;
   commitOperation(request: {
@@ -76,7 +78,7 @@ export interface WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult>;
   createCheckpoint(savedAtMs?: number): Promise<DesktopNativeCoreCheckpointResult>;
@@ -94,6 +96,7 @@ export interface NativeCoreSegmentedAdvanceRequest {
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
+  advanceMode?: NativeCoreAdvanceMode;
   maxSegmentSeconds?: number;
   signal?: AbortSignal;
   onProgress?: (progress: {
@@ -118,6 +121,7 @@ export type NativeCoreAdvanceSegmentExecutor = (request: {
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
+  advanceMode?: NativeCoreAdvanceMode;
 }) => Promise<{ supported: boolean; revision: number; reason?: string }>;
 
 export function partitionNativeAdvanceBudget(
@@ -179,7 +183,9 @@ export async function advanceNativeCoreSegmented(
     if (request.signal?.aborted) {
       return { supported: true, revision, cancelled: true, advancedSimulationSeconds, advancedWallSeconds };
     }
-    const result = await advance({ baseRevision: revision, ...segment });
+    const result = await advance(request.advanceMode === undefined
+      ? { baseRevision: revision, ...segment }
+      : { baseRevision: revision, ...segment, advanceMode: request.advanceMode });
     if (!result.supported) {
       return {
         supported: false,
@@ -289,7 +295,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     baseRevision: number;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<{ supported: boolean; revision: number; reason?: string }> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
@@ -312,7 +318,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");

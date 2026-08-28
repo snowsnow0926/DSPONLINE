@@ -12,6 +12,10 @@ const SAMPLE_SECONDS: f64 = 1.0;
 const RECENT_FINE_SECONDS: f64 = 70.0;
 const RECENT_MEDIUM_SECONDS: f64 = 660.0;
 const HISTORY_RETENTION_SECONDS: f64 = 3_660.0;
+const TIERED_MINUTE_SECONDS: f64 = 60.0;
+const TIERED_TEN_MINUTE_SECONDS: f64 = 600.0;
+const TIERED_HOUR_SECONDS: f64 = 3_600.0;
+const TIERED_HISTORY_RETENTION_SECONDS: f64 = 24.0 * TIERED_HOUR_SECONDS;
 
 type RateAccumulator = HashMap<String, f64>;
 type PlanetRateAccumulator = HashMap<String, RateAccumulator>;
@@ -240,6 +244,48 @@ fn merge_samples(samples: &[Value]) -> anyhow::Result<Value> {
     }))
 }
 
+fn split_sample_at_duration(
+    sample: &Value,
+    prefix_duration: f64,
+    previous_inventory: Option<&Value>,
+) -> anyhow::Result<(Value, Value)> {
+    let duration = sample_duration(sample);
+    if prefix_duration <= 0.0 || prefix_duration >= duration {
+        bail!("native production history split duration is invalid");
+    }
+    let elapsed = finite_number(sample.get("elapsedSeconds"))
+        .ok_or_else(|| anyhow!("native production history sample elapsed time is invalid"))?;
+    let mut prefix = sample.clone();
+    let mut suffix = sample.clone();
+    let prefix_object = prefix
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("native production history sample is invalid"))?;
+    prefix_object.insert(
+        "elapsedSeconds".to_owned(),
+        Value::from(elapsed - duration + prefix_duration),
+    );
+    prefix_object.insert(
+        "sampleDurationSeconds".to_owned(),
+        Value::from(prefix_duration),
+    );
+    // Inventory is an endpoint snapshot, not a rate. The source sample only
+    // proves its inventory at the end of the complete interval, so copying it
+    // into an earlier split would make a statistics query observe the future.
+    // Use the latest snapshot known at or before the prefix boundary instead.
+    prefix_object.insert(
+        "inventory".to_owned(),
+        Value::Object(clone_object(previous_inventory)),
+    );
+    suffix
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("native production history sample is invalid"))?
+        .insert(
+            "sampleDurationSeconds".to_owned(),
+            Value::from(duration - prefix_duration),
+        );
+    Ok((prefix, suffix))
+}
+
 fn compact_buckets_before(
     history: &mut Vec<Value>,
     cutoff_elapsed_seconds: f64,
@@ -294,6 +340,224 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
         history.remove(0);
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TieredHistorySource {
+    public_len: usize,
+    history_recorded_at_bits: u64,
+    latest_elapsed_bits: Option<u64>,
+    latest_duration_bits: Option<u64>,
+}
+
+fn tiered_history_source(
+    base: &Map<String, Value>,
+) -> anyhow::Result<(TieredHistorySource, &[Value])> {
+    let history = match base.get("productionHistory") {
+        Some(Value::Array(history)) => history.as_slice(),
+        Some(_) => bail!("native production history is invalid"),
+        None => &[],
+    };
+    let latest = history.last();
+    for sample in history {
+        if !sample.is_object() || finite_number(sample.get("elapsedSeconds")).is_none() {
+            bail!("native production history sample is invalid");
+        }
+    }
+    let latest_elapsed = latest.and_then(|sample| finite_number(sample.get("elapsedSeconds")));
+    let recorded = finite_number(base.get("historyRecordedAt"))
+        .or(latest_elapsed)
+        .or_else(|| finite_number(base.get("elapsedSeconds")))
+        .unwrap_or(0.0);
+    Ok((
+        TieredHistorySource {
+            public_len: history.len(),
+            history_recorded_at_bits: recorded.to_bits(),
+            latest_elapsed_bits: latest_elapsed.map(f64::to_bits),
+            latest_duration_bits: latest.map(sample_duration).map(f64::to_bits),
+        },
+        history,
+    ))
+}
+
+fn compact_tiered_buckets_before(
+    history: &mut Vec<Value>,
+    cutoff_elapsed_seconds: f64,
+    target_duration_seconds: f64,
+) -> anyhow::Result<()> {
+    let mut start = 0;
+    while start < history.len() {
+        let source_is_eligible = |sample: &Value| {
+            finite_number(sample.get("elapsedSeconds")).unwrap_or(f64::INFINITY)
+                <= cutoff_elapsed_seconds
+                && sample_duration(sample) < target_duration_seconds
+        };
+        if !source_is_eligible(&history[start]) {
+            start += 1;
+            continue;
+        }
+        let mut duration = 0.0;
+        let mut end = start;
+        while end < history.len() && source_is_eligible(&history[end]) {
+            let next_duration = sample_duration(&history[end]);
+            if duration + next_duration <= target_duration_seconds {
+                duration += next_duration;
+                end += 1;
+            } else {
+                // Publications can cover 1, 4, 5, 12, or more simulation
+                // seconds. Split only the private diagnostic sample at the
+                // promotion boundary so its weighted rates remain exact and
+                // promoted durations never drift to 64/604/3604 seconds.
+                let needed = target_duration_seconds - duration;
+                let previous_inventory = end
+                    .checked_sub(1)
+                    .and_then(|index| history.get(index))
+                    .and_then(|sample| sample.get("inventory"))
+                    .cloned();
+                let (prefix, suffix) =
+                    split_sample_at_duration(&history[end], needed, previous_inventory.as_ref())?;
+                history.splice(end..=end, [prefix, suffix]);
+                duration = target_duration_seconds;
+                end += 1;
+            }
+            if duration >= target_duration_seconds {
+                break;
+            }
+        }
+        if duration < target_duration_seconds {
+            start += 1;
+            continue;
+        }
+        let merged = merge_samples(&history[start..end])?;
+        history.splice(start..end, [merged]);
+        start += 1;
+    }
+    Ok(())
+}
+
+fn compact_tiered_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
+    history.sort_by(|left, right| {
+        finite_number(left.get("elapsedSeconds"))
+            .unwrap_or(0.0)
+            .partial_cmp(&finite_number(right.get("elapsedSeconds")).unwrap_or(0.0))
+            .unwrap_or(Ordering::Equal)
+    });
+    let latest = history
+        .last()
+        .and_then(|sample| finite_number(sample.get("elapsedSeconds")))
+        .unwrap_or(0.0);
+    compact_tiered_buckets_before(
+        history,
+        latest - TIERED_MINUTE_SECONDS,
+        TIERED_MINUTE_SECONDS,
+    )?;
+    compact_tiered_buckets_before(
+        history,
+        latest - TIERED_TEN_MINUTE_SECONDS,
+        TIERED_TEN_MINUTE_SECONDS,
+    )?;
+    compact_tiered_buckets_before(history, latest - TIERED_HOUR_SECONDS, TIERED_HOUR_SECONDS)?;
+    let mut retained = history.iter().map(sample_duration).sum::<f64>();
+    while history.len() > 1
+        && retained - sample_duration(&history[0]) >= TIERED_HISTORY_RETENTION_SECONDS
+    {
+        retained -= sample_duration(&history[0]);
+        history.remove(0);
+    }
+    Ok(())
+}
+
+/// Private, runtime-only statistics index. It is rebuilt from the public v47
+/// history on open and is deliberately excluded from public serialization,
+/// canonical hashes, checkpoints, and migrations. Consequently the JS
+/// authority keeps its established 1/10/60-second history bytes while native
+/// statistics can query bounded 1-second/1-minute/10-minute/1-hour tiers.
+#[derive(Debug, Clone)]
+pub(crate) struct TieredProductionHistory {
+    samples: Vec<Value>,
+    source: Option<TieredHistorySource>,
+    available: bool,
+    dirty: bool,
+}
+
+impl TieredProductionHistory {
+    pub(crate) fn from_base(base: &Map<String, Value>) -> Self {
+        let Ok((source, history)) = tiered_history_source(base) else {
+            return Self {
+                samples: Vec::new(),
+                source: None,
+                available: false,
+                dirty: false,
+            };
+        };
+        let mut samples = history.to_vec();
+        let available = compact_tiered_history(&mut samples).is_ok();
+        Self {
+            samples: if available { samples } else { Vec::new() },
+            source: available.then_some(source),
+            available,
+            dirty: false,
+        }
+    }
+
+    pub(crate) fn refresh_from_base(&mut self, base: &Map<String, Value>) {
+        *self = Self::from_base(base);
+    }
+
+    /// Fast path used only after the native simulator itself appended the
+    /// public v47 sample. Commands and arbitrary base patches always rebuild
+    /// this cache, so an edit to an older sample is never silently trusted.
+    pub(crate) fn refresh_after_internal_sample(&mut self, base: &Map<String, Value>) {
+        let Ok((source, public_history)) = tiered_history_source(base) else {
+            self.samples.clear();
+            self.source = None;
+            self.available = false;
+            self.dirty = false;
+            return;
+        };
+        if self.available && self.source == Some(source) {
+            self.dirty = false;
+            return;
+        }
+        let append_latest = self.source.filter(|_| self.available).and_then(|previous| {
+            let previous_recorded = f64::from_bits(previous.history_recorded_at_bits);
+            let current_recorded = f64::from_bits(source.history_recorded_at_bits);
+            let latest = public_history.last()?;
+            let latest_elapsed = finite_number(latest.get("elapsedSeconds"))?;
+            let latest_duration = sample_duration(latest);
+            (current_recorded > previous_recorded + EPSILON
+                && (latest_elapsed - current_recorded).abs() <= EPSILON
+                && (current_recorded - previous_recorded - latest_duration).abs() <= EPSILON)
+                .then(|| latest.clone())
+        });
+        if let Some(sample) = append_latest {
+            self.samples.push(sample);
+            if compact_tiered_history(&mut self.samples).is_ok() {
+                self.source = Some(source);
+                self.dirty = false;
+                return;
+            }
+        }
+        *self = Self::from_base(base);
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(crate) fn samples_if_current<'a>(
+        &'a self,
+        base: &'a Map<String, Value>,
+    ) -> anyhow::Result<&'a [Value]> {
+        let (source, public_history) = tiered_history_source(base)?;
+        if !self.dirty && self.available && self.source == Some(source) {
+            return Ok(&self.samples);
+        }
+        // Commands may mutate the public history between private-cache
+        // refreshes. A bounded public-history fallback is always safer than a
+        // stale private result or making statistics temporarily unavailable.
+        Ok(public_history)
+    }
 }
 
 impl CoreState {
@@ -853,6 +1117,29 @@ impl CoreState {
 mod tests {
     use super::*;
 
+    fn history_sample(elapsed_seconds: f64, rate: f64, duration: f64) -> Value {
+        serde_json::json!({
+            "elapsedSeconds": elapsed_seconds,
+            "sampleDurationSeconds": duration,
+            "productionPerMinute": {"iron_ingot": rate},
+            "consumptionPerMinute": {"iron_ore": rate / 5.0},
+            "planetProductionPerMinute": {"home": {"iron_ingot": rate}},
+            "planetConsumptionPerMinute": {"home": {"iron_ore": rate / 5.0}},
+            "inventory": {"iron_ingot": elapsed_seconds},
+            "generationKw": rate * 10.0,
+            "demandKw": rate * 4.0,
+            "machineEfficiency": rate / 100.0,
+            "logisticsEfficiency": rate / 200.0,
+            "powerEfficiency": 1.0,
+            "activeMachines": rate / 10.0,
+            "blockedMachines": rate / 30.0,
+        })
+    }
+
+    fn covered_seconds(history: &[Value]) -> f64 {
+        history.iter().map(sample_duration).sum()
+    }
+
     fn reference_add_rate(target: &mut BTreeMap<String, f64>, item: &str, amount: f64) {
         target.insert(
             item.to_owned(),
@@ -1046,5 +1333,277 @@ mod tests {
                 stable_bytes = Some(actual_bytes);
             }
         }
+    }
+
+    #[test]
+    fn tiered_history_promotes_exact_minute_ten_minute_and_hour_boundaries() {
+        let mut history = (1..=7_200)
+            .map(|second| history_sample(f64::from(second), 60.0, 1.0))
+            .collect::<Vec<_>>();
+
+        compact_tiered_history(&mut history).unwrap();
+
+        let count_duration = |duration: f64| {
+            history
+                .iter()
+                .filter(|sample| sample_duration(sample) == duration)
+                .count()
+        };
+        assert_eq!(history.len(), 75);
+        assert_eq!(count_duration(1.0), 60);
+        assert_eq!(count_duration(TIERED_MINUTE_SECONDS), 9);
+        assert_eq!(count_duration(TIERED_TEN_MINUTE_SECONDS), 5);
+        assert_eq!(count_duration(TIERED_HOUR_SECONDS), 1);
+        assert_eq!(covered_seconds(&history), 7_200.0);
+        assert_eq!(history.last().unwrap()["elapsedSeconds"], 7_200.0);
+
+        let mut previous_end = 0.0;
+        for sample in &history {
+            let end = finite_number(sample.get("elapsedSeconds")).unwrap();
+            assert_eq!(end - sample_duration(sample), previous_end);
+            previous_end = end;
+        }
+    }
+
+    #[test]
+    fn tiered_history_retains_a_complete_day_without_dropping_below_the_horizon() {
+        let mut history = (1..=30)
+            .map(|hour| {
+                history_sample(
+                    f64::from(hour) * TIERED_HOUR_SECONDS,
+                    f64::from(hour),
+                    TIERED_HOUR_SECONDS,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        compact_tiered_history(&mut history).unwrap();
+
+        assert_eq!(history.len(), 24);
+        assert_eq!(covered_seconds(&history), TIERED_HISTORY_RETENTION_SECONDS);
+        assert_eq!(history.first().unwrap()["elapsedSeconds"], 7.0 * 3_600.0);
+        assert_eq!(history.last().unwrap()["elapsedSeconds"], 30.0 * 3_600.0);
+        assert!(
+            covered_seconds(&history) - sample_duration(&history[0])
+                < TIERED_HISTORY_RETENTION_SECONDS
+        );
+    }
+
+    #[test]
+    fn tiered_history_merge_uses_duration_weights_and_latest_inventory() {
+        let mut first = history_sample(20.0, 30.0, 20.0);
+        first["machineEfficiency"] = Value::from(0.25);
+        first["activeMachines"] = Value::from(2);
+        first["blockedMachines"] = Value::from(1);
+        let mut second = history_sample(60.0, 90.0, 40.0);
+        second["machineEfficiency"] = Value::from(0.75);
+        second["activeMachines"] = Value::from(5);
+        second["blockedMachines"] = Value::from(4);
+
+        let merged = merge_samples(&[first, second]).unwrap();
+
+        assert_eq!(merged["sampleDurationSeconds"], 60.0);
+        assert_eq!(merged["productionPerMinute"]["iron_ingot"], 70.0);
+        assert_eq!(merged["consumptionPerMinute"]["iron_ore"], 14.0);
+        assert_eq!(
+            merged["planetProductionPerMinute"]["home"]["iron_ingot"],
+            70.0
+        );
+        assert_eq!(merged["inventory"]["iron_ingot"], 60.0);
+        assert_eq!(merged["generationKw"], 700.0);
+        assert_eq!(merged["demandKw"], 280.0);
+        assert_eq!(merged["machineEfficiency"], 0.5833);
+        assert_eq!(merged["activeMachines"], 4.0);
+        assert_eq!(merged["blockedMachines"], 3.0);
+    }
+
+    #[test]
+    fn tiered_history_split_does_not_expose_future_inventory() {
+        let first = history_sample(20.0, 30.0, 20.0);
+        let second = history_sample(70.0, 90.0, 50.0);
+        let mut history = vec![first, second];
+
+        compact_tiered_buckets_before(&mut history, 100.0, 60.0).unwrap();
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["elapsedSeconds"], 60.0);
+        assert_eq!(history[0]["sampleDurationSeconds"], 60.0);
+        assert_eq!(history[0]["inventory"]["iron_ingot"], 20.0);
+        assert_eq!(history[1]["elapsedSeconds"], 70.0);
+        assert_eq!(history[1]["sampleDurationSeconds"], 10.0);
+        assert_eq!(history[1]["inventory"]["iron_ingot"], 70.0);
+    }
+
+    #[test]
+    fn tiered_history_is_deterministic_across_irregular_publication_segments() {
+        let pattern: [f64; 3] = [4.0, 5.0, 12.0];
+        let mut elapsed = 0.0_f64;
+        let mut source = Vec::new();
+        let mut index = 0;
+        while elapsed < 7_200.0 {
+            let duration = pattern[index % pattern.len()].min(7_200.0 - elapsed);
+            elapsed += duration;
+            let rate = rounded(17.0 + f64::from((index % 29) as u32) * 0.37, 2);
+            source.push(history_sample(elapsed, rate, duration));
+            index += 1;
+        }
+
+        let mut whole = source.clone();
+        compact_tiered_history(&mut whole).unwrap();
+        let mut segmented = Vec::new();
+        for chunk in source.chunks(137) {
+            segmented.extend_from_slice(chunk);
+            compact_tiered_history(&mut segmented).unwrap();
+        }
+
+        assert_eq!(
+            serde_json::to_vec(&segmented).unwrap(),
+            serde_json::to_vec(&whole).unwrap()
+        );
+        assert_eq!(covered_seconds(&segmented), 7_200.0);
+        assert!(segmented.iter().all(|sample| {
+            let duration = sample_duration(sample);
+            duration <= TIERED_MINUTE_SECONDS
+                || duration == TIERED_TEN_MINUTE_SECONDS
+                || duration == TIERED_HOUR_SECONDS
+        }));
+    }
+
+    #[test]
+    fn tiered_history_serialization_is_stable_and_does_not_mutate_public_v47_history() {
+        let public_history = (1..=7_200)
+            .map(|second| history_sample(f64::from(second), 60.0, 1.0))
+            .collect::<Vec<_>>();
+        let base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(7_200)),
+            ("historyRecordedAt".to_owned(), Value::from(7_200)),
+            ("productionHistory".to_owned(), Value::Array(public_history)),
+        ]);
+        let public_before = serde_json::to_vec(&base).unwrap();
+
+        let first = TieredProductionHistory::from_base(&base);
+        let first_bytes = serde_json::to_vec(first.samples_if_current(&base).unwrap()).unwrap();
+        let second = TieredProductionHistory::from_base(&base);
+        let second_bytes = serde_json::to_vec(second.samples_if_current(&base).unwrap()).unwrap();
+        let mut decoded = serde_json::from_slice::<Vec<Value>>(&first_bytes).unwrap();
+        compact_tiered_history(&mut decoded).unwrap();
+
+        assert_eq!(first_bytes, second_bytes);
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), first_bytes);
+        assert_eq!(serde_json::to_vec(&base).unwrap(), public_before);
+        assert_eq!(base["version"], 47);
+    }
+
+    #[test]
+    fn tiered_history_detects_earlier_public_edits_and_falls_back_without_stale_data() {
+        let mut base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(3)),
+            ("historyRecordedAt".to_owned(), Value::from(3)),
+            (
+                "productionHistory".to_owned(),
+                Value::Array(vec![
+                    history_sample(1.0, 60.0, 1.0),
+                    history_sample(2.0, 70.0, 1.0),
+                    history_sample(3.0, 80.0, 1.0),
+                ]),
+            ),
+        ]);
+        let mut tiered = TieredProductionHistory::from_base(&base);
+        tiered.invalidate();
+        base.get_mut("productionHistory")
+            .and_then(Value::as_array_mut)
+            .unwrap()[0]["productionPerMinute"]["iron_ingot"] = Value::from(777.0);
+
+        // Before refresh, never serve the old private cache merely because
+        // length, latest timestamp, and historyRecordedAt are unchanged.
+        let fallback = tiered.samples_if_current(&base).unwrap();
+        assert_eq!(fallback[0]["productionPerMinute"]["iron_ingot"], 777.0);
+
+        tiered.refresh_from_base(&base);
+        let refreshed = tiered.samples_if_current(&base).unwrap();
+        assert_eq!(refreshed[0]["productionPerMinute"]["iron_ingot"], 777.0);
+    }
+
+    #[test]
+    fn tiered_history_handles_whole_replacement_and_empty_history_without_unavailability() {
+        let mut base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(2)),
+            ("historyRecordedAt".to_owned(), Value::from(2)),
+            (
+                "productionHistory".to_owned(),
+                Value::Array(vec![
+                    history_sample(1.0, 60.0, 1.0),
+                    history_sample(2.0, 70.0, 1.0),
+                ]),
+            ),
+        ]);
+        let mut tiered = TieredProductionHistory::from_base(&base);
+
+        tiered.invalidate();
+        base.insert(
+            "productionHistory".to_owned(),
+            Value::Array(vec![
+                history_sample(1.0, 160.0, 1.0),
+                history_sample(2.0, 170.0, 1.0),
+            ]),
+        );
+        let replacement = tiered.samples_if_current(&base).unwrap();
+        assert_eq!(replacement[0]["productionPerMinute"]["iron_ingot"], 160.0);
+        tiered.refresh_from_base(&base);
+        assert_eq!(
+            tiered.samples_if_current(&base).unwrap()[1]["productionPerMinute"]["iron_ingot"],
+            170.0
+        );
+
+        tiered.invalidate();
+        base.insert("productionHistory".to_owned(), Value::Array(Vec::new()));
+        assert!(tiered.samples_if_current(&base).unwrap().is_empty());
+        tiered.refresh_from_base(&base);
+        assert!(tiered.samples_if_current(&base).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tiered_history_refresh_retains_private_hours_while_public_history_keeps_legacy_layout() {
+        let mut base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(0)),
+            ("historyRecordedAt".to_owned(), Value::from(0)),
+            ("productionHistory".to_owned(), Value::Array(Vec::new())),
+        ]);
+        let mut tiered = TieredProductionHistory::from_base(&base);
+        for second in 1..=7_200 {
+            let history = base
+                .get_mut("productionHistory")
+                .and_then(Value::as_array_mut)
+                .unwrap();
+            history.push(history_sample(f64::from(second), 60.0, 1.0));
+            compact_history(history).unwrap();
+            base.insert("elapsedSeconds".to_owned(), Value::from(second));
+            base.insert("historyRecordedAt".to_owned(), Value::from(second));
+            tiered.refresh_after_internal_sample(&base);
+        }
+
+        let public_history = base["productionHistory"].as_array().unwrap();
+        let private_history = tiered.samples_if_current(&base).unwrap();
+        assert!(covered_seconds(public_history) >= 3_600.0);
+        assert!(covered_seconds(public_history) <= HISTORY_RETENTION_SECONDS);
+        assert!(public_history.iter().all(|sample| {
+            let duration = sample_duration(sample);
+            duration == 1.0 || duration == 10.0 || duration == 60.0
+        }));
+        assert_eq!(covered_seconds(private_history), 7_200.0);
+        assert!(
+            private_history
+                .iter()
+                .any(|sample| sample_duration(sample) == TIERED_HOUR_SECONDS)
+        );
+        assert!(
+            private_history
+                .iter()
+                .any(|sample| sample_duration(sample) == TIERED_TEN_MINUTE_SECONDS)
+        );
     }
 }

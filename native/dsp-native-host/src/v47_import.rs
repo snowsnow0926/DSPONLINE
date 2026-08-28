@@ -1,9 +1,10 @@
 use std::fs::{self, File, FileType, OpenOptions};
-use std::io::{Error as IoError, ErrorKind, Read};
+use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Read};
 use std::path::Path;
 
 use anyhow::{Context, bail};
 use dsp_native_core::MAX_V47_IMPORT_BYTES;
+use flate2::bufread::GzDecoder;
 
 #[cfg(windows)]
 use std::os::windows::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
@@ -21,8 +22,112 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 pub struct V47ImportSource {
-    pub file: V47ImportFile,
+    file: V47ImportFile,
     pub byte_length: u64,
+    encoding: V47ImportEncoding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum V47ImportEncoding {
+    Json,
+    Gzip,
+}
+
+pub struct V47ImportDecodedReader {
+    inner: V47ImportDecodedReaderInner,
+}
+
+enum V47ImportDecodedReaderInner {
+    Json(V47ImportFile),
+    Gzip(Box<StrictSingleMemberGzipReader>),
+}
+
+impl V47ImportSource {
+    /// Returns a decoded JSON reader and, for an uncompressed `.json`, the
+    /// exact byte length that must still match at EOF. A `.json.gz` has no
+    /// predeclared decoded length; the core counts and bounds those bytes.
+    pub fn into_decoded_reader(self) -> (V47ImportDecodedReader, Option<u64>) {
+        match self.encoding {
+            V47ImportEncoding::Json => (
+                V47ImportDecodedReader {
+                    inner: V47ImportDecodedReaderInner::Json(self.file),
+                },
+                Some(self.byte_length),
+            ),
+            V47ImportEncoding::Gzip => (
+                V47ImportDecodedReader {
+                    inner: V47ImportDecodedReaderInner::Gzip(Box::new(
+                        StrictSingleMemberGzipReader::new(self.file),
+                    )),
+                },
+                None,
+            ),
+        }
+    }
+}
+
+impl Read for V47ImportDecodedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match &mut self.inner {
+            V47ImportDecodedReaderInner::Json(reader) => reader.read(buffer),
+            V47ImportDecodedReaderInner::Gzip(reader) => reader.read(buffer),
+        }
+    }
+}
+
+struct StrictSingleMemberGzipReader {
+    decoder: GzDecoder<BufReader<V47ImportFile>>,
+    decoded_bytes: u64,
+    finished: bool,
+}
+
+impl StrictSingleMemberGzipReader {
+    fn new(file: V47ImportFile) -> Self {
+        Self {
+            decoder: GzDecoder::new(BufReader::new(file)),
+            decoded_bytes: 0,
+            finished: false,
+        }
+    }
+}
+
+impl Read for StrictSingleMemberGzipReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() || self.finished {
+            return Ok(0);
+        }
+        let bytes = self.decoder.read(buffer)?;
+        if bytes != 0 {
+            self.decoded_bytes = self
+                .decoded_bytes
+                .checked_add(bytes as u64)
+                .ok_or_else(|| {
+                    IoError::new(
+                        ErrorKind::InvalidData,
+                        "native v47 gzip decoded byte count overflowed",
+                    )
+                })?;
+            if self.decoded_bytes > MAX_V47_IMPORT_BYTES {
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
+                    "native v47 gzip import exceeds the decoded 256 MiB limit",
+                ));
+            }
+            return Ok(bytes);
+        }
+
+        // The BufRead decoder consumes exactly one gzip member. Any byte left
+        // in its input after the member footer is therefore ambiguous trailing
+        // data or a second member, both of which this import format rejects.
+        if !self.decoder.get_mut().fill_buf()?.is_empty() {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "native v47 gzip import contains trailing data or multiple members",
+            ));
+        }
+        self.finished = true;
+        Ok(0)
+    }
 }
 
 pub struct V47ImportFile {
@@ -70,6 +175,7 @@ pub fn open_v47_import_source(path: &Path) -> anyhow::Result<V47ImportSource> {
     if !path.is_absolute() {
         bail!("native v47 import path must be absolute");
     }
+    let encoding = import_encoding(path)?;
     let path_metadata =
         fs::symlink_metadata(path).context("inspect native v47 import selection")?;
     validate_direct_file_type(path_metadata.file_type(), &path_metadata)?;
@@ -116,7 +222,23 @@ pub fn open_v47_import_source(path: &Path) -> anyhow::Result<V47ImportSource> {
             identity,
         },
         byte_length: opened_metadata.len(),
+        encoding,
     })
+}
+
+fn import_encoding(path: &Path) -> anyhow::Result<V47ImportEncoding> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("native v47 import file name is invalid"))?
+        .to_ascii_lowercase();
+    if name.ends_with(".json.gz") {
+        Ok(V47ImportEncoding::Gzip)
+    } else if name.ends_with(".json") {
+        Ok(V47ImportEncoding::Json)
+    } else {
+        bail!("native v47 import requires a .json or .json.gz file");
+    }
 }
 
 #[cfg(windows)]
@@ -234,7 +356,10 @@ fn validate_direct_file_type(file_type: FileType, _metadata: &fs::Metadata) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsp_native_core::parse_v47_envelope;
+    use dsp_native_core::{parse_v47_envelope, parse_v47_envelope_stream};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use sha2::Digest;
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempdir;
 
@@ -256,15 +381,23 @@ mod tests {
         .into_bytes()
     }
 
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
     #[test]
     fn opens_only_a_bounded_absolute_regular_file() {
         let root = tempdir().unwrap();
         let path = root.path().join("save.json");
         fs::write(&path, b"{}").unwrap();
-        let mut source = open_v47_import_source(&path).unwrap();
+        let source = open_v47_import_source(&path).unwrap();
         assert_eq!(source.byte_length, 2);
+        let (mut reader, expected_byte_length) = source.into_decoded_reader();
+        assert_eq!(expected_byte_length, Some(2));
         let mut bytes = Vec::new();
-        source.file.read_to_end(&mut bytes).unwrap();
+        reader.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"{}");
         assert!(open_v47_import_source(Path::new("save.json")).is_err());
         let empty = root.path().join("empty.json");
@@ -276,6 +409,73 @@ mod tests {
             .set_len(MAX_V47_IMPORT_BYTES + 1)
             .unwrap();
         assert!(open_v47_import_source(&oversized).is_err());
+        let unsupported = root.path().join("save.gz");
+        fs::write(&unsupported, gzip(b"{}")).unwrap();
+        assert!(open_v47_import_source(&unsupported).is_err());
+    }
+
+    #[test]
+    fn streams_one_gzip_member_and_proves_the_decoded_json_identity() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("save.JSON.GZ");
+        let decoded = valid_envelope();
+        let compressed = gzip(&decoded);
+        fs::write(&path, &compressed).unwrap();
+
+        let source = open_v47_import_source(&path).unwrap();
+        assert_eq!(source.byte_length, compressed.len() as u64);
+        let (reader, expected_byte_length) = source.into_decoded_reader();
+        assert_eq!(expected_byte_length, None);
+        let parsed = parse_v47_envelope_stream(reader).unwrap();
+        assert_eq!(parsed.proof().source_byte_length, decoded.len() as u64);
+        assert_eq!(
+            parsed.proof().source_sha256,
+            hex::encode(sha2::Sha256::digest(&decoded))
+        );
+    }
+
+    #[test]
+    fn rejects_corrupt_truncated_trailing_and_multi_member_gzip() {
+        fn parse(bytes: &[u8]) -> anyhow::Result<dsp_native_core::ParsedV47Envelope> {
+            let root = tempdir().unwrap();
+            let path = root.path().join("save.json.gz");
+            fs::write(&path, bytes).unwrap();
+            let source = open_v47_import_source(&path).unwrap();
+            let (reader, expected_byte_length) = source.into_decoded_reader();
+            assert_eq!(expected_byte_length, None);
+            parse_v47_envelope_stream(reader)
+        }
+
+        let valid = gzip(&valid_envelope());
+        let mut corrupt = valid.clone();
+        let final_byte = corrupt.last_mut().unwrap();
+        *final_byte ^= 0xff;
+        assert!(parse(&corrupt).is_err());
+
+        let truncated = &valid[..valid.len() - 4];
+        assert!(parse(truncated).is_err());
+
+        let mut trailing = valid.clone();
+        trailing.extend_from_slice(b"trailing");
+        let trailing_error = parse(&trailing).unwrap_err();
+        assert!(format!("{trailing_error:#}").contains("trailing data or multiple members"));
+
+        let mut multiple = valid;
+        multiple.extend_from_slice(&gzip(&valid_envelope()));
+        let multiple_error = parse(&multiple).unwrap_err();
+        assert!(format!("{multiple_error:#}").contains("trailing data or multiple members"));
+    }
+
+    #[test]
+    fn rejects_a_gzip_bomb_when_the_decoded_counter_crosses_256_mib() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("save.json.gz");
+        fs::write(&path, gzip(b"  ")).unwrap();
+        let source = open_v47_import_source(&path).unwrap();
+        let mut reader = StrictSingleMemberGzipReader::new(source.file);
+        reader.decoded_bytes = MAX_V47_IMPORT_BYTES - 1;
+        let error = reader.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("decoded 256 MiB limit"));
     }
 
     #[cfg(not(windows))]
@@ -288,7 +488,10 @@ mod tests {
         let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
         writer.write_all(b" ").unwrap();
         writer.sync_all().unwrap();
-        let error = parse_v47_envelope(source.file, source.byte_length).unwrap_err();
+        let expected_byte_length = source.byte_length;
+        let (reader, expected) = source.into_decoded_reader();
+        let error = parse_v47_envelope(reader, expected.unwrap()).unwrap_err();
+        assert_eq!(expected, Some(expected_byte_length));
         assert!(error.to_string().contains("identity changed"));
     }
 
@@ -304,7 +507,8 @@ mod tests {
         assert!(OpenOptions::new().write(true).open(&path).is_err());
         assert!(fs::rename(&path, root.path().join("replaced.json")).is_err());
         drop(parallel_reader);
-        parse_v47_envelope(source.file, source.byte_length).unwrap();
+        let (reader, expected_byte_length) = source.into_decoded_reader();
+        parse_v47_envelope(reader, expected_byte_length.unwrap()).unwrap();
 
         let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
         writer.seek(SeekFrom::Start(0)).unwrap();

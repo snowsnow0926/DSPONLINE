@@ -444,6 +444,7 @@ impl CoreState {
             .then(|| next.summary())
             .transpose()?;
         *self = next;
+        self.refresh_production_history_tiers();
         Ok(CoreAdvanceResult {
             supported: true,
             exact_scope: "clock-only",

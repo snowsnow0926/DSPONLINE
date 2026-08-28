@@ -5,6 +5,7 @@ import {
   advanceNativeCoreSegmented,
   decodeNativeCoreProjectionTransfer,
   partitionNativeAdvanceBudget,
+  type NativeCoreAdvanceSegmentExecutor,
 } from "./nativeCore";
 
 describe("Windows native core segmented advance", () => {
@@ -42,12 +43,42 @@ describe("Windows native core segmented advance", () => {
       onProgress: () => controller.abort(),
     });
     expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("advanceMode");
     expect(result).toEqual({
       supported: true,
       revision: 8,
       cancelled: true,
       advancedSimulationSeconds: 600,
       advancedWallSeconds: 301 * 600 / 1_201,
+    });
+  });
+
+  it("preserves the pure-idle mode on every acknowledged segment", async () => {
+    const requests: Array<Parameters<NativeCoreAdvanceSegmentExecutor>[0]> = [];
+    const result = await advanceNativeCoreSegmented(async (request) => {
+      requests.push(request);
+      return { supported: true, revision: request.baseRevision + 1 };
+    }, {
+      baseRevision: 11,
+      simulationSeconds: 1_201,
+      wallSeconds: 301,
+      advanceMode: "pure-idle-conservative-v2",
+      maxSegmentSeconds: 600,
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(requests.map((request) => request.advanceMode)).toEqual([
+      "pure-idle-conservative-v2",
+      "pure-idle-conservative-v2",
+      "pure-idle-conservative-v2",
+    ]);
+    expect(requests.map((request) => request.baseRevision)).toEqual([11, 12, 13]);
+    expect(result).toMatchObject({
+      supported: true,
+      revision: 14,
+      cancelled: false,
+      advancedSimulationSeconds: 1_201,
+      advancedWallSeconds: 301,
     });
   });
 

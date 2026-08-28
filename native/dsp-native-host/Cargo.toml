@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 crc32fast.workspace = true
 dsp-native-core = { path = "../dsp-native-core" }
+flate2.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -179,13 +179,19 @@ fn handle_request(
             catalog,
         } => {
             let source = open_v47_import_source(&PathBuf::from(source_path))?;
-            to_value(cores.import_v47(
-                store,
-                source.file,
-                source.byte_length,
-                &registry_fingerprint,
-                catalog,
-            )?)?
+            let (reader, expected_byte_length) = source.into_decoded_reader();
+            let imported = if let Some(expected_byte_length) = expected_byte_length {
+                cores.import_v47(
+                    store,
+                    reader,
+                    expected_byte_length,
+                    &registry_fingerprint,
+                    catalog,
+                )?
+            } else {
+                cores.import_v47_stream(store, reader, &registry_fingerprint, catalog)?
+            };
+            to_value(imported)?
         }
         ControlRequest::CoreStatus { session_id } => to_value(cores.status(&session_id)?)?,
         ControlRequest::CoreProjection {

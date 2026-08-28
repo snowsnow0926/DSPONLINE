@@ -8,6 +8,7 @@ import type {
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import {
   openWindowsNativeCoreShadow,
+  type NativeCoreAdvanceMode,
   type WindowsNativeCoreShadow,
 } from "./nativeCore";
 import {
@@ -230,6 +231,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<NativeCoreMirroredOperationResult> {
     validateCommandId(input.commandId);
     if (this.authorityState.authority !== "javascript" ||
@@ -299,6 +301,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     javascriptProof: NativeCoreRevisionProof;
     compatibleFallback?: NativeCoreRevisionProof;
   }): Promise<NativeCoreMirroredOperationResult> {
@@ -368,6 +371,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     projection?: NativeCoreProjectionSelection;
   }): Promise<NativeCoreAuthoritativeOperationResult> {
     validateCommandId(input.commandId);
@@ -518,6 +522,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult> {
     if (!this.session) throw new Error("原生核心会话不可用");

@@ -31,9 +31,10 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3 均不变；本
 - Chromium 432/27/0；durable 7/7；production preview 3/3；手机浅色检查器专项 1/1。
 - Web build 1,984 modules，startup gzip 180,059 B，forbidden startup modules 0。
 - Android APK/AAB 由受保护加载器使用批准长期配置生成；APK v2/v3、zipalign、包名、`1.2.3 / 1002003` 和证书连续性通过。
+- API 36.1 模拟器完成正式 `1.2.2 / 1002002 → 1.2.3 / 1002003` 原地升级；`firstInstallTime` 不变、候选进程运行、Fatal/ANR 为 0。
 - Windows setup 与 unpacked 的版本、Build ID、stable 通道、正式 API/更新地址和隔离启动通过；Authenticode 明确为 `NotSigned`。
 
-尚未完成的候选专属硬件门禁：Android 实体设备、低配/主流/高配 Windows、`1.2.2 → 1.2.3` 覆盖升级与长时运行。旧候选豁免不得复用；必须补测或由用户明确接受 `1.2.3-25aeeb34e501` 的风险。
+尚未完成的候选专属硬件门禁：Android 实体设备、低配/主流/高配 Windows、Windows `1.2.2 → 1.2.3` 覆盖升级与长时运行。Android 模拟器覆盖升级已通过，但不能代替真机。旧候选豁免不得复用；必须补测或由用户明确接受 `1.2.3-25aeeb34e501` 的风险。
 
 ## 生产预检与切换边界
 

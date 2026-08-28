@@ -247,17 +247,21 @@ pub(crate) struct BeltStepReservation {
 enum ActiveSelection {
     All,
     Dense {
-        selected_groups: Vec<bool>,
         selected_group_indices: Vec<u32>,
+        selected_route_indices: Vec<u32>,
     },
     Mask {
-        selected_groups: Vec<bool>,
         selected_group_indices: Vec<u32>,
-        selected_routes: u64,
+        selected_route_indices: Vec<u32>,
     },
 }
 
 enum ActiveGroupIndices<'a> {
+    All(std::ops::Range<usize>),
+    Mask(std::slice::Iter<'a, u32>),
+}
+
+enum ActiveRouteIndices<'a> {
     All(std::ops::Range<usize>),
     Mask(std::slice::Iter<'a, u32>),
 }
@@ -273,23 +277,25 @@ impl Iterator for ActiveGroupIndices<'_> {
     }
 }
 
-impl ActiveSelection {
-    #[inline]
-    fn includes(&self, group_index: usize) -> bool {
+impl Iterator for ActiveRouteIndices<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::All | Self::Dense { .. } => true,
-            Self::Mask {
-                selected_groups, ..
-            } => selected_groups[group_index],
+            Self::All(indices) => indices.next(),
+            Self::Mask(indices) => indices.next().copied().map(expand_compact_index),
         }
     }
+}
 
+impl ActiveSelection {
     fn selected_routes(&self, route_count: usize) -> u64 {
         match self {
             Self::All | Self::Dense { .. } => route_count as u64,
             Self::Mask {
-                selected_routes, ..
-            } => *selected_routes,
+                selected_route_indices,
+                ..
+            } => selected_route_indices.len() as u64,
         }
     }
 
@@ -303,20 +309,33 @@ impl ActiveSelection {
         }
     }
 
-    fn recycle_into(self, selected_groups: &mut Vec<bool>, selected_group_indices: &mut Vec<u32>) {
+    fn route_indices(&self, route_count: usize) -> ActiveRouteIndices<'_> {
+        match self {
+            Self::All | Self::Dense { .. } => ActiveRouteIndices::All(0..route_count),
+            Self::Mask {
+                selected_route_indices,
+                ..
+            } => ActiveRouteIndices::Mask(selected_route_indices.iter()),
+        }
+    }
+
+    fn recycle_into(
+        self,
+        selected_group_indices: &mut Vec<u32>,
+        selected_route_indices: &mut Vec<u32>,
+    ) {
         match self {
             Self::All => {}
             Self::Dense {
-                selected_groups: reusable_groups,
                 selected_group_indices: reusable_indices,
+                selected_route_indices: reusable_routes,
             }
             | Self::Mask {
-                selected_groups: reusable_groups,
                 selected_group_indices: reusable_indices,
-                ..
+                selected_route_indices: reusable_routes,
             } => {
-                *selected_groups = reusable_groups;
                 *selected_group_indices = reusable_indices;
+                *selected_route_indices = reusable_routes;
             }
         }
     }
@@ -881,8 +900,8 @@ struct BeltWorkspace {
     groups: Vec<Group>,
     usable_candidate_indices: Vec<usize>,
     active_candidate_indices: Vec<usize>,
-    selected_groups: Vec<bool>,
     selected_group_indices: Vec<u32>,
+    selected_route_indices: Vec<u32>,
 }
 
 impl BeltWorkspace {
@@ -896,8 +915,8 @@ impl BeltWorkspace {
             groups,
             usable_candidate_indices: Vec::new(),
             active_candidate_indices: Vec::new(),
-            selected_groups: Vec::with_capacity(group_count),
             selected_group_indices: Vec::with_capacity(group_count),
+            selected_route_indices: Vec::with_capacity(belt_count),
         }
     }
 
@@ -1078,14 +1097,14 @@ fn select_active_groups(
     prepared_routes: &PreparedRoutes,
     reservation: Option<&BeltStepReservation>,
     seconds: f64,
-    mut selected_groups: Vec<bool>,
     mut selected_group_indices: Vec<u32>,
+    mut selected_route_indices: Vec<u32>,
 ) -> anyhow::Result<ActiveSelection> {
     if !runtime.active_queue_enabled {
         return Ok(ActiveSelection::All);
     }
-    selected_groups.clear();
     selected_group_indices.clear();
+    selected_route_indices.clear();
     let mut selected_routes = 0_u64;
     for (group_index, group) in prepared_routes.groups.iter().enumerate() {
         let item_id = state
@@ -1109,8 +1128,8 @@ fn select_active_groups(
         if selected {
             selected_routes += group.route_indices.len() as u64;
             selected_group_indices.push(compact_index(group_index, "active group index")?);
+            selected_route_indices.extend_from_slice(&group.route_indices);
         }
-        selected_groups.push(selected);
     }
     let route_count = prepared_routes.routes.len() as u64;
     if selected_routes.saturating_mul(4) >= route_count.saturating_mul(3) {
@@ -1119,14 +1138,18 @@ fn select_active_groups(
         // scratch allocations attached to the selection so the next sparse
         // pass can reuse them without rebuilding a factory-sized mask.
         Ok(ActiveSelection::Dense {
-            selected_groups,
             selected_group_indices,
+            selected_route_indices,
         })
     } else {
+        // Reservation capacity is shared by target slot and historically
+        // consumed in persisted belt-row order. Group slices are sorted for
+        // source fairness, not globally by row, so recover the old stable
+        // order before the sparse reservation pass skips dormant routes.
+        selected_route_indices.sort_unstable();
         Ok(ActiveSelection::Mask {
-            selected_groups,
             selected_group_indices,
-            selected_routes,
+            selected_route_indices,
         })
     }
 }
@@ -2285,13 +2308,13 @@ pub(crate) fn transfer(
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    let selected_group_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_groups)
+    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
+        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
     } else {
         Vec::new()
     };
-    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
+    let selected_route_index_scratch = if belt_runtime.active_queue_enabled {
+        std::mem::take(&mut belt_runtime.workspace.selected_route_indices)
     } else {
         Vec::new()
     };
@@ -2302,8 +2325,8 @@ pub(crate) fn transfer(
         prepared_routes,
         reservation,
         seconds,
-        selected_group_scratch,
         selected_group_index_scratch,
+        selected_route_index_scratch,
     )?;
     belt_runtime.record_selection(prepared_routes, &selection, false);
     advance_belt_clocks(
@@ -2706,8 +2729,8 @@ pub(crate) fn transfer(
     crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)?;
     refresh_active_groups(belt_runtime, prepared_routes, &selection);
     selection.recycle_into(
-        &mut belt_runtime.workspace.selected_groups,
         &mut belt_runtime.workspace.selected_group_indices,
+        &mut belt_runtime.workspace.selected_route_indices,
     );
     Ok(())
 }
@@ -2734,13 +2757,13 @@ pub(crate) fn reserve(
     };
     let mut quantum_session = None;
     belt_runtime.workspace.reset_target_free();
-    let selected_group_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_groups)
+    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
+        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
     } else {
         Vec::new()
     };
-    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
+    let selected_route_index_scratch = if belt_runtime.active_queue_enabled {
+        std::mem::take(&mut belt_runtime.workspace.selected_route_indices)
     } else {
         Vec::new()
     };
@@ -2751,18 +2774,16 @@ pub(crate) fn reserve(
         prepared_routes,
         None,
         0.0,
-        selected_group_scratch,
         selected_group_index_scratch,
+        selected_route_index_scratch,
     )?;
     belt_runtime.record_selection(prepared_routes, &selection, true);
     let progress = &belt_runtime.progress;
     let target_free = &mut belt_runtime.workspace.target_free;
     let touched_target_slots = &mut belt_runtime.workspace.touched_target_slots;
-    for (belt_index, route) in routes.iter().enumerate() {
+    for belt_index in selection.route_indices(routes.len()) {
+        let route = &routes[belt_index];
         let source_group = route.source_group();
-        if !selection.includes(source_group) {
-            continue;
-        }
         let allowance = (progress[belt_index] + EPSILON).floor().max(0.0);
         if allowance < 1.0 {
             continue;
@@ -2802,8 +2823,8 @@ pub(crate) fn reserve(
         *credit = (*credit + reserved).min(belt_limit);
     }
     selection.recycle_into(
-        &mut belt_runtime.workspace.selected_groups,
         &mut belt_runtime.workspace.selected_group_indices,
+        &mut belt_runtime.workspace.selected_route_indices,
     );
     Ok(result)
 }
@@ -3566,9 +3587,8 @@ mod tests {
             group_by_key: Arc::new(HashMap::new()),
         };
         let selection = ActiveSelection::Mask {
-            selected_groups: vec![false, true],
             selected_group_indices: vec![1],
-            selected_routes: 2,
+            selected_route_indices: vec![1, 2],
         };
         let mut workspace = BeltWorkspace::new(4, 2, 1);
         workspace.post_actions.fill(BeltPostAction::ResetProgress);
@@ -3593,44 +3613,44 @@ mod tests {
 
     #[test]
     fn sparse_selection_recycles_its_mask_allocation() {
-        let mut selected_groups = Vec::with_capacity(128);
-        selected_groups.extend([true, false, true]);
-        let group_capacity = selected_groups.capacity();
         let mut selected_group_indices = Vec::with_capacity(64);
         selected_group_indices.extend([0, 2]);
         let index_capacity = selected_group_indices.capacity();
+        let mut selected_route_indices = Vec::with_capacity(32);
+        selected_route_indices.extend([1, 4]);
+        let route_capacity = selected_route_indices.capacity();
         let selection = ActiveSelection::Mask {
-            selected_groups,
             selected_group_indices,
-            selected_routes: 2,
+            selected_route_indices,
         };
         assert_eq!(selection.group_indices(3).collect::<Vec<_>>(), [0, 2]);
-        let mut group_scratch = Vec::new();
+        assert_eq!(selection.route_indices(5).collect::<Vec<_>>(), [1, 4]);
         let mut index_scratch = Vec::new();
+        let mut route_scratch = Vec::new();
 
-        selection.recycle_into(&mut group_scratch, &mut index_scratch);
+        selection.recycle_into(&mut index_scratch, &mut route_scratch);
 
-        assert_eq!(group_scratch, [true, false, true]);
         assert_eq!(index_scratch, [0, 2]);
-        assert_eq!(group_scratch.capacity(), group_capacity);
+        assert_eq!(route_scratch, [1, 4]);
         assert_eq!(index_scratch.capacity(), index_capacity);
+        assert_eq!(route_scratch.capacity(), route_capacity);
     }
 
     #[test]
     fn dense_selection_uses_flat_order_and_retains_sparse_scratch() {
         let selection = ActiveSelection::Dense {
-            selected_groups: vec![true, true, true, false],
             selected_group_indices: vec![0, 1, 2],
+            selected_route_indices: vec![0, 1, 2],
         };
         assert!(selection.is_full_scan());
         assert_eq!(selection.selected_routes(17), 17);
         assert_eq!(selection.group_indices(4).collect::<Vec<_>>(), [0, 1, 2, 3]);
 
-        let mut groups = Vec::new();
         let mut indices = Vec::new();
-        selection.recycle_into(&mut groups, &mut indices);
-        assert_eq!(groups, [true, true, true, false]);
+        let mut routes = Vec::new();
+        selection.recycle_into(&mut indices, &mut routes);
         assert_eq!(indices, [0, 1, 2]);
+        assert_eq!(routes, [0, 1, 2]);
         assert!(ActiveSelection::All.is_full_scan());
     }
 

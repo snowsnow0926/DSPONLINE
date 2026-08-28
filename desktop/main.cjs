@@ -39,6 +39,9 @@ const {
 } = require("./native-core-exact-realtime-experiment.cjs");
 const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
 const {
+  NativePlayerAuthorityCommandBroker,
+} = require("./native-player-authority-command-broker.cjs");
+const {
   NativePlayerAuthorityProjectionBroker,
 } = require("./native-player-authority-projection-broker.cjs");
 const {
@@ -135,6 +138,7 @@ let nativeHostClient = null;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
+let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
@@ -312,6 +316,12 @@ async function initializeNativeHost() {
       registry: nativeCoreSessions,
       ownerId: playerAuthorityOwnerId,
     });
+    nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
     nativePlayerAuthorityProjectionBroker = new NativePlayerAuthorityProjectionBroker({
       runtime: nativePlayerAuthorityRuntime,
       registry: nativeCoreSessions,
@@ -363,6 +373,7 @@ async function initializeNativeHost() {
     nativeCoreSessions = null;
     nativePlayerAuthorityRuntime?.shutdownForProcessExit();
     nativePlayerAuthorityRuntime = null;
+    nativePlayerAuthorityCommandBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
   }
   return nativeHostState;
@@ -1095,6 +1106,9 @@ ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
     message: "原生影子命令执行失败，请重试",
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      return nativePlayerAuthorityCommandBroker.commit(ownerId, request);
+    }
     return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
   });
 });

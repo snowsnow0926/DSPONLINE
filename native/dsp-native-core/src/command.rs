@@ -4057,6 +4057,107 @@ fn validate_dyson_launch_configuration_command(
     Ok(())
 }
 
+fn validate_dyson_orbit_geometry_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.is_empty()
+        || command.top_level_changes.len() > 3
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority Dyson orbit geometry command shape is invalid")
+    }
+    let engineering = state
+        .base_value()
+        .get("dysonEngineering")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson engineering state is invalid"))?;
+    let systems = engineering
+        .get("orbitsBySystem")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson orbit directory is invalid"))?;
+    let mut command_target: Option<(&str, usize)> = None;
+    let mut fields = HashSet::new();
+
+    for change in &command.top_level_changes {
+        let (system_id, orbit_index, field) = match change.path.as_slice() {
+            [
+                PathSegment::Key(root),
+                PathSegment::Key(directory),
+                PathSegment::Key(system_id),
+                PathSegment::Index(orbit_index),
+                PathSegment::Key(field),
+            ] if root == "dysonEngineering"
+                && directory == "orbitsBySystem"
+                && matches!(field.as_str(), "radius" | "inclination" | "longitude") =>
+            {
+                (system_id.as_str(), *orbit_index, field.as_str())
+            }
+            _ => {
+                bail!("native player-authority Dyson orbit geometry patch path is not canonical")
+            }
+        };
+        if command_target.is_some_and(|target| target != (system_id, orbit_index)) {
+            bail!("native player-authority Dyson orbit geometry command spans multiple orbits")
+        }
+        command_target = Some((system_id, orbit_index));
+        if !fields.insert(field) || change.operation != "set" || change.value.is_none() {
+            bail!("native player-authority Dyson orbit geometry field is repeated or invalid")
+        }
+    }
+
+    let (system_id, orbit_index) = command_target
+        .ok_or_else(|| anyhow!("native player-authority Dyson orbit geometry target is missing"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.system_id == system_id)
+    {
+        bail!("native player-authority Dyson orbit geometry system is unknown")
+    }
+    let orbit = systems
+        .get(system_id)
+        .and_then(Value::as_array)
+        .and_then(|orbits| orbits.get(orbit_index))
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson orbit geometry target is missing"))?;
+    orbit
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+        .ok_or_else(|| anyhow!("native player-authority Dyson orbit geometry ID is invalid"))?;
+
+    let valid_geometry = |field: &str, value: f64| match field {
+        "radius" => value.fract() == 0.0 && (5_000.0..=50_000.0).contains(&value),
+        "inclination" => value.fract() == 0.0 && (-90.0..=90.0).contains(&value),
+        "longitude" => {
+            (0.0..360.0).contains(&value) && (value * 10.0 - (value * 10.0).round()).abs() < 1e-9
+        }
+        _ => false,
+    };
+    for change in &command.top_level_changes {
+        let field = match change.path.last() {
+            Some(PathSegment::Key(field)) => field.as_str(),
+            _ => unreachable!("canonical Dyson orbit path was already checked"),
+        };
+        let current = finite_json_number(orbit.get(field), "current Dyson orbit geometry")?;
+        let target = finite_json_number(change.value.as_ref(), "Dyson orbit geometry")?;
+        if !valid_geometry(field, current) || !valid_geometry(field, target) {
+            bail!("native player-authority Dyson orbit geometry is outside its canonical range")
+        }
+        if target == current {
+            bail!("native player-authority Dyson orbit geometry is unchanged")
+        }
+    }
+    Ok(())
+}
+
 fn validate_recipe_focus_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -4902,6 +5003,14 @@ impl CoreState {
         if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "dysonEngineering")
         }) {
+            if command.top_level_changes.iter().any(|change| {
+                matches!(
+                    change.path.get(1),
+                    Some(PathSegment::Key(directory)) if directory == "orbitsBySystem"
+                )
+            }) {
+                return validate_dyson_orbit_geometry_command(self, command);
+            }
             return validate_dyson_launch_configuration_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
@@ -5585,8 +5694,13 @@ mod tests {
                 "launchEnabled": true,
                 "activeOrbitBySystem": { "helios": "orbit-home-old", "sigma": "orbit-foreign" },
                 "orbitsBySystem": {
-                    "helios": [{ "id": "orbit-home-old" }, { "id": "orbit-home-new" }],
-                    "sigma": [{ "id": "orbit-foreign" }]
+                    "helios": [
+                        { "id": "orbit-home-old", "radius": 12000, "inclination": 0, "longitude": 0 },
+                        { "id": "orbit-home-new", "radius": 18000, "inclination": 18, "longitude": 24 }
+                    ],
+                    "sigma": [
+                        { "id": "orbit-foreign", "radius": 12000, "inclination": 0, "longitude": 0 }
+                    ]
                 }
             }
         })
@@ -6733,6 +6847,30 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }];
+        command
+    }
+
+    fn dyson_orbit_geometry_command(
+        revision: u64,
+        system_id: &str,
+        orbit_index: usize,
+        fields: &[(&str, Value)],
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = fields
+            .iter()
+            .map(|(field, value)| ValuePatch {
+                path: vec![
+                    PathSegment::Key("dysonEngineering".to_owned()),
+                    PathSegment::Key("orbitsBySystem".to_owned()),
+                    PathSegment::Key(system_id.to_owned()),
+                    PathSegment::Index(orbit_index),
+                    PathSegment::Key((*field).to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(value.clone()),
+            })
+            .collect();
         command
     }
 
@@ -8723,7 +8861,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_applies_only_canonical_dyson_launch_and_orbit_selection_controls() {
+    fn player_authority_applies_only_canonical_dyson_launch_and_orbit_controls() {
         let mut state = player_command_state();
 
         let mode = dyson_launch_command(state.revision, "launchMode", Value::from("sphere"));
@@ -8771,7 +8909,23 @@ mod tests {
             state.base_value()["dysonEngineering"]["activeOrbitBySystem"]["helios"],
             "orbit-home-new"
         );
-        assert_eq!(state.revision, 13);
+        state
+            .apply_player_authority_command(&dyson_orbit_geometry_command(
+                state.revision,
+                "helios",
+                1,
+                &[
+                    ("radius", Value::from(24_000)),
+                    ("inclination", Value::from(-12)),
+                    ("longitude", Value::from(359.9)),
+                ],
+            ))
+            .unwrap();
+        let orbit = &state.base_value()["dysonEngineering"]["orbitsBySystem"]["helios"][1];
+        assert_eq!(orbit["radius"], 24_000);
+        assert_eq!(orbit["inclination"], -12);
+        assert_eq!(orbit["longitude"], 359.9);
+        assert_eq!(state.revision, 14);
 
         let committed_hash = state.canonical_sha256().unwrap();
         let retry_error = state.apply_player_authority_command(&mode).unwrap_err();
@@ -8780,7 +8934,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_dyson_launch_and_orbit_selection_fail_closed_without_mutation() {
+    fn player_authority_dyson_launch_and_orbit_controls_fail_closed_without_mutation() {
         let mut delete_mode = dyson_launch_command(9, "launchMode", Value::from("sphere"));
         delete_mode.top_level_changes[0].operation = "delete".to_owned();
         delete_mode.top_level_changes[0].value = None;
@@ -8799,6 +8953,17 @@ mod tests {
                 value: Some(Value::from(true)),
             }],
         }];
+        let mut cross_orbit =
+            dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(22_000))]);
+        cross_orbit.top_level_changes.push(
+            dyson_orbit_geometry_command(9, "helios", 1, &[("inclination", Value::from(12))])
+                .top_level_changes
+                .remove(0),
+        );
+        let mut delete_geometry =
+            dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(22_000))]);
+        delete_geometry.top_level_changes[0].operation = "delete".to_owned();
+        delete_geometry.top_level_changes[0].value = None;
         let commands = [
             dyson_launch_command(9, "launchMode", Value::from("balanced")),
             dyson_launch_command(9, "launchMode", Value::from("unlimited")),
@@ -8826,6 +8991,16 @@ mod tests {
                 &["dysonEngineering", "activeOrbitBySystem", "helios"],
                 Value::from(""),
             ),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(12_000))]),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(4_999))]),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("radius", Value::from(12_000.5))]),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("inclination", Value::from(90.5))]),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("longitude", Value::from(360))]),
+            dyson_orbit_geometry_command(9, "helios", 0, &[("longitude", Value::from(12.34))]),
+            dyson_orbit_geometry_command(9, "missing", 0, &[("radius", Value::from(22_000))]),
+            dyson_orbit_geometry_command(9, "helios", 99, &[("radius", Value::from(22_000))]),
+            cross_orbit,
+            delete_geometry,
             delete_mode,
             mixed,
             entity_mixed,

@@ -1647,7 +1647,7 @@ pub(crate) fn certified_sail_launch_capacity_seconds(
     Ok(horizon.max(0))
 }
 
-const MAX_CERTIFIED_SAIL_UNBATCHED_STEPS: u64 = 10_000;
+const MAX_CERTIFIED_SAIL_UNBATCHED_STEPS: u64 = 32_768;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CertifiedSailOrbitDynamic {
@@ -1676,12 +1676,6 @@ struct CertifiedSailLifecycleCounters {
     launched_by_orbit: BTreeMap<(String, String), i128>,
     expired_by_orbit: BTreeMap<(String, String), i128>,
     total_absorbed: i128,
-}
-
-#[derive(Debug, Clone)]
-struct CertifiedSailCycleCheckpoint {
-    step: u64,
-    counters: CertifiedSailLifecycleCounters,
 }
 
 fn certified_sail_cycle_snapshot(
@@ -2052,40 +2046,18 @@ pub(crate) fn apply_certified_sail_launch_schedule(
                 .checked_add(*rate)
                 .ok_or_else(|| anyhow!("certified solar-sail rate sum overflowed"))
         })?;
-    let mut seen_cycles =
-        HashMap::<CertifiedSailLifecycleSignature, CertifiedSailCycleCheckpoint>::new();
     let mut step = 0_u64;
     let mut unbatched_steps = 0_u64;
+    // Brent's detector keeps a single prior dynamic state. Retaining every
+    // visited state would consume O(orbits * search steps) memory in the large
+    // saves this path is intended to protect.
+    let (mut cycle_anchor, mut cycle_anchor_counters) = certified_sail_cycle_snapshot(&dyson)?;
+    let mut cycle_power = 1_u64;
+    let mut cycle_length = 0_u64;
     while step < seconds {
-        let (signature, counters) = certified_sail_cycle_snapshot(&dyson)?;
-        if let Some(previous) = seen_cycles.get(&signature).cloned() {
-            let cycle_seconds = step.saturating_sub(previous.step);
-            if let Some(repetitions) = (seconds - step).checked_div(cycle_seconds) {
-                let repeated = repeat_certified_sail_cycle(
-                    &snapshot,
-                    &mut dyson,
-                    launches_per_second_by_orbit,
-                    &previous.counters,
-                    &counters,
-                    cycle_seconds,
-                    repetitions,
-                )?;
-                if repeated > 0 {
-                    step = step
-                        .checked_add(cycle_seconds.checked_mul(repeated).ok_or_else(|| {
-                            anyhow!("certified solar-sail cycle duration overflowed")
-                        })?)
-                        .ok_or_else(|| anyhow!("certified solar-sail duration overflowed"))?;
-                    unbatched_steps = 0;
-                    continue;
-                }
-            }
-        } else {
-            seen_cycles.insert(signature, CertifiedSailCycleCheckpoint { step, counters });
-        }
         if unbatched_steps >= MAX_CERTIFIED_SAIL_UNBATCHED_STEPS {
             bail!(
-                "certified solar-sail lifecycle did not reach a safely repeatable cycle within {MAX_CERTIFIED_SAIL_UNBATCHED_STEPS} steps"
+                "certified solar-sail lifecycle did not reach a safely repeatable cycle within {MAX_CERTIFIED_SAIL_UNBATCHED_STEPS} steps (step={step}, power={cycle_power}, length={cycle_length})"
             );
         }
         absorb(&snapshot, &mut dyson, 1.0)?;
@@ -2132,6 +2104,43 @@ pub(crate) fn apply_certified_sail_launch_schedule(
         aggregate_swarm(&mut dyson)?;
         step += 1;
         unbatched_steps += 1;
+        cycle_length = cycle_length
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle length overflowed"))?;
+
+        let (signature, counters) = certified_sail_cycle_snapshot(&dyson)?;
+        if signature == cycle_anchor {
+            let repetitions = (seconds - step) / cycle_length;
+            let repeated = repeat_certified_sail_cycle(
+                &snapshot,
+                &mut dyson,
+                launches_per_second_by_orbit,
+                &cycle_anchor_counters,
+                &counters,
+                cycle_length,
+                repetitions,
+            )?;
+            if repeated > 0 {
+                step =
+                    step.checked_add(cycle_length.checked_mul(repeated).ok_or_else(|| {
+                        anyhow!("certified solar-sail cycle duration overflowed")
+                    })?)
+                    .ok_or_else(|| anyhow!("certified solar-sail duration overflowed"))?;
+                unbatched_steps = 0;
+            }
+            // A skip can land exactly on a shell-capacity boundary. Restart
+            // from the actual post-skip state so the next phase is detected
+            // independently; a zero-repeat match likewise gets one exact step
+            // to cross its pending boundary instead of rediscovering forever.
+            (cycle_anchor, cycle_anchor_counters) = certified_sail_cycle_snapshot(&dyson)?;
+            cycle_power = 1;
+            cycle_length = 0;
+        } else if cycle_length == cycle_power {
+            cycle_anchor = signature;
+            cycle_anchor_counters = counters;
+            cycle_power = cycle_power.saturating_mul(2);
+            cycle_length = 0;
+        }
     }
     let launched = total_rate
         .checked_mul(i128::from(seconds))

@@ -84,6 +84,30 @@ describe("production statistics rolling buckets", () => {
     expect(history.every((entry) => entry.planetConsumptionPerMinute?.ashen?.iron_ore === 60)).toBe(true);
   });
 
+  it("preserves the latest cumulative replication endpoint while compacting", () => {
+    let history: ProductionHistorySample[] = [];
+    for (let second = 1; second <= 180; second += 1) {
+      history.push({
+        ...sample(second, 60),
+        pureIdleReplication: {
+          totalProduced: { universe_matrix: String(second * 10) },
+          researchInvestmentByItem: { universe_matrix: String(second * 2) },
+          structurePointsBySystem: { helios: second },
+          shellSailsBySystem: { helios: second * 3 },
+        },
+      });
+      history = compactProductionHistory(history);
+    }
+
+    expect(history.some((entry) => getProductionHistorySampleDuration(entry) > 1)).toBe(true);
+    expect(history.at(-1)?.pureIdleReplication).toEqual({
+      totalProduced: { universe_matrix: "1800" },
+      researchInvestmentByItem: { universe_matrix: "360" },
+      structurePointsBySystem: { helios: 180 },
+      shellSailsBySystem: { helios: 540 },
+    });
+  });
+
   it("uses the same rolling window for rows and totals", () => {
     const history = Array.from({ length: 120 }, (_, index) => sample(index + 1, index < 60 ? 60 : 120));
     const perSecond = calculateProductionWindowSnapshot(history, "second");

@@ -12,9 +12,9 @@ export interface DesktopUpdateStatus {
 
 export interface DesktopReleaseInfo {
   isDesktop: true;
-  /** Present in the isolated performance-edition shell; older rollback hosts may omit it. */
-  editionId?: "windows-performance-development-v1";
-  productName?: "DSP极简网络 Windows 性能开发版";
+  /** Older rollback hosts may omit the explicit desktop edition identity. */
+  editionId?: "stable-v1" | "windows-performance-development-v1";
+  productName?: "DSP极简网络" | "DSP极简网络 Windows 性能开发版";
   platform: string;
   channel: "stable" | "beta" | "nightly";
   channelLabel: string;

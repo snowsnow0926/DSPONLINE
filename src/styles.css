@@ -6452,6 +6452,37 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   font-variant-numeric: tabular-nums;
 }
 
+.time-warp-mode-actions {
+  display: grid;
+  gap: 7px;
+}
+
+.time-warp-mode-actions > button {
+  width: 100%;
+}
+
+.time-warp-mode-actions > small {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+.time-warp-mode-actions > small.ready {
+  color: #79d9b8;
+}
+
+.time-warp-mode-actions > button:disabled {
+  cursor: not-allowed;
+  filter: saturate(0.35);
+  opacity: 0.55;
+}
+
+.time-warp-replication-open {
+  border-color: #9d7bd8;
+  background: #261c3a;
+  color: #d9c7ff;
+}
+
 .station-slot-list {
   display: grid;
   gap: 8px;

@@ -109,6 +109,7 @@ export function mergeProductionHistorySamples(samples: readonly ProductionHistor
     powerEfficiency: weightedOptional(samples, (sample) => sample.powerEfficiency, duration),
     activeMachines: Math.max(0, Math.round(weightedOptional(samples, (sample) => sample.activeMachines, duration) ?? latest.activeMachines ?? 0)),
     blockedMachines: Math.max(0, Math.round(weightedOptional(samples, (sample) => sample.blockedMachines, duration) ?? latest.blockedMachines ?? 0)),
+    ...(latest.pureIdleReplication ? { pureIdleReplication: latest.pureIdleReplication } : {}),
   };
 }
 

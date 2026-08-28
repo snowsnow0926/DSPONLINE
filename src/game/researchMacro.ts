@@ -174,6 +174,43 @@ function allocateFiniteBudget(
   return { consumed, completedTechIds, remaining };
 }
 
+/**
+ * Spend a virtual, already-observed research budget without touching lab
+ * inventories. This is intentionally used only by the player's opt-in
+ * production-replication time-warp mode.
+ */
+export function advanceResearchReplicationInPlace(
+  state: GameState,
+  budgetByItem: Readonly<Partial<Record<ItemId, bigint>>>,
+): Omit<ResearchMacroApplication, "remainder" | "inflowRemainders"> {
+  const pools = new Map<ItemId, bigint>();
+  for (const [itemId, raw] of Object.entries(budgetByItem) as Array<[ItemId, bigint | undefined]>) {
+    if ((raw ?? 0n) > 0n) pools.set(itemId, raw!);
+  }
+  let budget = [...pools.values()].reduce((sum, value) => sum + value, 0n);
+  const finite = allocateFiniteBudget(state, budget, pools);
+  budget = finite.remaining;
+  let infiniteConsumed = 0n;
+  const completedInfiniteLevels: number[] = [];
+  const infiniteId = state.endgame.activeInfiniteResearchId;
+  if (!state.research.selectedTechId && infiniteId && budget > 0n) {
+    const beforeLevel = state.endgame.infiniteResearch[infiniteId].level;
+    const available = pools.get("universe_matrix") ?? 0n;
+    infiniteConsumed = investInfiniteResearchBudgetInPlace(
+      state,
+      infiniteId,
+      budget < available ? budget : available,
+    );
+    const afterLevel = state.endgame.infiniteResearch[infiniteId].level;
+    for (let level = beforeLevel + 1; level <= afterLevel; level += 1) completedInfiniteLevels.push(level);
+  }
+  return {
+    consumed: finite.consumed + infiniteConsumed,
+    completedFiniteTechIds: finite.completedTechIds,
+    completedInfiniteLevels,
+  };
+}
+
 function redistributeResearchPools(
   state: GameState,
   labs: GameState["entities"],

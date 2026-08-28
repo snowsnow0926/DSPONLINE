@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
+use num_bigint::{BigUint, ToBigUint};
 use serde_json::{Map, Value};
 
 use crate::belts::BeltFlowAggregate;
@@ -15,6 +16,8 @@ const HISTORY_RETENTION_SECONDS: f64 = 3_660.0;
 
 type RateAccumulator = HashMap<String, f64>;
 type PlanetRateAccumulator = HashMap<String, RateAccumulator>;
+
+const JAVASCRIPT_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn rounded(value: f64, digits: i32) -> f64 {
     let scale = 10_f64.powi(digits);
@@ -76,6 +79,116 @@ fn clone_object(value: Option<&Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+fn non_negative_integer(value: Option<&Value>, require_safe: bool) -> Option<BigUint> {
+    let value = finite_number(value)?;
+    if value < 0.0 || value.fract() != 0.0 || require_safe && value > JAVASCRIPT_MAX_SAFE_INTEGER {
+        return None;
+    }
+    value.to_biguint()
+}
+
+fn decimal_biguint(value: Option<&Value>) -> BigUint {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<BigUint>().ok())
+        .unwrap_or_default()
+}
+
+fn add_biguint(target: &mut BTreeMap<String, BigUint>, key: &str, amount: BigUint) {
+    *target.entry(key.to_owned()).or_default() += amount;
+}
+
+fn biguint_record(values: BTreeMap<String, BigUint>) -> Value {
+    Value::Object(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value.to_string())))
+            .collect(),
+    )
+}
+
+fn capture_pure_idle_replication(state: &CoreState, base: &Map<String, Value>) -> Option<Value> {
+    let total_produced = base.get("totalProduced")?.as_object()?;
+    let mut produced = BTreeMap::<String, BigUint>::new();
+    for (item_id, value) in total_produced {
+        produced.insert(item_id.clone(), non_negative_integer(Some(value), false)?);
+    }
+
+    let research = base.get("research")?.as_object()?;
+    let completed = research
+        .get("completedTechIds")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    let mut investment = BTreeMap::<String, BigUint>::new();
+    for technology_id in &completed {
+        let Some(technology) = state.catalog.technologies.get(*technology_id) else {
+            continue;
+        };
+        for cost in &technology.costs {
+            let amount = cost.amount.to_biguint()?;
+            add_biguint(&mut investment, &cost.item_id, amount);
+        }
+    }
+    for (technology_id, progress) in research.get("progressByTech")?.as_object()? {
+        if completed.contains(technology_id.as_str()) {
+            continue;
+        }
+        for (item_id, value) in progress.as_object()? {
+            add_biguint(
+                &mut investment,
+                item_id,
+                non_negative_integer(Some(value), true)?,
+            );
+        }
+    }
+
+    let infinite_research = base
+        .get("endgame")?
+        .as_object()?
+        .get("infiniteResearch")?
+        .as_object()?;
+    for (research_id, progress) in infinite_research {
+        let progress = progress.as_object()?;
+        let maximum = crate::infinite_research::maximum_level(research_id)?;
+        let level = finite_number(progress.get("level"))?;
+        let level = level.floor().clamp(0.0, f64::from(maximum)) as u32;
+        let invested = crate::infinite_research::cumulative_investment(
+            research_id,
+            level,
+            &decimal_biguint(progress.get("progress")),
+        )
+        .ok()?;
+        add_biguint(&mut investment, "universe_matrix", invested);
+    }
+
+    let plans = base.get("dysonPlans")?.as_object()?;
+    let mut structure = Map::new();
+    let mut sails = Map::new();
+    for (system_id, plan) in plans {
+        let plan = plan.as_object()?;
+        let structure_points = non_negative_integer(plan.get("structurePoints"), true)?;
+        let shell_sails = non_negative_integer(plan.get("shellSails"), true)?;
+        structure.insert(
+            system_id.clone(),
+            Value::from(structure_points.to_string().parse::<u64>().ok()?),
+        );
+        sails.insert(
+            system_id.clone(),
+            Value::from(shell_sails.to_string().parse::<u64>().ok()?),
+        );
+    }
+
+    Some(serde_json::json!({
+        "totalProduced": biguint_record(produced),
+        "researchInvestmentByItem": biguint_record(investment),
+        "structurePointsBySystem": structure,
+        "shellSailsBySystem": sails,
+    }))
 }
 
 fn metric_sum(base: &Map<String, Value>, planet_ids: &[&str], key: &str) -> f64 {
@@ -222,7 +335,7 @@ fn merge_samples(samples: &[Value]) -> anyhow::Result<Value> {
         .unwrap_or_else(|| latest_number("blockedMachines"))
         .round()
         .max(0.0);
-    Ok(serde_json::json!({
+    let mut merged = serde_json::json!({
         "elapsedSeconds": latest_number("elapsedSeconds"),
         "sampleDurationSeconds": duration,
         "productionPerMinute": merge_rate_records(samples, "productionPerMinute", duration),
@@ -237,7 +350,14 @@ fn merge_samples(samples: &[Value]) -> anyhow::Result<Value> {
         "powerEfficiency": weighted_optional(samples, "powerEfficiency", duration),
         "activeMachines": active,
         "blockedMachines": blocked,
-    }))
+    });
+    if let Some(replication) = latest.get("pureIdleReplication") {
+        merged
+            .as_object_mut()
+            .expect("merged production history sample is an object")
+            .insert("pureIdleReplication".to_owned(), replication.clone());
+    }
+    Ok(merged)
 }
 
 fn compact_buckets_before(
@@ -350,6 +470,7 @@ impl CoreState {
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("native production history is missing"))?;
         let previous = history.last();
+        let pure_idle_replication = capture_pure_idle_replication(self, base);
         let previous_boundary = ((elapsed - duration).max(0.0) / 10.0).floor();
         let current_boundary = (elapsed.max(0.0) / 10.0).floor();
         let refresh =
@@ -817,7 +938,7 @@ impl CoreState {
             0.0
         };
         profile_mark!("efficiency");
-        let sample = serde_json::json!({
+        let mut sample = serde_json::json!({
             "elapsedSeconds": elapsed,
             "sampleDurationSeconds": duration,
             "productionPerMinute": rates_to_value(production),
@@ -833,6 +954,12 @@ impl CoreState {
             "activeMachines": if refresh { active.floor().max(0.0) } else { previous_number("activeMachines").unwrap_or(0.0).floor().max(0.0) },
             "blockedMachines": if refresh { blocked.floor().max(0.0) } else { previous_number("blockedMachines").unwrap_or(0.0).floor().max(0.0) },
         });
+        if let Some(replication) = pure_idle_replication {
+            sample
+                .as_object_mut()
+                .expect("production history sample is an object")
+                .insert("pureIdleReplication".to_owned(), replication);
+        }
         // The history was only borrowed while this sample was calculated. Move
         // the existing array out now instead of cloning every retained bucket
         // (and all of its nested item maps) once per simulation second.
@@ -1046,5 +1173,47 @@ mod tests {
                 stable_bytes = Some(actual_bytes);
             }
         }
+    }
+
+    #[test]
+    fn compacted_bucket_retains_latest_replication_telemetry() {
+        let first = serde_json::json!({
+            "elapsedSeconds": 1,
+            "sampleDurationSeconds": 1,
+            "productionPerMinute": {},
+            "consumptionPerMinute": {},
+            "planetProductionPerMinute": {},
+            "planetConsumptionPerMinute": {},
+            "inventory": {},
+            "generationKw": 0,
+            "demandKw": 0,
+            "pureIdleReplication": {
+                "totalProduced": { "iron_ore": "1" },
+                "researchInvestmentByItem": {},
+                "structurePointsBySystem": {},
+                "shellSailsBySystem": {},
+            },
+        });
+        let latest_replication = serde_json::json!({
+            "totalProduced": { "iron_ore": "2" },
+            "researchInvestmentByItem": { "universe_matrix": "3" },
+            "structurePointsBySystem": { "helios": 4 },
+            "shellSailsBySystem": { "helios": 5 },
+        });
+        let second = serde_json::json!({
+            "elapsedSeconds": 2,
+            "sampleDurationSeconds": 1,
+            "productionPerMinute": {},
+            "consumptionPerMinute": {},
+            "planetProductionPerMinute": {},
+            "planetConsumptionPerMinute": {},
+            "inventory": {},
+            "generationKw": 0,
+            "demandKw": 0,
+            "pureIdleReplication": latest_replication,
+        });
+
+        let merged = merge_samples(&[first, second]).unwrap();
+        assert_eq!(merged.get("pureIdleReplication"), Some(&latest_replication),);
     }
 }

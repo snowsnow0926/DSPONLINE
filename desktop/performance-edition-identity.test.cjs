@@ -11,9 +11,13 @@ const { DebugLogger } = require("builder-util");
 const {
   PERFORMANCE_EDITION_IDENTITY,
   STABLE_IDENTITY,
+  initializeDesktopEditionIdentity,
   initializePerformanceEditionIdentity,
+  resolveDesktopEditionOutputDirectory,
   resolvePerformanceEditionOutputDirectory,
   validatePerformanceEditionPackageIdentity,
+  validateStablePackageIdentity,
+  verifyPackagedDesktopEditionIdentity,
   verifyPackagedPerformanceEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 
@@ -60,9 +64,24 @@ function assertOnlyOutsideSentinel(outsidePath) {
   assert.deepEqual(fs.readdirSync(outsidePath), ["stable-player-save.json"]);
 }
 
-test("package and NSIS metadata are frozen to a 1.2.3 identity distinct from the stable application", () => {
+function performancePackageFixture() {
+  const value = structuredClone(packageMetadata);
+  value.desktopEditionId = PERFORMANCE_EDITION_IDENTITY.editionId;
+  value.productName = PERFORMANCE_EDITION_IDENTITY.productName;
+  value.build.appId = PERFORMANCE_EDITION_IDENTITY.appId;
+  value.build.productName = PERFORMANCE_EDITION_IDENTITY.productName;
+  value.build.directories.output = PERFORMANCE_EDITION_IDENTITY.outputDirectoryName;
+  value.build.win.executableName = PERFORMANCE_EDITION_IDENTITY.executableName;
+  value.build.win.artifactName = PERFORMANCE_EDITION_IDENTITY.installerArtifactName;
+  value.build.nsis.shortcutName = PERFORMANCE_EDITION_IDENTITY.productName;
+  value.build.nsis.uninstallDisplayName = PERFORMANCE_EDITION_IDENTITY.productName;
+  value.build.nsis.allowToChangeInstallationDirectory = false;
+  return value;
+}
+
+test("source package is a 1.2.3 stable upgrade identity and retains an isolated performance build path", () => {
   assert.equal(packageMetadata.version, "1.2.3");
-  assert.equal(validatePerformanceEditionPackageIdentity(packageMetadata, {
+  assert.equal(validateStablePackageIdentity(packageMetadata, {
     requireBuildConfiguration: true,
     requireOfflineDefaults: true,
   }), true);
@@ -73,12 +92,12 @@ test("package and NSIS metadata are frozen to a 1.2.3 identity distinct from the
   assert.equal(Object.prototype.hasOwnProperty.call(packageMetadata.build.nsis, "guid"), false);
   assert.equal(packageMetadata.updateBaseUrl, "");
   assert.equal(packageMetadata.cloudApiBaseUrl, "");
-  assert.match(packageMetadata.scripts["desktop:release"], /--desktop-source release-performance-edition/);
-  assert.match(packageMetadata.scripts["desktop:release"], /--output release-performance-edition\/update-feed/);
-  assert.doesNotMatch(packageMetadata.scripts["desktop:release"], /--desktop-source release(?:\s|$)/);
+  assert.match(packageMetadata.scripts["desktop:release"], /--desktop-source release(?:\s|$)/);
+  assert.match(packageMetadata.scripts["desktop:performance:pack"], /DSP_DESKTOP_EDITION=performance/);
+  assert.match(packageMetadata.scripts["desktop:performance:dist"], /DSP_DESKTOP_EDITION=performance/);
 });
 
-test("electron-builder accepts the frozen performance-edition package configuration", async () => {
+test("electron-builder accepts the stable package configuration", async () => {
   await validateConfiguration(packageMetadata.build, new DebugLogger(false));
 });
 
@@ -100,7 +119,7 @@ test("package identity validation rejects every stable or collision-prone build 
     (value) => { value.build.nsis.guid = "00000000-0000-0000-0000-000000000000"; },
   ];
   for (const mutate of mutations) {
-    const candidate = structuredClone(packageMetadata);
+    const candidate = performancePackageFixture();
     mutate(candidate);
     assert.throws(() => validatePerformanceEditionPackageIdentity(candidate, {
       requireBuildConfiguration: true,
@@ -241,21 +260,55 @@ test("runtime identity rejects pre-positioned Windows userData and sessionData j
   }
 });
 
-test("packaging output is fixed outside release and pack.cjs has no free output-path environment override", () => {
+test("stable runtime preserves the historical userData directory without redirecting Electron", (t) => {
+  const appDataPath = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-stable-identity-"));
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }));
+  const userDataPath = path.join(appDataPath, STABLE_IDENTITY.userDataDirectoryName);
+  const calls = [];
+  const app = {
+    getPath(name) {
+      calls.push(["getPath", name]);
+      if (name === "appData") return appDataPath;
+      if (name === "userData" || name === "sessionData") return userDataPath;
+      throw new Error(`unexpected path ${name}`);
+    },
+  };
+  const result = initializeDesktopEditionIdentity({ metadata: packageMetadata, app });
+  assert.equal(result.editionId, STABLE_IDENTITY.editionId);
+  assert.equal(result.userDataPath, userDataPath);
+  assert.equal(fs.lstatSync(userDataPath).isDirectory(), true);
+  assert.equal(calls.some(([name]) => name === "setPath"), false);
+
+  assert.throws(() => initializeDesktopEditionIdentity({
+    metadata: packageMetadata,
+    app: {
+      getPath(name) {
+        if (name === "appData") return appDataPath;
+        return path.join(appDataPath, "another-product");
+      },
+    },
+  }), /历史稳定版 userData/);
+});
+
+test("packaging outputs are fixed per stable or isolated performance identity", () => {
   const repositoryRoot = path.resolve(__dirname, "..");
   const output = resolvePerformanceEditionOutputDirectory(repositoryRoot);
   assert.equal(output, path.join(repositoryRoot, PERFORMANCE_EDITION_IDENTITY.outputDirectoryName));
   assert.notEqual(output, path.join(repositoryRoot, STABLE_IDENTITY.outputDirectoryName));
+  assert.equal(
+    resolveDesktopEditionOutputDirectory(repositoryRoot, STABLE_IDENTITY),
+    path.join(repositoryRoot, STABLE_IDENTITY.outputDirectoryName),
+  );
 
   const packSource = fs.readFileSync(path.join(__dirname, "pack.cjs"), "utf8");
   assert.equal(packSource.includes("DSP_DESKTOP_OUTPUT_DIR"), false);
-  assert.match(packSource, /resolvePerformanceEditionOutputDirectory\(repositoryRoot\)/);
-  assert.match(packSource, /verifyPackagedPerformanceEditionIdentity/);
+  assert.match(packSource, /resolveDesktopEditionOutputDirectory\(repositoryRoot, desktopIdentity\)/);
+  assert.match(packSource, /verifyPackagedDesktopEditionIdentity/);
 });
 
-test("main applies isolated data identity before locks or userData reads and binds the Windows taskbar identity", () => {
+test("main resolves stable or isolated data identity before locks and binds the selected taskbar identity", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
-  const initializeOffset = source.indexOf("initializePerformanceEditionIdentity({");
+  const initializeOffset = source.indexOf("initializeDesktopEditionIdentity({");
   const userDataOffset = source.indexOf('app.getPath("userData")');
   const lockOffset = source.indexOf("app.requestSingleInstanceLock()");
   const readyOffset = source.indexOf("app.whenReady()");
@@ -263,9 +316,9 @@ test("main applies isolated data identity before locks or userData reads and bin
   assert.ok(userDataOffset > initializeOffset);
   assert.ok(lockOffset > initializeOffset);
   assert.ok(readyOffset > initializeOffset);
-  assert.match(source, /app\.setAppUserModelId\(PERFORMANCE_EDITION_IDENTITY\.appUserModelId\)/);
+  assert.match(source, /app\.setAppUserModelId\(desktopRuntimeIdentity\.appUserModelId\)/);
   assert.match(source, /window\.on\("page-title-updated"/);
-  assert.match(source, /if \(!window\.isDestroyed\(\)\) window\.setTitle\(PERFORMANCE_EDITION_IDENTITY\.productName\)/);
+  assert.match(source, /if \(!window\.isDestroyed\(\)\) window\.setTitle\(desktopRuntimeIdentity\.productName\)/);
   assert.equal(source.includes('app.setAppUserModelId("com.dspidle.network")'), false);
 });
 

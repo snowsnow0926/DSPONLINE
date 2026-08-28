@@ -138,9 +138,11 @@ export function TimeWarpIdleOverlay({
   const baseline = macroSummary?.baseline ?? persistentBaseline;
   const calibrationPending = !macroSummary && !continueAvailable;
   const conservativeOnly = macroSummary?.conservativeOnly === true;
-  const modeLabel = macroSummary?.mode === "extreme" ? "终局极限模式" : "宏观纯挂机";
+  const replication = macroSummary?.mode === "replication" || recovery?.mode === "replication";
+  const modeLabel = replication ? "产率复制模式" : macroSummary?.mode === "extreme" ? "终局极限模式" : "宏观纯挂机";
   const phaseLabel = macroSummary
-    ? macroSummary.phase === "preparing-power" ? "正在准备供电快照"
+    ? replication ? "按既有统计产率复制中"
+      : macroSummary.phase === "preparing-power" ? "正在准备供电快照"
       : macroSummary.phase === "calibrating" ? "正在执行有界精确校准"
         : macroSummary.phase === "conservative"
           ? macroSummary.conservativeOnly && macroSummary.validationFailures === 0
@@ -152,7 +154,7 @@ export function TimeWarpIdleOverlay({
                 : macroSummary.phase === "recovering" ? "正在恢复 Worker"
                   : macroSummary.phase === "failed" ? "正在等待安全恢复"
                     : "正常宏观结算中"
-    : continueAvailable ? "源存档或恢复日志需要处理" : "正在执行 3 × 10 秒校准";
+    : continueAvailable ? "源存档或恢复日志需要处理" : replication ? "正在读取既有滚动统计" : "正在执行 3 × 10 秒校准";
   const nextValidationSeconds = macroSummary?.nextValidationAtWallSeconds == null
     ? null
     : Math.max(0, macroSummary.nextValidationAtWallSeconds - elapsed);
@@ -198,6 +200,8 @@ export function TimeWarpIdleOverlay({
         </header>
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
+          : replication
+            ? "已锁定开始前最近 60 个模拟秒（不足时 30 秒）的真实正向产出；材料、科研、火箭与壳面帆按供电倍率直接复制，不消耗原料，也不执行守恒、缓存、矿脉、燃料或容量校验。"
           : conservativeOnly
             ? macroSummary?.validationFailures
               ? "精确校准未能形成完整证书；系统仅提交已验证前缀，未获证明的尾段保持冻结，主存档不会被不完整候选覆盖。"
@@ -209,9 +213,9 @@ export function TimeWarpIdleOverlay({
           <div><Zap size={17} /><span>请求 / 供电倍率</span><strong>{macroSummary?.requestedMultiplier ?? game.timeWarp.requestedMultiplier}x / {macroSummary?.powerLimitedMultiplier ?? computeLimits.powerLimitedMultiplier}x</strong></div>
           <div><Clock3 size={17} /><span>本次挂机</span><strong>{formatDuration(elapsed)}</strong></div>
           <div><Clock3 size={17} /><span>历史累计挂机</span><strong>{formatDuration(game.idleSettlement.totalIdleTime)}</strong><small>仅统计已验证提交的时间段</small></div>
-          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{calibrationPending ? "校准中" : efficiencyLabel(macroSummary?.minimumEfficiency ?? null, conservativeOnly)}</strong><small>{macroSummary?.limitingReason ?? (conservativeOnly ? "仅显示可验证短窗口；不确定尾段已冻结" : "等待首个验证快照")}</small></div>
+          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>{replication ? "统计复制状态" : "关键产线最低效率"}</span><strong>{calibrationPending ? replication ? "读取中" : "校准中" : efficiencyLabel(macroSummary?.minimumEfficiency ?? null, conservativeOnly)}</strong><small>{macroSummary?.limitingReason ?? (replication ? "等待读取现有统计窗口" : conservativeOnly ? "仅显示可验证短窗口；不确定尾段已冻结" : "等待首个验证快照")}</small></div>
           <div><HardDrive size={17} /><span>保存与恢复</span><strong className={saveFailure ? "warning" : "ready"}>{saveFailure ? "需要处理" : "检查点正常"}</strong><small>{recoveryStatus}</small></div>
-          <div><ShieldCheck size={17} /><span>下次真实校验</span><strong>{macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
+          <div><ShieldCheck size={17} /><span>{replication ? "统计快照" : "下次真实校验"}</span><strong>{replication ? "启动时锁定" : macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
         </section>
 
         <section className="time-warp-idle-output" aria-label="终局产出">
@@ -235,7 +239,7 @@ export function TimeWarpIdleOverlay({
         </section>
 
         {macroSummary?.terminalLines.length ? <section className="time-warp-limit-lines" aria-label="产线效率详情">
-          <header><span>产线效率</span><small>按启动校准速率比较</small></header>
+          <header><span>{replication ? "复制产线" : "产线效率"}</span><small>{replication ? "按启动时统计产率固定复制" : "按启动校准速率比较"}</small></header>
           {macroSummary.terminalLines.map((line) => <div key={line.id} className={`efficiency-${efficiencyTone(line.efficiency)}`}><span>{line.label}</span><strong>{efficiencyLabel(line.efficiency, conservativeOnly)}</strong><small>{line.reason}{conservativeOnly && line.efficiency === null ? "；不确定尾段已冻结" : ""} · {formatQuantityCompact(line.sustainableRatePerMinute)}/分钟</small></div>)}
         </section> : null}
 

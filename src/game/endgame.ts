@@ -151,6 +151,20 @@ export const INFINITE_RESEARCH_BY_ID = Object.fromEntries(
   INFINITE_RESEARCH_DEFINITIONS.map((definition) => [definition.id, definition]),
 ) as Record<InfiniteResearchId, InfiniteResearchDefinition>;
 
+/** "Greater than 200" is intentionally represented as the first unlocked total. */
+export const PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL = 201;
+
+export function getPureIdleReplicationResearchLevelTotal(state: Pick<GameState, "endgame">): number {
+  return INFINITE_RESEARCH_DEFINITIONS.reduce(
+    (sum, definition) => sum + getInfiniteResearchLevel(state, definition.id),
+    0,
+  );
+}
+
+export function isPureIdleReplicationUnlocked(state: Pick<GameState, "endgame">): boolean {
+  return getPureIdleReplicationResearchLevelTotal(state) >= PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL;
+}
+
 export const GALACTIC_EXPORT_BY_ID = Object.fromEntries(
   GALACTIC_EXPORT_DEFINITIONS.map((definition) => [definition.id, definition]),
 ) as Record<GalacticExportProjectId, GalacticExportDefinition>;

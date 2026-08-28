@@ -47,11 +47,11 @@ describe("release notes history", () => {
     expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.2.3" });
     expect(chinese.items).toHaveLength(5);
     expect(chinese.items.map((item) => item.id)).toEqual(expect.arrayContaining([
-      "native-active-dirty-pages",
-      "native-event-driven-belts",
-      "native-bounded-projections",
-      "native-streaming-v47-export",
-      "native-authority-gate",
+      "construction-offline-timewarp",
+      "pure-idle-rate-replication",
+      "windows-native-stable-integration",
+      "mobile-light-full-inspector",
+      "v123-compatibility-boundary",
     ]));
     expect(english.items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));
     expect(getEagerCurrentReleaseNotes("zh-CN").items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));

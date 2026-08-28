@@ -28,36 +28,36 @@ export interface LocalizedReleaseNotesUiCopy {
 }
 
 const release123Copy = {
-  date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
-  title: { "zh-CN": "Windows 原生增量热路径优化", en: "Windows Native Incremental Hot-path Optimization" },
+  date: { "zh-CN": "2026年8月28日", en: "August 28, 2026" },
+  title: { "zh-CN": "终局自动化、挂机模式与 Windows 性能更新", en: "Endgame Automation, Idle Modes, and Windows Performance" },
   summary: {
-    "zh-CN": "1.2.3 为 Windows 原生候选补齐活动 revision 脏页保存、安全稀疏线路筛选、有界视口与统计投影，以及不经过 renderer 完整正文的 v47 流式导出。当前线路结算仍保留精确全路由组扫描；Rust 权威接管仍由完整功能覆盖、24 小时与多硬件 Gate 阻止。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
-    en: "Version 1.2.3 adds active-revision dirty-page saves, safe sparse belt filtering, bounded viewport/statistics projections, and streaming v47 export that avoids a full renderer body to the Windows native candidate. Belt settlement still retains an exact scan of every route group, and Rust authority cutover remains blocked by complete feature coverage plus the 24-hour and multi-hardware gates. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+    "zh-CN": "1.2.3 优化递归建筑制造、离线/时间扭曲结算与 Windows 原生热路径；符合条件的普通存档可主动选择产率复制挂机，原守恒模式继续保留。手机完整检查器在浅色和深色主题下均可正常显示。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.3 improves recursive construction, offline/time-warp settlement, and the Windows native hot paths. Eligible normal saves can opt into rate-replication idle mode, while the original conservation mode remains available. The mobile full inspector is visible in both light and dark themes. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
   },
-  saveTitle: { "zh-CN": "活动存档只编码真实脏页", en: "Active saves encode only genuinely dirty pages" },
+  saveTitle: { "zh-CN": "建筑制造与离线结算持续产出", en: "Construction and offline settlement stay productive" },
   saveDescription: {
-    "zh-CN": "实体与线路页、顶层状态和拓扑分别记脏；只有 manifest、chunk、WAL 与 superblock 全部持久提交后才清除标记，失败重试会再次写出同一批脏页。",
-    en: "Entity pages, belt pages, top-level state, and topology track dirtiness separately. Flags clear only after the manifest, chunks, WAL, and superblock commit durably; a failed attempt emits the same dirty pages again.",
+    "zh-CN": "建筑制造会原子预留输入并续接未完成依赖链；逐恒星系火箭账本与滚动时间扭曲证书让已证明的终局产线持续运行，同时保留已提交检查点。",
+    en: "Construction reserves inputs atomically and resumes unfinished dependency chains. Multi-system rocket ledgers and rolling time-warp certificates keep proven endgame production moving without losing a committed checkpoint.",
   },
-  beltTitle: { "zh-CN": "稳定线路使用安全稀疏筛选", en: "Stable belts use safe sparse filtering" },
+  beltTitle: { "zh-CN": "符合条件的存档可选择产率复制挂机", en: "Eligible saves can choose rate-replication idle mode" },
   beltDescription: {
-    "zh-CN": "紧凑索引会跳过可证明无效的线路记录，但每个模拟步仍检查全部路由组并保持原有顺序；真正的反向依赖唤醒队列尚未完成，不会用少结算来冒充性能提升。",
-    en: "Compact indexes skip records proven inactive, while every simulation step still checks every route group in its original order. The full reverse-dependency wake queue is not complete, so performance is never claimed by settling less game state.",
+    "zh-CN": "普通存档五项无限科技有效等级合计大于 200 后，可按锁定供电倍率复制最近 60/30 模拟秒的正向产率；该模式由玩家主动选择，不替代原守恒挂机。",
+    en: "Normal saves whose five infinite-tech effective levels total more than 200 may copy positive 60/30-s production statistics at the locked power multiplier. It is explicitly optional and does not replace conservation idle mode.",
   },
-  projectionTitle: { "zh-CN": "原生 Host 提供有界视口与统计协议", en: "The native host provides bounded viewport and statistics protocols" },
+  projectionTitle: { "zh-CN": "Windows 原生热路径接回正式版身份", en: "Windows native hot paths retain the stable app identity" },
   projectionDescription: {
-    "zh-CN": "原生 Host 已能返回带 session、revision、sequence、长度和 SHA-256 的最多 1 MiB 二进制块，并支持分页视口与生产历史；玩家 UI 尚未切换到该协议，renderer 目前仍持有完整 GameState。",
-    en: "The native host can return binary blocks capped at 1 MiB with session, revision, sequence, length, and SHA-256 identity, including paged viewport and production-history projections. The player UI has not switched to this protocol yet, so the renderer still holds the complete GameState.",
+    "zh-CN": "脏页存档、有界投影、v47 流式导入导出与确定性原生核心能力使用既有正式应用及用户数据身份发布；原生覆盖不合格的领域仍由 JavaScript 作为玩家可见权威。",
+    en: "Dirty-page saves, bounded projections, streaming v47 import/export, and deterministic native-core support ship under the existing stable app and user-data identity. JavaScript remains player-visible authority where native coverage is not eligible.",
   },
-  exportTitle: { "zh-CN": "v47 兼容存档由原生核心流式导出", en: "The native core streams compatible v47 exports" },
+  exportTitle: { "zh-CN": "手机浅色主题完整检查器不再空白", en: "The mobile full inspector works in light theme" },
   exportDescription: {
-    "zh-CN": "原生核心按规范顺序直接写出 envelope v2、UTF-16 兼容 checksum、字节数和 SHA-256；主进程复核文件身份后原子替换用户选择的目标，取消或失败不改变权威状态。",
-    en: "The native core writes envelope v2, the legacy UTF-16 checksum, byte length, and SHA-256 in canonical order. The main process verifies the file before replacing the selected target, while cancellation or failure leaves authority unchanged.",
+    "zh-CN": "空白桥接抽屉不再用白色背景遮住真正的高级检查器；深色主题层级和触控行为保持不变。",
+    en: "The empty sheet bridge no longer paints an opaque white surface over the real advanced inspector, while dark-theme layering and touch behavior remain unchanged.",
   },
-  boundaryTitle: { "zh-CN": "原生权威继续失败关闭", en: "Native authority remains fail-closed" },
+  boundaryTitle: { "zh-CN": "存档、云端与回滚格式保持兼容", en: "Save, cloud, and rollback formats remain compatible" },
   boundaryDescription: {
-    "zh-CN": "1.2.3 不把内部影子能力伪装成已通过的稳定接管；完整纯挂机/时间扭曲覆盖、24 小时多硬件长跑、签名和灰度完成前，JavaScript 仍是玩家可见权威。",
-    en: "Version 1.2.3 does not present internal shadow capability as a validated stable cutover. JavaScript remains player-visible authority until complete pure-idle/time-warp coverage, 24-hour multi-hardware runs, signing, and rollout finish.",
+    "zh-CN": "本版不升级 GameState、envelope、cloud schema 或 SQLite layout；生产历史窗口仍只存在运行态，不会增大持久存档。",
+    en: "No GameState, envelope, cloud schema, or SQLite layout migration is introduced. Production-history windows remain runtime-only and do not enlarge saved files.",
   },
 } as const;
 
@@ -780,17 +780,17 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-27-v1.2.3",
+    id: "2026-08-28-v1.2.3",
     date: release123Message(locale, "date"),
     version: "1.2.3",
     title: release123Message(locale, "title"),
     summary: release123Message(locale, "summary"),
     items: [
-      { id: "native-active-dirty-pages", title: release123Message(locale, "saveTitle"), description: release123Message(locale, "saveDescription") },
-      { id: "native-event-driven-belts", title: release123Message(locale, "beltTitle"), description: release123Message(locale, "beltDescription") },
-      { id: "native-bounded-projections", title: release123Message(locale, "projectionTitle"), description: release123Message(locale, "projectionDescription") },
-      { id: "native-streaming-v47-export", title: release123Message(locale, "exportTitle"), description: release123Message(locale, "exportDescription") },
-      { id: "native-authority-gate", title: release123Message(locale, "boundaryTitle"), description: release123Message(locale, "boundaryDescription") },
+      { id: "construction-offline-timewarp", title: release123Message(locale, "saveTitle"), description: release123Message(locale, "saveDescription") },
+      { id: "pure-idle-rate-replication", title: release123Message(locale, "beltTitle"), description: release123Message(locale, "beltDescription") },
+      { id: "windows-native-stable-integration", title: release123Message(locale, "projectionTitle"), description: release123Message(locale, "projectionDescription") },
+      { id: "mobile-light-full-inspector", title: release123Message(locale, "exportTitle"), description: release123Message(locale, "exportDescription") },
+      { id: "v123-compatibility-boundary", title: release123Message(locale, "boundaryTitle"), description: release123Message(locale, "boundaryDescription") },
     ],
   };
 }

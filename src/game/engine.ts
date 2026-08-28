@@ -45,6 +45,7 @@ import {
 import { completeStationOperationModeTransition, createEmptyGalacticHubNetwork, createEmptySystemSpaceStations, settleSpaceStationConstructionInputs } from "./systemSpaceStation";
 import { isElevatorStation, settleSystemHubLogistics, SYSTEM_HUB_SETTLEMENT_SECONDS } from "./systemHubLogistics";
 import { compactProductionHistory, PRODUCTION_HISTORY_SAMPLE_SECONDS } from "./productionStatistics";
+import { capturePureIdleReplicationTelemetry } from "./pureIdleReplicationTelemetry";
 import type {
   BeltTier,
   BeltInputPortIndex,
@@ -398,6 +399,14 @@ function copyState(state: GameState): GameState {
         ? Object.fromEntries(Object.entries(sample.planetConsumptionPerMinute).map(([planetId, values]) => [planetId, { ...values }])) as GameState["productionHistory"][number]["planetConsumptionPerMinute"]
         : undefined,
       inventory: { ...sample.inventory },
+      pureIdleReplication: sample.pureIdleReplication
+        ? {
+          totalProduced: { ...sample.pureIdleReplication.totalProduced },
+          researchInvestmentByItem: { ...sample.pureIdleReplication.researchInvestmentByItem },
+          structurePointsBySystem: { ...sample.pureIdleReplication.structurePointsBySystem },
+          shellSailsBySystem: { ...sample.pureIdleReplication.shellSailsBySystem },
+        }
+        : undefined,
     })),
     metrics: { ...state.metrics },
     planetMetrics: Object.fromEntries(Object.entries(state.planetMetrics).map(([planetId, metrics]) => [
@@ -7555,6 +7564,7 @@ function recordProductionHistory(state: GameState, lookup?: SimulationLookupCont
     powerEfficiency: round(totalPowerDemand > 0 ? Math.min(1, deliveredPower / totalPowerDemand) : 1, 4),
     activeMachines: Math.max(0, Math.floor(activeMachines)),
     blockedMachines: Math.max(0, Math.floor(blockedMachines)),
+    pureIdleReplication: capturePureIdleReplicationTelemetry(state),
   });
   state.productionHistory = compactProductionHistory(state.productionHistory);
   state.historyRecordedAt = state.elapsedSeconds;

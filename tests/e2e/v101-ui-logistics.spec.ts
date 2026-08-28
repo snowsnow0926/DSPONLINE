@@ -4,7 +4,7 @@ import { createInitialState, placeBuilding, setEntityRecipe } from "../../src/ga
 import { validateTimedPeriodicProgress, type TimedPeriodicProgressSample } from "../../src/game/periodicProgressValidation";
 import { serializeEnvelope } from "../../src/game/storage";
 
-const RELEASE_NOTE_ID = "2026-08-27-v1.2.3";
+const RELEASE_NOTE_ID = "2026-08-28-v1.2.3";
 
 test.beforeEach(async ({ page }) => {
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
@@ -342,6 +342,33 @@ test("next mobile light shell keeps lazy surfaces themed in portrait and landsca
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
     await page.screenshot({ path: `artifacts/qa/v101-mobile-light-font-200-${viewport.shot}.png`, fullPage: true });
   }
+});
+
+test("next mobile full inspector stays visible above the light theme surface", async ({ page }) => {
+  await seedUiState(page, { theme: "light", fontScale: 1 });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGame(page, "/?mobileUi=next");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+  await page.locator('.react-flow__node[data-id="smelter"]').click();
+  const quickInspector = page.getByRole("dialog", { name: "电弧熔炉" });
+  await expect(quickInspector).toBeVisible();
+  await quickInspector.getByRole("button", { name: "查看输入、输出与快捷操作" }).click();
+  await quickInspector.getByRole("button", { name: "完整设置" }).click();
+
+  const advancedBridge = page.getByRole("dialog", { name: "完整检查器" });
+  await expect(advancedBridge).toBeVisible();
+  await expect.poll(() => advancedBridge.locator(".mobile-next-sheet__content").evaluate((element) =>
+    getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+  const fullInspector = page.locator(".inspector-panel .inspector-content");
+  await expect(fullInspector).toBeVisible();
+  await expect(fullInspector).toContainText("电弧熔炉");
+  await expect.poll(() => fullInspector.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const point = document.elementFromPoint(rect.left + Math.min(24, rect.width / 2), rect.top + Math.min(24, rect.height / 2));
+    return point === element || element.contains(point);
+  })).toBe(true);
+  await page.screenshot({ path: "artifacts/qa/v123-mobile-light-full-inspector-390x844.png", fullPage: true });
 });
 
 test("dark light dark switching and the classic mobile tablet matrix stay bounded", async ({ page }) => {

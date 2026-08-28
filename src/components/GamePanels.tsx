@@ -49,6 +49,7 @@ import {
   Satellite,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Sun,
   Telescope,
@@ -71,6 +72,12 @@ import { CAMPAIGN_TASKS, getCampaignSnapshot, getCampaignTaskDeficits } from "..
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConstructionId, getBeltTier, getBuilding, getBuildingUpgradeTarget, getConstructionCatalogIds, getConstructionDefinition, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getNextBeltTier, getPlanet, getProliferator, getRecipe, getRecipesForBuilding, getTechnology, isConstructionDeployable, isConstructionInCategory, isConveyorBeltId } from "../game/content";
  import { MATERIAL_DELIVERY_SLOT_COUNT, MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, MAX_MANUAL_CRAFT_BATCHES, MAX_PLANET_TRAY_ITEM_LIMIT, MIN_PLANET_TRAY_ITEM_LIMIT, PORTABLE_FLEET_ITEM_IDS, POWER_GRID_IDS, POWER_GRID_LABELS, canPlaceBuildingOnPlanet, canQueueHandcraftRecipe, canSetBeltStackSize, canUpgradeBelt, canUpgradeEntity, findInterstellarPeer, findPlanetaryPeer, getBeltCapacity, getBeltLaneAdjustmentCheck, getBeltNetworkIds, getConstructionAutomationStatus, getConstructionCraftDeficits, getConstructionQuickCraftPlan, getDysonEngineeringSnapshot, getDysonShellCapacity, getEjectorOrbitTargetStatus, getEntityExtraProductBonus, getEntityOperatingStatus, getEntityOutputCapacity, getEntityPowerFactor, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getInterstellarCargoCapacity, getInterstellarTripSeconds, getMaterialDeliveryItems, getMaterialDeliverySlots, getMaxConstructionQuickCraftBatches, getMaxRecursiveHandcraftBatches, getMiningSpeedMultiplier, getOrbitalCollectorQuantumStatus, getPlanetaryCargoCapacity, getPlanetaryTripSeconds, getPlanetMetrics, getPlanetTrayItemLimit, getPowerGridMetrics, getProliferatorSprayCost, getQuantumAttachmentStatus, getRayReceiverCapacityKw, getRecursiveHandcraftPlan, getResourceReserveSnapshot, getSprayCoaterInstallCheck, getSprayCoaterRemovalRefund, getStationActiveRoutes, getStationBusyVehicleCount, getStationDroneCapacity, getStationFleetDiagnostic, getStationMinimumCargo, getStationSlotCapacity, getStationSlots, getStationVesselCapacity, getStationWarperAutoRefillTarget, getStationWarperCapacity, getStationWarperRefillSnapshot, getTimeWarpRequiredPowerKw, isEntityInPowerCoverage, isHandcraftableRecipe, isPlanetColonized, isPortableFleetItem, isProliferatorEligible, isTechnologyCompleted, stationRouteRequiresWarp } from "../game/engine";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYields, specializationApplies } from "../game/galaxy";
+import {
+  getPureIdleReplicationResearchLevelTotal,
+  isPureIdleReplicationUnlocked,
+  PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL,
+} from "../game/endgame";
+import { getPureIdleReplicationReadiness } from "../game/pureIdleReplication";
 import { analyzeBeltNetwork } from "../game/network";
 import { ACTIVITY_MATERIAL_IDS } from "../game/activity";
 import { getOrbitalCargoPortItems } from "../game/stationCargoTerminal";
@@ -491,7 +498,7 @@ interface InspectorPanelProps {
   onGalacticExporterPausedChange: (entityId: string, paused: boolean) => void;
   onBlackHolePausedChange: (entityId: string, paused: boolean, confirmActivation?: boolean) => void;
   onTimeWarpControllerChange: (entityId: string) => void;
-  onTimeWarpEnabledChange: (enabled: boolean) => void;
+  onTimeWarpEnabledChange: (enabled: boolean, mode?: "conservative" | "replication") => void;
   onTimeWarpRequestedMultiplierChange: (multiplier: number) => void;
   galacticActivityStatus: GalacticActivityPublicStatus | null;
   fabricatorFocusItemId?: ItemId | null;
@@ -963,7 +970,7 @@ function EntityInspector({
   onGalacticExporterPausedChange: (entityId: string, paused: boolean) => void;
   onBlackHolePausedChange: (entityId: string, paused: boolean, confirmActivation?: boolean) => void;
   onTimeWarpControllerChange: (entityId: string) => void;
-  onTimeWarpEnabledChange: (enabled: boolean) => void;
+  onTimeWarpEnabledChange: (enabled: boolean, mode?: "conservative" | "replication") => void;
   onTimeWarpRequestedMultiplierChange: (multiplier: number) => void;
   onOpenTutorial?: (sectionId?: string) => void;
   galacticActivityStatus: GalacticActivityPublicStatus | null;
@@ -1088,6 +1095,10 @@ function EntityInspector({
       : game.timeWarp.effectiveMultiplier >= game.timeWarp.requestedMultiplier ? "无，当前供电满足请求倍率"
         : requestedPowerKw === null ? "请求倍率超出数值安全范围"
           : `当前获得功率仅支持 ${game.timeWarp.effectiveMultiplier}x，${game.timeWarp.requestedMultiplier}x 需要 ${formatPowerKw(requestedPowerKw)}`;
+    const replicationResearchTotal = getPureIdleReplicationResearchLevelTotal(game);
+    const replicationUnlocked = isPureIdleReplicationUnlocked(game);
+    const replicationReadiness = getPureIdleReplicationReadiness(game.productionHistory);
+    const replicationDisabled = !replicationUnlocked || Boolean(game.speedrun?.enabled);
     return <div className="inspector-content time-warp-inspector">
       <div className="inspector-identity"><i className="building-mark"><Gauge size={18} /></i><div><span>全局实时模拟</span><strong>{building.name}</strong></div></div>
       <dl className="metric-ledger">
@@ -1110,11 +1121,25 @@ function EntityInspector({
           }} />
           <button type="button" aria-label="倍率加一" onClick={() => onTimeWarpRequestedMultiplierChange(game.timeWarp.requestedMultiplier + 1)}>+</button>
         </div>
-      <button className="construction-center-open" type="button" onClick={() => onTimeWarpEnabledChange(!game.timeWarp.enabled)}>{game.timeWarp.enabled ? <Pause size={15} /> : <Play size={15} />}{game.timeWarp.enabled ? "纯挂机运行中" : "开始纯挂机"}</button>
+      {game.timeWarp.enabled
+        ? <button className="construction-center-open" type="button" onClick={() => onTimeWarpEnabledChange(false)}><Pause size={15} />纯挂机运行中</button>
+        : <div className="time-warp-mode-actions" role="group" aria-label="选择纯挂机结算模式">
+          <button className="construction-center-open" type="button" aria-label="开始纯挂机（守恒模式）" onClick={() => onTimeWarpEnabledChange(true, "conservative")}><ShieldCheck size={15} />开始守恒纯挂机</button>
+          <button className="construction-center-open time-warp-replication-open" type="button" disabled={replicationDisabled} onClick={() => onTimeWarpEnabledChange(true, "replication")}><Sparkles size={15} />开始产率复制挂机</button>
+          <small className={replicationUnlocked && replicationReadiness.ok ? "ready" : undefined}>
+            {game.speedrun?.enabled
+              ? "速通工厂不能使用产率复制挂机"
+              : replicationUnlocked
+              ? replicationReadiness.ok
+                ? `可用：直接读取最近 ${Math.floor(replicationReadiness.contract.windowSeconds)} 个模拟秒统计，不执行额外校准`
+                : `${replicationReadiness.reason}；点击时会先读取权威统计`
+              : `无限科技总等级 ${replicationResearchTotal}/${PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL}（需大于 200）`}
+          </small>
+        </div>}
       {onOpenTutorial && status.tone !== "running" ? <button className="inspector-tutorial-link" type="button" onClick={() => onOpenTutorial("time-warp")}><BookOpen size={14} />查看时间扭曲教程</button> : null}
       </>}
       <PowerNetworkControl game={game} entity={entity} onGridChange={onPowerGridChange} onPowerPriorityChange={onPowerPriorityChange} onGenerationPriorityChange={onGenerationPriorityChange} />
-      <p className="inspector-description">时间扭曲只有纯挂机模式。开始后会进入独立挂机页面并冻结画布；离线收益与活动时钟始终使用真实时间。高倍率若无法实时追赶会显示模拟积压。</p>
+      <p className="inspector-description">时间扭曲只有纯挂机模式。守恒模式保留原有安全校准；产率复制模式由玩家主动选择，直接复制最近 60 秒（不足时 30 秒）的正向材料、科研、火箭与壳面帆统计，不消耗原料并把材料送入量子共享库存。两种模式都沿用当前供电倍率；离线收益与活动时钟始终使用真实时间。</p>
       <EntityManagementActions game={game} entity={entity} onSetTarget={onSetTarget} onRemove={onRemove} />
     </div>;
   }

@@ -85,7 +85,7 @@ async function expectExpandedNodePainted(node: Locator): Promise<void> {
 
 async function importFixture(page: Page): Promise<void> {
   await page.addInitScript(({ detailKey, overlapKey, interactionKey }) => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem(detailKey, "minimal");
     localStorage.setItem(overlapKey, "marker");

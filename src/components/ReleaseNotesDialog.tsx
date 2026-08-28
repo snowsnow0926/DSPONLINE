@@ -77,11 +77,11 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
-  "native-active-dirty-pages": Database,
-  "native-event-driven-belts": Gauge,
-  "native-bounded-projections": Link2,
-  "native-streaming-v47-export": CloudUpload,
-  "native-authority-gate": ShieldCheck,
+  "construction-offline-timewarp": Gauge,
+  "pure-idle-rate-replication": History,
+  "windows-native-stable-integration": Database,
+  "mobile-light-full-inspector": Info,
+  "v123-compatibility-boundary": ShieldCheck,
   "windows-native-incremental-save": Database,
   "windows-native-shadow-core": Gauge,
   "dyson-material-conservation": ShieldCheck,

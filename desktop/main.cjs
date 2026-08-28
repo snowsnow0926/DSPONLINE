@@ -48,9 +48,7 @@ const {
   detectLogicalCpuCount,
 } = require("./native-performance-policy.cjs");
 const {
-  PERFORMANCE_EDITION_IDENTITY,
-  initializePerformanceEditionIdentity,
-  validatePerformanceEditionPackageIdentity,
+  initializeDesktopEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 const {
   createRendererNativeError,
@@ -62,8 +60,10 @@ const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
 const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
 
-validatePerformanceEditionPackageIdentity(packageMetadata);
-const performanceEditionRuntimeIdentity = initializePerformanceEditionIdentity({
+const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
+const desktopRuntimeIdentity = initializeDesktopEditionIdentity({
+  metadata: packageMetadata,
+  requestedEdition: isDevelopment ? process.env.DSP_DESKTOP_EDITION : undefined,
   app,
   fileSystem: fs,
   pathModule: path,
@@ -72,7 +72,6 @@ const performanceEditionRuntimeIdentity = initializePerformanceEditionIdentity({
 // not mutate Electron; only the exact experimental fallback can disable GPU use.
 const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });
 
-const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
 const channels = createReleaseChannels({
   updateBaseUrl: process.env.DSP_UPDATE_BASE_URL || packageMetadata.updateBaseUrl,
   stableUrl: process.env.DSP_UPDATE_STABLE_URL,
@@ -257,9 +256,14 @@ function initializeNativePerformancePolicy() {
 }
 
 async function initializeNativeHost() {
-  const rootPath = resolveFixedNativeSaveRootPath(performanceEditionRuntimeIdentity.userDataPath);
+  const rootPath = resolveFixedNativeSaveRootPath(
+    desktopRuntimeIdentity.userDataPath,
+    path,
+    desktopRuntimeIdentity.userDataDirectoryName,
+  );
   const inspectWithoutHost = () => inspectNativeExactRealtimeStartupWithoutHost({
-    performanceEditionUserDataPath: performanceEditionRuntimeIdentity.userDataPath,
+    desktopUserDataPath: desktopRuntimeIdentity.userDataPath,
+    expectedUserDataDirectoryName: desktopRuntimeIdentity.userDataDirectoryName,
     environment: process.env,
   });
   if (process.platform !== "win32") {
@@ -572,7 +576,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 680,
     backgroundColor: "#0b100e",
-    title: PERFORMANCE_EDITION_IDENTITY.productName,
+    title: desktopRuntimeIdentity.productName,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -604,7 +608,7 @@ function createWindow() {
   });
   window.on("page-title-updated", (event) => {
     event.preventDefault();
-    if (!window.isDestroyed()) window.setTitle(PERFORMANCE_EDITION_IDENTITY.productName);
+    if (!window.isDestroyed()) window.setTitle(desktopRuntimeIdentity.productName);
   });
   window.on("resize", () => {
     scheduleReadableDesktopZoom();
@@ -669,8 +673,8 @@ function configureAutoUpdater() {
 
 ipcMain.handle("desktop:release-info", () => ({
   isDesktop: true,
-  editionId: performanceEditionRuntimeIdentity.editionId,
-  productName: performanceEditionRuntimeIdentity.productName,
+  editionId: desktopRuntimeIdentity.editionId,
+  productName: desktopRuntimeIdentity.productName,
   platform: process.platform,
   channel: channelId,
   channelLabel: channel.label,
@@ -1381,7 +1385,7 @@ if (!hasSingleInstanceLock) {
     mainWindow.focus();
   });
   app.whenReady().then(async () => {
-    app.setAppUserModelId(PERFORMANCE_EDITION_IDENTITY.appUserModelId);
+    app.setAppUserModelId(desktopRuntimeIdentity.appUserModelId);
     Menu.setApplicationMenu(null);
     configureAutoUpdater();
     initializeNativePerformancePolicy();
@@ -1403,7 +1407,7 @@ if (!hasSingleInstanceLock) {
     });
   }).catch((error) => {
     console.error("Desktop startup failed", error);
-    dialog.showErrorBox("启动失败", `${PERFORMANCE_EDITION_IDENTITY.productName} 无法启动：${error instanceof Error ? error.message : "未知错误"}`);
+    dialog.showErrorBox("启动失败", `${desktopRuntimeIdentity.productName} 无法启动：${error instanceof Error ? error.message : "未知错误"}`);
     app.quit();
   });
 }

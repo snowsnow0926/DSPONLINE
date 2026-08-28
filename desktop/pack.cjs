@@ -5,16 +5,16 @@ const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = requi
 const { validatePackagedTransferContract } = require("./package-contract.cjs");
 const { verifyDesktopPackageHygiene } = require("./package-hygiene.cjs");
 const {
-  PERFORMANCE_EDITION_IDENTITY,
-  resolvePerformanceEditionOutputDirectory,
-  validatePerformanceEditionPackageIdentity,
-  verifyPackagedPerformanceEditionIdentity,
+  resolveDesktopEditionIdentity,
+  resolveDesktopEditionOutputDirectory,
+  validateStablePackageIdentity,
+  verifyPackagedDesktopEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 const { extractFile } = require("@electron/asar");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const packageMetadata = require("../package.json");
-validatePerformanceEditionPackageIdentity(packageMetadata, {
+validateStablePackageIdentity(packageMetadata, {
   requireBuildConfiguration: true,
   requireOfflineDefaults: true,
 });
@@ -22,7 +22,11 @@ const expectedTransferContract = JSON.parse(fs.readFileSync(path.join(__dirname,
 
 const builderEntry = require.resolve("electron-builder/cli");
 const mode = process.argv[2] || "pack";
-const outputDirectory = resolvePerformanceEditionOutputDirectory(repositoryRoot);
+const desktopIdentity = resolveDesktopEditionIdentity(
+  packageMetadata,
+  process.env.DSP_DESKTOP_EDITION || "stable",
+);
+const outputDirectory = resolveDesktopEditionOutputDirectory(repositoryRoot, desktopIdentity);
 const releaseChannel = resolveReleaseChannel(process.env.DSP_RELEASE_CHANNEL);
 const updateBaseUrl = optionalHttpsUrl(process.env.DSP_UPDATE_BASE_URL, "Desktop update base URL");
 const cloudApiBaseUrl = optionalHttpsUrl(process.env.DSP_DESKTOP_API_BASE_URL, "Desktop cloud API base URL");
@@ -54,7 +58,7 @@ function verifyPackagedOutput(outputDirectory) {
   const unpackedDirectory = path.join(outputDirectory, "win-unpacked");
   const asarPath = path.join(unpackedDirectory, "resources", "app.asar");
   verifyDesktopPackageHygiene(asarPath);
-  verifyPackagedPerformanceEditionIdentity({
+  verifyPackagedDesktopEditionIdentity({
     asarPath,
     unpackedDirectory,
     extractAsarFile: extractFile,
@@ -71,14 +75,29 @@ function verifyPackagedOutput(outputDirectory) {
   validatePackagedTransferContract(transferContract, expectedTransferContract);
 }
 
+function identityBuilderArgs(identity, targetOutputDirectory) {
+  const performanceEdition = identity.editionId === "windows-performance-development-v1";
+  return [
+    `--config.extraMetadata.desktopEditionId=${identity.editionId}`,
+    ...(performanceEdition ? [`--config.extraMetadata.productName=${identity.productName}`] : []),
+    `--config.appId=${identity.appId}`,
+    `--config.productName=${identity.productName}`,
+    `--config.directories.output=${targetOutputDirectory}`,
+    `--config.win.executableName=${identity.executableName}`,
+    `--config.win.artifactName=${identity.installerArtifactName}`,
+    `--config.nsis.allowToChangeInstallationDirectory=${performanceEdition ? "false" : "true"}`,
+    `--config.nsis.shortcutName=${identity.productName}`,
+    `--config.nsis.uninstallDisplayName=${identity.productName}`,
+    "--config.nsis.deleteAppDataOnUninstall=false",
+  ];
+}
+
 async function main() {
   if (!["pack", "dist"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
-    `--config.extraMetadata.desktopEditionId=${PERFORMANCE_EDITION_IDENTITY.editionId}`,
-    `--config.extraMetadata.productName=${PERFORMANCE_EDITION_IDENTITY.productName}`,
+    ...identityBuilderArgs(desktopIdentity, outputDirectory),
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
-    `--config.directories.output=${outputDirectory}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),
   ];
@@ -98,12 +117,10 @@ async function main() {
   console.warn("标准目录包被 Windows 文件锁阻塞，使用已解压 Electron 分发重试。", fallbackOutput);
   const fallbackResult = await runBuilder([
     ...(mode === "pack" ? ["--dir"] : []),
-    `--config.extraMetadata.desktopEditionId=${PERFORMANCE_EDITION_IDENTITY.editionId}`,
-    `--config.extraMetadata.productName=${PERFORMANCE_EDITION_IDENTITY.productName}`,
+    ...identityBuilderArgs(desktopIdentity, fallbackOutput),
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),
-    `--config.directories.output=${fallbackOutput}`,
     `--config.electronDist=${temporaryDist}`,
   ]);
   if (fallbackResult === 0) verifyPackagedOutput(fallbackOutput);

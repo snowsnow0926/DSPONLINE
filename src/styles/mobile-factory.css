@@ -159,6 +159,11 @@
 
 .game-shell[data-mobile-shell="true"] .mobile-inspector-sheet--advanced .mobile-next-sheet__content {
   overflow: hidden;
+  /* This full-height sheet is only a header bridge. The real advanced
+     inspector is rendered immediately below it. Light theme gives ordinary
+     sheet contents an opaque surface, which otherwise paints a white layer
+     over the inspector while leaving all of its DOM intact. */
+  background: transparent;
   pointer-events: none;
 }
 

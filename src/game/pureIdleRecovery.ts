@@ -222,10 +222,10 @@ function isRecoveryHistorySample(value: unknown): value is GameState["production
 }
 
 /**
- * Production history is display telemetry and never participates in macro
- * settlement. Older runtime journals can contain JSON nulls from sparse array
- * slots, so keep their gameplay checkpoint usable by dropping only invalid
- * telemetry before the macro Worker receives it.
+ * Production history is normally display telemetry; the opt-in replication
+ * mode reads only its small cumulative snapshots. Older runtime journals can
+ * contain JSON nulls from sparse array slots, so keep their gameplay checkpoint
+ * usable by dropping only invalid telemetry before the macro Worker receives it.
  */
 function sanitizePureIdleRecoveryState(state: GameState): GameState {
   const originalHistory = state.productionHistory;
@@ -304,7 +304,7 @@ function validCheckpoint(value: unknown): value is PureIdleCheckpointRecord {
     typeof record.sessionId === "string" && record.sessionId.length > 0 &&
     typeof record.startedAtMs === "number" && Number.isFinite(record.startedAtMs) &&
     (record.startedPaused === undefined || typeof record.startedPaused === "boolean") &&
-    (record.mode === "stable" || record.mode === "extreme") && Boolean(record.state && typeof record.state === "object");
+    (record.mode === "stable" || record.mode === "extreme" || record.mode === "replication") && Boolean(record.state && typeof record.state === "object");
 }
 
 function validHeartbeat(value: unknown): value is PureIdleHeartbeatRecord {

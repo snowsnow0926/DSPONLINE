@@ -224,7 +224,7 @@ test("disk fallback accepts no arbitrary native root or renderer-selected path",
   const fixture = createDiskFixture(t);
   assert.throws(() => inspectFixedNativeExactRealtimeLeaseOnDisk({
     performanceEditionUserDataPath: path.dirname(fixture.userDataPath),
-  }), /fixed performance-edition/);
+  }), /fixed desktop userData/);
   assert.throws(() => inspectFixedNativeExactRealtimeLeaseOnDisk({
     performanceEditionUserDataPath: fixture.userDataPath,
     path: "C:\\renderer-selected",
@@ -241,7 +241,7 @@ test("Electron main inspects after host hello and blocks before creating the nor
   assert.ok(inspection > hello, "lease inspection must follow the authenticated host hello");
   assert.ok(startupGuard > inspection, "startup guard must consume the completed lease inspection");
   assert.ok(normalWindow > startupGuard, "normal window creation must remain behind the guard");
-  assert.match(source, /resolveFixedNativeSaveRootPath\(performanceEditionRuntimeIdentity\.userDataPath\)/);
+  assert.match(source, /resolveFixedNativeSaveRootPath\([\s\S]*desktopRuntimeIdentity\.userDataPath,[\s\S]*desktopRuntimeIdentity\.userDataDirectoryName/);
   assert.match(source, /nativeExactRealtimeStartupStatus = inspectWithoutHost\(\)/);
   assert.doesNotMatch(source, /inspectNativeExactRealtimeStartupWithoutHost\([^)]*(?:request|event|sender)/);
   const failedHostStop = source.indexOf("await failedNativeHostClient.stop();");

@@ -32,6 +32,14 @@ import {
   type ResearchMacroLedger,
   type ResearchMacroStatus,
 } from "./researchMacro";
+import {
+  advancePureIdleReplicationInPlace,
+  getPureIdleReplicationReadiness,
+  pureIdleReplicationRatePerSecond,
+  PURE_IDLE_REPLICATION_ALGORITHM_VERSION,
+  type PureIdleReplicationContract,
+} from "./pureIdleReplication";
+import { isPureIdleReplicationUnlocked } from "./endgame";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
 export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v10-final-conservation-gate";
@@ -51,7 +59,7 @@ export const PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD = 3_000;
 export const PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD = 6_000;
 const PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT = 4;
 
-export type PureIdleMacroMode = "stable" | "extreme";
+export type PureIdleMacroMode = "stable" | "extreme" | "replication";
 export type PureIdleMacroPhase =
   | "preparing-power"
   | "calibrating"
@@ -138,7 +146,11 @@ export interface PureIdleMacroSession {
   /** Per-system fractional launch carries keep bucket segmentation deterministic. */
   rocketLaunchRemaindersBySystem: Record<string, number>;
   /** Compact source checkpoint for the final combined material gate. */
-  conservationCheckpoint: PureIdleCombinedConservationCheckpoint;
+  conservationCheckpoint?: PureIdleCombinedConservationCheckpoint;
+  /** Player-authorized positive-output snapshot; present only in replication mode. */
+  replicationContract?: PureIdleReplicationContract;
+  /** Integer fractional carries make segmented replication deterministic. */
+  replicationRemainders: Record<string, bigint>;
   baseline: PureIdleTerminalSnapshot;
   baselineResearch: ResearchMacroStatus;
   calibrationRate: PureIdleRateSnapshot;
@@ -358,6 +370,25 @@ function line(
 
 function terminalLines(session: PureIdleMacroSession): PureIdleLineStatus[] {
   const currentRate = session.currentRate;
+  if (session.mode === "replication") {
+    return [
+      line("white-matrix", "白矩阵", currentRate.whiteMatrixProduced, currentRate.whiteMatrixProduced,
+        0, "universe_matrix", currentRate.whiteMatrixProduced > 1e-9,
+        "统计窗口没有白矩阵正向产出"),
+      line("dyson-rockets", "小型运载火箭", currentRate.rocketsLaunched, currentRate.rocketsLaunched,
+        0, "small_carrier_rocket", currentRate.rocketsLaunched > 1e-9,
+        "统计窗口没有火箭发射"),
+      line("solar-sails", "太阳帆吸收", currentRate.sailsAbsorbed, currentRate.sailsAbsorbed,
+        0, "solar_sail", currentRate.sailsAbsorbed > 1e-9,
+        "统计窗口没有太阳帆吸收"),
+      line("dyson-structure", "戴森结构点", currentRate.structurePoints, currentRate.structurePoints,
+        0, undefined, currentRate.structurePoints > 1e-9,
+        "统计窗口没有戴森结构增长"),
+    ].map((entry) => ({
+      ...entry,
+      reason: entry.efficiency === null ? entry.reason : "按已锁定统计产率直接复制",
+    }));
+  }
   const extrapolatesWhiteMatrix = session.contract.deltas.some((delta) =>
     delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix") ||
     currentRate.whiteMatrixProduced > 1e-9;
@@ -388,13 +419,17 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
   const lines = terminalLines(session);
   const running = lines.filter((entry): entry is PureIdleLineStatus & { efficiency: number } => entry.efficiency !== null);
   const minimum = running.length > 0 ? Math.min(...running.map((entry) => entry.efficiency)) : null;
-  const limiting = minimum === null
+  const limiting = session.mode === "replication"
+    ? `按最近 ${Math.floor(session.replicationContract?.windowSeconds ?? 0)} 个模拟秒的正向统计产率直接复制，不消耗原料`
+    : minimum === null
     ? "终局产线尚未在校准窗口运行"
     : lines.find((entry) => entry.efficiency === minimum)?.reason ?? "供给稳定";
   return {
     phase: session.phase,
     mode: session.mode,
-    algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
+    algorithmVersion: session.mode === "replication"
+      ? PURE_IDLE_REPLICATION_ALGORITHM_VERSION
+      : PURE_IDLE_MACRO_ALGORITHM_VERSION,
     settledWallSeconds: session.settledWallSeconds,
     settledSimulationSeconds: session.settledSimulationSeconds,
     requestedMultiplier: session.candidate.timeWarp.requestedMultiplier,
@@ -464,8 +499,11 @@ function recalibrateAfterPowerBoundary(
   targetWallSeconds: number,
 ): "productive" | "frozen" | null {
   if (session.powerBoundaryRecalibrations >= PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT) return null;
-  refreshTimeWarpPowerSnapshotInPlace(session.candidate);
-  const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
+  // The supply/request rules are evaluated at session start and the resulting
+  // actual multiplier is locked with the production snapshot. Re-evaluating it
+  // after copied Dyson growth would make identical wall time depend on how the
+  // caller happened to split advance requests.
+  const multiplier = session.actualMultiplier;
   const calibrationWallSeconds = PURE_IDLE_MACRO_CALIBRATION_SECONDS / multiplier;
   if (session.settledWallSeconds + calibrationWallSeconds > targetWallSeconds + 1e-9) return null;
   const terminalBefore = capturePureIdleTerminalSnapshot(session.candidate);
@@ -527,7 +565,7 @@ function recalibrateAfterPowerBoundary(
     // receipt-aware construction bucket instead of silently losing it.
     session.pendingConstructionSimulationSeconds += PURE_IDLE_MACRO_CALIBRATION_SECONDS;
     creditPureIdleConstructionQuantumReplay(
-      session.conservationCheckpoint,
+      session.conservationCheckpoint!,
       PURE_IDLE_MACRO_CALIBRATION_SECONDS,
     );
   }
@@ -539,7 +577,7 @@ function recalibrateAfterPowerBoundary(
   refreshTimeWarpPowerSnapshotInPlace(session.candidate);
   session.actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
   const conservationFailure = validatePureIdleCombinedSettlementConservation(
-    session.conservationCheckpoint,
+    session.conservationCheckpoint!,
     session.candidate,
   );
   if (conservationFailure) throw new Error(`供电边界重校准最终物资守恒失败：${conservationFailure}`);
@@ -683,6 +721,7 @@ export function createConservativePureIdleMacroSession(
     ...(rocketLedger ? { rocketLedger } : {}),
     rocketLaunchRemaindersBySystem: {},
     conservationCheckpoint,
+    replicationRemainders: {},
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
@@ -727,6 +766,92 @@ export function createConservativePureIdleMacroSession(
   };
 }
 
+/**
+ * Build the opt-in snapshot session without running exact calibration or
+ * scanning the entity/belt graph. All source data already exists in the
+ * rolling production history maintained during ordinary play.
+ */
+export function createReplicationPureIdleMacroSession(state: GameState): PureIdleMacroSession {
+  if (!state.timeWarp.enabled || state.paused) throw new Error("产率复制挂机要求已启用且未暂停的时间扭曲状态");
+  if (state.speedrun?.enabled) throw new Error("速通工厂不能使用产率复制挂机");
+  if (!isPureIdleReplicationUnlocked(state)) throw new Error("产率复制挂机需要五项无限科技总等级大于 200");
+  const readiness = getPureIdleReplicationReadiness(state.productionHistory);
+  if (!readiness.ok) throw new Error(readiness.reason);
+  // FactoryGame evaluates the authoritative power allocation before it writes
+  // the durable checkpoint. Rebuilding the simulation lookup here traversed a
+  // 70+ MiB endgame factory a second time and left the overlay at “读取中” for
+  // minutes. The checkpoint's effective multiplier is the locked session
+  // multiplier, so this mode never needs another factory-wide power scan.
+  const actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(state));
+  const contract = readiness.contract;
+  const total = (record: object): bigint =>
+    (Object.values(record) as Array<bigint | undefined>)
+      .reduce<bigint>((sum, value) => sum + (value ?? 0n), 0n);
+  const rate: PureIdleRateSnapshot = {
+    dysonGenerationKw: 0,
+    whiteMatrixProduced: pureIdleReplicationRatePerSecond(contract, contract.materialByItem.universe_matrix),
+    rocketsLaunched: pureIdleReplicationRatePerSecond(contract, total(contract.rocketsBySystem)),
+    sailsAbsorbed: pureIdleReplicationRatePerSecond(contract, total(contract.sailsBySystem)),
+    structurePoints: pureIdleReplicationRatePerSecond(contract, total(contract.rocketsBySystem)),
+    shellSails: pureIdleReplicationRatePerSecond(contract, total(contract.sailsBySystem)),
+    sailsInOrbit: 0,
+    activityDelivered: {},
+  };
+  const baseline = capturePureIdleTerminalSnapshot(state);
+  return {
+    mode: "replication",
+    phase: "running",
+    candidate: state,
+    contract: {
+      deltas: [],
+      calibrationSeconds: contract.windowSeconds,
+      calibrationWallSeconds: 0,
+    },
+    researchLedger: {
+      unitsPerWindow: 0n,
+      windowSeconds: contract.windowSeconds,
+      observedUnits: 0n,
+      inflowPerWindow: {},
+    },
+    researchRemainder: 0n,
+    researchInflowRemainders: {},
+    rocketLaunchRemaindersBySystem: {},
+    replicationContract: contract,
+    replicationRemainders: {},
+    baseline,
+    baselineResearch: captureResearchMacroStatus(state),
+    calibrationRate: cloneRate(rate),
+    currentRate: cloneRate(rate),
+    settledWallSeconds: 0,
+    settledSimulationSeconds: 0,
+    contractVersion: 1,
+    validationCount: 0,
+    validationFailures: 0,
+    lastValidationDurationMs: 0,
+    lastValidationDeviation: 0,
+    lastValidationReason: `已直接锁定最近 ${Math.floor(contract.windowSeconds)} 个模拟秒的正向统计产率；未执行额外校准`,
+    nextValidationAtWallSeconds: null,
+    boundaryCorrections: 0,
+    calibrationWindowsCompleted: 0,
+    actualMultiplier,
+    computationDurationMs: 0,
+    conservativeOnly: false,
+    conservativeIntegerRemainders: {},
+    conservativeDecimalRemainders: {},
+    conservativeRemainingSimulationSeconds: null,
+    powerTail: {
+      productiveMultiplier: actualMultiplier,
+      fuelDebits: [],
+      maximumSimulationSeconds: null,
+      storageDispatchDetected: false,
+    },
+    powerRemainingSimulationSeconds: null,
+    powerBoundaryRecalibrations: 0,
+    conservativeRemainingSimulationSecondsByItem: {},
+    pendingConstructionSimulationSeconds: 0,
+  };
+}
+
 export function createPureIdleMacroSession(
   state: GameState,
   mode: PureIdleMacroMode,
@@ -738,6 +863,7 @@ export function createPureIdleMacroSession(
     throw new Error("纯挂机检查点仍包含未提交模拟预算");
   }
   throwIfMacroInterrupted(options);
+  if (mode === "replication") return createReplicationPureIdleMacroSession(state);
   if (options.forceConservativeReason) {
     return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason, options);
   }
@@ -767,6 +893,7 @@ export function createPureIdleMacroSession(
     ...(calibrated.rocketLedger ? { rocketLedger: calibrated.rocketLedger } : {}),
     rocketLaunchRemaindersBySystem: {},
     conservationCheckpoint,
+    replicationRemainders: {},
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(calibrated.rate),
@@ -884,12 +1011,52 @@ function advanceClosedRocketDomainInPlace(
   return { launched: result.launched };
 }
 
+function advanceReplicationSession(
+  session: PureIdleMacroSession,
+  targetWallSeconds: number,
+  options: PureIdleMacroOperationOptions,
+): PureIdleMacroSummary {
+  const contract = session.replicationContract;
+  if (!contract) throw new Error("产率复制会话缺少已锁定统计快照");
+  if (!Number.isFinite(targetWallSeconds) || targetWallSeconds < session.settledWallSeconds) {
+    throw new Error("产率复制目标墙钟时间无效或发生倒退");
+  }
+  throwIfMacroInterrupted(options);
+  if (targetWallSeconds <= session.settledWallSeconds + 1e-9) return summarizePureIdleMacroSession(session);
+  const startedAt = macroNow();
+  const multiplier = session.actualMultiplier;
+  const wallSeconds = targetWallSeconds - session.settledWallSeconds;
+  const simulationSeconds = wallSeconds * multiplier;
+  const application = advancePureIdleReplicationInPlace(
+    session.candidate,
+    contract,
+    simulationSeconds,
+    session.replicationRemainders,
+  );
+  throwIfMacroInterrupted(options);
+  session.candidate.elapsedSeconds += simulationSeconds;
+  // Do not let the first ordinary post-idle sample pretend it covered the
+  // whole replicated interval. A future snapshot requires fresh normal-play
+  // telemetry instead of recursively sampling copied output.
+  session.candidate.historyRecordedAt = session.candidate.elapsedSeconds;
+  session.settledWallSeconds = targetWallSeconds;
+  session.settledSimulationSeconds += simulationSeconds;
+  session.actualMultiplier = multiplier;
+  session.phase = "running";
+  session.lastValidationReason = `统计产率复制：材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}`;
+  session.computationDurationMs = Math.max(0, macroNow() - startedAt);
+  return summarizePureIdleMacroSession(session);
+}
+
 export function advancePureIdleMacroSession(
   session: PureIdleMacroSession,
   targetWallSeconds: number,
   options: PureIdleMacroOperationOptions = {},
 ): PureIdleMacroSummary {
   throwIfMacroInterrupted(options);
+  if (session.mode === "replication") {
+    return advanceReplicationSession(session, targetWallSeconds, options);
+  }
   if (session.phase === "failed") {
     throw new Error(session.degradedReason ?? "纯挂机候选已被最终物资守恒门禁拒绝");
   }
@@ -922,7 +1089,7 @@ export function advancePureIdleMacroSession(
           if (session.powerRemainingSimulationSeconds !== 0) {
             isolatedConstructionPrefixSeconds += exactSimulationSeconds;
             if (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9) {
-              creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint, exactSimulationSeconds);
+              creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint!, exactSimulationSeconds);
             }
           }
           macroWallSeconds = 0;
@@ -942,7 +1109,7 @@ export function advancePureIdleMacroSession(
             if (session.powerRemainingSimulationSeconds !== 0) {
               isolatedConstructionPrefixSeconds += exactSimulationSeconds;
               if (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9) {
-                creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint, exactSimulationSeconds);
+                creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint!, exactSimulationSeconds);
               }
             }
           } else {
@@ -953,7 +1120,7 @@ export function advancePureIdleMacroSession(
             if (isolatedConstructionPrefixSeconds > 1e-9 &&
               (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9)) {
               creditPureIdleConstructionQuantumReplay(
-                session.conservationCheckpoint,
+                session.conservationCheckpoint!,
                 isolatedConstructionPrefixSeconds,
               );
             }
@@ -1013,7 +1180,7 @@ export function advancePureIdleMacroSession(
           powerCreditedMacroSimulationSeconds,
           multiplier > 0 ? powerCreditedMacroSimulationSeconds / multiplier : 0,
           {
-            constructionCheckpoint: session.conservationCheckpoint,
+            constructionCheckpoint: session.conservationCheckpoint!,
             constructionPowerCertificate: session.constructionPowerCertificate,
             integerRemainders: session.conservativeIntegerRemainders,
             decimalRemainders: session.conservativeDecimalRemainders,
@@ -1187,7 +1354,7 @@ export function advancePureIdleMacroSession(
     const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
       session.candidate,
       constructionSeconds,
-      session.conservationCheckpoint,
+      session.conservationCheckpoint!,
       {
         powerCertificate: session.constructionPowerCertificate,
         contract: session.contract,
@@ -1207,7 +1374,7 @@ export function advancePureIdleMacroSession(
       session.lastValidationReason = `科研边界完成：有限科技 ${research.completedFiniteTechIds.length} 项，无限科技 ${research.completedInfiniteLevels.length} 级`;
     }
     const combinedConservationFailure = validatePureIdleCombinedSettlementConservation(
-      session.conservationCheckpoint,
+      session.conservationCheckpoint!,
       session.candidate,
     );
     if (combinedConservationFailure) {
@@ -1241,7 +1408,7 @@ export function advancePureIdleMacroSession(
             session.candidate,
             timeOnlySimulationSeconds,
             remainingWallSeconds,
-            session.conservationCheckpoint,
+            session.conservationCheckpoint!,
           );
           session.currentRate = rateBetween(
             terminalBeforeExact,
@@ -1307,7 +1474,7 @@ export function advancePureIdleMacroSession(
       }
     }
     const postBoundaryConservationFailure = validatePureIdleCombinedSettlementConservation(
-      session.conservationCheckpoint,
+      session.conservationCheckpoint!,
       session.candidate,
     );
     if (postBoundaryConservationFailure) {
@@ -1346,16 +1513,18 @@ export function finalizePureIdleMacroCandidate(
 ): { state: GameState; summary: PureIdleMacroSummary } {
   throwIfMacroInterrupted(options);
   advancePureIdleMacroSession(session, targetWallSeconds, options);
-  const combinedConservationFailure = validatePureIdleCombinedSettlementConservation(
-    session.conservationCheckpoint,
-    session.candidate,
-  );
-  if (combinedConservationFailure) {
-    session.phase = "failed";
-    session.validationFailures += 1;
-    session.degradedReason = `最终物资守恒门禁拒绝候选：${combinedConservationFailure}`;
-    session.lastValidationReason = session.degradedReason;
-    throw new Error(session.degradedReason);
+  if (session.mode !== "replication") {
+    const combinedConservationFailure = validatePureIdleCombinedSettlementConservation(
+      session.conservationCheckpoint!,
+      session.candidate,
+    );
+    if (combinedConservationFailure) {
+      session.phase = "failed";
+      session.validationFailures += 1;
+      session.degradedReason = `最终物资守恒门禁拒绝候选：${combinedConservationFailure}`;
+      session.lastValidationReason = session.degradedReason;
+      throw new Error(session.degradedReason);
+    }
   }
   session.phase = "finalizing";
   session.candidate.timeWarp = {

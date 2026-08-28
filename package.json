@@ -2,8 +2,6 @@
   "name": "dsp-idle-network",
   "private": true,
   "version": "1.2.3",
-  "desktopEditionId": "windows-performance-development-v1",
-  "productName": "DSP极简网络 Windows 性能开发版",
   "releaseChannel": "beta",
   "updateBaseUrl": "",
   "cloudApiBaseUrl": "",
@@ -58,10 +56,12 @@
     "release:test-switch": "node --test deploy/release-backup-evidence.test.mjs deploy/api-handoff-proxy.test.mjs deploy/release-switch.test.mjs",
     "build:desktop": "node scripts/build-native-host.mjs && node scripts/build-platform.mjs desktop",
     "build:android": "node scripts/build-platform.mjs android",
-    "desktop:dev": "cross-env DSP_DESKTOP_DEV_URL=http://127.0.0.1:4318 electron .",
+    "desktop:dev": "cross-env DSP_DESKTOP_DEV_URL=http://127.0.0.1:4318 DSP_DESKTOP_EDITION=performance electron .",
     "desktop:pack": "npm run build:desktop && node desktop/pack.cjs pack",
     "desktop:dist": "npm run build:desktop && node desktop/pack.cjs dist",
-    "desktop:release": "node scripts/verify-desktop-signing-env.mjs && npm run desktop:dist && node scripts/create-native-update-manifests.mjs --desktop-source release-performance-edition --output release-performance-edition/update-feed",
+    "desktop:performance:pack": "npm run build:desktop && cross-env DSP_DESKTOP_EDITION=performance node desktop/pack.cjs pack",
+    "desktop:performance:dist": "npm run build:desktop && cross-env DSP_DESKTOP_EDITION=performance node desktop/pack.cjs dist",
+    "desktop:release": "node scripts/verify-desktop-signing-env.mjs && npm run desktop:dist && node scripts/create-native-update-manifests.mjs --desktop-source release",
     "android:sync": "npm run build:android && cap sync android && node scripts/sync-native-versions.mjs",
     "android:debug": "cross-env DSP_ANDROID_DEBUG=1 npm run android:sync && android\\gradlew.bat -p android assembleDebug",
     "android:release:unsigned": "npm run android:sync && android\\gradlew.bat -p android bundleRelease assembleRelease",
@@ -106,11 +106,11 @@
     "js-yaml": "4.3.1"
   },
   "build": {
-    "appId": "com.dspidle.network.performance",
-    "productName": "DSP极简网络 Windows 性能开发版",
+    "appId": "com.dspidle.network",
+    "productName": "DSP极简网络",
     "asar": true,
     "directories": {
-      "output": "release-performance-edition"
+      "output": "release"
     },
     "files": [
       "dist/**",
@@ -132,7 +132,6 @@
       }
     ],
     "win": {
-      "executableName": "dsp-idle-performance-edition",
       "target": [
         {
           "target": "nsis",
@@ -141,13 +140,11 @@
           ]
         }
       ],
-      "artifactName": "dsp-idle-performance-edition-${version}-${arch}-setup.${ext}"
+      "artifactName": "dsp-idle-${version}-${arch}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": false,
-      "shortcutName": "DSP极简网络 Windows 性能开发版",
-      "uninstallDisplayName": "DSP极简网络 Windows 性能开发版",
+      "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
     },
     "mac": {

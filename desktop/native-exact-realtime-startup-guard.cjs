@@ -123,15 +123,26 @@ function unavailableStartupStatus(environment = process.env) {
   };
 }
 
-function resolveFixedNativeSaveRootPath(performanceEditionUserDataPath, pathModule = path) {
-  if (typeof performanceEditionUserDataPath !== "string" ||
-      !pathModule.isAbsolute(performanceEditionUserDataPath) ||
-      performanceEditionUserDataPath.includes("\0")) {
-    throw new TypeError("performance-edition userData path is invalid");
+function resolveFixedNativeSaveRootPath(
+  desktopUserDataPath,
+  pathModule = path,
+  expectedUserDataDirectoryName = PERFORMANCE_EDITION_IDENTITY.userDataDirectoryName,
+) {
+  if (typeof desktopUserDataPath !== "string" ||
+      !pathModule.isAbsolute(desktopUserDataPath) ||
+      desktopUserDataPath.includes("\0")) {
+    throw new TypeError("desktop userData path is invalid");
   }
-  const userDataPath = pathModule.resolve(performanceEditionUserDataPath);
-  if (pathModule.basename(userDataPath) !== PERFORMANCE_EDITION_IDENTITY.userDataDirectoryName) {
-    throw new TypeError("native save inspection is outside the fixed performance-edition userData root");
+  if (
+    typeof expectedUserDataDirectoryName !== "string"
+    || expectedUserDataDirectoryName.length === 0
+    || pathModule.basename(expectedUserDataDirectoryName) !== expectedUserDataDirectoryName
+  ) {
+    throw new TypeError("desktop userData directory identity is invalid");
+  }
+  const userDataPath = pathModule.resolve(desktopUserDataPath);
+  if (pathModule.basename(userDataPath) !== expectedUserDataDirectoryName) {
+    throw new TypeError("native save inspection is outside the fixed desktop userData root");
   }
   const nativeSaveRootPath = pathModule.join(userDataPath, NATIVE_SAVE_DIRECTORY_NAME);
   if (pathModule.dirname(nativeSaveRootPath) !== userDataPath) {
@@ -270,17 +281,28 @@ function parseStoredRustLease(bytes) {
 }
 
 function inspectFixedNativeExactRealtimeLeaseOnDisk(options) {
-  requireOnlyKeys(options, ["performanceEditionUserDataPath", "fileSystem", "pathModule"], "disk lease inspection options");
+  requireOnlyKeys(
+    options,
+    [
+      "desktopUserDataPath",
+      "performanceEditionUserDataPath",
+      "expectedUserDataDirectoryName",
+      "fileSystem",
+      "pathModule",
+    ],
+    "disk lease inspection options",
+  );
   const fileSystem = options.fileSystem ?? fs;
   const pathModule = options.pathModule ?? path;
   const nativeSaveRootPath = resolveFixedNativeSaveRootPath(
-    options.performanceEditionUserDataPath,
+    options.desktopUserDataPath ?? options.performanceEditionUserDataPath,
     pathModule,
+    options.expectedUserDataDirectoryName ?? PERFORMANCE_EDITION_IDENTITY.userDataDirectoryName,
   );
   try {
     const userDataPath = pathModule.dirname(nativeSaveRootPath);
-    const userData = requireDirectDirectory(fileSystem, userDataPath, "performance-edition userData");
-    if (userData === null) throw diskInspectionError("performance-edition userData disappeared");
+    const userData = requireDirectDirectory(fileSystem, userDataPath, "desktop userData");
+    if (userData === null) throw diskInspectionError("desktop userData disappeared");
 
     const nativeRoot = requireDirectDirectory(fileSystem, nativeSaveRootPath, "native save root");
     if (nativeRoot === null) {
@@ -351,12 +373,21 @@ async function inspectNativeExactRealtimeStartup(options) {
 function inspectNativeExactRealtimeStartupWithoutHost(options) {
   requireOnlyKeys(
     options,
-    ["performanceEditionUserDataPath", "fileSystem", "pathModule", "environment"],
+    [
+      "desktopUserDataPath",
+      "performanceEditionUserDataPath",
+      "expectedUserDataDirectoryName",
+      "fileSystem",
+      "pathModule",
+      "environment",
+    ],
     "host-unavailable startup inspection options",
   );
   const environment = options.environment ?? process.env;
   const inspection = inspectFixedNativeExactRealtimeLeaseOnDisk({
-    performanceEditionUserDataPath: options.performanceEditionUserDataPath,
+    desktopUserDataPath: options.desktopUserDataPath ?? options.performanceEditionUserDataPath,
+    expectedUserDataDirectoryName: options.expectedUserDataDirectoryName
+      ?? PERFORMANCE_EDITION_IDENTITY.userDataDirectoryName,
     ...(options.fileSystem ? { fileSystem: options.fileSystem } : {}),
     ...(options.pathModule ? { pathModule: options.pathModule } : {}),
   });

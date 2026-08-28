@@ -465,7 +465,7 @@ test("active-planet command publishes a full exact snapshot for unchanged record
 test("game runtime requeues a rejected slice exactly once across Pause and resume", async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const tracker = {
       armed: false,
@@ -607,7 +607,7 @@ test("game runtime requeues a rejected slice exactly once across Pause and resum
 test("game runtime replays acknowledged slices after a Worker crash and remains saveable", async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const tracker = { simulationWorkers: 0, steadyAdvances: 0, injectedCrashes: 0 };
     (window as typeof window & { __v144CrashTracker?: typeof tracker }).__v144CrashTracker = tracker;
@@ -708,7 +708,7 @@ test("real large save keeps running interactions and steady Worker payloads boun
     // that traversal; disable only its console timeline hook so the frame
     // gate measures application rendering rather than DevTools bookkeeping.
     try { Object.defineProperty(console, "timeStamp", { configurable: true, value: undefined }); } catch { /* browser-specific debug API */ }
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     // Large-factory escape hatch: this must stop the Worker scan itself, not
@@ -1135,7 +1135,7 @@ test("real large save manual persistence stays off the main thread", async ({ pa
       active: {},
       counters: {},
     };
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");
   });
@@ -1281,7 +1281,7 @@ test("real large pure-idle stop persists and rebases without main-thread payload
     // omit it entirely. Disable only that console timeline capability so this
     // gate continues measuring application work with the strict 100 ms limit.
     try { Object.defineProperty(console, "timeStamp", { configurable: true, value: undefined }); } catch { /* browser-specific debug API */ }
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.3");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.ui.factory-alerts.v1", "false");
   });

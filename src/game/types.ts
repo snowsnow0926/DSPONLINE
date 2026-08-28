@@ -1552,6 +1552,19 @@ export interface ProductionHistorySample {
   powerEfficiency?: number;
   activeMachines?: number;
   blockedMachines?: number;
+  /**
+   * Runtime-only cumulative counters used by the opt-in time-warp production
+   * replication mode. Primary-save projection still removes production
+   * history, so these samples never enlarge the persisted player save.
+   */
+  pureIdleReplication?: PureIdleReplicationTelemetry;
+}
+
+export interface PureIdleReplicationTelemetry {
+  totalProduced: Partial<Record<ItemId, DecimalIntegerString>>;
+  researchInvestmentByItem: Partial<Record<ItemId, DecimalIntegerString>>;
+  structurePointsBySystem: Partial<Record<StarSystemId, number>>;
+  shellSailsBySystem: Partial<Record<StarSystemId, number>>;
 }
 
 export type ConstructionAutomationTargetId = ConstructionId | PortableFleetItemId;

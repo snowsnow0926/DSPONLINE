@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail};
+use num_bigint::BigUint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Settlement {
@@ -85,6 +86,47 @@ pub(crate) fn cost(id: &str, current_level: u32) -> anyhow::Result<u128> {
     Ok(value)
 }
 
+/// Returns the exact lifetime matrix investment represented by one infinite
+/// research track. This mirrors the JavaScript telemetry helper without
+/// repeatedly walking the whole curve once per completed level.
+pub(crate) fn cumulative_investment(
+    id: &str,
+    current_level: u32,
+    current_progress: &BigUint,
+) -> anyhow::Result<BigUint> {
+    let definition = curve(id).ok_or_else(|| anyhow!("unknown infinite research ID"))?;
+    let level = current_level.min(definition.maximum_level);
+    let final_target = if level < definition.maximum_level {
+        level + 1
+    } else {
+        level
+    };
+    let mut cumulative = BigUint::default();
+    let mut next_cost = 0_u128;
+    for target_level in 1..=final_target {
+        if target_level <= 10 {
+            let exponent =
+                i32::try_from(target_level - 1).expect("legacy infinite research exponent");
+            let rounded_tens =
+                (definition.base_cost * definition.legacy_growth.powi(exponent) / 10.0).round();
+            next_cost = ((rounded_tens.max(1.0)) as u128) * 10;
+        } else {
+            next_cost = next_cost
+                .checked_mul(definition.growth_numerator)
+                .and_then(|product| product.checked_add(5_000))
+                .map(|rounded| rounded / 10_000 * 10)
+                .ok_or_else(|| anyhow!("infinite research curve overflow"))?;
+        }
+        if target_level <= level {
+            cumulative += BigUint::from(next_cost);
+        }
+    }
+    if level < definition.maximum_level {
+        cumulative += current_progress.min(&BigUint::from(next_cost));
+    }
+    Ok(cumulative)
+}
+
 pub(crate) fn settle(
     id: &str,
     current_level: u32,
@@ -133,7 +175,9 @@ pub(crate) fn settle(
 
 #[cfg(test)]
 mod tests {
-    use super::{cost, settle};
+    use num_bigint::BigUint;
+
+    use super::{cost, cumulative_investment, settle};
 
     #[test]
     fn cost_curve_matches_javascript_bigint_fixtures() {
@@ -171,5 +215,23 @@ mod tests {
         let pre_funded = settle("matrix_compression", 263, first, 0, true).unwrap();
         assert_eq!(pre_funded.level, 264);
         assert_eq!(pre_funded.consumed, 0);
+    }
+
+    #[test]
+    fn cumulative_investment_matches_completed_costs_and_caps_progress() {
+        let first = cost("matrix_compression", 0).unwrap();
+        let second = cost("matrix_compression", 1).unwrap();
+        assert_eq!(
+            cumulative_investment("matrix_compression", 1, &BigUint::from(second + 1)).unwrap(),
+            BigUint::from(first + second),
+        );
+
+        let completed = (0..23)
+            .map(|level| cost("continuum_simulation", level).unwrap())
+            .sum::<u128>();
+        assert_eq!(
+            cumulative_investment("continuum_simulation", 23, &BigUint::from(u128::MAX),).unwrap(),
+            BigUint::from(completed),
+        );
     }
 }

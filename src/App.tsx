@@ -311,6 +311,8 @@ import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, Sim
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
 import type { PureIdleMacroMode, PureIdleMacroSummary } from "./game/pureIdleMacro";
+import { isPureIdleReplicationUnlocked } from "./game/endgame";
+import { getPureIdleReplicationReadiness } from "./game/pureIdleReplication";
 import { beginIdleRun, finishIdleRun, settleIdleRun } from "./game/idleSettlement";
 import { classifyOfflineWorkload } from "./game/offlineComplexity";
 import { offlineProfileLabel } from "./game/offlineComplexityTypes";
@@ -4262,27 +4264,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       pureIdleMacroForceConservativeRef.current = true;
     }
     pureIdleMacroClientRef.current?.close();
-    const complexity = classifyOfflineWorkload(record.state, 30 * 24 * 60 * 60);
+    // Replication mode consumes only the already-recorded rolling counters.
+    // Do not traverse a huge entity/belt graph just to classify a workload
+    // that deliberately skips exact simulation and calibration.
+    const complexity = record.mode === "replication"
+      ? null
+      : classifyOfflineWorkload(record.state, 30 * 24 * 60 * 60);
     const recoveryConservativeReason = getPureIdleForceConservativeReason(
       record,
       pureIdleMacroRestartCountRef.current,
     );
     const workerFailureFallback = Math.max(record.workerRestartCount, pureIdleMacroRestartCountRef.current) >=
       PURE_IDLE_WORKER_RESTART_LIMIT;
-    const forceConservativeReason = recoveryConservativeReason ?? (complexity.recommendedStrategy === "conservative"
-      ? `${complexity.warning ?? "当前设备无法安全容纳多份校准状态"}；${offlineProfileLabel(complexity.profile)}`
+    const forceConservativeReason = record.mode === "replication" ? undefined : recoveryConservativeReason ?? (complexity!.recommendedStrategy === "conservative"
+      ? `${complexity!.warning ?? "当前设备无法安全容纳多份校准状态"}；${offlineProfileLabel(complexity!.profile)}`
       : undefined);
     const client = new PureIdleMacroClient({
-      operationDeadlineMs: complexity.recommendedDeadlineMs || undefined,
+      operationDeadlineMs: complexity?.recommendedDeadlineMs || undefined,
       onProgress: (progress) => {
         if (pureIdleMacroClientRef.current !== client || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) return;
         setPureIdleRecoveryStatus(`${pureIdleProgressLabel(progress)} · 现实耗时 ${(progress.wallClockMs / 1_000).toFixed(1)} 秒`);
       },
     });
     pureIdleMacroClientRef.current = client;
-    setPureIdleRecoveryStatus(forceConservativeReason
-      ? `正在从权威检查点建立保守宏观会话 · ${offlineProfileLabel(complexity.profile)}`
-      : record.summary ? `正在从检查点重建宏观状态 · ${offlineProfileLabel(complexity.profile)}` : `正在执行 3 × 10 秒产线校准 · ${offlineProfileLabel(complexity.profile)}`);
+    setPureIdleRecoveryStatus(record.mode === "replication"
+      ? "正在读取既有滚动统计快照；不会执行额外精确校准"
+      : forceConservativeReason
+      ? `正在从权威检查点建立保守宏观会话 · ${offlineProfileLabel(complexity!.profile)}`
+      : record.summary ? `正在从检查点重建宏观状态 · ${offlineProfileLabel(complexity!.profile)}` : `正在执行 3 × 10 秒产线校准 · ${offlineProfileLabel(complexity!.profile)}`);
     try {
       const summary = await client.initialize(record.state, record.mode, contentPackRuntimeSnapshotRef.current, {
         forceConservativeReason,
@@ -4299,7 +4308,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       publishPureIdleMacroSummary(record, summary);
       if (summary.settledWallSeconds > 0) pureIdleMacroRestartCountRef.current = 0;
       setPureIdleRecoveryContinueState(false);
-      setNotice(summary.conservativeOnly
+      setNotice(record.mode === "replication"
+        ? "产率复制挂机已启动：已直接锁定既有 60/30 秒统计，不运行额外校准"
+        : summary.conservativeOnly
         ? workerFailureFallback
           ? "精确 Worker 重建已切换到低内存路径；3 × 10 秒校准完成，闭合稳态产线继续结算，原存档和恢复日志保持有效"
           : "大型工厂已用 3 × 10 秒校准建立低内存稳态结算；闭合供需产线持续推进，缓存产线仍受真实边界保护"
@@ -4645,9 +4656,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(wasPaused ? "模拟已继续" : "模拟已暂停");
   }, [invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
 
-  const handleTimeWarpEnabledChange = useCallback((enabled: boolean) => {
+  const handleTimeWarpEnabledChange = useCallback((enabled: boolean, requestedMode: "conservative" | "replication" = "conservative") => {
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     if (enabled) {
+      if (requestedMode === "replication" && gameRef.current.speedrun?.enabled) {
+        setNotice("速通工厂不能使用产率复制挂机");
+        return;
+      }
       if (typeof Worker === "undefined" ||
         (!gameRef.current.speedrun?.enabled && !canUsePureIdleRecovery())) {
         setNotice("当前环境缺少 Worker 或 IndexedDB 恢复日志，已阻止纯挂机以保护存档");
@@ -4669,13 +4684,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice("当前模拟切片仍在提交，请稍后再次开始纯挂机");
             return;
           }
+          if (requestedMode === "replication") {
+            try {
+              await requestAuthoritativeDeferredTopLevelProjection();
+            } catch (error) {
+              pureIdleMacroActiveRef.current = false;
+              setNotice(error instanceof Error ? `无法读取产率统计：${error.message}` : "无法读取权威产率统计");
+              return;
+            }
+            if (!isPureIdleReplicationUnlocked(gameRef.current)) {
+              pureIdleMacroActiveRef.current = false;
+              setNotice("产率复制挂机需要五项无限科技总等级大于 200");
+              return;
+            }
+            const readiness = getPureIdleReplicationReadiness(gameRef.current.productionHistory);
+            if (!readiness.ok) {
+              pureIdleMacroActiveRef.current = false;
+              setNotice(readiness.reason);
+              return;
+            }
+          }
           const pendingWallSeconds = Math.max(0, simulationPendingWallSecondsRef.current);
           const startedPaused = gameRef.current.paused;
           simulationPendingSecondsRef.current = 0;
           simulationPendingWallSecondsRef.current = 0;
           setTimeWarpPendingUi(0);
           const startedAtMs = Date.now() - pendingWallSeconds * 1_000;
-          const mode: PureIdleMacroMode = endgameExtremeMode ? "extreme" : "stable";
+          const mode: PureIdleMacroMode = requestedMode === "replication"
+            ? "replication"
+            : endgameExtremeMode ? "extreme" : "stable";
           const checkpoint = refreshTimeWarpPowerSnapshot(
             setTimeWarpEnabled(setPaused(gameRef.current, false), true),
           );
@@ -4722,7 +4759,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           invalidateFactoryAlertProjection();
           gameRef.current = checkpoint;
           setGame(checkpoint);
-          setNotice(mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
+          setNotice(mode === "replication"
+            ? "正在启动产率复制挂机；直接读取既有统计，不执行 30 秒校准"
+            : mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
           await initializePureIdleMacroClient(claim.record);
         })();
         return;
@@ -4765,7 +4804,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, setPureIdleRecoveryContinueState]);
+  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {

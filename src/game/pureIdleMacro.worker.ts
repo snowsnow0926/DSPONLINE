@@ -114,10 +114,11 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
   };
   try {
     if (request.type === "initialize") {
-      postProgress(request.forceConservativeReason ? "conservative" : "preparing-power");
+      const replication = request.mode === "replication";
+      postProgress(replication ? "running" : request.forceConservativeReason ? "conservative" : "preparing-power");
       sessionContext = null;
       applyContentPackRuntimeSnapshot(request.registry);
-      postProgress(request.forceConservativeReason ? "conservative" : "calibrating");
+      postProgress(replication ? "running" : request.forceConservativeReason ? "conservative" : "calibrating");
       const consumeCalibrationState = request.state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
         request.state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD;
       const initializedSession = createPureIdleMacroSession(request.state, request.mode, {
@@ -133,12 +134,14 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
       // A consumed calibration candidate is exactly 30 simulated seconds in
       // the future. Never publish it before the corresponding real wall time
       // has elapsed, even on an unusually fast device or a 1x controller.
-      await waitForCreditedCalibrationWallTime(
-        request.id,
-        startedAt,
-        initializedSession.settledWallSeconds,
-        deadlineAtMs,
-      );
+      if (!replication) {
+        await waitForCreditedCalibrationWallTime(
+          request.id,
+          startedAt,
+          initializedSession.settledWallSeconds,
+          deadlineAtMs,
+        );
+      }
       const summary = summarizePureIdleMacroSession(initializedSession);
       const terminalState = readTerminalState(request);
       sessionContext = {

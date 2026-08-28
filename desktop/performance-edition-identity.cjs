@@ -17,10 +17,15 @@ const PERFORMANCE_EDITION_IDENTITY = Object.freeze({
 });
 
 const STABLE_IDENTITY = Object.freeze({
+  schemaVersion: 1,
+  editionId: "stable-v1",
   appId: "com.dspidle.network",
   appUserModelId: "com.dspidle.network",
   productName: "DSP极简网络",
+  executableName: "DSP极简网络",
+  installerArtifactName: "dsp-idle-${version}-${arch}-setup.${ext}",
   outputDirectoryName: "release",
+  userDataDirectoryName: "dsp-idle-network",
 });
 
 function assertEqual(actual, expected, label) {
@@ -59,6 +64,69 @@ function validatePerformanceEditionPackageIdentity(metadata, {
     throw new Error("Windows 性能开发版 NSIS 身份必须由冻结 appId 确定生成");
   }
   return true;
+}
+
+function validateStablePackageIdentity(metadata, {
+  requireBuildConfiguration = false,
+  requireOfflineDefaults = false,
+} = {}) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new TypeError("Windows 稳定版缺少 package metadata");
+  }
+  if (metadata.desktopEditionId !== undefined) {
+    assertEqual(metadata.desktopEditionId, STABLE_IDENTITY.editionId, "stable editionId");
+  }
+  if (metadata.productName !== undefined) {
+    assertEqual(metadata.productName, STABLE_IDENTITY.productName, "stable productName");
+  }
+  if (requireOfflineDefaults) {
+    assertEqual(metadata.updateBaseUrl, "", "stable 默认 updateBaseUrl");
+    assertEqual(metadata.cloudApiBaseUrl, "", "stable 默认 cloudApiBaseUrl");
+  }
+  if (!requireBuildConfiguration) return true;
+
+  const build = metadata.build;
+  if (!build || typeof build !== "object" || Array.isArray(build)) {
+    throw new Error("Windows 稳定版缺少 electron-builder 配置");
+  }
+  assertEqual(build.appId, STABLE_IDENTITY.appId, "stable appId");
+  assertEqual(build.productName, STABLE_IDENTITY.productName, "stable build.productName");
+  assertEqual(build.directories?.output, STABLE_IDENTITY.outputDirectoryName, "stable 输出目录");
+  if (build.win?.executableName !== undefined) {
+    assertEqual(build.win.executableName, STABLE_IDENTITY.executableName, "stable 可执行文件名");
+  }
+  assertEqual(build.win?.artifactName, STABLE_IDENTITY.installerArtifactName, "stable 安装制品名");
+  if (build.nsis?.shortcutName !== undefined) {
+    assertEqual(build.nsis.shortcutName, STABLE_IDENTITY.productName, "stable 快捷方式名");
+  }
+  if (build.nsis?.uninstallDisplayName !== undefined) {
+    assertEqual(build.nsis.uninstallDisplayName, STABLE_IDENTITY.productName, "stable 卸载项名称");
+  }
+  assertEqual(build.nsis?.allowToChangeInstallationDirectory, true, "stable 安装目录策略");
+  assertEqual(build.nsis?.deleteAppDataOnUninstall, false, "stable 卸载数据保留策略");
+  return true;
+}
+
+function resolveDesktopEditionIdentity(metadata, requestedEdition) {
+  const requested = requestedEdition === "performance"
+    ? PERFORMANCE_EDITION_IDENTITY.editionId
+    : requestedEdition === "stable"
+      ? STABLE_IDENTITY.editionId
+      : requestedEdition;
+  const declared = requested ?? metadata?.desktopEditionId ?? STABLE_IDENTITY.editionId;
+  if (declared === PERFORMANCE_EDITION_IDENTITY.editionId) return PERFORMANCE_EDITION_IDENTITY;
+  if (declared === STABLE_IDENTITY.editionId) return STABLE_IDENTITY;
+  throw new Error("Windows 桌面版身份无效");
+}
+
+function validateDesktopPackageIdentity(metadata, options = {}) {
+  const identity = resolveDesktopEditionIdentity(metadata, options.requestedEdition);
+  if (identity.editionId === PERFORMANCE_EDITION_IDENTITY.editionId) {
+    validatePerformanceEditionPackageIdentity(metadata, options);
+  } else {
+    validateStablePackageIdentity(metadata, options);
+  }
+  return identity;
 }
 
 function resolvePerformanceEditionOutputDirectory(repositoryRoot, pathModule = path) {
@@ -177,6 +245,65 @@ function initializePerformanceEditionIdentity({
   });
 }
 
+function initializeStableEditionIdentity({
+  app,
+  fileSystem = fs,
+  pathModule = path,
+} = {}) {
+  if (!app || typeof app.getPath !== "function") {
+    throw new TypeError("Windows 稳定版需要完整 Electron app identity API");
+  }
+  const appDataPath = app.getPath("appData");
+  const userDataPath = app.getPath("userData");
+  if (
+    typeof appDataPath !== "string" || !pathModule.isAbsolute(appDataPath)
+    || typeof userDataPath !== "string" || !pathModule.isAbsolute(userDataPath)
+  ) {
+    throw new Error("Windows 稳定版无法取得 AppData 路径");
+  }
+  if (pathModule.basename(pathModule.resolve(userDataPath)) !== STABLE_IDENTITY.userDataDirectoryName) {
+    throw new Error("Windows 稳定版拒绝使用非历史稳定版 userData 路径");
+  }
+  const userDataParentPath = pathModule.dirname(pathModule.resolve(userDataPath));
+  const userDataIdentity = createFixedDirectDirectory(
+    fileSystem,
+    userDataParentPath,
+    userDataPath,
+    "stable userData",
+  );
+  requireSameDirectDirectory(fileSystem, userDataPath, userDataIdentity, "stable userData");
+  const sessionDataPath = app.getPath("sessionData");
+  return Object.freeze({
+    ...STABLE_IDENTITY,
+    userDataPath,
+    sessionDataPath,
+  });
+}
+
+function initializeDesktopEditionIdentity({
+  metadata,
+  requestedEdition,
+  ...options
+} = {}) {
+  const identity = resolveDesktopEditionIdentity(metadata, requestedEdition);
+  if (identity.editionId === PERFORMANCE_EDITION_IDENTITY.editionId) {
+    validatePerformanceEditionPackageIdentity(metadata);
+    return initializePerformanceEditionIdentity(options);
+  }
+  validateStablePackageIdentity(metadata);
+  return initializeStableEditionIdentity(options);
+}
+
+function resolveDesktopEditionOutputDirectory(repositoryRoot, identity, pathModule = path) {
+  if (typeof repositoryRoot !== "string" || !pathModule.isAbsolute(repositoryRoot)) {
+    throw new TypeError("Windows 桌面版仓库根目录必须是绝对路径");
+  }
+  if (!identity || ![STABLE_IDENTITY.editionId, PERFORMANCE_EDITION_IDENTITY.editionId].includes(identity.editionId)) {
+    throw new TypeError("Windows 桌面版输出身份无效");
+  }
+  return pathModule.resolve(repositoryRoot, identity.outputDirectoryName);
+}
+
 function verifyPackagedPerformanceEditionIdentity({
   asarPath,
   unpackedDirectory,
@@ -207,11 +334,55 @@ function verifyPackagedPerformanceEditionIdentity({
   };
 }
 
+function verifyPackagedStableIdentity({
+  asarPath,
+  unpackedDirectory,
+  extractAsarFile,
+  fileSystem = fs,
+  pathModule = path,
+}) {
+  if (typeof extractAsarFile !== "function") throw new TypeError("ASAR extractor is required");
+  const metadata = JSON.parse(extractAsarFile(asarPath, "package.json").toString("utf8"));
+  validateStablePackageIdentity(metadata);
+  const expectedExecutable = pathModule.join(unpackedDirectory, `${STABLE_IDENTITY.executableName}.exe`);
+  if (!fileSystem.existsSync(expectedExecutable)) {
+    throw new Error("Windows 稳定版目录包缺少历史稳定版可执行文件");
+  }
+  if (fileSystem.existsSync(pathModule.join(
+    unpackedDirectory,
+    `${PERFORMANCE_EDITION_IDENTITY.executableName}.exe`,
+  ))) {
+    throw new Error("Windows 稳定版目录包混入性能开发版可执行身份");
+  }
+  return {
+    editionId: STABLE_IDENTITY.editionId,
+    appId: STABLE_IDENTITY.appId,
+    productName: STABLE_IDENTITY.productName,
+    executableName: STABLE_IDENTITY.executableName,
+  };
+}
+
+function verifyPackagedDesktopEditionIdentity(options) {
+  const metadata = JSON.parse(options.extractAsarFile(options.asarPath, "package.json").toString("utf8"));
+  const identity = resolveDesktopEditionIdentity(metadata);
+  return identity.editionId === PERFORMANCE_EDITION_IDENTITY.editionId
+    ? verifyPackagedPerformanceEditionIdentity(options)
+    : verifyPackagedStableIdentity(options);
+}
+
 module.exports = {
   PERFORMANCE_EDITION_IDENTITY,
   STABLE_IDENTITY,
+  initializeDesktopEditionIdentity,
   initializePerformanceEditionIdentity,
+  initializeStableEditionIdentity,
+  resolveDesktopEditionIdentity,
+  resolveDesktopEditionOutputDirectory,
   resolvePerformanceEditionOutputDirectory,
+  validateDesktopPackageIdentity,
   validatePerformanceEditionPackageIdentity,
+  validateStablePackageIdentity,
+  verifyPackagedDesktopEditionIdentity,
   verifyPackagedPerformanceEditionIdentity,
+  verifyPackagedStableIdentity,
 };

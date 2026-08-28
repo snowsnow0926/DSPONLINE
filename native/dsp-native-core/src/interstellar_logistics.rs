@@ -50,6 +50,7 @@ struct PlannedPath {
     score: f64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct Ledger {
     busy: HashMap<usize, f64>,
@@ -69,6 +70,24 @@ trait InterstellarLedgerView: Sync {
     fn active_progress(&self, station_index: usize) -> f64;
 }
 
+trait InterstellarDispatchLedger: InterstellarLedgerView {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64;
+    fn active_vehicle_load(&self, station_index: usize) -> f64;
+    #[allow(clippy::too_many_arguments)]
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        waypoint_indices: &[usize],
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    );
+}
+
+#[cfg(test)]
 impl InterstellarLedgerView for Ledger {
     fn remote_busy(&self, station_index: usize) -> f64 {
         self.busy.get(&station_index).copied().unwrap_or(0.0)
@@ -97,6 +116,51 @@ impl InterstellarLedgerView for Ledger {
     }
 }
 
+#[cfg(test)]
+impl InterstellarDispatchLedger for Ledger {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        self.reserved
+            .get(&(station_index, item_id.to_owned()))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn active_vehicle_load(&self, station_index: usize) -> f64 {
+        self.active_vehicle_load
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        waypoint_indices: &[usize],
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        _progress: f64,
+    ) {
+        *self.busy.entry(owner_index).or_default() += vehicles;
+        *self
+            .reserved
+            .entry((supply_index, item_id.to_owned()))
+            .or_default() += cargo;
+        *self
+            .in_flight
+            .entry((demand_index, item_id.to_owned()))
+            .or_default() += cargo;
+        for station_index in HashSet::from([demand_index, supply_index, owner_index]) {
+            *self.active_vehicle_load.entry(station_index).or_default() += vehicles;
+        }
+        for &waypoint_index in waypoint_indices {
+            *self.active_vehicle_load.entry(waypoint_index).or_default() += vehicles;
+        }
+    }
+}
+
 impl InterstellarLedgerView for StationRouteLedger {
     fn remote_busy(&self, station_index: usize) -> f64 {
         self.remote_busy_floor(station_index)
@@ -116,6 +180,40 @@ impl InterstellarLedgerView for StationRouteLedger {
 
     fn active_progress(&self, station_index: usize) -> f64 {
         StationRouteLedger::active_progress(self, station_index)
+    }
+}
+
+impl InterstellarDispatchLedger for StationRouteLedger {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        StationRouteLedger::interstellar_reserved(self, station_index, item_id)
+    }
+
+    fn active_vehicle_load(&self, station_index: usize) -> f64 {
+        StationRouteLedger::interstellar_active_vehicle_load(self, station_index)
+    }
+
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        waypoint_indices: &[usize],
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    ) {
+        StationRouteLedger::record_remote_dispatch(
+            self,
+            demand_index,
+            supply_index,
+            owner_index,
+            waypoint_indices,
+            item_id,
+            cargo,
+            vehicles,
+            progress,
+        );
     }
 }
 
@@ -1202,6 +1300,7 @@ impl EntityIndexLookup for HashMap<String, usize> {
     }
 }
 
+#[cfg(test)]
 fn build_ledger<I: EntityIndexLookup + ?Sized>(entities: &[Value], indexes: &I) -> Ledger {
     let mut ledger = Ledger::default();
     let mut active_stations = Vec::<usize>::with_capacity(8);
@@ -1677,12 +1776,13 @@ fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     }
 }
 
-pub(crate) fn dispatch(
+fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
     route_activity: &mut InterstellarRouteActivity,
+    ledger: &mut L,
 ) -> anyhow::Result<()> {
     let station_indices = &state.factory_topology.station_indices;
     if !station_indices.iter().copied().any(|index| {
@@ -1693,7 +1793,6 @@ pub(crate) fn dispatch(
         return Ok(());
     }
     let indexes = &state.entity_index;
-    let mut ledger = build_ledger(entities, indexes);
     let mut activated_remote_demands = Vec::new();
     for demand_index in station_indices.iter().copied() {
         let demand_snapshot = entities[demand_index]
@@ -1760,17 +1859,8 @@ pub(crate) fn dispatch(
                     .cmp(&left_priority)
                     .then_with(|| {
                         ledger
-                            .active_vehicle_load
-                            .get(left_index)
-                            .copied()
-                            .unwrap_or(0.0)
-                            .partial_cmp(
-                                &ledger
-                                    .active_vehicle_load
-                                    .get(right_index)
-                                    .copied()
-                                    .unwrap_or(0.0),
-                            )
+                            .active_vehicle_load(*left_index)
+                            .partial_cmp(&ledger.active_vehicle_load(*right_index))
                             .unwrap_or(Ordering::Equal)
                     })
                     .then_with(|| {
@@ -1794,11 +1884,7 @@ pub(crate) fn dispatch(
             let demand_now = entities[demand_index].as_object().expect("station object");
             let mut remaining_free = (station_capacity(state, base, demand_now, slot)?
                 - item_amount(demand_now, "outputs", &item_id)
-                - ledger
-                    .in_flight
-                    .get(&(demand_index, item_id.clone()))
-                    .copied()
-                    .unwrap_or(0.0)
+                - ledger.in_flight(demand_index, &item_id)
                 + EPSILON)
                 .floor()
                 .max(0.0);
@@ -1845,9 +1931,8 @@ pub(crate) fn dispatch(
                 }
                 for (owner_index, owner_slot) in vehicle_owners {
                     let owner = entities[owner_index].as_object().expect("station object");
-                    let free_vehicles = (installed_vessels(owner)
-                        - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
-                    .max(0.0);
+                    let free_vehicles =
+                        (installed_vessels(owner) - ledger.remote_busy(owner_index)).max(0.0);
                     let warp_available =
                         finite_number(owner.get("stationWarpers")).floor().max(0.0);
                     if free_vehicles < 1.0
@@ -1863,11 +1948,7 @@ pub(crate) fn dispatch(
                     }
                     let available = (item_amount(&supply_snapshot, "outputs", &item_id)
                         - supply_slot.min_stock
-                        - ledger
-                            .reserved
-                            .get(&(supply_index, item_id.clone()))
-                            .copied()
-                            .unwrap_or(0.0)
+                        - ledger.reserved(supply_index, &item_id)
                         + EPSILON)
                         .floor()
                         .max(0.0);
@@ -1935,23 +2016,21 @@ pub(crate) fn dispatch(
                         .ok_or_else(|| anyhow!("native interstellar demand routes are missing"))?
                         .push(route);
                     activated_remote_demands.push(demand_index);
-                    *ledger.busy.entry(owner_index).or_default() += dispatchable;
-                    *ledger
-                        .reserved
-                        .entry((supply_index, item_id.clone()))
-                        .or_default() += cargo;
-                    *ledger
-                        .in_flight
-                        .entry((demand_index, item_id.clone()))
-                        .or_default() += cargo;
-                    for index in HashSet::from([demand_index, supply_index, owner_index]) {
-                        *ledger.active_vehicle_load.entry(index).or_default() += dispatchable;
-                    }
-                    for waypoint in &economics.waypoint_station_ids {
-                        if let Some(index) = indexes.get(waypoint) {
-                            *ledger.active_vehicle_load.entry(*index).or_default() += dispatchable;
-                        }
-                    }
+                    let waypoint_indices = economics
+                        .waypoint_station_ids
+                        .iter()
+                        .filter_map(|waypoint| indexes.get(waypoint).copied())
+                        .collect::<Vec<_>>();
+                    ledger.record_dispatch(
+                        demand_index,
+                        supply_index,
+                        owner_index,
+                        &waypoint_indices,
+                        &item_id,
+                        cargo,
+                        dispatchable,
+                        initial_progress,
+                    );
                     remaining_free = (remaining_free - cargo).max(0.0);
                     set_number(base, "nextId", next_id + 1.0)?;
                     if economics.requires_warp {
@@ -2001,6 +2080,17 @@ pub(crate) fn dispatch(
         route_activity.update_remote_demand(demand_index, true);
     }
     Ok(())
+}
+
+pub(crate) fn dispatch(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    route_activity: &mut InterstellarRouteActivity,
+    route_ledger: &mut StationRouteLedger,
+) -> anyhow::Result<()> {
+    dispatch_with_ledger(state, base, entities, powers, route_activity, route_ledger)
 }
 
 fn add_max_field(
@@ -3524,6 +3614,22 @@ mod tests {
                     .unwrap_or(0.0)
             );
             assert_eq!(
+                shared.interstellar_reserved(station_index, "iron_ore"),
+                legacy
+                    .reserved
+                    .get(&(station_index, "iron_ore".to_owned()))
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.interstellar_active_vehicle_load(station_index),
+                legacy
+                    .active_vehicle_load
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
                 shared.is_active_remote_station(station_index),
                 legacy.active_remote_stations.contains(&station_index)
             );
@@ -3546,6 +3652,14 @@ mod tests {
             assert_eq!(
                 shared.interstellar_in_flight(station_index, "iron_ore"),
                 full.interstellar_in_flight(station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.interstellar_reserved(station_index, "iron_ore"),
+                full.interstellar_reserved(station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.interstellar_active_vehicle_load(station_index),
+                full.interstellar_active_vehicle_load(station_index)
             );
             assert_eq!(
                 shared.active_progress(station_index),
@@ -3717,6 +3831,186 @@ mod tests {
         assert!(!legacy_local.contains_local_station(8));
     }
 
+    fn assert_interstellar_dispatch_shared_ledger_matches_full_scan(
+        source: &[Value],
+        power_factor: f64,
+        expected_selected_demands: usize,
+        label: &str,
+    ) {
+        let state = dispatch_fixture_state(source);
+        let source_hash = state.canonical_sha256().unwrap();
+        let powers = route_activity_powers(source.len(), power_factor);
+
+        let mut legacy_base = dispatch_fixture_base();
+        let mut legacy_entities = source.to_vec();
+        let mut legacy_activity = prepare_route_activity(&legacy_entities);
+        let mut legacy_ledger = build_ledger(&legacy_entities, &state.entity_index);
+        dispatch_with_ledger(
+            &state,
+            legacy_base.as_object_mut().unwrap(),
+            &mut legacy_entities,
+            &powers,
+            &mut legacy_activity,
+            &mut legacy_ledger,
+        )
+        .unwrap();
+
+        let mut shared_base = dispatch_fixture_base();
+        let mut shared_entities = source.to_vec();
+        let mut shared_activity = prepare_route_activity(&shared_entities);
+        let mut shared_local_directory = crate::local_logistics::prepare_step_directory(
+            &shared_entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut shared_ledger = StationRouteLedger::build(
+            &state,
+            &shared_entities,
+            &shared_local_directory,
+            &shared_activity,
+        );
+        assert_eq!(
+            shared_ledger.scan().selected_demands,
+            expected_selected_demands,
+            "selected demand diagnostic diverged for {label}"
+        );
+        assert!(!shared_ledger.scan().dense_fallback, "{label}");
+        dispatch_with_ledger(
+            &state,
+            shared_base.as_object_mut().unwrap(),
+            &mut shared_entities,
+            &powers,
+            &mut shared_activity,
+            &mut shared_ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&(&shared_base, &shared_entities)).unwrap(),
+            serde_json::to_vec(&(&legacy_base, &legacy_entities)).unwrap(),
+            "dispatch result diverged for {label}"
+        );
+        assert_eq!(
+            shared_activity.active_demand_indices, legacy_activity.active_demand_indices,
+            "active remote route order diverged for {label}"
+        );
+        assert_eq!(
+            shared_activity.opaque_route_demand_indices(),
+            legacy_activity.opaque_route_demand_indices(),
+            "opaque route order diverged for {label}"
+        );
+
+        shared_local_directory = crate::local_logistics::prepare_step_directory(
+            &shared_entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let full = StationRouteLedger::build_full_oracle(
+            &state,
+            &shared_entities,
+            &shared_local_directory,
+        );
+        for station_index in 0..shared_entities.len() {
+            assert_eq!(
+                shared_ledger.remote_busy_floor(station_index),
+                legacy_ledger
+                    .busy
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0),
+                "busy ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_reserved(station_index, "iron_ore"),
+                legacy_ledger
+                    .reserved
+                    .get(&(station_index, "iron_ore".to_owned()))
+                    .copied()
+                    .unwrap_or(0.0),
+                "reserved ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_in_flight(station_index, "iron_ore"),
+                legacy_ledger
+                    .in_flight
+                    .get(&(station_index, "iron_ore".to_owned()))
+                    .copied()
+                    .unwrap_or(0.0),
+                "in-flight ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_active_vehicle_load(station_index),
+                legacy_ledger
+                    .active_vehicle_load
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0),
+                "vehicle-load ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_reserved(station_index, "iron_ore"),
+                full.interstellar_reserved(station_index, "iron_ore"),
+                "incremental reserved ledger diverged from full scan for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_in_flight(station_index, "iron_ore"),
+                full.interstellar_in_flight(station_index, "iron_ore"),
+                "incremental in-flight ledger diverged from full scan for {label}"
+            );
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn dispatch_reuses_shared_ledger_and_matches_full_scan_for_remote_wake_states() {
+        let mut normal = dispatch_fixture_entities();
+        normal[1]["stationWarpers"] = Value::from(1.0);
+
+        let mut source_empty = normal.clone();
+        source_empty[0]["outputs"]["iron_ore"] = Value::from(0.0);
+
+        let mut target_full = normal.clone();
+        target_full[1]["outputs"]["iron_ore"] = Value::from(1_000_000.0);
+
+        let warper_empty = dispatch_fixture_entities();
+
+        let mut preexisting_route = normal.clone();
+        preexisting_route[1]["stationRoutes"] = Value::Array(vec![route_activity_remote_route(
+            1,
+            1,
+            0.25,
+            120.0,
+            true,
+            &[],
+        )]);
+
+        let mut opaque_mod_route = normal.clone();
+        opaque_mod_route[1]["stationRoutes"] = json!([{
+            "id": "mod:route/unknown",
+            "scope": "mod:unknown-scope",
+            "progress": 0.5,
+            "waypointStationIds": ["missing-mod-waypoint"],
+            "mod:payload": { "signedZero": -0.0, "text": "保持原样" }
+        }]);
+
+        for (source, power_factor, selected, label) in [
+            (&normal, 1.0, 0, "normal inventory and warper wake"),
+            (&source_empty, 1.0, 0, "source empty"),
+            (&target_full, 1.0, 0, "target full"),
+            (&normal, 0.0, 0, "power limited"),
+            (&warper_empty, 1.0, 0, "warper empty"),
+            (&preexisting_route, 1.0, 1, "route already active"),
+            (&opaque_mod_route, 1.0, 1, "opaque MOD route"),
+        ] {
+            assert_interstellar_dispatch_shared_ledger_matches_full_scan(
+                source,
+                power_factor,
+                selected,
+                label,
+            );
+        }
+    }
+
     #[test]
     fn warper_arrival_allows_dispatch_and_immediately_wakes_remote_route() {
         let mut entities = dispatch_fixture_entities();
@@ -3724,6 +4018,13 @@ mod tests {
         let mut base = dispatch_fixture_base();
         let powers = route_activity_powers(entities.len(), 1.0);
         let mut activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut route_ledger =
+            StationRouteLedger::build(&state, &entities, &local_directory, &activity);
 
         dispatch(
             &state,
@@ -3731,6 +4032,7 @@ mod tests {
             &mut entities,
             &powers,
             &mut activity,
+            &mut route_ledger,
         )
         .unwrap();
         assert!(!activity.has_remote_routes());
@@ -3754,6 +4056,7 @@ mod tests {
             &mut entities,
             &powers,
             &mut activity,
+            &mut route_ledger,
         )
         .unwrap();
         assert_eq!(activity.active_demand_indices, vec![1]);
@@ -3795,6 +4098,13 @@ mod tests {
         let candidate_before = serde_json::to_vec(&candidate).unwrap();
         let mut base = dispatch_fixture_base();
         let powers = route_activity_powers(candidate.len(), 1.0);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &candidate,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut route_ledger =
+            StationRouteLedger::build(&state, &candidate, &local_directory, candidate_runtime);
 
         let error = dispatch(
             &state,
@@ -3802,6 +4112,7 @@ mod tests {
             &mut candidate,
             &powers,
             candidate_runtime,
+            &mut route_ledger,
         )
         .unwrap_err();
         assert_eq!(
@@ -3822,12 +4133,20 @@ mod tests {
         let powers = route_activity_powers(entities.len(), 1.0);
         let mut activity = prepare_route_activity(&entities);
         entities[1]["stationWarpers"] = Value::from(1.0);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &dispatch_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut route_ledger =
+            StationRouteLedger::build(&dispatch_state, &entities, &local_directory, &activity);
         dispatch(
             &dispatch_state,
             base.as_object_mut().unwrap(),
             &mut entities,
             &powers,
             &mut activity,
+            &mut route_ledger,
         )
         .unwrap();
 

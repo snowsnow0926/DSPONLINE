@@ -3555,14 +3555,14 @@ fn simulate_step(
     // snapshot. The active queues preserve persisted row order; a dense set
     // falls back to the complete station ledger without changing dispatch
     // fairness or command authority.
-    let ready_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+    let mut step_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
         state,
         entities,
         local_step_runtime,
         interstellar_route_activity.as_ref(),
     );
     if profile_enabled {
-        let scan = ready_route_ledger.scan();
+        let scan = step_route_ledger.scan();
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-ready\t{}/{}\tdense={}",
             scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
@@ -3573,16 +3573,15 @@ fn simulate_step(
         base,
         entities,
         local_step_runtime,
-        &ready_route_ledger,
+        &step_route_ledger,
     )?;
     profile_mark!("local-ready-stations");
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
         state,
         base,
         entities,
-        &ready_route_ledger,
+        &step_route_ledger,
     )?);
-    drop(ready_route_ledger);
     profile_mark!("interstellar-ready-stations");
     ready_stations.extend(indexed_quantum_endpoint_indices.iter().copied().filter(
         |&entity_index| {
@@ -4459,7 +4458,21 @@ fn simulate_step(
         })
         .collect::<HashMap<_, _>>();
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::dispatch(state, base, entities, &station_powers, local_step_runtime)?;
+    if profile_enabled {
+        let scan = step_route_ledger.scan();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-dispatch-reuse\t{}/{}\tdense={}",
+            scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
+        );
+    }
+    crate::local_logistics::dispatch(
+        state,
+        base,
+        entities,
+        &station_powers,
+        local_step_runtime,
+        &mut step_route_ledger,
+    )?;
     profile_mark!("local-dispatch");
     let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
     crate::interstellar_logistics::dispatch(
@@ -4468,7 +4481,9 @@ fn simulate_step(
         entities,
         &station_powers,
         interstellar_step_runtime,
+        &mut step_route_ledger,
     )?;
+    drop(step_route_ledger);
     profile_mark!("interstellar-dispatch");
     crate::local_logistics::advance_routes(
         state,

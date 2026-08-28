@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -25,11 +26,16 @@ pub(crate) struct StationRouteLedgerScan {
 /// rebuilt after dispatch/advance mutations before another consumer uses it.
 #[derive(Debug, Default)]
 pub(crate) struct StationRouteLedger {
+    local_station_ranks: Arc<HashMap<usize, usize>>,
     local_busy_floor: HashMap<usize, f64>,
     local_busy_raw: HashMap<usize, f64>,
     remote_busy_floor: HashMap<usize, f64>,
+    local_reserved: HashMap<usize, HashMap<String, f64>>,
+    interstellar_reserved: HashMap<usize, HashMap<String, f64>>,
     local_in_flight: HashMap<usize, HashMap<String, f64>>,
     interstellar_in_flight: HashMap<usize, HashMap<String, f64>>,
+    local_active_vehicle_load: HashMap<usize, f64>,
+    interstellar_active_vehicle_load: HashMap<usize, f64>,
     active_progress: HashMap<usize, f64>,
     active_local_progress: HashMap<usize, f64>,
     active_local_stations: HashSet<usize>,
@@ -142,6 +148,7 @@ impl StationRouteLedger {
         scan: StationRouteLedgerScan,
     ) -> Self {
         let mut ledger = Self {
+            local_station_ranks: local_directory.shared_station_ranks(),
             scan: Some(scan),
             ..Self::default()
         };
@@ -229,8 +236,26 @@ impl StationRouteLedger {
                     item_id,
                     cargo,
                 );
+                if let Some(supply) = supply {
+                    add_item(&mut ledger.interstellar_reserved, supply, item_id, cargo);
+                }
+                for &station_index in &active_stations {
+                    *ledger
+                        .interstellar_active_vehicle_load
+                        .entry(station_index)
+                        .or_default() += vehicles;
+                }
                 if visible_to_local {
                     add_item(&mut ledger.local_in_flight, demand_index, item_id, cargo);
+                    if let Some(supply) = supply {
+                        add_item(&mut ledger.local_reserved, supply, item_id, cargo);
+                    }
+                    for &station_index in &active_stations {
+                        *ledger
+                            .local_active_vehicle_load
+                            .entry(station_index)
+                            .or_default() += vehicles;
+                    }
                 }
             }
         }
@@ -290,8 +315,151 @@ impl StationRouteLedger {
         item_amount(&self.local_in_flight, station_index, item_id)
     }
 
+    pub(crate) fn local_reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        item_amount(&self.local_reserved, station_index, item_id)
+    }
+
+    pub(crate) fn local_active_vehicle_load(&self, station_index: usize) -> f64 {
+        self.local_active_vehicle_load
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     pub(crate) fn interstellar_in_flight(&self, station_index: usize, item_id: &str) -> f64 {
         item_amount(&self.interstellar_in_flight, station_index, item_id)
+    }
+
+    pub(crate) fn interstellar_reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        item_amount(&self.interstellar_reserved, station_index, item_id)
+    }
+
+    pub(crate) fn interstellar_active_vehicle_load(&self, station_index: usize) -> f64 {
+        self.interstellar_active_vehicle_load
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_local_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    ) {
+        *self.local_busy_floor.entry(owner_index).or_default() += vehicles;
+        *self.local_busy_raw.entry(owner_index).or_default() += vehicles;
+        add_item(&mut self.local_reserved, supply_index, item_id, cargo);
+        add_item(
+            &mut self.interstellar_reserved,
+            supply_index,
+            item_id,
+            cargo,
+        );
+        add_item(&mut self.local_in_flight, demand_index, item_id, cargo);
+        add_item(
+            &mut self.interstellar_in_flight,
+            demand_index,
+            item_id,
+            cargo,
+        );
+        let mut active_stations = Vec::with_capacity(3);
+        for station_index in [demand_index, supply_index, owner_index] {
+            if !active_stations.contains(&station_index) {
+                active_stations.push(station_index);
+            }
+        }
+        for station_index in active_stations {
+            *self
+                .local_active_vehicle_load
+                .entry(station_index)
+                .or_default() += vehicles;
+            *self
+                .interstellar_active_vehicle_load
+                .entry(station_index)
+                .or_default() += vehicles;
+            self.active_local_stations.insert(station_index);
+            let local_progress = self.active_local_progress.entry(station_index).or_default();
+            *local_progress = local_progress.max(progress);
+            let active_progress = self.active_progress.entry(station_index).or_default();
+            *active_progress = active_progress.max(progress);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_remote_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        waypoint_indices: &[usize],
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    ) {
+        *self.remote_busy_floor.entry(owner_index).or_default() += vehicles;
+        add_item(
+            &mut self.interstellar_reserved,
+            supply_index,
+            item_id,
+            cargo,
+        );
+        add_item(
+            &mut self.interstellar_in_flight,
+            demand_index,
+            item_id,
+            cargo,
+        );
+        let visible_to_local = self.local_station_ranks.contains_key(&demand_index);
+        if visible_to_local {
+            add_item(&mut self.local_reserved, supply_index, item_id, cargo);
+            add_item(&mut self.local_in_flight, demand_index, item_id, cargo);
+        }
+        let mut active_stations = Vec::with_capacity(3);
+        for station_index in [demand_index, supply_index, owner_index] {
+            if !active_stations.contains(&station_index) {
+                active_stations.push(station_index);
+            }
+        }
+        for station_index in active_stations {
+            *self
+                .interstellar_active_vehicle_load
+                .entry(station_index)
+                .or_default() += vehicles;
+            self.active_remote_stations.insert(station_index);
+            let active_progress = self.active_progress.entry(station_index).or_default();
+            *active_progress = active_progress.max(progress);
+            if visible_to_local {
+                *self
+                    .local_active_vehicle_load
+                    .entry(station_index)
+                    .or_default() += vehicles;
+            }
+        }
+        // Preserve the legacy incremental-dispatch behavior: the three route
+        // endpoints are de-duplicated together, while every persisted waypoint
+        // contributes its own vehicle-load entry in route order.
+        for &waypoint_index in waypoint_indices {
+            *self
+                .interstellar_active_vehicle_load
+                .entry(waypoint_index)
+                .or_default() += vehicles;
+            self.active_remote_stations.insert(waypoint_index);
+            let active_progress = self.active_progress.entry(waypoint_index).or_default();
+            *active_progress = active_progress.max(progress);
+            if visible_to_local {
+                *self
+                    .local_active_vehicle_load
+                    .entry(waypoint_index)
+                    .or_default() += vehicles;
+            }
+        }
     }
 
     pub(crate) fn active_progress(&self, station_index: usize) -> f64 {

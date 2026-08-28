@@ -3609,10 +3609,20 @@ fn simulate_step(
         interstellar_route_activity,
     );
     profile_mark!("time-warp-and-dyson-environment");
-    crate::local_logistics::reset_runtime_for_indices(
-        entities,
-        &state.factory_topology.station_indices,
-    )?;
+    // The imported/rebuilt directory starts with every station dirty. After a
+    // successful step it retains only the route endpoints and collectors that
+    // actually wrote transient runtime display fields, so dormant stations do
+    // not impose an O(all stations) reset on every simulated second.
+    let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
+    let runtime_reset_station_indices = local_step_runtime.runtime_reset_station_indices().to_vec();
+    crate::local_logistics::reset_runtime_for_indices(entities, &runtime_reset_station_indices)?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tlocal-runtime-reset-active\t{}/{}",
+            runtime_reset_station_indices.len(),
+            state.factory_topology.station_indices.len(),
+        );
+    }
     profile_mark!("local-runtime-reset");
     profile_mark!("local-step-directory");
     transfer_logistics_buffers(
@@ -3624,7 +3634,6 @@ fn simulate_step(
     profile_mark!("ordinary-logistics-buffers");
     // Only candidate-local wake vectors are mutable. Arc::make_mut preserves
     // the source revision's runtime cache if any later simulation stage fails.
-    let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
     let buffer_changed_station_indices =
         crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
@@ -4830,6 +4839,15 @@ fn simulate_step(
         interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
+    let mut next_runtime_reset_station_indices = congestion_route_ledger.active_station_indices();
+    next_runtime_reset_station_indices.extend_from_slice(&local_route_changed_station_indices);
+    next_runtime_reset_station_indices.extend_from_slice(&remote_route_changed_station_indices);
+    // Orbital collectors are productive station rows even without a route;
+    // they write utilization/rate directly and therefore remain an explicit
+    // active dependency rather than being hidden behind the route ledger.
+    next_runtime_reset_station_indices
+        .extend_from_slice(&state.factory_topology.orbital_collector_indices);
+    local_step_runtime.replace_runtime_reset_station_indices(next_runtime_reset_station_indices);
     drop(congestion_route_ledger);
     profile_mark!("interstellar-congestion");
     let exporter_powers = state

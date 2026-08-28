@@ -356,6 +356,7 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LocalPeerDirectory {
     station_indices: Arc<[usize]>,
+    runtime_station_indices: Arc<[usize]>,
     station_ranks: Arc<HashMap<usize, usize>>,
     by_planet_item: Arc<HashMap<usize, HashMap<String, LocalPeers>>>,
     station_slots: Arc<HashMap<usize, Vec<Slot>>>,
@@ -363,13 +364,16 @@ pub(crate) struct LocalPeerDirectory {
     local_route_demand_indices: Vec<usize>,
     buffer_active_station_indices: Vec<usize>,
     buffer_activity_initialized: bool,
+    runtime_reset_station_indices: Vec<usize>,
 }
 
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
+            + self.runtime_station_indices.len() * std::mem::size_of::<usize>()
             + (self.local_route_demand_indices.capacity()
-                + self.buffer_active_station_indices.capacity())
+                + self.buffer_active_station_indices.capacity()
+                + self.runtime_reset_station_indices.capacity())
                 * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
@@ -415,6 +419,24 @@ impl LocalPeerDirectory {
 
     pub(crate) fn shared_station_ranks(&self) -> Arc<HashMap<usize, usize>> {
         Arc::clone(&self.station_ranks)
+    }
+
+    pub(crate) fn runtime_reset_station_indices(&self) -> &[usize] {
+        &self.runtime_reset_station_indices
+    }
+
+    pub(crate) fn replace_runtime_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| { self.runtime_station_indices.binary_search(index).is_ok() })
+        );
+        self.runtime_reset_station_indices = station_indices;
     }
 
     fn route_scan_indices(&self) -> (Vec<usize>, bool) {
@@ -529,6 +551,7 @@ struct LocalPeers {
 fn build_peer_directory(
     entities: &[Value],
     station_indices: &[usize],
+    runtime_station_indices: &[usize],
 ) -> anyhow::Result<LocalPeerDirectory> {
     let mut by_planet_item = HashMap::<usize, HashMap<String, LocalPeers>>::new();
     let mut station_slots = HashMap::with_capacity(station_indices.len());
@@ -630,6 +653,7 @@ fn build_peer_directory(
         .collect::<HashMap<_, _>>();
     Ok(LocalPeerDirectory {
         station_indices: Arc::from(station_indices),
+        runtime_station_indices: Arc::from(runtime_station_indices),
         station_ranks: Arc::new(station_ranks),
         by_planet_item: Arc::new(by_planet_item),
         station_slots: Arc::new(station_slots),
@@ -637,6 +661,11 @@ fn build_peer_directory(
         local_route_demand_indices,
         buffer_active_station_indices: Vec::new(),
         buffer_activity_initialized: false,
+        // A newly imported/rebuilt directory cannot prove which station was
+        // active in the previous JS/native step. Clear every persisted runtime
+        // display once; successful native steps replace this with the exact
+        // active set for the following second.
+        runtime_reset_station_indices: runtime_station_indices.to_vec(),
     })
 }
 
@@ -661,7 +690,7 @@ pub(crate) fn prepare_step_directory(
             })
         })
         .collect::<Vec<_>>();
-    build_peer_directory(entities, &local_station_indices)
+    build_peer_directory(entities, &local_station_indices, station_indices)
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -2109,6 +2138,35 @@ mod tests {
             json!({ "index": index, "signedZero": -0.0, "text": "原样" }),
         );
         Value::Object(station.clone())
+    }
+
+    #[test]
+    fn runtime_reset_is_full_once_then_exactly_sparse_and_byte_identical() {
+        let mut source = route_matrix(8, &[], 0.0, 10.0);
+        let all_indices = (0..source.len()).collect::<Vec<_>>();
+        let mut directory = prepare_step_directory(&source, &all_indices).unwrap();
+        assert_eq!(directory.runtime_reset_station_indices(), all_indices);
+
+        for index in [2_usize, 6] {
+            let station = source[index].as_object_mut().unwrap();
+            station.insert("utilization".to_owned(), Value::from(0.75));
+            station.insert("productionRate".to_owned(), Value::from(123.5));
+            station.insert(
+                "stationPeerId".to_owned(),
+                Value::from(format!("station/runtime-peer/{index}")),
+            );
+        }
+        directory.replace_runtime_reset_station_indices(vec![6, 2, 6]);
+        assert_eq!(directory.runtime_reset_station_indices(), [2, 6]);
+
+        let mut sparse = source.clone();
+        let mut full = source;
+        reset_runtime_for_indices(&mut sparse, directory.runtime_reset_station_indices()).unwrap();
+        reset_runtime_for_indices(&mut full, &all_indices).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&sparse).unwrap(),
+            serde_json::to_vec(&full).unwrap(),
+        );
     }
 
     fn local_route(

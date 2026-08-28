@@ -483,4 +483,10 @@ impl StationRouteLedger {
     pub(crate) fn is_active_remote_station(&self, station_index: usize) -> bool {
         self.active_remote_stations.contains(&station_index)
     }
+
+    pub(crate) fn active_station_indices(&self) -> Vec<usize> {
+        let mut indices = self.active_progress.keys().copied().collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices
+    }
 }

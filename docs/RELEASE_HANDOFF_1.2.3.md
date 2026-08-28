@@ -1,5 +1,7 @@
 # 1.2.3 Release Agent 交接
 
+> 状态：`1.2.3-25aeeb34e501` 已于 2026-08-28 完成香港、上海、下载页、Windows 和 Android stable 全量原子发布；previous-stable 为 `1.2.2-8b9c93e13270`。最终生产证据见 [正式发布记录](./releases/1.2.3.md)。
+
 ## 固定候选
 
 - Runtime commit：`25aeeb34e501fdb68441b88cf305502b730c34d6`
@@ -51,3 +53,11 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3 均不变；本
 7. 观察通过后将刚替换的 1.2.2 Web 设置为香港 `/canary/previous/`，并记录新的 current/previous/generation、下载回滚指针与代码回滚命令。数据库永不随代码回滚。
 
 不得热改服务器、删除数据库/WAL/SHM或有效备份/回滚目录、输出签名/SSH材料、使用生产账号写 smoke、上传玩家存档，或跳过失败的备份、哈希、健康、签名、缓存和下载门禁。
+
+## 正式发布结果
+
+- 用户明确豁免本 Release ID 的 Android 实体设备、三档 Windows、Windows 1.2.2→1.2.3 覆盖升级及长时运行门禁；其余备份、清单、签名、健康、PWA、缓存、Range 和完整下载门禁均通过。
+- 香港/上海 current 为 `1.2.3-25aeeb34e501`，previous 为 `1.2.2-8b9c93e13270`，generation 分别为 44/28，均为 green/4322，pending absent、health/ready 200、`NRestarts=0`。
+- 上海下载 current/previous 为 `download-site-1.2.3-25aeeb34e501` / `download-site-1.2.2-8b9c93e13270`；香港 previous Web 已切到 1.2.2。
+- 正式 Backup API evidence：香港 4,054,929,408 B / `de96d50c926c02e8ba366823b50a593936937e034ef1088384cd38b799a6772e`，上海 462,848 B / `020e6c65a58778182a961219ac38573263b16d30c79566d980569233b61ac458`；均为 quick_check ok、schema 8、layout 3。
+- 完整现场记录、proxy 计数泄漏处置、制品哈希和回滚边界见 [1.2.3 正式发布记录](./releases/1.2.3.md)。

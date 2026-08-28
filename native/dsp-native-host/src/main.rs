@@ -82,6 +82,7 @@ fn handle_request(
                     "native-core-factory-read-model-v1",
                     "native-core-statistics-projection-v1",
                     "native-core-technology-projection-v1",
+                    "native-core-recipe-workspace-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
@@ -294,6 +295,23 @@ fn handle_request(
         ControlRequest::CoreTechnologyProjection { session_id } => {
             cores.technology_projection(&session_id)?
         }
+        ControlRequest::CoreRecipeWorkspaceProjection {
+            session_id,
+            expected_registry_fingerprint,
+            item_ids,
+            selected_item_id,
+            location_planet_id,
+            location_cursor,
+            location_limit,
+        } => cores.recipe_workspace_projection(
+            &session_id,
+            &expected_registry_fingerprint,
+            &item_ids,
+            &selected_item_id,
+            location_planet_id.as_deref(),
+            location_cursor,
+            location_limit,
+        )?,
         ControlRequest::CoreApplyCommand {
             session_id,
             command,

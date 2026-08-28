@@ -306,7 +306,7 @@ impl CoreState {
         let mut selected_stock = 0.0;
         let mut producer_counts = vec![0_usize; self.catalog.planets.len()];
         let mut location_total = 0_usize;
-        let mut location_entity_ids = Vec::with_capacity(location_limit);
+        let mut location_entities = Vec::with_capacity(location_limit);
         let mut sail_launches_per_minute = 0.0;
         let mut rocket_launches_per_minute = 0.0;
         let mut receiver_load_kw = 0.0;
@@ -344,11 +344,19 @@ impl CoreState {
             {
                 producer_counts[entity_planet_index] += 1;
                 if location_planet_index == Some(entity_planet_index) {
-                    if location_total >= location_cursor
-                        && location_entity_ids.len() < location_limit
+                    if location_total >= location_cursor && location_entities.len() < location_limit
                     {
-                        location_entity_ids
-                            .push(Value::from(self.entities.ids[entity_index].to_owned()));
+                        let position = entity
+                            .get("position")
+                            .and_then(Value::as_object)
+                            .ok_or_else(|| {
+                                anyhow!("native recipe workspace entity position is invalid")
+                            })?;
+                        location_entities.push(json!({
+                            "id": self.entities.ids[entity_index].to_owned(),
+                            "x": required_finite(position, "x", "entity x position")?,
+                            "y": required_finite(position, "y", "entity y position")?,
+                        }));
                     }
                     location_total += 1;
                 }
@@ -587,6 +595,7 @@ impl CoreState {
             .planets
             .iter()
             .enumerate()
+            .take(MAX_PLANET_ROWS)
             .filter(|(index, _)| producer_counts[*index] > 0)
             .map(|(index, planet)| {
                 json!({ "planetId": planet.id, "producerCount": producer_counts[index] })
@@ -594,13 +603,13 @@ impl CoreState {
             .collect::<Vec<_>>();
         let location_page = location_planet_index.map(|planet_index| {
             let next_cursor = location_cursor
-                .checked_add(location_entity_ids.len())
+                .checked_add(location_entities.len())
                 .filter(|next| *next < location_total);
             json!({
                 "planetId": self.catalog.planets[planet_index].id,
                 "cursor": location_cursor,
                 "totalCount": location_total,
-                "entityIds": location_entity_ids,
+                "entities": location_entities,
                 "nextCursor": next_cursor,
             })
         });
@@ -886,8 +895,8 @@ mod tests {
             2
         );
         assert_eq!(
-            projection["locationPage"]["entityIds"],
-            json!(["smelter-home"])
+            projection["locationPage"]["entities"],
+            json!([{ "id": "smelter-home", "x": 0.0, "y": 0.0 }])
         );
         assert_eq!(projection["locationPage"]["nextCursor"], Value::Null);
         assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_PROJECTION_BYTES);

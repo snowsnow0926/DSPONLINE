@@ -191,6 +191,19 @@ pub enum ControlRequest {
     CoreTechnologyProjection {
         session_id: String,
     },
+    CoreRecipeWorkspaceProjection {
+        session_id: String,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        item_ids: Vec<String>,
+        selected_item_id: String,
+        #[serde(default)]
+        location_planet_id: Option<String>,
+        #[serde(default)]
+        location_cursor: usize,
+        #[serde(default)]
+        location_limit: usize,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -503,6 +516,64 @@ mod tests {
                 assert!(selected_belt_ids.is_empty());
             }
             _ => panic!("factory read-model defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn recipe_workspace_protocol_preserves_explicit_page_and_location_selectors() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreRecipeWorkspaceProjection",
+            "sessionId": "core-1",
+            "expectedRegistryFingerprint": "builtin:test",
+            "itemIds": ["iron_ore", "iron_ingot"],
+            "selectedItemId": "iron_ingot",
+            "locationPlanetId": "home",
+            "locationCursor": 4,
+            "locationLimit": 32
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreRecipeWorkspaceProjection {
+                session_id,
+                expected_registry_fingerprint,
+                item_ids,
+                selected_item_id,
+                location_planet_id,
+                location_cursor,
+                location_limit,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(item_ids, ["iron_ore", "iron_ingot"]);
+                assert_eq!(selected_item_id, "iron_ingot");
+                assert_eq!(location_planet_id.as_deref(), Some("home"));
+                assert_eq!(location_cursor, 4);
+                assert_eq!(location_limit, 32);
+            }
+            _ => panic!("recipe workspace operation decoded as the wrong variant"),
+        }
+
+        let defaults = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreRecipeWorkspaceProjection",
+            "sessionId": "core-2",
+            "expectedRegistryFingerprint": "builtin:test",
+            "selectedItemId": "iron_ore"
+        }))
+        .unwrap();
+        match defaults {
+            ControlRequest::CoreRecipeWorkspaceProjection {
+                item_ids,
+                location_planet_id,
+                location_cursor,
+                location_limit,
+                ..
+            } => {
+                assert!(item_ids.is_empty());
+                assert!(location_planet_id.is_none());
+                assert_eq!(location_cursor, 0);
+                assert_eq!(location_limit, 0);
+            }
+            _ => panic!("recipe workspace defaults decoded as the wrong variant"),
         }
     }
 }

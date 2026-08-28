@@ -1991,6 +1991,27 @@ impl CoreRegistry {
         self.session(session_id)?.technology_projection()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn recipe_workspace_projection(
+        &self,
+        session_id: &str,
+        expected_registry_fingerprint: &str,
+        item_ids: &[String],
+        selected_item_id: &str,
+        location_planet_id: Option<&str>,
+        location_cursor: usize,
+        location_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.recipe_workspace_projection(
+            expected_registry_fingerprint,
+            item_ids,
+            selected_item_id,
+            location_planet_id,
+            location_cursor,
+            location_limit,
+        )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

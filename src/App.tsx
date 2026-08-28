@@ -1924,6 +1924,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
   );
+  const factoryActivePlanetNavigationRow = useMemo(
+    () => factoryPlanetNavigationReadModel.planets.rows.find(
+      (row) => row.planetId === factoryPlanetNavigationReadModel.activePlanetId,
+    ) ?? webFactoryPlanetNavigationReadModel.planets.rows.find(
+      (row) => row.planetId === webFactoryPlanetNavigationReadModel.activePlanetId,
+    ),
+    [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],
+  );
   useEffect(() => {
     if (!windowsNativeCoreAvailable || !windowsNativeCoreBetaEnabled ||
       !["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)) {
@@ -12970,7 +12978,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             lineFindMode={lineFindMode}
             batchConnectionMode={batchConnectionMode}
             blueprintCount={game.blueprints.length}
-            beltCount={game.belts.filter((belt) => belt.planetId === game.activePlanetId).length}
+            beltCount={factoryActivePlanetNavigationRow?.beltCount ?? 0}
             regionCount={game.canvasRegions.filter((region) => region.planetId === game.activePlanetId).length}
             canUndo={gameHistoryRef.current.canUndo}
             canRedo={gameHistoryRef.current.canRedo}
@@ -13152,7 +13160,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           ) : null}
           <div className="canvas-status">
             <FactoryRunStatus model={factoryRunStatusReadModel} />
-            <strong>{getPlanetDisplayName(game, game.activePlanetId)} · {getPlanet(game.activePlanetId).code}工厂区</strong>
+            <strong>{factoryActivePlanetNavigationRow?.displayName ?? factoryPlanetNavigationReadModel.activePlanetId} · {factoryActivePlanetNavigationRow?.code ?? factoryPlanetNavigationReadModel.activePlanetId}工厂区</strong>
           </div>
           <RecipeFocusPanel
             game={game}

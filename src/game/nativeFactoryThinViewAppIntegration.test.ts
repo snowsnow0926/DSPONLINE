@@ -55,4 +55,14 @@ describe("factory thin-view App consumption", () => {
     expect(navigator).toMatch(/row\.powerFactor/);
     expect(navigator).not.toMatch(/GameState|game\./);
   });
+
+  it("feeds the visible canvas planet headline and belt count from the same bounded row", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+
+    expect(app).toMatch(/const factoryActivePlanetNavigationRow = useMemo\(/);
+    expect(app).toMatch(/beltCount=\{factoryActivePlanetNavigationRow\?\.beltCount \?\? 0\}/);
+    expect(app).toMatch(/<strong>\{factoryActivePlanetNavigationRow\?\.displayName[\s\S]*?factoryActivePlanetNavigationRow\?\.code/);
+    expect(app).not.toMatch(/beltCount=\{game\.belts\.filter\(/);
+    expect(app).not.toMatch(/<strong>\{getPlanetDisplayName\(game, game\.activePlanetId\)/);
+  });
 });

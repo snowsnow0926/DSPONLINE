@@ -49,7 +49,6 @@ const {
 } = require("./native-player-authority-projection-broker.cjs");
 const {
   NativePlayerAuthorityStateBroker,
-  normalizeNativePlayerAuthorityState,
 } = require("./native-player-authority-state-broker.cjs");
 const {
   inspectNativeExactRealtimeStartup,
@@ -271,32 +270,33 @@ function requireTrustedNativeSender(event) {
 }
 
 function validatedNativePlayerAuthorityState(rendererOwnerId) {
-  if (!nativePlayerAuthorityStateBroker || !nativeCoreSessions) {
+  if (!nativePlayerAuthorityRuntime || !nativePlayerAuthorityStateBroker || !nativeCoreSessions) {
     throw new Error("Windows 原生玩家权威时钟不可用");
   }
-  const state = nativePlayerAuthorityStateBroker.read(rendererOwnerId);
-  if (state.sessionId !== null) {
-    const owned = nativeCoreSessions.inspectSession("main-player-authority", state.sessionId);
+  const authoritySnapshot = nativePlayerAuthorityRuntime.snapshot();
+  const authoritySessionId = authoritySnapshot?.sessionId;
+  if (authoritySessionId !== null) {
+    if (!validNativeLogicalId(authoritySessionId)) {
+      throw new Error("Windows 原生玩家权威会话无效");
+    }
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", authoritySessionId);
     if (owned.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
         owned.state !== "owned") {
       throw new Error("Windows 原生玩家权威会话不一致");
     }
   }
+  const state = nativePlayerAuthorityStateBroker.read(rendererOwnerId);
   return normalizeRendererNativeResult("playerAuthorityState", state);
 }
 
-function publishNativePlayerAuthorityState(snapshot) {
+function publishNativePlayerAuthorityState(_snapshot) {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
   try {
-    const state = normalizeRendererNativeResult(
-      "playerAuthorityState",
-      normalizeNativePlayerAuthorityState(snapshot),
-    );
-    if (state.sessionId !== null) {
-      const owned = nativeCoreSessions?.inspectSession("main-player-authority", state.sessionId);
-      if (owned?.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
-          owned.state !== "owned") return;
-    }
+    // Treat the transition only as a wake-up signal. Reading through the
+    // trusted broker is essential for macro states: it validates the internal
+    // authority identity and then redacts every session/run/macro/operation ID
+    // before the payload reaches the renderer.
+    const state = validatedNativePlayerAuthorityState(mainWindow.webContents.id);
     mainWindow.webContents.send("desktop:native-player-authority-state-changed", state);
   } catch {
     // A malformed or stale authority snapshot is never delivered. The pull

@@ -12,6 +12,8 @@ const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
 const MAX_PLAYER_BELT_LANES: u64 = 4_096;
 const PLAYER_STATION_SLOT_COUNT: usize = 5;
 const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
+const PLAYER_STATION_DRONES_PER_BUILDING: u64 = 50;
+const PLAYER_STATION_VESSELS_PER_BUILDING: u64 = 10;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
 const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
@@ -1608,6 +1610,251 @@ fn validate_interstellar_station_configuration_command(
     Ok(())
 }
 
+fn station_busy_vehicle_count(
+    state: &CoreState,
+    station_id: &str,
+    scope: &str,
+) -> anyhow::Result<u64> {
+    let mut total = 0_u64;
+    for entity_index in 0..state.entity_index.len() {
+        let entity = state.parse_entity(entity_index)?;
+        let demand = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority route owner is invalid"))?;
+        let demand_id = demand
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority route owner ID is missing"))?;
+        let Some(routes) = demand.get("stationRoutes") else {
+            continue;
+        };
+        if routes.is_null() {
+            continue;
+        }
+        let routes = routes
+            .as_array()
+            .ok_or_else(|| anyhow!("native player-authority station route directory is invalid"))?;
+        for route in routes {
+            let route = route
+                .as_object()
+                .ok_or_else(|| anyhow!("native player-authority station route is invalid"))?;
+            if route.get("scope").and_then(Value::as_str) != Some(scope) {
+                continue;
+            }
+            let owner_id = match route.get("vehicleStationId") {
+                None | Some(Value::Null) => demand_id,
+                Some(Value::String(owner_id)) if !owner_id.is_empty() => owner_id,
+                _ => bail!("native player-authority station route vehicle owner is invalid"),
+            };
+            if owner_id != station_id {
+                continue;
+            }
+            let count = safe_json_integer(
+                route.get("vehicleCount"),
+                "station route busy vehicle count",
+            )?;
+            total = total
+                .checked_add(count)
+                .filter(|total| *total <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station busy vehicle count overflows")
+                })?;
+        }
+    }
+    Ok(total)
+}
+
+fn validate_station_fleet_target_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station fleet command shape is invalid")
+    }
+    let mut target = None;
+    for record in &command.changed_entities {
+        for change in &record.changes {
+            let [PathSegment::Key(field)] = change.path.as_slice() else {
+                continue;
+            };
+            if !matches!(field.as_str(), "stationDrones" | "stationVessels") {
+                continue;
+            }
+            if target.is_some() || change.operation != "set" {
+                bail!("native player-authority station fleet target is repeated or malformed")
+            }
+            let value = change
+                .value
+                .as_ref()
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station fleet target is invalid")
+                })?;
+            target = Some((record.id.as_str(), field.as_str(), value));
+        }
+    }
+    let (station_id, field, final_count) =
+        target.ok_or_else(|| anyhow!("native player-authority station fleet target is missing"))?;
+    let station_index = *state
+        .entity_index
+        .get(station_id)
+        .ok_or_else(|| anyhow!("native player-authority station fleet entity is missing"))?;
+    let station = state.parse_entity(station_index)?;
+    let station = station
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station fleet entity is invalid"))?;
+    let building_id = station
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority station fleet building is missing"))?;
+    let compatible = match field {
+        "stationDrones" => matches!(
+            building_id,
+            "planetary_logistics_station" | "interstellar_logistics_station"
+        ),
+        "stationVessels" => building_id == "interstellar_logistics_station",
+        _ => false,
+    };
+    if !compatible
+        || station.get("kind").and_then(Value::as_str) != Some("station")
+        || state
+            .catalog
+            .buildings
+            .get(building_id)
+            .is_none_or(|building| building.kind != "station")
+    {
+        bail!("native player-authority station fleet target is incompatible")
+    }
+    if let Some(locked) = station.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority station fleet target is locked or malformed")
+    }
+    let current_count = finite_json_number(station.get(field), "current station fleet count")?
+        .floor()
+        .max(0.0);
+    if current_count > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority current station fleet count is too large")
+    }
+    let current_count = current_count as u64;
+    if final_count == current_count {
+        bail!("native player-authority station fleet target is unchanged")
+    }
+    let machine_count = safe_json_integer(station.get("machineCount"), "station stack")?;
+    let per_building = if field == "stationDrones" {
+        PLAYER_STATION_DRONES_PER_BUILDING
+    } else {
+        PLAYER_STATION_VESSELS_PER_BUILDING
+    };
+    let capacity = machine_count
+        .checked_mul(per_building)
+        .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station fleet capacity overflows"))?;
+    let scope = if field == "stationDrones" {
+        "local"
+    } else {
+        "remote"
+    };
+    let busy = station_busy_vehicle_count(state, station_id, scope)?;
+    if final_count > capacity || final_count < busy {
+        bail!("native player-authority station fleet target violates capacity or busy vehicles")
+    }
+
+    let item_id = if field == "stationDrones" {
+        "logistics_drone"
+    } else {
+        "logistics_vessel"
+    };
+    if !state.catalog.items.contains_key(item_id) {
+        bail!("native player-authority station fleet item is not in the catalog")
+    }
+    let base = state.base_value();
+    let (inventory_root, expected_inventory) = if final_count > current_count {
+        let portable = base
+            .get("portableFleet")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native player-authority portable fleet is missing"))?;
+        let available = normalized_construction_inventory(portable.get(item_id))?;
+        let loaded = final_count - current_count;
+        let remaining = available.checked_sub(loaded).ok_or_else(|| {
+            anyhow!("native player-authority portable fleet stock is insufficient")
+        })?;
+        ("portableFleet", remaining)
+    } else {
+        let tray = base
+            .get("tray")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native player-authority tray is missing"))?;
+        let current = normalized_construction_inventory(tray.get(item_id))?;
+        let returned = current_count - final_count;
+        let next = current
+            .checked_add(returned)
+            .filter(|next| *next <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority fleet refund overflows"))?;
+        ("tray", next)
+    };
+    if command.top_level_changes.len() != 1
+        || require_exact_set_patch(&command.top_level_changes, &[inventory_root, item_id])?.as_u64()
+            != Some(expected_inventory)
+    {
+        bail!("native player-authority station fleet inventory accounting is invalid")
+    }
+
+    let mut expected_records = BTreeMap::<String, Vec<(Vec<&str>, Value)>>::new();
+    let mut station_changes = vec![(vec![field], Value::from(final_count))];
+    let station_progress_is_zero = station
+        .get("stationProgress")
+        .map(|value| finite_json_number(Some(value), "current station progress"))
+        .transpose()?
+        .is_some_and(|progress| progress == 0.0);
+    if !station_progress_is_zero {
+        station_changes.push((vec!["stationProgress"], Value::from(0)));
+    }
+    expected_records.insert(station_id.to_owned(), station_changes);
+    let peer_id = match station.get("stationPeerId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(peer_id)) if !peer_id.is_empty() => Some(peer_id.as_str()),
+        _ => bail!("native player-authority station fleet peer ID is invalid"),
+    };
+    if let Some(peer_id) = peer_id
+        && peer_id != station_id
+        && let Some(peer_index) = state.entity_index.get(peer_id)
+    {
+        let peer = state.parse_entity(*peer_index)?;
+        let peer_progress_is_zero = peer
+            .get("stationProgress")
+            .map(|value| finite_json_number(Some(value), "current station peer progress"))
+            .transpose()?
+            .is_some_and(|progress| progress == 0.0);
+        if !peer_progress_is_zero {
+            expected_records.insert(
+                peer_id.to_owned(),
+                vec![(vec!["stationProgress"], Value::from(0))],
+            );
+        }
+    }
+    if command.changed_entities.len() != expected_records.len() {
+        bail!("native player-authority station fleet entity effects are incomplete or mixed")
+    }
+    let mut seen_records = HashSet::new();
+    for record in &command.changed_entities {
+        if !seen_records.insert(record.id.as_str()) {
+            bail!("native player-authority station fleet entity is repeated")
+        }
+        let expected = expected_records.get(&record.id).ok_or_else(|| {
+            anyhow!("native player-authority station fleet command changes an unrelated entity")
+        })?;
+        require_exact_set_patch_values(&record.changes, expected)?;
+    }
+    Ok(())
+}
+
 struct ValidatedTimeWarpState<'a> {
     value: &'a Map<String, Value>,
     controller_entity_id: Option<&'a str>,
@@ -2664,6 +2911,17 @@ impl CoreState {
         }) {
             return validate_interstellar_station_configuration_command(self, command);
         }
+        if command.changed_entities.iter().any(|record| {
+            record.changes.iter().any(|change| {
+                matches!(
+                    change.path.as_slice(),
+                    [PathSegment::Key(field)]
+                        if matches!(field.as_str(), "stationDrones" | "stationVessels")
+                )
+            })
+        }) {
+            return validate_station_fleet_target_command(self, command);
+        }
         if !command.changed_entities.is_empty()
             && command.changed_entities.iter().all(|record| {
                 record.changes.iter().all(|change| {
@@ -3154,7 +3412,9 @@ mod tests {
             "items": [
                 { "id": "iron_ore", "kind": "solid" },
                 { "id": "iron_ingot", "kind": "solid" },
-                { "id": "solar_sail", "kind": "solid" }
+                { "id": "solar_sail", "kind": "solid" },
+                { "id": "logistics_drone", "kind": "solid" },
+                { "id": "logistics_vessel", "kind": "solid" }
             ],
             "buildings": [
                 {
@@ -3305,6 +3565,8 @@ mod tests {
                 "giant": { "x": 510, "y": 250, "zoom": 0.84 }
             },
             "construction": { "arc_smelter": 4, "em_rail_ejector": 0, "conveyor_belt_mk1": 5 },
+            "tray": { "logistics_drone": 0, "logistics_vessel": 0 },
+            "portableFleet": { "logistics_drone": 20, "logistics_vessel": 5 },
             "constructionQueue": [],
             "blueprintVersions": [],
             "totalProduced": { "iron_ingot": 10 },
@@ -3581,6 +3843,8 @@ mod tests {
                     "stationMode": "demand",
                     "stationMinimumLoad": 0.5,
                     "stationProgress": 0,
+                    "stationDrones": 5,
+                    "stationVessels": 2,
                     "stationPeerId": null,
                     "stationRoutes": [],
                     "stationWarpEnabled": true,
@@ -3723,6 +3987,35 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }
+    }
+
+    fn station_fleet_command(
+        revision: u64,
+        entity_id: &str,
+        field: &str,
+        final_count: u64,
+        inventory_root: &str,
+        item_id: &str,
+        inventory_count: u64,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key(inventory_root.to_owned()),
+                PathSegment::Key(item_id.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(inventory_count)),
+        }];
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key(field.to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(final_count)),
+            }],
+        }];
+        command
     }
 
     fn top_level_leaf_command(
@@ -4661,6 +4954,223 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("current station hub priority"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_moves_station_fleet_with_exact_material_accounting() {
+        let mut state = player_station_configuration_state();
+        state
+            .apply_player_authority_command(&station_fleet_command(
+                state.revision,
+                "station-ils",
+                "stationDrones",
+                10,
+                "portableFleet",
+                "logistics_drone",
+                15,
+            ))
+            .unwrap();
+        assert_eq!(state.base_value()["portableFleet"]["logistics_drone"], 15);
+
+        state
+            .apply_command(&entity_leaf_command(
+                state.revision,
+                "station-ils",
+                "stationProgress",
+                Value::from(3),
+            ))
+            .unwrap();
+        let mut unload = station_fleet_command(
+            state.revision,
+            "station-ils",
+            "stationDrones",
+            8,
+            "tray",
+            "logistics_drone",
+            2,
+        );
+        unload.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationProgress".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(0)),
+        });
+        state.apply_player_authority_command(&unload).unwrap();
+        assert_eq!(state.base_value()["tray"]["logistics_drone"], 2);
+
+        state
+            .apply_player_authority_command(&station_fleet_command(
+                state.revision,
+                "station-ils",
+                "stationVessels",
+                4,
+                "portableFleet",
+                "logistics_vessel",
+                3,
+            ))
+            .unwrap();
+        let station_index = *state.entity_index.get("station-ils").unwrap();
+        let station = state.parse_entity(station_index).unwrap();
+        assert_eq!(station["stationDrones"], 8);
+        assert_eq!(station["stationVessels"], 4);
+        assert_eq!(station["stationProgress"], 0);
+        assert_eq!(state.base_value()["portableFleet"]["logistics_vessel"], 3);
+        assert_eq!(
+            station["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 31 })
+        );
+        assert_eq!(state.revision, 14);
+    }
+
+    #[test]
+    fn player_authority_station_fleet_rejects_forged_or_unfunded_changes_atomically() {
+        let mut mixed = station_fleet_command(
+            10,
+            "station-ils",
+            "stationDrones",
+            10,
+            "portableFleet",
+            "logistics_drone",
+            15,
+        );
+        mixed.changed_entities.push(RecordPatch {
+            id: "station-pls".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("stationProgress".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0)),
+            }],
+        });
+        let commands = [
+            station_fleet_command(
+                10,
+                "missing",
+                "stationDrones",
+                10,
+                "portableFleet",
+                "logistics_drone",
+                15,
+            ),
+            station_fleet_command(
+                10,
+                "station-pls",
+                "stationVessels",
+                4,
+                "portableFleet",
+                "logistics_vessel",
+                3,
+            ),
+            station_fleet_command(
+                10,
+                "station-locked",
+                "stationDrones",
+                10,
+                "portableFleet",
+                "logistics_drone",
+                15,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                51,
+                "portableFleet",
+                "logistics_drone",
+                0,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                30,
+                "portableFleet",
+                "logistics_drone",
+                0,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                10,
+                "portableFleet",
+                "logistics_drone",
+                16,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                4,
+                "tray",
+                "logistics_drone",
+                0,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                5,
+                "portableFleet",
+                "logistics_drone",
+                20,
+            ),
+            station_fleet_command(
+                10,
+                "station-ils",
+                "stationDrones",
+                10,
+                "tray",
+                "logistics_drone",
+                15,
+            ),
+            mixed,
+        ];
+        for command in commands {
+            let mut state = player_station_configuration_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 10);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut busy = player_station_configuration_state();
+        let mut add_busy_route = empty_player_command(busy.revision);
+        add_busy_route.changed_entities = vec![RecordPatch {
+            id: "station-pls".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("stationRoutes".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!([{
+                    "id": "route-busy",
+                    "slotIndex": 0,
+                    "peerId": "station-ils",
+                    "itemId": "iron_ore",
+                    "scope": "local",
+                    "cargo": 4,
+                    "vehicleCount": 4,
+                    "progress": 0,
+                    "duration": 1,
+                    "requiresWarp": false,
+                    "vehicleStationId": "station-ils"
+                }])),
+            }],
+        }];
+        busy.apply_command(&add_busy_route).unwrap();
+        let before = busy.canonical_sha256().unwrap();
+        let mut below_busy = station_fleet_command(
+            busy.revision,
+            "station-ils",
+            "stationDrones",
+            3,
+            "tray",
+            "logistics_drone",
+            2,
+        );
+        below_busy.top_level_changes[0].value = Some(Value::from(2));
+        let error = busy
+            .apply_player_authority_command(&below_busy)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("busy vehicles"));
+        assert_eq!(busy.canonical_sha256().unwrap(), before);
     }
 
     #[test]

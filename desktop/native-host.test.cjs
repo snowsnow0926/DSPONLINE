@@ -155,6 +155,63 @@ test("save session batches bounded records when the Rust host advertises support
   ]);
 });
 
+test("save session checks the exact normalized batch against the fixed native filesystem before IPC", async () => {
+  const calls = [];
+  const budgetCalls = [];
+  const client = {
+    hello: { capabilities: ["native-save-put-batch-v1"] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "saveBegin") return { transactionId: "tx-budget" };
+      return { acceptedRecords: request.records.length };
+    },
+  };
+  const targetPath = "C:\\DSPidle2-Performance-Edition\\native-save-v1\\.native-save-space-probe";
+  const registry = new NativeSaveSessionRegistry(client, {
+    diskBudgetTargetPath: targetPath,
+    diskBudgetCheck(request) {
+      budgetCalls.push(request);
+      return { allowed: true, checked: true };
+    },
+  });
+  await registry.begin(7, {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: "builtin:test",
+    revision: 1,
+    savedAtMs: 1,
+  });
+  const records = [
+    { key: "base", value: "{\"label\":\"白糖🚀\"}" },
+    { key: "entities:00000000", value: "[]" },
+  ];
+  await registry.write(7, "tx-budget", records);
+  assert.deepEqual(budgetCalls, [{ targetPath, payload: JSON.stringify(records) }]);
+  assert.deepEqual(calls.map((call) => call.operation), ["saveBegin", "savePutBatch"]);
+
+  const rejected = new NativeSaveSessionRegistry(client, {
+    diskBudgetTargetPath: targetPath,
+    diskBudgetCheck() { throw Object.assign(new Error("low disk"), { code: "NATIVE_SAVE_DISK_BUDGET_SPACE_INSUFFICIENT" }); },
+  });
+  await rejected.begin(9, {
+    slot: "normal-main",
+    mode: "normal",
+    stateVersion: 47,
+    baseChecksum: "01234567",
+    registryFingerprint: "builtin:test",
+    revision: 2,
+    savedAtMs: 2,
+  });
+  const beforeRejectedWrite = calls.length;
+  await assert.rejects(
+    () => rejected.write(9, "tx-budget", [{ key: "base", value: "{}" }]),
+    (error) => error.code === "NATIVE_SAVE_DISK_BUDGET_SPACE_INSUFFICIENT",
+  );
+  assert.equal(calls.length, beforeRejectedWrite);
+});
+
 test("save session rejects an incomplete native batch receipt", async () => {
   const client = {
     hello: { capabilities: ["native-save-put-batch-v1"] },

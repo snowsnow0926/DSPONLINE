@@ -291,7 +291,12 @@ async function initializeNativeHost() {
       spawnEnvironment: nativePerformancePolicyStore.spawnEnvironment(),
     });
     const hello = normalizeRendererNativeResult("hostHello", await nativeHostClient.start(app.getVersion()));
-    nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
+    nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient, {
+      // The Rust Host creates this fixed root before hello.  The JavaScript
+      // preflight uses a non-existent probe filename only to query the same
+      // filesystem; it never creates or removes the probe.
+      diskBudgetTargetPath: path.join(rootPath, ".native-save-space-probe"),
+    });
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
     nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({

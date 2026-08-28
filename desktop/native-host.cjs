@@ -1,6 +1,7 @@
 const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
+const { requireNativeSaveDiskBudget } = require("./native-save-disk-budget.cjs");
 
 const FRAME_MAGIC = Buffer.from("DSPNATV1", "ascii");
 const FRAME_HEADER_BYTES = 36;
@@ -407,9 +408,18 @@ function normalizeNativeSaveRecords(records) {
 }
 
 class NativeSaveSessionRegistry {
-  constructor(client) {
+  constructor(client, options = {}) {
     this.client = client;
     this.sessions = new Map();
+    this.diskBudgetTargetPath = options.diskBudgetTargetPath ?? null;
+    this.diskBudgetCheck = options.diskBudgetCheck ?? requireNativeSaveDiskBudget;
+    if (this.diskBudgetTargetPath !== null &&
+        (typeof this.diskBudgetTargetPath !== "string" || !path.isAbsolute(this.diskBudgetTargetPath))) {
+      throw new TypeError("native save disk budget target is invalid");
+    }
+    if (typeof this.diskBudgetCheck !== "function") {
+      throw new TypeError("native save disk budget checker is invalid");
+    }
   }
 
   async begin(ownerId, request) {
@@ -424,6 +434,12 @@ class NativeSaveSessionRegistry {
   async write(ownerId, transactionId, records) {
     this.assertOwner(ownerId, transactionId);
     const normalized = normalizeNativeSaveRecords(records);
+    if (this.diskBudgetTargetPath !== null) {
+      this.diskBudgetCheck({
+        targetPath: this.diskBudgetTargetPath,
+        payload: JSON.stringify(normalized),
+      });
+    }
     if (this.client.hello?.capabilities?.includes("native-save-put-batch-v1")) {
       const result = await this.client.request({
         operation: "savePutBatch",

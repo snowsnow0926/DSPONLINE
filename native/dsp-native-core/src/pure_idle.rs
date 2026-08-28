@@ -9,7 +9,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-dag-v4";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-research-sink-v5";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DEFAULT_QUANTUM_ITEM_CAPACITY: i128 = 10_000_000_000;
@@ -37,6 +37,38 @@ struct DysonTerminalSnapshot {
     orbit_expired_by_system: MaterialTotals,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InfiniteResearchProgressSnapshot {
+    level: u32,
+    progress: i128,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResearchLabProofSnapshot {
+    entity_id: String,
+    planet_id: String,
+    power_grid_id: String,
+    building_id: String,
+    machine_count: i128,
+    progress_micros: i128,
+    input_item_ids: Vec<String>,
+    output_item_ids: Vec<String>,
+    spray_coater_installed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResearchProofSnapshot {
+    selected_technology_id: Option<String>,
+    queued_technology_ids: Vec<String>,
+    completed_technology_ids: Vec<String>,
+    finite_progress: BTreeMap<String, MaterialTotals>,
+    active_infinite_research_id: Option<String>,
+    auto_research: bool,
+    infinite_progress: BTreeMap<String, InfiniteResearchProgressSnapshot>,
+    galactic_score: i128,
+    labs: Vec<ResearchLabProofSnapshot>,
+}
+
 /// Ephemeral proof input for one native candidate. It is never serialized into
 /// public GameState v47, the save envelope, or a canonical hash. Each capture
 /// owns only compact per-item counters; entity rows are decoded one at a time.
@@ -51,6 +83,27 @@ struct SettlementProofSnapshot {
     portable_fleet: MaterialTotals,
     construction_crafted: i128,
     dyson: DysonTerminalSnapshot,
+    research: ResearchProofSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResearchSinkKind {
+    Finite {
+        technology_id: String,
+        costs: MaterialTotals,
+    },
+    Infinite {
+        research_id: String,
+        level: u32,
+        level_cost: i128,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResearchSinkCertificate {
+    kind: ResearchSinkKind,
+    consumed_units_per_second: MaterialTotals,
+    expected: ResearchProofSnapshot,
 }
 
 /// A deliberately narrow productive contract. Every admitted item is an
@@ -73,6 +126,10 @@ struct OrdinaryFlowCertificate {
     /// the legacy source-only proof; non-empty means the complete acyclic
     /// recipe domain was closed without reordering any persisted entity.
     recipe_ids: Vec<String>,
+    /// Optional material-consuming terminal. It may advance only the exact
+    /// current finite technology or infinite-research level and never crosses
+    /// the completion/reward/switch boundary represented by this certificate.
+    research: Option<ResearchSinkCertificate>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -575,6 +632,190 @@ fn add_consumption_entry(
     add_material_amount(consumed, item_id, proof_counter(value, label)?, label)
 }
 
+fn proof_optional_string(value: Option<&Value>, label: &str) -> anyhow::Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} is not a string or null"))?;
+    if value.is_empty() {
+        bail!("{label} is an empty identifier");
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn proof_string_array(value: Option<&Value>, label: &str) -> anyhow::Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("{label} is not an array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("{label}.{index} is not a non-empty identifier"))
+        })
+        .collect()
+}
+
+fn proof_fixed_micros(value: Option<&Value>, label: &str) -> anyhow::Result<i128> {
+    let value = value.and_then(Value::as_f64).unwrap_or(0.0);
+    if !value.is_finite() || !(0.0..=MAX_SAFE_INTEGER).contains(&value) {
+        bail!("{label} is not a finite non-negative number");
+    }
+    let scaled = value * MICROS_PER_SECOND as f64;
+    let rounded = scaled.round();
+    if !scaled.is_finite() || (scaled - rounded).abs() > EPSILON * scaled.abs().max(1.0) {
+        bail!("{label} is not representable at microsecond precision");
+    }
+    Ok(rounded as i128)
+}
+
+fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<ResearchProofSnapshot> {
+    let base = state.base_value();
+    let research = base
+        .get("research")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("research is not an object"))?;
+    let endgame = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("endgame is not an object"))?;
+
+    let mut finite_progress = BTreeMap::new();
+    if let Some(progress) = research.get("progressByTech")
+        && !progress.is_null()
+    {
+        for (technology_id, by_item) in progress
+            .as_object()
+            .ok_or_else(|| anyhow!("research.progressByTech is not an object"))?
+        {
+            let by_item = by_item.as_object().ok_or_else(|| {
+                anyhow!("research.progressByTech.{technology_id} is not an object")
+            })?;
+            let mut captured = MaterialTotals::new();
+            for (item_id, amount) in by_item {
+                captured.insert(
+                    item_id.clone(),
+                    proof_counter(
+                        Some(amount),
+                        &format!("research.progressByTech.{technology_id}.{item_id}"),
+                    )?,
+                );
+            }
+            finite_progress.insert(technology_id.clone(), captured);
+        }
+    }
+
+    let mut infinite_progress = BTreeMap::new();
+    if let Some(progress) = endgame.get("infiniteResearch")
+        && !progress.is_null()
+    {
+        for (research_id, entry) in progress
+            .as_object()
+            .ok_or_else(|| anyhow!("endgame.infiniteResearch is not an object"))?
+        {
+            let entry = entry.as_object().ok_or_else(|| {
+                anyhow!("endgame.infiniteResearch.{research_id} is not an object")
+            })?;
+            let level = proof_counter(
+                entry.get("level"),
+                &format!("endgame.infiniteResearch.{research_id}.level"),
+            )?;
+            infinite_progress.insert(
+                research_id.clone(),
+                InfiniteResearchProgressSnapshot {
+                    level: u32::try_from(level).map_err(|_| {
+                        anyhow!("endgame.infiniteResearch.{research_id}.level exceeds u32")
+                    })?,
+                    progress: proof_counter(
+                        entry.get("progress"),
+                        &format!("endgame.infiniteResearch.{research_id}.progress"),
+                    )?,
+                },
+            );
+        }
+    }
+
+    let mut labs = Vec::new();
+    for entity_index in 0..state.entity_index.len() {
+        let entity = state.parse_entity(entity_index)?;
+        if entity.get("recipeId").and_then(Value::as_str) != Some("matrix_research")
+            || number_at(Some(&entity), &["machineCount"]) <= EPSILON
+        {
+            continue;
+        }
+        let required_id = |key: &str| -> anyhow::Result<String> {
+            entity
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("active research lab is missing {key}"))
+        };
+        let item_ids = |key: &str| -> anyhow::Result<Vec<String>> {
+            let values = entity
+                .get(key)
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("active research lab {key} is not an object"))?;
+            Ok(values.keys().cloned().collect())
+        };
+        labs.push(ResearchLabProofSnapshot {
+            entity_id: required_id("id")?,
+            planet_id: required_id("planetId")?,
+            power_grid_id: required_id("powerGridId")?,
+            building_id: required_id("buildingId")?,
+            machine_count: proof_counter(entity.get("machineCount"), "researchLab.machineCount")?,
+            progress_micros: proof_fixed_micros(entity.get("progress"), "researchLab.progress")?,
+            input_item_ids: item_ids("inputs")?,
+            output_item_ids: item_ids("outputs")?,
+            spray_coater_installed: entity
+                .get("sprayCoaterInstalled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+
+    Ok(ResearchProofSnapshot {
+        selected_technology_id: proof_optional_string(
+            research.get("selectedTechId"),
+            "research.selectedTechId",
+        )?,
+        queued_technology_ids: proof_string_array(
+            research.get("queuedTechIds"),
+            "research.queuedTechIds",
+        )?,
+        completed_technology_ids: proof_string_array(
+            research.get("completedTechIds"),
+            "research.completedTechIds",
+        )?,
+        finite_progress,
+        active_infinite_research_id: proof_optional_string(
+            endgame.get("activeInfiniteResearchId"),
+            "endgame.activeInfiniteResearchId",
+        )?,
+        auto_research: endgame
+            .get("autoResearch")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        infinite_progress,
+        galactic_score: proof_counter(endgame.get("galacticScore"), "endgame.galacticScore")?,
+        labs,
+    })
+}
+
 fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementProofSnapshot> {
     let base = state.base_value();
     let mut snapshot = SettlementProofSnapshot {
@@ -586,6 +827,7 @@ fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementPr
             "constructionAutomation.totalCrafted",
         )?,
         dyson: capture_dyson_terminal(base)?,
+        research: capture_research_proof_snapshot(state)?,
         ..SettlementProofSnapshot::default()
     };
 
@@ -1779,27 +2021,7 @@ fn collection_has_entries(value: Option<&Value>) -> bool {
 
 fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
     let base = state.base_value();
-    let research = base.get("research").and_then(Value::as_object);
-    if research
-        .and_then(|research| research.get("selectedTechId"))
-        .is_some_and(|value| !value.is_null())
-        || collection_has_entries(research.and_then(|research| research.get("queuedTechIds")))
-    {
-        return Some("research is active".to_owned());
-    }
-
     let endgame = base.get("endgame").and_then(Value::as_object);
-    if endgame
-        .and_then(|endgame| endgame.get("activeInfiniteResearchId"))
-        .is_some_and(|value| !value.is_null())
-        || endgame
-            .and_then(|endgame| endgame.get("autoResearch"))
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        return Some("infinite or automatic research is active".to_owned());
-    }
-
     if collection_has_entries(base.get("handcraftQueue"))
         || collection_has_entries(base.get("constructionQueue"))
     {
@@ -1917,6 +2139,24 @@ fn active_ordinary_recipe_ids(state: &CoreState) -> Result<Vec<String>, String> 
             return Err(format!(
                 "active recipe {recipe_id} is installed in incompatible building {building_id}"
             ));
+        }
+        if recipe_id == "matrix_research" {
+            if !recipe.inputs.is_empty() || !recipe.outputs.is_empty() {
+                return Err(
+                    "matrix_research catalog entry unexpectedly carries a material recipe"
+                        .to_owned(),
+                );
+            }
+            if !entity_output_ids.is_empty() {
+                return Err("active research lab declares material outputs".to_owned());
+            }
+            if entity.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true) {
+                return Err(
+                    "active research lab uses proliferator without a closed bonus ledger"
+                        .to_owned(),
+                );
+            }
+            continue;
         }
         if recipe.inputs.is_empty() || recipe.outputs.is_empty() {
             return Err(format!(
@@ -2088,14 +2328,346 @@ fn add_catalog_flow_amount(
     Ok(())
 }
 
+fn research_static_state_matches(
+    before: &ResearchProofSnapshot,
+    after: &ResearchProofSnapshot,
+    selected_finite: Option<&str>,
+    selected_infinite: Option<&str>,
+) -> bool {
+    if before.selected_technology_id != after.selected_technology_id
+        || before.queued_technology_ids != after.queued_technology_ids
+        || before.completed_technology_ids != after.completed_technology_ids
+        || before.active_infinite_research_id != after.active_infinite_research_id
+        || before.auto_research != after.auto_research
+        || before.galactic_score != after.galactic_score
+        || before.labs != after.labs
+    {
+        return false;
+    }
+    if before
+        .finite_progress
+        .iter()
+        .filter(|(id, _)| Some(id.as_str()) != selected_finite)
+        .ne(after
+            .finite_progress
+            .iter()
+            .filter(|(id, _)| Some(id.as_str()) != selected_finite))
+    {
+        return false;
+    }
+    before
+        .infinite_progress
+        .iter()
+        .filter(|(id, _)| Some(id.as_str()) != selected_infinite)
+        .eq(after
+            .infinite_progress
+            .iter()
+            .filter(|(id, _)| Some(id.as_str()) != selected_infinite))
+}
+
+fn validate_research_labs(
+    state: &CoreState,
+    research: &ResearchProofSnapshot,
+    allowed_inputs: &BTreeSet<String>,
+) -> Result<(), String> {
+    if research.labs.is_empty() {
+        return Err("active research has no powered matrix lab".to_owned());
+    }
+    let recipe = state
+        .catalog
+        .recipes
+        .get("matrix_research")
+        .ok_or_else(|| "matrix_research recipe is absent from the catalog".to_owned())?;
+    if !recipe.inputs.is_empty() || !recipe.outputs.is_empty() {
+        return Err("matrix_research catalog entry is not a terminal sink".to_owned());
+    }
+    for lab in &research.labs {
+        if lab.building_id != recipe.building_id {
+            return Err(format!(
+                "research lab {} uses incompatible building {}",
+                lab.entity_id, lab.building_id
+            ));
+        }
+        if lab.machine_count <= 0 || lab.spray_coater_installed {
+            return Err(format!(
+                "research lab {} has an uncertified machine or spray configuration",
+                lab.entity_id
+            ));
+        }
+        if !lab.output_item_ids.is_empty()
+            || lab
+                .input_item_ids
+                .iter()
+                .any(|item_id| !allowed_inputs.contains(item_id))
+        {
+            return Err(format!(
+                "research lab {} exposes material slots outside the current research ledger",
+                lab.entity_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stable_window_rate(deltas: &[i128], label: &str) -> Result<i128, String> {
+    if deltas.len() != 3 || deltas.iter().any(|delta| *delta < 0) {
+        return Err(format!("{label} regressed during three-window calibration"));
+    }
+    if deltas.iter().skip(1).any(|delta| delta != &deltas[0]) {
+        return Err(format!(
+            "{label} was unstable across three calibration windows"
+        ));
+    }
+    let window_seconds = MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128;
+    if deltas[0] % window_seconds != 0 {
+        return Err(format!(
+            "{label} is not an integer rate over the ten-second window"
+        ));
+    }
+    Ok(deltas[0] / window_seconds)
+}
+
+fn build_research_sink_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<ResearchSinkCertificate>, String> {
+    let current = capture_research_proof_snapshot(state)
+        .map_err(|error| format!("current research state is invalid: {error:#}"))?;
+    let selected = current.selected_technology_id.as_deref();
+    let active_infinite = current.active_infinite_research_id.as_deref();
+    if selected.is_none() && active_infinite.is_none() {
+        if !current.labs.is_empty() {
+            return Err("matrix labs are active without a selected research sink".to_owned());
+        }
+        return Ok(None);
+    }
+    if selected.is_some() && active_infinite.is_some() {
+        return Err("finite and infinite research are active simultaneously".to_owned());
+    }
+    if current != snapshots[0].research && current != snapshots[3].research {
+        return Err("current research state is not a calibration endpoint".to_owned());
+    }
+
+    if let Some(technology_id) = selected {
+        let technology = state
+            .catalog
+            .technologies
+            .get(technology_id)
+            .ok_or_else(|| format!("selected technology {technology_id} is absent from catalog"))?;
+        if technology.costs.is_empty()
+            || current
+                .completed_technology_ids
+                .iter()
+                .any(|id| id == technology_id)
+        {
+            return Err(format!(
+                "selected technology {technology_id} is empty or already completed"
+            ));
+        }
+        let mut costs = MaterialTotals::new();
+        for cost in &technology.costs {
+            add_catalog_flow_amount(
+                &mut costs,
+                &cost.item_id,
+                cost.amount,
+                &format!("technologies.{technology_id}.costs.{}", cost.item_id),
+            )?;
+        }
+        let allowed_inputs = costs.keys().cloned().collect::<BTreeSet<_>>();
+        validate_research_labs(state, &current, &allowed_inputs)?;
+        let mut consumed = MaterialTotals::new();
+        for window in snapshots.windows(2) {
+            if !research_static_state_matches(
+                &window[0].research,
+                &window[1].research,
+                Some(technology_id),
+                None,
+            ) {
+                return Err("finite research configuration changed during calibration".to_owned());
+            }
+        }
+        let empty = MaterialTotals::new();
+        for item_id in &allowed_inputs {
+            let mut deltas = Vec::with_capacity(3);
+            for window in snapshots.windows(2) {
+                let before = window[0]
+                    .research
+                    .finite_progress
+                    .get(technology_id)
+                    .unwrap_or(&empty)
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0);
+                let after = window[1]
+                    .research
+                    .finite_progress
+                    .get(technology_id)
+                    .unwrap_or(&empty)
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0);
+                deltas.push(
+                    after
+                        .checked_sub(before)
+                        .ok_or_else(|| format!("research {item_id} progress overflowed"))?,
+                );
+            }
+            let rate = stable_window_rate(
+                &deltas,
+                &format!("research.progressByTech.{technology_id}.{item_id}"),
+            )?;
+            let progress = current
+                .finite_progress
+                .get(technology_id)
+                .and_then(|progress| progress.get(item_id))
+                .copied()
+                .unwrap_or(0);
+            let cost = costs[item_id];
+            if progress > cost {
+                return Err(format!(
+                    "research {item_id} progress exceeds its technology cost"
+                ));
+            }
+            if rate > 0 {
+                if !current
+                    .labs
+                    .iter()
+                    .any(|lab| lab.input_item_ids.contains(item_id))
+                {
+                    return Err(format!(
+                        "research {item_id} consumption has no matching matrix-lab slot"
+                    ));
+                }
+                consumed.insert(item_id.clone(), rate);
+            }
+        }
+        let selected_progress = current
+            .finite_progress
+            .get(technology_id)
+            .cloned()
+            .unwrap_or_default();
+        if selected_progress
+            .keys()
+            .any(|item_id| !costs.contains_key(item_id))
+        {
+            return Err("selected technology progress has an unknown matrix item".to_owned());
+        }
+        if consumed.is_empty() {
+            return Err("finite research made no stable integer progress".to_owned());
+        }
+        return Ok(Some(ResearchSinkCertificate {
+            kind: ResearchSinkKind::Finite {
+                technology_id: technology_id.to_owned(),
+                costs,
+            },
+            consumed_units_per_second: consumed,
+            expected: current,
+        }));
+    }
+
+    let research_id = active_infinite.expect("one research mode was selected");
+    if !current
+        .completed_technology_ids
+        .iter()
+        .any(|id| id == "universe_matrix")
+    {
+        return Err("infinite research is active before universe_matrix unlock".to_owned());
+    }
+    if !crate::infinite_research::valid_id(research_id) {
+        return Err(format!("unknown infinite research ID {research_id}"));
+    }
+    let allowed_inputs = BTreeSet::from(["universe_matrix".to_owned()]);
+    validate_research_labs(state, &current, &allowed_inputs)?;
+    for window in snapshots.windows(2) {
+        if !research_static_state_matches(
+            &window[0].research,
+            &window[1].research,
+            None,
+            Some(research_id),
+        ) {
+            return Err("infinite research configuration changed during calibration".to_owned());
+        }
+    }
+    let mut deltas = Vec::with_capacity(3);
+    let mut stable_level = None;
+    for window in snapshots.windows(2) {
+        let before = window[0]
+            .research
+            .infinite_progress
+            .get(research_id)
+            .ok_or_else(|| format!("infinite research {research_id} progress is missing"))?;
+        let after = window[1]
+            .research
+            .infinite_progress
+            .get(research_id)
+            .ok_or_else(|| format!("infinite research {research_id} progress is missing"))?;
+        if before.level != after.level {
+            return Err("infinite research crossed a level during calibration".to_owned());
+        }
+        match stable_level {
+            None => stable_level = Some(before.level),
+            Some(level) if level == before.level => {}
+            Some(_) => return Err("infinite research level changed between windows".to_owned()),
+        }
+        deltas.push(
+            after
+                .progress
+                .checked_sub(before.progress)
+                .ok_or_else(|| "infinite research progress overflowed".to_owned())?,
+        );
+    }
+    let rate = stable_window_rate(&deltas, "infinite research progress")?;
+    if rate <= 0 {
+        return Err("infinite research made no stable integer progress".to_owned());
+    }
+    if !current
+        .labs
+        .iter()
+        .any(|lab| lab.input_item_ids.iter().any(|id| id == "universe_matrix"))
+    {
+        return Err("infinite research has no universe-matrix lab slot".to_owned());
+    }
+    let level = stable_level.unwrap_or(0);
+    if current
+        .infinite_progress
+        .get(research_id)
+        .is_none_or(|progress| progress.level != level)
+    {
+        return Err("current infinite research level is not the calibrated level".to_owned());
+    }
+    if crate::infinite_research::maximum_level(research_id).is_some_and(|maximum| level >= maximum)
+    {
+        return Err("infinite research is already at maximum level".to_owned());
+    }
+    let level_cost = i128::try_from(
+        crate::infinite_research::cost(research_id, level)
+            .map_err(|error| format!("infinite research cost is invalid: {error:#}"))?,
+    )
+    .map_err(|_| "infinite research cost exceeds the proof ledger".to_owned())?;
+    let progress = current.infinite_progress[research_id].progress;
+    if progress > level_cost {
+        return Err("infinite research progress exceeds the current level cost".to_owned());
+    }
+    Ok(Some(ResearchSinkCertificate {
+        kind: ResearchSinkKind::Infinite {
+            research_id: research_id.to_owned(),
+            level,
+            level_cost,
+        },
+        consumed_units_per_second: BTreeMap::from([("universe_matrix".to_owned(), rate)]),
+        expected: current,
+    }))
+}
+
 fn build_closed_recipe_certificate(
     state: &CoreState,
     sources: &BTreeSet<String>,
     flow: &OrdinaryWindowFlow,
+    research: Option<ResearchSinkCertificate>,
 ) -> Result<OrdinaryFlowCertificate, String> {
     let recipe_ids = active_ordinary_recipe_ids(state)?;
-    if recipe_ids.is_empty() {
-        return Err("no active ordinary recipe is available".to_owned());
+    if recipe_ids.is_empty() && research.is_none() {
+        return Err("no active ordinary recipe or research sink is available".to_owned());
     }
 
     // Recipe IDs are retained in first-seen entity order. The topological
@@ -2200,10 +2772,20 @@ fn build_closed_recipe_certificate(
         .chain(output_producer.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
-    let allowed_consumption = recipe_inputs
+    let mut allowed_consumption = recipe_inputs
         .iter()
         .flat_map(|inputs| inputs.keys().cloned())
         .collect::<BTreeSet<_>>();
+    if let Some(research) = &research {
+        for item_id in research.consumed_units_per_second.keys() {
+            if !sources.contains(item_id) && !output_producer.contains_key(item_id) {
+                return Err(format!(
+                    "research input {item_id} has no certified infinite source or active producer"
+                ));
+            }
+            allowed_consumption.insert(item_id.clone());
+        }
+    }
     for item_id in flow.produced_per_second.keys() {
         if !allowed_production.contains(item_id) {
             return Err(format!(
@@ -2253,7 +2835,10 @@ fn build_closed_recipe_certificate(
     // Sum every consumer before comparing against the inferred aggregate.
     // This is the shared-intermediate fan-out receipt: an intermediate can be
     // consumed by several recipes, but each unit is charged exactly once.
-    let mut expected_consumption = MaterialTotals::new();
+    let mut expected_consumption = research
+        .as_ref()
+        .map(|research| research.consumed_units_per_second.clone())
+        .unwrap_or_default();
     for (recipe_index, inputs) in recipe_inputs.iter().enumerate() {
         for (item_id, input_amount) in inputs {
             let consumed = input_amount
@@ -2280,7 +2865,7 @@ fn build_closed_recipe_certificate(
         &flow.net_owned_per_second,
         &expected_consumption,
     ]);
-    let mut has_terminal_product = false;
+    let mut has_terminal_product = research.is_some();
     for item_id in ledger_items {
         if !allowed_production.contains(&item_id) && !allowed_consumption.contains(&item_id) {
             return Err(format!(
@@ -2310,7 +2895,7 @@ fn build_closed_recipe_certificate(
         }
     }
     if !has_terminal_product {
-        return Err("ordinary recipe DAG has no stable net-positive final product".to_owned());
+        return Err("ordinary recipe DAG has no stable final product or research sink".to_owned());
     }
 
     Ok(OrdinaryFlowCertificate {
@@ -2318,6 +2903,7 @@ fn build_closed_recipe_certificate(
         produced_units_per_second: flow.produced_per_second.clone(),
         consumed_units_per_second: flow.consumed_per_second.clone(),
         recipe_ids,
+        research,
     })
 }
 
@@ -2356,6 +2942,7 @@ fn build_ordinary_flow_certificate(
     }
 
     let sources = exclusive_infinite_vein_sources(state)?;
+    let research = build_research_sink_certificate(state, snapshots)?;
     let recipe_rejection = (|| {
         let mut windows = Vec::with_capacity(3);
         for window in snapshots.windows(2) {
@@ -2368,7 +2955,7 @@ fn build_ordinary_flow_certificate(
         if windows.iter().skip(1).any(|window| window != &flow) {
             return Err("ordinary production/consumption/ownership rates were unstable across the three calibration windows".to_owned());
         }
-        build_closed_recipe_certificate(state, &sources, &flow)
+        build_closed_recipe_certificate(state, &sources, &flow, research.clone())
     })();
     if let Ok(certificate) = recipe_rejection {
         return Ok(certificate);
@@ -2378,7 +2965,7 @@ fn build_ordinary_flow_certificate(
     // Source-only is a strict subset, not a recovery path for a malformed or
     // unclosed active recipe domain. Otherwise a blocked/cyclic factory could
     // still receive extrapolated mining while its material consumers freeze.
-    if !active_ordinary_recipe_ids(state)?.is_empty() {
+    if !active_ordinary_recipe_ids(state)?.is_empty() || research.is_some() {
         return Err(recipe_rejection);
     }
 
@@ -2453,6 +3040,7 @@ fn build_ordinary_flow_certificate(
         produced_units_per_second: rates,
         consumed_units_per_second: MaterialTotals::new(),
         recipe_ids: Vec::new(),
+        research: None,
     })
 }
 
@@ -2524,6 +3112,7 @@ struct OrdinaryFlowApplication {
     produced_units: i128,
     consumed_units: i128,
     recipe_certified: bool,
+    research_certified: bool,
     capacity_limited: bool,
 }
 
@@ -2654,11 +3243,11 @@ fn apply_source_only_flow_certificate(
 
 fn apply_ordinary_flow_certificate(
     state: &mut CoreState,
-    certificate: &OrdinaryFlowCertificate,
+    certificate: &mut OrdinaryFlowCertificate,
     elapsed_before: f64,
     elapsed_after: f64,
 ) -> Result<OrdinaryFlowApplication, String> {
-    if certificate.recipe_ids.is_empty() {
+    if certificate.recipe_ids.is_empty() && certificate.research.is_none() {
         return apply_source_only_flow_certificate(
             state,
             certificate,
@@ -2746,7 +3335,63 @@ fn apply_ordinary_flow_certificate(
         .and_then(Value::as_object)
         .ok_or_else(|| "totalProduced is malformed".to_owned())?;
 
+    let research = certificate.research.clone();
+    if let Some(research) = &research {
+        let current = capture_research_proof_snapshot(state)
+            .map_err(|error| format!("research sink state is invalid: {error:#}"))?;
+        if current != research.expected {
+            return Err("research sink state diverged from its certified endpoint".to_owned());
+        }
+    }
+
     let mut accepted_seconds = scheduled_seconds;
+    if let Some(research) = &research {
+        match &research.kind {
+            ResearchSinkKind::Finite {
+                technology_id,
+                costs,
+            } => {
+                for (item_id, rate) in &research.consumed_units_per_second {
+                    if *rate <= 0 {
+                        return Err(format!("research {item_id} has a non-positive rate"));
+                    }
+                    let progress = research
+                        .expected
+                        .finite_progress
+                        .get(technology_id)
+                        .and_then(|progress| progress.get(item_id))
+                        .copied()
+                        .unwrap_or(0);
+                    let cost = costs.get(item_id).copied().ok_or_else(|| {
+                        format!("research {item_id} is absent from the certified technology cost")
+                    })?;
+                    accepted_seconds = accepted_seconds.min(cost.saturating_sub(progress) / rate);
+                }
+            }
+            ResearchSinkKind::Infinite {
+                research_id,
+                level,
+                level_cost,
+            } => {
+                let progress = research
+                    .expected
+                    .infinite_progress
+                    .get(research_id)
+                    .ok_or_else(|| "certified infinite research progress disappeared".to_owned())?;
+                if progress.level != *level {
+                    return Err("certified infinite research level diverged".to_owned());
+                }
+                let rate = research
+                    .consumed_units_per_second
+                    .get("universe_matrix")
+                    .copied()
+                    .filter(|rate| *rate > 0)
+                    .ok_or_else(|| "infinite research has no positive matrix rate".to_owned())?;
+                accepted_seconds =
+                    accepted_seconds.min(level_cost.saturating_sub(progress.progress) / rate);
+            }
+        }
+    }
     let mut inventory_baselines = MaterialTotals::new();
     for (item_id, rate) in &certificate.units_per_second {
         if *rate <= 0 {
@@ -2797,6 +3442,7 @@ fn apply_ordinary_flow_certificate(
     let mut application = OrdinaryFlowApplication {
         certified_items: certified_ids.len(),
         recipe_certified: !certificate.recipe_ids.is_empty(),
+        research_certified: research.is_some(),
         capacity_limited: accepted_seconds < scheduled_seconds,
         ..OrdinaryFlowApplication::default()
     };
@@ -2865,6 +3511,68 @@ fn apply_ordinary_flow_certificate(
             .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
         produced.insert(item_id, Value::Number(Number::from(next_produced)));
     }
+    if let Some(research) = research {
+        match research.kind {
+            ResearchSinkKind::Finite { technology_id, .. } => {
+                let progress = base
+                    .get_mut("research")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|research| research.get_mut("progressByTech"))
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| "finite research progress directory disappeared".to_owned())?
+                    .entry(technology_id.clone())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                    .as_object_mut()
+                    .ok_or_else(|| "finite research progress entry is malformed".to_owned())?;
+                for (item_id, rate) in &research.consumed_units_per_second {
+                    let current = research
+                        .expected
+                        .finite_progress
+                        .get(&technology_id)
+                        .and_then(|progress| progress.get(item_id))
+                        .copied()
+                        .unwrap_or(0);
+                    let invested = rate
+                        .checked_mul(accepted_seconds)
+                        .ok_or_else(|| format!("research {item_id} schedule overflowed"))?;
+                    let next = current
+                        .checked_add(invested)
+                        .ok_or_else(|| format!("research {item_id} progress overflowed"))?;
+                    progress.insert(
+                        item_id.clone(),
+                        Value::Number(Number::from(i64::try_from(next).map_err(|_| {
+                            format!("research {item_id} progress cannot be encoded")
+                        })?)),
+                    );
+                }
+            }
+            ResearchSinkKind::Infinite { research_id, .. } => {
+                let rate = research.consumed_units_per_second["universe_matrix"];
+                let current = research.expected.infinite_progress[&research_id].progress;
+                let next = current
+                    .checked_add(
+                        rate.checked_mul(accepted_seconds)
+                            .ok_or_else(|| "infinite research schedule overflowed".to_owned())?,
+                    )
+                    .ok_or_else(|| "infinite research progress overflowed".to_owned())?;
+                base.get_mut("endgame")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|endgame| endgame.get_mut("infiniteResearch"))
+                    .and_then(Value::as_object_mut)
+                    .and_then(|progress| progress.get_mut(&research_id))
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| "infinite research progress entry disappeared".to_owned())?
+                    .insert("progress".to_owned(), Value::String(next.to_string()));
+            }
+        }
+        let next = capture_research_proof_snapshot(state)
+            .map_err(|error| format!("committed research state is invalid: {error:#}"))?;
+        certificate
+            .research
+            .as_mut()
+            .expect("cloned research certificate remains installed")
+            .expected = next;
+    }
     Ok(application)
 }
 
@@ -2911,8 +3619,10 @@ fn prove_internal_exact_settlement_candidate(
 /// inputs are funded by those sources and whose shared intermediates balance
 /// exactly. Its tail writes only non-negative net ownership into bounded
 /// quantum inventory while crediting gross `totalProduced` from the runtime
-/// produced/consumed ledger. Finite resources, stored/fuel energy, research,
-/// construction and every terminal subsystem remain frozen.
+/// produced/consumed ledger. A separately proven matrix-lab sink may advance
+/// only the currently selected finite technology or infinite-research level,
+/// clipped before completion, rewards or switching. Finite resources,
+/// stored/fuel energy, construction and every other terminal remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -3111,8 +3821,8 @@ fn advance_bounded(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
-        if let Some(runtime) = macro_runtime.as_ref() {
-            if let Some(certificate) = runtime.certificate.as_ref() {
+        if let Some(runtime) = macro_runtime.as_mut() {
+            if let Some(certificate) = runtime.certificate.as_mut() {
                 let ordinary_application = match apply_ordinary_flow_certificate(
                     &mut candidate,
                     certificate,
@@ -3134,14 +3844,30 @@ fn advance_bounded(
                     } else {
                         "source-only ordinary"
                     };
+                    let research_scope = if ordinary_application.research_certified {
+                        " the certified current-level research sink advanced without crossing its reward/switch boundary;"
+                    } else {
+                        " research remained frozen;"
+                    };
                     format!(
-                        "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption; research, construction and terminal tails remained frozen{}",
+                        "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{research_scope} construction and other terminal tails remained frozen{}",
                         ordinary_application.certified_items,
                         ordinary_application.deposited_units,
                         ordinary_application.produced_units,
                         ordinary_application.consumed_units,
                         if ordinary_application.capacity_limited {
                             " at the proven capacity horizon"
+                        } else {
+                            ""
+                        }
+                    )
+                } else if ordinary_application.research_certified
+                    && ordinary_application.produced_units > 0
+                {
+                    format!(
+                        "certified current-level research sink consumed closed ordinary production without net quantum deposit; it stopped before completion, rewards or switching{}",
+                        if ordinary_application.capacity_limited {
+                            " at the proven research/capacity horizon"
                         } else {
                             ""
                         }
@@ -3246,7 +3972,7 @@ mod tests {
     use crate::canonical::fnv1a_utf8;
     use crate::catalog::{
         BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
-        ItemDefinition, PlanetDefinition, RecipeDefinition, RuntimeCatalog,
+        ItemDefinition, PlanetDefinition, RecipeDefinition, RuntimeCatalog, TechnologyDefinition,
     };
     use crate::state::CoreCheckpointIdentity;
 
@@ -3264,15 +3990,23 @@ mod tests {
                     simulation_order: 0,
                     orbital_yields: HashMap::new(),
                 }],
-                items: ["iron_ore", "iron_ingot", "iron_gear", "magnet"]
-                    .into_iter()
-                    .map(|id| ItemDefinition {
-                        id: id.into(),
-                        name: id.into(),
-                        kind: "solid".into(),
-                        fuel_energy_mj: 0.0,
-                    })
-                    .collect(),
+                items: [
+                    "iron_ore",
+                    "iron_ingot",
+                    "iron_gear",
+                    "magnet",
+                    "electromagnetic_matrix",
+                    "energy_matrix",
+                    "universe_matrix",
+                ]
+                .into_iter()
+                .map(|id| ItemDefinition {
+                    id: id.into(),
+                    name: id.into(),
+                    kind: "solid".into(),
+                    fuel_energy_mj: 0.0,
+                })
+                .collect(),
                 buildings: vec![
                     BuildingDefinition {
                         id: "mining_machine".into(),
@@ -3349,6 +4083,21 @@ mod tests {
                         family: Some("smelter".into()),
                         accepts: None,
                     },
+                    BuildingDefinition {
+                        id: "matrix_lab".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
                 ],
                 recipes: vec![
                     RecipeDefinition {
@@ -3402,6 +4151,68 @@ mod tests {
                             amount: 1.0,
                         }],
                     },
+                    RecipeDefinition {
+                        id: "electromagnetic_matrix".into(),
+                        name: "electromagnetic_matrix".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "electromagnetic_matrix".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "energy_matrix".into(),
+                        name: "energy_matrix".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "energy_matrix".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "universe_matrix".into(),
+                        name: "universe_matrix".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "universe_matrix".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "matrix_research".into(),
+                        name: "matrix_research".into(),
+                        building_id: "matrix_lab".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                    },
                 ],
                 constructions: vec![
                     ConstructionDefinition {
@@ -3430,7 +4241,44 @@ mod tests {
                     speed: 6.0,
                 }],
                 proliferators: Vec::new(),
-                technologies: Vec::new(),
+                technologies: vec![
+                    TechnologyDefinition {
+                        id: "test_matrix_research".into(),
+                        name: "test_matrix_research".into(),
+                        costs: vec![ItemAmount {
+                            item_id: "electromagnetic_matrix".into(),
+                            amount: 1_000.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: vec!["test_building".into()],
+                    },
+                    TechnologyDefinition {
+                        id: "test_multi_matrix_research".into(),
+                        name: "test_multi_matrix_research".into(),
+                        costs: vec![
+                            ItemAmount {
+                                item_id: "electromagnetic_matrix".into(),
+                                amount: 40.0,
+                            },
+                            ItemAmount {
+                                item_id: "energy_matrix".into(),
+                                amount: 1_000.0,
+                            },
+                        ],
+                        prerequisites: Vec::new(),
+                        construction_rewards: Vec::new(),
+                    },
+                    TechnologyDefinition {
+                        id: "universe_matrix".into(),
+                        name: "universe_matrix".into(),
+                        costs: vec![ItemAmount {
+                            item_id: "universe_matrix".into(),
+                            amount: 1.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: Vec::new(),
+                    },
+                ],
             },
             "pure-idle-test",
         )
@@ -3930,6 +4778,127 @@ mod tests {
                 "lastFlow": 0,
                 "totalTransferred": 0
             })],
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResearchFixtureMode {
+        Finite,
+        MultiInput,
+        Infinite,
+    }
+
+    fn productive_research_macro_fixture(multiplier: f64, mode: ResearchFixtureMode) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["campaign"]["rewardedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        base["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000",
+            "electromagnetic_matrix": "10000000000",
+            "energy_matrix": "10000000000",
+            "universe_matrix": "10000000000"
+        });
+        let (technology_id, matrix_recipe_id, matrix_inputs, miner_count) = match mode {
+            ResearchFixtureMode::Finite => {
+                base["research"]["selectedTechId"] = json!("test_matrix_research");
+                (
+                    Some("test_matrix_research"),
+                    "electromagnetic_matrix",
+                    json!({ "electromagnetic_matrix": 10_000 }),
+                    2,
+                )
+            }
+            ResearchFixtureMode::MultiInput => {
+                base["research"]["selectedTechId"] = json!("test_multi_matrix_research");
+                base["research"]["progressByTech"] = json!({
+                    "test_multi_matrix_research": { "electromagnetic_matrix": 40 }
+                });
+                (
+                    Some("test_multi_matrix_research"),
+                    "energy_matrix",
+                    json!({ "electromagnetic_matrix": 0, "energy_matrix": 10_000 }),
+                    2,
+                )
+            }
+            ResearchFixtureMode::Infinite => {
+                base["research"]["completedTechIds"] = json!(["universe_matrix"]);
+                base["endgame"]["activeInfiniteResearchId"] = json!("matrix_compression");
+                base["orbitalStation"] = json!({
+                    "status": "locked",
+                    "construction": { "stageRequirements": [] },
+                    "contractBoard": {
+                        "taskDay": 0,
+                        "lastConfirmedWallClockMs": 0,
+                        "offers": [],
+                        "accepted": [],
+                        "history": [],
+                        "settledIds": []
+                    },
+                    "totals": { "exportedByItem": {} }
+                });
+                (
+                    None,
+                    "universe_matrix",
+                    json!({ "universe_matrix": 10_000 }),
+                    2,
+                )
+            }
+        };
+        let _ = technology_id;
+        fixture_state_from_parts(
+            base,
+            vec![
+                json!({
+                    "id": "wind", "kind": "power", "planetId": "home",
+                    "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                    "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                    "progress": 0, "routingCursor": 0, "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "controller", "kind": "machine", "planetId": "home",
+                    "powerGridId": "grid-a", "buildingId": "time_warp_device",
+                    "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                    "progress": 0, "routingCursor": 0, "utilization": 1,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "vein", "kind": "vein", "planetId": "home",
+                    "powerGridId": "grid-a", "resourceId": "iron_ore",
+                    "extractorBuildingId": "mining_machine", "minerCount": miner_count,
+                    "inputs": {}, "outputs": { "iron_ore": 0 },
+                    "resourceCapacity": 1_000_000, "resourceRemaining": 1_000_000,
+                    "resourceDepletionRemainder": 0, "progress": 0,
+                    "routingCursor": 0, "utilization": 0, "productionRate": 0
+                }),
+                json!({
+                    "id": "matrix-producer", "kind": "machine", "planetId": "home",
+                    "powerGridId": "grid-a", "buildingId": "arc_smelter",
+                    "recipeId": matrix_recipe_id, "machineCount": 1, "minerCount": 0,
+                    "inputs": { "iron_ore": 10_000 },
+                    "outputs": { matrix_recipe_id: 0 }, "progress": 0,
+                    "routingCursor": 0, "utilization": 0, "productionRate": 0
+                }),
+                json!({
+                    "id": "research-lab", "kind": "machine", "planetId": "home",
+                    "powerGridId": "grid-a", "buildingId": "matrix_lab",
+                    "recipeId": "matrix_research", "machineCount": 1, "minerCount": 0,
+                    "inputs": matrix_inputs, "outputs": {}, "progress": 0,
+                    "routingCursor": 0, "utilization": 0, "productionRate": 0,
+                    "sprayCoaterInstalled": false
+                }),
+            ],
         )
     }
 
@@ -4840,6 +5809,285 @@ mod tests {
     }
 
     #[test]
+    fn macro_v10_certifies_finite_research_sink_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial =
+                productive_research_macro_fixture(multiplier, ResearchFixtureMode::Finite);
+            let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / multiplier);
+            let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+            let certificate = build_ordinary_flow_certificate(&initial, &snapshots).unwrap();
+            let research = certificate.research.as_ref().expect("finite research sink");
+            assert_eq!(
+                research.consumed_units_per_second,
+                BTreeMap::from([("electromagnetic_matrix".to_owned(), 1)])
+            );
+
+            let mut prefix = initial.clone();
+            let revision = prefix.revision;
+            let result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+
+            let mut long = initial.clone();
+            let result = advance_macro_v10(&mut long, &request).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            let long_state = long.materialize().unwrap();
+            assert_eq!(
+                proof_counter(
+                    long_state["research"]["progressByTech"]["test_matrix_research"]
+                        .get("electromagnetic_matrix"),
+                    "finite research progress",
+                )
+                .unwrap(),
+                600
+            );
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            assert_eq!(long_state["research"]["completedTechIds"], json!([]));
+            assert_eq!(
+                long_state["research"]["selectedTechId"],
+                json!("test_matrix_research")
+            );
+            assert_eq!(long_state["construction"], prefix_state["construction"]);
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_research_sink_stops_at_finite_or_infinite_boundary_without_rewards() {
+        for (mode, expected_path, expected_value) in [
+            (ResearchFixtureMode::Finite, "finite", 1_000_i128),
+            (
+                ResearchFixtureMode::Infinite,
+                "infinite",
+                i128::try_from(crate::infinite_research::cost("matrix_compression", 0).unwrap())
+                    .unwrap(),
+            ),
+        ] {
+            let initial = productive_research_macro_fixture(15.0, mode);
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(revision, 5_000.0, 5_000.0 / 15.0),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "mode={expected_path} reason={:?}",
+                result.reason
+            );
+            let state = long.materialize().unwrap();
+            let progress = if expected_path == "finite" {
+                proof_counter(
+                    state["research"]["progressByTech"]["test_matrix_research"]
+                        .get("electromagnetic_matrix"),
+                    "finite boundary",
+                )
+                .unwrap()
+            } else {
+                proof_counter(
+                    state["endgame"]["infiniteResearch"]["matrix_compression"].get("progress"),
+                    "infinite boundary",
+                )
+                .unwrap()
+            };
+            assert_eq!(progress, expected_value, "mode={expected_path}");
+            if expected_path == "finite" {
+                assert_eq!(state["research"]["completedTechIds"], json!([]));
+                assert_eq!(state["construction"]["test_building"], json!(0));
+                assert_eq!(
+                    state["research"]["selectedTechId"],
+                    json!("test_matrix_research")
+                );
+            } else {
+                assert_eq!(
+                    state["endgame"]["infiniteResearch"]["matrix_compression"]["level"],
+                    json!(0)
+                );
+                assert_eq!(state["endgame"]["galacticScore"], json!(0));
+                assert_eq!(
+                    state["endgame"]["activeInfiniteResearchId"],
+                    json!("matrix_compression")
+                );
+            }
+
+            let mut segmented = initial;
+            for seconds in [30.0, 1000.0, 1000.0, 1000.0, 1000.0, 970.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "mode={expected_path} reason={:?}",
+                    result.reason
+                );
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "mode={expected_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_certifies_remaining_item_of_multi_input_research() {
+        let initial = productive_research_macro_fixture(15.0, ResearchFixtureMode::MultiInput);
+        let snapshots = exact_three_window_probe(
+            &initial,
+            &pure_idle_macro_request(initial.revision, 600.0, 40.0),
+        )
+        .unwrap();
+        let certificate = build_ordinary_flow_certificate(&initial, &snapshots).unwrap();
+        let research = certificate.research.unwrap();
+        assert_eq!(
+            research.consumed_units_per_second,
+            BTreeMap::from([("energy_matrix".to_owned(), 1)])
+        );
+
+        let mut long = initial;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let state = long.materialize().unwrap();
+        assert_eq!(
+            state["research"]["progressByTech"]["test_multi_matrix_research"]["electromagnetic_matrix"],
+            json!(40)
+        );
+        assert_eq!(
+            state["research"]["progressByTech"]["test_multi_matrix_research"]["energy_matrix"],
+            json!(600)
+        );
+    }
+
+    #[test]
+    fn macro_v10_research_sink_rejects_prefill_spray_and_unstable_progress() {
+        let initial = productive_research_macro_fixture(15.0, ResearchFixtureMode::Finite);
+        let request = pure_idle_macro_request(initial.revision, 600.0, 40.0);
+
+        let mut prefilled = initial.clone();
+        let mut producer = prefilled.parse_entity(3).unwrap();
+        producer["machineCount"] = json!(0);
+        prefilled.replace_entity_raw(3, serde_json::to_string(&producer).unwrap().into());
+        prefilled.rebuild_indexes().unwrap();
+        let snapshots = exact_three_window_probe(&prefilled, &request).unwrap();
+        let rejection = build_ordinary_flow_certificate(&prefilled, &snapshots).unwrap_err();
+        assert!(
+            rejection.contains("depleted owned inventory")
+                || rejection.contains("no certified infinite source or active producer"),
+            "{rejection}"
+        );
+
+        let mut sprayed = initial.clone();
+        let mut lab = sprayed.parse_entity(4).unwrap();
+        lab["sprayCoaterInstalled"] = json!(true);
+        sprayed.replace_entity_raw(4, serde_json::to_string(&lab).unwrap().into());
+        sprayed.rebuild_indexes().unwrap();
+        let snapshots = exact_three_window_probe(&sprayed, &request).unwrap();
+        let rejection = build_ordinary_flow_certificate(&sprayed, &snapshots).unwrap_err();
+        assert!(
+            rejection.contains("spray") || rejection.contains("made no stable"),
+            "{rejection}"
+        );
+
+        let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+        let mut unstable = snapshots.clone();
+        *unstable[2]
+            .research
+            .finite_progress
+            .get_mut("test_matrix_research")
+            .unwrap()
+            .get_mut("electromagnetic_matrix")
+            .unwrap() += 1;
+        let rejection = build_ordinary_flow_certificate(&initial, &unstable).unwrap_err();
+        assert!(rejection.contains("unstable"), "{rejection}");
+    }
+
+    #[test]
+    fn macro_v10_research_certificate_failure_is_atomic_and_checkpoint_reload_is_deterministic() {
+        let mut calibrated = productive_research_macro_fixture(15.0, ResearchFixtureMode::Finite);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut corrupted = calibrated.clone();
+        corrupted
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .and_then(|certificate| certificate.research.as_mut())
+            .expect("research certificate")
+            .expected
+            .galactic_score += 1;
+        let before_hash = corrupted.summary().unwrap().canonical_sha256;
+        let before_revision = corrupted.revision;
+        let before_credit = corrupted.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut corrupted,
+            &pure_idle_macro_request(before_revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(corrupted.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(corrupted.revision, before_revision);
+        assert_eq!(
+            corrupted.pure_idle_macro_exact_seconds_used(),
+            before_credit
+        );
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut restored =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert!(restored.pure_idle_macro_runtime.is_none());
+        for state in [&mut calibrated, &mut restored] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 570.0, 38.0)).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            restored.summary().unwrap().canonical_sha256,
+            calibrated.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
     fn macro_v10_certifies_one_closed_recipe_at_supported_multipliers() {
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
             let initial = productive_closed_recipe_macro_fixture(multiplier);
@@ -5172,7 +6420,7 @@ mod tests {
         let cycle_hash = cycle.summary().unwrap().canonical_sha256;
         let cycle_sources = exclusive_infinite_vein_sources(&cycle).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0]).unwrap_err();
+            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None).unwrap_err();
         assert!(rejection.contains("dependency cycle"), "{rejection}");
         assert_eq!(cycle.summary().unwrap().canonical_sha256, cycle_hash);
 
@@ -5192,7 +6440,8 @@ mod tests {
         let alternate_hash = alternate.summary().unwrap().canonical_sha256;
         let alternate_sources = exclusive_infinite_vein_sources(&alternate).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0]).unwrap_err();
+            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0], None)
+                .unwrap_err();
         assert!(
             rejection.contains("alternate active producers"),
             "{rejection}"
@@ -5210,7 +6459,7 @@ mod tests {
         let hidden_hash = hidden_producer.summary().unwrap().canonical_sha256;
         let hidden_sources = exclusive_infinite_vein_sources(&hidden_producer).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&hidden_producer, &hidden_sources, &flows[0])
+            build_closed_recipe_certificate(&hidden_producer, &hidden_sources, &flows[0], None)
                 .unwrap_err();
         assert!(
             rejection.contains("alternate unmodelled producer"),
@@ -5228,7 +6477,8 @@ mod tests {
         sprayed.rebuild_indexes().unwrap();
         let sprayed_sources = exclusive_infinite_vein_sources(&sprayed).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0]).unwrap_err();
+            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0], None)
+                .unwrap_err();
         assert!(rejection.contains("proliferator"), "{rejection}");
     }
 
@@ -5548,7 +6798,8 @@ mod tests {
             assert!(
                 rejection.contains("not a source-only closed flow")
                     || rejection.contains("did not produce")
-                    || rejection.contains("ordinary recipe tail is excluded while"),
+                    || rejection.contains("ordinary recipe tail is excluded while")
+                    || rejection.contains("current research state is not a calibration endpoint"),
                 "domain={label} rejection={rejection}"
             );
         };
@@ -5785,6 +7036,7 @@ mod tests {
                 produced_units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
                 consumed_units_per_second: MaterialTotals::new(),
                 recipe_ids: Vec::new(),
+                research: None,
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

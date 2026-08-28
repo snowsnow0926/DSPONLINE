@@ -206,8 +206,10 @@ describe("factory thin-view App consumption", () => {
     expect(minimap).toMatch(/data-projection-source=\{projectionSource/);
     expect(minimap).toMatch(/projectCanvasMiniMap\(nodes, currentViewport, canvasWidth, canvasHeight, worldBounds\)/);
 
-    // The native viewport is display-only. ReactFlow, belt hit-testing and all
-    // topology mutations still consume the original Web-derived models.
+    // A main-owned active authority may now supply the complete bounded
+    // ReactFlow/Canvas display atom. Mutations remain stable-ID GameState
+    // commands and Web/PWA keeps the original fallback.
+    expect(app).toMatch(/selectFactoryCanvasRows\(\s*nativeAuthoritativeFactoryCanvasFrame/);
     expect(app).toMatch(/<ReactFlow\s+[\s\S]*?nodes=\{renderedFlowNodes\}[\s\S]*?edges=\{renderedFlowEdges\}/);
     expect(app).toMatch(/<CanvasBeltLayer[\s\S]*?belts=\{canvasTopology\.belts\}/);
     expect(app).toMatch(/onNodesChange=\{handleNodesChange\}/);

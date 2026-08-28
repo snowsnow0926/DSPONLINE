@@ -10,6 +10,8 @@ import type {
 export interface NativeFactoryThinViewFrame {
   readonly revision: number;
   readonly planetId: string;
+  /** Main-owned authority session for fail-closed renderer binding; null for JS shadow reads. */
+  readonly authoritySessionId?: string | null;
   readonly factory: DesktopNativeCoreFactoryReadModelResult;
   readonly viewport: DesktopNativeCoreViewportProjectionV2Result;
 }
@@ -33,6 +35,7 @@ export interface NativeFactoryThinViewSource {
 
 export interface NativeFactoryThinViewRequest {
   readonly expectedRevision: number;
+  readonly authoritySessionId?: string | null;
   readonly factory: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId" | "expectedRevision">;
   readonly viewport: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId" | "expectedRevision">;
 }
@@ -53,6 +56,11 @@ const MAX_COMPLETE_VIEWPORT_PAGES = 64;
 
 function isValidRevision(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidAuthoritySessionId(value: string | null | undefined): boolean {
+  return value === undefined || value === null ||
+    (value.length >= 1 && value.length <= 128 && /^[A-Za-z0-9_.:-]+$/.test(value));
 }
 
 function frameMatchesRequest(
@@ -278,7 +286,7 @@ export class NativeFactoryThinViewStore {
     source: NativeFactoryThinViewSource,
     request: NativeFactoryThinViewRequest,
   ): Promise<NativeFactoryThinViewRefreshResult> {
-    if (!isValidRevision(request.expectedRevision)) {
+    if (!isValidRevision(request.expectedRevision) || !isValidAuthoritySessionId(request.authoritySessionId)) {
       this.requestToken += 1;
       this.publish(Object.freeze({
         status: "unavailable",
@@ -314,6 +322,7 @@ export class NativeFactoryThinViewStore {
     const frame: NativeFactoryThinViewFrame = Object.freeze({
       revision: request.expectedRevision,
       planetId: request.viewport.planetId,
+      authoritySessionId: request.authoritySessionId ?? null,
       factory,
       viewport,
     });

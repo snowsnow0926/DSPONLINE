@@ -383,6 +383,12 @@ import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure 
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
+import {
+  collectCanvasDragMembers,
+  collectCanvasSelectionBeltIds,
+  selectFactoryCanvasRows,
+  selectNativeAuthoritativeFactoryCanvasFrame,
+} from "./game/nativeFactoryCanvasFrame";
 import { FACTORY_READ_MODEL_LIMITS, type FactoryViewportBoundsReadModel } from "./game/factoryReadModels";
 import {
   factoryViewportProvesWholePlanet,
@@ -1986,6 +1992,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       viewportZoom,
     ],
   );
+  const nativeAuthoritativeFactoryCanvasFrame = useMemo(
+    () => selectNativeAuthoritativeFactoryCanvasFrame(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      planetId: game.activePlanetId,
+      bounds: nativeFactoryViewportBounds,
+      requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+      requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+      requestTruncated:
+        factoryThinViewAllSelectedEntityIds.length > 32 ||
+        factoryThinViewAllSelectedBeltIds.length > 64,
+    }),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      game.activePlanetId,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativeFactoryViewportBounds,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
   const webFactoryRunStatusReadModel = useMemo(
     () => createWebFactoryRunStatusReadModel(game),
     [game.activePlanetId, game.paused],
@@ -2074,7 +2106,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],
   );
   const webFactoryViewportReadModel = useMemo(
-    () => createWebFactoryViewportReadModel(game, {
+    () => nativeAuthoritativeFactoryCanvasFrame ? null : createWebFactoryViewportReadModel(game, {
       planetId: game.activePlanetId,
       bounds: nativeFactoryViewportBounds,
       pinnedEntityIds: factoryViewportPinnedEntityIds,
@@ -2086,12 +2118,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       game.activePlanetId,
       game.belts,
       game.entities,
+      nativeAuthoritativeFactoryCanvasFrame,
       nativeFactoryViewportBounds,
     ],
   );
   const factoryViewportReadModel = useMemo(
-    () => selectFactoryViewportReadModel(
-      webFactoryViewportReadModel,
+    () => nativeAuthoritativeFactoryCanvasFrame?.viewportReadModel ?? selectFactoryViewportReadModel(
+      webFactoryViewportReadModel!,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
       {
@@ -2113,6 +2146,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryThinViewSnapshot,
       nativeFactoryThinViewActive,
       nativeFactoryViewportBounds,
+      nativeAuthoritativeFactoryCanvasFrame,
       webFactoryViewportReadModel,
     ],
   );
@@ -2148,6 +2182,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     void nativeFactoryThinViewStore.refresh(projectionSource, {
       expectedRevision: factoryThinViewExpectedRevision,
+      authoritySessionId: nativeFactoryThinViewMode === "native-authoritative"
+        ? nativePlayerAuthorityActiveFrame?.sessionId ?? null
+        : null,
       factory: {
         selectedEntityIds: factoryThinViewSelectedEntityIds,
         selectedBeltIds: factoryThinViewSelectedBeltIds,
@@ -2177,6 +2214,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryThinViewStore,
     nativeFactoryThinViewActive,
     nativeFactoryThinViewMode,
+    nativePlayerAuthorityActiveFrame?.sessionId,
     nativeCoreProjectionSessionId,
     windowsNativeCoreAvailable,
     windowsNativeCoreBetaEnabled,
@@ -9483,18 +9521,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (canvasWorkspacePaused) stopCanvasPointerMotion();
   }, [canvasWorkspacePaused, game.activePlanetId, stopCanvasPointerMotion]);
 
-  const activePlanetEntities = useMemo(
-    () => measureRuntimeTransitionPhase("active-planet-entity-filter", () =>
-      canvasGame.entities.filter((entity) => entity.planetId === canvasGame.activePlanetId),
-    { entities: canvasGame.entities.length }),
-    [canvasGame.activePlanetId, canvasGame.entities],
-  );
-  const activePlanetBelts = useMemo(
-    () => measureRuntimeTransitionPhase("active-planet-belt-filter", () =>
-      canvasGame.belts.filter((belt) => belt.planetId === canvasGame.activePlanetId),
-    { belts: canvasGame.belts.length }),
-    [canvasGame.activePlanetId, canvasGame.belts],
-  );
+  const factoryCanvasRows = useMemo(() => selectFactoryCanvasRows(
+    nativeAuthoritativeFactoryCanvasFrame,
+    () => {
+      const entities = measureRuntimeTransitionPhase("active-planet-entity-filter", () =>
+        canvasGame.entities.filter((entity) => entity.planetId === canvasGame.activePlanetId),
+      { entities: canvasGame.entities.length });
+      const belts = measureRuntimeTransitionPhase("active-planet-belt-filter", () =>
+        canvasGame.belts.filter((belt) => belt.planetId === canvasGame.activePlanetId),
+      { belts: canvasGame.belts.length });
+      return {
+        entities,
+        belts,
+        entityById: canvasRenderSnapshot.planetId === canvasGame.activePlanetId
+          ? canvasRenderSnapshot.entityById
+          : new Map(entities.map((entity) => [entity.id, entity] as const)),
+      };
+    },
+  ), [
+    canvasGame.activePlanetId,
+    canvasGame.belts,
+    canvasGame.entities,
+    canvasRenderSnapshot.entityById,
+    canvasRenderSnapshot.planetId,
+    nativeAuthoritativeFactoryCanvasFrame,
+  ]);
+  const activePlanetEntities = factoryCanvasRows.entities;
+  const activePlanetBelts = factoryCanvasRows.belts;
   const automaticDenseCanvasMode = shouldAutoOptimizeDenseCanvas(activePlanetEntityCount, activePlanetBelts.length);
   const denseNodeLodActive = nodeLodFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.nodeLod);
   const denseViewportCullingActive = viewportCullingFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.viewportCulling);
@@ -9587,12 +9640,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       alerts: alertCount,
     })
     : [], [alertCount, game, operationsOpen, operationsTab, visibleFactoryAlertProjection]);
-  const activeEntityById = useMemo(
-    () => canvasRenderSnapshot.planetId === canvasGame.activePlanetId
-      ? canvasRenderSnapshot.entityById
-      : new Map(activePlanetEntities.map((entity) => [entity.id, entity])),
-    [activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.entityById, canvasRenderSnapshot.planetId],
-  );
+  const activeEntityById = factoryCanvasRows.entityById;
 
   const canvasTopology = useMemo(() => {
     return measureRuntimeTransitionPhase("canvas-topology-reconcile", () => {
@@ -9601,12 +9649,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         canvasGame.activePlanetId,
         activePlanetEntities,
         activePlanetBelts,
-        topologyCacheFeatureActive ? canvasRenderSnapshot.topologyRevision : undefined,
+        topologyCacheFeatureActive && factoryCanvasRows.source === "web-game-state"
+          ? canvasRenderSnapshot.topologyRevision
+          : undefined,
       );
       canvasTopologyRef.current = next;
       return next;
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
-  }, [activePlanetBelts, activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, topologyCacheFeatureActive]);
+  }, [activePlanetBelts, activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, factoryCanvasRows.source, topologyCacheFeatureActive]);
   const factoryMiniMapUsesNativeTopology = nativeFactoryThinViewActive &&
     factoryViewportProvesWholePlanet(factoryViewportReadModel);
   const factoryMiniMapEntities = factoryMiniMapUsesNativeTopology
@@ -9614,7 +9664,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : canvasTopology.entities;
   const factoryMiniMapWorldBounds = factoryMiniMapUsesNativeTopology
     ? factoryViewportReadModel.worldBounds
-    : webFactoryViewportReadModel.worldBounds;
+    : nativeAuthoritativeFactoryCanvasFrame?.worldBounds ?? webFactoryViewportReadModel!.worldBounds;
+  const factoryMiniMapProjectionIsNative = factoryMiniMapUsesNativeTopology ||
+    factoryCanvasRows.source === "native-authoritative";
 
   const beltDiagnosticIndex = useMemo(() => ({ entityById: activeEntityById }), [activeEntityById]);
 
@@ -9715,7 +9767,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // collapsed to 96x32.
     width: CANVAS_STACK_PROXY_WIDTH,
     height: CANVAS_STACK_PROXY_HEIGHT,
-  })), [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision]);
+  })), [activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, factoryCanvasRows.revision]);
   canvasPositionNodesRef.current = canvasPositionNodes;
   const canvasVisibleNodeCount = useMemo(() => countVisibleCanvasNodes(
     canvasPositionNodes,
@@ -9914,6 +9966,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
     canvasGame.activePlanetId,
+    factoryCanvasRows.source,
+    factoryCanvasRows.revision ?? "web",
     canvasRenderSnapshot.runtimeRevision,
     canvasRenderSnapshot.topologyRevision,
     canvasPresentationDetailStage,
@@ -10357,7 +10411,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           canvasElement.dataset.changedNodeCount = String(changedNodeCount);
           canvasElement.dataset.stackMembershipTokenCompareCount = String(stackMembershipTokenCompareCount);
           canvasElement.dataset.stackMemberIdReferenceCount = String(stackMemberIdReferenceCount);
-          canvasElement.dataset.projectionRuntimeRevision = String(canvasRenderSnapshot.runtimeRevision);
+          canvasElement.dataset.projectionRuntimeRevision = String(
+            factoryCanvasRows.revision ?? canvasRenderSnapshot.runtimeRevision,
+          );
         }
         if (performanceMonitor.isActive()) {
           performanceMonitor.recordCanvas({
@@ -10377,7 +10433,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -11313,11 +11369,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // drag-start can snapshot every unlocked member and preserve offsets.
     if (selectionModeRef.current && ids.length === 1 && selectedEdges.length === 0 &&
       selectedEntityIdsRef.current.length > 1 && selectedEntityIdsRef.current.includes(ids[0])) return;
-    const nodeIds = new Set(ids);
-    const beltIds = new Set(selectedEdges.map((edge) => edge.id));
-    for (const belt of gameRef.current.belts) {
-      if (belt.planetId === gameRef.current.activePlanetId && nodeIds.has(belt.source) && nodeIds.has(belt.target)) beltIds.add(belt.id);
-    }
+    const beltIds = new Set(collectCanvasSelectionBeltIds(
+      activePlanetBelts,
+      ids,
+      selectedEdges.map((edge) => edge.id),
+    ));
     selectedEntityIdsRef.current = ids;
     selectedBeltIdsRef.current = [...beltIds];
     selectedBeltIdRef.current = beltIds.size === 1 ? [...beltIds][0] : null;
@@ -11326,7 +11382,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds((current) => current.length === beltIds.size && current.every((id) => beltIds.has(id)) ? current : nextBeltIds);
     if (ids.length > 0 || beltIds.size > 1) setSelectedBeltId(null);
     else if (beltIds.size === 1) setSelectedBeltId([...beltIds][0]);
-  }, [mobileCanvasMode, nextMobileShell]);
+  }, [activePlanetBelts, mobileCanvasMode, nextMobileShell]);
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;
@@ -11337,7 +11393,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!placement && batchConnectionModeRef.current) return;
     if (nextMobileShell && mobileCanvasMode === "layout" && !placement) return;
     if (placement) {
-      const entity = gameRef.current.entities.find((candidate) => candidate.id === node.id);
+      const entity = activeEntityById.get(node.id);
       const constructionId = entity?.kind === "vein" && entity.resourceId
         ? getExtractorBuildingId(entity.resourceId)
         : entity?.buildingId;
@@ -11365,7 +11421,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     const mobileSelecting = nextMobileShell && mobileCanvasMode === "select";
-    const clickedEntity = gameRef.current.entities.find((entity) => entity.id === node.id);
+    const clickedEntity = activeEntityById.get(node.id);
     // Network focus is a temporary inspection lens. Selecting a building is a
     // new primary action, so leave that lens instead of retaining a dimming
     // context around the newly expanded card.
@@ -11390,7 +11446,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       } else if (nextMobileShell) mobileNavigation.openSheet("inspector", "peek");
       else setMobilePanel("inspector");
     }
-  }, [blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, selectionMode]);
+  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, selectionMode]);
 
   const onNodeDoubleClick: NodeMouseHandler<FactoryFlowNode> = useCallback((_event, node) => {
     if (placement || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
@@ -11480,10 +11536,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const restoreCanvasEntityPositions = useCallback(() => {
     setNodes((current) => current.map((node) => {
-      const entity = gameRef.current.entities.find((candidate) => candidate.id === node.id);
+      const entity = activeEntityById.get(node.id);
       return entity ? { ...node, position: { ...entity.position }, dragging: false } : node;
     }));
-  }, [setNodes]);
+  }, [activeEntityById, setNodes]);
 
   const cancelPendingTouchAction = useCallback(() => {
     stopCanvasPointerMotion();
@@ -12334,16 +12390,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const handleFactoryNodeDragStart = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node) => {
     if (blockCanvasTouchRef.current) return;
     const selectedIds = selectedEntityIdsRef.current.includes(node.id) ? selectedEntityIdsRef.current : [node.id];
-    const selectedIdSet = new Set(selectedIds);
-    const members = gameRef.current.entities.filter((entity) => entity.planetId === gameRef.current.activePlanetId &&
-      selectedIdSet.has(entity.id) && !entity.interactionLocked).map((entity) => ({ id: entity.id, position: { ...entity.position } }));
+    const members = collectCanvasDragMembers(activeEntityById, selectedIds);
     const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
     multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members };
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
-  }, [alignmentSpatialIndex]);
+  }, [activeEntityById, alignmentSpatialIndex]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
     nodeDragActiveRef.current = false;
     setDraggedEntityIds([]);
@@ -12628,6 +12682,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-connection-viewport-logical-count={connectionViewportLogicalCount}
       data-connection-viewport-token={connectionViewportToken}
       data-active-planet-node-count={activePlanetEntities.length}
+      data-factory-canvas-source={factoryCanvasRows.source}
+      data-factory-canvas-revision={factoryCanvasRows.revision ?? "web"}
+      data-factory-canvas-cross-boundary-belts={nativeAuthoritativeFactoryCanvasFrame?.omittedCrossBoundaryBeltCount ?? 0}
       data-canvas-extreme-visuals={extremeVisualsActive ? "true" : "false"}
       data-canvas-node-lod={denseNodeLodActive ? "true" : "false"}
       data-canvas-viewport-culling={denseViewportCullingActive ? "true" : "false"}
@@ -13209,8 +13266,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               worldBounds={factoryViewportReadModel.planetTotals.entities > 0
                 ? factoryMiniMapWorldBounds
                 : undefined}
-              projectionSource={factoryMiniMapUsesNativeTopology ? "native-core" : "web-game-state"}
-              projectionRevision={factoryMiniMapUsesNativeTopology ? factoryViewportReadModel.revision : null}
+              projectionSource={factoryMiniMapProjectionIsNative ? "native-core" : "web-game-state"}
+              projectionRevision={factoryMiniMapProjectionIsNative ? factoryViewportReadModel.revision : null}
               planetEntityCount={factoryViewportReadModel.planetTotals.entities}
               planetBeltCount={factoryViewportReadModel.planetTotals.belts}
               viewport={minimapViewport}

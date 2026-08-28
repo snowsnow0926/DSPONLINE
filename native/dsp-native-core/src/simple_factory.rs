@@ -3390,6 +3390,9 @@ fn maximum_stable_time_warp_multiplier(
     Some(requested_multiplier.min(supported))
 }
 
+// Keep each mutable runtime dependency explicit at the candidate boundary;
+// bundling them would obscure which wake cache is committed only on success.
+#[allow(clippy::too_many_arguments)]
 fn simulate_step(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -3397,6 +3400,9 @@ fn simulate_step(
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    interstellar_route_activity: &mut std::sync::Arc<
+        crate::interstellar_logistics::InterstellarRouteActivity,
+    >,
     seconds: f64,
 ) -> anyhow::Result<()> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
@@ -4417,7 +4423,14 @@ fn simulate_step(
     let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
     crate::local_logistics::dispatch(state, base, entities, &station_powers, local_step_runtime)?;
     profile_mark!("local-dispatch");
-    crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
+    let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
+    crate::interstellar_logistics::dispatch(
+        state,
+        base,
+        entities,
+        &station_powers,
+        interstellar_step_runtime,
+    )?;
     profile_mark!("interstellar-dispatch");
     crate::local_logistics::advance_routes(
         state,
@@ -4428,7 +4441,13 @@ fn simulate_step(
         local_step_runtime,
     )?;
     profile_mark!("local-route-advance");
-    crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
+    crate::interstellar_logistics::advance_routes(
+        state,
+        entities,
+        seconds,
+        &station_powers,
+        interstellar_step_runtime,
+    )?;
     profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
     crate::local_logistics::update_congestion(state, entities, local_step_runtime)?;
@@ -4599,6 +4618,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    pub interstellar_route_activity:
+        std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
 }
 
 pub(crate) fn prepare_advance(
@@ -4663,6 +4684,14 @@ pub(crate) fn prepare_advance(
             &state.factory_topology.station_indices,
         )?)
     };
+    let mut interstellar_route_activity =
+        if let Some(activity) = state.prepared_interstellar_route_activity() {
+            activity
+        } else {
+            std::sync::Arc::new(crate::interstellar_logistics::prepare_route_activity(
+                &entities,
+            ))
+        };
     let mut belt_runtime = crate::belts::BeltRuntime::from_state(
         state,
         &entities,
@@ -4759,6 +4788,7 @@ pub(crate) fn prepare_advance(
             &mut belt_runtime,
             &belt_routes,
             &mut local_peer_directory,
+            &mut interstellar_route_activity,
             step,
         )
         .context("advance native simple factory step")?;
@@ -4845,6 +4875,7 @@ pub(crate) fn prepare_advance(
         belt_routes,
         belt_activity,
         local_peer_directory,
+        interstellar_route_activity,
     })
 }
 

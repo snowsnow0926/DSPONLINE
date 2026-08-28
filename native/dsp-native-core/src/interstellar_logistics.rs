@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -15,6 +16,8 @@ const CARGO_PER_VESSEL: f64 = 100.0;
 const BASE_TRIP_SECONDS: f64 = 30.0;
 const WARPER_CAPACITY_PER_BUILDING: f64 = 50.0;
 const DEFAULT_WARPER_TARGET: f64 = WARPER_CAPACITY_PER_BUILDING;
+const REMOTE_ROUTE_DENSE_NUMERATOR: usize = 3;
+const REMOTE_ROUTE_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -60,6 +63,78 @@ struct Ledger {
 #[derive(Debug, Default)]
 struct LocalSupplyDirectory {
     by_planet_item: HashMap<String, HashMap<String, Vec<usize>>>,
+}
+
+/// Runtime-only wake set for demand stations that own at least one remote
+/// route. The static station order is shared across candidate revisions while
+/// only the compact activity vector is copied on write. Nothing in this
+/// structure is persisted or included in canonical state hashes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InterstellarRouteActivity {
+    station_indices: Arc<[usize]>,
+    station_ranks: Arc<HashMap<usize, usize>>,
+    active_demand_indices: Vec<usize>,
+}
+
+impl InterstellarRouteActivity {
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        (self.station_indices.len() * std::mem::size_of::<usize>()
+            + self.station_ranks.capacity() * std::mem::size_of::<(usize, usize)>()
+            + self.active_demand_indices.capacity() * std::mem::size_of::<usize>()) as u64
+    }
+
+    fn has_remote_routes(&self) -> bool {
+        !self.active_demand_indices.is_empty()
+    }
+
+    fn route_scan_indices(&self) -> (Vec<usize>, bool) {
+        let active = self.active_demand_indices.len();
+        let total = self.station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(REMOTE_ROUTE_DENSE_DENOMINATOR)
+                >= total.saturating_mul(REMOTE_ROUTE_DENSE_NUMERATOR);
+        if dense {
+            (self.station_indices.to_vec(), true)
+        } else {
+            (self.active_demand_indices.clone(), false)
+        }
+    }
+
+    fn update_remote_demand(&mut self, station_index: usize, active: bool) {
+        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+            return;
+        };
+        match (
+            self.active_demand_indices
+                .binary_search_by_key(&rank, |candidate| {
+                    self.station_ranks
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                }),
+            active,
+        ) {
+            (Ok(position), false) => {
+                self.active_demand_indices.remove(position);
+            }
+            (Err(position), true) => {
+                self.active_demand_indices.insert(position, station_index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    fn replace_scanned_activity(&mut self, updates: &[(usize, bool)]) {
+        // Sparse scans cover the complete previous wake set; dense scans cover
+        // the complete static station order. Replaying the booleans in that
+        // same order therefore installs an exact next wake set atomically.
+        self.active_demand_indices.clear();
+        self.active_demand_indices.extend(
+            updates
+                .iter()
+                .filter_map(|(station_index, active)| active.then_some(*station_index)),
+        );
+    }
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -187,6 +262,59 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
             })
         })
         .collect()
+}
+
+fn route_activity_station_indices(entities: &[Value]) -> Vec<usize> {
+    // Keep every station that can ever participate in a remote route in this
+    // immutable order, including an ILS currently in elevator mode. A runtime
+    // transition back to legacy can then dispatch and wake a route without a
+    // five-second O(all) directory rebuild. Record/topology commands still
+    // rebuild the cache through CoreState::rebuild_indexes.
+    entities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entity)| {
+            entity.as_object().and_then(|object| {
+                (string_at(object, "kind") == Some("station")
+                    && matches!(
+                        string_at(object, "buildingId"),
+                        Some("interstellar_logistics_station" | "orbital_collector")
+                    ))
+                .then_some(index)
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteActivity {
+    let station_indices = route_activity_station_indices(entities);
+    let active_demand_indices = station_indices
+        .iter()
+        .copied()
+        .filter(|&station_index| {
+            entities[station_index]
+                .as_object()
+                .and_then(|station| station.get("stationRoutes"))
+                .and_then(Value::as_array)
+                .is_some_and(|routes| {
+                    routes
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .any(|route| string_at(route, "scope") == Some("remote"))
+                })
+        })
+        .collect::<Vec<_>>();
+    let station_ranks = station_indices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(rank, station_index)| (station_index, rank))
+        .collect::<HashMap<_, _>>();
+    InterstellarRouteActivity {
+        station_indices: Arc::from(station_indices),
+        station_ranks: Arc::new(station_ranks),
+        active_demand_indices,
+    }
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -1441,6 +1569,7 @@ pub(crate) fn dispatch(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
+    route_activity: &mut InterstellarRouteActivity,
 ) -> anyhow::Result<()> {
     let station_indices = &state.factory_topology.station_indices;
     if !station_indices.iter().copied().any(|index| {
@@ -1452,6 +1581,7 @@ pub(crate) fn dispatch(
     }
     let indexes = &state.entity_index;
     let mut ledger = build_ledger(entities, indexes);
+    let mut activated_remote_demands = Vec::new();
     for demand_index in station_indices.iter().copied() {
         let demand_snapshot = entities[demand_index]
             .as_object()
@@ -1691,6 +1821,7 @@ pub(crate) fn dispatch(
                         .and_then(Value::as_array_mut)
                         .ok_or_else(|| anyhow!("native interstellar demand routes are missing"))?
                         .push(route);
+                    activated_remote_demands.push(demand_index);
                     *ledger.busy.entry(owner_index).or_default() += dispatchable;
                     *ledger
                         .reserved
@@ -1753,6 +1884,9 @@ pub(crate) fn dispatch(
             }
         }
     }
+    for demand_index in activated_remote_demands {
+        route_activity.update_remote_demand(demand_index, true);
+    }
     Ok(())
 }
 
@@ -1768,26 +1902,15 @@ fn add_max_field(
     set_number(entity, key, finite_number(entity.get(key)).max(value))
 }
 
-pub(crate) fn advance_routes(
+fn advance_routes_for_indices<I: EntityIndexLookup + ?Sized>(
     entities: &mut [Value],
     seconds: f64,
     powers: &HashMap<usize, f64>,
-) -> anyhow::Result<()> {
-    if !entities.iter().filter_map(Value::as_object).any(|entity| {
-        entity
-            .get("stationRoutes")
-            .and_then(Value::as_array)
-            .is_some_and(|routes| {
-                routes
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .any(|route| string_at(route, "scope") == Some("remote"))
-            })
-    }) {
-        return Ok(());
-    }
-    let indexes = entity_index(entities);
-    for demand_index in station_indices(entities) {
+    indexes: &I,
+    route_scan_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
+    let mut activity_updates = Vec::with_capacity(route_scan_indices.len());
+    for &demand_index in route_scan_indices {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?
@@ -1802,6 +1925,7 @@ pub(crate) fn advance_routes(
                     .any(|route| string_at(route, "scope") == Some("remote"))
             });
         if !has_remote_route {
+            activity_updates.push((demand_index, false));
             continue;
         }
         let routes = entities[demand_index]
@@ -1900,6 +2024,10 @@ pub(crate) fn advance_routes(
         let demand = entities[demand_index]
             .as_object_mut()
             .expect("station object");
+        let has_remote_route = remaining
+            .iter()
+            .filter_map(Value::as_object)
+            .any(|route| string_at(route, "scope") == Some("remote"));
         let max_progress = remaining
             .iter()
             .filter_map(Value::as_object)
@@ -1914,8 +2042,42 @@ pub(crate) fn advance_routes(
             };
         set_number(demand, "productionRate", rate)?;
         set_number(demand, "stationProgress", max_progress)?;
+        activity_updates.push((demand_index, has_remote_route));
     }
+    Ok(activity_updates)
+}
+
+fn advance_routes_with_activity<I: EntityIndexLookup + ?Sized>(
+    entities: &mut [Value],
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    indexes: &I,
+    route_activity: &mut InterstellarRouteActivity,
+) -> anyhow::Result<()> {
+    if !route_activity.has_remote_routes() {
+        return Ok(());
+    }
+    let (route_scan_indices, _dense_fallback) = route_activity.route_scan_indices();
+    let activity_updates =
+        advance_routes_for_indices(entities, seconds, powers, indexes, &route_scan_indices)?;
+    route_activity.replace_scanned_activity(&activity_updates);
     Ok(())
+}
+
+pub(crate) fn advance_routes(
+    state: &CoreState,
+    entities: &mut [Value],
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    route_activity: &mut InterstellarRouteActivity,
+) -> anyhow::Result<()> {
+    advance_routes_with_activity(
+        entities,
+        seconds,
+        powers,
+        &state.entity_index,
+        route_activity,
+    )
 }
 
 fn build_local_supply_directory(
@@ -2132,7 +2294,13 @@ pub(crate) fn update_congestion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
+        RuntimeCatalog,
+    };
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     #[derive(Clone, Copy)]
@@ -2872,5 +3040,657 @@ mod tests {
         .unwrap();
         assert_eq!(planned.len(), station_indices.len());
         assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    fn route_activity_slot(remote_mode: &str) -> Value {
+        json!({
+            "itemId": if remote_mode == "storage" { Value::Null } else { Value::from("iron_ore") },
+            "localMode": "storage",
+            "remoteMode": remote_mode,
+            "minimumLoad": 0.1,
+            "minStock": 0,
+            "maxStock": 1000000000,
+            "priority": 1,
+            "routePolicy": "direct",
+            "warperBudget": 2,
+            "mod:slot/opaque": { "signedZero": -0.0, "text": "保持" }
+        })
+    }
+
+    fn route_activity_station(index: usize) -> Value {
+        json!({
+            "id": format!("remote-station/{index:05}/Ω"),
+            "kind": "station",
+            "buildingId": "interstellar_logistics_station",
+            "planetId": format!("remote-planet/{:03}", index % 7),
+            "stationTier": 1,
+            "stationOperationMode": "legacy",
+            "machineCount": 1,
+            "stationSlots": [
+                route_activity_slot(if index == 0 { "supply" } else { "demand" }),
+                route_activity_slot("storage"),
+                route_activity_slot("storage"),
+                route_activity_slot("storage"),
+                route_activity_slot("storage")
+            ],
+            "stationRoutes": [],
+            "stationVessels": 10,
+            "stationWarpEnabled": true,
+            "stationWarpers": 100,
+            "stationDispatchCursor": 0,
+            "stationLastSupplyPeerBySlot": {},
+            "stationProgress": 0.0,
+            "stationCongestion": 0.0,
+            "stationTrips": 0.0,
+            "stationLastTransfer": 0.0,
+            "utilization": 0.0,
+            "productionRate": 0.0,
+            "inputs": { "iron_ore": 0.0 },
+            "outputs": { "iron_ore": if index == 0 { 1000000000.0 } else { 0.0 } },
+            "mod:station/opaque": { "index": index, "signedZero": -0.0, "text": "原样" }
+        })
+    }
+
+    fn route_activity_remote_route(
+        id: usize,
+        demand_index: usize,
+        progress: f64,
+        duration: f64,
+        requires_warp: bool,
+        waypoint_indices: &[usize],
+    ) -> Value {
+        json!({
+            "id": format!("remote-route/{id:05}"),
+            "slotIndex": 0,
+            "peerId": "remote-station/00000/Ω",
+            "itemId": "iron_ore",
+            "scope": "remote",
+            "cargo": 11.0,
+            "vehicleCount": 1.0,
+            "progress": progress,
+            "duration": duration,
+            "requiresWarp": requires_warp,
+            "waypointStationIds": waypoint_indices
+                .iter()
+                .map(|index| Value::from(format!("remote-station/{index:05}/Ω")))
+                .collect::<Vec<_>>(),
+            "distanceLy": if requires_warp { 9.5 } else { 0.0 },
+            "warpersPerVessel": if requires_warp { waypoint_indices.len() + 1 } else { 0 },
+            "vehicleStationId": format!("remote-station/{demand_index:05}/Ω"),
+            "mod:route/opaque": { "signedZero": -0.0, "text": "路线原样" }
+        })
+    }
+
+    fn route_activity_matrix(
+        count: usize,
+        active: &[(usize, bool, Vec<usize>)],
+        progress: f64,
+        duration: f64,
+    ) -> Vec<Value> {
+        let mut entities = (0..count).map(route_activity_station).collect::<Vec<_>>();
+        for (demand_index, requires_warp, waypoints) in active {
+            entities[*demand_index]["stationRoutes"] = Value::Array(vec![
+                json!({
+                    "id": format!("local-preserved/{demand_index:05}"),
+                    "scope": "local",
+                    "progress": 0.25,
+                    "mod:local/opaque": true
+                }),
+                route_activity_remote_route(
+                    *demand_index,
+                    *demand_index,
+                    progress,
+                    duration,
+                    *requires_warp,
+                    waypoints,
+                ),
+            ]);
+        }
+        entities
+    }
+
+    fn route_activity_powers(count: usize, factor: f64) -> HashMap<usize, f64> {
+        (0..count).map(|index| (index, factor)).collect()
+    }
+
+    fn dispatch_fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn dispatch_fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "remote-route-active-test".to_owned(),
+                planets: vec![
+                    PlanetDefinition {
+                        id: "source_planet".to_owned(),
+                        name: "source".to_owned(),
+                        system_id: "source_system".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 1,
+                        simulation_order: 0,
+                        orbital_yields: HashMap::new(),
+                    },
+                    PlanetDefinition {
+                        id: "demand_planet".to_owned(),
+                        name: "demand".to_owned(),
+                        system_id: "demand_system".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 1,
+                        simulation_order: 1,
+                        orbital_yields: HashMap::new(),
+                    },
+                ],
+                items: vec![
+                    ItemDefinition {
+                        id: "iron_ore".to_owned(),
+                        name: "iron".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                    ItemDefinition {
+                        id: "space_warper".to_owned(),
+                        name: "warper".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                ],
+                buildings: vec![BuildingDefinition {
+                    id: "interstellar_logistics_station".to_owned(),
+                    kind: "station".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 1_000_000.0,
+                    output_capacity: 1_000_000.0,
+                    power_demand_kw: 1.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                }],
+                recipes: Vec::new(),
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "remote-route-active-test",
+        )
+        .unwrap()
+    }
+
+    fn dispatch_fixture_base() -> Value {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "paused": false,
+            "activePlanetId": "source_planet",
+            "nextId": 100,
+            "settings": { "difficulty": "standard", "logisticsBufferLimit": 1000000 },
+            "research": { "completedTechIds": ["space_warp"] },
+            "handcraftQueue": [],
+            "exploration": {
+                "unlockedSystemIds": ["source_system", "demand_system"],
+                "colonizedPlanetIds": ["source_planet", "demand_planet"],
+                "surveyProgressBySystem": { "source_system": 1.0, "demand_system": 1.0 },
+                "missions": []
+            },
+            "galaxy": {
+                "profiles": {
+                    "source_planet": { "travelTimeMultiplier": 1.0 },
+                    "demand_planet": { "travelTimeMultiplier": 1.0 }
+                },
+                "systemProfiles": {
+                    "source_system": { "positionX": 0.0, "positionY": 0.0 },
+                    "demand_system": { "positionX": 4.0, "positionY": 0.0 }
+                }
+            },
+            "endgame": { "infiniteResearch": { "galactic_logistics": { "level": 0 } } },
+            "tray": {},
+            "planetTrays": { "source_planet": {}, "demand_planet": {} },
+            "totalProduced": {},
+            "mod:base/opaque": { "signedZero": -0.0, "text": "保持原样" }
+        })
+    }
+
+    fn dispatch_fixture_entities() -> Vec<Value> {
+        let mut supply = route_activity_station(0);
+        supply["planetId"] = Value::from("source_planet");
+        supply["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        supply["stationSlots"][0]["routePolicy"] = Value::from("direct");
+        supply["stationSlots"][0]["warperBudget"] = Value::from(1);
+        supply["outputs"]["iron_ore"] = Value::from(100.0);
+        supply["stationWarpers"] = Value::from(0.0);
+
+        let mut demand = route_activity_station(1);
+        demand["planetId"] = Value::from("demand_planet");
+        demand["stationSlots"][0]["remoteMode"] = Value::from("demand");
+        demand["stationSlots"][0]["routePolicy"] = Value::from("direct");
+        demand["stationSlots"][0]["warperBudget"] = Value::from(1);
+        demand["stationWarpers"] = Value::from(0.0);
+        vec![supply, demand]
+    }
+
+    fn dispatch_fixture_state(entities: &[Value]) -> CoreState {
+        let entity_count = entities.len();
+        let base = serde_json::to_vec(&dispatch_fixture_base()).unwrap();
+        let entities = serde_json::to_vec(entities).unwrap();
+        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base, 0, 1),
+            ("entities:00000000", "entities", &entities, 0, entity_count),
+            ("belts:00000000", "belts", &belts, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": dispatch_fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base.len() + entities.len() + belts.len(),
+            "entityCount": entity_count,
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entities,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belts,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "remote-route-active-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            dispatch_fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn run_route_activity_step(
+        source: &[Value],
+        seconds: f64,
+        force_full_scan: bool,
+        powers: &HashMap<usize, f64>,
+    ) -> (Vec<Value>, InterstellarRouteActivity, usize, bool) {
+        let indexes = indexes(source);
+        let mut entities = source.to_vec();
+        let mut activity = prepare_route_activity(&entities);
+        let (scheduled, dense) = activity.route_scan_indices();
+        let scan_count = if force_full_scan {
+            activity.station_indices.len()
+        } else {
+            scheduled.len()
+        };
+        if force_full_scan {
+            let full = activity.station_indices.to_vec();
+            let updates =
+                advance_routes_for_indices(&mut entities, seconds, powers, &indexes, &full)
+                    .unwrap();
+            activity.replace_scanned_activity(&updates);
+        } else {
+            advance_routes_with_activity(&mut entities, seconds, powers, &indexes, &mut activity)
+                .unwrap();
+        }
+        (entities, activity, scan_count, dense)
+    }
+
+    #[test]
+    fn warper_arrival_allows_dispatch_and_immediately_wakes_remote_route() {
+        let mut entities = dispatch_fixture_entities();
+        let state = dispatch_fixture_state(&entities);
+        let mut base = dispatch_fixture_base();
+        let powers = route_activity_powers(entities.len(), 1.0);
+        let mut activity = prepare_route_activity(&entities);
+
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut activity,
+        )
+        .unwrap();
+        assert!(!activity.has_remote_routes());
+        assert!(entities[1]["stationRoutes"].as_array().unwrap().is_empty());
+
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut activity,
+        )
+        .unwrap();
+        assert_eq!(activity.active_demand_indices, vec![1]);
+        assert_eq!(entities[1]["stationRoutes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            entities[1]["stationRoutes"][0]["scope"],
+            Value::from("remote")
+        );
+        assert_eq!(
+            entities[1]["stationRoutes"][0]["requiresWarp"],
+            Value::from(true)
+        );
+        assert_eq!(entities[1]["stationWarpers"], Value::from(0.0));
+    }
+
+    #[test]
+    fn failed_dispatch_does_not_install_partial_route_activity_or_mutate_source() {
+        let source = dispatch_fixture_entities();
+        let state = dispatch_fixture_state(&source);
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_activity = Arc::new(prepare_route_activity(&source));
+        let mut candidate_activity = Arc::clone(&source_activity);
+        let candidate_runtime = Arc::make_mut(&mut candidate_activity);
+        let mut candidate = source.clone();
+        candidate[1]["stationWarpers"] = Value::from(1.0);
+        candidate[1]["stationLastSupplyPeerBySlot"] = Value::Null;
+        let candidate_before = serde_json::to_vec(&candidate).unwrap();
+        let mut base = dispatch_fixture_base();
+        let powers = route_activity_powers(candidate.len(), 1.0);
+
+        let error = dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut candidate,
+            &powers,
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native interstellar fairness record is missing"
+        );
+        assert!(source_activity.active_demand_indices.is_empty());
+        assert!(candidate_activity.active_demand_indices.is_empty());
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+    }
+
+    #[test]
+    fn successful_candidate_installs_route_activity_without_mutating_source_clone() {
+        let mut entities = dispatch_fixture_entities();
+        let dispatch_state = dispatch_fixture_state(&entities);
+        let mut base = dispatch_fixture_base();
+        let powers = route_activity_powers(entities.len(), 1.0);
+        let mut activity = prepare_route_activity(&entities);
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        dispatch(
+            &dispatch_state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut activity,
+        )
+        .unwrap();
+
+        let mut state = dispatch_fixture_state(&entities);
+        state.install_prepared_interstellar_route_activity(Arc::new(prepare_route_activity(
+            &entities,
+        )));
+        let source = state.clone();
+        let source_hash = source.canonical_sha256().unwrap();
+        let source_activity = source.prepared_interstellar_route_activity().unwrap();
+        assert_eq!(source_activity.active_demand_indices, vec![1]);
+        let mut candidate_activity = state.prepared_interstellar_route_activity().unwrap();
+        let candidate_runtime = Arc::make_mut(&mut candidate_activity);
+        let mut candidate_entities = entities.clone();
+        advance_routes(
+            &state,
+            &mut candidate_entities,
+            1.0,
+            &powers,
+            candidate_runtime,
+        )
+        .unwrap();
+        state.install_prepared_interstellar_route_activity(candidate_activity);
+        let committed_activity = state.prepared_interstellar_route_activity().unwrap();
+        assert_eq!(committed_activity.active_demand_indices, vec![1]);
+        assert!(!Arc::ptr_eq(&source_activity, &committed_activity));
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(source.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(source_activity.active_demand_indices, vec![1]);
+    }
+
+    #[test]
+    fn route_activity_keeps_runtime_elevator_rank_and_topology_rebuild_drops_removed_station() {
+        let mut entities = dispatch_fixture_entities();
+        let initial = prepare_route_activity(&entities);
+        assert_eq!(initial.station_indices.as_ref(), &[0, 1]);
+        entities[1]["stationOperationMode"] = Value::from("elevator");
+        entities[1]["stationTier"] = Value::from(2);
+        let runtime_transition = prepare_route_activity(&entities);
+        assert_eq!(runtime_transition.station_indices.as_ref(), &[0, 1]);
+        entities[1]["buildingId"] = Value::from("planetary_logistics_station");
+        let rebuilt = prepare_route_activity(&entities);
+        assert_eq!(rebuilt.station_indices.as_ref(), &[0]);
+        assert!(rebuilt.active_demand_indices.is_empty());
+    }
+
+    #[test]
+    fn sparse_remote_route_advance_matches_full_oracle_for_direct_warp_and_relay_at_1_5_60() {
+        let count = 256;
+        let active = vec![
+            (7, false, vec![]),
+            (113, true, vec![]),
+            (251, true, vec![89]),
+        ];
+        let source = route_activity_matrix(count, &active, 0.125, 120.0);
+        let source_bytes = serde_json::to_vec(&source).unwrap();
+        let powers = route_activity_powers(count, 1.0);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let sparse = run_route_activity_step(&source, seconds, false, &powers);
+            let oracle = run_route_activity_step(&source, seconds, true, &powers);
+            assert_eq!(sparse.2, active.len());
+            assert!(!sparse.3);
+            assert_eq!(
+                serde_json::to_vec(&sparse.0).unwrap(),
+                serde_json::to_vec(&oracle.0).unwrap(),
+                "remote active replay diverged from full scan at {seconds}s"
+            );
+            assert_eq!(
+                sparse.1.active_demand_indices,
+                oracle.1.active_demand_indices
+            );
+            assert_eq!(
+                sparse.1.active_demand_indices,
+                active.iter().map(|entry| entry.0).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn dense_remote_route_activity_falls_back_at_exactly_three_quarters() {
+        let count = 80;
+        let active = (1..=60)
+            .map(|index| (index, index % 2 == 0, Vec::new()))
+            .collect::<Vec<_>>();
+        let source = route_activity_matrix(count, &active, 0.2, 90.0);
+        let activity = prepare_route_activity(&source);
+        let (indices, dense) = activity.route_scan_indices();
+        assert!(dense);
+        assert_eq!(indices, activity.station_indices.as_ref());
+        for seconds in [1.0, 5.0, 60.0] {
+            let scheduled = run_route_activity_step(
+                &source,
+                seconds,
+                false,
+                &route_activity_powers(count, 1.0),
+            );
+            let oracle =
+                run_route_activity_step(&source, seconds, true, &route_activity_powers(count, 1.0));
+            assert!(scheduled.3);
+            assert_eq!(scheduled.2, count);
+            assert_eq!(
+                serde_json::to_vec(&scheduled.0).unwrap(),
+                serde_json::to_vec(&oracle.0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn relay_power_loss_keeps_route_awake_until_powered_completion_and_conserves_cargo() {
+        let mut entities = route_activity_matrix(32, &[(7, true, vec![19])], 0.0, 8.0);
+        entities[0]["outputs"]["iron_ore"] = Value::from(11.0);
+        let indexes = indexes(&entities);
+        let mut activity = prepare_route_activity(&entities);
+        let source_total = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        let mut powers = route_activity_powers(entities.len(), 1.0);
+        powers.insert(19, 0.0);
+
+        advance_routes_with_activity(&mut entities, 60.0, &powers, &indexes, &mut activity)
+            .unwrap();
+        assert_eq!(activity.active_demand_indices, vec![7]);
+        assert_eq!(
+            entities[7]["stationRoutes"][1]["progress"],
+            Value::from(0.0)
+        );
+
+        powers.insert(19, 1.0);
+        advance_routes_with_activity(&mut entities, 8.0, &powers, &indexes, &mut activity).unwrap();
+        assert!(activity.active_demand_indices.is_empty());
+        assert_eq!(entities[7]["stationRoutes"].as_array().unwrap().len(), 1);
+        let completed_total = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        assert_eq!(completed_total, source_total);
+        assert_eq!(entities[0]["outputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(11.0));
+    }
+
+    #[test]
+    fn failed_remote_candidate_preserves_source_activity_static_cache_and_json() {
+        let source =
+            route_activity_matrix(128, &[(7, true, vec![]), (83, false, vec![])], 0.2, 30.0);
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_activity = Arc::new(prepare_route_activity(&source));
+        let source_active = source_activity.active_demand_indices.clone();
+        let source_static = Arc::clone(&source_activity.station_indices);
+        let mut candidate_activity = Arc::clone(&source_activity);
+        let candidate_runtime = Arc::make_mut(&mut candidate_activity);
+        assert!(Arc::ptr_eq(
+            &source_static,
+            &candidate_runtime.station_indices
+        ));
+        let mut candidate = source.clone();
+        candidate[7]["stationRoutes"][0] = Value::Null;
+        let candidate_before = serde_json::to_vec(&candidate).unwrap();
+        let powers = route_activity_powers(candidate.len(), 1.0);
+
+        let error = advance_routes_with_activity(
+            &mut candidate,
+            1.0,
+            &powers,
+            &indexes(&source),
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native interstellar route is invalid");
+        assert_eq!(source_activity.active_demand_indices, source_active);
+        assert_eq!(candidate_activity.active_demand_indices, source_active);
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+    }
+
+    fn remote_route_pipeline_bytes(worker_count: usize) -> Vec<u8> {
+        let count = PARALLEL_MIN_ITEMS + 31;
+        let mut entities = route_activity_matrix(
+            count,
+            &[
+                (7, false, vec![]),
+                (2_057, true, vec![1_003]),
+                (count - 1, true, vec![]),
+            ],
+            0.1,
+            120.0,
+        );
+        let indexes = indexes(&entities);
+        let mut activity = prepare_route_activity(&entities);
+        advance_routes_with_activity(
+            &mut entities,
+            5.0,
+            &route_activity_powers(count, 1.0),
+            &indexes,
+            &mut activity,
+        )
+        .unwrap();
+        let ledger = build_ledger(&entities, &indexes);
+        let local_supply =
+            build_local_supply_directory(&entities, activity.station_indices.as_ref());
+        let updates = plan_congestion_updates_with(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            activity.station_indices.as_ref(),
+            &ledger,
+            &local_supply,
+            |_, _, _| Ok(false),
+        )
+        .unwrap();
+        apply_congestion_updates(&mut entities, updates).unwrap();
+        serde_json::to_vec(&json!({
+            "entities": entities,
+            "active": activity.active_demand_indices,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_route_pipeline_serialized_bytes_are_exact_for_1_2_4_8_workers() {
+        let expected = remote_route_pipeline_bytes(1);
+        for worker_count in [2, 4, 8] {
+            assert_eq!(remote_route_pipeline_bytes(worker_count), expected);
+        }
     }
 }

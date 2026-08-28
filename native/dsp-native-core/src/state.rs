@@ -2355,6 +2355,10 @@ pub struct CoreState {
     /// route graph. It is installed only after a successful revision commit.
     prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
+    /// Runtime-only deterministic wake set for in-flight interstellar routes.
+    /// It is installed only after a successful candidate revision commits.
+    prepared_interstellar_route_activity:
+        Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>>,
     /// Persistence dirtiness is deliberately independent from the simulation
     /// wake queues. A successful checkpoint clears only this structure; belt
     /// or logistics scheduling state is never acknowledged by the saver.
@@ -3002,6 +3006,7 @@ impl CoreState {
             prepared_belt_routes: None,
             prepared_belt_activity: None,
             prepared_local_peer_directory: None,
+            prepared_interstellar_route_activity: None,
             save_dirty,
             checkpoint_chunks,
             pending_checkpoint_chunks: SyncCell::new(None),
@@ -3027,6 +3032,9 @@ impl CoreState {
                     &parsed_entities,
                     &state.factory_topology.station_indices,
                 )?));
+            state.prepared_interstellar_route_activity = Some(Arc::new(
+                crate::interstellar_logistics::prepare_route_activity(&parsed_entities),
+            ));
         }
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
@@ -3401,6 +3409,19 @@ impl CoreState {
         self.prepared_local_peer_directory = Some(directory);
     }
 
+    pub(crate) fn prepared_interstellar_route_activity(
+        &self,
+    ) -> Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>> {
+        self.prepared_interstellar_route_activity.clone()
+    }
+
+    pub(crate) fn install_prepared_interstellar_route_activity(
+        &mut self,
+        activity: Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    ) {
+        self.prepared_interstellar_route_activity = Some(activity);
+    }
+
     pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
         let entities = self.parse_entities_parallel()?;
         self.rebuild_indexes_from_parsed_entities(&entities)?;
@@ -3663,6 +3684,7 @@ impl CoreState {
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
         Ok(())
     }
 
@@ -5053,6 +5075,11 @@ impl CoreState {
                 .prepared_local_peer_directory
                 .as_ref()
                 .map(|directory| directory.estimated_bytes())
+                .unwrap_or(0)
+            + self
+                .prepared_interstellar_route_activity
+                .as_ref()
+                .map(|activity| activity.estimated_bytes())
                 .unwrap_or(0)
             + self.factory_topology.estimated_bytes();
         let belt_activity_runtime_bytes = self

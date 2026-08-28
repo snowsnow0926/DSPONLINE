@@ -475,6 +475,7 @@ fn stored_energy(entity: &Map<String, Value>, building: &BuildingDefinition) -> 
         .min(energy_capacity(entity, building))
 }
 
+#[cfg(test)]
 fn collect_ordered_planet_metric_probes_with_runtime<T, R, F>(
     runtime: &DeterministicRuntime,
     values: &[T],
@@ -486,6 +487,21 @@ where
     F: Fn(usize, &T) -> anyhow::Result<R> + Send + Sync,
 {
     runtime.indexed_try_map(values, probe)
+}
+
+fn collect_planet_metric_probes_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Vec<PlanetMetricProbe>> {
+    // The range variant writes directly into one ordered result buffer and
+    // retains only the lowest failing index. Unlike `indexed_try_map`, this
+    // avoids holding both `Vec<Result<_>>` and `Vec<_>` for every factory row.
+    runtime.indexed_try_map_range(
+        0..entities.len(),
+        |entity_index| probe_planet_metric(state, entity_index, &entities[entity_index]),
+        |_| PlanetMetricProbe::default(),
+    )
 }
 
 fn probe_planet_metric(
@@ -537,11 +553,7 @@ fn collect_planet_metrics_with_runtime(
     entities: &[Value],
     planet_count: usize,
 ) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
-    let probes = collect_ordered_planet_metric_probes_with_runtime(
-        runtime,
-        entities,
-        |entity_index, entity| probe_planet_metric(state, entity_index, entity),
-    )?;
+    let probes = collect_planet_metric_probes_with_runtime(runtime, state, entities)?;
     let mut total_items_before_global = vec![0.0; planet_count];
     let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_count];
     // Worker scheduling must never decide an IEEE-754 accumulation order.

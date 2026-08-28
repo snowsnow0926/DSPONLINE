@@ -89,11 +89,9 @@ try {
 }
 
 Start-Sleep -Milliseconds 750
-$ResidualProcessIds = if ($null -eq $StartedProcess) {
-  @()
-} else {
-  @(Get-ProcessTreeRows -RootProcessId $StartedProcess.Id | ForEach-Object { [int]$_.ProcessId })
-}
+$ResidualProcessIds = @(if ($null -ne $StartedProcess) {
+  Get-ProcessTreeRows -RootProcessId $StartedProcess.Id | ForEach-Object { [int]$_.ProcessId }
+})
 $IsolatedUserData = Join-Path $ResolvedSmokeRoot $UserDataDirectoryName
 $TemporaryProfileIsolation = Test-Path -LiteralPath $IsolatedUserData -PathType Container
 $Result = [ordered]@{

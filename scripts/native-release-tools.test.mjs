@@ -149,6 +149,7 @@ test("Windows performance package smoke uses an explicit bounded temporary profi
   assert.match(source, /DSP_PERFORMANCE_SMOKE_APP_DATA_ROOT/);
   assert.match(source, /dspidle-performance-smoke-/);
   assert.match(source, /Start-Process[^\n]+-WindowStyle Hidden[^\n]+-PassThru/);
+  assert.match(source, /\$ResidualProcessIds = @\(if \(\$null -ne \$StartedProcess\)/);
   assert.match(source, /Stop-Process -Id/);
   assert.match(source, /Remove-Item -LiteralPath \$FinalSmokeRoot -Recurse -Force/);
   assert.doesNotMatch(source, /taskkill|Stop-Process\s+-(?:Name|ProcessName)|Remove-Item\s+[^\n]*\*/i);

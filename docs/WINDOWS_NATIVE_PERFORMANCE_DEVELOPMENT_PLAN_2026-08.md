@@ -1485,3 +1485,63 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 | WIN-490 外壳替换 | No-Go | 薄 UI 后 Electron 固定成本占比没有达到有证据的启动条件 |
 
 本地可安全自动化闭合的高价值实现已经完成，但“Windows 三层计划全部完成”为 false。剩余 24 小时、多硬件、签名、覆盖升级、真实薄 UI、mmap/LRU、生产云文件句柄和灰度都需要独立环境、发布授权或更大架构阶段，不能由本工作树冒充通过。
+
+## 23. a4a76e1 继续收口与最终本地候选（2026-08-28）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 最终运行时/打包提交：`a4a76e1310ad7e61448b3ac694ae072353af62bd`
+>
+> Build ID：`1.2.3+a4a76e1310ad`
+>
+> 状态：Windows 本地性能开发候选；未签名、未部署、未连接生产，真实玩家存档只读。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 不变。
+
+本节取代第 22 节中已被后续代码关闭或部分关闭的三项旧描述：磁盘水位不再是“未实现”，统计工作区已经消费 `statistics-v1` 窄读模型，私有 24 小时统计冷层也已经可跨重启持久化。它们仍不足以把 WIN-410、WIN-440 或 WIN-460 整体标记完成。
+
+### 23.1 本轮增量实现
+
+1. **保存写入双层磁盘门禁**：JavaScript 以精确 UTF-8 字节数预检固定保存根；Rust 在 chunk、WAL、manifest、superblock、统计 sidecar、实时 lease 和 v47 `.part` 的实际写入边界再次检查写入量加 64 MiB。API 明确不受支持时只返回 unchecked；空间不足、路径、I/O、回执和整数异常均失败关闭。v47 采用两遍流式编码取得精确长度，不引入完整正文副本。
+2. **空闲保存合并与线路稀疏循环**：新 checkpoint/WAL 会取消并重排尚未开始的 15 秒 compaction；稀疏线路 reservation 只遍历已选 route 行，达到 75% 自动稳定退化全扫描。已经开始的 Host compaction 不可中断，route selection 仍扫描全部 group。
+3. **统计窄读和持久 sidecar**：统计面板打开只发出一次 revision-verified `sync-statistics`，不索取完整 checkpoint，并仅在新 `historyRecordedAt` 边界刷新。Rust 的 1 秒/1 分/10 分/1 小时冷层绑定 checkpoint 与 SHA-256 持久化；恢复时校验规范、连续、无重叠/缺口且不超过 24 小时。
+4. **本机线程确定性**：新增独立进程 `1/2/4/8` 实际 worker 矩阵，对完整状态、领域和守恒摘要 fail-closed；真实 v47 档 4/4 哈希一致。该结果不是跨硬件加速声明。
+5. **原生守恒型纯挂机前缀**：私有 `pure-idle-macro-v10` 执行 `3 × 10` 秒 exact，并持久化 session credit 与最终 `SettlementProof`；无法证明的物料尾段冻结，只推进时间。JavaScript e503 仍是玩家路径并继续提供闭合、有收益的宏观尾段，Rust 尚未完整移植该 productive 证书，因此三个原生权威能力标志保持 false。
+6. **可审计包冒烟**：beta/nightly 性能包使用显式临时 profile 和精确 PID 树；12 秒冒烟确认主进程响应、Rust Host 可见、profile 隔离和清理后残留 0。空残留数组固定序列化为 `[]`。
+
+### 23.2 真实档性能与守恒证据
+
+只读夹具 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json` 为 44,167,989 字节、45,904 个实体、91,955 条线路；测试前后 bytes、mtime 与 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 不变。
+
+- 玩家 JavaScript 纯挂机 15×、600 秒墙钟：30 秒校准耗时 34,070 ms，宏观尾段 1,339 ms；白矩阵最终增加 335,450,292,523，合法火箭增加 7,007,145,985，建筑制造完成 13,076,629，8 个恒星系账本闭合，最终守恒门禁及序列化/重载通过。
+- 原生 full stress 三轮中位：打开 4,179.85 ms；打开后 Private Bytes 增量约 160.7 MiB；打开峰值约 1,029.4 MiB；一秒 exact 1,234.03 ms，对应同轮 JavaScript 1,745.76 ms，约 1.44× 吞吐；checkpoint 378.99 ms、变化字节 2,255,510；三轮 exact 和三秒 burst 哈希分别一致。
+- 真实历史档的通用 aggregate validator 仍因缺少 construction receipt 报告不可验证，所以不能宣称“通用 aggregate 守恒通过”；能证明的是原生完整状态严格等于 JavaScript oracle、确定性哈希一致，以及专用 settlement/conservation 摘要一致。
+- 线程矩阵在实际 1/2/4/8 worker 下 4/4 得到相同 revision、规范状态哈希、领域哈希和守恒摘要；仅作为本机确定性门禁，不包装成固定性能倍数。
+
+### 23.3 新鲜自动化与可测试包
+
+- TypeScript 通过；Vitest 201 文件通过/14 条件跳过、1,702 项通过/29 跳过/0 失败；server 384/2 加 station 4/4；Ops 56/6；Windows native/desktop 195/1/0；Rust workspace 266/266（core 174、Host 92），fmt 与 clippy `-D warnings` 通过。
+- Chromium 首轮 430/27/1 暴露统计入口重复窄读；修复后定向 1/1、完整复跑 431/27/0。durable E2E 7/7。首轮失败不删除。
+- production build 为 1,982 modules；startup 总 gzip 179,912 B、JavaScript 86,745 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,532 B、forbidden 0；125 个运行时许可证，根/server production audit 均为 0 漏洞。
+- `win-unpacked` 为 75 文件、413,584,327 B；EXE 为 225,485,824 B，SHA-256 `2242a0b3e28881e4577ebaf7ea56a7949b9e501dddc0eae5be7ad59e921730ea`；包内 Host SHA-256 `e4ad68c30442bf17cd570dc44a06b0c52718a7504fc4f07e7169edcaac202ddc`；Authenticode `NotSigned`。
+- unsigned ZIP 为 157,915,912 B，SHA-256 `a64b8d98ef8f8f5615bd2574049954796572902a641d97510626a666d7098aed`；75/75 条目逐文件一致。没有 installer、更新清单、下载页上传或生产发布。
+- 新包使用独立的 `windows-performance-plan-completion-a4a76e1310ad-*` candidate、package、逐文件 SHA、SHA256SUMS 和 final gate 元数据，明确列出外部门禁；不得复用 `be80af0` 的旧 final gate 给本包背书。
+
+完整实现、原始数字、制品路径、SHA 和未关闭门禁见 [a4a76e1 继续收口报告](./releases/1.2.3-windows-native-plan-completion-a4a76e1-development-report-2026-08-28.md)。
+
+### 23.4 工作包状态更新
+
+| 工作包 | a4a76e1 本地结算 | 仍未关闭 |
+| --- | --- | --- |
+| WIN-400 原生权威/薄 UI | 部分完成，继续 No-Go | renderer/Worker 仍持完整 GameState；Rust productive pure-idle/offline/time-warp 未覆盖；三个 authority flag 均为 false |
+| WIN-410 活动脏块保存 | 双层磁盘门禁、ACK 安全与空闲合并调度已落地，整体部分完成 | base 域仍先全序列化/哈希；已启动 compaction 不可取消；真实磁盘/Defender/升级/24 小时未测 |
+| WIN-420 事件驱动线路 | 稀疏热循环继续收敛，整体部分完成 | selection 仍扫描全部 route group；无完整反向依赖和真正 O(active) 队列 |
+| WIN-430 确定性原生多核 | 本机 1/2/4/8 矩阵通过，整体部分完成 | 非全领域权威并行；无跨 CPU/Windows/调度/24 小时矩阵 |
+| WIN-440 有界增量投影 | 统计消费者已接入，整体部分完成 | 工厂 viewport UI 未切换；renderer 仍持完整状态；MessagePort 不是共享内存零拷贝 |
+| WIN-450 GPU/Canvas | 继承既有候选，部分完成 | 无新 WebGL/WebGPU 权威路径及 GPU 丢失/RDP/多硬件门禁 |
+| WIN-460 原生统计/诊断 | 私有分层持久 sidecar 与窄读完成，整体部分完成 | 采样仍扫描记录；不是全领域事件桶 |
+| WIN-470 流式 v47/云准备 | current-v47 json/gzip 导入和流式导出完成，整体部分完成 | 旧版适配、云文件句柄上传、取消/背压和生产往返未闭合 |
+| WIN-480 紧凑布局/分配 | Arc/SoA、变化写回和容量收紧完成，整体部分完成 | 无 mmap/LRU、完整 allocator 预算和 24 小时全进程内存斜率 |
+| WIN-490 外壳替换 | No-Go | Rust 唯一权威和真正薄 UI 尚未完成，也没有证据证明 Electron 固定开销超过 15% |
+
+本工作树已完成当前单机可安全自动化闭合的高价值实现；“Windows 三层计划全部完成”仍为 false。剩余项目需要新的架构阶段、真实多硬件长跑、签名/云凭据或生产发布授权，不能以本地短测替代。

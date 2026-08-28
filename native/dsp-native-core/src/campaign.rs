@@ -431,6 +431,17 @@ struct CampaignEntityMetricProbe {
 }
 
 impl CampaignFactoryMetrics {
+    fn apply_entity_probe(&mut self, probe: CampaignEntityMetricProbe) {
+        self.miner_count += probe.miner_count;
+        self.spray_coater_installed |= probe.spray_coater_installed;
+        let Some(building_id) = probe.building_id else {
+            return;
+        };
+        let building = self.buildings.entry(building_id).or_default();
+        building.count += probe.building_count;
+        building.station_trips += probe.station_trips;
+    }
+
     fn collect(state: &CoreState, entities: &[Value]) -> Self {
         Self::collect_with_runtime(deterministic_runtime(), &state.belts.tiers, entities)
     }
@@ -451,7 +462,7 @@ impl CampaignFactoryMetrics {
         // Entity inspection is read-only and independent. Parallel workers
         // produce an index-aligned probe vector; the serial replay below keeps
         // legacy entity-order floating-point accumulation and map mutation.
-        let probes = runtime.indexed_map(entities, |_, entity| {
+        let inspect = |entity: &Value| {
             let entity = entity.as_object()?;
             let miner_count = finite_number(entity.get("minerCount"));
             let building_id = string_at(entity, "buildingId").map(str::to_owned);
@@ -474,16 +485,19 @@ impl CampaignFactoryMetrics {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             })
-        });
-        for probe in probes.into_iter().flatten() {
-            metrics.miner_count += probe.miner_count;
-            metrics.spray_coater_installed |= probe.spray_coater_installed;
-            let Some(building_id) = probe.building_id else {
-                continue;
-            };
-            let building = metrics.buildings.entry(building_id).or_default();
-            building.count += probe.building_count;
-            building.station_trips += probe.station_trips;
+        };
+        if runtime.worker_count_for_items(entities.len()) == 1 {
+            for probe in entities.iter().filter_map(inspect) {
+                metrics.apply_entity_probe(probe);
+            }
+        } else {
+            for probe in runtime
+                .indexed_map(entities, |_, entity| inspect(entity))
+                .into_iter()
+                .flatten()
+            {
+                metrics.apply_entity_probe(probe);
+            }
         }
         for &tier in belt_tiers {
             for &minimum_tier in &minimum_belt_tiers {

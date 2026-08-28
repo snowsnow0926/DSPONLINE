@@ -1983,6 +1983,157 @@ fn validate_station_warper_inventory_command(
     Ok(())
 }
 
+fn string_array_contains(value: Option<&Value>, needle: &str) -> anyhow::Result<bool> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority exploration directory is invalid"))?;
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or_else(|| anyhow!("native player-authority exploration ID is invalid"))?;
+        if value == needle {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_active_planet_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.is_empty()
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority active planet command shape is invalid")
+    }
+    let target_id = require_exact_set_patch(&command.top_level_changes, &["activePlanetId"])?
+        .as_str()
+        .filter(|planet_id| !planet_id.is_empty() && planet_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+        .ok_or_else(|| anyhow!("native player-authority active planet target is invalid"))?;
+    let base = state.base_value();
+    let current_id = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority current active planet is invalid"))?;
+    if target_id == current_id {
+        bail!("native player-authority active planet target is unchanged")
+    }
+    let target_planet = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == target_id)
+        .ok_or_else(|| anyhow!("native player-authority active planet is not in the catalog"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == current_id)
+    {
+        bail!("native player-authority current active planet is not in the catalog")
+    }
+    let exploration = base
+        .get("exploration")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority exploration state is missing"))?;
+    if !string_array_contains(
+        exploration.get("unlockedSystemIds"),
+        &target_planet.system_id,
+    )? {
+        bail!("native player-authority active planet system is locked")
+    }
+    let explicitly_colonized =
+        string_array_contains(exploration.get("colonizedPlanetIds"), target_id)?;
+    let helios_technology_colonized = target_planet.system_id == "helios"
+        && target_id != "home"
+        && technology_is_completed(state, "interstellar_logistics");
+    let pioneer_planet = state
+        .catalog
+        .planets
+        .iter()
+        .filter(|planet| planet.system_id == target_planet.system_id)
+        .min_by(|left, right| {
+            (left.orbit_index, left.simulation_order, left.id.as_str()).cmp(&(
+                right.orbit_index,
+                right.simulation_order,
+                right.id.as_str(),
+            ))
+        })
+        .is_some_and(|planet| planet.id == target_id);
+    if !explicitly_colonized && !helios_technology_colonized && !pioneer_planet {
+        bail!("native player-authority active planet is not colonized")
+    }
+
+    let tray = base
+        .get("tray")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority active planet tray is invalid"))?;
+    let planet_trays = base
+        .get("planetTrays")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority planet tray directory is invalid"))?;
+    let target_tray = planet_trays
+        .get(target_id)
+        .map(|value| {
+            value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!("native player-authority target planet tray is invalid"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let target_metrics = base
+        .get("planetMetrics")
+        .and_then(Value::as_object)
+        .and_then(|metrics| metrics.get(target_id))
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow!("native player-authority target planet metrics are missing"))?;
+
+    let mut current_subset = Map::new();
+    for key in ["activePlanetId", "tray", "planetTrays", "metrics"] {
+        current_subset.insert(
+            key.to_owned(),
+            base.get(key)
+                .cloned()
+                .ok_or_else(|| anyhow!("native player-authority planet switch field is missing"))?,
+        );
+    }
+    let mut expected_subset = current_subset.clone();
+    expected_subset.insert("activePlanetId".to_owned(), Value::from(target_id));
+    expected_subset.insert("tray".to_owned(), Value::Object(target_tray));
+    expected_subset.insert("metrics".to_owned(), Value::Object(target_metrics));
+    expected_subset
+        .get_mut("planetTrays")
+        .and_then(Value::as_object_mut)
+        .expect("planetTrays object was proved above")
+        .insert(current_id.to_owned(), Value::Object(tray.clone()));
+
+    let mut candidate = Value::Object(current_subset);
+    for change in &command.top_level_changes {
+        let Some(PathSegment::Key(root)) = change.path.first() else {
+            bail!("native player-authority planet switch path is invalid")
+        };
+        if !matches!(
+            root.as_str(),
+            "activePlanetId" | "tray" | "planetTrays" | "metrics"
+        ) {
+            bail!("native player-authority planet switch changes an unrelated field")
+        }
+        apply_value_patch(&mut candidate, change)?;
+    }
+    if candidate != Value::Object(expected_subset) {
+        bail!("native player-authority planet switch snapshot is not canonical")
+    }
+    Ok(())
+}
+
 struct ValidatedTimeWarpState<'a> {
     value: &'a Map<String, Value>,
     controller_entity_id: Option<&'a str>,
@@ -3077,6 +3228,11 @@ impl CoreState {
             return validate_time_warp_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "activePlanetId")
+        }) {
+            return validate_active_planet_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
         }) {
             return validate_recipe_focus_command(self, command);
@@ -3709,6 +3865,18 @@ mod tests {
             "blueprintVersions": [],
             "totalProduced": { "iron_ingot": 10 },
             "research": { "completedTechIds": [] },
+            "exploration": {
+                "unlockedSystemIds": ["helios", "sigma"],
+                "colonizedPlanetIds": ["home", "ashen"],
+                "missions": [],
+                "surveyProgressBySystem": { "helios": 1, "sigma": 1 }
+            },
+            "metrics": { "generationKw": 1, "demandKw": 2, "powerFactor": 0.5 },
+            "planetMetrics": {
+                "home": { "generationKw": 1, "demandKw": 2, "powerFactor": 0.5 },
+                "ashen": { "generationKw": 3, "demandKw": 4, "powerFactor": 0.75 },
+                "giant": { "generationKw": 0, "demandKw": 0, "powerFactor": 1 }
+            },
             "dysonEngineering": {
                 "activeOrbitBySystem": { "helios": "orbit-home-old", "sigma": "orbit-foreign" },
                 "orbitsBySystem": {
@@ -4177,6 +4345,78 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }];
+        command
+    }
+
+    fn active_planet_to_ashen_command(revision: u64) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![
+            ValuePatch {
+                path: vec![PathSegment::Key("activePlanetId".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from("ashen")),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("planetTrays".to_owned()),
+                    PathSegment::Key("home".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "logistics_drone": 0,
+                    "logistics_vessel": 0,
+                    "space_warper": 10
+                })),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key("logistics_drone".to_owned()),
+                ],
+                operation: "delete".to_owned(),
+                value: None,
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key("logistics_vessel".to_owned()),
+                ],
+                operation: "delete".to_owned(),
+                value: None,
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key("space_warper".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(7)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("metrics".to_owned()),
+                    PathSegment::Key("generationKw".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(3)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("metrics".to_owned()),
+                    PathSegment::Key("demandKw".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(4)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("metrics".to_owned()),
+                    PathSegment::Key("powerFactor".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0.75)),
+            },
+        ];
         command
     }
 
@@ -5516,6 +5756,107 @@ mod tests {
             assert_eq!(state.revision, 11);
             assert_eq!(state.canonical_sha256().unwrap(), before);
         }
+    }
+
+    #[test]
+    fn player_authority_switches_planet_with_exact_tray_and_metrics_snapshot() {
+        let mut state = player_command_state();
+        let command = active_planet_to_ashen_command(state.revision);
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert!(applied.topology_dirty);
+        assert_eq!(state.base_value()["activePlanetId"], "ashen");
+        assert_eq!(
+            state.base_value()["tray"],
+            serde_json::json!({ "space_warper": 7 })
+        );
+        assert_eq!(
+            state.base_value()["planetTrays"]["home"],
+            serde_json::json!({
+                "logistics_drone": 0,
+                "logistics_vessel": 0,
+                "space_warper": 10
+            })
+        );
+        assert_eq!(state.base_value()["metrics"]["generationKw"], 3);
+        assert_eq!(state.base_value()["metrics"]["demandKw"], 4);
+        assert_eq!(state.base_value()["metrics"]["powerFactor"], 0.75);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_planet_switch_fails_closed_on_forged_or_locked_state() {
+        let mut forged_tray = active_planet_to_ashen_command(9);
+        let tray_patch = forged_tray
+            .top_level_changes
+            .iter_mut()
+            .find(|change| path_matches(&change.path, &["tray", "space_warper"]))
+            .unwrap();
+        tray_patch.value = Some(Value::from(8));
+        let mut extra = active_planet_to_ashen_command(9);
+        extra.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut delete_target = active_planet_to_ashen_command(9);
+        delete_target.top_level_changes[0].operation = "delete".to_owned();
+        delete_target.top_level_changes[0].value = None;
+        let commands = [
+            top_level_leaf_command(9, &["activePlanetId"], Value::from("home")),
+            top_level_leaf_command(9, &["activePlanetId"], Value::from("missing")),
+            top_level_leaf_command(9, &["activePlanetId"], Value::from("giant")),
+            forged_tray,
+            extra,
+            delete_target,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut locked_system = player_command_state();
+        locked_system
+            .apply_command(&top_level_leaf_command(
+                locked_system.revision,
+                &["exploration", "unlockedSystemIds"],
+                serde_json::json!(["helios"]),
+            ))
+            .unwrap();
+        let before = locked_system.canonical_sha256().unwrap();
+        let mut switch = active_planet_to_ashen_command(9);
+        switch.base_revision = locked_system.revision;
+        let error = locked_system
+            .apply_player_authority_command(&switch)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("system is locked"));
+        assert_eq!(locked_system.canonical_sha256().unwrap(), before);
+
+        let mut missing_metrics = player_command_state();
+        let mut remove_metrics = top_level_leaf_command(
+            missing_metrics.revision,
+            &["planetMetrics", "ashen"],
+            Value::Null,
+        );
+        remove_metrics.top_level_changes[0].operation = "delete".to_owned();
+        remove_metrics.top_level_changes[0].value = None;
+        missing_metrics.apply_command(&remove_metrics).unwrap();
+        let before = missing_metrics.canonical_sha256().unwrap();
+        let mut switch = active_planet_to_ashen_command(9);
+        switch.base_revision = missing_metrics.revision;
+        let error = missing_metrics
+            .apply_player_authority_command(&switch)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("metrics are missing"));
+        assert_eq!(missing_metrics.canonical_sha256().unwrap(), before);
     }
 
     #[test]

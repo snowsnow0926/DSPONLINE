@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -365,6 +365,64 @@ fn require_exact_set_patch<'a>(
         );
     }
     found.ok_or_else(|| anyhow!("native player-authority protected patch is missing"))
+}
+
+fn optional_exact_set_patch<'a>(
+    patches: &'a [ValuePatch],
+    expected_path: &[&str],
+) -> anyhow::Result<Option<&'a Value>> {
+    let mut found = None;
+    for patch in patches {
+        if !path_matches(&patch.path, expected_path) {
+            continue;
+        }
+        if found.is_some() {
+            bail!("native player-authority command repeats a protected patch")
+        }
+        if patch.operation != "set" {
+            bail!("native player-authority protected patch operation is invalid")
+        }
+        found = Some(
+            patch
+                .value
+                .as_ref()
+                .ok_or_else(|| anyhow!("native player-authority protected set has no value"))?,
+        );
+    }
+    Ok(found)
+}
+
+fn require_exact_set_patch_values(
+    patches: &[ValuePatch],
+    expected: &[(Vec<&str>, Value)],
+) -> anyhow::Result<()> {
+    if patches.len() != expected.len() {
+        bail!("native player-authority protected patch set is incomplete or mixed")
+    }
+    let mut matched = vec![false; expected.len()];
+    for patch in patches {
+        let Some(index) = expected
+            .iter()
+            .position(|(path, _)| path_matches(&patch.path, path))
+        else {
+            bail!("native player-authority protected patch set contains an unknown path")
+        };
+        if matched[index] || patch.operation != "set" {
+            bail!("native player-authority protected patch set is repeated or malformed")
+        }
+        let value = patch
+            .value
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority protected set has no value"))?;
+        if value != &expected[index].1 {
+            bail!("native player-authority protected patch value is not canonical")
+        }
+        matched[index] = true;
+    }
+    if matched.iter().any(|matched| !matched) {
+        bail!("native player-authority protected patch set is incomplete")
+    }
+    Ok(())
 }
 
 fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
@@ -1126,6 +1184,229 @@ fn validate_entity_power_or_splitter_configuration_command(
         _ => bail!("native player-authority entity configuration field is not typed"),
     }
     Ok(())
+}
+
+struct ValidatedTimeWarpState<'a> {
+    value: &'a Map<String, Value>,
+    controller_entity_id: Option<&'a str>,
+    enabled: bool,
+    requested_multiplier: u64,
+    simulation_speed: Value,
+    paused: bool,
+}
+
+fn validated_time_warp_state(state: &CoreState) -> anyhow::Result<ValidatedTimeWarpState<'_>> {
+    let base = state.base_value();
+    let value = base
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority time-warp state is missing"))?;
+    let controller_entity_id = match value.get("controllerEntityId") {
+        Some(Value::Null) => None,
+        Some(Value::String(entity_id)) if !entity_id.is_empty() => Some(entity_id.as_str()),
+        _ => bail!("native player-authority time-warp controller state is invalid"),
+    };
+    let enabled = value
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native player-authority time-warp enabled state is invalid"))?;
+    let requested_multiplier = safe_json_integer(
+        value.get("requestedMultiplier"),
+        "time-warp requested multiplier",
+    )?;
+    if requested_multiplier < 5 {
+        bail!("native player-authority time-warp requested multiplier is invalid")
+    }
+    let effective_multiplier = finite_json_number(
+        value.get("effectiveMultiplier"),
+        "time-warp effective multiplier",
+    )?;
+    if effective_multiplier <= 0.0 {
+        bail!("native player-authority time-warp effective multiplier is invalid")
+    }
+    for field in [
+        "pendingSimulationSeconds",
+        "pendingWallSeconds",
+        "requiredPowerKw",
+        "allocatedPowerKw",
+    ] {
+        if finite_json_number(value.get(field), field)? < 0.0 {
+            bail!("native player-authority time-warp non-negative field is invalid")
+        }
+    }
+    let simulation_speed = base
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("simulationSpeed"))
+        .filter(|value| {
+            value
+                .as_f64()
+                .is_some_and(|speed| speed.is_finite() && speed > 0.0)
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("native player-authority simulation speed is invalid"))?;
+    let paused = base
+        .get("paused")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native player-authority paused state is invalid"))?;
+    Ok(ValidatedTimeWarpState {
+        value,
+        controller_entity_id,
+        enabled,
+        requested_multiplier,
+        simulation_speed,
+        paused,
+    })
+}
+
+fn require_unlocked_time_warp_controller(state: &CoreState, entity_id: &str) -> anyhow::Result<()> {
+    let index = *state
+        .entity_index
+        .get(entity_id)
+        .ok_or_else(|| anyhow!("native player-authority time-warp controller is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority time-warp controller is invalid"))?;
+    if object.get("buildingId").and_then(Value::as_str) != Some("time_warp_device")
+        || !state.catalog.buildings.contains_key("time_warp_device")
+    {
+        bail!("native player-authority time-warp controller building is invalid")
+    }
+    if let Some(locked) = object.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority time-warp controller is locked or malformed")
+    }
+    Ok(())
+}
+
+fn push_expected_time_warp_change(
+    expected: &mut Vec<(Vec<&'static str>, Value)>,
+    current: &Map<String, Value>,
+    field: &'static str,
+    target: Value,
+) {
+    if current.get(field) != Some(&target) {
+        expected.push((vec!["timeWarp", field], target));
+    }
+}
+
+fn validate_time_warp_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.is_empty()
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority time-warp command shape is invalid")
+    }
+    let controller_target = optional_exact_set_patch(
+        &command.top_level_changes,
+        &["timeWarp", "controllerEntityId"],
+    )?;
+    let enabled_target =
+        optional_exact_set_patch(&command.top_level_changes, &["timeWarp", "enabled"])?;
+    let multiplier_target = optional_exact_set_patch(
+        &command.top_level_changes,
+        &["timeWarp", "requestedMultiplier"],
+    )?;
+    if controller_target.is_none() && enabled_target.is_none() && multiplier_target.is_none() {
+        bail!("native player-authority time-warp command intent is ambiguous")
+    }
+
+    let current = validated_time_warp_state(state)?;
+    let mut expected = Vec::<(Vec<&'static str>, Value)>::new();
+    if let Some(target) = controller_target {
+        let entity_id = target
+            .as_str()
+            .filter(|entity_id| !entity_id.is_empty())
+            .ok_or_else(|| {
+                anyhow!("native player-authority time-warp controller target is invalid")
+            })?;
+        if current.controller_entity_id == Some(entity_id) {
+            bail!("native player-authority time-warp controller target is unchanged")
+        }
+        require_unlocked_time_warp_controller(state, entity_id)?;
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "controllerEntityId",
+            Value::from(entity_id),
+        );
+        push_expected_time_warp_change(&mut expected, current.value, "enabled", Value::from(false));
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "effectiveMultiplier",
+            current.simulation_speed.clone(),
+        );
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "requiredPowerKw",
+            Value::from(0),
+        );
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "allocatedPowerKw",
+            Value::from(0),
+        );
+    } else if let Some(target) = enabled_target {
+        let target = target.as_bool().ok_or_else(|| {
+            anyhow!("native player-authority time-warp enabled target is invalid")
+        })?;
+        if current.enabled == target {
+            bail!("native player-authority time-warp enabled target is unchanged")
+        }
+        let controller_entity_id = current.controller_entity_id.ok_or_else(|| {
+            anyhow!("native player-authority time-warp controller is not selected")
+        })?;
+        require_unlocked_time_warp_controller(state, controller_entity_id)?;
+        if target && current.paused {
+            expected.push((vec!["paused"], Value::from(false)));
+        }
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "enabled",
+            Value::from(target),
+        );
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "effectiveMultiplier",
+            current.simulation_speed.clone(),
+        );
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "requiredPowerKw",
+            Value::from(0),
+        );
+        push_expected_time_warp_change(
+            &mut expected,
+            current.value,
+            "allocatedPowerKw",
+            Value::from(0),
+        );
+    } else if let Some(target) = multiplier_target {
+        let target = safe_json_integer(Some(target), "time-warp requested multiplier")?;
+        if target < 5 || target == current.requested_multiplier {
+            bail!("native player-authority time-warp requested multiplier target is invalid")
+        }
+        if let Some(controller_entity_id) = current.controller_entity_id {
+            require_unlocked_time_warp_controller(state, controller_entity_id)?;
+        }
+        expected.push((vec!["timeWarp", "requestedMultiplier"], Value::from(target)));
+    }
+    require_exact_set_patch_values(&command.top_level_changes, &expected)
 }
 
 fn validate_player_pause_command(
@@ -1946,6 +2227,11 @@ impl CoreState {
             return validate_player_position_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "timeWarp")
+        }) {
+            return validate_time_warp_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
         }) {
             return validate_recipe_focus_command(self, command);
@@ -2439,6 +2725,10 @@ mod tests {
                 {
                     "id": "ray_receiver", "kind": "machine", "speed": 1,
                     "inputCapacity": 100, "outputCapacity": 100
+                },
+                {
+                    "id": "time_warp_device", "kind": "machine", "speed": 1,
+                    "inputCapacity": 0, "outputCapacity": 0
                 }
             ],
             "recipes": [
@@ -2533,6 +2823,17 @@ mod tests {
             "activePlanetId": "home",
             "elapsedSeconds": 100,
             "paused": false,
+            "settings": { "simulationSpeed": 4 },
+            "timeWarp": {
+                "controllerEntityId": null,
+                "enabled": false,
+                "requestedMultiplier": 15,
+                "effectiveMultiplier": 4,
+                "pendingSimulationSeconds": 0,
+                "pendingWallSeconds": 0,
+                "requiredPowerKw": 0,
+                "allocatedPowerKw": 0
+            },
             "nextId": 9,
             "recipeFocus": {
                 "itemId": null,
@@ -2705,6 +3006,46 @@ mod tests {
         state
     }
 
+    fn player_time_warp_state() -> CoreState {
+        let mut state = player_command_state();
+        let mut addition = empty_player_command(state.revision);
+        addition.added_entities = [
+            ("time-warp-a", false, 7.0, 21),
+            ("time-warp-b", false, 8.0, 22),
+            ("time-warp-locked", true, 9.0, 23),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(offset, (id, interaction_locked, x, mod_revision))| AddedRecord {
+                index: 3 + offset,
+                value: serde_json::json!({
+                    "id": id,
+                    "kind": "machine",
+                    "planetId": "home",
+                    "position": { "x": x, "y": 2.0 },
+                    "interactionLocked": interaction_locked,
+                    "buildingId": "time_warp_device",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "powerInputKw": 0,
+                    "modPayload": { "owner": "pack:test", "revision": mod_revision }
+                }),
+            },
+        )
+        .collect();
+        state.apply_command(&addition).unwrap();
+        state
+    }
+
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
         SimulationCommandPatch {
             protocol_version: crate::CORE_PROTOCOL_VERSION,
@@ -2818,6 +3159,42 @@ mod tests {
                 value: Some(value),
             }],
         }];
+        command
+    }
+
+    fn top_level_leaf_command(
+        revision: u64,
+        path: &[&str],
+        value: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: path
+                .iter()
+                .map(|segment| PathSegment::Key((*segment).to_owned()))
+                .collect(),
+            operation: "set".to_owned(),
+            value: Some(value),
+        }];
+        command
+    }
+
+    fn time_warp_changes_command(
+        revision: u64,
+        changes: &[(&str, Value)],
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = changes
+            .iter()
+            .map(|(field, value)| ValuePatch {
+                path: vec![
+                    PathSegment::Key("timeWarp".to_owned()),
+                    PathSegment::Key((*field).to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(value.clone()),
+            })
+            .collect();
         command
     }
 
@@ -3412,6 +3789,232 @@ mod tests {
             ))
             .unwrap_err();
         assert!(format!("{error:#}").contains("current power grid is invalid"));
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_only_canonical_time_warp_controller_multiplier_and_toggle() {
+        let mut state = player_time_warp_state();
+        assert_eq!(state.revision, 10);
+
+        state
+            .apply_player_authority_command(&time_warp_changes_command(
+                state.revision,
+                &[("controllerEntityId", Value::from("time-warp-a"))],
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&time_warp_changes_command(
+                state.revision,
+                &[("requestedMultiplier", Value::from(16))],
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&time_warp_changes_command(
+                state.revision,
+                &[("enabled", Value::from(true))],
+            ))
+            .unwrap();
+
+        let mut live_snapshot = time_warp_changes_command(
+            state.revision,
+            &[
+                ("effectiveMultiplier", Value::from(12)),
+                ("requiredPowerKw", Value::from(100_000)),
+                ("allocatedPowerKw", Value::from(80_000)),
+                ("pendingSimulationSeconds", Value::from(7)),
+                ("pendingWallSeconds", Value::from(0.5)),
+            ],
+        );
+        state.apply_command(&live_snapshot).unwrap();
+
+        state
+            .apply_player_authority_command(&time_warp_changes_command(
+                state.revision,
+                &[
+                    ("controllerEntityId", Value::from("time-warp-b")),
+                    ("enabled", Value::from(false)),
+                    ("effectiveMultiplier", Value::from(4)),
+                    ("requiredPowerKw", Value::from(0)),
+                    ("allocatedPowerKw", Value::from(0)),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["timeWarp"]["pendingSimulationSeconds"],
+            7
+        );
+        assert_eq!(state.base_value()["timeWarp"]["pendingWallSeconds"], 0.5);
+
+        live_snapshot = top_level_leaf_command(state.revision, &["paused"], Value::from(true));
+        live_snapshot.top_level_changes.extend([
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("timeWarp".to_owned()),
+                    PathSegment::Key("pendingSimulationSeconds".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("timeWarp".to_owned()),
+                    PathSegment::Key("pendingWallSeconds".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0)),
+            },
+        ]);
+        state.apply_command(&live_snapshot).unwrap();
+
+        let mut enable =
+            time_warp_changes_command(state.revision, &[("enabled", Value::from(true))]);
+        enable.top_level_changes.insert(
+            0,
+            ValuePatch {
+                path: vec![PathSegment::Key("paused".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(false)),
+            },
+        );
+        state.apply_player_authority_command(&enable).unwrap();
+
+        live_snapshot = time_warp_changes_command(
+            state.revision,
+            &[
+                ("effectiveMultiplier", Value::from(15)),
+                ("requiredPowerKw", Value::from(200_000)),
+                ("allocatedPowerKw", Value::from(200_000)),
+            ],
+        );
+        state.apply_command(&live_snapshot).unwrap();
+        state
+            .apply_player_authority_command(&time_warp_changes_command(
+                state.revision,
+                &[
+                    ("enabled", Value::from(false)),
+                    ("effectiveMultiplier", Value::from(4)),
+                    ("requiredPowerKw", Value::from(0)),
+                    ("allocatedPowerKw", Value::from(0)),
+                ],
+            ))
+            .unwrap();
+
+        let time_warp = &state.base_value()["timeWarp"];
+        assert_eq!(time_warp["controllerEntityId"], "time-warp-b");
+        assert_eq!(time_warp["enabled"], false);
+        assert_eq!(time_warp["requestedMultiplier"], 16);
+        assert_eq!(time_warp["effectiveMultiplier"], 4);
+        assert_eq!(time_warp["requiredPowerKw"], 0);
+        assert_eq!(time_warp["allocatedPowerKw"], 0);
+        let controller_index = *state.entity_index.get("time-warp-b").unwrap();
+        assert_eq!(
+            state.parse_entity(controller_index).unwrap()["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 22 })
+        );
+        assert_eq!(state.revision, 19);
+    }
+
+    #[test]
+    fn player_authority_time_warp_commands_fail_closed_without_mutation() {
+        let mut delete_multiplier =
+            time_warp_changes_command(10, &[("requestedMultiplier", Value::from(16))]);
+        delete_multiplier.top_level_changes[0].operation = "delete".to_owned();
+        delete_multiplier.top_level_changes[0].value = None;
+
+        let mut mixed_intent = time_warp_changes_command(
+            10,
+            &[
+                ("controllerEntityId", Value::from("time-warp-a")),
+                ("requestedMultiplier", Value::from(16)),
+            ],
+        );
+        mixed_intent.top_level_changes.reverse();
+
+        let mut forged_pending =
+            time_warp_changes_command(10, &[("requestedMultiplier", Value::from(16))]);
+        forged_pending.top_level_changes.push(ValuePatch {
+            path: vec![
+                PathSegment::Key("timeWarp".to_owned()),
+                PathSegment::Key("pendingSimulationSeconds".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(1_000_000)),
+        });
+
+        let commands = [
+            time_warp_changes_command(10, &[("enabled", Value::from(true))]),
+            time_warp_changes_command(10, &[("controllerEntityId", Value::from("smelter-a"))]),
+            time_warp_changes_command(
+                10,
+                &[("controllerEntityId", Value::from("time-warp-locked"))],
+            ),
+            time_warp_changes_command(10, &[("controllerEntityId", Value::Null)]),
+            time_warp_changes_command(10, &[("requestedMultiplier", Value::from(4))]),
+            time_warp_changes_command(10, &[("requestedMultiplier", Value::from(15))]),
+            time_warp_changes_command(10, &[("requestedMultiplier", Value::from(5.5))]),
+            time_warp_changes_command(
+                10,
+                &[(
+                    "requestedMultiplier",
+                    Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+                )],
+            ),
+            time_warp_changes_command(10, &[("effectiveMultiplier", Value::from(12))]),
+            delete_multiplier,
+            mixed_intent,
+            forged_pending,
+        ];
+        for command in commands {
+            let mut state = player_time_warp_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 10);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut selected = player_time_warp_state();
+        selected
+            .apply_player_authority_command(&time_warp_changes_command(
+                selected.revision,
+                &[("controllerEntityId", Value::from("time-warp-a"))],
+            ))
+            .unwrap();
+        selected
+            .apply_command(&entity_leaf_command(
+                selected.revision,
+                "time-warp-a",
+                "interactionLocked",
+                Value::from(true),
+            ))
+            .unwrap();
+        let before = selected.canonical_sha256().unwrap();
+        assert!(
+            selected
+                .apply_player_authority_command(&time_warp_changes_command(
+                    selected.revision,
+                    &[("requestedMultiplier", Value::from(16))],
+                ))
+                .is_err()
+        );
+        assert_eq!(selected.canonical_sha256().unwrap(), before);
+
+        let mut malformed = player_time_warp_state();
+        malformed
+            .apply_command(&time_warp_changes_command(
+                malformed.revision,
+                &[("requiredPowerKw", Value::from("forged"))],
+            ))
+            .unwrap();
+        let before = malformed.canonical_sha256().unwrap();
+        assert!(
+            malformed
+                .apply_player_authority_command(&time_warp_changes_command(
+                    malformed.revision,
+                    &[("requestedMultiplier", Value::from(16))],
+                ))
+                .is_err()
+        );
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 

@@ -9,7 +9,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-research-rocket-sail-product-v7";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-v8";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -21,6 +21,7 @@ const TERMINAL_ROCKET_ITEM_ID: &str = "small_carrier_rocket";
 const TERMINAL_SAIL_ITEM_ID: &str = "solar_sail";
 
 type MaterialTotals = BTreeMap<String, i128>;
+type OrbitMaterialTotals = BTreeMap<String, MaterialTotals>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DysonTerminalSnapshot {
@@ -36,6 +37,9 @@ struct DysonTerminalSnapshot {
     orbit_sails_by_system: MaterialTotals,
     orbit_launched_by_system: MaterialTotals,
     orbit_expired_by_system: MaterialTotals,
+    orbit_sails_by_orbit: OrbitMaterialTotals,
+    orbit_launched_by_orbit: OrbitMaterialTotals,
+    orbit_expired_by_orbit: OrbitMaterialTotals,
     launch_energy_micro_mj: i128,
 }
 
@@ -108,14 +112,26 @@ struct ResearchSinkCertificate {
     expected: ResearchProofSnapshot,
 }
 
-/// A material-funded terminal receipt for the only Dyson event currently
-/// admitted by the native macro tail. Each rate is a whole rocket per
+/// A material-funded rocket terminal receipt. Each rate is a whole rocket per
 /// simulated second and is observed identically in three adjacent exact
-/// windows. Solar-sail state remains entirely frozen.
+/// windows. Rocket and sail terminals remain mutually exclusive certificates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DysonRocketSinkCertificate {
     launches_per_second: i128,
     launches_per_second_by_system: MaterialTotals,
+    expected: DysonTerminalSnapshot,
+}
+
+/// A same-window-funded solar-sail launch schedule. Unlike the old scalar
+/// extrapolation this certificate contains only whole launch rates observed
+/// identically in three adjacent exact windows. The Dyson helper advances
+/// absorption and decay from the current orbit state for every scheduled
+/// second, so no prefilled ejector cache is replayed and no sail lifecycle
+/// counter is copied from a probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DysonSailSinkCertificate {
+    launches_per_second: i128,
+    launches_per_second_by_orbit: OrbitMaterialTotals,
     expected: DysonTerminalSnapshot,
 }
 
@@ -147,6 +163,10 @@ struct OrdinaryFlowCertificate {
     /// ordinary consumption of `small_carrier_rocket`; no starting inventory
     /// or launcher cache is credited as a renewable tail source.
     dyson_rocket: Option<DysonRocketSinkCertificate>,
+    /// Optional closed solar-sail terminal. Only the calibrated launch vector
+    /// is extrapolated; orbit decay and shell absorption are advanced by the
+    /// native Dyson lifecycle from the committed endpoint.
+    dyson_sail: Option<DysonSailSinkCertificate>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -604,34 +624,55 @@ fn capture_dyson_terminal(
             let mut stock = 0_i128;
             let mut launched = 0_i128;
             let mut expired = 0_i128;
+            let mut stock_by_orbit = MaterialTotals::new();
+            let mut launched_by_orbit = MaterialTotals::new();
+            let mut expired_by_orbit = MaterialTotals::new();
             for (orbit_index, orbit) in orbits.iter().enumerate() {
+                let orbit_id = orbit
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.id is missing"
+                        )
+                    })?;
+                if stock_by_orbit.contains_key(orbit_id) {
+                    bail!("dysonEngineering.orbitsBySystem.{system_id} repeats orbit {orbit_id}");
+                }
+                let orbit_stock = counter_at(
+                    Some(orbit),
+                    "sailsInOrbit",
+                    &format!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.sailsInOrbit"
+                    ),
+                )?;
+                let orbit_launched = counter_at(
+                    Some(orbit),
+                    "totalLaunched",
+                    &format!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.totalLaunched"
+                    ),
+                )?;
+                let orbit_expired = counter_at(
+                    Some(orbit),
+                    "totalExpired",
+                    &format!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.totalExpired"
+                    ),
+                )?;
                 stock = stock
-                    .checked_add(counter_at(
-                        Some(orbit),
-                        "sailsInOrbit",
-                        &format!(
-                            "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.sailsInOrbit"
-                        ),
-                    )?)
+                    .checked_add(orbit_stock)
                     .ok_or_else(|| anyhow!("Dyson orbit stock proof ledger overflow"))?;
                 launched = launched
-                    .checked_add(counter_at(
-                        Some(orbit),
-                        "totalLaunched",
-                        &format!(
-                            "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.totalLaunched"
-                        ),
-                    )?)
+                    .checked_add(orbit_launched)
                     .ok_or_else(|| anyhow!("Dyson orbit launch proof ledger overflow"))?;
                 expired = expired
-                    .checked_add(counter_at(
-                        Some(orbit),
-                        "totalExpired",
-                        &format!(
-                            "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.totalExpired"
-                        ),
-                    )?)
+                    .checked_add(orbit_expired)
                     .ok_or_else(|| anyhow!("Dyson orbit expiry proof ledger overflow"))?;
+                stock_by_orbit.insert(orbit_id.to_owned(), orbit_stock);
+                launched_by_orbit.insert(orbit_id.to_owned(), orbit_launched);
+                expired_by_orbit.insert(orbit_id.to_owned(), orbit_expired);
             }
             snapshot
                 .orbit_sails_by_system
@@ -642,6 +683,15 @@ fn capture_dyson_terminal(
             snapshot
                 .orbit_expired_by_system
                 .insert(system_id.clone(), expired);
+            snapshot
+                .orbit_sails_by_orbit
+                .insert(system_id.clone(), stock_by_orbit);
+            snapshot
+                .orbit_launched_by_orbit
+                .insert(system_id.clone(), launched_by_orbit);
+            snapshot
+                .orbit_expired_by_orbit
+                .insert(system_id.clone(), expired_by_orbit);
         }
     }
     Ok(snapshot)
@@ -2110,6 +2160,7 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
 fn active_ordinary_recipe_ids(
     state: &CoreState,
     allow_certified_rocket_terminal: bool,
+    allow_certified_sail_terminal: bool,
 ) -> Result<Vec<String>, String> {
     if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
         return Err(format!("ordinary recipe tail is excluded while {reason}"));
@@ -2197,6 +2248,14 @@ fn active_ordinary_recipe_ids(
                 "active carrier_rocket_launch has no certified Dyson rocket sink".to_owned(),
             );
         }
+        if recipe_id == "solar_sail_launch" {
+            if allow_certified_sail_terminal {
+                // The ejector is validated by the solar-sail terminal
+                // certificate and has no ordinary material output.
+                continue;
+            }
+            return Err("active solar_sail_launch has no certified Dyson sail sink".to_owned());
+        }
         if recipe.inputs.is_empty() || recipe.outputs.is_empty() {
             return Err(format!(
                 "active recipe {recipe_id} is a research or terminal recipe"
@@ -2268,9 +2327,9 @@ struct OrdinaryWindowFlow {
 fn capture_ordinary_window_flow(
     before: &SettlementProofSnapshot,
     after: &SettlementProofSnapshot,
-    allow_certified_rocket_terminal: bool,
+    allow_certified_dyson_terminal: bool,
 ) -> Result<OrdinaryWindowFlow, String> {
-    if !allow_certified_rocket_terminal && before.dyson != after.dyson {
+    if !allow_certified_dyson_terminal && before.dyson != after.dyson {
         return Err("Dyson rocket, sail or structure state changed during calibration".to_owned());
     }
     if before.construction_outputs != after.construction_outputs
@@ -2723,6 +2782,275 @@ fn build_dyson_rocket_sink_certificate(
     }))
 }
 
+fn orbit_window_delta(
+    before: &OrbitMaterialTotals,
+    after: &OrbitMaterialTotals,
+    label: &str,
+    monotonic: bool,
+) -> Result<OrbitMaterialTotals, String> {
+    if before.keys().ne(after.keys()) {
+        return Err(format!(
+            "{label} system topology changed during calibration"
+        ));
+    }
+    let mut deltas = OrbitMaterialTotals::new();
+    for (system_id, before_orbits) in before {
+        let after_orbits = after
+            .get(system_id)
+            .ok_or_else(|| format!("{label}.{system_id} disappeared"))?;
+        if before_orbits.keys().ne(after_orbits.keys()) {
+            return Err(format!(
+                "{label}.{system_id} orbit topology changed during calibration"
+            ));
+        }
+        let mut system_deltas = MaterialTotals::new();
+        for (orbit_id, before_value) in before_orbits {
+            let delta = after_orbits
+                .get(orbit_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_sub(*before_value)
+                .ok_or_else(|| format!("{label}.{system_id}.{orbit_id} delta overflowed"))?;
+            if monotonic && delta < 0 {
+                return Err(format!(
+                    "{label}.{system_id}.{orbit_id} regressed during calibration"
+                ));
+            }
+            system_deltas.insert(orbit_id.clone(), delta);
+        }
+        deltas.insert(system_id.clone(), system_deltas);
+    }
+    Ok(deltas)
+}
+
+fn validate_certified_sail_launcher_domain(state: &CoreState) -> Result<(), String> {
+    let recipe = state
+        .catalog
+        .recipes
+        .get("solar_sail_launch")
+        .ok_or_else(|| "solar_sail_launch recipe is absent from the catalog".to_owned())?;
+    if recipe.building_id != "em_rail_ejector"
+        || !recipe.outputs.is_empty()
+        || recipe.inputs.len() != 1
+        || recipe.inputs[0].item_id != TERMINAL_SAIL_ITEM_ID
+        || recipe.inputs[0].amount != 1.0
+    {
+        return Err("solar_sail_launch is not the canonical one-sail terminal sink".to_owned());
+    }
+    if crate::dyson::launch_factor(state.base_value(), "solar_sail_launch") <= EPSILON {
+        return Err("Dyson solar-sail launch is disabled or throttled to zero".to_owned());
+    }
+
+    let mut active_launchers = 0_usize;
+    for entity_index in 0..state.entity_index.len() {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("Dyson sail launcher decode failed: {error:#}"))?;
+        if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
+            continue;
+        }
+        match entity.get("recipeId").and_then(Value::as_str) {
+            Some("carrier_rocket_launch") => {
+                return Err(
+                    "carrier-rocket launch is active beside the certified solar-sail terminal"
+                        .to_owned(),
+                );
+            }
+            Some("solar_sail_launch") => {}
+            _ => continue,
+        }
+        if entity.get("buildingId").and_then(Value::as_str) != Some("em_rail_ejector") {
+            return Err("solar_sail_launch is installed in an incompatible building".to_owned());
+        }
+        if entity.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true) {
+            return Err(
+                "solar-sail launcher uses proliferator without a closed launch-bonus ledger"
+                    .to_owned(),
+            );
+        }
+        let inputs = entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .map(|inputs| inputs.keys().map(String::as_str).collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        let outputs = entity
+            .get("outputs")
+            .and_then(Value::as_object)
+            .map(|outputs| outputs.keys().map(String::as_str).collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        if inputs != BTreeSet::from([TERMINAL_SAIL_ITEM_ID]) || !outputs.is_empty() {
+            return Err(
+                "solar-sail launcher slots do not match the canonical terminal ledger".to_owned(),
+            );
+        }
+        let planet_id = entity
+            .get("planetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "solar-sail launcher has no planet".to_owned())?;
+        let system_id = state
+            .catalog
+            .planets
+            .iter()
+            .find(|planet| planet.id == planet_id)
+            .map(|planet| planet.system_id.as_str())
+            .ok_or_else(|| {
+                format!("solar-sail launcher planet {planet_id} is absent from catalog")
+            })?;
+        let target_id = entity
+            .get("targetDysonOrbitId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "solar-sail launcher has no target orbit".to_owned())?;
+        let target_exists = state
+            .base_value()
+            .get("dysonEngineering")
+            .and_then(Value::as_object)
+            .and_then(|engineering| engineering.get("orbitsBySystem"))
+            .and_then(Value::as_object)
+            .and_then(|systems| systems.get(system_id))
+            .and_then(Value::as_array)
+            .is_some_and(|orbits| {
+                orbits
+                    .iter()
+                    .any(|orbit| orbit.get("id").and_then(Value::as_str) == Some(target_id))
+            });
+        if !target_exists {
+            return Err(format!(
+                "solar-sail launcher target {system_id}.{target_id} is absent"
+            ));
+        }
+        active_launchers = active_launchers
+            .checked_add(1)
+            .ok_or_else(|| "solar-sail launcher count overflowed".to_owned())?;
+    }
+    if active_launchers == 0 {
+        return Err("calibrated solar-sail launches have no active ejector".to_owned());
+    }
+    Ok(())
+}
+
+fn build_dyson_sail_sink_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<DysonSailSinkCertificate>, String> {
+    if snapshots.len() != 4 {
+        return Err("Dyson solar-sail calibration requires four snapshots".to_owned());
+    }
+    let sail_changed = snapshots.windows(2).any(|window| {
+        window[0].dyson.sails_launched != window[1].dyson.sails_launched
+            || window[0].dyson.sails_expired != window[1].dyson.sails_expired
+            || window[0].dyson.sails_in_orbit != window[1].dyson.sails_in_orbit
+            || window[0].dyson.sails_absorbed != window[1].dyson.sails_absorbed
+            || window[0].dyson.shell_sails != window[1].dyson.shell_sails
+    });
+    if !sail_changed {
+        return Ok(None);
+    }
+    let current = capture_dyson_terminal(state.base_value())
+        .map_err(|error| format!("current Dyson terminal state is invalid: {error:#}"))?;
+    if current != snapshots[0].dyson && current != snapshots[3].dyson {
+        return Err("current Dyson state is not a solar-sail calibration endpoint".to_owned());
+    }
+
+    let mut launch_deltas = Vec::with_capacity(3);
+    let mut orbit_launch_deltas = BTreeMap::<String, BTreeMap<String, Vec<i128>>>::new();
+    for window in snapshots.windows(2) {
+        let before = &window[0].dyson;
+        let after = &window[1].dyson;
+        if before.rockets_launched != after.rockets_launched
+            || before.structure_points != after.structure_points
+            || before.structure_by_system != after.structure_by_system
+        {
+            return Err(
+                "carrier-rocket or structure state changed during solar-sail calibration"
+                    .to_owned(),
+            );
+        }
+        let launched = checked_terminal_delta(
+            after.sails_launched,
+            before.sails_launched,
+            "solar sail launch",
+        )?;
+        let energy = checked_terminal_delta(
+            after.launch_energy_micro_mj,
+            before.launch_energy_micro_mj,
+            "Dyson launch-energy",
+        )?;
+        let expected_energy = launched
+            .checked_mul(21_600_000)
+            .ok_or_else(|| "solar-sail launch-energy calibration overflowed".to_owned())?;
+        if energy != expected_energy {
+            return Err(format!(
+                "Dyson launch-energy delta {energy} does not match {launched} solar-sail launch event(s)"
+            ));
+        }
+        let deltas = orbit_window_delta(
+            &before.orbit_launched_by_orbit,
+            &after.orbit_launched_by_orbit,
+            "dysonEngineering.orbitsBySystem.totalLaunched",
+            true,
+        )?;
+        let mut orbit_sum = 0_i128;
+        for (system_id, orbits) in deltas {
+            for (orbit_id, delta) in orbits {
+                orbit_sum = orbit_sum
+                    .checked_add(delta)
+                    .ok_or_else(|| "per-orbit solar-sail launch total overflowed".to_owned())?;
+                orbit_launch_deltas
+                    .entry(system_id.clone())
+                    .or_default()
+                    .entry(orbit_id)
+                    .or_default()
+                    .push(delta);
+            }
+        }
+        if orbit_sum != launched {
+            return Err(format!(
+                "per-orbit solar-sail launch delta {orbit_sum} does not equal global delta {launched}"
+            ));
+        }
+        launch_deltas.push(launched);
+    }
+
+    let launches_per_second = stable_window_rate(&launch_deltas, "solar sail launch")?;
+    if launches_per_second <= 0 {
+        return Err(
+            "solar-sail lifecycle changed without a stable positive launch rate".to_owned(),
+        );
+    }
+    validate_certified_sail_launcher_domain(state)?;
+    let mut launches_per_second_by_orbit = OrbitMaterialTotals::new();
+    let mut orbit_rate_sum = 0_i128;
+    for (system_id, orbits) in orbit_launch_deltas {
+        let mut rates = MaterialTotals::new();
+        for (orbit_id, deltas) in orbits {
+            let rate = stable_window_rate(
+                &deltas,
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalLaunched"),
+            )?;
+            if rate > 0 {
+                rates.insert(orbit_id, rate);
+                orbit_rate_sum = orbit_rate_sum
+                    .checked_add(rate)
+                    .ok_or_else(|| "per-orbit solar-sail rate sum overflowed".to_owned())?;
+            }
+        }
+        if !rates.is_empty() {
+            launches_per_second_by_orbit.insert(system_id, rates);
+        }
+    }
+    if launches_per_second_by_orbit.is_empty() || orbit_rate_sum != launches_per_second {
+        return Err(format!(
+            "per-orbit solar-sail rate {orbit_rate_sum}/s does not close to global rate {launches_per_second}/s"
+        ));
+    }
+    Ok(Some(DysonSailSinkCertificate {
+        launches_per_second,
+        launches_per_second_by_orbit,
+        expected: current,
+    }))
+}
+
 fn build_research_sink_certificate(
     state: &CoreState,
     snapshots: &[SettlementProofSnapshot],
@@ -2961,11 +3289,15 @@ fn build_closed_recipe_certificate(
     flow: &OrdinaryWindowFlow,
     research: Option<ResearchSinkCertificate>,
     dyson_rocket: Option<DysonRocketSinkCertificate>,
+    dyson_sail: Option<DysonSailSinkCertificate>,
 ) -> Result<OrdinaryFlowCertificate, String> {
-    let recipe_ids = active_ordinary_recipe_ids(state, dyson_rocket.is_some())?;
-    if recipe_ids.is_empty() && research.is_none() && dyson_rocket.is_none() {
+    let recipe_ids =
+        active_ordinary_recipe_ids(state, dyson_rocket.is_some(), dyson_sail.is_some())?;
+    if recipe_ids.is_empty() && research.is_none() && dyson_rocket.is_none() && dyson_sail.is_none()
+    {
         return Err(
-            "no active ordinary recipe, research sink or Dyson rocket sink is available".to_owned(),
+            "no active ordinary recipe, research sink or Dyson terminal sink is available"
+                .to_owned(),
         );
     }
 
@@ -3097,6 +3429,17 @@ fn build_closed_recipe_certificate(
             return Err("Dyson rocket sink has a non-positive launch rate".to_owned());
         }
     }
+    if let Some(sail) = &dyson_sail {
+        if !output_producer.contains_key(TERMINAL_SAIL_ITEM_ID) {
+            return Err(
+                "Dyson solar-sail sink has no active certified solar-sail producer".to_owned(),
+            );
+        }
+        allowed_consumption.insert(TERMINAL_SAIL_ITEM_ID.to_owned());
+        if sail.launches_per_second <= 0 {
+            return Err("Dyson solar-sail sink has a non-positive launch rate".to_owned());
+        }
+    }
     for item_id in flow.produced_per_second.keys() {
         if !allowed_production.contains(item_id) {
             return Err(format!(
@@ -3162,6 +3505,18 @@ fn build_closed_recipe_certificate(
                 .ok_or_else(|| "Dyson rocket consumption rate overflowed".to_owned())?,
         );
     }
+    if let Some(sail) = &dyson_sail {
+        let current = expected_consumption
+            .get(TERMINAL_SAIL_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        expected_consumption.insert(
+            TERMINAL_SAIL_ITEM_ID.to_owned(),
+            current
+                .checked_add(sail.launches_per_second)
+                .ok_or_else(|| "Dyson solar-sail consumption rate overflowed".to_owned())?,
+        );
+    }
     for (recipe_index, inputs) in recipe_inputs.iter().enumerate() {
         for (item_id, input_amount) in inputs {
             let consumed = input_amount
@@ -3188,7 +3543,8 @@ fn build_closed_recipe_certificate(
         &flow.net_owned_per_second,
         &expected_consumption,
     ]);
-    let mut has_terminal_product = research.is_some() || dyson_rocket.is_some();
+    let mut has_terminal_product =
+        research.is_some() || dyson_rocket.is_some() || dyson_sail.is_some();
     for item_id in ledger_items {
         if !allowed_production.contains(&item_id) && !allowed_consumption.contains(&item_id) {
             return Err(format!(
@@ -3228,6 +3584,7 @@ fn build_closed_recipe_certificate(
         recipe_ids,
         research,
         dyson_rocket,
+        dyson_sail,
     })
 }
 
@@ -3267,14 +3624,19 @@ fn build_ordinary_flow_certificate(
 
     let sources = exclusive_infinite_vein_sources(state)?;
     let research = build_research_sink_certificate(state, snapshots)?;
-    let dyson_rocket = build_dyson_rocket_sink_certificate(state, snapshots)?;
+    let dyson_sail = build_dyson_sail_sink_certificate(state, snapshots)?;
+    let dyson_rocket = if dyson_sail.is_none() {
+        build_dyson_rocket_sink_certificate(state, snapshots)?
+    } else {
+        None
+    };
     let recipe_rejection = (|| {
         let mut windows = Vec::with_capacity(3);
         for window in snapshots.windows(2) {
             windows.push(capture_ordinary_window_flow(
                 &window[0],
                 &window[1],
-                dyson_rocket.is_some(),
+                dyson_rocket.is_some() || dyson_sail.is_some(),
             )?);
         }
         let flow = windows
@@ -3290,6 +3652,7 @@ fn build_ordinary_flow_certificate(
             &flow,
             research.clone(),
             dyson_rocket.clone(),
+            dyson_sail.clone(),
         )
     })();
     if let Ok(certificate) = recipe_rejection {
@@ -3300,9 +3663,10 @@ fn build_ordinary_flow_certificate(
     // Source-only is a strict subset, not a recovery path for a malformed or
     // unclosed active recipe domain. Otherwise a blocked/cyclic factory could
     // still receive extrapolated mining while its material consumers freeze.
-    if !active_ordinary_recipe_ids(state, dyson_rocket.is_some())?.is_empty()
+    if !active_ordinary_recipe_ids(state, dyson_rocket.is_some(), dyson_sail.is_some())?.is_empty()
         || research.is_some()
         || dyson_rocket.is_some()
+        || dyson_sail.is_some()
     {
         return Err(recipe_rejection);
     }
@@ -3380,6 +3744,7 @@ fn build_ordinary_flow_certificate(
         recipe_ids: Vec::new(),
         research: None,
         dyson_rocket: None,
+        dyson_sail: None,
     })
 }
 
@@ -3453,7 +3818,11 @@ struct OrdinaryFlowApplication {
     recipe_certified: bool,
     research_certified: bool,
     rocket_certified: bool,
+    sail_certified: bool,
     rockets_launched: i128,
+    sails_launched: i128,
+    sails_expired: i128,
+    sails_absorbed: i128,
     capacity_limited: bool,
 }
 
@@ -3466,6 +3835,7 @@ fn apply_source_only_flow_certificate(
     if certificate.produced_units_per_second != certificate.units_per_second
         || !certificate.consumed_units_per_second.is_empty()
         || certificate.dyson_rocket.is_some()
+        || certificate.dyson_sail.is_some()
     {
         return Err("source-only certificate has an invalid closed-flow identity".to_owned());
     }
@@ -3592,6 +3962,7 @@ fn apply_ordinary_flow_certificate(
     if certificate.recipe_ids.is_empty()
         && certificate.research.is_none()
         && certificate.dyson_rocket.is_none()
+        && certificate.dyson_sail.is_none()
     {
         return apply_source_only_flow_certificate(
             state,
@@ -3682,6 +4053,7 @@ fn apply_ordinary_flow_certificate(
 
     let research = certificate.research.clone();
     let dyson_rocket = certificate.dyson_rocket.clone();
+    let dyson_sail = certificate.dyson_sail.clone();
     if let Some(research) = &research {
         let current = capture_research_proof_snapshot(state)
             .map_err(|error| format!("research sink state is invalid: {error:#}"))?;
@@ -3710,6 +4082,33 @@ fn apply_ordinary_flow_certificate(
         {
             return Err(
                 "Dyson rocket sink is no longer funded by the closed ordinary-flow ledger"
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(sail) = &dyson_sail {
+        let current = capture_dyson_terminal(state.base_value())
+            .map_err(|error| format!("Dyson solar-sail sink state is invalid: {error:#}"))?;
+        if current != sail.expected {
+            return Err(
+                "Dyson solar-sail sink state diverged from its certified endpoint".to_owned(),
+            );
+        }
+        let material_consumption = certificate
+            .consumed_units_per_second
+            .get(TERMINAL_SAIL_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        let material_production = certificate
+            .produced_units_per_second
+            .get(TERMINAL_SAIL_ITEM_ID)
+            .copied()
+            .unwrap_or(0);
+        if material_consumption != sail.launches_per_second
+            || material_production < sail.launches_per_second
+        {
+            return Err(
+                "Dyson solar-sail sink is no longer funded by the closed ordinary-flow ledger"
                     .to_owned(),
             );
         }
@@ -3771,6 +4170,14 @@ fn apply_ordinary_flow_certificate(
         .map_err(|error| format!("Dyson rocket capacity proof failed: {error:#}"))?;
         accepted_seconds = accepted_seconds.min(dyson_horizon);
     }
+    if let Some(sail) = &dyson_sail {
+        let dyson_horizon = crate::dyson::certified_sail_launch_capacity_seconds(
+            state.base_value(),
+            &sail.launches_per_second_by_orbit,
+        )
+        .map_err(|error| format!("Dyson solar-sail capacity proof failed: {error:#}"))?;
+        accepted_seconds = accepted_seconds.min(dyson_horizon);
+    }
     let mut inventory_baselines = MaterialTotals::new();
     for (item_id, rate) in &certificate.units_per_second {
         if *rate <= 0 {
@@ -3823,6 +4230,7 @@ fn apply_ordinary_flow_certificate(
         recipe_certified: !certificate.recipe_ids.is_empty(),
         research_certified: research.is_some(),
         rocket_certified: dyson_rocket.is_some(),
+        sail_certified: dyson_sail.is_some(),
         capacity_limited: accepted_seconds < scheduled_seconds,
         ..OrdinaryFlowApplication::default()
     };
@@ -3986,6 +4394,41 @@ fn apply_ordinary_flow_certificate(
             .expect("cloned Dyson rocket certificate remains installed")
             .expected = next;
     }
+    if let Some(sail) = dyson_sail {
+        let before = capture_dyson_terminal(state.base_value())
+            .map_err(|error| format!("Dyson solar-sail pre-commit state is invalid: {error:#}"))?;
+        let launched = crate::dyson::apply_certified_sail_launch_schedule(
+            state.base_value_mut(),
+            &sail.launches_per_second_by_orbit,
+            accepted_seconds,
+        )
+        .map_err(|error| format!("Dyson solar-sail commit failed: {error:#}"))?;
+        let expected_launches = sail
+            .launches_per_second
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| "Dyson solar-sail schedule overflowed".to_owned())?;
+        if launched != expected_launches {
+            return Err(format!(
+                "Dyson solar-sail commit launched {launched} instead of {expected_launches}"
+            ));
+        }
+        let next = capture_dyson_terminal(state.base_value())
+            .map_err(|error| format!("committed Dyson solar-sail state is invalid: {error:#}"))?;
+        application.sails_launched = launched;
+        application.sails_expired = next
+            .sails_expired
+            .checked_sub(before.sails_expired)
+            .ok_or_else(|| "Dyson solar-sail expiry schedule overflowed".to_owned())?;
+        application.sails_absorbed = next
+            .sails_absorbed
+            .checked_sub(before.sails_absorbed)
+            .ok_or_else(|| "Dyson solar-sail absorption schedule overflowed".to_owned())?;
+        certificate
+            .dyson_sail
+            .as_mut()
+            .expect("cloned Dyson solar-sail certificate remains installed")
+            .expected = next;
+    }
     Ok(application)
 }
 
@@ -4035,11 +4478,13 @@ fn prove_internal_exact_settlement_candidate(
 /// produced/consumed ledger. A separately proven matrix-lab sink may advance
 /// only the currently selected finite technology or infinite-research level,
 /// clipped before completion, rewards or switching. A separately proven
-/// carrier-rocket sink may launch only the same-window manufactured whole
-/// rockets, update the matching per-system plans and rederive Dyson power;
-/// starting silo inventory and every solar-sail field remain frozen. Finite
-/// resources, stored/fuel energy, construction and every other terminal remain
-/// frozen.
+/// carrier-rocket sink may launch only same-window manufactured whole rockets,
+/// update matching per-system plans and rederive Dyson power. Alternatively a
+/// solar-sail sink may consume only same-window manufactured whole sails and
+/// feed a stable per-orbit launch schedule into the native decay/absorption
+/// lifecycle. Starting launcher inventories are never renewable sources.
+/// Finite resources, stored/fuel energy, construction and every other terminal
+/// remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -4258,6 +4703,7 @@ fn advance_bounded(
                 tail_reason = Some(
                     if ordinary_application.deposited_units > 0
                         || ordinary_application.rockets_launched > 0
+                        || ordinary_application.sails_launched > 0
                     {
                         let scope = if ordinary_application.recipe_certified {
                             "acyclic closed ordinary recipe"
@@ -4269,16 +4715,23 @@ fn advance_bounded(
                         } else {
                             " research remained frozen;"
                         };
-                        let rocket_scope = if ordinary_application.rocket_certified {
+                        let dyson_scope = if ordinary_application.rocket_certified {
                             format!(
                                 " {} material-funded rocket(s) launched into certified per-system Dyson plans;",
                                 ordinary_application.rockets_launched
+                            )
+                        } else if ordinary_application.sail_certified {
+                            format!(
+                                " {} material-funded solar sail(s) launched while the native lifecycle expired {} and absorbed {};",
+                                ordinary_application.sails_launched,
+                                ordinary_application.sails_expired,
+                                ordinary_application.sails_absorbed,
                             )
                         } else {
                             " Dyson rocket and sail terminals remained frozen;".to_owned()
                         };
                         format!(
-                            "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{rocket_scope}{research_scope} construction and other terminal tails remained frozen{}",
+                            "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{dyson_scope}{research_scope} construction and other terminal tails remained frozen{}",
                             ordinary_application.certified_items,
                             ordinary_application.deposited_units,
                             ordinary_application.produced_units,
@@ -7493,7 +7946,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_v10_freezes_an_active_uncertified_solar_sail_launcher_after_exact_prefix() {
+    fn macro_v10_certifies_same_window_funded_solar_sail_launch_and_lifecycle() {
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
             let initial = productive_solar_sail_launch_macro_fixture(multiplier);
             let mut prefix = initial.clone();
@@ -7515,7 +7968,7 @@ mod tests {
                 "the exact prefix must exercise the sail terminal"
             );
 
-            let mut long = initial;
+            let mut long = initial.clone();
             let long_revision = long.revision;
             let long_result = advance_macro_v10(
                 &mut long,
@@ -7527,28 +7980,292 @@ mod tests {
                 long_result
                     .reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("solar-sail")),
+                    .is_some_and(|reason| reason.contains("material-funded solar sail")),
                 "reason={:?}",
                 long_result.reason
             );
             let long_state = long.materialize().unwrap();
-            for frozen in [
-                "entities",
-                "belts",
-                "totalProduced",
-                "quantumLogisticsNetwork",
-                "dysonSwarm",
-                "dysonSphere",
-                "dysonEngineering",
-                "dysonPlans",
-            ] {
+            for frozen in ["entities", "belts"] {
                 assert_eq!(
                     long_state[frozen], prefix_state[frozen],
                     "multiplier={multiplier} field={frozen}"
                 );
             }
+            let prefix_terminal =
+                capture_dyson_terminal(prefix_state.as_object().unwrap()).unwrap();
+            let long_terminal = capture_dyson_terminal(long_state.as_object().unwrap()).unwrap();
+            assert_eq!(
+                long_terminal.sails_launched - prefix_terminal.sails_launched,
+                570
+            );
+            assert!(long_terminal.sails_expired > prefix_terminal.sails_expired);
+            assert_eq!(long_terminal.sails_absorbed, prefix_terminal.sails_absorbed);
+            let before = capture_settlement_snapshot(&initial).unwrap();
+            let after = capture_settlement_snapshot(&long).unwrap();
+            validate_settlement_proof(&before, &after, &long.catalog, None).unwrap();
             assert_eq!(number_at(Some(&long_state), &["elapsedSeconds"]), 600.0);
+
+            let mut segmented = initial;
+            for seconds in [30.0, 111.0, 59.0, 400.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
         }
+    }
+
+    #[test]
+    fn macro_v10_advances_certified_sail_absorption_without_copying_shell_results() {
+        let mut initial = productive_solar_sail_launch_macro_fixture(15.0);
+        initial.base_value_mut()["research"]["completedTechIds"] = json!(["dyson_shell"]);
+        initial.base_value_mut()["dysonPlans"]["helios"]["structurePoints"] = json!(10);
+        initial.base_value_mut()["dysonSphere"]["structurePoints"] = json!(10);
+        crate::dyson::finalize(initial.base_value_mut()).unwrap();
+
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        let result =
+            advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_terminal = capture_dyson_terminal(prefix.base_value()).unwrap();
+        assert!(prefix_terminal.sails_absorbed > 0);
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let long_terminal = capture_dyson_terminal(long.base_value()).unwrap();
+        assert_eq!(
+            long_terminal.sails_launched - prefix_terminal.sails_launched,
+            570
+        );
+        assert!(long_terminal.sails_absorbed > prefix_terminal.sails_absorbed);
+        assert_eq!(
+            long_terminal.shell_sails - prefix_terminal.shell_sails,
+            long_terminal.sails_absorbed - prefix_terminal.sails_absorbed
+        );
+        let before = capture_settlement_snapshot(&initial).unwrap();
+        let after = capture_settlement_snapshot(&long).unwrap();
+        validate_settlement_proof(&before, &after, &long.catalog, None).unwrap();
+
+        let mut segmented = initial;
+        for seconds in [30.0, 111.0, 59.0, 400.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_batches_thirty_day_sail_lifecycle_deterministically() {
+        let initial = productive_solar_sail_launch_macro_fixture(15.0);
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(revision, 2_592_000.0, 172_800.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            capture_dyson_terminal(long.base_value())
+                .unwrap()
+                .sails_launched,
+            2_592_000
+        );
+
+        let mut segmented = initial;
+        for seconds in [30.0, 86_370.0, 2_505_600.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_sail_sink_failure_is_atomic_and_checkpoint_reload_is_deterministic() {
+        let mut calibrated = productive_solar_sail_launch_macro_fixture(15.0);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut corrupted = calibrated.clone();
+        corrupted
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .and_then(|certificate| certificate.dyson_sail.as_mut())
+            .expect("solar-sail certificate")
+            .expected
+            .sails_launched += 1;
+        let before_hash = corrupted.summary().unwrap().canonical_sha256;
+        let before_revision = corrupted.revision;
+        let before_credit = corrupted.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut corrupted,
+            &pure_idle_macro_request(before_revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(corrupted.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(corrupted.revision, before_revision);
+        assert_eq!(
+            corrupted.pure_idle_macro_exact_seconds_used(),
+            before_credit
+        );
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut restored =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert!(restored.pure_idle_macro_runtime.is_none());
+        for state in [&mut calibrated, &mut restored] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 570.0, 38.0)).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            restored.summary().unwrap().canonical_sha256,
+            calibrated.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn certified_sail_helper_reserves_existing_orbit_stock_for_expiry_counters() {
+        let mut value = powered_fixture_base(15.0, "infinite");
+        let base = value.as_object_mut().unwrap();
+        let orbit = base["dysonEngineering"]["orbitsBySystem"]["helios"]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_object_mut()
+            .unwrap();
+        orbit.insert("sailsInOrbit".to_owned(), json!(2));
+        orbit.insert("totalLaunched".to_owned(), json!(2));
+        orbit.insert("totalExpired".to_owned(), json!(MAX_SAFE_INTEGER - 3.0));
+        base["dysonSwarm"]["sailsInOrbit"] = json!(2);
+        base["dysonSwarm"]["totalLaunched"] = json!(2);
+        base["dysonSwarm"]["totalExpired"] = json!(MAX_SAFE_INTEGER - 3.0);
+        crate::dyson::finalize(base).unwrap();
+
+        let one = BTreeMap::from([(
+            "helios".to_owned(),
+            BTreeMap::from([("test-orbit-helios".to_owned(), 1_i128)]),
+        )]);
+        assert_eq!(
+            crate::dyson::certified_sail_launch_capacity_seconds(base, &one).unwrap(),
+            1
+        );
+        assert_eq!(
+            crate::dyson::apply_certified_sail_launch_schedule(base, &one, 1).unwrap(),
+            1
+        );
+        assert_eq!(
+            crate::dyson::certified_sail_launch_capacity_seconds(base, &one).unwrap(),
+            0
+        );
+        let before = serde_json::to_vec(base).unwrap();
+        assert!(crate::dyson::apply_certified_sail_launch_schedule(base, &one, 1).is_err());
+        assert_eq!(serde_json::to_vec(base).unwrap(), before);
+    }
+
+    #[test]
+    fn macro_v10_solar_sail_sink_never_replays_prefilled_ejector_inventory() {
+        let initial = productive_solar_sail_launch_macro_fixture(15.0);
+        let mut underfunded = initial.clone();
+        let mut assembler = underfunded.parse_entity(3).unwrap();
+        assembler["machineCount"] = json!(0);
+        underfunded.replace_entity_raw(3, serde_json::to_string(&assembler).unwrap().into());
+        underfunded.rebuild_indexes().unwrap();
+
+        let mut prefix = underfunded.clone();
+        let revision = prefix.revision;
+        let result =
+            advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_state = prefix.materialize().unwrap();
+        assert_eq!(
+            proof_counter(
+                prefix_state["totalProduced"].get(TERMINAL_SAIL_ITEM_ID),
+                "underfunded solar-sail production",
+            )
+            .unwrap(),
+            0,
+        );
+        assert!(
+            proof_counter(
+                prefix_state["dysonSwarm"].get("totalLaunched"),
+                "underfunded exact launch",
+            )
+            .unwrap()
+                > 0,
+        );
+
+        let mut long = underfunded;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result.reason.as_deref().is_some_and(|reason| {
+                reason.contains("depleted owned inventory")
+                    || reason.contains("same-window certified production")
+            }),
+            "reason={:?}",
+            result.reason,
+        );
+        let long_state = long.materialize().unwrap();
+        for frozen in [
+            "entities",
+            "belts",
+            "totalProduced",
+            "quantumLogisticsNetwork",
+            "dysonSwarm",
+            "dysonSphere",
+            "dysonEngineering",
+            "dysonPlans",
+        ] {
+            assert_eq!(long_state[frozen], prefix_state[frozen], "field={frozen}");
+        }
+        assert_eq!(number_at(Some(&long_state), &["elapsedSeconds"]), 600.0);
     }
 
     #[test]
@@ -7783,7 +8500,7 @@ mod tests {
         let cycle_hash = cycle.summary().unwrap().canonical_sha256;
         let cycle_sources = exclusive_infinite_vein_sources(&cycle).unwrap();
         let rejection =
-            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None, None)
+            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None, None, None)
                 .unwrap_err();
         assert!(rejection.contains("dependency cycle"), "{rejection}");
         assert_eq!(cycle.summary().unwrap().canonical_sha256, cycle_hash);
@@ -7803,9 +8520,15 @@ mod tests {
         alternate.rebuild_indexes().unwrap();
         let alternate_hash = alternate.summary().unwrap().canonical_sha256;
         let alternate_sources = exclusive_infinite_vein_sources(&alternate).unwrap();
-        let rejection =
-            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0], None, None)
-                .unwrap_err();
+        let rejection = build_closed_recipe_certificate(
+            &alternate,
+            &alternate_sources,
+            &flows[0],
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             rejection.contains("alternate active producers"),
             "{rejection}"
@@ -7828,6 +8551,7 @@ mod tests {
             &flows[0],
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -7845,9 +8569,15 @@ mod tests {
         sprayed.replace_entity_raw(3, serde_json::to_string(&entity).unwrap().into());
         sprayed.rebuild_indexes().unwrap();
         let sprayed_sources = exclusive_infinite_vein_sources(&sprayed).unwrap();
-        let rejection =
-            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0], None, None)
-                .unwrap_err();
+        let rejection = build_closed_recipe_certificate(
+            &sprayed,
+            &sprayed_sources,
+            &flows[0],
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(rejection.contains("proliferator"), "{rejection}");
     }
 
@@ -8407,6 +9137,7 @@ mod tests {
                 recipe_ids: Vec::new(),
                 research: None,
                 dyson_rocket: None,
+                dyson_sail: None,
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

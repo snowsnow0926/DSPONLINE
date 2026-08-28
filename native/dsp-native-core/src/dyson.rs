@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -1111,6 +1111,7 @@ pub(crate) fn certified_rocket_launch_capacity_seconds(
         bail!("certified rocket rate has no target system");
     }
     let dyson = load(base)?;
+    validate_certified_dyson_commit(base, &dyson)?;
     let max_safe = MAX_SAFE_INTEGER as i128;
     let global_structure = strict_non_negative_number(
         &dyson.sphere,
@@ -1225,7 +1226,7 @@ pub(crate) fn certified_rocket_launch_capacity_seconds(
     Ok(horizon.max(0))
 }
 
-fn validate_certified_rocket_commit(
+fn validate_certified_dyson_commit(
     base: &Map<String, Value>,
     state: &DysonState,
 ) -> anyhow::Result<()> {
@@ -1354,9 +1355,802 @@ pub(crate) fn apply_certified_rocket_launches(
         rounded(spent + total as f64 * DYSON_ROCKET_LAUNCH_ENERGY_MJ, 3),
     )?;
     update_sphere_generation(base, &mut dyson)?;
-    validate_certified_rocket_commit(base, &dyson)?;
+    validate_certified_dyson_commit(base, &dyson)?;
     save(base, dyson);
     Ok(total)
+}
+
+/// Returns a conservative whole-second horizon for a certified, stable
+/// per-orbit solar-sail launch schedule. Existing orbit stock is reserved once
+/// for every monotonic lifecycle counter it can still enter; future launches
+/// are then bounded by their certified rate. This deliberately underestimates
+/// the horizon near a safe-integer boundary instead of relying on expiry or
+/// absorption timing to make a larger window happen to fit.
+pub(crate) fn certified_sail_launch_capacity_seconds(
+    base: &Map<String, Value>,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+) -> anyhow::Result<i128> {
+    if launches_per_second_by_orbit.is_empty() {
+        bail!("certified solar-sail rate has no target orbit");
+    }
+    let dyson = load(base)?;
+    validate_certified_dyson_commit(base, &dyson)?;
+    let max_safe = MAX_SAFE_INTEGER as i128;
+    let mut horizon = max_safe;
+    let mut total_rate = 0_i128;
+    let mut total_orbit_stock = 0_i128;
+    let mut total_orbit_launched = 0_i128;
+    let mut total_orbit_expired = 0_i128;
+    let mut current_swarm_generation = 0.0;
+    let mut future_generation_rate = 0.0;
+    let mut potential_shell_generation_from_existing_stock = 0.0;
+
+    let reserve_counter = |horizon: &mut i128,
+                           current: i128,
+                           one_time_reserve: i128,
+                           rate: i128,
+                           label: &str|
+     -> anyhow::Result<()> {
+        if current < 0 || current > max_safe || one_time_reserve < 0 || rate < 0 {
+            bail!("{label} has an invalid certified counter bound");
+        }
+        let room = max_safe - current;
+        if one_time_reserve > room {
+            *horizon = 0;
+        } else if rate > 0 {
+            *horizon = (*horizon).min((room - one_time_reserve) / rate);
+        }
+        Ok(())
+    };
+
+    for (system_id, orbit_rates) in launches_per_second_by_orbit {
+        if !SYSTEM_IDS.contains(&system_id.as_str()) || orbit_rates.is_empty() {
+            bail!("certified solar-sail target system {system_id} is invalid");
+        }
+    }
+    for system_id in SYSTEM_IDS {
+        let orbit_rates = launches_per_second_by_orbit.get(system_id);
+        let orbits = orbits_for(&dyson, system_id);
+        let mut seen_orbits = HashSet::new();
+        let mut system_stock = 0_i128;
+        let mut system_rate = 0_i128;
+        let per_sail_generation = sail_power(base, system_id);
+        if !per_sail_generation.is_finite() || per_sail_generation <= 0.0 {
+            bail!("certified solar-sail power for {system_id} is invalid");
+        }
+        for (orbit_index, orbit) in orbits.iter().enumerate() {
+            let orbit = orbit.as_object().ok_or_else(|| {
+                anyhow!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_index} is invalid")
+            })?;
+            let orbit_id = text(orbit, "id")
+                .filter(|orbit_id| !orbit_id.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.id is invalid"
+                    )
+                })?;
+            if !seen_orbits.insert(orbit_id.to_owned()) {
+                bail!("dysonEngineering.orbitsBySystem.{system_id} repeats orbit {orbit_id}");
+            }
+            let rate = orbit_rates
+                .and_then(|rates| rates.get(orbit_id))
+                .copied()
+                .unwrap_or(0);
+            if rate < 0 || rate > max_safe {
+                bail!("certified solar-sail rate {system_id}.{orbit_id} is invalid");
+            }
+            let stock = strict_non_negative_number(
+                orbit,
+                "sailsInOrbit",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.sailsInOrbit"),
+                true,
+            )? as i128;
+            let launched = strict_non_negative_number(
+                orbit,
+                "totalLaunched",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalLaunched"),
+                true,
+            )? as i128;
+            let expired = strict_non_negative_number(
+                orbit,
+                "totalExpired",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalExpired"),
+                true,
+            )? as i128;
+            if launched < stock {
+                bail!(
+                    "certified solar-sail orbit {system_id}.{orbit_id} has less launches than stock"
+                );
+            }
+            reserve_counter(
+                &mut horizon,
+                stock,
+                0,
+                rate,
+                &format!("{system_id}.{orbit_id}.sailsInOrbit"),
+            )?;
+            reserve_counter(
+                &mut horizon,
+                launched,
+                0,
+                rate,
+                &format!("{system_id}.{orbit_id}.totalLaunched"),
+            )?;
+            reserve_counter(
+                &mut horizon,
+                expired,
+                stock,
+                rate,
+                &format!("{system_id}.{orbit_id}.totalExpired"),
+            )?;
+
+            let orbit_generation = stock as f64 * per_sail_generation;
+            let orbit_generation_rate = rate as f64 * per_sail_generation;
+            if !orbit_generation.is_finite()
+                || orbit_generation > MAX_SAFE_INTEGER
+                || !orbit_generation_rate.is_finite()
+            {
+                horizon = 0;
+            } else if orbit_generation_rate > 0.0 {
+                horizon = horizon.min(
+                    ((MAX_SAFE_INTEGER - orbit_generation) / orbit_generation_rate).floor() as i128,
+                );
+            }
+            system_stock = system_stock
+                .checked_add(stock)
+                .ok_or_else(|| anyhow!("certified solar-sail system stock overflowed"))?;
+            system_rate = system_rate
+                .checked_add(rate)
+                .ok_or_else(|| anyhow!("certified solar-sail system rate overflowed"))?;
+            total_orbit_stock = total_orbit_stock
+                .checked_add(stock)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit stock overflowed"))?;
+            total_orbit_launched = total_orbit_launched
+                .checked_add(launched)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit launch total overflowed"))?;
+            total_orbit_expired = total_orbit_expired
+                .checked_add(expired)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit expiry total overflowed"))?;
+            current_swarm_generation += orbit_generation;
+            future_generation_rate += orbit_generation_rate;
+            potential_shell_generation_from_existing_stock += orbit_generation;
+        }
+        if let Some(orbit_rates) = orbit_rates {
+            for (orbit_id, rate) in orbit_rates {
+                if *rate <= 0 || *rate > max_safe {
+                    bail!("certified solar-sail rate {system_id}.{orbit_id} is invalid");
+                }
+                if !seen_orbits.contains(orbit_id) {
+                    bail!("certified solar-sail target {system_id}.{orbit_id} disappeared");
+                }
+            }
+        }
+
+        let plan = dyson
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared"))?;
+        let shell = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        reserve_counter(
+            &mut horizon,
+            shell,
+            system_stock,
+            system_rate,
+            &format!("dysonPlans.{system_id}.shellSails"),
+        )?;
+        total_rate = total_rate
+            .checked_add(system_rate)
+            .ok_or_else(|| anyhow!("certified solar-sail rate sum overflowed"))?;
+    }
+    if total_rate <= 0 || total_rate > max_safe {
+        bail!("certified solar-sail rate sum is invalid");
+    }
+    let swarm_stock = strict_non_negative_number(
+        &dyson.swarm,
+        "sailsInOrbit",
+        "dysonSwarm.sailsInOrbit",
+        true,
+    )? as i128;
+    let swarm_launched = strict_non_negative_number(
+        &dyson.swarm,
+        "totalLaunched",
+        "dysonSwarm.totalLaunched",
+        true,
+    )? as i128;
+    let swarm_expired = strict_non_negative_number(
+        &dyson.swarm,
+        "totalExpired",
+        "dysonSwarm.totalExpired",
+        true,
+    )? as i128;
+    if swarm_stock != total_orbit_stock
+        || swarm_launched != total_orbit_launched
+        || swarm_expired != total_orbit_expired
+    {
+        bail!("certified solar-sail global counters do not match the orbit ledger");
+    }
+    reserve_counter(
+        &mut horizon,
+        swarm_stock,
+        0,
+        total_rate,
+        "dysonSwarm.sailsInOrbit",
+    )?;
+    reserve_counter(
+        &mut horizon,
+        swarm_launched,
+        0,
+        total_rate,
+        "dysonSwarm.totalLaunched",
+    )?;
+    reserve_counter(
+        &mut horizon,
+        swarm_expired,
+        total_orbit_stock,
+        total_rate,
+        "dysonSwarm.totalExpired",
+    )?;
+    for (key, label) in [
+        ("totalSailsAbsorbed", "dysonSphere.totalSailsAbsorbed"),
+        ("shellSails", "dysonSphere.shellSails"),
+    ] {
+        let current = strict_non_negative_number(&dyson.sphere, key, label, true)? as i128;
+        reserve_counter(&mut horizon, current, total_orbit_stock, total_rate, label)?;
+    }
+
+    if !current_swarm_generation.is_finite()
+        || current_swarm_generation > MAX_SAFE_INTEGER
+        || !future_generation_rate.is_finite()
+    {
+        horizon = 0;
+    } else if future_generation_rate > 0.0 {
+        horizon = horizon.min(
+            ((MAX_SAFE_INTEGER - current_swarm_generation) / future_generation_rate).floor()
+                as i128,
+        );
+    }
+    let current_sphere_generation = derived_sphere_generation(base, &dyson);
+    if !current_sphere_generation.is_finite()
+        || current_sphere_generation > MAX_SAFE_INTEGER
+        || !potential_shell_generation_from_existing_stock.is_finite()
+        || potential_shell_generation_from_existing_stock
+            > MAX_SAFE_INTEGER - current_sphere_generation
+    {
+        horizon = 0;
+    } else if future_generation_rate > 0.0 {
+        horizon = horizon.min(
+            ((MAX_SAFE_INTEGER
+                - current_sphere_generation
+                - potential_shell_generation_from_existing_stock)
+                / future_generation_rate)
+                .floor() as i128,
+        );
+    }
+    let launch_energy = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+    let launch_energy_rate = total_rate as f64 * DYSON_SAIL_LAUNCH_ENERGY_MJ;
+    if !launch_energy_rate.is_finite() || launch_energy_rate <= 0.0 {
+        bail!("certified solar-sail launch-energy rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - launch_energy) / launch_energy_rate).floor() as i128);
+    Ok(horizon.max(0))
+}
+
+const MAX_CERTIFIED_SAIL_UNBATCHED_STEPS: u64 = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailOrbitDynamic {
+    system_id: String,
+    orbit_id: String,
+    stock: i128,
+    decay_progress_bits: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailSystemDynamic {
+    system_id: String,
+    absorption_progress_bits: u64,
+    shell_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailLifecycleSignature {
+    systems: Vec<CertifiedSailSystemDynamic>,
+    orbits: Vec<CertifiedSailOrbitDynamic>,
+}
+
+#[derive(Debug, Clone)]
+struct CertifiedSailLifecycleCounters {
+    shell_by_system: BTreeMap<String, i128>,
+    launched_by_orbit: BTreeMap<(String, String), i128>,
+    expired_by_orbit: BTreeMap<(String, String), i128>,
+    total_absorbed: i128,
+}
+
+#[derive(Debug, Clone)]
+struct CertifiedSailCycleCheckpoint {
+    step: u64,
+    counters: CertifiedSailLifecycleCounters,
+}
+
+fn certified_sail_cycle_snapshot(
+    state: &DysonState,
+) -> anyhow::Result<(
+    CertifiedSailLifecycleSignature,
+    CertifiedSailLifecycleCounters,
+)> {
+    let progress_by_system = state
+        .engineering
+        .get("absorptionProgressBySystem")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native Dyson absorption progress is missing"))?;
+    let mut systems = Vec::with_capacity(SYSTEM_IDS.len());
+    let mut orbits_dynamic = Vec::new();
+    let mut shell_by_system = BTreeMap::new();
+    let mut launched_by_orbit = BTreeMap::new();
+    let mut expired_by_orbit = BTreeMap::new();
+    for system_id in SYSTEM_IDS {
+        let plan = state
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native Dyson plan is missing: {system_id}"))?;
+        let shell = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let shell_capacity = plan_shell_capacity(plan).floor();
+        if !shell_capacity.is_finite() || !(0.0..=MAX_SAFE_INTEGER).contains(&shell_capacity) {
+            bail!("dysonPlans.{system_id} has an invalid shell capacity");
+        }
+        let absorption_progress = progress_by_system
+            .get(system_id)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if !absorption_progress.is_finite() || !(0.0..1.0 + EPSILON).contains(&absorption_progress)
+        {
+            bail!("Dyson absorption progress for {system_id} is invalid");
+        }
+        systems.push(CertifiedSailSystemDynamic {
+            system_id: system_id.to_owned(),
+            absorption_progress_bits: absorption_progress.to_bits(),
+            shell_open: shell_capacity - shell as f64 >= 1.0,
+        });
+        shell_by_system.insert(system_id.to_owned(), shell);
+
+        let mut seen = HashSet::new();
+        for (orbit_index, orbit) in orbits_for(state, system_id).iter().enumerate() {
+            let orbit = orbit.as_object().ok_or_else(|| {
+                anyhow!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_index} is invalid")
+            })?;
+            let orbit_id = text(orbit, "id")
+                .filter(|orbit_id| !orbit_id.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.id is invalid"
+                    )
+                })?;
+            if !seen.insert(orbit_id.to_owned()) {
+                bail!("dysonEngineering.orbitsBySystem.{system_id} repeats orbit {orbit_id}");
+            }
+            let stock = strict_non_negative_number(
+                orbit,
+                "sailsInOrbit",
+                &format!("{system_id}.{orbit_id}.sailsInOrbit"),
+                true,
+            )? as i128;
+            let launched = strict_non_negative_number(
+                orbit,
+                "totalLaunched",
+                &format!("{system_id}.{orbit_id}.totalLaunched"),
+                true,
+            )? as i128;
+            let expired = strict_non_negative_number(
+                orbit,
+                "totalExpired",
+                &format!("{system_id}.{orbit_id}.totalExpired"),
+                true,
+            )? as i128;
+            let decay_progress = orbit
+                .get("decayProgress")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if !decay_progress.is_finite() || !(0.0..1.0 + EPSILON).contains(&decay_progress) {
+                bail!("Dyson decay progress for {system_id}.{orbit_id} is invalid");
+            }
+            let key = (system_id.to_owned(), orbit_id.to_owned());
+            orbits_dynamic.push(CertifiedSailOrbitDynamic {
+                system_id: key.0.clone(),
+                orbit_id: key.1.clone(),
+                stock,
+                decay_progress_bits: decay_progress.to_bits(),
+            });
+            launched_by_orbit.insert(key.clone(), launched);
+            expired_by_orbit.insert(key, expired);
+        }
+    }
+    let total_absorbed = strict_non_negative_number(
+        &state.sphere,
+        "totalSailsAbsorbed",
+        "dysonSphere.totalSailsAbsorbed",
+        true,
+    )? as i128;
+    Ok((
+        CertifiedSailLifecycleSignature {
+            systems,
+            orbits: orbits_dynamic,
+        },
+        CertifiedSailLifecycleCounters {
+            shell_by_system,
+            launched_by_orbit,
+            expired_by_orbit,
+            total_absorbed,
+        },
+    ))
+}
+
+fn certified_sail_counter_deltas<K: Ord + Clone>(
+    before: &BTreeMap<K, i128>,
+    after: &BTreeMap<K, i128>,
+    label: &str,
+) -> anyhow::Result<BTreeMap<K, i128>> {
+    if before.keys().ne(after.keys()) {
+        bail!("{label} keys changed inside a certified lifecycle cycle");
+    }
+    before
+        .iter()
+        .map(|(key, before)| {
+            let after = after
+                .get(key)
+                .expect("certified lifecycle counter key remains present");
+            let delta = after
+                .checked_sub(*before)
+                .ok_or_else(|| anyhow!("{label} counter regressed"))?;
+            Ok((key.clone(), delta))
+        })
+        .collect()
+}
+
+fn repeat_certified_sail_cycle(
+    base: &Map<String, Value>,
+    state: &mut DysonState,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+    before: &CertifiedSailLifecycleCounters,
+    after: &CertifiedSailLifecycleCounters,
+    cycle_seconds: u64,
+    requested_repetitions: u64,
+) -> anyhow::Result<u64> {
+    if cycle_seconds == 0 || requested_repetitions == 0 {
+        return Ok(0);
+    }
+    let shell_deltas = certified_sail_counter_deltas(
+        &before.shell_by_system,
+        &after.shell_by_system,
+        "Dyson shell",
+    )?;
+    let launch_deltas = certified_sail_counter_deltas(
+        &before.launched_by_orbit,
+        &after.launched_by_orbit,
+        "solar-sail launch",
+    )?;
+    let expiry_deltas = certified_sail_counter_deltas(
+        &before.expired_by_orbit,
+        &after.expired_by_orbit,
+        "solar-sail expiry",
+    )?;
+    let absorbed_delta = after
+        .total_absorbed
+        .checked_sub(before.total_absorbed)
+        .ok_or_else(|| anyhow!("solar-sail absorption counter regressed"))?;
+    let cycle_seconds = i128::from(cycle_seconds);
+    let mut launch_sum = 0_i128;
+    for ((system_id, orbit_id), delta) in &launch_deltas {
+        let rate = launches_per_second_by_orbit
+            .get(system_id)
+            .and_then(|orbits| orbits.get(orbit_id))
+            .copied()
+            .unwrap_or(0);
+        let expected = rate
+            .checked_mul(cycle_seconds)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle launch rate overflowed"))?;
+        if *delta != expected {
+            bail!(
+                "certified solar-sail cycle launched {delta} instead of {expected} for {system_id}.{orbit_id}"
+            );
+        }
+        launch_sum = launch_sum
+            .checked_add(*delta)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle launch total overflowed"))?;
+    }
+    let expected_launch_sum = launches_per_second_by_orbit
+        .values()
+        .flat_map(BTreeMap::values)
+        .try_fold(0_i128, |total, rate| total.checked_add(*rate))
+        .ok_or_else(|| anyhow!("certified solar-sail cycle rate sum overflowed"))?
+        .checked_mul(cycle_seconds)
+        .ok_or_else(|| anyhow!("certified solar-sail cycle launch total overflowed"))?;
+    if launch_sum != expected_launch_sum {
+        bail!("certified solar-sail cycle does not close its launch ledger");
+    }
+    let shell_sum = shell_deltas
+        .values()
+        .try_fold(0_i128, |total, delta| total.checked_add(*delta))
+        .ok_or_else(|| anyhow!("certified Dyson shell cycle total overflowed"))?;
+    if shell_sum != absorbed_delta {
+        bail!("certified solar-sail cycle does not close its absorption ledger");
+    }
+    let expiry_sum = expiry_deltas
+        .values()
+        .try_fold(0_i128, |total, delta| total.checked_add(*delta))
+        .ok_or_else(|| anyhow!("certified solar-sail cycle expiry total overflowed"))?;
+    if launch_sum
+        != expiry_sum
+            .checked_add(absorbed_delta)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle terminal total overflowed"))?
+    {
+        bail!("certified solar-sail cycle does not close its terminal flow ledger");
+    }
+
+    let mut repetitions = i128::from(requested_repetitions);
+    for (system_id, delta) in &shell_deltas {
+        if *delta == 0 {
+            continue;
+        }
+        let plan = state
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native Dyson plan disappeared: {system_id}"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let capacity = plan_shell_capacity(plan).floor();
+        if !capacity.is_finite() || !(0.0..=MAX_SAFE_INTEGER).contains(&capacity) {
+            bail!("dysonPlans.{system_id} has an invalid shell capacity");
+        }
+        repetitions = repetitions.min((capacity as i128).saturating_sub(current) / delta);
+    }
+    if repetitions <= 0 {
+        return Ok(0);
+    }
+
+    for (system_id, delta) in shell_deltas {
+        if delta == 0 {
+            continue;
+        }
+        let plan = state
+            .plans
+            .get_mut(&system_id)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native Dyson plan disappeared: {system_id}"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let added = delta
+            .checked_mul(repetitions)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.shellSails cycle overflowed"))?;
+        let next = current
+            .checked_add(added)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.shellSails overflowed"))?;
+        set_number(plan, "shellSails", next as f64)?;
+        reconcile_plan(plan)?;
+    }
+    for system_id in SYSTEM_IDS {
+        for orbit in orbits_for_mut(state, system_id)?
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+        {
+            let orbit_id = text(orbit, "id")
+                .ok_or_else(|| anyhow!("native Dyson orbit ID disappeared"))?
+                .to_owned();
+            let key = (system_id.to_owned(), orbit_id.clone());
+            for (field, deltas, label) in [
+                ("totalLaunched", &launch_deltas, "solar-sail launch"),
+                ("totalExpired", &expiry_deltas, "solar-sail expiry"),
+            ] {
+                let delta = deltas
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| anyhow!("{label} cycle orbit disappeared"))?;
+                if delta == 0 {
+                    continue;
+                }
+                let current = strict_non_negative_number(
+                    orbit,
+                    field,
+                    &format!("{system_id}.{orbit_id}.{field}"),
+                    true,
+                )? as i128;
+                let added = delta
+                    .checked_mul(repetitions)
+                    .ok_or_else(|| anyhow!("{label} cycle overflowed"))?;
+                let next = current
+                    .checked_add(added)
+                    .ok_or_else(|| anyhow!("{label} counter overflowed"))?;
+                set_number(orbit, field, next as f64)?;
+            }
+        }
+    }
+    if absorbed_delta > 0 {
+        let added = absorbed_delta
+            .checked_mul(repetitions)
+            .ok_or_else(|| anyhow!("solar-sail absorption cycle overflowed"))?;
+        let current = strict_non_negative_number(
+            &state.sphere,
+            "totalSailsAbsorbed",
+            "dysonSphere.totalSailsAbsorbed",
+            true,
+        )? as i128;
+        set_number(
+            &mut state.sphere,
+            "totalSailsAbsorbed",
+            current
+                .checked_add(added)
+                .ok_or_else(|| anyhow!("solar-sail absorption counter overflowed"))?
+                as f64,
+        )?;
+    }
+    // The per-orbit counters are authoritative for this private cycle jump.
+    // Synchronize their legacy aggregate before `update_generation` calls
+    // `sync_swarm`, otherwise that compatibility path would interpret the
+    // still-stale global total as an instruction to remove the skipped events.
+    aggregate_swarm(state)?;
+    update_generation(base, state)?;
+    validate_certified_dyson_commit(base, state)?;
+    u64::try_from(repetitions)
+        .map_err(|_| anyhow!("certified solar-sail cycle repetition cannot be represented"))
+}
+
+/// Advances only the Dyson sail lifecycle for a same-window-funded launch
+/// schedule. Each second follows the exact engine's observable order:
+/// absorption/decay first, then ejector launches. The factory, launcher caches
+/// and production totals are owned by the caller's closed material ledger.
+pub(crate) fn apply_certified_sail_launch_schedule(
+    base: &mut Map<String, Value>,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+    seconds: i128,
+) -> anyhow::Result<i128> {
+    if seconds < 0 {
+        bail!("certified solar-sail schedule has a negative duration");
+    }
+    if seconds == 0 {
+        return Ok(0);
+    }
+    if certified_sail_launch_capacity_seconds(base, launches_per_second_by_orbit)? < seconds {
+        bail!("certified solar-sail schedule exceeds a safe counter boundary");
+    }
+    let seconds = u64::try_from(seconds)
+        .map_err(|_| anyhow!("certified solar-sail duration cannot be iterated"))?;
+    let snapshot = base.clone();
+    let mut dyson = load(base)?;
+    sync_swarm(&snapshot, &mut dyson)?;
+    sync_sphere(&mut dyson)?;
+    let total_rate = launches_per_second_by_orbit
+        .values()
+        .flat_map(BTreeMap::values)
+        .try_fold(0_i128, |total, rate| {
+            total
+                .checked_add(*rate)
+                .ok_or_else(|| anyhow!("certified solar-sail rate sum overflowed"))
+        })?;
+    let mut seen_cycles =
+        HashMap::<CertifiedSailLifecycleSignature, CertifiedSailCycleCheckpoint>::new();
+    let mut step = 0_u64;
+    let mut unbatched_steps = 0_u64;
+    while step < seconds {
+        let (signature, counters) = certified_sail_cycle_snapshot(&dyson)?;
+        if let Some(previous) = seen_cycles.get(&signature).cloned() {
+            let cycle_seconds = step.saturating_sub(previous.step);
+            if let Some(repetitions) = (seconds - step).checked_div(cycle_seconds) {
+                let repeated = repeat_certified_sail_cycle(
+                    &snapshot,
+                    &mut dyson,
+                    launches_per_second_by_orbit,
+                    &previous.counters,
+                    &counters,
+                    cycle_seconds,
+                    repetitions,
+                )?;
+                if repeated > 0 {
+                    step = step
+                        .checked_add(cycle_seconds.checked_mul(repeated).ok_or_else(|| {
+                            anyhow!("certified solar-sail cycle duration overflowed")
+                        })?)
+                        .ok_or_else(|| anyhow!("certified solar-sail duration overflowed"))?;
+                    unbatched_steps = 0;
+                    continue;
+                }
+            }
+        } else {
+            seen_cycles.insert(signature, CertifiedSailCycleCheckpoint { step, counters });
+        }
+        if unbatched_steps >= MAX_CERTIFIED_SAIL_UNBATCHED_STEPS {
+            bail!(
+                "certified solar-sail lifecycle did not reach a safely repeatable cycle within {MAX_CERTIFIED_SAIL_UNBATCHED_STEPS} steps"
+            );
+        }
+        absorb(&snapshot, &mut dyson, 1.0)?;
+        decay(&snapshot, &mut dyson, 1.0)?;
+        for (system_id, orbit_rates) in launches_per_second_by_orbit {
+            let per_sail = sail_power(&snapshot, system_id);
+            let orbits = orbits_for_mut(&mut dyson, system_id)?;
+            for (orbit_id, rate) in orbit_rates {
+                let orbit = orbits
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .find(|orbit| text(orbit, "id") == Some(orbit_id.as_str()))
+                    .ok_or_else(|| {
+                        anyhow!("certified solar-sail target {system_id}.{orbit_id} disappeared")
+                    })?;
+                let stock = strict_non_negative_number(
+                    orbit,
+                    "sailsInOrbit",
+                    &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.sailsInOrbit"),
+                    true,
+                )? as i128;
+                let launched = strict_non_negative_number(
+                    orbit,
+                    "totalLaunched",
+                    &format!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalLaunched"
+                    ),
+                    true,
+                )? as i128;
+                let next_stock = stock
+                    .checked_add(*rate)
+                    .ok_or_else(|| anyhow!("certified solar-sail orbit stock overflowed"))?;
+                let next_launched = launched
+                    .checked_add(*rate)
+                    .ok_or_else(|| anyhow!("certified solar-sail launch counter overflowed"))?;
+                set_number(orbit, "sailsInOrbit", next_stock as f64)?;
+                set_number(orbit, "totalLaunched", next_launched as f64)?;
+                set_number(orbit, "generationKw", next_stock as f64 * per_sail)?;
+            }
+        }
+        // Keep the legacy/global fields synchronized before the next exact
+        // lifecycle second; otherwise sync_swarm would interpret the newly
+        // launched orbit stock as a legacy aggregate mismatch.
+        aggregate_swarm(&mut dyson)?;
+        step += 1;
+        unbatched_steps += 1;
+    }
+    let launched = total_rate
+        .checked_mul(i128::from(seconds))
+        .ok_or_else(|| anyhow!("certified solar-sail schedule total overflowed"))?;
+    let spent = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+    set_number(
+        &mut dyson.engineering,
+        "launchEnergySpentMj",
+        rounded(spent + launched as f64 * DYSON_SAIL_LAUNCH_ENERGY_MJ, 3),
+    )?;
+    update_generation(&snapshot, &mut dyson)?;
+    validate_certified_dyson_commit(&snapshot, &dyson)?;
+    save(base, dyson);
+    Ok(launched)
 }
 
 pub(crate) fn finalize(base: &mut Map<String, Value>) -> anyhow::Result<()> {

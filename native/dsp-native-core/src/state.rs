@@ -36,6 +36,17 @@ const MAX_VIEWPORT_OPAQUE_ID_BYTES: usize = 1_024;
 const VIEWPORT_SPATIAL_CELL_SIZE: f64 = 512.0;
 const MAX_VIEWPORT_GRID_CELL_PROBES: u64 = 4_096;
 const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
+const MAX_TECHNOLOGY_PROJECTION_TECH_ROWS: usize = 512;
+const MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS: usize = 16;
+const MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS: usize = 8;
+const TECHNOLOGY_PROJECTION_MATRIX_ITEMS: [&str; 6] = [
+    "electromagnetic_matrix",
+    "energy_matrix",
+    "structure_matrix",
+    "information_matrix",
+    "gravity_matrix",
+    "universe_matrix",
+];
 const NONE_SYMBOL: u32 = u32::MAX;
 const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
 const BELT_CHECKPOINT_CHUNK_SIZE: usize = 2_048;
@@ -4729,6 +4740,277 @@ impl CoreState {
         Ok(value)
     }
 
+    /// Builds the complete dynamic read model for the technology workspace.
+    ///
+    /// The payload is constant-size with respect to factory entities and belts:
+    /// entity records are inspected only inside the native process to aggregate
+    /// the six matrix stocks and are never cloned into the renderer. Research
+    /// collections retain their total counts and explicit truncation markers so
+    /// an over-limit save can be rejected as one atom by the renderer.
+    pub fn technology_projection(&self) -> anyhow::Result<Value> {
+        let research = self
+            .base
+            .get("research")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection research is missing"))?;
+        let endgame = self
+            .base
+            .get("endgame")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection endgame is missing"))?;
+        let settings = self
+            .base
+            .get("settings")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection settings are missing"))?;
+
+        let optional_id = |record: &Map<String, Value>, key: &str| -> anyhow::Result<Value> {
+            match record.get(key) {
+                None | Some(Value::Null) => Ok(Value::Null),
+                Some(Value::String(value)) if !value.is_empty() && value.len() <= 1_024 => {
+                    Ok(Value::String(value.clone()))
+                }
+                _ => bail!("native technology projection {key} is invalid"),
+            }
+        };
+        let bounded_ids = |key: &str| -> anyhow::Result<(Vec<Value>, usize, bool)> {
+            let values = research
+                .get(key)
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("native technology projection {key} is missing"))?;
+            let rows = values
+                .iter()
+                .take(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+                .map(|value| match value {
+                    Value::String(id) if !id.is_empty() && id.len() <= 1_024 => {
+                        Ok(Value::String(id.clone()))
+                    }
+                    _ => bail!("native technology projection {key} row is invalid"),
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((
+                rows,
+                values.len(),
+                values.len() > MAX_TECHNOLOGY_PROJECTION_TECH_ROWS,
+            ))
+        };
+        let (completed_tech_ids, completed_count, completed_truncated) =
+            bounded_ids("completedTechIds")?;
+        let (queued_tech_ids, queued_count, queued_truncated) = bounded_ids("queuedTechIds")?;
+
+        let progress = research
+            .get("progressByTech")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection progress is missing"))?;
+        let mut progress_entries = progress.iter().collect::<Vec<_>>();
+        progress_entries.sort_by(|left, right| left.0.cmp(right.0));
+        let mut progress_truncated = progress_entries.len() > MAX_TECHNOLOGY_PROJECTION_TECH_ROWS;
+        let mut progress_rows = Vec::with_capacity(
+            progress_entries
+                .len()
+                .min(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS),
+        );
+        for (tech_id, value) in progress_entries
+            .into_iter()
+            .take(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+        {
+            if tech_id.is_empty() || tech_id.len() > 1_024 {
+                bail!("native technology projection progress technology is invalid");
+            }
+            let items = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native technology projection progress row is invalid"))?;
+            let mut item_entries = items.iter().collect::<Vec<_>>();
+            item_entries.sort_by(|left, right| left.0.cmp(right.0));
+            let row_truncated = item_entries.len() > MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS;
+            progress_truncated |= row_truncated;
+            let item_rows = item_entries
+                .into_iter()
+                .take(MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS)
+                .map(|(item_id, amount)| {
+                    let amount = amount.as_f64().filter(|amount| {
+                        amount.is_finite() && *amount >= 0.0 && amount.fract() == 0.0
+                    });
+                    if item_id.is_empty() || item_id.len() > 1_024 || amount.is_none() {
+                        bail!("native technology projection progress item is invalid");
+                    }
+                    Ok(serde_json::json!({ "itemId": item_id, "amount": amount.unwrap() }))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            progress_rows.push(serde_json::json!({
+                "techId": tech_id,
+                "totalCount": items.len(),
+                "truncated": row_truncated,
+                "items": item_rows,
+            }));
+        }
+
+        let infinite = endgame
+            .get("infiniteResearch")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection infinite research is missing"))?;
+        let mut infinite_entries = infinite.iter().collect::<Vec<_>>();
+        infinite_entries.sort_by(|left, right| left.0.cmp(right.0));
+        let infinite_truncated = infinite_entries.len() > MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS;
+        let infinite_rows = infinite_entries
+            .into_iter()
+            .take(MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS)
+            .map(|(research_id, value)| {
+                if research_id.is_empty() || research_id.len() > 1_024 {
+                    bail!("native technology projection infinite research id is invalid");
+                }
+                let value = value.as_object().ok_or_else(|| {
+                    anyhow!("native technology projection infinite research row is invalid")
+                })?;
+                let level = value
+                    .get("level")
+                    .and_then(Value::as_f64)
+                    .filter(|level| level.is_finite() && *level >= 0.0 && level.fract() == 0.0)
+                    .ok_or_else(|| {
+                        anyhow!("native technology projection infinite level is invalid")
+                    })?;
+                let historical_level = match value.get("historicalLevel") {
+                    None | Some(Value::Null) => Value::Null,
+                    Some(value) => {
+                        let level = value.as_f64().filter(|level| {
+                            level.is_finite() && *level >= 0.0 && level.fract() == 0.0
+                        });
+                        match level {
+                            Some(level) => Value::from(level),
+                            None => bail!(
+                                "native technology projection infinite historical level is invalid"
+                            ),
+                        }
+                    }
+                };
+                let progress = value
+                    .get("progress")
+                    .and_then(Value::as_str)
+                    .filter(|progress| {
+                        !progress.is_empty()
+                            && progress.len() <= 1_024
+                            && progress.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("native technology projection infinite progress is invalid")
+                    })?;
+                Ok(serde_json::json!({
+                    "researchId": research_id,
+                    "level": level,
+                    "historicalLevel": historical_level,
+                    "progress": progress,
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut matrix_stock = [0.0_f64; TECHNOLOGY_PROJECTION_MATRIX_ITEMS.len()];
+        for index in 0..self.entity_raw.len() {
+            let entity = self.parse_entity(index)?;
+            for inventory in [entity.get("inputs"), entity.get("outputs")]
+                .into_iter()
+                .filter_map(|value| value.and_then(Value::as_object))
+            {
+                for (matrix_index, item_id) in TECHNOLOGY_PROJECTION_MATRIX_ITEMS.iter().enumerate()
+                {
+                    matrix_stock[matrix_index] += inventory
+                        .get(*item_id)
+                        .and_then(Value::as_f64)
+                        .filter(|amount| amount.is_finite())
+                        .unwrap_or(0.0);
+                }
+            }
+        }
+        let active_planet_id = self
+            .base
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native technology projection active planet is missing"))?;
+        let active_tray = self.base.get("tray").and_then(Value::as_object);
+        let planet_trays = self.base.get("planetTrays").and_then(Value::as_object);
+        for planet in &self.catalog.planets {
+            let tray = if planet.id == active_planet_id {
+                active_tray
+            } else {
+                planet_trays
+                    .and_then(|trays| trays.get(&planet.id))
+                    .and_then(Value::as_object)
+            };
+            for (matrix_index, item_id) in TECHNOLOGY_PROJECTION_MATRIX_ITEMS.iter().enumerate() {
+                matrix_stock[matrix_index] += tray
+                    .and_then(|tray| tray.get(*item_id))
+                    .and_then(Value::as_f64)
+                    .filter(|amount| amount.is_finite())
+                    .unwrap_or(0.0);
+            }
+        }
+        if let Some(cargo) = self.base.get("cargo").and_then(Value::as_object)
+            && let (Some(item_id), Some(amount)) = (
+                cargo.get("itemId").and_then(Value::as_str),
+                cargo
+                    .get("amount")
+                    .and_then(Value::as_f64)
+                    .filter(|amount| amount.is_finite()),
+            )
+            && let Some(matrix_index) = TECHNOLOGY_PROJECTION_MATRIX_ITEMS
+                .iter()
+                .position(|candidate| *candidate == item_id)
+        {
+            matrix_stock[matrix_index] += amount;
+        }
+        let matrix_stock = TECHNOLOGY_PROJECTION_MATRIX_ITEMS
+            .iter()
+            .enumerate()
+            .map(|(index, item_id)| {
+                (
+                    (*item_id).to_owned(),
+                    Value::from(matrix_stock[index].floor()),
+                )
+            })
+            .collect::<Map<_, _>>();
+
+        let truncated =
+            completed_truncated || queued_truncated || progress_truncated || infinite_truncated;
+        let value = serde_json::json!({
+            "schemaVersion": 1,
+            "projectionType": "technology-v1",
+            "revision": self.revision,
+            "truncated": truncated,
+            "limits": {
+                "techRows": MAX_TECHNOLOGY_PROJECTION_TECH_ROWS,
+                "progressItemsPerTech": MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS,
+                "infiniteRows": MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS,
+            },
+            "counts": {
+                "completedTechIds": completed_count,
+                "queuedTechIds": queued_count,
+                "progressTechs": progress.len(),
+                "infiniteResearch": infinite.len(),
+            },
+            "selectedTechId": optional_id(research, "selectedTechId")?,
+            "pausedTechId": optional_id(research, "pausedTechId")?,
+            "completedTechIds": completed_tech_ids,
+            "queuedTechIds": queued_tech_ids,
+            "progressByTech": progress_rows,
+            "activeInfiniteResearchId": optional_id(endgame, "activeInfiniteResearchId")?,
+            "autoResearch": endgame.get("autoResearch").and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("native technology projection auto research is invalid"))?,
+            "infiniteResearch": infinite_rows,
+            "settings": {
+                "technologyLayout": settings.get("technologyLayout").cloned()
+                    .ok_or_else(|| anyhow!("native technology projection layout is missing"))?,
+                "fontScale": settings.get("fontScale").cloned()
+                    .ok_or_else(|| anyhow!("native technology projection font scale is missing"))?,
+                "difficulty": settings.get("difficulty").cloned()
+                    .unwrap_or_else(|| Value::String("standard".to_owned())),
+            },
+            "matrixStock": matrix_stock,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native technology projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
     pub fn canonical_sha256(&self) -> anyhow::Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(b"{");
@@ -6445,6 +6727,86 @@ mod tests {
         for worker in workers {
             assert_eq!(worker.join().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn technology_projection_is_bounded_read_only_and_aggregates_matrix_stock() {
+        let records = fixture_records_with_entity_json(
+            r#"[{"id":"lab","kind":"machine","planetId":"home","inputs":{"electromagnetic_matrix":2.6},"outputs":{"electromagnetic_matrix":1.6,"energy_matrix":5}}]"#,
+            1,
+        );
+        let mut state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        state.base.insert(
+            "research".into(),
+            json!({
+                "selectedTechId":"electromagnetism",
+                "pausedTechId":null,
+                "completedTechIds":["electromagnetic_matrix"],
+                "queuedTechIds":["energy_matrix"],
+                "progressByTech":{
+                    "electromagnetism":{"electromagnetic_matrix":7}
+                }
+            }),
+        );
+        state.base.insert(
+            "endgame".into(),
+            json!({
+                "activeInfiniteResearchId":null,
+                "autoResearch":false,
+                "infiniteResearch":{
+                    "matrix_compression":{"level":2,"progress":"17"},
+                    "vein_utilization":{"level":0,"progress":"0"},
+                    "galactic_logistics":{"level":0,"progress":"0"},
+                    "stellar_harnessing":{"level":0,"progress":"0"},
+                    "continuum_simulation":{"level":0,"progress":"0"}
+                }
+            }),
+        );
+        state.base.insert(
+            "settings".into(),
+            json!({"technologyLayout":"compact","fontScale":1.25,"difficulty":"hard"}),
+        );
+        state
+            .base
+            .insert("tray".into(), json!({"electromagnetic_matrix":3.2}));
+        state.base.insert(
+            "planetTrays".into(),
+            json!({"home":{"electromagnetic_matrix":99}}),
+        );
+        state.base.insert(
+            "cargo".into(),
+            json!({"itemId":"electromagnetic_matrix","amount":4.7}),
+        );
+
+        let canonical_before = state.canonical_sha256().unwrap();
+        let projection = state.technology_projection().unwrap();
+        assert_eq!(projection["projectionType"], "technology-v1");
+        assert_eq!(projection["revision"], 7);
+        assert_eq!(projection["truncated"], false);
+        assert_eq!(projection["counts"]["completedTechIds"], 1);
+        assert_eq!(projection["progressByTech"][0]["totalCount"], 1);
+        assert_eq!(projection["matrixStock"]["electromagnetic_matrix"], 12.0);
+        assert_eq!(projection["matrixStock"]["energy_matrix"], 5.0);
+        assert_eq!(projection["settings"]["technologyLayout"], "compact");
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+
+        state.base["research"]["completedTechIds"] = Value::Array(
+            (0..=MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+                .map(|index| Value::String(format!("tech-{index}")))
+                .collect(),
+        );
+        let truncated = state.technology_projection().unwrap();
+        assert_eq!(truncated["truncated"], true);
+        assert_eq!(
+            truncated["completedTechIds"].as_array().unwrap().len(),
+            MAX_TECHNOLOGY_PROJECTION_TECH_ROWS
+        );
+        assert_eq!(
+            truncated["counts"]["completedTechIds"],
+            MAX_TECHNOLOGY_PROJECTION_TECH_ROWS + 1
+        );
     }
 
     #[test]

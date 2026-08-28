@@ -1987,6 +1987,10 @@ impl CoreRegistry {
         )
     }
 
+    pub fn technology_projection(&self, session_id: &str) -> anyhow::Result<Value> {
+        self.session(session_id)?.technology_projection()
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

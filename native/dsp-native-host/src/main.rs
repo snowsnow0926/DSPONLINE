@@ -81,6 +81,7 @@ fn handle_request(
                     "native-core-viewport-projection-v2",
                     "native-core-factory-read-model-v1",
                     "native-core-statistics-projection-v1",
+                    "native-core-technology-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
@@ -290,6 +291,9 @@ fn handle_request(
             planet_id.as_deref(),
             item_id.as_deref(),
         )?,
+        ControlRequest::CoreTechnologyProjection { session_id } => {
+            cores.technology_projection(&session_id)?
+        }
         ControlRequest::CoreApplyCommand {
             session_id,
             command,

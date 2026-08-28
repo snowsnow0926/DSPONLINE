@@ -188,6 +188,9 @@ pub enum ControlRequest {
         #[serde(default)]
         item_id: Option<String>,
     },
+    CoreTechnologyProjection {
+        session_id: String,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,

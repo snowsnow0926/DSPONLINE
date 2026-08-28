@@ -14,6 +14,12 @@ pub enum CoreAdvanceMode {
     Exact,
     #[serde(rename = "pure-idle-conservative-v2")]
     PureIdleConservativeV2,
+    /// Deterministic three-window calibration mode. Its current v1 closed
+    /// scope deliberately freezes the unproved tail; the distinct wire value
+    /// prevents WAL replay from silently substituting the legacy one-shot
+    /// conservative calibration semantics.
+    #[serde(rename = "pure-idle-macro-v10")]
+    PureIdleMacroV10,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,8 +220,14 @@ fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
 
 impl CoreState {
     pub fn advance(&mut self, request: &CoreAdvanceRequest) -> anyhow::Result<CoreAdvanceResult> {
-        if request.advance_mode == CoreAdvanceMode::PureIdleConservativeV2 {
-            return crate::pure_idle::advance(self, request);
+        match request.advance_mode {
+            CoreAdvanceMode::PureIdleConservativeV2 => {
+                return crate::pure_idle::advance(self, request);
+            }
+            CoreAdvanceMode::PureIdleMacroV10 => {
+                return crate::pure_idle::advance_macro_v10(self, request);
+            }
+            CoreAdvanceMode::Exact => {}
         }
         self.advance_exact(request)
     }

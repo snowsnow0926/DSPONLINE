@@ -145,6 +145,26 @@ fn apply_record_changes(value: &mut Value, changes: &[ValuePatch]) -> anyhow::Re
     Ok(())
 }
 
+fn command_requires_production_history_rebuild(command: &SimulationCommandPatch) -> bool {
+    command
+        .top_level_changes
+        .iter()
+        .any(|change| match change.path.first() {
+            Some(PathSegment::Key(key))
+                if matches!(
+                    key.as_str(),
+                    "productionHistory" | "historyRecordedAt" | "elapsedSeconds"
+                ) =>
+            {
+                true
+            }
+            Some(PathSegment::Key(key)) => !crate::state::is_known_base_checkpoint_key(key),
+            // A root replacement or a non-object top-level path cannot prove
+            // that the public history source remains byte-for-byte unchanged.
+            None | Some(PathSegment::Index(_)) => true,
+        })
+}
+
 impl CoreState {
     pub fn apply_command(
         &mut self,
@@ -169,18 +189,20 @@ impl CoreState {
 
         // Apply to a cloned transactional state. A malformed late patch can
         // never leave the authoritative candidate partially edited.
+        let rebuild_production_history = command_requires_production_history_rebuild(command);
         let mut next = self.clone();
         // `next` is already disposable on failure. Move its base map into the
         // patch value instead of retaining two complete copies during every
         // pause/edit command.
-        let mut base = Value::Object(std::mem::take(next.base_value_mut()));
+        let mut base = Value::Object(next.take_base_for_command());
         for change in &command.top_level_changes {
             apply_value_patch(&mut base, change)?;
         }
-        *next.base_value_mut() = match base {
+        let base = match base {
             Value::Object(base) => base,
             _ => bail!("native command replaced the GameState root"),
         };
+        next.install_base_from_command(base, rebuild_production_history);
 
         let mut changed_entity_ids = Vec::new();
         for record in &command.changed_entities {
@@ -332,7 +354,6 @@ impl CoreState {
         if !only_pause_changed {
             next.invalidate_factory_static_admission();
         }
-        next.rebuild_production_history_tiers();
         let previous_revision = self.revision;
         *self = next;
         Ok(CommandApplyResult {
@@ -342,5 +363,52 @@ impl CoreState {
             changed_belt_ids,
             topology_dirty,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_for_path(path: Vec<PathSegment>) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: 1,
+            top_level_changes: vec![ValuePatch {
+                path,
+                operation: "set".to_owned(),
+                value: Some(Value::Null),
+            }],
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn production_history_cache_rebuild_classification_is_fail_closed() {
+        for key in ["productionHistory", "historyRecordedAt", "elapsedSeconds"] {
+            assert!(command_requires_production_history_rebuild(
+                &command_for_path(vec![PathSegment::Key(key.to_owned())])
+            ));
+        }
+        assert!(!command_requires_production_history_rebuild(
+            &command_for_path(vec![PathSegment::Key("paused".to_owned())])
+        ));
+        assert!(!command_requires_production_history_rebuild(
+            &command_for_path(vec![PathSegment::Key("metrics".to_owned())])
+        ));
+        assert!(command_requires_production_history_rebuild(
+            &command_for_path(vec![PathSegment::Key("futureUnknownField".to_owned())])
+        ));
+        assert!(command_requires_production_history_rebuild(
+            &command_for_path(Vec::new())
+        ));
+        assert!(command_requires_production_history_rebuild(
+            &command_for_path(vec![PathSegment::Index(0)])
+        ));
     }
 }

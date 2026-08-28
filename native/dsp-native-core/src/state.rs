@@ -824,6 +824,10 @@ fn classify_base_checkpoint_key(key: &str) -> BaseCheckpointDomain {
     }
 }
 
+pub(crate) fn is_known_base_checkpoint_key(key: &str) -> bool {
+    classify_base_checkpoint_key(key) != BaseCheckpointDomain::Unknown
+}
+
 struct BaseCheckpointDomainView<'a> {
     base: &'a Map<String, Value>,
     domain: BaseCheckpointDomain,
@@ -933,6 +937,11 @@ struct ChunkedManifest {
     chunks: Vec<ChunkMetadata>,
     #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
     pure_idle_session: Option<PureIdleSessionState>,
+    // Kept separate from the legacy field so an older native host can ignore
+    // the new private cache instead of rejecting the whole checkpoint because
+    // PureIdleSessionState uses deny_unknown_fields.
+    #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
+    pure_idle_macro_session: Option<PureIdleSessionState>,
 }
 
 fn deserialize_present_pure_idle_session<'de, D>(
@@ -956,6 +965,12 @@ pub(crate) struct PureIdleSessionState {
     format_version: u8,
     exact_simulation_seconds_used: f64,
     last_committed_revision: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    macro_v10: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl PureIdleSessionState {
@@ -2096,10 +2111,22 @@ impl CoreState {
                 bail!("native core checkpoint manifest chunk root is invalid");
             }
         }
-        let pure_idle_session = manifest
-            .pure_idle_session
-            .map(|session| session.validate(identity.revision))
-            .transpose()?;
+        let pure_idle_session = match (manifest.pure_idle_session, manifest.pure_idle_macro_session)
+        {
+            (Some(_), Some(_)) => {
+                bail!("native core checkpoint contains conflicting pure-idle sessions")
+            }
+            (Some(session), None) if session.macro_v10 => {
+                bail!("native core legacy pure-idle session has the wrong mode")
+            }
+            (None, Some(session)) if !session.macro_v10 => {
+                bail!("native core macro pure-idle session has the wrong mode")
+            }
+            (Some(session), None) | (None, Some(session)) => {
+                Some(session.validate(identity.revision)?)
+            }
+            (None, None) => None,
+        };
         let mut remaining_chunk_references = HashMap::<String, usize>::new();
         for metadata in &manifest.chunks {
             *remaining_chunk_references
@@ -2409,10 +2436,15 @@ impl CoreState {
             .pure_idle_session
             .filter(|session| session.last_committed_revision == self.revision)
         {
+            let key = if session.macro_v10 {
+                "pureIdleMacroSession"
+            } else {
+                "pureIdleSession"
+            };
             manifest_value
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
-                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+                .insert(key.to_owned(), serde_json::to_value(session)?);
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -2555,10 +2587,15 @@ impl CoreState {
             .pure_idle_session
             .filter(|session| session.last_committed_revision == self.revision)
         {
+            let key = if session.macro_v10 {
+                "pureIdleMacroSession"
+            } else {
+                "pureIdleSession"
+            };
             manifest_value
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
-                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+                .insert(key.to_owned(), serde_json::to_value(session)?);
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -2987,6 +3024,26 @@ impl CoreState {
         self.production_history_tiers.invalidate();
         &mut self.base
     }
+
+    /// Commands are applied to a disposable cloned state. Moving the base map
+    /// out through this boundary avoids cloning or invalidating the private
+    /// history tiers before the command has been classified. The caller must
+    /// rebuild the tiers whenever a patch can touch their public source.
+    pub(crate) fn take_base_for_command(&mut self) -> Map<String, Value> {
+        self.summary_cache.get_mut().take();
+        std::mem::take(&mut self.base)
+    }
+
+    pub(crate) fn install_base_from_command(
+        &mut self,
+        base: Map<String, Value>,
+        rebuild_production_history: bool,
+    ) {
+        self.base = base;
+        if rebuild_production_history {
+            self.rebuild_production_history_tiers();
+        }
+    }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
     }
@@ -3000,12 +3057,36 @@ impl CoreState {
         self.production_history_tiers.refresh_from_base(&self.base);
     }
 
+    /// Exports only the disposable desktop diagnostics cache. The returned
+    /// value is excluded from public v47 state, canonical hashes and the
+    /// authoritative checkpoint manifest.
+    pub fn production_history_sidecar(&self) -> Option<Value> {
+        self.production_history_tiers.sidecar_value(&self.base)
+    }
+
+    /// Installs a previously validated, identity-bound diagnostics cache.
+    /// Callers must treat every error as a cache miss and keep the history
+    /// rebuilt from public v47 state.
+    pub fn restore_production_history_sidecar(&mut self, value: Value) -> anyhow::Result<()> {
+        self.production_history_tiers
+            .restore_sidecar(&self.base, value)
+    }
+
     /// Returns progress only when no other committed operation has interrupted
     /// the conservative session. Commands and exact/realtime advances already
     /// move `revision`; observing that mismatch is the reset boundary.
     pub(crate) fn pure_idle_exact_seconds_used(&self) -> f64 {
         self.pure_idle_session
-            .filter(|session| session.last_committed_revision == self.revision)
+            .filter(|session| {
+                session.last_committed_revision == self.revision && !session.macro_v10
+            })
+            .map(|session| session.exact_simulation_seconds_used)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn pure_idle_macro_exact_seconds_used(&self) -> f64 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
             .map(|session| session.exact_simulation_seconds_used)
             .unwrap_or(0.0)
     }
@@ -3021,6 +3102,21 @@ impl CoreState {
             format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
             exact_simulation_seconds_used,
             last_committed_revision: self.revision,
+            macro_v10: false,
+        }
+        .validate(self.revision)
+        .map(|session| self.pure_idle_session = Some(session))
+    }
+
+    pub(crate) fn install_pure_idle_macro_session_progress(
+        &mut self,
+        exact_simulation_seconds_used: f64,
+    ) -> anyhow::Result<()> {
+        PureIdleSessionState {
+            format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
+            exact_simulation_seconds_used,
+            last_committed_revision: self.revision,
+            macro_v10: true,
         }
         .validate(self.revision)
         .map(|session| self.pure_idle_session = Some(session))
@@ -4899,6 +4995,105 @@ mod tests {
         assert!(second["nextCursor"].is_null());
         assert_eq!(state.entity_raw.len(), 1);
         assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    fn state_with_restored_cold_history() -> CoreState {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state
+            .base
+            .insert("elapsedSeconds".to_owned(), Value::from(102));
+        state
+            .base
+            .insert("historyRecordedAt".to_owned(), Value::from(102));
+        state.base.insert(
+            "productionHistory".to_owned(),
+            json!([
+                {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+            ]),
+        );
+        state.rebuild_production_history_tiers();
+        state
+            .restore_production_history_sidecar(json!({
+                "formatVersion": 1,
+                "source": {
+                    "publicLen": 2,
+                    "historyRecordedAtBits": 102.0_f64.to_bits(),
+                    "latestElapsedBits": 102.0_f64.to_bits(),
+                    "latestDurationBits": 1.0_f64.to_bits()
+                },
+                "coldSamples": [{
+                    "elapsedSeconds": 100,
+                    "sampleDurationSeconds": 100,
+                    "productionPerMinute": {"iron_ore": 12}
+                }]
+            }))
+            .unwrap();
+        state
+    }
+
+    fn top_level_command(revision: u64, key: &str, value: Value) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: revision,
+            top_level_changes: vec![ValuePatch {
+                path: vec![PathSegment::Key(key.to_owned())],
+                operation: "set".to_owned(),
+                value: Some(value),
+            }],
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unrelated_command_preserves_cold_history_but_source_or_unknown_patch_rebuilds() {
+        let mut paused = state_with_restored_cold_history();
+        let sidecar_before = paused.production_history_sidecar().unwrap();
+        paused
+            .apply_command(&top_level_command(7, "paused", Value::from(true)))
+            .unwrap();
+        assert_eq!(paused.production_history_sidecar().unwrap(), sidecar_before);
+        let projection = paused
+            .statistics_projection(0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["samples"][0]["elapsedSeconds"], 100);
+
+        for (key, value) in [
+            (
+                "productionHistory",
+                json!([
+                    {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                    {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+                ]),
+            ),
+            ("historyRecordedAt", Value::from(102)),
+            ("elapsedSeconds", Value::from(102)),
+            ("futureUnknownField", Value::from(true)),
+        ] {
+            let mut state = state_with_restored_cold_history();
+            state
+                .apply_command(&top_level_command(7, key, value))
+                .unwrap();
+            assert!(
+                state.production_history_sidecar().is_none(),
+                "{key} must rebuild rather than retain an unproved cold cache"
+            );
+            let projection = state
+                .statistics_projection(0.0, 100.0, 0, 10, None, None)
+                .unwrap();
+            assert_eq!(projection["samples"], Value::Array(Vec::new()));
+        }
     }
 
     #[test]
@@ -6791,6 +6986,70 @@ mod tests {
         restored.write_v47_envelope(42, &mut public).unwrap();
         let envelope: Value = serde_json::from_slice(&public).unwrap();
         assert!(envelope["state"].get("pureIdleSession").is_none());
+    }
+
+    #[test]
+    fn private_macro_v10_credit_roundtrips_without_changing_public_v47() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        state
+            .install_pure_idle_macro_session_progress(20.0)
+            .unwrap();
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 20.0);
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
+        assert!(manifest.get("pureIdleSession").is_none());
+        assert_eq!(manifest["pureIdleMacroSession"]["formatVersion"], 1);
+        assert_eq!(manifest["pureIdleMacroSession"]["macroV10"], true);
+
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &streamed, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_exact_seconds_used(), 20.0);
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
+        assert_eq!(restored.canonical_sha256().unwrap(), canonical_before);
+
+        let mut public = Vec::new();
+        restored.write_v47_envelope(42, &mut public).unwrap();
+        let envelope: Value = serde_json::from_slice(&public).unwrap();
+        assert!(envelope["state"].get("pureIdleSession").is_none());
+    }
+
+    #[test]
+    fn conservative_and_macro_v10_sessions_never_inherit_each_others_credit() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.install_pure_idle_session_progress(30.0).unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 30.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+
+        state
+            .install_pure_idle_macro_session_progress(10.0)
+            .unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 10.0);
+
+        state.install_pure_idle_session_progress(5.0).unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 5.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
     }
 
     #[test]

@@ -82,6 +82,27 @@ describe("Windows native core segmented advance", () => {
     });
   });
 
+  it("preserves the wire-distinct macro-v10 mode on every segment", async () => {
+    const requests: Array<Parameters<NativeCoreAdvanceSegmentExecutor>[0]> = [];
+    const result = await advanceNativeCoreSegmented(async (request) => {
+      requests.push(request);
+      return { supported: true, revision: request.baseRevision + 1 };
+    }, {
+      baseRevision: 20,
+      simulationSeconds: 1_201,
+      wallSeconds: 301,
+      advanceMode: "pure-idle-macro-v10",
+      maxSegmentSeconds: 600,
+    });
+
+    expect(requests.map((request) => request.advanceMode)).toEqual([
+      "pure-idle-macro-v10",
+      "pure-idle-macro-v10",
+      "pure-idle-macro-v10",
+    ]);
+    expect(result).toMatchObject({ supported: true, revision: 23, cancelled: false });
+  });
+
   it("stops at an unsupported boundary and rejects a non-advancing revision", async () => {
     let calls = 0;
     const unsupported = await advanceNativeCoreSegmented(async (request) => {

@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::belts::BeltFlowAggregate;
@@ -16,6 +17,8 @@ const TIERED_MINUTE_SECONDS: f64 = 60.0;
 const TIERED_TEN_MINUTE_SECONDS: f64 = 600.0;
 const TIERED_HOUR_SECONDS: f64 = 3_600.0;
 const TIERED_HISTORY_RETENTION_SECONDS: f64 = 24.0 * TIERED_HOUR_SECONDS;
+const TIERED_HISTORY_SIDECAR_FORMAT_VERSION: u16 = 1;
+const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
 
 type RateAccumulator = HashMap<String, f64>;
 type PlanetRateAccumulator = HashMap<String, RateAccumulator>;
@@ -342,12 +345,66 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TieredHistorySource {
     public_len: usize,
     history_recorded_at_bits: u64,
     latest_elapsed_bits: Option<u64>,
     latest_duration_bits: Option<u64>,
+}
+
+/// Private desktop-only cache payload. It is intentionally independent from
+/// public v47 state and the authoritative checkpoint manifest: losing or
+/// rejecting it may shorten the visible diagnostic window, but can never
+/// change gameplay state or prevent recovery.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TieredHistorySidecar {
+    format_version: u16,
+    source: TieredHistorySource,
+    cold_samples: Vec<Value>,
+}
+
+fn validate_sidecar_timeline(
+    cold_samples: &[Value],
+    public_start: f64,
+    public_end: f64,
+) -> anyhow::Result<()> {
+    let mut first_start: Option<f64> = None;
+    let mut previous_elapsed: Option<f64> = None;
+    for sample in cold_samples {
+        let elapsed = finite_number(sample.get("elapsedSeconds"))
+            .filter(|value| *value >= 0.0)
+            .ok_or_else(|| anyhow!("native production history sidecar sample is invalid"))?;
+        let duration = finite_number(sample.get("sampleDurationSeconds"))
+            .filter(|value| *value > 0.0 && *value <= elapsed + EPSILON)
+            .ok_or_else(|| anyhow!("native production history sidecar duration is invalid"))?;
+        let start = elapsed - duration;
+        if !start.is_finite() || start < -EPSILON {
+            bail!("native production history sidecar start is invalid");
+        }
+        if let Some(previous) = previous_elapsed
+            && (start - previous).abs() > EPSILON
+        {
+            bail!("native production history sidecar timeline is not contiguous");
+        }
+        first_start.get_or_insert(start.max(0.0));
+        previous_elapsed = Some(elapsed);
+    }
+    let first_start = first_start
+        .ok_or_else(|| anyhow!("native production history sidecar timeline is empty"))?;
+    let cold_end = previous_elapsed.expect("non-empty sidecar timeline has an end");
+    if (cold_end - public_start).abs() > EPSILON {
+        bail!("native production history sidecar boundary is stale");
+    }
+    let restored_window = public_end - first_start;
+    if !restored_window.is_finite()
+        || !(-EPSILON..=TIERED_HISTORY_RETENTION_SECONDS + EPSILON).contains(&restored_window)
+    {
+        bail!("native production history sidecar retention window is invalid");
+    }
+    Ok(())
 }
 
 fn tiered_history_source(
@@ -557,6 +614,97 @@ impl TieredProductionHistory {
         // refreshes. A bounded public-history fallback is always safer than a
         // stale private result or making statistics temporarily unavailable.
         Ok(public_history)
+    }
+
+    pub(crate) fn sidecar_value(&self, base: &Map<String, Value>) -> Option<Value> {
+        let source = self.source.filter(|_| self.available && !self.dirty)?;
+        let (current_source, public_history) = tiered_history_source(base).ok()?;
+        if current_source != source {
+            return None;
+        }
+        let first_public = public_history.first()?;
+        let public_start = finite_number(first_public.get("elapsedSeconds"))?
+            - finite_number(first_public.get("sampleDurationSeconds"))?;
+        let mut cold_samples = Vec::new();
+        let mut previous_inventory = None;
+        for sample in &self.samples {
+            let elapsed = finite_number(sample.get("elapsedSeconds"))?;
+            let duration = finite_number(sample.get("sampleDurationSeconds"))?;
+            let start = elapsed - duration;
+            if elapsed <= public_start + EPSILON {
+                cold_samples.push(sample.clone());
+                previous_inventory = sample.get("inventory").cloned();
+                continue;
+            }
+            if start < public_start - EPSILON {
+                let (prefix, _) = split_sample_at_duration(
+                    sample,
+                    public_start - start,
+                    previous_inventory.as_ref(),
+                )
+                .ok()?;
+                cold_samples.push(prefix);
+            }
+            break;
+        }
+        if cold_samples.is_empty() || cold_samples.len() > MAX_TIERED_HISTORY_SIDECAR_SAMPLES {
+            return None;
+        }
+        let public_end = public_history
+            .last()
+            .and_then(|sample| finite_number(sample.get("elapsedSeconds")))?;
+        validate_sidecar_timeline(&cold_samples, public_start, public_end).ok()?;
+        serde_json::to_value(TieredHistorySidecar {
+            format_version: TIERED_HISTORY_SIDECAR_FORMAT_VERSION,
+            source,
+            cold_samples,
+        })
+        .ok()
+    }
+
+    pub(crate) fn restore_sidecar(
+        &mut self,
+        base: &Map<String, Value>,
+        value: Value,
+    ) -> anyhow::Result<()> {
+        let sidecar = serde_json::from_value::<TieredHistorySidecar>(value)
+            .map_err(|error| anyhow!("decode native production history sidecar: {error}"))?;
+        if sidecar.format_version != TIERED_HISTORY_SIDECAR_FORMAT_VERSION
+            || sidecar.cold_samples.is_empty()
+            || sidecar.cold_samples.len() > MAX_TIERED_HISTORY_SIDECAR_SAMPLES
+        {
+            bail!("native production history sidecar bounds are invalid");
+        }
+        let (source, public_history) = tiered_history_source(base)?;
+        if sidecar.source != source {
+            bail!("native production history sidecar source is stale");
+        }
+        let first_public = public_history
+            .first()
+            .ok_or_else(|| anyhow!("native production history sidecar has no public boundary"))?;
+        let public_start = finite_number(first_public.get("elapsedSeconds"))
+            .zip(finite_number(first_public.get("sampleDurationSeconds")))
+            .map(|(elapsed, duration)| elapsed - duration)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| anyhow!("native production history sidecar boundary is invalid"))?;
+        let public_end = public_history
+            .last()
+            .and_then(|sample| finite_number(sample.get("elapsedSeconds")))
+            .ok_or_else(|| anyhow!("native production history sidecar public end is invalid"))?;
+        validate_sidecar_timeline(&sidecar.cold_samples, public_start, public_end)?;
+        let mut canonical = sidecar.cold_samples.clone();
+        compact_tiered_history(&mut canonical)?;
+        if serde_json::to_vec(&canonical)? != serde_json::to_vec(&sidecar.cold_samples)? {
+            bail!("native production history sidecar is not canonical");
+        }
+        let mut samples = sidecar.cold_samples;
+        samples.extend(self.samples.iter().cloned());
+        compact_tiered_history(&mut samples)?;
+        self.samples = samples;
+        self.source = Some(source);
+        self.available = true;
+        self.dirty = false;
+        Ok(())
     }
 }
 
@@ -1604,6 +1752,120 @@ mod tests {
             private_history
                 .iter()
                 .any(|sample| sample_duration(sample) == TIERED_TEN_MINUTE_SECONDS)
+        );
+
+        let public_before = serde_json::to_vec(&base).unwrap();
+        let sidecar = tiered.sidecar_value(&base).unwrap();
+        let mut reopened = TieredProductionHistory::from_base(&base);
+        assert!(covered_seconds(reopened.samples_if_current(&base).unwrap()) < 7_200.0);
+        reopened.restore_sidecar(&base, sidecar).unwrap();
+        assert_eq!(
+            covered_seconds(reopened.samples_if_current(&base).unwrap()),
+            7_200.0
+        );
+        assert_eq!(serde_json::to_vec(&base).unwrap(), public_before);
+    }
+
+    #[test]
+    fn tiered_history_sidecar_rejects_stale_or_noncanonical_payloads_without_installing_them() {
+        let base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(102)),
+            ("historyRecordedAt".to_owned(), Value::from(102)),
+            (
+                "productionHistory".to_owned(),
+                Value::Array(vec![
+                    history_sample(101.0, 60.0, 1.0),
+                    history_sample(102.0, 70.0, 1.0),
+                ]),
+            ),
+        ]);
+        let source = tiered_history_source(&base).unwrap().0;
+        let payload = serde_json::to_value(TieredHistorySidecar {
+            format_version: TIERED_HISTORY_SIDECAR_FORMAT_VERSION,
+            source,
+            cold_samples: vec![
+                history_sample(50.0, 40.0, 50.0),
+                history_sample(100.0, 50.0, 50.0),
+            ],
+        })
+        .unwrap();
+
+        let mut stale_base = base.clone();
+        stale_base.insert("historyRecordedAt".to_owned(), Value::from(103));
+        let mut target = TieredProductionHistory::from_base(&stale_base);
+        assert!(
+            target
+                .restore_sidecar(&stale_base, payload.clone())
+                .is_err()
+        );
+        assert_eq!(
+            target.samples_if_current(&stale_base).unwrap(),
+            stale_base["productionHistory"].as_array().unwrap()
+        );
+
+        let mut noncanonical = payload;
+        noncanonical["coldSamples"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        let mut target = TieredProductionHistory::from_base(&base);
+        assert!(target.restore_sidecar(&base, noncanonical).is_err());
+        assert_eq!(
+            target.samples_if_current(&base).unwrap(),
+            base["productionHistory"].as_array().unwrap()
+        );
+
+        let assert_timeline_rejected = |cold_samples: Vec<Value>| {
+            let invalid = serde_json::to_value(TieredHistorySidecar {
+                format_version: TIERED_HISTORY_SIDECAR_FORMAT_VERSION,
+                source,
+                cold_samples,
+            })
+            .unwrap();
+            let mut target = TieredProductionHistory::from_base(&base);
+            assert!(target.restore_sidecar(&base, invalid).is_err());
+            assert_eq!(
+                target.samples_if_current(&base).unwrap(),
+                base["productionHistory"].as_array().unwrap()
+            );
+        };
+        // Each payload below is ordered and would stay byte-canonical after
+        // compaction. It must still be rejected because a correctly signed
+        // cache cannot invent, overlap, or omit a slice of diagnostic time.
+        assert_timeline_rejected(vec![
+            history_sample(40.0, 40.0, 40.0),
+            history_sample(100.0, 50.0, 50.0),
+        ]);
+        assert_timeline_rejected(vec![
+            history_sample(60.0, 40.0, 60.0),
+            history_sample(100.0, 50.0, 50.0),
+        ]);
+        assert_timeline_rejected(vec![history_sample(99.0, 40.0, 99.0)]);
+
+        let long_base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(90_002)),
+            ("historyRecordedAt".to_owned(), Value::from(90_002)),
+            (
+                "productionHistory".to_owned(),
+                Value::Array(vec![
+                    history_sample(90_001.0, 60.0, 1.0),
+                    history_sample(90_002.0, 70.0, 1.0),
+                ]),
+            ),
+        ]);
+        let overlong = serde_json::to_value(TieredHistorySidecar {
+            format_version: TIERED_HISTORY_SIDECAR_FORMAT_VERSION,
+            source: tiered_history_source(&long_base).unwrap().0,
+            cold_samples: vec![history_sample(90_000.0, 40.0, 90_000.0)],
+        })
+        .unwrap();
+        let mut target = TieredProductionHistory::from_base(&long_base);
+        assert!(target.restore_sidecar(&long_base, overlong).is_err());
+        assert_eq!(
+            target.samples_if_current(&long_base).unwrap(),
+            long_base["productionHistory"].as_array().unwrap()
         );
     }
 }

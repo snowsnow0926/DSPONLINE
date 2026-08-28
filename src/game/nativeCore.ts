@@ -21,7 +21,7 @@ import type { SaveMode } from "./types";
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 
-export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2";
+export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10";
 
 type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult

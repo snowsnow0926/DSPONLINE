@@ -318,6 +318,18 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
   assert.equal(advanced.reason, "native-domain-unavailable");
   assert.doesNotMatch(JSON.stringify(advanced), /Player|private-save|token/);
 
+  const macroAdvanced = normalizeRendererNativeResult("coreAdvance", {
+    supported: true,
+    exactScope: "pure-idle-macro-v10",
+    changed: true,
+    previousRevision: 2,
+    revision: 5,
+    algorithmVersion: "native-pure-idle-macro-v10-three-window-strict-freeze-v1",
+    exactCalibrationSeconds: 30,
+    approximatedSeconds: 30,
+  });
+  assert.equal(macroAdvanced.exactScope, "pure-idle-macro-v10");
+
   const checkpoint = {
     checkpoint: saveCommit(2),
     summary: coreSummary(2),

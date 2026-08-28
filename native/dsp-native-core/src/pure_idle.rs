@@ -8,6 +8,9 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
+const MACRO_V10_ALGORITHM_VERSION: &str =
+    "native-pure-idle-macro-v10-three-window-strict-freeze-v1";
+const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MAX_ADVANCE_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 const EPSILON: f64 = 0.000_001;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -182,7 +185,7 @@ fn unsupported(
         previous_revision: state.revision,
         revision: state.revision,
         reason: Some(reason.into()),
-        algorithm_version: Some(ALGORITHM_VERSION),
+        algorithm_version: Some(algorithm_version(request.advance_mode)),
         exact_calibration_seconds: Some(0.0),
         approximated_seconds: Some(0.0),
         belt_scheduler: None,
@@ -191,6 +194,13 @@ fn unsupported(
             .then(|| state.summary())
             .transpose()?,
     })
+}
+
+fn algorithm_version(mode: CoreAdvanceMode) -> &'static str {
+    match mode {
+        CoreAdvanceMode::PureIdleMacroV10 => MACRO_V10_ALGORITHM_VERSION,
+        CoreAdvanceMode::Exact | CoreAdvanceMode::PureIdleConservativeV2 => ALGORITHM_VERSION,
+    }
 }
 
 fn exact_request(
@@ -1648,6 +1658,26 @@ pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
 ) -> anyhow::Result<CoreAdvanceResult> {
+    advance_bounded(state, request, false)
+}
+
+/// New wire-distinct macro mode. This prerequisite slice deliberately ships
+/// only the settlement proof and deterministic 3x10-second calibration
+/// boundary. Until a productive ordinary-flow contract is independently
+/// proven, every material-bearing tail remains frozen instead of inheriting
+/// the legacy one-shot calibration semantics under a misleading mode name.
+pub(crate) fn advance_macro_v10(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    advance_bounded(state, request, true)
+}
+
+fn advance_bounded(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+    macro_v10: bool,
+) -> anyhow::Result<CoreAdvanceResult> {
     if request.base_revision != state.revision {
         bail!("native pure-idle advance base revision is not current");
     }
@@ -1677,7 +1707,11 @@ pub(crate) fn advance(
         }
     };
 
-    let exact_seconds_used_before = state.pure_idle_exact_seconds_used();
+    let exact_seconds_used_before = if macro_v10 {
+        state.pure_idle_macro_exact_seconds_used()
+    } else {
+        state.pure_idle_exact_seconds_used()
+    };
     let exact_seconds_remaining =
         (PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS - exact_seconds_used_before).max(0.0);
     let budget = prefix_budget(
@@ -1691,23 +1725,47 @@ pub(crate) fn advance(
     let mut exact_changed = false;
     let mut belt_scheduler = None;
     if exact_seconds > 0.0 || exact_wall_seconds > EPSILON {
-        let mut exact = candidate.advance_exact(&exact_request(
-            candidate.revision,
-            exact_seconds,
-            exact_wall_seconds,
-        ))?;
-        if !exact.supported {
-            return unsupported(
-                state,
-                request,
-                exact
-                    .reason
-                    .take()
-                    .unwrap_or_else(|| "pure-idle-exact-prefix-unsupported".to_owned()),
-            );
+        let mut remaining_exact = exact_seconds;
+        let mut calibrated_before = exact_seconds_used_before;
+        while remaining_exact > EPSILON {
+            let slice_seconds = if macro_v10 {
+                let in_window = calibrated_before % MACRO_V10_CALIBRATION_WINDOW_SECONDS;
+                let window_remaining = if in_window <= EPSILON {
+                    MACRO_V10_CALIBRATION_WINDOW_SECONDS
+                } else {
+                    MACRO_V10_CALIBRATION_WINDOW_SECONDS - in_window
+                };
+                remaining_exact.min(window_remaining)
+            } else {
+                remaining_exact
+            };
+            let slice_wall_seconds = if exact_seconds > EPSILON {
+                exact_wall_seconds * slice_seconds / exact_seconds
+            } else {
+                exact_wall_seconds
+            };
+            let mut exact = candidate.advance_exact(&exact_request(
+                candidate.revision,
+                slice_seconds,
+                slice_wall_seconds,
+            ))?;
+            if !exact.supported {
+                return unsupported(
+                    state,
+                    request,
+                    exact
+                        .reason
+                        .take()
+                        .unwrap_or_else(|| "pure-idle-exact-prefix-unsupported".to_owned()),
+                );
+            }
+            exact_changed |= exact.changed;
+            if exact.belt_scheduler.is_some() {
+                belt_scheduler = exact.belt_scheduler.take();
+            }
+            remaining_exact = (remaining_exact - slice_seconds).max(0.0);
+            calibrated_before += slice_seconds;
         }
-        exact_changed = exact.changed;
-        belt_scheduler = exact.belt_scheduler.take();
     }
     if let Some(reason) = budget_attestation_reason(&candidate, request) {
         // Exact settlement may have exhausted fuel or otherwise changed the
@@ -1756,9 +1814,13 @@ pub(crate) fn advance(
         // The exact debit and its new revision live only on this disposable
         // candidate. Every possible failure below leaves the source session
         // and its full/remaining credit untouched.
-        candidate.install_pure_idle_session_progress(
-            (exact_seconds_used_before + exact_seconds).min(PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS),
-        )?;
+        let exact_progress =
+            (exact_seconds_used_before + exact_seconds).min(PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS);
+        if macro_v10 {
+            candidate.install_pure_idle_macro_session_progress(exact_progress)?;
+        } else {
+            candidate.install_pure_idle_session_progress(exact_progress)?;
+        }
     }
 
     let previous_revision = state.revision;
@@ -1770,10 +1832,9 @@ pub(crate) fn advance(
     *state = candidate;
     Ok(CoreAdvanceResult {
         supported: true,
-        exact_scope: if tail_seconds > EPSILON {
-            // Wire-compatible scope; `algorithm_version` distinguishes the
-            // new 30-second bounded implementation without widening the
-            // desktop protocol in this single-file change.
+        exact_scope: if tail_seconds > EPSILON && macro_v10 {
+            "pure-idle-macro-v10"
+        } else if tail_seconds > EPSILON {
             "pure-idle-conservative-v2"
         } else {
             "pure-idle-bounded-exact"
@@ -1784,7 +1845,7 @@ pub(crate) fn advance(
         reason: (tail_seconds > EPSILON).then(|| {
             "unproven pure-idle tail froze material-bearing systems after the session's bounded 30-second exact credit".to_owned()
         }),
-        algorithm_version: Some(ALGORITHM_VERSION),
+        algorithm_version: Some(algorithm_version(request.advance_mode)),
         exact_calibration_seconds: Some(exact_seconds),
         approximated_seconds: Some(tail_seconds),
         belt_scheduler,
@@ -2383,6 +2444,20 @@ mod tests {
         }
     }
 
+    fn pure_idle_macro_request(
+        revision: u64,
+        simulation_seconds: f64,
+        wall_seconds: f64,
+    ) -> CoreAdvanceRequest {
+        CoreAdvanceRequest {
+            base_revision: revision,
+            simulation_seconds,
+            wall_seconds,
+            advance_mode: CoreAdvanceMode::PureIdleMacroV10,
+            include_diagnostics: false,
+        }
+    }
+
     #[test]
     fn settlement_snapshot_counts_owned_stores_once_and_replaces_route_reservations() {
         let mut base = powered_fixture_base(15.0, "infinite");
@@ -2927,6 +3002,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn macro_v10_uses_three_ten_second_windows_and_freezes_the_unproved_tail() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_powered_fixture(multiplier, "infinite");
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            assert_eq!(prefix_result.revision, prefix_revision + 3);
+            assert_eq!(prefix_result.exact_calibration_seconds, Some(30.0));
+            assert_eq!(prefix.pure_idle_macro_exact_seconds_used(), 30.0);
+            assert_eq!(prefix.pure_idle_exact_seconds_used(), 0.0);
+
+            let mut long = initial.clone();
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 60.0, 60.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert_eq!(long_result.exact_scope, "pure-idle-macro-v10");
+            assert_eq!(
+                long_result.algorithm_version,
+                Some(MACRO_V10_ALGORITHM_VERSION)
+            );
+            assert_eq!(long_result.approximated_seconds, Some(30.0));
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 30.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+
+            let prefix_state = prefix.materialize().unwrap();
+            let long_state = long.materialize().unwrap();
+            assert_eq!(long_state["totalProduced"], prefix_state["totalProduced"]);
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            assert_eq!(long_state["elapsedSeconds"], json!(60.0));
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256
+            );
+            assert_eq!(segmented.pure_idle_macro_exact_seconds_used(), 30.0);
+        }
+    }
+
+    #[test]
+    fn macro_v10_rejection_preserves_source_hash_revision_and_mode_credit() {
+        let mut state = productive_powered_fixture(15.0, "infinite");
+        state
+            .install_pure_idle_macro_session_progress(10.0)
+            .unwrap();
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 30.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("pure-idle-power-multiplier-changed")
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 10.0);
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+    }
+
     fn unsupported_prefix_fixture() -> CoreState {
         let base = serde_json::to_vec(&json!({
             "version": 47,
@@ -3286,5 +3441,26 @@ mod tests {
             initial.pure_idle_exact_seconds_used(),
             PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS
         );
+    }
+
+    #[test]
+    fn durable_replay_preserves_macro_v10_mode_and_three_window_credit() {
+        let initial = productive_powered_fixture(15.0, "infinite");
+        let mut expected = initial.clone();
+        let result =
+            advance_macro_v10(&mut expected, &pure_idle_macro_request(7, 60.0, 4.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(result.revision, 10);
+
+        let mut replayed = initial;
+        replayed
+            .replay_operation(7, 10, None, 60.0, 4.0, CoreAdvanceMode::PureIdleMacroV10)
+            .unwrap();
+        assert_eq!(
+            replayed.summary().unwrap().canonical_sha256,
+            expected.summary().unwrap().canonical_sha256
+        );
+        assert_eq!(replayed.pure_idle_macro_exact_seconds_used(), 30.0);
+        assert_eq!(replayed.pure_idle_exact_seconds_used(), 0.0);
     }
 }

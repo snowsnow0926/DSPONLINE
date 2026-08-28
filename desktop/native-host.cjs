@@ -543,7 +543,7 @@ function normalizeNativeCoreCommitOperation(value) {
     !Number.isFinite(value.simulationSeconds) || value.simulationSeconds < 0 ||
     !Number.isFinite(value.wallSeconds) || value.wallSeconds < 0 ||
     value.includeDiagnostics !== undefined && typeof value.includeDiagnostics !== "boolean" ||
-    value.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2"].includes(value.advanceMode)) {
+    value.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10"].includes(value.advanceMode)) {
     throw new TypeError("native core authoritative operation is invalid");
   }
   const command = value.command == null ? null : normalizeNativeCoreCommand(value.command);
@@ -713,7 +713,7 @@ class NativeCoreSessionRegistry {
       !Number.isFinite(request?.simulationSeconds) || request.simulationSeconds < 0 ||
       !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0 ||
       request?.includeDiagnostics !== undefined && typeof request.includeDiagnostics !== "boolean" ||
-      request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2"].includes(request.advanceMode)) {
+      request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10"].includes(request.advanceMode)) {
       throw new TypeError("native core advance request is invalid");
     }
     return this.client.request({

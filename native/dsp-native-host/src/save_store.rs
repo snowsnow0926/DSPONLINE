@@ -19,6 +19,9 @@ const MAX_BATCH_RECORDS: usize = 8;
 const MAX_WAL_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WAL_ENTRIES: usize = 4_096;
+const MAX_STATISTICS_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
+const STATISTICS_SIDECAR_FORMAT_VERSION: u16 = 1;
+const STATISTICS_SIDECAR_FILE: &str = "statistics-history-v1.json";
 const WAL_FRAME_HEADER_BYTES: u64 = 8;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
 const SAVE_SLOTS: [&str; 2] = ["normal-main", "speedrun-main"];
@@ -235,6 +238,32 @@ pub struct SaveRecoveryResult {
     pub wal_entry_count: usize,
 }
 
+/// A disposable diagnostics cache bound to one exact authoritative
+/// generation. It deliberately lives outside `SaveManifest.records`; a stale
+/// or damaged file is a cache miss, never a reason to reject the save.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StatisticsSidecarPayload {
+    format_version: u16,
+    checkpoint_format_version: u16,
+    slot: String,
+    generation: u64,
+    revision: u64,
+    root_hash: String,
+    state_version: u16,
+    mode: String,
+    base_checksum: String,
+    registry_fingerprint: String,
+    history: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StatisticsSidecarEnvelope {
+    payload: StatisticsSidecarPayload,
+    checksum: String,
+}
+
 /// Identity of a checkpoint that was fully verified from the published
 /// SaveStore superblocks, manifest, and chunks. Authority coordination must
 /// never manufacture this identity from an IPC request or an in-memory core.
@@ -422,6 +451,121 @@ impl SaveStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Best-effort callers must ignore every error from this method. The
+    /// sidecar is not part of the save transaction and is published only after
+    /// the authoritative generation has already been acknowledged.
+    pub(crate) fn write_statistics_sidecar(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+        history: Value,
+    ) -> anyhow::Result<()> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native statistics sidecar checkpoint is missing"))?;
+        if manifest.generation != generation
+            || manifest.revision != revision
+            || manifest.root_hash != root_hash
+        {
+            bail!("native statistics sidecar checkpoint identity is stale");
+        }
+        let payload = StatisticsSidecarPayload {
+            format_version: STATISTICS_SIDECAR_FORMAT_VERSION,
+            checkpoint_format_version: manifest.format_version,
+            slot: manifest.slot.clone(),
+            generation: manifest.generation,
+            revision: manifest.revision,
+            root_hash: manifest.root_hash.clone(),
+            state_version: manifest.state_version,
+            mode: manifest.mode.clone(),
+            base_checksum: manifest.base_checksum.clone(),
+            registry_fingerprint: manifest.registry_fingerprint.clone(),
+            history,
+        };
+        let envelope = StatisticsSidecarEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.len() as u64 > MAX_STATISTICS_SIDECAR_BYTES {
+            bail!("native statistics sidecar exceeds its byte budget");
+        }
+        let path = self.statistics_sidecar_path(slot)?;
+        atomic_replace(&path, &bytes, &self.next_temporary_name()?)?;
+        sync_directory(&self.slot_dir(slot)?)?;
+        Ok(())
+    }
+
+    /// Reads a disposable cache fail-open. Corruption, stale identity,
+    /// unsupported formats and I/O failures all return `None`; callers retain
+    /// the history rebuilt from public v47 fields.
+    pub(crate) fn read_statistics_sidecar(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+    ) -> Option<Value> {
+        self.read_statistics_sidecar_checked(slot, generation, revision, root_hash)
+            .ok()
+            .flatten()
+    }
+
+    fn read_statistics_sidecar_checked(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native statistics sidecar checkpoint is missing"))?;
+        if manifest.generation != generation
+            || manifest.revision != revision
+            || manifest.root_hash != root_hash
+        {
+            bail!("native statistics sidecar requested identity is stale");
+        }
+        let path = self.statistics_sidecar_path(slot)?;
+        if !reject_existing_path_redirect(&path, "native statistics sidecar")? {
+            return Ok(None);
+        }
+        let file = File::open(&path)?;
+        let length = file.metadata()?.len();
+        if length == 0 || length > MAX_STATISTICS_SIDECAR_BYTES {
+            bail!("native statistics sidecar byte length is invalid");
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(length)?);
+        file.take(MAX_STATISTICS_SIDECAR_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != length {
+            bail!("native statistics sidecar changed during read");
+        }
+        let envelope = serde_json::from_slice::<StatisticsSidecarEnvelope>(&bytes)
+            .context("decode native statistics sidecar")?;
+        if sha256_hex(&serde_json::to_vec(&envelope.payload)?) != envelope.checksum {
+            bail!("native statistics sidecar checksum is invalid");
+        }
+        let payload = envelope.payload;
+        if payload.format_version != STATISTICS_SIDECAR_FORMAT_VERSION
+            || payload.checkpoint_format_version != manifest.format_version
+            || payload.slot != manifest.slot
+            || payload.generation != manifest.generation
+            || payload.revision != manifest.revision
+            || payload.root_hash != manifest.root_hash
+            || payload.state_version != manifest.state_version
+            || payload.mode != manifest.mode
+            || payload.base_checksum != manifest.base_checksum
+            || payload.registry_fingerprint != manifest.registry_fingerprint
+        {
+            bail!("native statistics sidecar identity is stale");
+        }
+        Ok(Some(payload.history))
     }
 
     /// Publishes a bounded native-generated compatibility export under the
@@ -1837,6 +1981,12 @@ impl SaveStore {
         Ok(path)
     }
 
+    fn statistics_sidecar_path(&self, slot: &str) -> anyhow::Result<PathBuf> {
+        let path = safe_child(&self.slot_dir(slot)?, STATISTICS_SIDECAR_FILE)?;
+        reject_existing_path_redirect(&path, "native statistics sidecar")?;
+        Ok(path)
+    }
+
     fn fixed_directory(&self, path: &Path, label: &str) -> anyhow::Result<PathBuf> {
         let root_expected = self
             .fixed_directories
@@ -2654,6 +2804,112 @@ mod tests {
             b"stable-data"
         );
         assert_eq!(fs::read_dir(outside).unwrap().count(), 1);
+    }
+
+    fn seed_statistics_checkpoint(store: &mut SaveStore, revision: u64) -> SaveCommitResult {
+        let transaction = begin(store, revision);
+        store
+            .put(&transaction, "base", Some("{\"version\":47}"))
+            .unwrap();
+        store.commit(&transaction).unwrap()
+    }
+
+    #[test]
+    fn statistics_sidecar_round_trip_is_bound_to_one_checkpoint() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let first = seed_statistics_checkpoint(&mut store, 1);
+        let history = serde_json::json!({"formatVersion":1,"samples":[{"elapsedSeconds":1}]});
+        store
+            .write_statistics_sidecar(
+                &first.slot,
+                first.generation,
+                first.revision,
+                &first.root_hash,
+                history.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.read_statistics_sidecar(
+                &first.slot,
+                first.generation,
+                first.revision,
+                &first.root_hash,
+            ),
+            Some(history)
+        );
+
+        let second = seed_statistics_checkpoint(&mut store, 2);
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &second.slot,
+                    second.generation,
+                    second.revision,
+                    &second.root_hash,
+                )
+                .is_none()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn statistics_sidecar_corruption_and_size_overflow_are_fail_open() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let checkpoint = seed_statistics_checkpoint(&mut store, 1);
+        store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples":[]}),
+            )
+            .unwrap();
+        let path = store.statistics_sidecar_path("normal-main").unwrap();
+        fs::write(&path, b"corrupt diagnostics cache").unwrap();
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                )
+                .is_none()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 1);
+
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_STATISTICS_SIDECAR_BYTES + 1)
+            .unwrap();
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                )
+                .is_none()
+        );
+        let oversized = serde_json::json!({
+            "blob": "x".repeat(MAX_STATISTICS_SIDECAR_BYTES as usize)
+        });
+        assert!(
+            store
+                .write_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                    oversized,
+                )
+                .is_err()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 1);
     }
 
     #[test]

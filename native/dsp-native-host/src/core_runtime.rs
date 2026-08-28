@@ -20,6 +20,20 @@ use crate::save_store::{SaveCommitResult, SaveStore, WalEntry, json_values_bitwi
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+fn persist_statistics_sidecar_best_effort(
+    store: &SaveStore,
+    slot: &str,
+    generation: u64,
+    revision: u64,
+    root_hash: &str,
+    history: Option<Value>,
+) {
+    let Some(history) = history else {
+        return;
+    };
+    let _ = store.write_statistics_sidecar(slot, generation, revision, root_hash, history);
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreOpenResult {
@@ -445,6 +459,14 @@ impl CoreRegistry {
             records,
             catalog,
         )?;
+        if let Some(history) = store.read_statistics_sidecar(slot, generation, revision, root_hash)
+        {
+            // This file is a disposable diagnostic cache. Any schema,
+            // identity or content error leaves the public-history rebuild in
+            // place and must never prevent the authoritative checkpoint from
+            // opening.
+            let _ = state.restore_production_history_sidecar(history);
+        }
         let wal = store.read_wal(slot, revision)?;
         for entry in &wal {
             replay_wal_entry(&mut state, entry)?;
@@ -611,6 +633,16 @@ impl CoreRegistry {
             }
         };
         state.install_checkpoint_identity(checkpoint.generation, checkpoint.root_hash.clone());
+        // The authoritative checkpoint is already durable. Sidecar I/O is
+        // deliberately best-effort and cannot change the import result.
+        persist_statistics_sidecar_best_effort(
+            store,
+            &checkpoint.slot,
+            checkpoint.generation,
+            checkpoint.revision,
+            &checkpoint.root_hash,
+            state.production_history_sidecar(),
+        );
         self.next_session_id = next_session_id;
         self.sessions.insert(session_id.clone(), state);
         Ok(CoreImportV47Result {
@@ -1082,11 +1114,24 @@ impl CoreRegistry {
                 return Err(error.context("publish native core checkpoint"));
             }
         };
-        let state = self.session_mut(session_id)?;
-        state.install_checkpoint_identity(checkpoint.generation, checkpoint.root_hash.clone());
+        let (summary, history) = {
+            let state = self.session_mut(session_id)?;
+            state.install_checkpoint_identity(checkpoint.generation, checkpoint.root_hash.clone());
+            (state.summary()?, state.production_history_sidecar())
+        };
+        // Publication and dirty ACK already succeeded. A locked, damaged or
+        // oversized diagnostics cache is merely skipped.
+        persist_statistics_sidecar_best_effort(
+            store,
+            &checkpoint.slot,
+            checkpoint.generation,
+            checkpoint.revision,
+            &checkpoint.root_hash,
+            history,
+        );
         Ok(CoreCheckpointResult {
             checkpoint,
-            summary: state.summary()?,
+            summary,
             encoded_records: visit_result.encoded_records,
             reused_records: visit_result.reused_records,
         })
@@ -1134,8 +1179,19 @@ impl CoreRegistry {
             self.session(session_id)?.abort_checkpoint_visit();
             bail!("uncertain native checkpoint does not match the active core session");
         }
-        let state = self.session_mut(session_id)?;
-        state.install_checkpoint_identity(published.generation, published.root_hash);
+        let history = {
+            let state = self.session_mut(session_id)?;
+            state.install_checkpoint_identity(published.generation, published.root_hash.clone());
+            state.production_history_sidecar()
+        };
+        persist_statistics_sidecar_best_effort(
+            store,
+            &published.slot,
+            published.generation,
+            published.revision,
+            &published.root_hash,
+            history,
+        );
         self.uncertain_checkpoint_transactions.remove(session_id);
         Ok(())
     }
@@ -1682,6 +1738,339 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.root_hash, before.root_hash);
         assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn statistics_sidecar_damage_or_write_failure_never_blocks_authority_lifecycle() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut envelope = serde_json::from_slice::<Value>(&import_envelope()).unwrap();
+        let state = envelope["state"].as_object_mut().unwrap();
+        state.insert("elapsedSeconds".to_owned(), Value::from(102));
+        state.insert("historyRecordedAt".to_owned(), Value::from(102));
+        state.insert(
+            "productionHistory".to_owned(),
+            serde_json::json!([
+                {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+            ]),
+        );
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let sidecar = store
+            .root()
+            .join("normal-main")
+            .join("statistics-history-v1.json");
+        let valid_history = serde_json::json!({
+            "formatVersion": 1,
+            "source": {
+                "publicLen": 2,
+                "historyRecordedAtBits": 102.0_f64.to_bits(),
+                "latestElapsedBits": 102.0_f64.to_bits(),
+                "latestDurationBits": 1.0_f64.to_bits()
+            },
+            "coldSamples": [{
+                "elapsedSeconds": 100,
+                "sampleDurationSeconds": 100,
+                "productionPerMinute": {"iron_ore": 12}
+            }]
+        });
+        store
+            .write_statistics_sidecar(
+                &imported.checkpoint.slot,
+                imported.checkpoint.generation,
+                imported.checkpoint.revision,
+                &imported.checkpoint.root_hash,
+                valid_history.clone(),
+            )
+            .unwrap();
+
+        // Opening the exact checkpoint restores the cold bucket without
+        // adding it to the authoritative public v47 state.
+        let published = store.recover("normal-main").unwrap().unwrap();
+        let mut reopened = CoreRegistry::default();
+        let opened = reopened
+            .open(
+                &store,
+                "normal-main",
+                published.generation,
+                &published.root_hash,
+                published.revision,
+                &published.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        let projection = reopened
+            .statistics_projection(&opened.session_id, 0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["samples"][0]["elapsedSeconds"], 100);
+
+        store
+            .write_statistics_sidecar(
+                &imported.checkpoint.slot,
+                imported.checkpoint.generation,
+                imported.checkpoint.revision,
+                &imported.checkpoint.root_hash,
+                serde_json::json!({
+                    "formatVersion": 1,
+                    "source": {
+                        "publicLen": 2,
+                        "historyRecordedAtBits": 102.0_f64.to_bits(),
+                        "latestElapsedBits": 102.0_f64.to_bits(),
+                        "latestDurationBits": 1.0_f64.to_bits()
+                    },
+                    "coldSamples": [
+                        {
+                            "elapsedSeconds": 40,
+                            "sampleDurationSeconds": 40,
+                            "productionPerMinute": {"iron_ore": 12}
+                        },
+                        {
+                            "elapsedSeconds": 100,
+                            "sampleDurationSeconds": 50,
+                            "productionPerMinute": {"iron_ore": 12}
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+
+        // write_statistics_sidecar recomputed a valid outer SHA-256, but the
+        // cold timeline contains a ten-second gap. Core validation treats the
+        // carefully re-signed local payload as a cache miss.
+        let mut reopened = CoreRegistry::default();
+        let opened = reopened
+            .open(
+                &store,
+                "normal-main",
+                published.generation,
+                &published.root_hash,
+                published.revision,
+                &published.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(opened.replayed_revision, published.revision);
+        let projection = reopened
+            .statistics_projection(&opened.session_id, 0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"], Value::Array(Vec::new()));
+
+        std::fs::write(&sidecar, b"damaged disposable cache").unwrap();
+        let mut reopened = CoreRegistry::default();
+        assert!(
+            reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    import_catalog(),
+                )
+                .is_ok()
+        );
+
+        // A directory at the exact cache filename makes atomic replacement
+        // fail on every supported host. The lifecycle helper deliberately has
+        // no error result and therefore cannot rewrite the authority outcome.
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+        persist_statistics_sidecar_best_effort(
+            &store,
+            &imported.checkpoint.slot,
+            imported.checkpoint.generation,
+            imported.checkpoint.revision,
+            &imported.checkpoint.root_hash,
+            Some(serde_json::json!({"coldSamples":[]})),
+        );
+        let recovered = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(recovered.generation, imported.checkpoint.generation);
+        assert_eq!(recovered.root_hash, imported.checkpoint.root_hash);
+    }
+
+    #[test]
+    fn pause_only_wal_replay_preserves_checkpoint_bound_cold_history() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut envelope = serde_json::from_slice::<Value>(&import_envelope()).unwrap();
+        let state = envelope["state"].as_object_mut().unwrap();
+        state.insert("elapsedSeconds".to_owned(), Value::from(102));
+        state.insert("historyRecordedAt".to_owned(), Value::from(102));
+        state.insert(
+            "productionHistory".to_owned(),
+            serde_json::json!([
+                {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+            ]),
+        );
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        store
+            .write_statistics_sidecar(
+                &imported.checkpoint.slot,
+                imported.checkpoint.generation,
+                imported.checkpoint.revision,
+                &imported.checkpoint.root_hash,
+                serde_json::json!({
+                    "formatVersion": 1,
+                    "source": {
+                        "publicLen": 2,
+                        "historyRecordedAtBits": 102.0_f64.to_bits(),
+                        "latestElapsedBits": 102.0_f64.to_bits(),
+                        "latestDurationBits": 1.0_f64.to_bits()
+                    },
+                    "coldSamples": [{
+                        "elapsedSeconds": 100,
+                        "sampleDurationSeconds": 100,
+                        "productionPerMinute": {"iron_ore": 12}
+                    }]
+                }),
+            )
+            .unwrap();
+
+        let checkpoint = store.recover("normal-main").unwrap().unwrap();
+        let mut running = CoreRegistry::default();
+        let opened = running
+            .open(
+                &store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                &checkpoint.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        let pause_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [{
+                "path": ["paused"],
+                "operation": "set",
+                "value": true
+            }],
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = running
+            .commit_operation(
+                &store,
+                &opened.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "pause-with-cold-history".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(pause_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                },
+            )
+            .unwrap();
+
+        let mut replayed = CoreRegistry::default();
+        let opened = replayed
+            .open(
+                &store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                &checkpoint.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(opened.replayed_wal_entries, 1);
+        assert_eq!(opened.replayed_revision, committed.revision);
+        let projection = replayed
+            .statistics_projection(&opened.session_id, 0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["samples"][0]["elapsedSeconds"], 100);
+
+        let unknown_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": committed.revision,
+            "topLevelChanges": [{
+                "path": ["futureUnknownField"],
+                "operation": "set",
+                "value": true
+            }],
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let invalidated = replayed
+            .commit_operation(
+                &store,
+                &opened.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "unknown-patch-invalidates-cold-history".to_owned(),
+                    base_revision: committed.revision,
+                    command: Some(unknown_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                },
+            )
+            .unwrap();
+        let mut replayed_after_unknown = CoreRegistry::default();
+        let opened = replayed_after_unknown
+            .open(
+                &store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                &checkpoint.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(opened.replayed_wal_entries, 2);
+        assert_eq!(opened.replayed_revision, invalidated.revision);
+        let projection = replayed_after_unknown
+            .statistics_projection(&opened.session_id, 0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"], Value::Array(Vec::new()));
     }
 
     #[test]

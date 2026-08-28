@@ -40,7 +40,11 @@ import { CanvasMiniMap, type CanvasMiniMapHandle } from "./components/CanvasMini
 import { BlueprintWorkspace, CanvasRegionEditor, CanvasRegionLayer, CanvasSelectionTools, PendingBlueprintLayer, SelectionToolbar, type CanvasRegionRectangle, type CanvasRegionResizeHandle } from "./components/BlueprintWorkspace";
 import { CanvasInteractionOverlay, type CanvasClickConnectionPreview, type CanvasConnectionPreviewTone } from "./components/CanvasInteractionOverlay";
 import { GAME_DIALOG_CLOSED_EVENT, useGameDialog } from "./components/GameDialogProvider";
-import type { StarMapBatchActionResult } from "./components/StarMapWorkspace";
+import type {
+  StarMapBatchActionResult,
+  StarMapIndustryReadRequest,
+  StarMapNativeReadStatus,
+} from "./components/StarMapWorkspace";
 import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
 import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
@@ -396,8 +400,11 @@ import {
   createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
 } from "./game/nativeRecipeWorkspaceStore";
 import {
+  NATIVE_STELLAR_PAGE_ROWS,
   NativeStellarWorkspaceStore,
   createNativePlayerAuthorityStellarProjectionSource,
+  selectNativeStarMapWorkspaceReadModel,
+  type NativeStellarIndustrySelector,
 } from "./game/nativeStellarWorkspaceStore";
 import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
@@ -1514,6 +1521,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     selectedItemId: loaded.state.recipeFocus.itemId ?? "iron_ore",
   }));
   const [starMapOpen, setStarMapOpen] = useState(false);
+  const [starMapIndustryReadRequest, setStarMapIndustryReadRequest] = useState<StarMapIndustryReadRequest>({
+    systemId: null,
+    planetId: null,
+    routeFilter: "all",
+    query: "",
+  });
   const [systemSpaceStationOpen, setSystemSpaceStationOpen] = useState(false);
   const [systemSpaceStationId, setSystemSpaceStationId] = useState<StarSystemId | null>(null);
   const [orbitalStationOpen, setOrbitalStationOpen] = useState(false);
@@ -2136,32 +2149,55 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeStellarWorkspaceStore.getSnapshot,
     nativeStellarWorkspaceStore.getSnapshot,
   );
-  const nativeStarMapOverviewProjection = useMemo(() => {
-    const frame = nativeStellarWorkspaceSnapshot.overview.frame;
-    if (!frame || nativeStellarWorkspaceSnapshot.overview.status !== "ready" ||
-        !nativePlayerAuthorityActiveFrame || frame.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
-        frame.revision !== factoryThinViewExpectedRevision ||
-        frame.registryFingerprint !== recipeWorkspaceRegistryFingerprint) return null;
-    return frame.projection;
-  }, [
+  const nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>(() => ({
+    ...starMapIndustryReadRequest,
+    planetCursor: 0,
+    planetLimit: NATIVE_STELLAR_PAGE_ROWS,
+    stationCursor: 0,
+    stationLimit: NATIVE_STELLAR_PAGE_ROWS,
+    routeCursor: 0,
+    routeLimit: NATIVE_STELLAR_PAGE_ROWS,
+  }), [starMapIndustryReadRequest]);
+  const updateStarMapIndustryReadRequest = useCallback((request: StarMapIndustryReadRequest) => {
+    setStarMapIndustryReadRequest((current) => current.systemId === request.systemId &&
+        current.planetId === request.planetId && current.routeFilter === request.routeFilter &&
+        current.query === request.query
+      ? current
+      : { ...request });
+  }, []);
+  const nativeStellarProjectionIdentity = useMemo(() => nativePlayerAuthorityActiveFrame?.sessionId
+    ? Object.freeze({
+        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+        revision: factoryThinViewExpectedRevision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+    : null, [
     factoryThinViewExpectedRevision,
     nativePlayerAuthorityActiveFrame,
-    nativeStellarWorkspaceSnapshot.overview,
     recipeWorkspaceRegistryFingerprint,
   ]);
-  const nativeStellarIndustryProjection = useMemo(() => {
-    const frame = nativeStellarWorkspaceSnapshot.industry.frame;
-    if (!frame || nativeStellarWorkspaceSnapshot.industry.status !== "ready" ||
-        !nativePlayerAuthorityActiveFrame || frame.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
-        frame.revision !== factoryThinViewExpectedRevision ||
-        frame.registryFingerprint !== recipeWorkspaceRegistryFingerprint) return null;
-    return frame.projection;
-  }, [
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
-    nativeStellarWorkspaceSnapshot.industry,
-    recipeWorkspaceRegistryFingerprint,
+  const nativeStellarProjectionSource = useMemo(() => nativeStellarProjectionIdentity
+    ? createNativePlayerAuthorityStellarProjectionSource(desktopBridge, nativeStellarProjectionIdentity)
+    : null, [desktopBridge, nativeStellarProjectionIdentity]);
+  const nativeStarMapWorkspaceReadModel = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativeStarMapWorkspaceReadModel(
+        nativeStellarWorkspaceSnapshot,
+        nativeStellarProjectionIdentity,
+        nativeStellarIndustrySelector,
+      )
+    : null, [
+    nativeStellarIndustrySelector,
+    nativeStellarProjectionIdentity,
+    nativeStellarWorkspaceSnapshot,
   ]);
+  const nativeStarMapWorkspaceReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStarMapWorkspaceReadModel
+    ? "ready"
+    : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
+        nativeStellarWorkspaceSnapshot.overview.status === "unavailable" ||
+        nativeStellarWorkspaceSnapshot.industry.status === "unavailable"
+      ? "unavailable"
+      : "loading";
   const commandPaletteEntitySearchSelector = useMemo(
     () => createCommandPaletteEntitySearchSelector(
       commandPaletteEntitySearchRequest.query,
@@ -2698,44 +2734,46 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recipesOpen,
   ]);
   useEffect(() => {
-    if (!starMapOpen || !nativePlayerAuthorityBoundFrame) {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionSource) {
       nativeStellarWorkspaceStore.clear();
-      return;
     }
-    if (!nativePlayerAuthorityActiveFrame) return;
-    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
-    if (!sessionId) {
-      nativeStellarWorkspaceStore.clear();
-      return;
-    }
-    const identity = {
-      sessionId,
-      revision: factoryThinViewExpectedRevision,
-      registryFingerprint: recipeWorkspaceRegistryFingerprint,
-    };
-    const source = createNativePlayerAuthorityStellarProjectionSource(desktopBridge, identity);
-    if (!source) {
-      nativeStellarWorkspaceStore.clear();
-      return;
-    }
-    void Promise.all([
-      nativeStellarWorkspaceStore.refreshOverview(source, identity, { cursor: 0, limit: 64 }),
-      nativeStellarWorkspaceStore.refreshIndustry(source, identity, {
-        systemId: null,
-        planetId: null,
-        planetCursor: 0,
-        planetLimit: 64,
-        stationCursor: 0,
-        stationLimit: 64,
-      }),
-    ]).catch(() => undefined);
   }, [
-    desktopBridge,
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
-    recipeWorkspaceRegistryFingerprint,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshOverview(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionIdentity,
+      { cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS },
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshIndustry(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionIdentity,
+      nativeStellarIndustrySelector,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarIndustrySelector,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
     starMapOpen,
   ]);
   useEffect(() => {
@@ -14834,8 +14872,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           <StarMapWorkspace
             open
             game={game}
-            nativeOverviewProjection={nativeStarMapOverviewProjection}
-            nativeIndustryProjection={nativeStellarIndustryProjection}
+            nativeReadModel={nativeStarMapWorkspaceReadModel}
+            nativeReadStatus={nativeStarMapWorkspaceReadStatus}
+            nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
+            industryReadRequest={starMapIndustryReadRequest}
+            onIndustryReadRequest={updateStarMapIndustryReadRequest}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}

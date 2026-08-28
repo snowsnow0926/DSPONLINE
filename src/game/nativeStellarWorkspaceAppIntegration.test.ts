@@ -9,27 +9,49 @@ describe("native stellar workspace App integration", () => {
     "utf8",
   );
 
-  it("binds both bounded reads to the active authority identity", () => {
-    expect(app).toMatch(/createNativePlayerAuthorityStellarProjectionSource\(desktopBridge, identity\)/);
-    expect(app).toMatch(/refreshOverview\(source, identity, \{ cursor: 0, limit: 64 \}\)/);
-    expect(app).toMatch(/refreshIndustry\(source, identity, \{[\s\S]*?planetLimit: 64,[\s\S]*?stationLimit: 64/);
-    expect(app).toMatch(/frame\.sessionId !== nativePlayerAuthorityActiveFrame\.sessionId/);
-    expect(app).toMatch(/frame\.revision !== factoryThinViewExpectedRevision/);
-    expect(app).toMatch(/frame\.registryFingerprint !== recipeWorkspaceRegistryFingerprint/);
+  it("selects the complete v2 workspace model for the exact authority identity and selector", () => {
+    expect(app).toMatch(/selectNativeStarMapWorkspaceReadModel\([\s\S]*?nativeStellarWorkspaceSnapshot,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarIndustrySelector/);
+    expect(app).toMatch(/nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>[\s\S]*?planetCursor: 0,[\s\S]*?stationCursor: 0,[\s\S]*?routeCursor: 0,[\s\S]*?routeFilter/);
+    expect(app).toMatch(/createNativePlayerAuthorityStellarProjectionSource\(desktopBridge, nativeStellarProjectionIdentity\)/);
+    expect(app).not.toMatch(/const nativeStarMapOverviewProjection = useMemo/);
+    expect(app).not.toMatch(/const nativeStellarIndustryProjection = useMemo/);
   });
 
-  it("passes only identity-checked projections into the workspace", () => {
-    expect(app).toMatch(/nativeOverviewProjection=\{nativeStarMapOverviewProjection\}/);
-    expect(app).toMatch(/nativeIndustryProjection=\{nativeStellarIndustryProjection\}/);
-    expect(workspace).toMatch(/nativeOverviewProjection\?: DesktopNativeCoreStarMapOverviewProjectionResult \| null/);
-    expect(workspace).toMatch(/nativeIndustryProjection\?: DesktopNativeCoreStellarIndustryProjectionResult \| null/);
+  it("refreshes overview independently and makes scope, filter, and query latest-only through the store", () => {
+    expect(app).toMatch(/refreshOverview\([\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS/);
+    expect(app).toMatch(/refreshIndustry\([\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarIndustrySelector/);
+    expect(app).toMatch(/nativeStellarIndustrySelector,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarWorkspaceStore,[\s\S]*?starMapOpen/);
+    expect(workspace).toMatch(/星际工业恒星系筛选/);
+    expect(workspace).toMatch(/星际工业行星筛选/);
+    expect(workspace).toMatch(/routeFilter: "issues"/);
+    expect(workspace).toMatch(/query: clampNativeRouteQuery\(query\)/);
   });
 
-  it("uses native rows only after a complete first page proves the whole scope", () => {
-    expect(workspace).toMatch(/systems\.cursor === 0[\s\S]*?systems\.nextCursor === null[\s\S]*?systems\.rows\.length === nativeOverviewProjection\.systems\.totalCount/);
-    expect(workspace).toMatch(/planets\.cursor === 0[\s\S]*?planets\.nextCursor === null[\s\S]*?planets\.rows\.length === nativeIndustryProjection\.planets\.totalCount/);
-    expect(workspace).toMatch(/stations\.cursor === 0[\s\S]*?stations\.nextCursor === null[\s\S]*?stations\.rows\.length === nativeIndustryProjection\.stations\.totalCount/);
-    expect(workspace).toMatch(/nativePlanetRows\.get\(planetId\)\?\.deviceCount/);
-    expect(workspace).toMatch(/nativeSystemRows\.get\(system\.id\)/);
+  it("passes only the selector-checked read model and fails closed for player authority", () => {
+    expect(app).toMatch(/nativeReadModel=\{nativeStarMapWorkspaceReadModel\}/);
+    expect(app).toMatch(/nativeReadStatus=\{nativeStarMapWorkspaceReadStatus\}/);
+    expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
+    expect(app).toMatch(/industryReadRequest=\{starMapIndustryReadRequest\}/);
+    expect(workspace).toMatch(/nativeAuthorityRequired\s*\? <NativeIndustryConsole/);
+    expect(workspace).toMatch(/玩家权威模式不会回退 JavaScript 存档/);
+    expect(workspace).toMatch(/nativeAuthorityRequired && !nativeReadModel/);
+  });
+
+  it("renders native routes and indexes without reconstructing authority routes from GameState", () => {
+    expect(workspace).toMatch(/readModel\?\.routes\.flatMap/);
+    expect(workspace).toMatch(/readModel\.routeRowsById\.get\(route\.id\)/);
+    expect(workspace).toMatch(/readModel\.routeRowsByTargetStationId\.get\(station\.stationId\)/);
+    expect(workspace).toMatch(/readModel\.stationRowsById\.get\(route\.targetStationId\)/);
+    expect(workspace).toMatch(/readModel\?\.planetRowsById\.get\(selector\.planetId\)/);
+    expect(workspace).toMatch(/readModel\?\.systemRowsById\.get\(selector\.systemId\)/);
+    expect(workspace).toMatch(/nativeAuthorityRequired[\s\S]*?<NativeIndustryConsole[\s\S]*?: <IndustryConsole game=\{game\}/);
+    expect(workspace).toMatch(/function IndustryConsole[\s\S]*?getStellarRouteSnapshots\(game\)/);
+  });
+
+  it("keeps stellar edits on the existing commitGame command path", () => {
+    expect(app).toMatch(/onRoleChange=\{\(planetId: PlanetId, role: PlanetIndustryRole\) => commitGame/);
+    expect(app).toMatch(/onStationPriorityChange=\{[\s\S]*?=> commitGame/);
+    expect(app).toMatch(/onStationMinimumLoadChange=\{[\s\S]*?=> commitGame/);
+    expect(app).toMatch(/onStationLimitsChange=\{[\s\S]*?=> commitGame/);
   });
 });

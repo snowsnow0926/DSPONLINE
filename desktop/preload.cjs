@@ -132,11 +132,15 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   setFontScale: (scale) => ipcRenderer.invoke("desktop:set-font-scale", scale),
   getReleaseInfo: () => ipcRenderer.invoke("desktop:release-info"),
   getNativePerformanceStatus: () => invokeNative("desktop:native-status", { fallbackCode: "NATIVE_STATUS_FAILED", message: "无法读取 Windows 原生性能服务状态" }),
-  // Read-only and optional at the TypeScript boundary for rollback hosts. No
-  // activation, ticking, command, checkpoint, lease or recovery control is
-  // exposed to the renderer.
+  // Authority identity and durable control remain main-owned. The only macro
+  // mutation surface accepts bounded time budgets (or an empty finish/retry)
+  // and never accepts a session, run, checkpoint, lease or operation ID.
   getNativePlayerAuthorityState: () => invokeNative("desktop:native-player-authority-state", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", message: "无法读取 Windows 原生玩家权威时钟" }),
   onNativePlayerAuthorityState: subscribeNativePlayerAuthorityState,
+  startNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-start", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算启动失败" }, request),
+  advanceNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, request),
+  finishNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-finish", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算结束失败" }, {}),
+  recoverNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-recover", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算恢复失败" }, {}),
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
   getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
   setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),

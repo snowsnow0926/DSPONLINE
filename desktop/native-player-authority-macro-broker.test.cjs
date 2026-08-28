@@ -7,6 +7,7 @@ const {
   MAX_MACRO_BUDGET_MILLISECONDS,
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
+const { normalizeRendererNativeResult } = require("./native-renderer-boundary.cjs");
 const {
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
@@ -483,12 +484,78 @@ test("startup-recovered macro is adopted without renderer identity or a second H
   );
 });
 
-test("desktop main owns the macro broker and exposes no raw macro authority IPC", () => {
+test("renderer macro receipts expose only bounded progress and never durable identities", () => {
+  const active = normalizeRendererNativeResult("playerAuthorityMacroReceipt", {
+    schemaVersion: 1,
+    state: "macro-active",
+    previousRevision: 7,
+    revision: 9,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+    algorithmVersion: "native-pure-idle-macro-v10",
+    recovered: false,
+  });
+  assert.deepEqual(active, {
+    schemaVersion: 1,
+    state: "macro-active",
+    previousRevision: 7,
+    revision: 9,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+    recovered: false,
+  });
+  assert.equal(Object.hasOwn(active, "algorithmVersion"), false);
+  const recovered = normalizeRendererNativeResult("playerAuthorityMacroReceipt", {
+    schemaVersion: 1,
+    state: "macro-active",
+    revision: 9,
+    algorithmVersion: "native-pure-idle-macro-v10",
+    recovered: true,
+  });
+  assert.equal(recovered.previousRevision, null);
+  assert.equal(recovered.simulationMilliseconds, null);
+  const finished = normalizeRendererNativeResult("playerAuthorityMacroReceipt", {
+    schemaVersion: 1,
+    state: "finished",
+    revision: 9,
+    recovered: true,
+  });
+  assert.equal(finished.state, "finished");
+  for (const invalid of [
+    {
+      schemaVersion: 1, state: "macro-active", previousRevision: 9, revision: 9,
+      simulationMilliseconds: 1, wallMilliseconds: 1,
+      algorithmVersion: "native-pure-idle-macro-v10", recovered: false,
+    },
+    {
+      schemaVersion: 1, state: "macro-active", previousRevision: 7, revision: 9,
+      simulationMilliseconds: 1, wallMilliseconds: 1,
+      algorithmVersion: "native-pure-idle-macro-v10", recovered: false,
+      operationId: "forged",
+    },
+    {
+      schemaVersion: 1, state: "finished", revision: 9, recovered: false,
+      sessionId: "forged",
+    },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("playerAuthorityMacroReceipt", invalid),
+      { code: "NATIVE_PROTOCOL_INVALID" },
+    );
+  }
+});
+
+test("desktop exposes only budget-only macro IPC while main owns every identity", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   assert.match(main, /new NativePlayerAuthorityMacroBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime/);
   assert.match(main, /recoveredOperationId:\s*playerAuthorityStartupRecovery\.recoveredMacroOperationId/);
-  assert.doesNotMatch(main, /ipcMain\.(?:handle|on)\([^\n]*macro/i);
+  assert.match(main, /desktop:native-player-authority-macro-start"[\s\S]*?nativePlayerAuthorityMacroBroker\.start\(request\)/);
+  assert.match(main, /desktop:native-player-authority-macro-advance"[\s\S]*?nativePlayerAuthorityMacroBroker\.advance\(request\)/);
+  assert.match(main, /desktop:native-player-authority-macro-finish"[\s\S]*?nativePlayerAuthorityMacroBroker\.finish\(request\)/);
+  assert.match(main, /desktop:native-player-authority-macro-recover"[\s\S]*?nativePlayerAuthorityMacroBroker\.recover\(request\)/);
   assert.doesNotMatch(main, /nativeCoreSessions\.(?:commitPlayerAuthorityMacroAdvance|finishPlayerAuthorityMacroSession|recoverPlayerAuthorityMacroAdvance)/);
-  assert.doesNotMatch(preload, /macro(?:Advance|Session|Recovery)|main-player-authority/i);
+  assert.match(preload, /startNativePlayerAuthorityMacro:[\s\S]*?desktop:native-player-authority-macro-start/);
+  assert.match(preload, /finishNativePlayerAuthorityMacro:\s*\(\)[\s\S]*?desktop:native-player-authority-macro-finish[\s\S]*?\{\}/);
+  assert.doesNotMatch(preload, /macroSessionId|operationId|runId|main-player-authority/);
 });

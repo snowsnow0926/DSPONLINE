@@ -72,7 +72,7 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_HOST_EXITED", "NATIVE_HOST_START_FAILED", "NATIVE_HOST_TIMEOUT",
   "NATIVE_HOST_UNAVAILABLE", "NATIVE_HOST_WRITE_FAILED", "NATIVE_OPERATION_FAILED",
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
-  "NATIVE_PLAYER_AUTHORITY_STATE_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
   "NATIVE_PROTOCOL_INVALID", "NATIVE_SAVE_ABORT_FAILED", "NATIVE_SAVE_BEGIN_FAILED",
   "NATIVE_SAVE_COMMIT_FAILED", "NATIVE_SAVE_COMPACT_FAILED", "NATIVE_SAVE_READ_FAILED",
   "NATIVE_SAVE_RECOVER_FAILED", "NATIVE_SAVE_WRITE_FAILED", "NATIVE_STATUS_FAILED",
@@ -3265,6 +3265,86 @@ function normalizePlayerAuthorityState(value) {
   throw protocolError("native player-authority state schema");
 }
 
+function normalizePlayerAuthorityMacroReceipt(value) {
+  const source = jsonObject(value, "native player-authority macro receipt");
+  const maximumBudget = 30 * 24 * 60 * 60 * 1_000;
+  if (source.schemaVersion !== 1 || !["macro-active", "finished"].includes(source.state)) {
+    throw protocolError("native player-authority macro receipt identity");
+  }
+  const revision = safeInteger(source.revision, "native player-authority macro receipt revision");
+  if (source.state === "finished") {
+    objectWithKeys(
+      source,
+      ["schemaVersion", "state", "revision"],
+      ["recovered"],
+      "native player-authority macro finish receipt",
+    );
+    return {
+      schemaVersion: 1,
+      state: "finished",
+      revision,
+      previousRevision: null,
+      simulationMilliseconds: null,
+      wallMilliseconds: null,
+      recovered: Object.hasOwn(source, "recovered")
+        ? boolean(source.recovered, "native player-authority macro recovered finish")
+        : false,
+    };
+  }
+  const hasBudget = Object.hasOwn(source, "previousRevision") ||
+    Object.hasOwn(source, "simulationMilliseconds") || Object.hasOwn(source, "wallMilliseconds");
+  if (hasBudget) {
+    exactObject(source, [
+      "schemaVersion", "state", "previousRevision", "revision", "simulationMilliseconds",
+      "wallMilliseconds", "algorithmVersion", "recovered",
+    ], "native player-authority macro advance receipt");
+    const previousRevision = safeInteger(
+      source.previousRevision,
+      "native player-authority macro previous revision",
+    );
+    const simulationMilliseconds = safeInteger(
+      source.simulationMilliseconds,
+      "native player-authority macro simulation budget",
+      1,
+    );
+    const wallMilliseconds = safeInteger(
+      source.wallMilliseconds,
+      "native player-authority macro wall budget",
+      1,
+    );
+    if (revision <= previousRevision || simulationMilliseconds > maximumBudget ||
+        wallMilliseconds > maximumBudget) {
+      throw protocolError("native player-authority macro advance receipt binding");
+    }
+    logicalId(source.algorithmVersion, "native player-authority macro algorithm", 128);
+    return {
+      schemaVersion: 1,
+      state: "macro-active",
+      revision,
+      previousRevision,
+      simulationMilliseconds,
+      wallMilliseconds,
+      recovered: boolean(source.recovered, "native player-authority macro recovered advance"),
+    };
+  }
+  exactObject(source, [
+    "schemaVersion", "state", "revision", "algorithmVersion", "recovered",
+  ], "native player-authority macro startup recovery receipt");
+  logicalId(source.algorithmVersion, "native player-authority macro algorithm", 128);
+  if (source.recovered !== true) {
+    throw protocolError("native player-authority macro startup recovery binding");
+  }
+  return {
+    schemaVersion: 1,
+    state: "macro-active",
+    revision,
+    previousRevision: null,
+    simulationMilliseconds: null,
+    wallMilliseconds: null,
+    recovered: true,
+  };
+}
+
 const RESULT_NORMALIZERS = Object.freeze({
   hostHello: normalizeHostHello,
   nativeStatus: normalizeNativeStatus,
@@ -3299,6 +3379,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreCompare: normalizeCoreCompare,
   coreClose: normalizeCoreClose,
   playerAuthorityState: normalizePlayerAuthorityState,
+  playerAuthorityMacroReceipt: normalizePlayerAuthorityMacroReceipt,
 });
 
 function normalizeRendererNativeResult(kind, value, context) {

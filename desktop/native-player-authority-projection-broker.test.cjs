@@ -156,7 +156,7 @@ test("a tick or phase transition during an asynchronous read discards the result
   }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RENDERER_UNTRUSTED");
 });
 
-test("main routes only matching authority reads through the broker and exposes no authority control IPC", () => {
+test("main routes matching authority reads and keeps identity-bearing control out of preload", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   const broker = readFileSync("desktop/native-player-authority-projection-broker.cjs", "utf8");
@@ -170,8 +170,10 @@ test("main routes only matching authority reads through the broker and exposes n
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"command-palette-entity-search-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "star-map-overview-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v1", request\)/);
+  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v2", request\)/);
   assert.match(preload, /getNativePlayerAuthorityState/);
   assert.match(preload, /onNativePlayerAuthorityState/);
   assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);
+  assert.doesNotMatch(preload, /macroSessionId|operationId|runId|main-player-authority/);
   assert.doesNotMatch(broker, /\.preparePlayerAuthority|\.activatePlayerAuthority|\.commitPlayerAuthorityTick|\.applyCommand|\.advance\(/);
 });

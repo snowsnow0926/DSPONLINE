@@ -917,6 +917,46 @@ ipcMain.handle("desktop:native-player-authority-state", async (event) =>
     message: "无法读取 Windows 原生玩家权威时钟",
   }, async () => validatedNativePlayerAuthorityState(requireTrustedNativeSender(event))));
 
+ipcMain.handle("desktop:native-player-authority-macro-start", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算启动失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.start(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-advance", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算推进失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.advance(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-finish", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算结束失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.finish(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-recover", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算恢复失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.recover(request);
+  }));
+
 ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
   if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");
   return runtimeDiagnosticsSampler.sample();

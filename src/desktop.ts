@@ -109,6 +109,22 @@ export type DesktopNativePlayerAuthorityState =
   | DesktopNativePlayerAuthorityClockState
   | DesktopNativePlayerAuthorityMacroState;
 
+export interface DesktopNativePlayerAuthorityMacroBudgetRequest {
+  readonly simulationMilliseconds: number;
+  readonly wallMilliseconds: number;
+}
+
+/** Identity-free receipt; all durable macro IDs remain inside main/Rust. */
+export interface DesktopNativePlayerAuthorityMacroReceipt {
+  readonly schemaVersion: 1;
+  readonly state: "macro-active" | "finished";
+  readonly revision: number;
+  readonly previousRevision: number | null;
+  readonly simulationMilliseconds: number | null;
+  readonly wallMilliseconds: number | null;
+  readonly recovered: boolean;
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
@@ -120,6 +136,15 @@ export interface DesktopBridge {
   onNativePlayerAuthorityState?: (
     listener: (state: DesktopNativePlayerAuthorityState) => void,
   ) => () => void;
+  /** Budget-only request; session/run/operation IDs cannot be supplied by the renderer. */
+  startNativePlayerAuthorityMacro?: (
+    request: DesktopNativePlayerAuthorityMacroBudgetRequest,
+  ) => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
+  advanceNativePlayerAuthorityMacro?: (
+    request: DesktopNativePlayerAuthorityMacroBudgetRequest,
+  ) => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
+  finishNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
+  recoverNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
   getNativePerformancePolicy: () => Promise<DesktopNativePerformancePolicyStatus>;
   setNativePerformancePolicy: (request: DesktopNativePerformancePolicy) => Promise<DesktopNativePerformancePolicyStatus>;

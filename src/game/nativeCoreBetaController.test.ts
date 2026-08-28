@@ -93,6 +93,8 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   viewportProjectionV2RevisionOffset = 0;
   statisticsProjectionCalls = 0;
   statisticsProjectionRevisionOffset = 0;
+  technologyProjectionCalls = 0;
+  technologyProjectionRevisionOffset = 0;
   lastStatisticsProjectionRequest: Parameters<WindowsNativeCoreShadow["statisticsProjection"]>[0] | null = null;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
@@ -245,6 +247,37 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
       filters: { planetId: null, itemId: null },
       samples: [],
       nextCursor: null,
+    };
+  }
+
+  async technologyProjection(_request: Parameters<WindowsNativeCoreShadow["technologyProjection"]>[0]) {
+    this.technologyProjectionCalls += 1;
+    return {
+      schemaVersion: 1 as const,
+      projectionType: "technology-v1" as const,
+      revision: this.current.revision + this.technologyProjectionRevisionOffset,
+      truncated: false,
+      limits: { techRows: 512 as const, progressItemsPerTech: 16 as const, infiniteRows: 8 as const },
+      counts: { completedTechIds: 0, queuedTechIds: 0, progressTechs: 0, infiniteResearch: 5 },
+      selectedTechId: null,
+      pausedTechId: null,
+      completedTechIds: [],
+      queuedTechIds: [],
+      progressByTech: [],
+      activeInfiniteResearchId: null,
+      autoResearch: false,
+      infiniteResearch: [
+        "matrix_compression", "vein_utilization", "galactic_logistics", "stellar_harnessing", "continuum_simulation",
+      ].map((researchId) => ({ researchId, level: 0, historicalLevel: null, progress: "0" })),
+      settings: { technologyLayout: "standard" as const, fontScale: 1 as const, difficulty: "standard" as const },
+      matrixStock: {
+        electromagnetic_matrix: 0,
+        energy_matrix: 0,
+        structure_matrix: 0,
+        information_matrix: 0,
+        gravity_matrix: 0,
+        universe_matrix: 0,
+      },
     };
   }
 
@@ -467,6 +500,30 @@ describe("Windows native core invitation-Beta controller", () => {
       limit: 512,
     }, 1)).toBeNull();
     expect(controller.snapshot().authority).toMatchObject({ authority: "javascript", phase: "shadow", shadowRevision: 1 });
+  });
+
+  it("serves technology only from a verified same-revision JavaScript shadow", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    await expect(controller.readVerifiedTechnologyProjection({}, 1)).resolves.toMatchObject({
+      projectionType: "technology-v1",
+      revision: 1,
+    });
+    expect(session.technologyProjectionCalls).toBe(1);
+
+    session.technologyProjectionRevisionOffset = 1;
+    await expect(controller.readVerifiedTechnologyProjection({}, 1)).resolves.toBeNull();
+    expect(session.technologyProjectionCalls).toBe(2);
+
+    await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "technology-unverified",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    await expect(controller.readVerifiedTechnologyProjection({}, 2)).resolves.toBeNull();
+    expect(session.technologyProjectionCalls).toBe(2);
   });
 
   it("mirrors JavaScript durably while JavaScript remains authoritative", async () => {

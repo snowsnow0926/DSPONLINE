@@ -5,6 +5,8 @@ import type {
   DesktopNativeCoreProjectionResult,
   DesktopNativeCoreStatisticsProjectionRequest,
   DesktopNativeCoreStatisticsProjectionResult,
+  DesktopNativeCoreTechnologyProjectionRequest,
+  DesktopNativeCoreTechnologyProjectionResult,
   DesktopNativeCoreViewportProjectionV2Request,
   DesktopNativeCoreViewportProjectionV2Result,
   DesktopNativeCoreSummary,
@@ -579,6 +581,33 @@ export class WindowsNativeCoreBetaController {
       return projection;
     } catch {
       // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
+  }
+
+  async readVerifiedTechnologyProjection(
+    request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreTechnologyProjectionResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.technologyProjection({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
       return null;
     }
   }

@@ -1,11 +1,11 @@
 import { Check, ChevronDown, ChevronUp, FlaskConical, Gauge, ListOrdered, LockKeyhole, PackageCheck, Pause, Pickaxe, Play, Rocket, Satellite, Timer, X, Zap } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
-import { ITEMS, MATRIX_ITEM_IDS, PLANET_LIST, TECHNOLOGY_LIST, getTechnology, isDeprecatedTechnology } from "../game/content";
-import { canQueueTechnology, getDysonSailAbsorptionMultiplier, getInterstellarCargoCapacity, getLogisticsSpeedMultiplier, getMiningSpeedMultiplier, getPlanetaryCargoCapacity, getRayReceiverCapacityKw, getRecipeSpeedMultiplier, getSolarSailLifetimeSeconds, isTechnologyCompleted } from "../game/engine";
-import { INFINITE_RESEARCH_DEFINITIONS, getInfiniteResearchCompletion, getInfiniteResearchLevel, isEndgameUnlocked } from "../game/endgame";
-import { getInfiniteResearchCostString, isInfiniteResearchComplete } from "../game/infiniteResearch";
-import type { GameState, InfiniteResearchId, ItemId, TechnologyLayoutMode, TechId } from "../game/types";
+import { ITEMS, MATRIX_ITEM_IDS, TECHNOLOGY_LIST, getTechnology, isDeprecatedTechnology } from "../game/content";
+import { INFINITE_RESEARCH_DEFINITIONS, getInfiniteResearchCompletion } from "../game/endgame";
+import { getInfiniteResearchCostString, getInfiniteResearchMaximumLevel, isInfiniteResearchComplete } from "../game/infiniteResearch";
+import type { InfiniteResearchId, TechnologyLayoutMode, TechId } from "../game/types";
+import type { TechnologyWorkspaceReadModel } from "../game/technologyWorkspaceReadModel";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { horizontalFocusScrollLeft, useHorizontalPan } from "../hooks/useHorizontalPan";
 import { getTechnologyTierGrid } from "../game/technologyTreeLayout";
@@ -16,7 +16,7 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 
 interface TechnologyWorkspaceProps {
   open: boolean;
-  game: GameState;
+  readModel: TechnologyWorkspaceReadModel;
   onClose: () => void;
   onSelect: (techId: TechId) => void;
   onPauseResearch: () => void;
@@ -32,16 +32,35 @@ interface TechnologyWorkspaceProps {
   onMobileOpenDetail?: (subview: string) => void;
 }
 
-function networkMatrixStock(game: GameState, itemId: ItemId): number {
-  const nodeStock = game.entities.reduce((sum, entity) =>
-    sum + (entity.inputs[itemId] ?? 0) + (entity.outputs[itemId] ?? 0), 0);
-  const trayStock = PLANET_LIST.reduce((sum, planet) => sum + (planet.id === game.activePlanetId
-    ? game.tray[itemId] ?? 0
-    : game.planetTrays[planet.id][itemId] ?? 0), 0);
-  return Math.floor(nodeStock + trayStock + (game.cargo?.itemId === itemId ? game.cargo.amount : 0));
+function technologyCompleted(readModel: TechnologyWorkspaceReadModel, techId: TechId): boolean {
+  return readModel.research.completedTechIds.includes(techId);
 }
 
-export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, onLayoutChange, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
+function technologyCanQueue(readModel: TechnologyWorkspaceReadModel, techId: TechId): boolean {
+  const technology = getTechnology(techId);
+  if (!technology || isDeprecatedTechnology(techId) || technologyCompleted(readModel, techId) ||
+    readModel.research.selectedTechId === techId || readModel.research.queuedTechIds.includes(techId)) return false;
+  const planned = new Set<TechId>([
+    ...readModel.research.completedTechIds,
+    ...(readModel.research.pausedTechId ? [readModel.research.pausedTechId] : []),
+    ...(readModel.research.selectedTechId ? [readModel.research.selectedTechId] : []),
+    ...readModel.research.queuedTechIds,
+  ]);
+  return technology.prerequisites.every((prerequisite) => planned.has(prerequisite));
+}
+
+function endgameUnlocked(readModel: TechnologyWorkspaceReadModel): boolean {
+  return readModel.research.completedTechIds.includes("universe_matrix");
+}
+
+function infiniteResearchLevel(readModel: TechnologyWorkspaceReadModel, id: InfiniteResearchId): number {
+  return Math.min(
+    getInfiniteResearchMaximumLevel(id),
+    Math.max(0, Math.floor(readModel.infiniteResearch[id]?.level ?? 0)),
+  );
+}
+
+export function TechnologyWorkspace({ open, readModel, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, onLayoutChange, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
   const [focusedTechId, setFocusedTechId] = useState<TechId | null>(null);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [mobileFilter, setMobileFilter] = useState<"available" | "active" | "all">("available");
@@ -92,7 +111,7 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
     const observer = new ResizeObserver(measure);
     observer.observe(tree);
     return () => observer.disconnect();
-  }, [game.settings.fontScale, game.settings.technologyLayout, horizontalPan.surfaceRef, mobile, open]);
+  }, [readModel.settings.fontScale, readModel.settings.technologyLayout, horizontalPan.surfaceRef, mobile, open]);
   useEffect(() => {
     if (!mobile || !open) return;
     if (previousMobileSubviewRef.current && !mobileSubview) {
@@ -111,14 +130,14 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
     onMobileOpenDetail(targetSubview);
   }, [focusTechId, mobile, mobileSubview, onMobileOpenDetail, open]);
   if (!open) return null;
-  const selected = getTechnology(game.research.selectedTechId);
-  const paused = getTechnology(game.research.pausedTechId);
-  const activeInfinite = game.endgame.activeInfiniteResearchId
-    ? INFINITE_RESEARCH_DEFINITIONS.find((definition) => definition.id === game.endgame.activeInfiniteResearchId)
+  const selected = getTechnology(readModel.research.selectedTechId);
+  const paused = getTechnology(readModel.research.pausedTechId);
+  const activeInfinite = readModel.activeInfiniteResearchId
+    ? INFINITE_RESEARCH_DEFINITIONS.find((definition) => definition.id === readModel.activeInfiniteResearchId)
     : undefined;
-  const activeInfiniteProgress = activeInfinite ? game.endgame.infiniteResearch[activeInfinite.id] : undefined;
+  const activeInfiniteProgress = activeInfinite ? readModel.infiniteResearch[activeInfinite.id] : undefined;
   const displayedTechnology = selected ?? (!activeInfinite ? paused : undefined);
-  const selectedProgress = displayedTechnology ? game.research.progressByTech[displayedTechnology.id] ?? {} : {};
+  const selectedProgress = displayedTechnology ? readModel.research.progressByTech[displayedTechnology.id] ?? {} : {};
   const finiteCostTotal = displayedTechnology?.costs.reduce((sum, cost) => sum + cost.amount, 0);
   const finiteProgressTotal = displayedTechnology?.costs.reduce((sum, cost) =>
     sum + Math.min(cost.amount, selectedProgress[cost.itemId] ?? 0), 0);
@@ -129,26 +148,26 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
     ? (selectedCostTotal > 0 ? Math.min(100, selectedProgressTotal / selectedCostTotal * 100) : 0)
     : activeInfinite && activeInfiniteProgress ? getInfiniteResearchCompletion(activeInfiniteProgress, activeInfinite.id) * 100 : 0;
   const maximumTier = Math.max(...TECHNOLOGY_LIST.map((technology) => technology.tier));
-  const activeCompletedCount = game.research.completedTechIds.filter((techId) => !isDeprecatedTechnology(techId)).length;
+  const activeCompletedCount = readModel.research.completedTechIds.filter((techId) => !isDeprecatedTechnology(techId)).length;
 
   if (mobile) {
     const detailTechId = mobileSubview?.startsWith("tech:") ? mobileSubview.slice(5) as TechId : null;
     const detailTechnology = getTechnology(detailTechId);
     const detailInfiniteId = mobileSubview?.startsWith("infinite:") ? mobileSubview.slice(9) as InfiniteResearchId : null;
     const detailInfinite = INFINITE_RESEARCH_DEFINITIONS.find((definition) => definition.id === detailInfiniteId);
-    const endgameUnlocked = isEndgameUnlocked(game);
+    const unlockedEndgame = endgameUnlocked(readModel);
     const visibleTechnologies = TECHNOLOGY_LIST.filter((technology) => {
-      const complete = isTechnologyCompleted(game, technology.id);
-      const active = game.research.selectedTechId === technology.id || game.research.pausedTechId === technology.id || game.research.queuedTechIds.includes(technology.id);
+      const complete = technologyCompleted(readModel, technology.id);
+      const active = readModel.research.selectedTechId === technology.id || readModel.research.pausedTechId === technology.id || readModel.research.queuedTechIds.includes(technology.id);
       if (mobileFilter === "active") return active;
-      if (mobileFilter === "available") return !complete && (active || canQueueTechnology(game, technology.id));
+      if (mobileFilter === "available") return !complete && (active || technologyCanQueue(readModel, technology.id));
       return true;
     });
     const visibleInfiniteResearch = INFINITE_RESEARCH_DEFINITIONS.filter((definition) => {
-      const active = game.endgame.activeInfiniteResearchId === definition.id;
-      const capped = isInfiniteResearchComplete(definition.id, getInfiniteResearchLevel(game, definition.id));
+      const active = readModel.activeInfiniteResearchId === definition.id;
+      const capped = isInfiniteResearchComplete(definition.id, infiniteResearchLevel(readModel, definition.id));
       if (mobileFilter === "active") return active;
-      if (mobileFilter === "available") return endgameUnlocked && !capped;
+      if (mobileFilter === "available") return unlockedEndgame && !capped;
       return true;
     });
     const mobileProgressPercent = selectedProgressPercent;
@@ -158,41 +177,41 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
           <header className="mobile-detail-heading"><i style={{ color: detailInfinite.color }}><Rocket size={20} /></i><span><small>白糖阶段 · 无限科技</small><strong>{detailInfinite.name}</strong></span></header>
           <p className="mobile-detail-summary">{detailInfinite.summary}</p>
           <section className="mobile-detail-section"><header>当前效果</header><div className="mobile-tech-unlocks"><span><Gauge size={15} /><strong>{detailInfinite.effect}</strong></span></div></section>
-          <section className="mobile-detail-section"><header>研究状态</header><div className="mobile-tech-cost-list"><span><ItemGlyph itemId="universe_matrix" /><em>{ITEMS.universe_matrix.name}</em><strong><QuantityValue value={game.endgame.infiniteResearch[detailInfinite.id].progress} /> / <QuantityValue value={getInfiniteResearchCostString(detailInfinite.id, getInfiniteResearchLevel(game, detailInfinite.id))} /></strong></span></div></section>
-          <section className="mobile-detail-section"><header>前置科技</header><div className="mobile-tech-prerequisites"><span className={endgameUnlocked ? "complete" : ""}>{endgameUnlocked ? <Check size={15} /> : <LockKeyhole size={15} />}<strong>完成宇宙矩阵科技</strong></span></div></section>
+          <section className="mobile-detail-section"><header>研究状态</header><div className="mobile-tech-cost-list"><span><ItemGlyph itemId="universe_matrix" /><em>{ITEMS.universe_matrix.name}</em><strong><QuantityValue value={readModel.infiniteResearch[detailInfinite.id].progress} /> / <QuantityValue value={getInfiniteResearchCostString(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id))} /></strong></span></div></section>
+          <section className="mobile-detail-section"><header>前置科技</header><div className="mobile-tech-prerequisites"><span className={unlockedEndgame ? "complete" : ""}>{unlockedEndgame ? <Check size={15} /> : <LockKeyhole size={15} />}<strong>完成宇宙矩阵科技</strong></span></div></section>
           <div className="mobile-detail-spacer" />
-          <footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={!endgameUnlocked || isInfiniteResearchComplete(detailInfinite.id, getInfiniteResearchLevel(game, detailInfinite.id)) || game.endgame.activeInfiniteResearchId === detailInfinite.id} onClick={() => onSelectInfiniteResearch(detailInfinite.id)}><Rocket size={18} />{!endgameUnlocked ? "需要宇宙矩阵科技" : isInfiniteResearchComplete(detailInfinite.id, getInfiniteResearchLevel(game, detailInfinite.id)) ? "已达等级上限" : game.endgame.activeInfiniteResearchId === detailInfinite.id ? "正在研究" : "开始无限研究"}</button></footer>
+          <footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={!unlockedEndgame || isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) || readModel.activeInfiniteResearchId === detailInfinite.id} onClick={() => onSelectInfiniteResearch(detailInfinite.id)}><Rocket size={18} />{!unlockedEndgame ? "需要宇宙矩阵科技" : isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) ? "已达等级上限" : readModel.activeInfiniteResearchId === detailInfinite.id ? "正在研究" : "开始无限研究"}</button></footer>
         </div> : detailTechnology ? <div className="mobile-workspace-scroll mobile-technology-detail">
-          <header className="mobile-detail-heading"><i>{isTechnologyCompleted(game, detailTechnology.id) ? <Check size={20} /> : <FlaskConical size={20} />}</i><span><small>科技层级 {String(detailTechnology.tier + 1).padStart(2, "0")}</small><strong>{detailTechnology.name}</strong></span></header>
+          <header className="mobile-detail-heading"><i>{technologyCompleted(readModel, detailTechnology.id) ? <Check size={20} /> : <FlaskConical size={20} />}</i><span><small>科技层级 {String(detailTechnology.tier + 1).padStart(2, "0")}</small><strong>{detailTechnology.name}</strong></span></header>
           <p className="mobile-detail-summary">{detailTechnology.summary}</p>
-          <section className="mobile-detail-section"><header>研究矩阵</header><div className="mobile-tech-cost-list">{detailTechnology.costs.map((cost) => { const progress = game.research.progressByTech[detailTechnology.id]?.[cost.itemId] ?? 0; return <span key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{ITEMS[cost.itemId].name}</em><strong>{progress}/{cost.amount}</strong></span>; })}</div></section>
-          <section className="mobile-detail-section"><header>前置科技</header><div className="mobile-tech-prerequisites">{detailTechnology.prerequisites.length ? detailTechnology.prerequisites.map((id) => <span className={isTechnologyCompleted(game, id) ? "complete" : ""} key={id}>{isTechnologyCompleted(game, id) ? <Check size={15} /> : <LockKeyhole size={15} />}<strong>{getTechnology(id)?.name}</strong></span>) : <p>基础科技，无前置要求</p>}</div></section>
+          <section className="mobile-detail-section"><header>研究矩阵</header><div className="mobile-tech-cost-list">{detailTechnology.costs.map((cost) => { const progress = readModel.research.progressByTech[detailTechnology.id]?.[cost.itemId] ?? 0; return <span key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{ITEMS[cost.itemId].name}</em><strong>{progress}/{cost.amount}</strong></span>; })}</div></section>
+          <section className="mobile-detail-section"><header>前置科技</header><div className="mobile-tech-prerequisites">{detailTechnology.prerequisites.length ? detailTechnology.prerequisites.map((id) => <span className={technologyCompleted(readModel, id) ? "complete" : ""} key={id}>{technologyCompleted(readModel, id) ? <Check size={15} /> : <LockKeyhole size={15} />}<strong>{getTechnology(id)?.name}</strong></span>) : <p>基础科技，无前置要求</p>}</div></section>
           <section className="mobile-detail-section"><header>解锁内容</header><div className="mobile-tech-unlocks">{detailTechnology.unlocks.map((unlock) => <span key={unlock}><PackageCheck size={15} />{unlock}</span>)}</div></section>
           <div className="mobile-detail-spacer" />
           <footer className="mobile-detail-actionbar">
-            {isTechnologyCompleted(game, detailTechnology.id) ? <button type="button" disabled><Check size={18} />科技已完成</button>
-              : game.research.selectedTechId === detailTechnology.id ? <><button type="button" onClick={onPauseResearch}><Pause size={18} />暂停研究</button><button className="warning" type="button" onClick={onCancelResearch}><X size={18} />取消并保留进度</button></>
-                : game.research.pausedTechId === detailTechnology.id ? <button className="primary" type="button" disabled={Boolean(selected || activeInfinite)} onClick={onResumeResearch}><Play size={18} />继续研究</button>
-                  : game.research.queuedTechIds.includes(detailTechnology.id) ? <button className="warning" type="button" onClick={() => onRemoveQueued(detailTechnology.id)}><X size={18} />移出科研队列</button>
-                    : <button className="primary" type="button" disabled={!canQueueTechnology(game, detailTechnology.id)} onClick={() => onSelect(detailTechnology.id)}><FlaskConical size={18} />{game.research.selectedTechId || activeInfinite ? "加入科研队列" : "开始研究"}</button>}
+            {technologyCompleted(readModel, detailTechnology.id) ? <button type="button" disabled><Check size={18} />科技已完成</button>
+              : readModel.research.selectedTechId === detailTechnology.id ? <><button type="button" onClick={onPauseResearch}><Pause size={18} />暂停研究</button><button className="warning" type="button" onClick={onCancelResearch}><X size={18} />取消并保留进度</button></>
+                : readModel.research.pausedTechId === detailTechnology.id ? <button className="primary" type="button" disabled={Boolean(selected || activeInfinite)} onClick={onResumeResearch}><Play size={18} />继续研究</button>
+                  : readModel.research.queuedTechIds.includes(detailTechnology.id) ? <button className="warning" type="button" onClick={() => onRemoveQueued(detailTechnology.id)}><X size={18} />移出科研队列</button>
+                    : <button className="primary" type="button" disabled={!technologyCanQueue(readModel, detailTechnology.id)} onClick={() => onSelect(detailTechnology.id)}><FlaskConical size={18} />{readModel.research.selectedTechId || activeInfinite ? "加入科研队列" : "开始研究"}</button>}
           </footer>
         </div> : <div className="mobile-workspace-scroll" ref={mobileListRef}>
           <section className="mobile-research-status">
             <div><span>{selected || activeInfinite ? "当前研究" : paused ? "研究已暂停" : "科研空闲"}</span><strong>{displayedTechnology?.name ?? activeInfinite?.name ?? "选择一个可研究科技"}</strong><em>{Math.round(mobileProgressPercent)}%</em></div>
             <i><b style={{ width: `${mobileProgressPercent}%` }} /></i>
-            <footer><span>{selectedProgressTotal} / {selectedCostTotal} 矩阵</span><strong>队列 {game.research.queuedTechIds.length}</strong></footer>
+            <footer><span>{selectedProgressTotal} / {selectedCostTotal} 矩阵</span><strong>队列 {readModel.research.queuedTechIds.length}</strong></footer>
           </section>
           <nav className="mobile-workspace-sticky mobile-tech-filter" aria-label="科技筛选">{(["available", "active", "all"] as const).map((filter) => <button className={mobileFilter === filter ? "active" : ""} type="button" key={filter} onClick={() => setMobileFilter(filter)}>{{ available: "可研究", active: "进行中", all: "全部" }[filter]}</button>)}</nav>
           <div className="mobile-tech-list">{Array.from({ length: maximumTier + 1 }, (_, tier) => {
             const tierTechnologies = visibleTechnologies.filter((technology) => technology.tier === tier);
             if (!tierTechnologies.length) return null;
             return <section key={tier}><header>层级 {String(tier + 1).padStart(2, "0")}</header><div>{tierTechnologies.map((technology) => {
-              const complete = isTechnologyCompleted(game, technology.id);
-              const active = game.research.selectedTechId === technology.id;
-              const pausedTech = game.research.pausedTechId === technology.id;
-              const queueIndex = game.research.queuedTechIds.indexOf(technology.id);
-              const available = canQueueTechnology(game, technology.id);
-              const progress = game.research.progressByTech[technology.id] ?? {};
+              const complete = technologyCompleted(readModel, technology.id);
+              const active = readModel.research.selectedTechId === technology.id;
+              const pausedTech = readModel.research.pausedTechId === technology.id;
+              const queueIndex = readModel.research.queuedTechIds.indexOf(technology.id);
+              const available = technologyCanQueue(readModel, technology.id);
+              const progress = readModel.research.progressByTech[technology.id] ?? {};
               const done = technology.costs.reduce((sum, cost) => sum + Math.min(cost.amount, progress[cost.itemId] ?? 0), 0);
               const total = technology.costs.reduce((sum, cost) => sum + cost.amount, 0);
               return <button className={`${complete ? "complete" : ""}${active ? " active" : ""}${pausedTech ? " paused" : ""}`} type="button" key={technology.id} onClick={() => { mobileListScrollRef.current = mobileListRef.current?.scrollTop ?? 0; if (mobileListRef.current) mobileListRef.current.scrollTop = 0; onMobileOpenDetail?.(`tech:${technology.id}`); }}>
@@ -203,15 +222,15 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
             })}</div></section>;
           })}
           {visibleInfiniteResearch.length > 0 ? <section className="mobile-infinite-research-list"><header>白糖阶段 · 无限科技</header><div>{visibleInfiniteResearch.map((definition) => {
-            const progress = game.endgame.infiniteResearch[definition.id];
-            const level = getInfiniteResearchLevel(game, definition.id);
-            const active = game.endgame.activeInfiniteResearchId === definition.id;
+            const progress = readModel.infiniteResearch[definition.id];
+            const level = infiniteResearchLevel(readModel, definition.id);
+            const active = readModel.activeInfiniteResearchId === definition.id;
             const capped = isInfiniteResearchComplete(definition.id, level);
             return <button className={`${active ? "active" : ""}${capped ? " complete" : ""}`} type="button" key={definition.id} onClick={() => { mobileListScrollRef.current = mobileListRef.current?.scrollTop ?? 0; onMobileOpenDetail?.(`infinite:${definition.id}`); }}>
-              <i style={{ color: definition.color }}>{definition.symbol}</i><span><strong>{definition.name}</strong><small>{definition.summary}</small>{!endgameUnlocked ? <em>前置：完成宇宙矩阵科技</em> : null}</span><b>{capped ? "已达上限" : active ? `${Math.round(getInfiniteResearchCompletion(progress, definition.id) * 100)}%` : `Lv.${level}`}</b><ChevronDown size={17} />
+              <i style={{ color: definition.color }}>{definition.symbol}</i><span><strong>{definition.name}</strong><small>{definition.summary}</small>{!unlockedEndgame ? <em>前置：完成宇宙矩阵科技</em> : null}</span><b>{capped ? "已达上限" : active ? `${Math.round(getInfiniteResearchCompletion(progress, definition.id) * 100)}%` : `Lv.${level}`}</b><ChevronDown size={17} />
             </button>;
           })}</div></section> : null}
-          {visibleTechnologies.length === 0 && visibleInfiniteResearch.length === 0 ? <div className="mobile-workspace-empty"><FlaskConical size={24} /><span>当前筛选下没有科技</span><small>{mobileFilter === "available" && !endgameUnlocked ? "无限科技前置：完成宇宙矩阵科技" : "可清除筛选查看全部普通与无限科技"}</small><button type="button" onClick={() => setMobileFilter("all")}>清除筛选</button></div> : null}</div>
+          {visibleTechnologies.length === 0 && visibleInfiniteResearch.length === 0 ? <div className="mobile-workspace-empty"><FlaskConical size={24} /><span>当前筛选下没有科技</span><small>{mobileFilter === "available" && !unlockedEndgame ? "无限科技前置：完成宇宙矩阵科技" : "可清除筛选查看全部普通与无限科技"}</small><button type="button" onClick={() => setMobileFilter("all")}>清除筛选</button></div> : null}</div>
         </div>}
       </WorkspaceFrame>
     );
@@ -226,14 +245,14 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
         </div>
         <div className="technology-summary">
           {MATRIX_ITEM_IDS.map((itemId) => {
-            return <span className="matrix-stock" key={itemId}><ItemHoverCard itemId={itemId}><ItemGlyph itemId={itemId} /></ItemHoverCard><strong>{networkMatrixStock(game, itemId)}</strong></span>;
+            return <span className="matrix-stock" key={itemId}><ItemHoverCard itemId={itemId}><ItemGlyph itemId={itemId} /></ItemHoverCard><strong>{readModel.matrixStock[itemId as keyof typeof readModel.matrixStock]}</strong></span>;
           })}
           <span>已完成 <strong>{activeCompletedCount}/{TECHNOLOGY_LIST.length}</strong></span>
-          <span>无限等级 <strong>{Object.values(game.endgame.infiniteResearch).reduce((sum, progress) => sum + progress.level, 0)}</strong></span>
+          <span>无限等级 <strong>{Object.values(readModel.infiniteResearch).reduce((sum, progress) => sum + progress.level, 0)}</strong></span>
         </div>
         <div className="technology-layout-toggle" role="group" aria-label="科技树布局">
-          <button className={game.settings.technologyLayout === "standard" ? "active" : ""} type="button" onClick={() => onLayoutChange("standard")}>标准</button>
-          <button className={game.settings.technologyLayout === "compact" ? "active" : ""} type="button" onClick={() => onLayoutChange("compact")}>精简</button>
+          <button className={readModel.settings.technologyLayout === "standard" ? "active" : ""} type="button" onClick={() => onLayoutChange("standard")}>标准</button>
+          <button className={readModel.settings.technologyLayout === "compact" ? "active" : ""} type="button" onClick={() => onLayoutChange("compact")}>精简</button>
         </div>
         <button className="technology-close" type="button" onClick={onClose} title="关闭科技树" aria-label="关闭科技树"><X size={18} /></button>
       </header>
@@ -263,9 +282,9 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
           <Gauge size={14} /><span>科研详情</span>{advancedExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
         <div className="research-queue">
-          <header><ListOrdered size={14} /><span>科研队列</span><strong>{game.research.queuedTechIds.length}</strong></header>
+          <header><ListOrdered size={14} /><span>科研队列</span><strong>{readModel.research.queuedTechIds.length}</strong></header>
           <div>
-            {game.research.queuedTechIds.length === 0 ? <span className="research-queue__empty">队列为空</span> : game.research.queuedTechIds.map((techId, index) => (
+            {readModel.research.queuedTechIds.length === 0 ? <span className="research-queue__empty">队列为空</span> : readModel.research.queuedTechIds.map((techId, index) => (
               <div className="research-queue__item" key={techId}>
                 <b>{index + 1}</b>
                 <span>{getTechnology(techId)?.name}</span>
@@ -278,25 +297,25 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
           <section className="technology-upgrade-overview" aria-label="全局科技升级效果">
           <header><Gauge size={13} /><span>全局升级效果</span></header>
           <div>
-            <span><Pickaxe size={13} /><small>固体采矿</small><strong>{getMiningSpeedMultiplier(game).toFixed(2)}×</strong></span>
-            <span><FlaskConical size={13} /><small>科研吞吐</small><strong>{getRecipeSpeedMultiplier(game, "matrix_research").toFixed(2)}×</strong></span>
-            <span><Rocket size={13} /><small>物流航速</small><strong>{getLogisticsSpeedMultiplier(game).toFixed(2)}×</strong></span>
-            <span><PackageCheck size={13} /><small>机 / 船载荷</small><strong>{getPlanetaryCargoCapacity(game)} / {getInterstellarCargoCapacity(game)}</strong></span>
-            <span><Timer size={13} /><small>太阳帆寿命</small><strong>{Math.round(getSolarSailLifetimeSeconds(game) / 60)} min</strong></span>
-            <span><Satellite size={13} /><small>单站接收</small><strong><PowerValue valueKw={getRayReceiverCapacityKw(game)} /></strong></span>
-            <span><Zap size={13} /><small>壳面吸附</small><strong>{getDysonSailAbsorptionMultiplier(game).toFixed(2)}×</strong></span>
+            <span><Pickaxe size={13} /><small>固体采矿</small><strong>{readModel.effects.miningSpeedMultiplier.toFixed(2)}×</strong></span>
+            <span><FlaskConical size={13} /><small>科研吞吐</small><strong>{readModel.effects.researchSpeedMultiplier.toFixed(2)}×</strong></span>
+            <span><Rocket size={13} /><small>物流航速</small><strong>{readModel.effects.logisticsSpeedMultiplier.toFixed(2)}×</strong></span>
+            <span><PackageCheck size={13} /><small>机 / 船载荷</small><strong>{readModel.effects.planetaryCargoCapacity} / {readModel.effects.interstellarCargoCapacity}</strong></span>
+            <span><Timer size={13} /><small>太阳帆寿命</small><strong>{Math.round(readModel.effects.solarSailLifetimeSeconds / 60)} min</strong></span>
+            <span><Satellite size={13} /><small>单站接收</small><strong><PowerValue valueKw={readModel.effects.rayReceiverCapacityKw} /></strong></span>
+            <span><Zap size={13} /><small>壳面吸附</small><strong>{readModel.effects.dysonSailAbsorptionMultiplier.toFixed(2)}×</strong></span>
           </div>
           </section>
           <section className="infinite-research-console" aria-label="无限科技">
-          <header><span><Rocket size={13} />无限科技</span><strong>{isEndgameUnlocked(game) ? "可持续研究" : "宇宙矩阵后解锁"}</strong><label><input type="checkbox" checked={game.endgame.autoResearch} disabled={!isEndgameUnlocked(game)} onChange={(event) => onInfiniteResearchAutomation(event.target.checked)} />自动续研</label></header>
+          <header><span><Rocket size={13} />无限科技</span><strong>{endgameUnlocked(readModel) ? "可持续研究" : "宇宙矩阵后解锁"}</strong><label><input type="checkbox" checked={readModel.autoResearch} disabled={!endgameUnlocked(readModel)} onChange={(event) => onInfiniteResearchAutomation(event.target.checked)} />自动续研</label></header>
           <div>
             {INFINITE_RESEARCH_DEFINITIONS.map((definition) => {
-              const progress = game.endgame.infiniteResearch[definition.id];
-              const active = game.endgame.activeInfiniteResearchId === definition.id;
-              const level = getInfiniteResearchLevel(game, definition.id);
+              const progress = readModel.infiniteResearch[definition.id];
+              const active = readModel.activeInfiniteResearchId === definition.id;
+              const level = infiniteResearchLevel(readModel, definition.id);
               const cost = getInfiniteResearchCostString(definition.id, level);
               const capped = isInfiniteResearchComplete(definition.id, level);
-              return <button type="button" key={definition.id} className={active ? "active" : ""} disabled={!isEndgameUnlocked(game) || capped} onClick={() => onSelectInfiniteResearch(definition.id)} title={active ? definition.summary : `${definition.summary} · ${formatQuantityExact(cost)} 矩阵`}>
+              return <button type="button" key={definition.id} className={active ? "active" : ""} disabled={!endgameUnlocked(readModel) || capped} onClick={() => onSelectInfiniteResearch(definition.id)} title={active ? definition.summary : `${definition.summary} · ${formatQuantityExact(cost)} 矩阵`}>
                 <i style={{ color: definition.color }}>{definition.symbol}</i><span><strong>{definition.name}</strong><small>Lv.{level}{progress.historicalLevel && progress.historicalLevel > level ? `（历史 Lv.${progress.historicalLevel}）` : ""} · {definition.effect}</small></span><em>{capped ? "已达上限" : active ? `${Math.round(getInfiniteResearchCompletion(progress, definition.id) * 100)}%` : `${formatQuantityCompact(cost)} 矩阵`}</em>
               </button>;
             })}
@@ -305,10 +324,10 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
         </div> : null}
       </div>
 
-      <div ref={horizontalPan.surfaceRef} className={`technology-tree technology-tree--${game.settings.technologyLayout}${horizontalPan.isPanning ? " horizontal-pan--active" : ""}`} tabIndex={0} role="region" aria-label="科技树横向视口" {...horizontalPan.bindings}>
+      <div ref={horizontalPan.surfaceRef} className={`technology-tree technology-tree--${readModel.settings.technologyLayout}${horizontalPan.isPanning ? " horizontal-pan--active" : ""}`} tabIndex={0} role="region" aria-label="科技树横向视口" {...horizontalPan.bindings}>
         {Array.from({ length: maximumTier + 1 }, (_, tier) => {
           const tierTechnologies = TECHNOLOGY_LIST.filter((technology) => technology.tier === tier);
-          const grid = getTechnologyTierGrid(tierTechnologies.length, game.settings.technologyLayout, game.settings.fontScale, treeViewportHeight);
+          const grid = getTechnologyTierGrid(tierTechnologies.length, readModel.settings.technologyLayout, readModel.settings.fontScale, treeViewportHeight);
           return (
           <section className="technology-tier" key={tier} style={{
             "--technology-tier-columns": grid.columns,
@@ -319,13 +338,13 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
             <header><span>层级 {String(tier + 1).padStart(2, "0")}</span></header>
             <div>
               {tierTechnologies.map((technology) => {
-                const complete = isTechnologyCompleted(game, technology.id);
-                const active = game.research.selectedTechId === technology.id;
-                const isPaused = game.research.pausedTechId === technology.id;
-                const queuedIndex = game.research.queuedTechIds.indexOf(technology.id);
+                const complete = technologyCompleted(readModel, technology.id);
+                const active = readModel.research.selectedTechId === technology.id;
+                const isPaused = readModel.research.pausedTechId === technology.id;
+                const queuedIndex = readModel.research.queuedTechIds.indexOf(technology.id);
                 const queued = queuedIndex >= 0;
-                const available = canQueueTechnology(game, technology.id);
-                const progress = game.research.progressByTech[technology.id] ?? {};
+                const available = technologyCanQueue(readModel, technology.id);
+                const progress = readModel.research.progressByTech[technology.id] ?? {};
                 const prerequisiteNames = technology.prerequisites.map((id) => getTechnology(id)?.name).filter(Boolean);
                 return (
                   <button
@@ -335,7 +354,7 @@ export function TechnologyWorkspace({ open, game, onClose, onSelect, onPauseRese
                     data-tech-id={technology.id}
                     disabled={isPaused ? Boolean(selected || activeInfinite) : !available || active || queued}
                     onClick={() => isPaused ? onResumeResearch() : onSelect(technology.id)}
-                    title={isPaused ? selected || activeInfinite ? "先暂停或取消当前研究" : `继续研究：${technology.name}` : available ? game.research.selectedTechId ? `加入科研队列：${technology.name}` : `开始研究：${technology.name}` : undefined}
+                    title={isPaused ? selected || activeInfinite ? "先暂停或取消当前研究" : `继续研究：${technology.name}` : available ? readModel.research.selectedTechId ? `加入科研队列：${technology.name}` : `开始研究：${technology.name}` : undefined}
                   >
                     <header>
                       <i>{complete ? <Check size={15} /> : active ? <Play size={15} /> : isPaused ? <Pause size={15} /> : queued ? <ListOrdered size={15} /> : available ? <FlaskConical size={15} /> : <LockKeyhole size={15} />}</i>

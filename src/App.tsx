@@ -384,6 +384,14 @@ import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransact
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import {
+  NativeTechnologyWorkspaceStore,
+  createNativePlayerAuthorityTechnologyProjectionSource,
+} from "./game/nativeTechnologyWorkspaceStore";
+import {
+  createWebTechnologyWorkspaceReadModel,
+  selectNativeTechnologyWorkspaceReadModel,
+} from "./game/technologyWorkspaceReadModel";
+import {
   collectCanvasDragMembers,
   collectCanvasSelectionBeltIds,
   selectFactoryCanvasRows,
@@ -1957,6 +1965,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // the last confirmed frame but do not issue another native read.
   const factoryThinViewExpectedRevision = nativePlayerAuthorityBoundFrame?.revision ??
     simulationStateRevisionRef.current;
+  const nativeTechnologyWorkspaceStoreRef = useRef<NativeTechnologyWorkspaceStore | null>(null);
+  if (nativeTechnologyWorkspaceStoreRef.current === null) {
+    nativeTechnologyWorkspaceStoreRef.current = new NativeTechnologyWorkspaceStore();
+  }
+  const nativeTechnologyWorkspaceStore = nativeTechnologyWorkspaceStoreRef.current;
+  const nativeTechnologyWorkspaceSnapshot = useSyncExternalStore(
+    nativeTechnologyWorkspaceStore.subscribe,
+    nativeTechnologyWorkspaceStore.getSnapshot,
+    nativeTechnologyWorkspaceStore.getSnapshot,
+  );
+  const nativeTechnologyWorkspaceReadModel = useMemo(
+    () => selectNativeTechnologyWorkspaceReadModel(nativeTechnologyWorkspaceSnapshot.frame, {
+      enabled: Boolean(nativePlayerAuthorityBoundFrame),
+      sessionId: nativePlayerAuthorityBoundFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativePlayerAuthorityBoundFrame,
+      nativeTechnologyWorkspaceSnapshot.frame,
+    ],
+  );
+  const webTechnologyWorkspaceReadModel = useMemo(
+    () => technologyOpen && !nativePlayerAuthorityBoundFrame
+      ? createWebTechnologyWorkspaceReadModel(game)
+      : null,
+    [game, nativePlayerAuthorityBoundFrame, technologyOpen],
+  );
+  const technologyWorkspaceReadModel = nativePlayerAuthorityBoundFrame
+    ? nativeTechnologyWorkspaceReadModel
+    : webTechnologyWorkspaceReadModel;
   const nativeFactoryThinViewMode = nativePlayerAuthorityActiveFrame
     ? "native-authoritative"
     : nativePlayerAuthorityBoundFrame
@@ -2278,6 +2317,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     windowsNativeCoreAvailable,
     windowsNativeCoreBetaEnabled,
     windowsNativeCoreBetaStatus,
+  ]);
+  useEffect(() => {
+    if (!technologyOpen || !nativePlayerAuthorityBoundFrame) {
+      nativeTechnologyWorkspaceStore.clear();
+      return;
+    }
+    if (!nativePlayerAuthorityActiveFrame) return;
+    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
+    if (!sessionId) {
+      nativeTechnologyWorkspaceStore.clear();
+      return;
+    }
+    const source = createNativePlayerAuthorityTechnologyProjectionSource(
+      desktopBridge,
+      sessionId,
+    );
+    if (!source) {
+      nativeTechnologyWorkspaceStore.clear();
+      return;
+    }
+    void nativeTechnologyWorkspaceStore.refresh(
+      source,
+      sessionId,
+      factoryThinViewExpectedRevision,
+    ).catch(() => undefined);
+  }, [
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    nativeTechnologyWorkspaceStore,
+    technologyOpen,
   ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
@@ -13952,10 +14023,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onRestoreCloudSave={restoreCloudSave}
           />
         ) : null}
-        {technologyOpen ? (
+        {technologyOpen ? (technologyWorkspaceReadModel ? (
           <TechnologyWorkspace
             open
-            game={game}
+            readModel={technologyWorkspaceReadModel}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -13986,7 +14057,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onInfiniteResearchAutomation={(enabled) => commitGame((current) => setInfiniteResearchAutomation(current, enabled))}
             onLayoutChange={(technologyLayout) => updateSettings({ technologyLayout })}
           />
-        ) : null}
+        ) : <WorkspaceLoading label="正在同步权威科研状态…" />) : null}
         {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
           open
           game={game}

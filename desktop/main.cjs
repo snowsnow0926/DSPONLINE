@@ -586,6 +586,13 @@ function nativeStatisticsProjectionResultContext(request) {
   };
 }
 
+function nativeTechnologyProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+  };
+}
+
 async function waitForResponseAck(record, expectedBytes) {
   if (record.cancelled) throw Object.assign(new Error("云存档上传已取消"), { name: "AbortError", code: "ABORTED" });
   await new Promise((resolve, reject) => {
@@ -1093,6 +1100,20 @@ ipcMain.handle("desktop:native-core-statistics-projection", async (event, reques
   });
 });
 
+ipcMain.handle("desktop:native-core-technology-projection", async (event, request) => {
+  return runRendererNativeOperation("coreTechnologyProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生科研投影请求失败，请重试",
+    resultContext: nativeTechnologyProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "technology-v1", request);
+    }
+    return await nativeCoreSessions.technologyProjection(ownerId, request);
+  });
+});
+
 ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   const port = event.ports?.[0];
   if (!port) return;
@@ -1101,7 +1122,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1120,8 +1141,10 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest);
     } else if (request.projectionType === "factory-read-model-v1") {
       rawResult = await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest);
-    } else {
+    } else if (request.projectionType === "statistics-v1") {
       rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    } else {
+      rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
     const result = normalizeRendererNativeResult(
       request.projectionType === "viewport-v1"
@@ -1130,7 +1153,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
           ? "coreViewportProjectionV2"
           : request.projectionType === "factory-read-model-v1"
             ? "coreFactoryReadModelProjection"
-            : "coreStatisticsProjection",
+            : request.projectionType === "statistics-v1"
+              ? "coreStatisticsProjection"
+              : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
@@ -1138,7 +1163,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
           ? nativeViewportProjectionV2ResultContext(normalizedRequest)
           : request.projectionType === "factory-read-model-v1"
             ? nativeFactoryReadModelResultContext(normalizedRequest)
-            : nativeStatisticsProjectionResultContext(request.payload),
+            : request.projectionType === "statistics-v1"
+              ? nativeStatisticsProjectionResultContext(request.payload)
+              : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

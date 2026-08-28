@@ -368,6 +368,14 @@ function normalizeStatisticsProjectionContext(value, label) {
   };
 }
 
+function normalizeTechnologyProjectionContext(value, label) {
+  const source = exactObject(value, ["sessionId", "expectedRevision"], label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -1372,6 +1380,133 @@ function normalizeCoreStatisticsProjection(value, context) {
   };
 }
 
+function normalizeCoreTechnologyProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "truncated", "limits", "counts",
+    "selectedTechId", "pausedTechId", "completedTechIds", "queuedTechIds", "progressByTech",
+    "activeInfiniteResearchId", "autoResearch", "infiniteResearch", "settings", "matrixStock",
+  ], "native technology projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "technology-v1") {
+    throw protocolError("native technology projection identity");
+  }
+  requireProjectionByteBudget(source, "native technology projection");
+  const projectionContext = normalizeTechnologyProjectionContext(context, "native technology projection context");
+  const revision = safeInteger(source.revision, "native technology projection revision");
+  if (revision !== projectionContext.expectedRevision || !projectionContext.sessionId) {
+    throw protocolError("native technology projection revision binding");
+  }
+  const limits = exactObject(source.limits, ["techRows", "progressItemsPerTech", "infiniteRows"], "native technology limits");
+  const techRows = safeInteger(limits.techRows, "native technology tech-row limit", 1);
+  const progressItemsPerTech = safeInteger(limits.progressItemsPerTech, "native technology progress-item limit", 1);
+  const infiniteRows = safeInteger(limits.infiniteRows, "native technology infinite-row limit", 1);
+  if (techRows !== 512 || progressItemsPerTech !== 16 || infiniteRows !== 8) {
+    throw protocolError("native technology limits binding");
+  }
+  const countsSource = exactObject(source.counts, [
+    "completedTechIds", "queuedTechIds", "progressTechs", "infiniteResearch",
+  ], "native technology counts");
+  const counts = {
+    completedTechIds: safeInteger(countsSource.completedTechIds, "native technology completed count"),
+    queuedTechIds: safeInteger(countsSource.queuedTechIds, "native technology queued count"),
+    progressTechs: safeInteger(countsSource.progressTechs, "native technology progress count"),
+    infiniteResearch: safeInteger(countsSource.infiniteResearch, "native technology infinite count"),
+  };
+  const optionalId = (value, label) => value === null ? null : opaqueId(value, label);
+  const boundedUniqueIds = (value, label) => opaqueIdArray(value, label, techRows);
+  const completedTechIds = boundedUniqueIds(source.completedTechIds, "native technology completed IDs");
+  const queuedTechIds = boundedUniqueIds(source.queuedTechIds, "native technology queued IDs");
+  if (!Array.isArray(source.progressByTech) || source.progressByTech.length > techRows) {
+    throw protocolError("native technology progress rows");
+  }
+  const progressTechIds = new Set();
+  let nestedTruncated = false;
+  const progressByTech = source.progressByTech.map((row, rowIndex) => {
+    const label = `native technology progress rows[${rowIndex}]`;
+    const entry = exactObject(row, ["techId", "totalCount", "truncated", "items"], label);
+    const techId = opaqueId(entry.techId, `${label}.techId`);
+    if (progressTechIds.has(techId)) throw protocolError(`${label}.techId`);
+    progressTechIds.add(techId);
+    const totalCount = safeInteger(entry.totalCount, `${label}.totalCount`);
+    const truncated = boolean(entry.truncated, `${label}.truncated`);
+    if (!Array.isArray(entry.items) || entry.items.length > progressItemsPerTech ||
+        totalCount < entry.items.length || truncated !== (totalCount > entry.items.length)) {
+      throw protocolError(`${label} cardinality`);
+    }
+    nestedTruncated ||= truncated;
+    const itemIds = new Set();
+    const items = entry.items.map((item, itemIndex) => {
+      const itemLabel = `${label}.items[${itemIndex}]`;
+      const itemSource = exactObject(item, ["itemId", "amount"], itemLabel);
+      const itemId = opaqueId(itemSource.itemId, `${itemLabel}.itemId`);
+      if (itemIds.has(itemId)) throw protocolError(`${itemLabel}.itemId`);
+      itemIds.add(itemId);
+      return { itemId, amount: safeInteger(itemSource.amount, `${itemLabel}.amount`) };
+    });
+    return { techId, totalCount, truncated, items };
+  });
+  if (!Array.isArray(source.infiniteResearch) || source.infiniteResearch.length > infiniteRows) {
+    throw protocolError("native technology infinite rows");
+  }
+  const infiniteIds = new Set();
+  const infiniteResearch = source.infiniteResearch.map((row, index) => {
+    const label = `native technology infinite rows[${index}]`;
+    const entry = exactObject(row, ["researchId", "level", "historicalLevel", "progress"], label);
+    const researchId = opaqueId(entry.researchId, `${label}.researchId`);
+    if (infiniteIds.has(researchId)) throw protocolError(`${label}.researchId`);
+    infiniteIds.add(researchId);
+    const progress = boundedReadModelText(entry.progress, `${label}.progress`, 1_024, 1);
+    if (!/^\d+$/.test(progress)) throw protocolError(`${label}.progress`);
+    return {
+      researchId,
+      level: safeInteger(entry.level, `${label}.level`),
+      historicalLevel: entry.historicalLevel === null ? null : safeInteger(entry.historicalLevel, `${label}.historicalLevel`),
+      progress,
+    };
+  });
+  const settingsSource = exactObject(source.settings, ["technologyLayout", "fontScale", "difficulty"], "native technology settings");
+  const fontScale = finiteNumber(settingsSource.fontScale, "native technology font scale", 0.8);
+  if (![0.8, 1, 1.25, 1.5, 2].includes(fontScale)) throw protocolError("native technology font scale");
+  const settings = {
+    technologyLayout: oneOf(settingsSource.technologyLayout, ["standard", "compact"], "native technology layout"),
+    fontScale,
+    difficulty: oneOf(settingsSource.difficulty, ["relaxed", "standard", "hard"], "native technology difficulty"),
+  };
+  const matrixSource = exactObject(source.matrixStock, [
+    "electromagnetic_matrix", "energy_matrix", "structure_matrix",
+    "information_matrix", "gravity_matrix", "universe_matrix",
+  ], "native technology matrix stock");
+  const matrixStock = Object.fromEntries(Object.entries(matrixSource).map(([itemId, amount]) => [
+    itemId, safeInteger(amount, `native technology matrix stock.${itemId}`),
+  ]));
+  const truncated = boolean(source.truncated, "native technology truncated flag");
+  const computedTruncated = nestedTruncated ||
+    counts.completedTechIds > completedTechIds.length ||
+    counts.queuedTechIds > queuedTechIds.length ||
+    counts.progressTechs > progressByTech.length ||
+    counts.infiniteResearch > infiniteResearch.length;
+  if (counts.completedTechIds < completedTechIds.length || counts.queuedTechIds < queuedTechIds.length ||
+      counts.progressTechs < progressByTech.length || counts.infiniteResearch < infiniteResearch.length ||
+      truncated !== computedTruncated) throw protocolError("native technology cardinality binding");
+  return {
+    schemaVersion: 1,
+    projectionType: "technology-v1",
+    revision,
+    truncated,
+    limits: { techRows, progressItemsPerTech, infiniteRows },
+    counts,
+    selectedTechId: optionalId(source.selectedTechId, "native technology selected ID"),
+    pausedTechId: optionalId(source.pausedTechId, "native technology paused ID"),
+    completedTechIds,
+    queuedTechIds,
+    progressByTech,
+    activeInfiniteResearchId: optionalId(source.activeInfiniteResearchId, "native technology active infinite ID"),
+    autoResearch: boolean(source.autoResearch, "native technology auto research"),
+    infiniteResearch,
+    settings,
+    matrixStock,
+  };
+}
+
 function normalizeCoreCommand(value) {
   const source = exactObject(value, ["previousRevision", "revision", "changedEntityIds", "changedBeltIds", "topologyDirty"], "native core command result");
   const previousRevision = safeInteger(source.previousRevision, "native command previous revision");
@@ -1557,6 +1692,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreViewportProjectionV2: normalizeCoreViewportProjectionV2,
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
+  coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,
   coreCommit: normalizeCoreCommit,

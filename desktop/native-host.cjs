@@ -55,7 +55,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (projectionType === "viewport-v2" ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -958,6 +958,17 @@ class NativeCoreSessionRegistry {
       limit: request.limit,
       ...(request.planetId ? { planetId: request.planetId } : {}),
       ...(request.itemId ? { itemId: request.itemId } : {}),
+    });
+  }
+
+  technologyProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!Number.isSafeInteger(request?.expectedRevision) || request.expectedRevision < 0) {
+      throw new TypeError("native core technology projection request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreTechnologyProjection",
+      sessionId: request.sessionId,
     });
   }
 

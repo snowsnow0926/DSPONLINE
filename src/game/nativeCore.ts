@@ -16,6 +16,8 @@ import {
   type DesktopNativeCoreFactoryReadModelResult,
   type DesktopNativeCoreStatisticsProjectionRequest,
   type DesktopNativeCoreStatisticsProjectionResult,
+  type DesktopNativeCoreTechnologyProjectionRequest,
+  type DesktopNativeCoreTechnologyProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -31,7 +33,8 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult
   | DesktopNativeCoreViewportProjectionV2Result
   | DesktopNativeCoreFactoryReadModelResult
-  | DesktopNativeCoreStatisticsProjectionResult;
+  | DesktopNativeCoreStatisticsProjectionResult
+  | DesktopNativeCoreTechnologyProjectionResult;
 
 function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
   return projectionType === "viewport-v2" ? 2 : 1;
@@ -77,6 +80,7 @@ export interface WindowsNativeCoreShadow {
   viewportProjectionV2(request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">): Promise<DesktopNativeCoreViewportProjectionV2Result>;
   factoryReadModel(request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">): Promise<DesktopNativeCoreFactoryReadModelResult>;
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
+  technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -331,6 +335,26 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       });
     }
     return desktop.getNativeCoreStatisticsProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async technologyProjection(
+    request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreTechnologyProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "technology-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreTechnologyProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "technology-v1",
+      });
+    }
+    return desktop.getNativeCoreTechnologyProjection({ sessionId: this.sessionId, ...request });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

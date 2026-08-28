@@ -91,6 +91,7 @@ export interface DesktopBridge {
   getNativeCoreViewportProjectionV2: (request: DesktopNativeCoreViewportProjectionV2Request) => Promise<DesktopNativeCoreViewportProjectionV2Result>;
   getNativeCoreFactoryReadModel: (request: DesktopNativeCoreFactoryReadModelRequest) => Promise<DesktopNativeCoreFactoryReadModelResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
+  getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
@@ -697,6 +698,60 @@ export interface DesktopNativeCoreStatisticsProjectionResult {
   nextCursor: number | null;
 }
 
+export type DesktopTechnologyMatrixItemId =
+  | "electromagnetic_matrix"
+  | "energy_matrix"
+  | "structure_matrix"
+  | "information_matrix"
+  | "gravity_matrix"
+  | "universe_matrix";
+
+export interface DesktopNativeCoreTechnologyProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+}
+
+export interface DesktopNativeCoreTechnologyProgressRow {
+  techId: string;
+  totalCount: number;
+  truncated: boolean;
+  items: Array<{ itemId: string; amount: number }>;
+}
+
+export interface DesktopNativeCoreTechnologyInfiniteRow {
+  researchId: string;
+  level: number;
+  historicalLevel: number | null;
+  progress: string;
+}
+
+export interface DesktopNativeCoreTechnologyProjectionResult {
+  schemaVersion: 1;
+  projectionType: "technology-v1";
+  revision: number;
+  truncated: boolean;
+  limits: { techRows: 512; progressItemsPerTech: 16; infiniteRows: 8 };
+  counts: {
+    completedTechIds: number;
+    queuedTechIds: number;
+    progressTechs: number;
+    infiniteResearch: number;
+  };
+  selectedTechId: string | null;
+  pausedTechId: string | null;
+  completedTechIds: string[];
+  queuedTechIds: string[];
+  progressByTech: DesktopNativeCoreTechnologyProgressRow[];
+  activeInfiniteResearchId: string | null;
+  autoResearch: boolean;
+  infiniteResearch: DesktopNativeCoreTechnologyInfiniteRow[];
+  settings: {
+    technologyLayout: "standard" | "compact";
+    fontScale: 0.8 | 1 | 1.25 | 1.5 | 2;
+    difficulty: "relaxed" | "standard" | "hard";
+  };
+  matrixStock: Record<DesktopTechnologyMatrixItemId, number>;
+}
+
 export type DesktopNativeCoreProjectionTransferRequest =
   | {
       sessionId: string;
@@ -717,6 +772,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "technology-v1";
+      payload: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -724,7 +784,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1";
   payloadLength: number;
   sha256: string;
 }

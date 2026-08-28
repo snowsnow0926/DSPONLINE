@@ -14,6 +14,7 @@ const PROJECTION_METHODS = Object.freeze({
   "viewport-v2": "viewportProjectionV2",
   "factory-read-model-v1": "factoryReadModelProjection",
   "statistics-v1": "statisticsProjection",
+  "technology-v1": "technologyProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

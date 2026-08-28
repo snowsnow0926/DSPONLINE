@@ -37,6 +37,7 @@ const {
 const {
   NativeCoreExactRealtimeRustLeaseStore,
 } = require("./native-core-exact-realtime-experiment.cjs");
+const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
 const {
   inspectNativeExactRealtimeStartup,
   inspectNativeExactRealtimeStartupWithoutHost,
@@ -130,6 +131,7 @@ let accountArchiveQuitDrainComplete = false;
 let nativeHostClient = null;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
+let nativePlayerAuthorityRuntime = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -298,6 +300,12 @@ async function initializeNativeHost() {
       diskBudgetTargetPath: path.join(rootPath, ".native-save-space-probe"),
     });
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
+    // Main-owned only. There is deliberately no renderer IPC that can call
+    // activate/tick; player cutover remains blocked by Rust domain coverage
+    // and by the future public-primary handoff coordinator.
+    nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
+      registry: nativeCoreSessions,
+    });
     nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
         leaseRegistry: new NativeExactRealtimeLeaseRegistry(nativeHostClient),
@@ -339,6 +347,8 @@ async function initializeNativeHost() {
     nativeHostClient = null;
     nativeSaveSessions = null;
     nativeCoreSessions = null;
+    nativePlayerAuthorityRuntime?.shutdownForProcessExit();
+    nativePlayerAuthorityRuntime = null;
   }
   return nativeHostState;
 }
@@ -1487,6 +1497,7 @@ if (!hasSingleInstanceLock) {
 
 app.on("before-quit", (event) => {
   persistWindowState();
+  nativePlayerAuthorityRuntime?.shutdownForProcessExit();
   cancelAllAccountArchiveDownloads();
   if (updateTimer) clearInterval(updateTimer);
   const accountArchiveReady = accountArchiveQuitDrainComplete || activeAccountArchiveDownloadCompletions.size === 0;

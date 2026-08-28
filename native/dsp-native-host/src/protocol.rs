@@ -4,8 +4,9 @@ use serde_json::Value;
 use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 
 use crate::core_runtime::{
-    CoreCheckpointAcknowledgeExactRealtimeRequest, CoreCheckpointExactRealtimeFinalizationRequest,
-    CoreCommitOperationExactRealtimeRequest, CoreCommitOperationRequest,
+    CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
+    CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
+    CoreCommitOperationRequest, CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
 
@@ -14,6 +15,20 @@ use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
 pub struct SavePutRecord {
     pub key: String,
     pub value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePreparePlayerAuthorityControlRequest {
+    pub session_id: String,
+    pub request: CorePreparePlayerAuthorityRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreActivatePlayerAuthorityControlRequest {
+    pub session_id: String,
+    pub request: CoreActivatePlayerAuthorityRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +155,8 @@ pub enum ControlRequest {
         session_id: String,
         request: CoreCommitOperationExactRealtimeRequest,
     },
+    CorePreparePlayerAuthority(CorePreparePlayerAuthorityControlRequest),
+    CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
     CoreCheckpoint {
         session_id: String,
         saved_at_ms: u64,
@@ -206,6 +223,57 @@ impl ControlResponse<Value> {
                 message: message.into(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn player_authority_prepare_protocol_rejects_caller_supplied_proof() {
+        let nested_proof = json!({
+            "operation": "corePreparePlayerAuthority",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "expectedCheckpoint": {
+                    "generation": 1,
+                    "rootHash": "a".repeat(64),
+                    "revision": 0
+                },
+                "settledDeadlineMs": 42_000,
+                "proof": {
+                    "revision": 0,
+                    "canonicalSha256": "b".repeat(64),
+                    "domainSha256": "c".repeat(64)
+                }
+            }
+        });
+        let error = serde_json::from_value::<ControlRequest>(nested_proof).unwrap_err();
+        assert!(error.to_string().contains("unknown field `proof`"));
+
+        let top_level_proof = json!({
+            "operation": "corePreparePlayerAuthority",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "expectedCheckpoint": {
+                    "generation": 1,
+                    "rootHash": "a".repeat(64),
+                    "revision": 0
+                },
+                "settledDeadlineMs": 42_000
+            },
+            "proof": {
+                "revision": 0,
+                "canonicalSha256": "b".repeat(64),
+                "domainSha256": "c".repeat(64)
+            }
+        });
+        let error = serde_json::from_value::<ControlRequest>(top_level_proof).unwrap_err();
+        assert!(error.to_string().contains("unknown field `proof`"));
     }
 }
 

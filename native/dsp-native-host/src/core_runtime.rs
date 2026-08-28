@@ -13,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::exact_realtime_lease::{
-    ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeStateProof,
+    ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePurpose, ExactRealtimeStateProof,
 };
 use crate::save_store::{SaveCommitResult, SaveStore, WalEntry, json_values_bitwise_equal};
 
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
 
 fn persist_statistics_sidecar_best_effort(
     store: &SaveStore,
@@ -239,6 +241,9 @@ fn derive_exact_realtime_commit_operation(
     current_revision: u64,
     request: &CoreCommitOperationExactRealtimeRequest,
 ) -> anyhow::Result<CoreCommitOperationRequest> {
+    if lease.purpose()? != ExactRealtimeLeasePurpose::Experiment {
+        bail!("native player-authority lease cannot enter the E1 experiment commit path")
+    }
     let pending = lease
         .pending_tick
         .as_ref()
@@ -369,6 +374,21 @@ pub struct CoreCheckpointExactRealtimeFinalizationRequest {
     pub saved_at_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePreparePlayerAuthorityRequest {
+    pub run_id: String,
+    pub expected_checkpoint: ExactRealtimeCheckpoint,
+    pub settled_deadline_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreActivatePlayerAuthorityRequest {
+    pub run_id: String,
+    pub expected_checkpoint: ExactRealtimeCheckpoint,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointAcknowledgeExactRealtimeResult {
@@ -376,6 +396,13 @@ pub struct CoreCheckpointAcknowledgeExactRealtimeResult {
     pub summary: CoreStateSummary,
     pub lease: ExactRealtimeLease,
     pub duplicate: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorePlayerAuthorityLeaseResult {
+    pub lease: ExactRealtimeLease,
+    pub summary: CoreStateSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -652,6 +679,123 @@ impl CoreRegistry {
             import,
             summary,
         })
+    }
+
+    /// Prepares the durable player-authority writer fence from one exact
+    /// current CoreRegistry session. The IPC caller supplies only a run ID,
+    /// deadline and expected checkpoint identity; all state proof material and
+    /// the registry fingerprint are derived here after disk readback. Current
+    /// coverage deliberately fails this gate closed.
+    pub fn prepare_player_authority(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        request: CorePreparePlayerAuthorityRequest,
+    ) -> anyhow::Result<CorePlayerAuthorityLeaseResult> {
+        if request.settled_deadline_ms > MAX_SAFE_INTEGER {
+            bail!("native player-authority entry deadline is invalid");
+        }
+        let summary = self.validated_player_authority_session(
+            store,
+            session_id,
+            &request.expected_checkpoint,
+        )?;
+        if !summary.coverage.authority_eligible {
+            bail!("native core domain coverage is not player-authority eligible");
+        }
+        let proof = ExactRealtimeStateProof {
+            revision: summary.revision,
+            canonical_sha256: summary.canonical_sha256.clone(),
+            domain_sha256: summary.domain_sha256.clone(),
+        };
+        let lease = store.prepare_player_authority_lease(
+            session_id.to_owned(),
+            request.run_id,
+            summary.registry_fingerprint.clone(),
+            request.expected_checkpoint,
+            proof,
+            request.settled_deadline_ms,
+        )?;
+        Ok(CorePlayerAuthorityLeaseResult { lease, summary })
+    }
+
+    /// Player-authority activation remains a separate CoreRegistry-owned
+    /// operation so the raw E1 lease protocol cannot activate a production
+    /// lease. Session identity, current publication and coverage are all
+    /// revalidated immediately before the durable phase transition.
+    pub fn activate_player_authority(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        request: CoreActivatePlayerAuthorityRequest,
+    ) -> anyhow::Result<CorePlayerAuthorityLeaseResult> {
+        let summary = self.validated_player_authority_session(
+            store,
+            session_id,
+            &request.expected_checkpoint,
+        )?;
+        let current = store.require_exact_realtime_lease()?;
+        if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || current.authority_session_id.as_deref() != Some(session_id)
+            || current.run_id != request.run_id
+            || current.registry_fingerprint != summary.registry_fingerprint
+            || current.checkpoint != request.expected_checkpoint
+        {
+            bail!("native player-authority activation lease identity conflicts");
+        }
+        if !summary.coverage.authority_eligible {
+            bail!("native core domain coverage is not player-authority eligible");
+        }
+        let lease = store.activate_player_authority_lease(
+            session_id,
+            &request.run_id,
+            &summary.registry_fingerprint,
+        )?;
+        Ok(CorePlayerAuthorityLeaseResult { lease, summary })
+    }
+
+    fn validated_player_authority_session(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        expected_checkpoint: &ExactRealtimeCheckpoint,
+    ) -> anyhow::Result<CoreStateSummary> {
+        validate_session_id(session_id)?;
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
+        let state = self.session(session_id)?;
+        let summary = state.summary()?;
+        if state.identity.slot != "normal-main"
+            || state.identity.mode != "normal"
+            || state.identity.state_version != 47
+            || summary.mode != "normal"
+            || summary.state_version != 47
+            || summary.registry_fingerprint != state.identity.registry_fingerprint
+            || summary.paused
+        {
+            bail!("native player-authority entry requires a running v47 normal-main session");
+        }
+        if state.revision != state.identity.revision
+            || summary.revision != state.revision
+            || expected_checkpoint.generation != state.identity.generation
+            || expected_checkpoint.root_hash != state.identity.root_hash
+            || expected_checkpoint.revision != state.identity.revision
+        {
+            bail!("native player-authority checkpoint/session/revision identity conflicts");
+        }
+        let published = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != state.identity.registry_fingerprint
+            || published.generation != expected_checkpoint.generation
+            || published.root_hash != expected_checkpoint.root_hash
+            || published.revision != expected_checkpoint.revision
+        {
+            bail!("native player-authority checkpoint is not the current verified publication");
+        }
+        Ok(summary)
     }
 
     pub fn status(&self, session_id: &str) -> anyhow::Result<CoreStateSummary> {
@@ -1225,6 +1369,9 @@ impl CoreRegistry {
             bail!("native exact realtime ACK deadline is invalid");
         }
         let current = store.require_exact_realtime_lease()?;
+        if current.purpose()? != ExactRealtimeLeasePurpose::Experiment {
+            bail!("native player-authority lease cannot enter the E1 experiment ACK path");
+        }
         if current.run_id != request.run_id
             || current.registry_fingerprint != request.registry_fingerprint
         {
@@ -1370,6 +1517,9 @@ impl CoreRegistry {
             bail!("native exact realtime finalization timestamp is invalid");
         }
         let current = store.require_exact_realtime_lease()?;
+        if current.purpose()? != ExactRealtimeLeasePurpose::Experiment {
+            bail!("native player-authority lease cannot enter the E1 experiment finalization path");
+        }
         if current.run_id != request.run_id
             || current.registry_fingerprint != request.registry_fingerprint
             || current.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Finalizing
@@ -1693,6 +1843,7 @@ mod tests {
             kind: "native-core-exact-realtime-experiment-lease-v2".to_owned(),
             phase: crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active,
             run_id: "authority-run-1".to_owned(),
+            authority_session_id: None,
             mode: "normal".to_owned(),
             slot: "normal-main".to_owned(),
             registry_fingerprint: "builtin:test".to_owned(),
@@ -1773,6 +1924,180 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.root_hash, before.root_hash);
         assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn player_authority_prepare_is_atomic_and_fails_closed_on_every_entry_gate() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let checkpoint = ExactRealtimeCheckpoint {
+            generation: imported.checkpoint.generation,
+            root_hash: imported.checkpoint.root_hash.clone(),
+            revision: imported.checkpoint.revision,
+        };
+        let checkpoint_before = store.recover("normal-main").unwrap().unwrap();
+        let summary_before =
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap();
+
+        let mut wrong_checkpoint = checkpoint.clone();
+        wrong_checkpoint.revision += 1;
+        let mismatch = registry
+            .prepare_player_authority(
+                &store,
+                &imported.session_id,
+                CorePreparePlayerAuthorityRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    expected_checkpoint: wrong_checkpoint,
+                    settled_deadline_ms: 42_000,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{mismatch:#}").contains("checkpoint/session/revision"));
+
+        registry.uncertain_checkpoint_transactions.insert(
+            imported.session_id.clone(),
+            UncertainCoreCheckpoint {
+                transaction_id: "uncertain-player-authority-entry".to_owned(),
+                revision: checkpoint.revision,
+            },
+        );
+        let uncertain = registry
+            .prepare_player_authority(
+                &store,
+                &imported.session_id,
+                CorePreparePlayerAuthorityRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    expected_checkpoint: checkpoint.clone(),
+                    settled_deadline_ms: 42_000,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{uncertain:#}").contains("must be reconciled"));
+        registry
+            .uncertain_checkpoint_transactions
+            .remove(&imported.session_id);
+
+        registry
+            .sessions
+            .get_mut(&imported.session_id)
+            .unwrap()
+            .revision += 1;
+        let session_revision = registry
+            .prepare_player_authority(
+                &store,
+                &imported.session_id,
+                CorePreparePlayerAuthorityRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    expected_checkpoint: checkpoint.clone(),
+                    settled_deadline_ms: 42_000,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{session_revision:#}").contains("checkpoint/session/revision"));
+        registry
+            .sessions
+            .get_mut(&imported.session_id)
+            .unwrap()
+            .revision -= 1;
+
+        let coverage = registry
+            .prepare_player_authority(
+                &store,
+                &imported.session_id,
+                CorePreparePlayerAuthorityRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    expected_checkpoint: checkpoint,
+                    settled_deadline_ms: 42_000,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{coverage:#}").contains("not player-authority eligible"));
+        assert_eq!(
+            store
+                .exact_realtime_lease(
+                    crate::exact_realtime_lease::ExactRealtimeLeaseRequest::Inspect
+                )
+                .unwrap(),
+            json!({ "state": "missing" })
+        );
+        let checkpoint_after = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(checkpoint_after.generation, checkpoint_before.generation);
+        assert_eq!(checkpoint_after.root_hash, checkpoint_before.root_hash);
+        assert_eq!(checkpoint_after.revision, checkpoint_before.revision);
+        assert_eq!(
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap(),
+            summary_before
+        );
+    }
+
+    #[test]
+    fn player_authority_activation_revalidates_session_purpose_and_coverage() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let checkpoint = ExactRealtimeCheckpoint {
+            generation: imported.checkpoint.generation,
+            root_hash: imported.checkpoint.root_hash.clone(),
+            revision: imported.checkpoint.revision,
+        };
+        let summary = registry.status(&imported.session_id).unwrap();
+        let prepared = store
+            .prepare_player_authority_lease(
+                imported.session_id.clone(),
+                "player-authority-run".to_owned(),
+                summary.registry_fingerprint.clone(),
+                checkpoint.clone(),
+                ExactRealtimeStateProof {
+                    revision: summary.revision,
+                    canonical_sha256: summary.canonical_sha256.clone(),
+                    domain_sha256: summary.domain_sha256.clone(),
+                },
+                42_000,
+            )
+            .unwrap();
+
+        let raw_activation = store
+            .exact_realtime_lease(
+                crate::exact_realtime_lease::ExactRealtimeLeaseRequest::Activate {
+                    run_id: "player-authority-run".to_owned(),
+                    registry_fingerprint: summary.registry_fingerprint.clone(),
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{raw_activation:#}").contains("purpose"));
+        let gated_activation = registry
+            .activate_player_authority(
+                &store,
+                &imported.session_id,
+                CoreActivatePlayerAuthorityRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    expected_checkpoint: checkpoint,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{gated_activation:#}").contains("not player-authority eligible"));
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), prepared);
     }
 
     #[test]

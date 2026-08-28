@@ -14,7 +14,8 @@ pub const EXACT_REALTIME_WRITER_FENCE_CAPABILITY: &str =
 
 const SCHEMA_VERSION: u16 = 2;
 const STORAGE_VERSION: u16 = 2;
-const LEASE_KIND: &str = "native-core-exact-realtime-experiment-lease-v2";
+const EXPERIMENT_LEASE_KIND: &str = "native-core-exact-realtime-experiment-lease-v2";
+const PLAYER_AUTHORITY_LEASE_KIND: &str = "native-core-exact-realtime-player-authority-lease-v1";
 const NORMAL_MODE: &str = "normal";
 const NORMAL_SLOT: &str = "normal-main";
 const STATE_VERSION: u16 = 47;
@@ -34,6 +35,12 @@ pub enum ExactRealtimeLeasePhase {
     Active,
     Paused,
     Finalizing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExactRealtimeLeasePurpose {
+    Experiment,
+    PlayerAuthority,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,6 +129,11 @@ pub struct ExactRealtimeLease {
     pub kind: String,
     pub phase: ExactRealtimeLeasePhase,
     pub run_id: String,
+    /// Player-authority leases are bound to the exact CoreRegistry session
+    /// that derived their entry proof. Experiment leases omit this field so
+    /// existing E1 lease bytes and checksums remain backwards compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_session_id: Option<String>,
     pub mode: String,
     pub slot: String,
     pub registry_fingerprint: String,
@@ -134,6 +146,16 @@ pub struct ExactRealtimeLease {
     pub pause: Option<ExactRealtimePause>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub finalization: Option<ExactRealtimeFinalization>,
+}
+
+impl ExactRealtimeLease {
+    pub(crate) fn purpose(&self) -> anyhow::Result<ExactRealtimeLeasePurpose> {
+        match self.kind.as_str() {
+            EXPERIMENT_LEASE_KIND => Ok(ExactRealtimeLeasePurpose::Experiment),
+            PLAYER_AUTHORITY_LEASE_KIND => Ok(ExactRealtimeLeasePurpose::PlayerAuthority),
+            _ => bail!("native exact realtime lease purpose is unsupported"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -306,6 +328,49 @@ impl SaveStore {
         proof: ExactRealtimeStateProof,
         settled_deadline_ms: u64,
     ) -> anyhow::Result<ExactRealtimeLease> {
+        self.prepare_exact_realtime_lease_for_purpose(
+            ExactRealtimeLeasePurpose::Experiment,
+            None,
+            run_id,
+            registry_fingerprint,
+            checkpoint,
+            proof,
+            settled_deadline_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_player_authority_lease(
+        &self,
+        authority_session_id: String,
+        run_id: String,
+        registry_fingerprint: String,
+        checkpoint: ExactRealtimeCheckpoint,
+        proof: ExactRealtimeStateProof,
+        settled_deadline_ms: u64,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        self.prepare_exact_realtime_lease_for_purpose(
+            ExactRealtimeLeasePurpose::PlayerAuthority,
+            Some(authority_session_id),
+            run_id,
+            registry_fingerprint,
+            checkpoint,
+            proof,
+            settled_deadline_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_exact_realtime_lease_for_purpose(
+        &self,
+        purpose: ExactRealtimeLeasePurpose,
+        authority_session_id: Option<String>,
+        run_id: String,
+        registry_fingerprint: String,
+        checkpoint: ExactRealtimeCheckpoint,
+        proof: ExactRealtimeStateProof,
+        settled_deadline_ms: u64,
+    ) -> anyhow::Result<ExactRealtimeLease> {
         let requested_publication =
             published_checkpoint_identity(&checkpoint, &registry_fingerprint);
         let published = self
@@ -320,9 +385,14 @@ impl SaveStore {
         }
         let lease = ExactRealtimeLease {
             schema_version: SCHEMA_VERSION,
-            kind: LEASE_KIND.to_owned(),
+            kind: match purpose {
+                ExactRealtimeLeasePurpose::Experiment => EXPERIMENT_LEASE_KIND,
+                ExactRealtimeLeasePurpose::PlayerAuthority => PLAYER_AUTHORITY_LEASE_KIND,
+            }
+            .to_owned(),
             phase: ExactRealtimeLeasePhase::Prepared,
             run_id,
+            authority_session_id,
             mode: NORMAL_MODE.to_owned(),
             slot: NORMAL_SLOT.to_owned(),
             registry_fingerprint,
@@ -355,8 +425,31 @@ impl SaveStore {
         run_id: &str,
         registry_fingerprint: &str,
     ) -> anyhow::Result<ExactRealtimeLease> {
-        let mut lease = self.require_exact_realtime_lease()?;
+        let lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
+        self.activate_prepared_exact_realtime_lease(lease)
+    }
+
+    pub(crate) fn activate_player_authority_lease(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        registry_fingerprint: &str,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        let lease = self.require_exact_realtime_lease()?;
+        require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::PlayerAuthority)?;
+        if lease.authority_session_id.as_deref() != Some(authority_session_id) {
+            bail!("native player-authority lease session identity conflicts")
+        }
+        self.activate_prepared_exact_realtime_lease(lease)
+    }
+
+    fn activate_prepared_exact_realtime_lease(
+        &self,
+        mut lease: ExactRealtimeLease,
+    ) -> anyhow::Result<ExactRealtimeLease> {
         if lease.phase == ExactRealtimeLeasePhase::Active {
             return Ok(lease);
         }
@@ -381,6 +474,7 @@ impl SaveStore {
         validate_logical_id(reason_code, 160, "pause reason")?;
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         if lease.phase == ExactRealtimeLeasePhase::Paused {
             if lease.pause.as_ref().map(|pause| pause.reason_code.as_str()) == Some(reason_code) {
                 return Ok(lease);
@@ -405,6 +499,7 @@ impl SaveStore {
     ) -> anyhow::Result<ExactRealtimeLease> {
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         validate_pending_tick(&pending, &lease.run_id)?;
         if let Some(current) = lease.pending_tick.as_ref() {
             if current == &pending {
@@ -494,6 +589,7 @@ impl SaveStore {
         }
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         let Some(pending) = lease.pending_tick.as_ref() else {
             if lease.acknowledged.sequence == sequence
                 && lease.acknowledged.command_id.as_deref() == Some(command_id.as_str())
@@ -532,6 +628,7 @@ impl SaveStore {
     ) -> anyhow::Result<ExactRealtimeLease> {
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         if lease.phase == ExactRealtimeLeasePhase::Finalizing {
             return Ok(lease);
         }
@@ -569,6 +666,7 @@ impl SaveStore {
         }
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         if lease.phase != ExactRealtimeLeasePhase::Finalizing {
             bail!("native exact realtime lease is not finalizing")
         }
@@ -597,6 +695,7 @@ impl SaveStore {
     ) -> anyhow::Result<ExactRealtimeLease> {
         let mut lease = self.require_exact_realtime_lease()?;
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         if lease.phase != ExactRealtimeLeasePhase::Finalizing {
             bail!("native exact realtime lease is not finalizing")
         }
@@ -629,6 +728,7 @@ impl SaveStore {
             return Ok(json!({ "state": "missing" }));
         };
         require_lease_identity(&lease, run_id, registry_fingerprint)?;
+        require_lease_purpose(&lease, ExactRealtimeLeasePurpose::Experiment)?;
         validate_public_primary_proof(proof, &lease)?;
         if lease.phase != ExactRealtimeLeasePhase::Finalizing
             || lease.finalization.as_ref().map(|value| value.status)
@@ -688,6 +788,7 @@ impl SaveStore {
         if current != *expected_lease {
             bail!("native exact realtime WAL authorization changed")
         }
+        require_lease_purpose(&current, ExactRealtimeLeasePurpose::Experiment)?;
         if current.slot != slot
             || current.slot != NORMAL_SLOT
             || current.mode != NORMAL_MODE
@@ -729,6 +830,7 @@ impl SaveStore {
         if current != *expected_lease {
             bail!("native exact realtime checkpoint authorization changed")
         }
+        require_lease_purpose(&current, ExactRealtimeLeasePurpose::Experiment)?;
         if current.slot != slot
             || current.slot != NORMAL_SLOT
             || current.mode != mode
@@ -905,8 +1007,22 @@ impl SaveStore {
 }
 
 fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<()> {
-    if lease.schema_version != SCHEMA_VERSION || lease.kind != LEASE_KIND {
+    if lease.schema_version != SCHEMA_VERSION {
         bail!("native exact realtime lease schema identity is invalid")
+    }
+    match lease.purpose()? {
+        ExactRealtimeLeasePurpose::Experiment => {
+            if lease.authority_session_id.is_some() {
+                bail!("native experiment lease cannot bind a player-authority session")
+            }
+        }
+        ExactRealtimeLeasePurpose::PlayerAuthority => {
+            let authority_session_id = lease
+                .authority_session_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("native player-authority lease session is missing"))?;
+            validate_logical_id(authority_session_id, 128, "player-authority session ID")?;
+        }
     }
     if lease.mode != NORMAL_MODE || lease.slot != NORMAL_SLOT {
         bail!("native exact realtime lease is outside normal-main")
@@ -1099,6 +1215,16 @@ fn require_lease_identity(
     validate_logical_id(registry_fingerprint, 256, "request registry fingerprint")?;
     if lease.run_id != run_id || lease.registry_fingerprint != registry_fingerprint {
         bail!("native exact realtime lease identity conflicts")
+    }
+    Ok(())
+}
+
+fn require_lease_purpose(
+    lease: &ExactRealtimeLease,
+    expected: ExactRealtimeLeasePurpose,
+) -> anyhow::Result<()> {
+    if lease.purpose()? != expected {
+        bail!("native exact realtime lease purpose does not authorize this operation")
     }
     Ok(())
 }
@@ -1423,6 +1549,16 @@ mod tests {
         );
         let prepared = prepare(&mut store);
         assert_eq!(prepared.phase, ExactRealtimeLeasePhase::Prepared);
+        assert_eq!(
+            prepared.purpose().unwrap(),
+            ExactRealtimeLeasePurpose::Experiment
+        );
+        assert!(prepared.authority_session_id.is_none());
+        assert!(
+            !String::from_utf8(fs::read(exact_realtime_lease_path(store.root())).unwrap())
+                .unwrap()
+                .contains("authoritySessionId")
+        );
         assert_eq!(prepare(&mut store), prepared);
         let active = store
             .activate_exact_realtime_lease(RUN_ID, FINGERPRINT)
@@ -1478,6 +1614,37 @@ mod tests {
                 .unwrap(),
             json!({ "state": "missing" })
         );
+    }
+
+    #[test]
+    fn raw_experiment_protocol_cannot_activate_a_player_authority_lease() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let checkpoint = publish_checkpoint(&mut store, 7);
+        let prepared = store
+            .prepare_player_authority_lease(
+                "core-1".to_owned(),
+                RUN_ID.to_owned(),
+                FINGERPRINT.to_owned(),
+                checkpoint,
+                proof(7),
+                10_000,
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.purpose().unwrap(),
+            ExactRealtimeLeasePurpose::PlayerAuthority
+        );
+        assert_eq!(prepared.authority_session_id.as_deref(), Some("core-1"));
+
+        let error = store
+            .exact_realtime_lease(ExactRealtimeLeaseRequest::Activate {
+                run_id: RUN_ID.to_owned(),
+                registry_fingerprint: FINGERPRINT.to_owned(),
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("purpose"));
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), prepared);
     }
 
     #[test]

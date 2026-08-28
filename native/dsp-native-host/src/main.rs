@@ -6,7 +6,7 @@ use anyhow::{Context, anyhow, bail};
 use dsp_native_core::{
     V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE, V47ImportJavascriptCompatibilityRequired,
 };
-use dsp_native_host::core_runtime::CoreRegistry;
+use dsp_native_host::core_runtime::{CoreRegistry, PLAYER_AUTHORITY_GATE_CAPABILITY};
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
 };
@@ -80,6 +80,7 @@ fn handle_request(
                     "native-core-v47-stream-import-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
+                    PLAYER_AUTHORITY_GATE_CAPABILITY,
                 ],
             })?
         }
@@ -256,6 +257,12 @@ fn handle_request(
             session_id,
             request,
         } => to_value(cores.commit_operation_exact_realtime(store, &session_id, request)?)?,
+        ControlRequest::CorePreparePlayerAuthority(control) => to_value(
+            cores.prepare_player_authority(store, &control.session_id, control.request)?,
+        )?,
+        ControlRequest::CoreActivatePlayerAuthority(control) => to_value(
+            cores.activate_player_authority(store, &control.session_id, control.request)?,
+        )?,
         ControlRequest::CoreCheckpoint {
             session_id,
             saved_at_ms,

@@ -771,6 +771,21 @@ impl CoreState {
             prepared_belt_flow,
             deterministic_runtime(),
         )
+        .map(|_| ())
+    }
+
+    pub(crate) fn record_production_history_with_campaign_metrics(
+        &self,
+        base: &mut Map<String, Value>,
+        entities: &[Value],
+        prepared_belt_flow: Option<PreparedBeltFlow>,
+    ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
+        self.record_production_history_with_records_and_runtime(
+            base,
+            entities,
+            prepared_belt_flow,
+            deterministic_runtime(),
+        )
     }
 
     fn record_production_history_with_records_and_runtime(
@@ -779,7 +794,7 @@ impl CoreState {
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
         runtime: &DeterministicRuntime,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -809,7 +824,7 @@ impl CoreState {
         // second. Check the sample clock before building any whole-factory
         // aggregates so the common no-sample path is O(1).
         let Some(boundary) = production_history_boundary(base)? else {
-            return Ok(());
+            return Ok(None);
         };
         let elapsed = boundary.elapsed;
         let duration = boundary.duration;
@@ -859,10 +874,20 @@ impl CoreState {
         let mut productive_units = 0.0;
         let mut utilized_units = 0.0;
         let mut active = 0.0;
+        // A pending campaign otherwise performs another whole-factory entity
+        // scan immediately after this history sample. Its topology metrics are
+        // read-only and use the same persisted entity order, so collect them
+        // here and hand the finished probe to the fixed-order campaign commit.
+        // Completed campaigns pay no extra per-entity work.
+        let mut campaign_factory_metrics = crate::campaign::factory_metrics_needed(base)
+            .then(crate::campaign::CampaignFactoryMetrics::default);
         for (index, entity) in entities.iter().enumerate() {
             let Some(entity) = entity.as_object() else {
                 continue;
             };
+            if let Some(metrics) = &mut campaign_factory_metrics {
+                metrics.observe_indexed_entity(self, index, entity);
+            }
             // Kind, planet, building, recipe and resource are topology fields.
             // They already live in the compact columns and do not change during
             // an ordinary simulation revision. Reusing those symbols avoids
@@ -941,6 +966,9 @@ impl CoreState {
                     add_planet_rate(&mut planet_production, planet, &output.item_id, amount);
                 }
             }
+        }
+        if let Some(metrics) = &mut campaign_factory_metrics {
+            metrics.observe_belts(&self.belts.tiers);
         }
         let inventory = if let Some(mut inventory) = inventory_values {
             if let Some(trays) = base.get("planetTrays").and_then(Value::as_object) {
@@ -1313,7 +1341,7 @@ impl CoreState {
         base.insert("productionHistory".to_owned(), Value::Array(next));
         base.insert("historyRecordedAt".to_owned(), Value::from(elapsed));
         profile_last!("compact");
-        Ok(())
+        Ok(campaign_factory_metrics)
     }
 }
 
@@ -1326,6 +1354,7 @@ mod tests {
     };
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
+    use std::time::Instant;
 
     fn fixture_checksum(bytes: &[u8]) -> String {
         let mut hash = 0x811c9dc5_u32;
@@ -1684,6 +1713,80 @@ mod tests {
         }
         for candidate in &encoded[1..] {
             assert_eq!(candidate, &encoded[0]);
+        }
+    }
+
+    #[test]
+    fn sampled_history_reuses_campaign_probe_without_changing_campaign_bytes() {
+        let (state, mut base, entities, _) = history_parallel_fixture();
+        base.insert("manualMined".to_owned(), Value::from(1));
+        base.insert("totalProduced".to_owned(), json!({ "iron_ingot": 4 }));
+        base.insert(
+            "campaign".to_owned(),
+            json!({
+                "activeChapterId": "foundation",
+                "activeTaskId": "mine_first_ore",
+                "completedTaskIds": [],
+                "rewardedTaskIds": []
+            }),
+        );
+
+        let mut canonical = None;
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            let mut sampled = base.clone();
+            let shared_metrics = state
+                .record_production_history_with_records_and_runtime(
+                    &mut sampled,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    &runtime,
+                )
+                .unwrap()
+                .expect("pending campaign history sample should return shared metrics");
+            let mut reused = sampled.clone();
+            let mut fallback = sampled;
+            let reused_started = Instant::now();
+            crate::campaign::synchronize_with_factory_metrics(
+                &state,
+                &mut reused,
+                &entities,
+                Some(shared_metrics),
+            )
+            .unwrap();
+            let reused_micros = reused_started.elapsed().as_micros();
+            let fallback_started = Instant::now();
+            crate::campaign::synchronize_with_factory_metrics(
+                &state,
+                &mut fallback,
+                &entities,
+                None,
+            )
+            .unwrap();
+            let fallback_micros = fallback_started.elapsed().as_micros();
+            if workers == 8 {
+                eprintln!(
+                    "post-stage-campaign-reuse-synthetic\tentities={}\treused-us={reused_micros}\tfallback-full-scan-us={fallback_micros}",
+                    entities.len(),
+                );
+            }
+
+            let reused = serde_json::to_vec(&reused).unwrap();
+            assert_eq!(reused, serde_json::to_vec(&fallback).unwrap());
+            if let Some(canonical) = &canonical {
+                assert_eq!(&reused, canonical, "worker count {workers}");
+            } else {
+                canonical = Some(reused);
+            }
+            assert_eq!(
+                fallback
+                    .get("campaign")
+                    .and_then(Value::as_object)
+                    .and_then(|campaign| campaign.get("completedTaskIds")),
+                Some(&json!(["mine_first_ore", "smelt_iron"]))
+            );
         }
     }
 

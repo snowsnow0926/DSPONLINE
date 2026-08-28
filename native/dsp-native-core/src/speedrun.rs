@@ -65,6 +65,22 @@ fn baseline_number(speedrun: &Map<String, Value>, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn finite_technology_progress<'a>(
+    technology_ids: impl Iterator<Item = &'a String>,
+    completed: &HashSet<&str>,
+    baseline_ids: &HashSet<&str>,
+) -> (usize, usize) {
+    technology_ids
+        .filter(|id| !DEPRECATED_TECHNOLOGIES.contains(&id.as_str()))
+        .filter(|id| !baseline_ids.contains(id.as_str()))
+        .fold((0, 0), |(target, current), id| {
+            (
+                target + 1,
+                current + usize::from(completed.contains(id.as_str())),
+            )
+        })
+}
+
 pub(crate) fn evaluate(state: &CoreState, base: &mut Map<String, Value>) -> anyhow::Result<()> {
     let Some(mut speedrun) = base
         .remove("speedrun")
@@ -91,21 +107,11 @@ pub(crate) fn evaluate(state: &CoreState, base: &mut Map<String, Value>) -> anyh
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
-    let finite_technologies = state
-        .catalog
-        .technologies
-        .keys()
-        .filter(|id| !DEPRECATED_TECHNOLOGIES.contains(&id.as_str()))
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let all_target = finite_technologies
-        .iter()
-        .filter(|id| !baseline_ids.contains(**id))
-        .count();
-    let all_current = completed
-        .iter()
-        .filter(|id| finite_technologies.contains(**id) && !baseline_ids.contains(**id))
-        .count();
+    // The technology catalog is immutable and small. A second HashSet plus a
+    // parallel task costs more than the probe itself; one deterministic pass
+    // computes both counts without allocating another catalog-sized table.
+    let (all_target, all_current) =
+        finite_technology_progress(state.catalog.technologies.keys(), &completed, &baseline_ids);
     let rocket_current = (base
         .get("dysonSphere")
         .and_then(Value::as_object)
@@ -221,4 +227,26 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         return Ok(Some("speedrun-state-invalid"));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn technology_progress_excludes_baseline_and_deprecated_ids_without_a_catalog_set() {
+        let ids = [
+            "baseline-tech".to_owned(),
+            "current-tech".to_owned(),
+            "pending-tech".to_owned(),
+            "orbital_elevator_engineering".to_owned(),
+        ];
+        let completed = HashSet::from(["baseline-tech", "current-tech", "unknown-tech"]);
+        let baseline = HashSet::from(["baseline-tech"]);
+
+        assert_eq!(
+            finite_technology_progress(ids.iter(), &completed, &baseline),
+            (2, 1)
+        );
+    }
 }

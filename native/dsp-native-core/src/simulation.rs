@@ -345,13 +345,18 @@ impl CoreState {
             let local_peer_directory = prepared.local_peer_directory.clone();
             let interstellar_route_activity = prepared.interstellar_route_activity.clone();
             profile_mark!("simulate");
-            self.record_production_history_with_records(
+            let campaign_factory_metrics = self.record_production_history_with_campaign_metrics(
                 &mut prepared.base,
                 &prepared.entities,
                 Some(prepared.belt_flow),
             )?;
             profile_mark!("production-history");
-            crate::campaign::synchronize(self, &mut prepared.base, &prepared.entities)?;
+            crate::campaign::synchronize_with_factory_metrics(
+                self,
+                &mut prepared.base,
+                &prepared.entities,
+                campaign_factory_metrics,
+            )?;
             crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
             profile_mark!("campaign");
             crate::speedrun::evaluate(self, &mut prepared.base)?;

@@ -519,6 +519,37 @@ function normalizeStellarIndustryProjectionContext(value, label) {
   };
 }
 
+function normalizeStellarIndustryV2ProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit", "routeCursor",
+    "routeLimit", "routeFilter", "query",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  const base = normalizeStellarIndustryProjectionContext({
+    sessionId: source.sessionId,
+    expectedRevision: source.expectedRevision,
+    expectedRegistryFingerprint: source.expectedRegistryFingerprint,
+    systemId: source.systemId,
+    planetId: source.planetId,
+    planetCursor: source.planetCursor,
+    planetLimit: source.planetLimit,
+    stationCursor: source.stationCursor,
+    stationLimit: source.stationLimit,
+  }, label);
+  if (typeof source.query !== "string" || Buffer.byteLength(source.query, "utf8") > 512 ||
+      /\p{Cc}/u.test(source.query)) {
+    throw protocolError(`${label} query`);
+  }
+  return {
+    ...base,
+    routeCursor: stellarCursor(source.routeCursor, `${label} route cursor`),
+    routeLimit: stellarPageLimit(source.routeLimit, `${label} route limit`),
+    routeFilter: oneOf(source.routeFilter, ["all", "remote", "issues"], `${label} route filter`),
+    query: source.query,
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -2497,6 +2528,346 @@ function normalizeCoreStellarIndustryProjection(value, context) {
   };
 }
 
+function normalizeCoreStellarIndustryV2Projection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "activePlanetId", "activeSystemId", "scopeSystemId", "scopePlanetId",
+    "truncated", "planets", "stations", "routeSummary", "routes",
+  ], "native stellar industry v2 projection");
+  if (source.schemaVersion !== 2 || source.projectionType !== "stellar-industry-v2") {
+    throw protocolError("native stellar industry v2 projection identity");
+  }
+  requireProjectionByteBudget(source, "native stellar industry v2 projection");
+  const projectionContext = normalizeStellarIndustryV2ProjectionContext(
+    context,
+    "native stellar industry v2 projection context",
+  );
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit", "routeCursor",
+    "routeLimit", "routeFilter", "query",
+  ], "native stellar industry v2 echoed request");
+  const echoed = normalizeStellarIndustryV2ProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native stellar industry v2 echoed request");
+  for (const key of [
+    "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit", "routeCursor",
+    "routeLimit", "routeFilter", "query",
+  ]) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native stellar industry v2 request binding");
+    }
+  }
+
+  const limitsSource = exactObject(source.limits, [
+    "requestBytes", "projectionBytes", "pageRows", "labelBytes", "queryBytes", "pathVisits",
+  ], "native stellar industry v2 limits");
+  const limits = {
+    ...normalizeStellarProjectionLimits({
+      requestBytes: limitsSource.requestBytes,
+      projectionBytes: limitsSource.projectionBytes,
+      pageRows: limitsSource.pageRows,
+      labelBytes: limitsSource.labelBytes,
+    }, "native stellar industry v2 base limits"),
+    queryBytes: safeInteger(limitsSource.queryBytes, "native stellar industry v2 query limit", 1),
+    pathVisits: safeInteger(limitsSource.pathVisits, "native stellar industry v2 path limit", 1),
+  };
+  if (limits.queryBytes !== 512 || limits.pathVisits !== 200_000) {
+    throw protocolError("native stellar industry v2 extended limit binding");
+  }
+
+  // The v2 envelope intentionally embeds the exact v1 planet/station model.
+  // Normalize it through the already strict v1 boundary so the two versions
+  // cannot drift or relax each other's identity and cardinality checks.
+  const baseTruncated = source.planets?.nextCursor !== null || source.stations?.nextCursor !== null;
+  const base = normalizeCoreStellarIndustryProjection({
+    schemaVersion: 1,
+    projectionType: "stellar-industry-v1",
+    revision: source.revision,
+    registryFingerprint: source.registryFingerprint,
+    stateVersion: source.stateVersion,
+    limits: {
+      requestBytes: limits.requestBytes,
+      projectionBytes: limits.projectionBytes,
+      pageRows: limits.pageRows,
+      labelBytes: limits.labelBytes,
+    },
+    request: {
+      expectedRevision: requestSource.expectedRevision,
+      expectedRegistryFingerprint: requestSource.expectedRegistryFingerprint,
+      systemId: requestSource.systemId,
+      planetId: requestSource.planetId,
+      planetCursor: requestSource.planetCursor,
+      planetLimit: requestSource.planetLimit,
+      stationCursor: requestSource.stationCursor,
+      stationLimit: requestSource.stationLimit,
+    },
+    activePlanetId: source.activePlanetId,
+    activeSystemId: source.activeSystemId,
+    scopeSystemId: source.scopeSystemId,
+    scopePlanetId: source.scopePlanetId,
+    truncated: baseTruncated,
+    planets: source.planets,
+    stations: source.stations,
+  }, {
+    sessionId: projectionContext.sessionId,
+    expectedRevision: projectionContext.expectedRevision,
+    expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+    systemId: projectionContext.systemId,
+    planetId: projectionContext.planetId,
+    planetCursor: projectionContext.planetCursor,
+    planetLimit: projectionContext.planetLimit,
+    stationCursor: projectionContext.stationCursor,
+    stationLimit: projectionContext.stationLimit,
+  });
+
+  const nullableId = (entry, label) => entry === null ? null : opaqueId(entry, label);
+  const nullableLabel = (entry, label) => entry === null ? null : stellarLabel(entry, label, 1);
+  const nullableIndex = (entry, label) => entry === null ? null : safeInteger(entry, label);
+  const routeIds = new Set();
+  const routes = normalizeStellarPage(
+    source.routes,
+    echoed.routeCursor,
+    echoed.routeLimit,
+    "native stellar industry routes",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "id", "scope", "itemId", "itemLabel", "itemLabelTruncated", "sourceStationId",
+        "sourceStationLabel", "sourceStationLabelTruncated", "sourceBuildingId",
+        "sourceBuildingLabel", "sourceSlotIndex", "sourcePlanetId", "sourcePlanetLabel",
+        "sourcePlanetLabelTruncated", "targetStationId", "targetStationLabel",
+        "targetStationLabelTruncated", "targetBuildingId", "targetBuildingLabel",
+        "targetSlotIndex", "targetPlanetId", "targetPlanetLabel", "targetPlanetLabelTruncated",
+        "sourceStock", "sourceReserve", "sourceSlotMinStock", "sourceSlotMaxStock",
+        "targetStock", "targetLimit", "targetFree", "targetSlotMinStock", "targetSlotMaxStock",
+        "minimumLoad", "minimumCargo", "priority", "installedVehicles",
+        "installedVehicleCapacity", "availableVehicles", "activeVehicles", "activeRouteCount",
+        "activeCargo", "activeRouteItemConsistent", "distanceLy", "orbitSpan",
+        "durationSeconds", "cargoPerTrip", "throughputPerMinute",
+        "economicsThroughputPerMinute", "powerKw", "energyMjPerTrip", "warpersPerTrip",
+        "warpersPerVessel", "availableWarpers", "dispatchStationId", "dispatchPlanetId",
+        "dispatchDirection", "routeKind", "routeAvailable", "routePlanningComplete",
+        "routePathLabel", "routePathLabelTruncated", "waypointStationIds",
+        "waypointPlanetIds", "waypointStationLabels", "hopCount", "maxLegDistanceLy",
+        "routePolicy", "warperBudget", "requiresWarp", "warpVehicleReady",
+        "localVehiclePowerReady", "sourcePowerFactor", "targetPowerFactor", "routePowerReady",
+        "powerProofComplete", "sourceCongestion", "targetCongestion",
+        "waypointMaxCongestion", "routeCongestion", "status", "statusLabel",
+      ], label);
+      const id = opaqueId(entry.id, `${label}.id`);
+      if (routeIds.has(id)) throw protocolError(`${label}.id`);
+      routeIds.add(id);
+      const scope = oneOf(entry.scope, ["local", "remote"], `${label}.scope`);
+      const sourceStationId = nullableId(entry.sourceStationId, `${label}.sourceStationId`);
+      const sourceBuildingId = nullableId(entry.sourceBuildingId, `${label}.sourceBuildingId`);
+      const sourceBuildingLabel = nullableLabel(entry.sourceBuildingLabel, `${label}.sourceBuildingLabel`);
+      const sourceSlotIndex = nullableIndex(entry.sourceSlotIndex, `${label}.sourceSlotIndex`);
+      const sourcePlanetId = nullableId(entry.sourcePlanetId, `${label}.sourcePlanetId`);
+      const sourcePlanetLabel = nullableLabel(entry.sourcePlanetLabel, `${label}.sourcePlanetLabel`);
+      if ((sourceStationId === null) !== (sourceBuildingId === null) ||
+          (sourceStationId === null) !== (sourceBuildingLabel === null) ||
+          (sourceStationId === null) !== (sourceSlotIndex === null) ||
+          (sourceStationId === null) !== (sourcePlanetId === null) ||
+          (sourceStationId === null) !== (sourcePlanetLabel === null)) {
+        throw protocolError(`${label} source identity group`);
+      }
+      const waypointStationIds = opaqueIdArray(
+        entry.waypointStationIds,
+        `${label}.waypointStationIds`,
+        200_000,
+      );
+      const waypointPlanetIds = opaqueIdArray(
+        entry.waypointPlanetIds,
+        `${label}.waypointPlanetIds`,
+        200_000,
+      );
+      if (!Array.isArray(entry.waypointStationLabels) ||
+          entry.waypointStationLabels.length !== waypointStationIds.length ||
+          waypointPlanetIds.length !== waypointStationIds.length) {
+        throw protocolError(`${label} waypoint binding`);
+      }
+      const waypointStationLabels = entry.waypointStationLabels.map((value, index) =>
+        stellarLabel(value, `${label}.waypointStationLabels[${index}]`, 1));
+      const minimumLoad = finiteNumber(entry.minimumLoad, `${label}.minimumLoad`);
+      if (![0.1, 0.25, 0.5, 1].includes(minimumLoad)) {
+        throw protocolError(`${label}.minimumLoad`);
+      }
+      const installedVehicles = finiteNumber(entry.installedVehicles, `${label}.installedVehicles`);
+      const availableVehicles = finiteNumber(entry.availableVehicles, `${label}.availableVehicles`);
+      const activeVehicles = finiteNumber(entry.activeVehicles, `${label}.activeVehicles`);
+      if (availableVehicles > installedVehicles || activeVehicles > installedVehicles) {
+        throw protocolError(`${label} vehicle cardinality`);
+      }
+      const hopCount = safeInteger(entry.hopCount, `${label}.hopCount`);
+      if (hopCount !== waypointStationIds.length + 1 && sourceStationId !== null) {
+        throw protocolError(`${label} hop binding`);
+      }
+      const status = oneOf(entry.status, [
+        "active", "ready", "missing-source", "missing-vehicle", "missing-hub",
+        "missing-warper", "missing-stock", "target-full", "no-power",
+      ], `${label}.status`);
+      const dispatchStationId = nullableId(entry.dispatchStationId, `${label}.dispatchStationId`);
+      const dispatchPlanetId = nullableId(entry.dispatchPlanetId, `${label}.dispatchPlanetId`);
+      if ((dispatchStationId === null) !== (dispatchPlanetId === null)) {
+        throw protocolError(`${label} dispatch identity group`);
+      }
+      return {
+        id,
+        scope,
+        itemId: opaqueId(entry.itemId, `${label}.itemId`),
+        itemLabel: stellarLabel(entry.itemLabel, `${label}.itemLabel`, 1),
+        itemLabelTruncated: boolean(entry.itemLabelTruncated, `${label}.itemLabelTruncated`),
+        sourceStationId,
+        sourceStationLabel: stellarLabel(entry.sourceStationLabel, `${label}.sourceStationLabel`, 1),
+        sourceStationLabelTruncated: boolean(entry.sourceStationLabelTruncated, `${label}.sourceStationLabelTruncated`),
+        sourceBuildingId,
+        sourceBuildingLabel,
+        sourceSlotIndex,
+        sourcePlanetId,
+        sourcePlanetLabel,
+        sourcePlanetLabelTruncated: boolean(entry.sourcePlanetLabelTruncated, `${label}.sourcePlanetLabelTruncated`),
+        targetStationId: opaqueId(entry.targetStationId, `${label}.targetStationId`),
+        targetStationLabel: stellarLabel(entry.targetStationLabel, `${label}.targetStationLabel`, 1),
+        targetStationLabelTruncated: boolean(entry.targetStationLabelTruncated, `${label}.targetStationLabelTruncated`),
+        targetBuildingId: opaqueId(entry.targetBuildingId, `${label}.targetBuildingId`),
+        targetBuildingLabel: stellarLabel(entry.targetBuildingLabel, `${label}.targetBuildingLabel`, 1),
+        targetSlotIndex: safeInteger(entry.targetSlotIndex, `${label}.targetSlotIndex`),
+        targetPlanetId: opaqueId(entry.targetPlanetId, `${label}.targetPlanetId`),
+        targetPlanetLabel: stellarLabel(entry.targetPlanetLabel, `${label}.targetPlanetLabel`, 1),
+        targetPlanetLabelTruncated: boolean(entry.targetPlanetLabelTruncated, `${label}.targetPlanetLabelTruncated`),
+        sourceStock: finiteNumber(entry.sourceStock, `${label}.sourceStock`),
+        sourceReserve: finiteNumber(entry.sourceReserve, `${label}.sourceReserve`),
+        sourceSlotMinStock: finiteNumber(entry.sourceSlotMinStock, `${label}.sourceSlotMinStock`),
+        sourceSlotMaxStock: finiteNumber(entry.sourceSlotMaxStock, `${label}.sourceSlotMaxStock`),
+        targetStock: finiteNumber(entry.targetStock, `${label}.targetStock`),
+        targetLimit: finiteNumber(entry.targetLimit, `${label}.targetLimit`),
+        targetFree: finiteNumber(entry.targetFree, `${label}.targetFree`),
+        targetSlotMinStock: finiteNumber(entry.targetSlotMinStock, `${label}.targetSlotMinStock`),
+        targetSlotMaxStock: finiteNumber(entry.targetSlotMaxStock, `${label}.targetSlotMaxStock`),
+        minimumLoad,
+        minimumCargo: finiteNumber(entry.minimumCargo, `${label}.minimumCargo`),
+        priority: safeInteger(entry.priority, `${label}.priority`),
+        installedVehicles,
+        installedVehicleCapacity: finiteNumber(entry.installedVehicleCapacity, `${label}.installedVehicleCapacity`),
+        availableVehicles,
+        activeVehicles,
+        activeRouteCount: safeInteger(entry.activeRouteCount, `${label}.activeRouteCount`),
+        activeCargo: finiteNumber(entry.activeCargo, `${label}.activeCargo`),
+        activeRouteItemConsistent: boolean(entry.activeRouteItemConsistent, `${label}.activeRouteItemConsistent`),
+        distanceLy: finiteNumber(entry.distanceLy, `${label}.distanceLy`),
+        orbitSpan: safeInteger(entry.orbitSpan, `${label}.orbitSpan`),
+        durationSeconds: finiteNumber(entry.durationSeconds, `${label}.durationSeconds`),
+        cargoPerTrip: finiteNumber(entry.cargoPerTrip, `${label}.cargoPerTrip`),
+        throughputPerMinute: finiteNumber(entry.throughputPerMinute, `${label}.throughputPerMinute`),
+        economicsThroughputPerMinute: finiteNumber(entry.economicsThroughputPerMinute, `${label}.economicsThroughputPerMinute`),
+        powerKw: finiteNumber(entry.powerKw, `${label}.powerKw`),
+        energyMjPerTrip: finiteNumber(entry.energyMjPerTrip, `${label}.energyMjPerTrip`),
+        warpersPerTrip: finiteNumber(entry.warpersPerTrip, `${label}.warpersPerTrip`),
+        warpersPerVessel: finiteNumber(entry.warpersPerVessel, `${label}.warpersPerVessel`),
+        availableWarpers: finiteNumber(entry.availableWarpers, `${label}.availableWarpers`),
+        dispatchStationId,
+        dispatchPlanetId,
+        dispatchDirection: oneOf(entry.dispatchDirection, ["unassigned", "supply-delivery", "demand-pickup"], `${label}.dispatchDirection`),
+        routeKind: oneOf(entry.routeKind, ["local", "direct", "relay"], `${label}.routeKind`),
+        routeAvailable: boolean(entry.routeAvailable, `${label}.routeAvailable`),
+        routePlanningComplete: boolean(entry.routePlanningComplete, `${label}.routePlanningComplete`),
+        routePathLabel: stellarLabel(entry.routePathLabel, `${label}.routePathLabel`, 1),
+        routePathLabelTruncated: boolean(entry.routePathLabelTruncated, `${label}.routePathLabelTruncated`),
+        waypointStationIds,
+        waypointPlanetIds,
+        waypointStationLabels,
+        hopCount,
+        maxLegDistanceLy: finiteNumber(entry.maxLegDistanceLy, `${label}.maxLegDistanceLy`),
+        routePolicy: oneOf(entry.routePolicy, ["direct", "relay-preferred", "relay-required"], `${label}.routePolicy`),
+        warperBudget: safeInteger(entry.warperBudget, `${label}.warperBudget`),
+        requiresWarp: boolean(entry.requiresWarp, `${label}.requiresWarp`),
+        warpVehicleReady: boolean(entry.warpVehicleReady, `${label}.warpVehicleReady`),
+        localVehiclePowerReady: boolean(entry.localVehiclePowerReady, `${label}.localVehiclePowerReady`),
+        sourcePowerFactor: stellarUnitNumber(entry.sourcePowerFactor, `${label}.sourcePowerFactor`),
+        targetPowerFactor: stellarUnitNumber(entry.targetPowerFactor, `${label}.targetPowerFactor`),
+        routePowerReady: boolean(entry.routePowerReady, `${label}.routePowerReady`),
+        powerProofComplete: boolean(entry.powerProofComplete, `${label}.powerProofComplete`),
+        sourceCongestion: stellarUnitNumber(entry.sourceCongestion, `${label}.sourceCongestion`),
+        targetCongestion: stellarUnitNumber(entry.targetCongestion, `${label}.targetCongestion`),
+        waypointMaxCongestion: stellarUnitNumber(entry.waypointMaxCongestion, `${label}.waypointMaxCongestion`),
+        routeCongestion: stellarUnitNumber(entry.routeCongestion, `${label}.routeCongestion`),
+        status,
+        statusLabel: stellarLabel(entry.statusLabel, `${label}.statusLabel`, 1),
+      };
+    },
+  );
+
+  const summarySource = exactObject(source.routeSummary, [
+    "scopeTotalCount", "filteredCount", "activeCount", "blockedCount", "remoteCount",
+    "routePlanningIncompleteCount", "powerUnprovenCount", "statusCounts",
+  ], "native stellar industry route summary");
+  const allowedStatuses = [
+    "active", "ready", "missing-source", "missing-vehicle", "missing-hub",
+    "missing-warper", "missing-stock", "target-full", "no-power",
+  ];
+  const statusCountsSource = jsonObject(summarySource.statusCounts, "native stellar industry status counts");
+  const statusKeys = Reflect.ownKeys(statusCountsSource);
+  if (statusKeys.some((key) => typeof key !== "string" || !allowedStatuses.includes(key))) {
+    throw protocolError("native stellar industry status counts");
+  }
+  const statusCounts = Object.fromEntries(statusKeys.map((key) => [
+    key,
+    safeInteger(statusCountsSource[key], `native stellar industry status counts.${key}`),
+  ]));
+  const routeSummary = {
+    scopeTotalCount: safeInteger(summarySource.scopeTotalCount, "native stellar industry route scope count"),
+    filteredCount: safeInteger(summarySource.filteredCount, "native stellar industry route filtered count"),
+    activeCount: safeInteger(summarySource.activeCount, "native stellar industry active route count"),
+    blockedCount: safeInteger(summarySource.blockedCount, "native stellar industry blocked route count"),
+    remoteCount: safeInteger(summarySource.remoteCount, "native stellar industry remote route count"),
+    routePlanningIncompleteCount: safeInteger(summarySource.routePlanningIncompleteCount, "native stellar industry incomplete route count"),
+    powerUnprovenCount: safeInteger(summarySource.powerUnprovenCount, "native stellar industry unproven route power count"),
+    statusCounts,
+  };
+  const statusTotal = Object.values(statusCounts).reduce((sum, count) => sum + count, 0);
+  const blockedStatuses = ["missing-source", "missing-vehicle", "missing-hub", "missing-warper", "no-power"];
+  const blockedTotal = blockedStatuses.reduce((sum, key) => sum + (statusCounts[key] ?? 0), 0);
+  if (routeSummary.filteredCount !== routes.totalCount ||
+      routeSummary.filteredCount > routeSummary.scopeTotalCount ||
+      routeSummary.activeCount !== (statusCounts.active ?? 0) ||
+      routeSummary.blockedCount !== blockedTotal ||
+      routeSummary.remoteCount > routeSummary.scopeTotalCount ||
+      routeSummary.routePlanningIncompleteCount > routeSummary.scopeTotalCount ||
+      routeSummary.powerUnprovenCount > routeSummary.scopeTotalCount ||
+      statusTotal !== routeSummary.scopeTotalCount) {
+    throw protocolError("native stellar industry route summary binding");
+  }
+  const truncated = boolean(source.truncated, "native stellar industry v2 truncated");
+  if (truncated !== (baseTruncated || routes.nextCursor !== null)) {
+    throw protocolError("native stellar industry v2 truncation binding");
+  }
+  return {
+    ...base,
+    schemaVersion: 2,
+    projectionType: "stellar-industry-v2",
+    limits,
+    request: {
+      expectedRevision: echoed.expectedRevision,
+      expectedRegistryFingerprint: echoed.expectedRegistryFingerprint,
+      systemId: echoed.systemId,
+      planetId: echoed.planetId,
+      planetCursor: echoed.planetCursor,
+      planetLimit: echoed.planetLimit,
+      stationCursor: echoed.stationCursor,
+      stationLimit: echoed.stationLimit,
+      routeCursor: echoed.routeCursor,
+      routeLimit: echoed.routeLimit,
+      routeFilter: echoed.routeFilter,
+      query: echoed.query,
+    },
+    truncated,
+    routeSummary,
+    routes,
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -2918,6 +3289,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,
   coreStarMapOverviewProjection: normalizeCoreStarMapOverviewProjection,
   coreStellarIndustryProjection: normalizeCoreStellarIndustryProjection,
+  coreStellarIndustryProjectionV2: normalizeCoreStellarIndustryV2Projection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

@@ -16,6 +16,7 @@ const MAX_COMMAND_PALETTE_SELECTOR_IDS = 256;
 const MAX_COMMAND_PALETTE_ROWS = 16;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const MAX_STELLAR_PROJECTION_PAGE_ROWS = 64;
+const MAX_STELLAR_ROUTE_QUERY_BYTES = 512;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
@@ -64,8 +65,8 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1"].includes(projectionType) || !result || typeof result !== "object" ||
-    result.schemaVersion !== (projectionType === "viewport-v2" ? 2 : 1) || result.projectionType !== projectionType ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"].includes(projectionType) || !result || typeof result !== "object" ||
+    result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
   }
@@ -1124,6 +1125,58 @@ class NativeCoreSessionRegistry {
     };
     if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
       throw new RangeError("native stellar industry projection request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
+  stellarIndustryProjectionV2(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+      "planetCursor", "planetLimit", "stationCursor", "stationLimit", "routeCursor",
+      "routeLimit", "routeFilter", "query",
+    ]);
+    const validOptionalId = (value) => value === null || validOpaqueId(value);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !validOptionalId(request.systemId) || !validOptionalId(request.planetId) ||
+      !Number.isSafeInteger(request.planetCursor) || request.planetCursor < 0 ||
+      request.planetCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.planetLimit) || request.planetLimit < 1 ||
+      request.planetLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS ||
+      !Number.isSafeInteger(request.stationCursor) || request.stationCursor < 0 ||
+      request.stationCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.stationLimit) || request.stationLimit < 1 ||
+      request.stationLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS ||
+      !Number.isSafeInteger(request.routeCursor) || request.routeCursor < 0 ||
+      request.routeCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.routeLimit) || request.routeLimit < 1 ||
+      request.routeLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS ||
+      !["all", "remote", "issues"].includes(request.routeFilter) ||
+      typeof request.query !== "string" || Buffer.byteLength(request.query, "utf8") > MAX_STELLAR_ROUTE_QUERY_BYTES ||
+      /[\u0000-\u001f\u007f]/.test(request.query)) {
+      throw new TypeError("native stellar industry v2 projection request is invalid");
+    }
+    const hostRequest = {
+      operation: "coreStellarIndustryProjectionV2",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      systemId: request.systemId,
+      planetId: request.planetId,
+      planetCursor: request.planetCursor,
+      planetLimit: request.planetLimit,
+      stationCursor: request.stationCursor,
+      stationLimit: request.stationLimit,
+      routeCursor: request.routeCursor,
+      routeLimit: request.routeLimit,
+      routeFilter: request.routeFilter,
+      query: request.query,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native stellar industry v2 projection request exceeds the bounded IPC limit");
     }
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }

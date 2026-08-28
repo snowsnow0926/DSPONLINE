@@ -212,6 +212,130 @@ function industryProjection() {
   };
 }
 
+function industryV2Context() {
+  return {
+    ...industryContext(),
+    routeCursor: 0,
+    routeLimit: 64,
+    routeFilter: "all",
+    query: "",
+  };
+}
+
+function routeRow() {
+  return {
+    id: "remote:station-1:0:station-source",
+    scope: "remote",
+    itemId: "iron_ore",
+    itemLabel: "铁矿",
+    itemLabelTruncated: false,
+    sourceStationId: "station-source",
+    sourceStationLabel: "Source · 星际站",
+    sourceStationLabelTruncated: false,
+    sourceBuildingId: "interstellar_logistics_station",
+    sourceBuildingLabel: "星际站",
+    sourceSlotIndex: 0,
+    sourcePlanetId: "source-world",
+    sourcePlanetLabel: "Source",
+    sourcePlanetLabelTruncated: false,
+    targetStationId: "station-1",
+    targetStationLabel: "Home · 星际站",
+    targetStationLabelTruncated: false,
+    targetBuildingId: "interstellar_logistics_station",
+    targetBuildingLabel: "星际站",
+    targetSlotIndex: 0,
+    targetPlanetId: "home",
+    targetPlanetLabel: "Home",
+    targetPlanetLabelTruncated: false,
+    sourceStock: 450,
+    sourceReserve: 50,
+    sourceSlotMinStock: 50,
+    sourceSlotMaxStock: 500,
+    targetStock: 25,
+    targetLimit: 200,
+    targetFree: 125,
+    targetSlotMinStock: 10,
+    targetSlotMaxStock: 200,
+    minimumLoad: 0.5,
+    minimumCargo: 50,
+    priority: 2,
+    installedVehicles: 5,
+    installedVehicleCapacity: 500,
+    availableVehicles: 4,
+    activeVehicles: 1,
+    activeRouteCount: 1,
+    activeCargo: 50,
+    activeRouteItemConsistent: true,
+    distanceLy: 3,
+    orbitSpan: 2,
+    durationSeconds: 12,
+    cargoPerTrip: 500,
+    throughputPerMinute: 2500,
+    economicsThroughputPerMinute: 2500,
+    powerKw: 1000,
+    energyMjPerTrip: 12,
+    warpersPerTrip: 5,
+    warpersPerVessel: 1,
+    availableWarpers: 10,
+    dispatchStationId: "station-source",
+    dispatchPlanetId: "source-world",
+    dispatchDirection: "supply-delivery",
+    routeKind: "direct",
+    routeAvailable: true,
+    routePlanningComplete: true,
+    routePathLabel: "Source → Home",
+    routePathLabelTruncated: false,
+    waypointStationIds: [],
+    waypointPlanetIds: [],
+    waypointStationLabels: [],
+    hopCount: 1,
+    maxLegDistanceLy: 3,
+    routePolicy: "direct",
+    warperBudget: 2,
+    requiresWarp: true,
+    warpVehicleReady: true,
+    localVehiclePowerReady: true,
+    sourcePowerFactor: 1,
+    targetPowerFactor: 1,
+    routePowerReady: true,
+    powerProofComplete: true,
+    sourceCongestion: 0.2,
+    targetCongestion: 0.25,
+    waypointMaxCongestion: 0,
+    routeCongestion: 0.25,
+    status: "active",
+    statusLabel: "运输中",
+  };
+}
+
+function industryV2Projection() {
+  const base = industryProjection();
+  return {
+    ...base,
+    schemaVersion: 2,
+    projectionType: "stellar-industry-v2",
+    limits: { ...limits, queryBytes: 512, pathVisits: 200_000 },
+    request: {
+      ...base.request,
+      routeCursor: 0,
+      routeLimit: 64,
+      routeFilter: "all",
+      query: "",
+    },
+    routeSummary: {
+      scopeTotalCount: 1,
+      filteredCount: 1,
+      activeCount: 1,
+      blockedCount: 0,
+      remoteCount: 1,
+      routePlanningIncompleteCount: 0,
+      powerUnprovenCount: 0,
+      statusCounts: { active: 1 },
+    },
+    routes: { cursor: 0, limit: 64, totalCount: 1, nextCursor: null, rows: [routeRow()] },
+  };
+}
+
 test("stellar workspace boundaries bind identity, exact request echo, scope, and page chains", () => {
   const map = normalizeRendererNativeResult(
     "coreStarMapOverviewProjection",
@@ -276,6 +400,48 @@ test("stellar workspace boundaries bind identity, exact request echo, scope, and
   }
 });
 
+test("stellar industry v2 binds a complete independently paged route model", () => {
+  const result = normalizeRendererNativeResult(
+    "coreStellarIndustryProjectionV2",
+    industryV2Projection(),
+    industryV2Context(),
+  );
+  assert.equal(result.schemaVersion, 2);
+  assert.equal(result.routes.rows[0].routePathLabel, "Source → Home");
+  assert.equal(result.routeSummary.activeCount, 1);
+  assert.deepEqual(result.routes.rows[0].waypointStationIds, []);
+
+  for (const invalid of [
+    { ...industryV2Projection(), projectionType: "stellar-industry-v1" },
+    { ...industryV2Projection(), limits: { ...industryV2Projection().limits, queryBytes: 511 } },
+    { ...industryV2Projection(), request: { ...industryV2Projection().request, routeCursor: 1 } },
+    { ...industryV2Projection(), routeSummary: { ...industryV2Projection().routeSummary, activeCount: 0 } },
+    {
+      ...industryV2Projection(),
+      routes: {
+        ...industryV2Projection().routes,
+        rows: [{ ...routeRow(), waypointStationIds: ["hub"] }],
+      },
+    },
+    {
+      ...industryV2Projection(),
+      routes: {
+        ...industryV2Projection().routes,
+        rows: [{ ...routeRow(), availableVehicles: 6 }],
+      },
+    },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult(
+        "coreStellarIndustryProjectionV2",
+        invalid,
+        industryV2Context(),
+      ),
+      { code: "NATIVE_PROTOCOL_INVALID" },
+    );
+  }
+});
+
 test("stellar workspace projections use trusted direct IPC and checksummed bounded transfer only", () => {
   const main = readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
   const preload = readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
@@ -285,15 +451,19 @@ test("stellar workspace projections use trusted direct IPC and checksummed bound
 
   assert.match(main, /desktop:native-core-star-map-overview-projection"[\s\S]*?coreStarMapOverviewProjection[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-industry-projection"[\s\S]*?coreStellarIndustryProjection[\s\S]*?stellarIndustryProjection\(ownerId, request\)/);
+  assert.match(main, /desktop:native-core-stellar-industry-v2-projection"[\s\S]*?coreStellarIndustryProjectionV2[\s\S]*?stellarIndustryProjectionV2\(ownerId, request\)/);
   assert.match(main, /"star-map-overview-v1"[\s\S]*?nativeStarMapOverviewProjectionResultContext/);
   assert.match(main, /"stellar-industry-v1"[\s\S]*?nativeStellarIndustryProjectionResultContext/);
   assert.match(preload, /MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768/);
   assert.match(preload, /getNativeCoreStarMapOverviewProjection:[\s\S]*?desktop:native-core-star-map-overview-projection/);
   assert.match(preload, /getNativeCoreStellarIndustryProjection:[\s\S]*?desktop:native-core-stellar-industry-projection/);
+  assert.match(preload, /getNativeCoreStellarIndustryV2Projection:[\s\S]*?desktop:native-core-stellar-industry-v2-projection/);
   assert.match(host, /MAX_STELLAR_PROJECTION_PAGE_ROWS = 64[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
   assert.match(host, /stellarIndustryProjection\(ownerId, request\)[\s\S]*?bounded IPC limit/);
+  assert.match(host, /stellarIndustryProjectionV2\(ownerId, request\)[\s\S]*?coreStellarIndustryProjectionV2/);
   assert.match(desktop, /projectionType:\s*"star-map-overview-v1"/);
   assert.match(desktop, /projectionType:\s*"stellar-industry-v1"/);
+  assert.match(desktop, /projectionType:\s*"stellar-industry-v2"/);
   assert.match(nativeCore, /starMapOverviewProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.match(nativeCore, /stellarIndustryProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.doesNotMatch(nativeCore, /starMapOverviewProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);

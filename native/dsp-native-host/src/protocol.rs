@@ -263,6 +263,27 @@ pub enum ControlRequest {
         station_cursor: usize,
         station_limit: usize,
     },
+    CoreStellarIndustryProjectionV2 {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        system_id: Option<String>,
+        #[serde(default)]
+        planet_id: Option<String>,
+        #[serde(default)]
+        planet_cursor: usize,
+        planet_limit: usize,
+        #[serde(default)]
+        station_cursor: usize,
+        station_limit: usize,
+        #[serde(default)]
+        route_cursor: usize,
+        route_limit: usize,
+        route_filter: String,
+        #[serde(default)]
+        query: String,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -847,6 +868,56 @@ mod tests {
                 assert_eq!(station_cursor, 0);
             }
             _ => panic!("stellar-industry defaults decoded as the wrong variant"),
+        }
+
+        let industry_v2 = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStellarIndustryProjectionV2",
+            "sessionId": "core-4",
+            "expectedRevision": 45,
+            "expectedRegistryFingerprint": "builtin:test",
+            "systemId": "sol",
+            "planetId": null,
+            "planetCursor": 3,
+            "planetLimit": 8,
+            "stationCursor": 4,
+            "stationLimit": 16,
+            "routeCursor": 5,
+            "routeLimit": 32,
+            "routeFilter": "issues",
+            "query": "warp"
+        }))
+        .unwrap();
+        match industry_v2 {
+            ControlRequest::CoreStellarIndustryProjectionV2 {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                system_id,
+                planet_id,
+                planet_cursor,
+                planet_limit,
+                station_cursor,
+                station_limit,
+                route_cursor,
+                route_limit,
+                route_filter,
+                query,
+            } => {
+                assert_eq!(session_id, "core-4");
+                assert_eq!(expected_revision, 45);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(system_id.as_deref(), Some("sol"));
+                assert!(planet_id.is_none());
+                assert_eq!(planet_cursor, 3);
+                assert_eq!(planet_limit, 8);
+                assert_eq!(station_cursor, 4);
+                assert_eq!(station_limit, 16);
+                assert_eq!(route_cursor, 5);
+                assert_eq!(route_limit, 32);
+                assert_eq!(route_filter, "issues");
+                assert_eq!(query, "warp");
+            }
+            _ => panic!("stellar-industry v2 projection decoded as the wrong variant"),
         }
     }
 }

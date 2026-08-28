@@ -147,6 +147,8 @@ export interface DesktopBridge {
   getNativeCoreStarMapOverviewProjection?: (request: DesktopNativeCoreStarMapOverviewProjectionRequest) => Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
   /** Independently bounded planet/station pages; never falls back to the Web GameState. */
   getNativeCoreStellarIndustryProjection?: (request: DesktopNativeCoreStellarIndustryProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
+  /** Adds an independently paged, filtered native route table to the v1 industry model. */
+  getNativeCoreStellarIndustryV2Projection?: (request: DesktopNativeCoreStellarIndustryV2ProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -1089,6 +1091,124 @@ export interface DesktopNativeCoreStellarIndustryProjectionResult {
   stations: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarIndustryStationRow>;
 }
 
+export type DesktopNativeCoreStellarRouteFilter = "all" | "remote" | "issues";
+
+export interface DesktopNativeCoreStellarIndustryV2ProjectionRequest
+  extends DesktopNativeCoreStellarIndustryProjectionRequest {
+  routeCursor: number;
+  routeLimit: number;
+  routeFilter: DesktopNativeCoreStellarRouteFilter;
+  query: string;
+}
+
+export interface DesktopNativeCoreStellarIndustryRouteRow {
+  id: string;
+  scope: "local" | "remote";
+  itemId: string;
+  itemLabel: string;
+  itemLabelTruncated: boolean;
+  sourceStationId: string | null;
+  sourceStationLabel: string;
+  sourceStationLabelTruncated: boolean;
+  sourceBuildingId: string | null;
+  sourceBuildingLabel: string | null;
+  sourceSlotIndex: number | null;
+  sourcePlanetId: string | null;
+  sourcePlanetLabel: string | null;
+  sourcePlanetLabelTruncated: boolean;
+  targetStationId: string;
+  targetStationLabel: string;
+  targetStationLabelTruncated: boolean;
+  targetBuildingId: string;
+  targetBuildingLabel: string;
+  targetSlotIndex: number;
+  targetPlanetId: string;
+  targetPlanetLabel: string;
+  targetPlanetLabelTruncated: boolean;
+  sourceStock: number;
+  sourceReserve: number;
+  sourceSlotMinStock: number;
+  sourceSlotMaxStock: number;
+  targetStock: number;
+  targetLimit: number;
+  targetFree: number;
+  targetSlotMinStock: number;
+  targetSlotMaxStock: number;
+  minimumLoad: number;
+  minimumCargo: number;
+  priority: number;
+  installedVehicles: number;
+  installedVehicleCapacity: number;
+  availableVehicles: number;
+  activeVehicles: number;
+  activeRouteCount: number;
+  activeCargo: number;
+  activeRouteItemConsistent: boolean;
+  distanceLy: number;
+  orbitSpan: number;
+  durationSeconds: number;
+  cargoPerTrip: number;
+  throughputPerMinute: number;
+  economicsThroughputPerMinute: number;
+  powerKw: number;
+  energyMjPerTrip: number;
+  warpersPerTrip: number;
+  warpersPerVessel: number;
+  availableWarpers: number;
+  dispatchStationId: string | null;
+  dispatchPlanetId: string | null;
+  dispatchDirection: "unassigned" | "supply-delivery" | "demand-pickup";
+  routeKind: "local" | "direct" | "relay";
+  routeAvailable: boolean;
+  routePlanningComplete: boolean;
+  routePathLabel: string;
+  routePathLabelTruncated: boolean;
+  waypointStationIds: string[];
+  waypointPlanetIds: string[];
+  waypointStationLabels: string[];
+  hopCount: number;
+  maxLegDistanceLy: number;
+  routePolicy: "direct" | "relay-preferred" | "relay-required";
+  warperBudget: number;
+  requiresWarp: boolean;
+  warpVehicleReady: boolean;
+  localVehiclePowerReady: boolean;
+  sourcePowerFactor: number;
+  targetPowerFactor: number;
+  routePowerReady: boolean;
+  powerProofComplete: boolean;
+  sourceCongestion: number;
+  targetCongestion: number;
+  waypointMaxCongestion: number;
+  routeCongestion: number;
+  status: "active" | "ready" | "missing-source" | "missing-vehicle" | "missing-hub" |
+    "missing-warper" | "missing-stock" | "target-full" | "no-power";
+  statusLabel: string;
+}
+
+export interface DesktopNativeCoreStellarIndustryV2ProjectionResult
+  extends Omit<DesktopNativeCoreStellarIndustryProjectionResult, "schemaVersion" | "projectionType" | "limits" | "request" | "truncated"> {
+  schemaVersion: 2;
+  projectionType: "stellar-industry-v2";
+  limits: DesktopNativeCoreStellarProjectionLimits & {
+    queryBytes: 512;
+    pathVisits: 200000;
+  };
+  request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">;
+  truncated: boolean;
+  routeSummary: {
+    scopeTotalCount: number;
+    filteredCount: number;
+    activeCount: number;
+    blockedCount: number;
+    remoteCount: number;
+    routePlanningIncompleteCount: number;
+    powerUnprovenCount: number;
+    statusCounts: Partial<Record<DesktopNativeCoreStellarIndustryRouteRow["status"], number>>;
+  };
+  routes: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarIndustryRouteRow>;
+}
+
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -1175,6 +1295,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "stellar-industry-v1";
       payload: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "stellar-industry-v2";
+      payload: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -1182,7 +1307,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1" | "stellar-industry-v2";
   payloadLength: number;
   sha256: string;
 }

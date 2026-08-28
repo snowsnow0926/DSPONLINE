@@ -386,6 +386,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-command-v1"));
@@ -647,6 +648,37 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(stellarIndustry.projectionType, "stellar-industry-v1");
   assert.deepEqual(stellarIndustry.planets.rows.map((row) => row.planetId), ["home"]);
   assert.deepEqual(stellarIndustry.stations.rows, []);
+
+  const stellarIndustryV2Request = {
+    ...stellarIndustryRequest,
+    operation: "coreStellarIndustryProjectionV2",
+    routeCursor: 0,
+    routeLimit: 64,
+    routeFilter: "all",
+    query: "",
+  };
+  const stellarIndustryV2 = await client.request(stellarIndustryV2Request);
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreStellarIndustryProjectionV2",
+    stellarIndustryV2,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      systemId: "helios",
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 64,
+      stationCursor: 0,
+      stationLimit: 64,
+      routeCursor: 0,
+      routeLimit: 64,
+      routeFilter: "all",
+      query: "",
+    },
+  ));
+  assert.equal(stellarIndustryV2.projectionType, "stellar-industry-v2");
+  assert.equal(stellarIndustryV2.routes.totalCount, 0);
 
   await assert.rejects(
     client.request({ ...starMapRequest, expectedRevision: 1 }),

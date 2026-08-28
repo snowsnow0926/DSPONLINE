@@ -645,6 +645,16 @@ function nativeStellarIndustryProjectionResultContext(request) {
   };
 }
 
+function nativeStellarIndustryV2ProjectionResultContext(request) {
+  return {
+    ...nativeStellarIndustryProjectionResultContext(request),
+    routeCursor: request?.routeCursor,
+    routeLimit: request?.routeLimit,
+    routeFilter: request?.routeFilter,
+    query: request?.query,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1222,6 +1232,20 @@ ipcMain.handle("desktop:native-core-stellar-industry-projection", async (event, 
   });
 });
 
+ipcMain.handle("desktop:native-core-stellar-industry-v2-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarIndustryProjectionV2", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星工业 v2 投影请求失败，请重试",
+    resultContext: nativeStellarIndustryV2ProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-industry-v2", request);
+    }
+    return await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1248,7 +1272,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1275,6 +1299,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.starMapOverviewProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "stellar-industry-v1") {
       rawResult = await nativeCoreSessions.stellarIndustryProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-industry-v2") {
+      rawResult = await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -1293,6 +1319,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? "coreStarMapOverviewProjection"
                   : request.projectionType === "stellar-industry-v1"
                     ? "coreStellarIndustryProjection"
+                    : request.projectionType === "stellar-industry-v2"
+                      ? "coreStellarIndustryProjectionV2"
                     : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
@@ -1309,6 +1337,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? nativeStarMapOverviewProjectionResultContext(normalizedRequest)
                   : request.projectionType === "stellar-industry-v1"
                     ? nativeStellarIndustryProjectionResultContext(normalizedRequest)
+                    : request.projectionType === "stellar-industry-v2"
+                      ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)
                     : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({

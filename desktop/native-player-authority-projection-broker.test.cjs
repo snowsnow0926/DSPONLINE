@@ -51,6 +51,10 @@ function fixture(initialSnapshot = {}) {
       calls.push(["stellar-industry-v1", ownerId, request]);
       return { projectionType: "stellar-industry-v1", schemaVersion: 1, revision: request.expectedRevision };
     },
+    async stellarIndustryProjectionV2(ownerId, request) {
+      calls.push(["stellar-industry-v2", ownerId, request]);
+      return { projectionType: "stellar-industry-v2", schemaVersion: 2, revision: request.expectedRevision };
+    },
   };
   const broker = new NativePlayerAuthorityProjectionBroker({
     runtime: { snapshot: () => ({ ...snapshot }) },
@@ -69,7 +73,7 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "stellar-industry-v1"]) {
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"]) {
     const request = { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
@@ -83,6 +87,7 @@ test("active same-session same-revision reads use only the main owner identity",
     ["command-palette-entity-search-v1", "main-player-authority"],
     ["star-map-overview-v1", "main-player-authority"],
     ["stellar-industry-v1", "main-player-authority"],
+    ["stellar-industry-v2", "main-player-authority"],
   ]);
 });
 

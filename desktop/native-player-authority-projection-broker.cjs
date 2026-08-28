@@ -19,6 +19,7 @@ const PROJECTION_METHODS = Object.freeze({
   "command-palette-entity-search-v1": "commandPaletteEntitySearchProjection",
   "star-map-overview-v1": "starMapOverviewProjection",
   "stellar-industry-v1": "stellarIndustryProjection",
+  "stellar-industry-v2": "stellarIndustryProjectionV2",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

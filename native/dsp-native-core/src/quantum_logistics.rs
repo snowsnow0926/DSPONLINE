@@ -26,6 +26,16 @@ pub(crate) struct BoundaryFlow {
     quantum_collector_stacks: f64,
 }
 
+impl BoundaryFlow {
+    /// Whether this boundary actually credited any download sink. An enabled
+    /// network still returns an empty flow because uploads later in the same
+    /// boundary must retain its bandwidth/cursor context; callers must not
+    /// interpret that empty flow as station inventory movement.
+    pub(crate) fn has_downloads(&self) -> bool {
+        self.downloaded.values().any(|amount| !amount.is_zero())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RuntimeBandwidth {
     per_minute: f64,
@@ -2156,6 +2166,24 @@ mod tests {
         let accepted = settle_inputs(&mut network, &inputs, &BigUint::from(5_000_u64));
         assert_eq!(accepted["upload"], BigUint::from(2_000_u64));
         assert_eq!(network.inventory["iron_ore"], BigUint::from(10_000_u64));
+    }
+
+    #[test]
+    fn boundary_flow_distinguishes_enabled_zero_delivery_from_real_downloads() {
+        let empty = BoundaryFlow::default();
+        assert!(!empty.has_downloads());
+
+        let zero_record = BoundaryFlow {
+            downloaded: BTreeMap::from([("iron_ore".to_owned(), BigUint::zero())]),
+            ..BoundaryFlow::default()
+        };
+        assert!(!zero_record.has_downloads());
+
+        let delivered = BoundaryFlow {
+            downloaded: BTreeMap::from([("iron_ore".to_owned(), BigUint::from(1_u8))]),
+            ..BoundaryFlow::default()
+        };
+        assert!(delivered.has_downloads());
     }
 
     #[test]

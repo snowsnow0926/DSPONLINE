@@ -343,6 +343,12 @@ fn finite_number(value: Option<&Value>) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn quantum_boundary_changed_station_inventory(
+    flow: Option<&crate::quantum_logistics::BoundaryFlow>,
+) -> bool {
+    flow.is_some_and(crate::quantum_logistics::BoundaryFlow::has_downloads)
+}
+
 fn string_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     object.get(key).and_then(Value::as_str)
 }
@@ -3485,6 +3491,10 @@ fn simulate_step(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &buffer_changed_station_indices,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
     profile_mark!("quantum-supply-buffers");
@@ -3510,6 +3520,10 @@ fn simulate_step(
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &belt_changed_entity_indices,
         interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &belt_changed_entity_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     profile_mark!("belt-input-transfer");
@@ -3618,6 +3632,8 @@ fn simulate_step(
                 == Some("interstellar_logistics_station")
         },
     ));
+    let mut ready_logistics_station_indices = ready_stations.iter().copied().collect::<Vec<_>>();
+    ready_logistics_station_indices.sort_unstable();
     if crate::construction::has_deficit(state, base) {
         ready_stations.extend(
             state
@@ -4432,6 +4448,17 @@ fn simulate_step(
     } else {
         None
     };
+    let mut late_logistics_changed_entity_indices = Vec::new();
+    if quantum_boundary_changed_station_inventory(quantum_flow.as_ref()) {
+        // Quantum downloads can add warpers directly to an ILS output at the
+        // five-second boundary. The endpoint index is already stable and
+        // bounded, so wake only those candidates.
+        crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+            &indexed_quantum_endpoint_indices,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+        );
+        late_logistics_changed_entity_indices.extend_from_slice(&indexed_quantum_endpoint_indices);
+    }
     profile_mark!("quantum-download");
 
     crate::belts::transfer(
@@ -4446,6 +4473,10 @@ fn simulate_step(
         seconds,
         &mut belt_changed_entity_indices,
     )?;
+    // `belts::transfer` clears and repopulates its movement evidence for each
+    // phase. At this point the vector is therefore exactly the late output
+    // transfer set, not an append-only continuation of the input phase.
+    late_logistics_changed_entity_indices.extend_from_slice(&belt_changed_entity_indices);
     crate::local_logistics::wake_transfer_buffers_from_changed_entities(
         entities,
         &belt_changed_entity_indices,
@@ -4454,6 +4485,10 @@ fn simulate_step(
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &belt_changed_entity_indices,
         interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &belt_changed_entity_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     drain_material_delivery_hubs(
@@ -4465,9 +4500,27 @@ fn simulate_step(
     )?;
     profile_mark!("belt-output-transfer");
 
-    let station_powers = state
-        .factory_topology
-        .station_indices
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        base,
+        entities,
+        false,
+        interstellar_peer_directory,
+        interstellar_route_activity,
+    );
+    crate::interstellar_logistics::refresh_warper_tray_wakes(
+        base,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    let (station_power_indices, station_power_scan) =
+        crate::interstellar_logistics::select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &ready_logistics_station_indices,
+            &late_logistics_changed_entity_indices,
+            interstellar_peer_directory,
+            interstellar_route_activity,
+        );
+    let station_powers = station_power_indices
         .iter()
         .copied()
         .filter_map(|entity_index| {
@@ -4489,22 +4542,39 @@ fn simulate_step(
             ))
         })
         .collect::<HashMap<_, _>>();
-    crate::interstellar_logistics::refresh_peer_directory(
-        state,
-        base,
-        entities,
-        false,
-        interstellar_peer_directory,
-        interstellar_route_activity,
-    );
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tstation-power-active\t{}/{}\tdense={}\tdirectory-fallback={}\truntime-fallback={}",
+            station_power_scan.selected_station_rows,
+            station_power_scan.total_station_rows,
+            station_power_scan.dense_fallback,
+            station_power_scan.directory_fallback,
+            station_power_scan.runtime_fallback,
+        );
+    }
     crate::interstellar_logistics::refresh_dispatch_power_wakes(
-        &state.factory_topology.station_indices,
+        &station_power_indices,
         &station_powers,
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
-    let warper_changed_station_indices =
-        crate::interstellar_logistics::refill_station_warpers(base, entities)?;
+    let (warper_changed_station_indices, warper_refill_scan) =
+        crate::interstellar_logistics::refill_station_warpers(
+            base,
+            entities,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+            &step_route_ledger,
+        )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\twarper-refill-active\t{}/{}\treservation-rows={}\tdense={}\tdirectory-fallback={}",
+            warper_refill_scan.selected_station_rows,
+            warper_refill_scan.total_station_rows,
+            warper_refill_scan.reservation_rows_visited,
+            warper_refill_scan.dense_fallback,
+            warper_refill_scan.directory_fallback,
+        );
+    }
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &warper_changed_station_indices,
         interstellar_peer_directory,
@@ -4571,25 +4641,50 @@ fn simulate_step(
         interstellar_peer_directory,
         interstellar_step_runtime,
     );
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &local_route_changed_station_indices,
+        interstellar_step_runtime,
+    );
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &remote_route_changed_station_indices,
         interstellar_peer_directory,
         interstellar_step_runtime,
     );
-    profile_mark!("interstellar-route-advance");
-    let post_route_warper_changed_station_indices =
-        crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
-        &post_route_warper_changed_station_indices,
-        interstellar_peer_directory,
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &remote_route_changed_station_indices,
         interstellar_step_runtime,
     );
-    // Route completion can remove the final active demand, so congestion must
-    // use a fresh post-advance snapshot rather than the readiness ledger.
+    profile_mark!("interstellar-route-advance");
+    // Route advance can complete the final flight and release an output
+    // reservation. Rebuild the already-required congestion ledger once here
+    // so post-route warper refill reads the exact post-advance reservation
+    // set without rescanning every entity a second time.
     let congestion_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
         state,
         entities,
         local_step_runtime,
+        interstellar_step_runtime,
+    );
+    let (post_route_warper_changed_station_indices, post_route_warper_refill_scan) =
+        crate::interstellar_logistics::refill_station_warpers(
+            base,
+            entities,
+            interstellar_step_runtime,
+            &congestion_route_ledger,
+        )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\twarper-refill-post-route-active\t{}/{}\treservation-rows={}\tdense={}\tdirectory-fallback={}",
+            post_route_warper_refill_scan.selected_station_rows,
+            post_route_warper_refill_scan.total_station_rows,
+            post_route_warper_refill_scan.reservation_rows_visited,
+            post_route_warper_refill_scan.dense_fallback,
+            post_route_warper_refill_scan.directory_fallback,
+        );
+    }
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &post_route_warper_changed_station_indices,
+        interstellar_peer_directory,
         interstellar_step_runtime,
     );
     if profile_enabled {
@@ -5094,6 +5189,14 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    #[test]
+    fn empty_quantum_boundary_does_not_claim_late_station_inventory_change() {
+        assert!(!quantum_boundary_changed_station_inventory(None));
+        assert!(!quantum_boundary_changed_station_inventory(Some(
+            &crate::quantum_logistics::BoundaryFlow::default()
+        )));
+    }
 
     fn fixture_checksum(bytes: &[u8]) -> String {
         let mut hash = 0x811c9dc5_u32;

@@ -21,6 +21,10 @@ const REMOTE_ROUTE_DENSE_NUMERATOR: usize = 3;
 const REMOTE_ROUTE_DENSE_DENOMINATOR: usize = 4;
 const REMOTE_DISPATCH_DENSE_NUMERATOR: usize = 3;
 const REMOTE_DISPATCH_DENSE_DENOMINATOR: usize = 4;
+const WARPER_REFILL_DENSE_NUMERATOR: usize = 3;
+const WARPER_REFILL_DENSE_DENOMINATOR: usize = 4;
+const STATION_POWER_DENSE_NUMERATOR: usize = 3;
+const STATION_POWER_DENSE_DENOMINATOR: usize = 4;
 const ORBITAL_COLLECTOR_DENSE_NUMERATOR: usize = 3;
 const ORBITAL_COLLECTOR_DENSE_DENOMINATOR: usize = 4;
 
@@ -320,6 +324,24 @@ pub(crate) struct InterstellarDispatchScan {
     pub directory_fallback: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WarperRefillScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub reservation_rows_visited: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StationPowerScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    pub runtime_fallback: bool,
+}
+
 /// Runtime-only wake set for demand stations that own at least one remote
 /// route. The static station order is shared across candidate revisions while
 /// only the compact activity vector is copied on write. Nothing in this
@@ -327,7 +349,6 @@ pub(crate) struct InterstellarDispatchScan {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InterstellarRouteActivity {
     station_indices: Arc<[usize]>,
-    station_ranks: Arc<HashMap<usize, usize>>,
     active_demand_indices: Vec<usize>,
     /// Route-bearing rows that cannot be maintained by the legacy local or
     /// remote wake queues (custom station kinds and opaque/MOD scopes). They
@@ -342,17 +363,42 @@ pub(crate) struct InterstellarRouteActivity {
     /// Stations that had usable power at the previous dispatch boundary.
     /// Only the false -> true transition can create new dispatch eligibility.
     powered_station_indices: Vec<usize>,
+    /// Stable persisted-order list of every vanilla ILS row that can
+    /// participate in automatic warper refill. Runtime mode, target and
+    /// inventory fields deliberately do not affect membership: those fields
+    /// can change without rebuilding topology at a five-second boundary.
+    warper_refill_station_indices: Arc<[usize]>,
+    /// Candidate stations grouped by planet in first-seen persisted order.
+    /// Only the scalar tray amount for these planets is compared between
+    /// revisions; a changed tray wakes that planet's candidates.
+    warper_refill_planets: Arc<[(String, Arc<[usize]>)]>,
+    pending_warper_refill_station_indices: Vec<usize>,
+    warper_tray_amount_bits: Vec<Option<u64>>,
+    /// A non-station row masquerading as a vanilla ILS, or a vanilla ILS
+    /// without a planet, is outside the indexed authority contract. Preserve
+    /// the permissive legacy behavior by scanning every row in that case.
+    warper_refill_full_scan_required: bool,
 }
 
 impl InterstellarRouteActivity {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         (self.station_indices.len() * std::mem::size_of::<usize>()
-            + self.station_ranks.capacity() * std::mem::size_of::<(usize, usize)>()
             + (self.active_demand_indices.capacity() + self.opaque_route_demand_indices.capacity())
                 * std::mem::size_of::<usize>()
             + (self.pending_dispatch_demand_indices.capacity()
-                + self.powered_station_indices.capacity())
-                * std::mem::size_of::<usize>()) as u64
+                + self.powered_station_indices.capacity()
+                + self.warper_refill_station_indices.len()
+                + self.pending_warper_refill_station_indices.capacity())
+                * std::mem::size_of::<usize>()
+            + self
+                .warper_refill_planets
+                .iter()
+                .map(|(planet_id, indices)| {
+                    planet_id.capacity() + indices.len() * std::mem::size_of::<usize>()
+                })
+                .sum::<usize>()
+            + self.warper_tray_amount_bits.capacity() * std::mem::size_of::<Option<u64>>())
+            as u64
     }
 
     fn has_remote_routes(&self) -> bool {
@@ -381,17 +427,11 @@ impl InterstellarRouteActivity {
     }
 
     fn update_remote_demand(&mut self, station_index: usize, active: bool) {
-        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+        if self.station_indices.binary_search(&station_index).is_err() {
             return;
-        };
+        }
         match (
-            self.active_demand_indices
-                .binary_search_by_key(&rank, |candidate| {
-                    self.station_ranks
-                        .get(candidate)
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                }),
+            self.active_demand_indices.binary_search(&station_index),
             active,
         ) {
             (Ok(position), false) => {
@@ -417,21 +457,104 @@ impl InterstellarRouteActivity {
     }
 
     fn wake_dispatch_demand(&mut self, station_index: usize) {
-        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+        if self.station_indices.binary_search(&station_index).is_err() {
             return;
-        };
-        if let Err(position) =
-            self.pending_dispatch_demand_indices
-                .binary_search_by_key(&rank, |candidate| {
-                    self.station_ranks
-                        .get(candidate)
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                })
+        }
+        if let Err(position) = self
+            .pending_dispatch_demand_indices
+            .binary_search(&station_index)
         {
             self.pending_dispatch_demand_indices
                 .insert(position, station_index);
         }
+    }
+
+    fn wake_warper_refill_station(&mut self, station_index: usize) {
+        if self
+            .warper_refill_station_indices
+            .binary_search(&station_index)
+            .is_err()
+        {
+            return;
+        }
+        if let Err(position) = self
+            .pending_warper_refill_station_indices
+            .binary_search(&station_index)
+        {
+            self.pending_warper_refill_station_indices
+                .insert(position, station_index);
+        }
+    }
+
+    fn wake_warper_refill_from_changed_stations(&mut self, station_indices: &[usize]) {
+        for &station_index in station_indices {
+            self.wake_warper_refill_station(station_index);
+        }
+    }
+
+    fn wake_all_warper_refill_stations(&mut self) {
+        self.pending_warper_refill_station_indices.clear();
+        self.pending_warper_refill_station_indices
+            .extend_from_slice(&self.warper_refill_station_indices);
+    }
+
+    fn wake_changed_warper_trays(&mut self, base: &Map<String, Value>) {
+        let mut changed = Vec::new();
+        for (planet_rank, (planet_id, station_indices)) in
+            self.warper_refill_planets.iter().enumerate()
+        {
+            let amount_bits = planet_tray_warper_amount(base, planet_id).to_bits();
+            if self
+                .warper_tray_amount_bits
+                .get(planet_rank)
+                .and_then(|value| *value)
+                .is_some_and(|previous| previous != amount_bits)
+            {
+                changed.extend_from_slice(station_indices);
+            }
+        }
+        self.wake_warper_refill_from_changed_stations(&changed);
+    }
+
+    fn record_warper_trays(&mut self, base: &Map<String, Value>) {
+        self.warper_tray_amount_bits.clear();
+        self.warper_tray_amount_bits.extend(
+            self.warper_refill_planets
+                .iter()
+                .map(|(planet_id, _)| Some(planet_tray_warper_amount(base, planet_id).to_bits())),
+        );
+    }
+
+    fn take_warper_refill_indices(
+        &mut self,
+        entity_count: usize,
+        force_full_scan: bool,
+    ) -> (Option<Vec<usize>>, WarperRefillScan) {
+        let active = self.pending_warper_refill_station_indices.len();
+        let total = self.warper_refill_station_indices.len();
+        let dense_fallback = active > 0
+            && active.saturating_mul(WARPER_REFILL_DENSE_DENOMINATOR)
+                >= total.saturating_mul(WARPER_REFILL_DENSE_NUMERATOR);
+        let directory_fallback = self.warper_refill_full_scan_required;
+        let full_scan = force_full_scan || dense_fallback || directory_fallback;
+        let selected = if full_scan {
+            self.pending_warper_refill_station_indices.clear();
+            None
+        } else {
+            Some(std::mem::take(
+                &mut self.pending_warper_refill_station_indices,
+            ))
+        };
+        (
+            selected,
+            WarperRefillScan {
+                selected_station_rows: if full_scan { entity_count } else { active },
+                total_station_rows: total,
+                reservation_rows_visited: 0,
+                dense_fallback,
+                directory_fallback,
+            },
+        )
     }
 
     fn wake_all_dispatch_demands(&mut self, directory: &InterstellarPeerDirectory) {
@@ -873,6 +996,39 @@ fn route_activity_station_indices(entities: &[Value]) -> Vec<usize> {
 
 pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteActivity {
     let station_indices = route_activity_station_indices(entities);
+    let mut warper_refill_station_indices = Vec::new();
+    let mut warper_planet_ranks = HashMap::<String, usize>::new();
+    let mut warper_refill_planets = Vec::<(String, Vec<usize>)>::new();
+    let mut warper_refill_full_scan_required = false;
+    for (entity_index, entity) in entities.iter().enumerate() {
+        let Some(entity) = entity.as_object() else {
+            continue;
+        };
+        if string_at(entity, "buildingId") != Some("interstellar_logistics_station") {
+            continue;
+        }
+        warper_refill_station_indices.push(entity_index);
+        if string_at(entity, "kind") != Some("station") {
+            warper_refill_full_scan_required = true;
+        }
+        let Some(planet_id) = string_at(entity, "planetId") else {
+            warper_refill_full_scan_required = true;
+            continue;
+        };
+        let planet_rank = if let Some(rank) = warper_planet_ranks.get(planet_id).copied() {
+            rank
+        } else {
+            let rank = warper_refill_planets.len();
+            warper_planet_ranks.insert(planet_id.to_owned(), rank);
+            warper_refill_planets.push((planet_id.to_owned(), Vec::new()));
+            rank
+        };
+        warper_refill_planets[planet_rank].1.push(entity_index);
+    }
+    let warper_refill_planets = warper_refill_planets
+        .into_iter()
+        .map(|(planet_id, indices)| (planet_id, Arc::from(indices)))
+        .collect::<Vec<_>>();
     let active_demand_indices = station_indices
         .iter()
         .copied()
@@ -923,12 +1079,12 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
                 .then_some(entity_index)
         })
         .collect::<Vec<_>>();
-    let station_ranks = station_indices
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(rank, station_index)| (station_index, rank))
-        .collect::<HashMap<_, _>>();
+    // The legacy refill path reserves space warpers for every route shape,
+    // including MOD-defined scopes. The compact ledger intentionally only
+    // understands local/remote routes, so any opaque dependency must fail
+    // closed to the persisted-order legacy scan instead of treating its cargo
+    // as available inventory.
+    warper_refill_full_scan_required |= !opaque_route_demand_indices.is_empty();
     let pending_dispatch_demand_indices = station_indices
         .iter()
         .copied()
@@ -948,13 +1104,18 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
                 })
         })
         .collect::<Vec<_>>();
+    let pending_warper_refill_station_indices = warper_refill_station_indices.clone();
     InterstellarRouteActivity {
         station_indices: Arc::from(station_indices),
-        station_ranks: Arc::new(station_ranks),
         active_demand_indices,
         opaque_route_demand_indices,
         pending_dispatch_demand_indices,
         powered_station_indices: Vec::new(),
+        warper_refill_station_indices: Arc::from(warper_refill_station_indices),
+        warper_refill_planets: Arc::from(warper_refill_planets),
+        pending_warper_refill_station_indices,
+        warper_tray_amount_bits: Vec::new(),
+        warper_refill_full_scan_required,
     }
 }
 
@@ -991,6 +1152,20 @@ pub(crate) fn wake_dispatch_from_changed_stations(
     route_activity.wake_dispatch_from_changed_stations(peer_directory, changed_station_indices);
 }
 
+pub(crate) fn wake_warper_refill_from_changed_stations(
+    changed_station_indices: &[usize],
+    route_activity: &mut InterstellarRouteActivity,
+) {
+    route_activity.wake_warper_refill_from_changed_stations(changed_station_indices);
+}
+
+pub(crate) fn refresh_warper_tray_wakes(
+    base: &Map<String, Value>,
+    route_activity: &mut InterstellarRouteActivity,
+) {
+    route_activity.wake_changed_warper_trays(base);
+}
+
 pub(crate) fn wake_orbital_supply_demands(
     peer_directory: &InterstellarPeerDirectory,
     route_activity: &mut InterstellarRouteActivity,
@@ -1010,12 +1185,78 @@ pub(crate) fn refresh_dispatch_power_wakes(
     route_activity.refresh_power_wakes(peer_directory, station_indices, powers);
 }
 
+/// Select the only station rows whose power can be observed by this step's
+/// local/remote dispatch or route advance. Readiness is deliberately computed
+/// without power, so an inventory-ready station remains selected while its
+/// grid is off and can wake dispatch on the exact false -> true transition.
+/// Relay hubs are explicit prospective dependencies. Active route owners and
+/// waypoints are already part of the shared readiness ledger.
+pub(crate) fn select_station_power_indices(
+    all_station_indices: &[usize],
+    ready_station_indices: &[usize],
+    changed_since_readiness: &[usize],
+    peer_directory: &InterstellarPeerDirectory,
+    route_activity: &InterstellarRouteActivity,
+) -> (Vec<usize>, StationPowerScan) {
+    let mut selected = ready_station_indices.to_vec();
+    selected.extend_from_slice(&peer_directory.hub_station_indices);
+    selected.sort_unstable();
+    selected.dedup();
+
+    let invalid_order = all_station_indices
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1]);
+    let missing_dependency = selected
+        .iter()
+        .any(|index| all_station_indices.binary_search(index).is_err());
+    let directory_fallback = peer_directory.fallback_full_scan
+        || !route_activity.opaque_route_demand_indices.is_empty()
+        || invalid_order
+        || missing_dependency;
+    let ready = |station_index: &usize| ready_station_indices.binary_search(station_index).is_ok();
+    let runtime_fallback = route_activity
+        .pending_dispatch_demand_indices
+        .iter()
+        .chain(route_activity.pending_warper_refill_station_indices.iter())
+        .any(|station_index| !ready(station_index))
+        // A late supply-side change can make a previously dormant peer
+        // dispatchable even when the changed endpoint itself was proactively
+        // powered (quantum endpoints are the canonical example). Preserve the
+        // old same-step behavior by falling back for any station mutation that
+        // occurred after the readiness snapshot.
+        || changed_since_readiness
+            .iter()
+            .any(|station_index| all_station_indices.binary_search(station_index).is_ok());
+    let dense_fallback = !directory_fallback
+        && !runtime_fallback
+        && !selected.is_empty()
+        && selected
+            .len()
+            .saturating_mul(STATION_POWER_DENSE_DENOMINATOR)
+            >= all_station_indices
+                .len()
+                .saturating_mul(STATION_POWER_DENSE_NUMERATOR);
+    if directory_fallback || runtime_fallback || dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(all_station_indices);
+    }
+    let scan = StationPowerScan {
+        selected_station_rows: selected.len(),
+        total_station_rows: all_station_indices.len(),
+        dense_fallback,
+        directory_fallback,
+        runtime_fallback,
+    };
+    (selected, scan)
+}
+
 pub(crate) fn reset_dispatch_wakes(
     peer_directory: &InterstellarPeerDirectory,
     route_activity: &mut InterstellarRouteActivity,
 ) {
     route_activity.wake_all_dispatch_demands(peer_directory);
     route_activity.powered_station_indices.clear();
+    route_activity.wake_all_warper_refill_stations();
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -1144,14 +1385,7 @@ fn is_legacy_interstellar_station(entity: &Map<String, Value>) -> bool {
             && string_at(entity, "stationOperationMode") == Some("elevator"))
 }
 
-pub(crate) fn refill_station_warpers(
-    base: &mut Map<String, Value>,
-    entities: &mut [Value],
-) -> anyhow::Result<Vec<usize>> {
-    if !completed_tech(base, "space_warp") {
-        return Ok(Vec::new());
-    }
-
+fn legacy_warper_reservations(entities: &[Value]) -> HashMap<String, f64> {
     let mut reserved_outgoing = HashMap::<String, f64>::new();
     for station in entities.iter().filter_map(Value::as_object) {
         let Some(routes) = station.get("stationRoutes").and_then(Value::as_array) else {
@@ -1168,107 +1402,105 @@ pub(crate) fn refill_station_warpers(
                 finite_number(route.get("cargo"));
         }
     }
+    reserved_outgoing
+}
 
-    let mut changed_station_indices = Vec::new();
-    for (entity_index, entity) in entities.iter_mut().enumerate() {
-        let Some(station) = entity.as_object_mut() else {
-            continue;
-        };
-        if string_at(station, "buildingId") != Some("interstellar_logistics_station")
-            || traditional_remote_disabled(station)
-            || !station
-                .get("stationWarperAutoRefill")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            continue;
-        }
+fn planet_tray_warper_amount(base: &Map<String, Value>, planet_id: &str) -> f64 {
+    let active_planet = base.get("activePlanetId").and_then(Value::as_str);
+    (if active_planet == Some(planet_id) {
+        base.get("tray")
+    } else {
+        base.get("planetTrays")
+            .and_then(Value::as_object)
+            .and_then(|trays| trays.get(planet_id))
+    })
+    .and_then(Value::as_object)
+    .and_then(|tray| tray.get("space_warper"))
+    .map(|value| finite_number(Some(value)).floor().max(0.0))
+    .unwrap_or(0.0)
+}
 
-        let station_id = string_at(station, "id").unwrap_or_default().to_owned();
-        let planet_id = string_at(station, "planetId")
-            .ok_or_else(|| anyhow!("native warper refill station planet is missing"))?
-            .to_owned();
-        let loaded = finite_number(station.get("stationWarpers"))
+fn refill_station_warper(
+    base: &mut Map<String, Value>,
+    entity: &mut Value,
+    output_reserved: f64,
+) -> anyhow::Result<bool> {
+    let Some(station) = entity.as_object_mut() else {
+        return Ok(false);
+    };
+    if string_at(station, "buildingId") != Some("interstellar_logistics_station")
+        || traditional_remote_disabled(station)
+        || !station
+            .get("stationWarperAutoRefill")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let planet_id = string_at(station, "planetId")
+        .ok_or_else(|| anyhow!("native warper refill station planet is missing"))?
+        .to_owned();
+    let loaded = finite_number(station.get("stationWarpers"))
+        .floor()
+        .max(0.0);
+    let capacity =
+        WARPER_CAPACITY_PER_BUILDING * finite_number(station.get("machineCount")).floor().max(0.0);
+    if capacity < 1.0 {
+        return Ok(false);
+    }
+    let target = station
+        .get("stationWarperTarget")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(f64::floor)
+        .unwrap_or(DEFAULT_WARPER_TARGET)
+        .max(1.0)
+        .min(capacity);
+    let input_available = item_amount(station, "inputs", "space_warper")
+        .floor()
+        .max(0.0);
+    let output_stored = item_amount(station, "outputs", "space_warper")
+        .floor()
+        .max(0.0);
+    let output_reserved = output_reserved.floor().max(0.0).min(output_stored);
+    let output_available = (output_stored - output_reserved).max(0.0);
+    let tray_available = planet_tray_warper_amount(base, &planet_id);
+
+    let mut needed = (target - loaded).max(0.0);
+    if needed < 1.0 {
+        return Ok(false);
+    }
+    let before = loaded;
+    let from_input = needed.min(input_available);
+    if from_input > 0.0 {
+        set_item_amount(
+            station,
+            "inputs",
+            "space_warper",
+            input_available - from_input,
+        )?;
+        set_number(station, "stationWarpers", loaded + from_input)?;
+        needed -= from_input;
+    }
+    let from_output = needed.min(output_available);
+    if from_output > 0.0 {
+        set_item_amount(
+            station,
+            "outputs",
+            "space_warper",
+            output_stored - from_output,
+        )?;
+        let current = finite_number(station.get("stationWarpers"))
             .floor()
             .max(0.0);
-        let capacity = WARPER_CAPACITY_PER_BUILDING
-            * finite_number(station.get("machineCount")).floor().max(0.0);
-        if capacity < 1.0 {
-            continue;
-        }
-        let target = station
-            .get("stationWarperTarget")
-            .and_then(Value::as_f64)
-            .filter(|value| value.is_finite())
-            .map(f64::floor)
-            .unwrap_or(DEFAULT_WARPER_TARGET)
-            .max(1.0)
-            .min(capacity);
-        let input_available = item_amount(station, "inputs", "space_warper")
-            .floor()
-            .max(0.0);
-        let output_stored = item_amount(station, "outputs", "space_warper")
-            .floor()
-            .max(0.0);
-        let output_reserved = reserved_outgoing
-            .get(&station_id)
-            .copied()
-            .unwrap_or(0.0)
-            .floor()
-            .max(0.0)
-            .min(output_stored);
-        let output_available = (output_stored - output_reserved).max(0.0);
-        let active_planet = base.get("activePlanetId").and_then(Value::as_str);
-        let tray_available = (if active_planet == Some(planet_id.as_str()) {
-            base.get("tray")
-        } else {
-            base.get("planetTrays")
-                .and_then(Value::as_object)
-                .and_then(|trays| trays.get(&planet_id))
-        })
-        .and_then(Value::as_object)
-        .and_then(|tray| tray.get("space_warper"))
-        .map(|value| finite_number(Some(value)).floor().max(0.0))
-        .unwrap_or(0.0);
-
-        let mut needed = (target - loaded).max(0.0);
-        if needed < 1.0 {
-            continue;
-        }
-        let before = loaded;
-        let from_input = needed.min(input_available);
-        if from_input > 0.0 {
-            set_item_amount(
-                station,
-                "inputs",
-                "space_warper",
-                input_available - from_input,
-            )?;
-            set_number(station, "stationWarpers", loaded + from_input)?;
-            needed -= from_input;
-        }
-        let from_output = needed.min(output_available);
-        if from_output > 0.0 {
-            set_item_amount(
-                station,
-                "outputs",
-                "space_warper",
-                output_stored - from_output,
-            )?;
-            let current = finite_number(station.get("stationWarpers"))
-                .floor()
-                .max(0.0);
-            set_number(station, "stationWarpers", current + from_output)?;
-            needed -= from_output;
-        }
-        if needed < 1.0 {
-            if finite_number(station.get("stationWarpers")) > before + EPSILON {
-                changed_station_indices.push(entity_index);
-            }
-            continue;
-        }
+        set_number(station, "stationWarpers", current + from_output)?;
+        needed -= from_output;
+    }
+    if needed >= 1.0 {
         let from_tray = needed.min(tray_available);
         if from_tray > 0.0 {
+            let active_planet = base.get("activePlanetId").and_then(Value::as_str);
             let tray = if active_planet == Some(planet_id.as_str()) {
                 base.get_mut("tray").and_then(Value::as_object_mut)
             } else {
@@ -1289,11 +1521,77 @@ pub(crate) fn refill_station_warpers(
                 .max(0.0);
             set_number(station, "stationWarpers", current + from_tray)?;
         }
-        if finite_number(station.get("stationWarpers")) > before + EPSILON {
-            changed_station_indices.push(entity_index);
+    }
+    Ok(finite_number(station.get("stationWarpers")) > before + EPSILON)
+}
+
+fn refill_station_warpers_with_scan<L: InterstellarDispatchLedger + ?Sized>(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    route_activity: &mut InterstellarRouteActivity,
+    route_ledger: &L,
+    force_full_scan: bool,
+) -> anyhow::Result<(Vec<usize>, WarperRefillScan)> {
+    if !completed_tech(base, "space_warp") {
+        return Ok((
+            Vec::new(),
+            WarperRefillScan {
+                total_station_rows: route_activity.warper_refill_station_indices.len(),
+                ..WarperRefillScan::default()
+            },
+        ));
+    }
+
+    route_activity.wake_changed_warper_trays(base);
+    let (selected_indices, mut scan) =
+        route_activity.take_warper_refill_indices(entities.len(), force_full_scan);
+    let legacy_reservations = selected_indices
+        .is_none()
+        .then(|| legacy_warper_reservations(entities));
+    if legacy_reservations.is_some() {
+        scan.reservation_rows_visited = entities.len();
+    }
+
+    let mut changed_station_indices = Vec::new();
+    if let Some(indices) = selected_indices.as_deref() {
+        for &entity_index in indices {
+            if refill_station_warper(
+                base,
+                &mut entities[entity_index],
+                route_ledger.reserved(entity_index, "space_warper"),
+            )? {
+                changed_station_indices.push(entity_index);
+            }
+        }
+    } else {
+        let reservations = legacy_reservations
+            .as_ref()
+            .expect("full scan reservations");
+        for (entity_index, entity) in entities.iter_mut().enumerate() {
+            let station_id = entity
+                .as_object()
+                .and_then(|station| string_at(station, "id"))
+                .unwrap_or_default();
+            if refill_station_warper(
+                base,
+                entity,
+                reservations.get(station_id).copied().unwrap_or(0.0),
+            )? {
+                changed_station_indices.push(entity_index);
+            }
         }
     }
-    Ok(changed_station_indices)
+    route_activity.record_warper_trays(base);
+    Ok((changed_station_indices, scan))
+}
+
+pub(crate) fn refill_station_warpers(
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    route_activity: &mut InterstellarRouteActivity,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<(Vec<usize>, WarperRefillScan)> {
+    refill_station_warpers_with_scan(base, entities, route_activity, route_ledger, false)
 }
 
 fn cargo_capacity(base: &Map<String, Value>) -> f64 {
@@ -3046,6 +3344,12 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
                         dispatchable,
                         initial_progress,
                     );
+                    // A remote dispatch can consume the owner's loaded
+                    // warpers and immediately reserves the source output.
+                    // Wake both rows for the post-dispatch refill boundary;
+                    // insertion is rank ordered and de-duplicated.
+                    route_activity.wake_warper_refill_station(owner_index);
+                    route_activity.wake_warper_refill_station(supply_index);
                     remaining_free = (remaining_free - cargo).max(0.0);
                     set_number(base, "nextId", next_id + 1.0)?;
                     if economics.requires_warp {
@@ -4624,6 +4928,356 @@ mod tests {
         vec![supply, demand]
     }
 
+    fn warper_refill_station(index: usize, planet_id: &str) -> Value {
+        let mut station = route_activity_station(index);
+        station["planetId"] = Value::from(planet_id);
+        station["stationWarperAutoRefill"] = Value::from(true);
+        station["stationWarperTarget"] = Value::from(20.0);
+        station["stationWarpers"] = Value::from(0.0);
+        station["inputs"]["space_warper"] = Value::from(0.0);
+        station["outputs"]["space_warper"] = Value::from(0.0);
+        station
+    }
+
+    fn warper_refill_base() -> Map<String, Value> {
+        let mut base = dispatch_fixture_base();
+        base["activePlanetId"] = Value::from("source_planet");
+        base["tray"] = json!({ "space_warper": 0.0 });
+        base["planetTrays"] = json!({
+            "source_planet": { "space_warper": 0.0 },
+            "demand_planet": { "space_warper": 0.0 },
+            "relay_planet": { "space_warper": 0.0 }
+        });
+        base.as_object().expect("warper base object").clone()
+    }
+
+    fn assert_warper_refill_bytes_equal(
+        indexed_base: &Map<String, Value>,
+        indexed_entities: &[Value],
+        oracle_base: &Map<String, Value>,
+        oracle_entities: &[Value],
+        boundary: usize,
+    ) {
+        assert_eq!(
+            serde_json::to_vec(&json!({
+                "base": indexed_base,
+                "entities": indexed_entities,
+            }))
+            .unwrap(),
+            serde_json::to_vec(&json!({
+                "base": oracle_base,
+                "entities": oracle_entities,
+            }))
+            .unwrap(),
+            "indexed warper refill diverged from the legacy oracle at {boundary}s"
+        );
+    }
+
+    #[test]
+    fn active_warper_refill_matches_full_scan_oracle_at_1_5_60_and_wakes_every_source() {
+        let mut source = vec![
+            warper_refill_station(0, "source_planet"),
+            warper_refill_station(1, "demand_planet"),
+            warper_refill_station(2, "relay_planet"),
+            warper_refill_station(3, "source_planet"),
+        ];
+        source.extend((0..128).map(|index| {
+            json!({
+                "id": format!("dormant-machine-{index}"),
+                "kind": "machine",
+                "buildingId": "assembler_mk1",
+                "mod:opaque": { "index": index, "signedZero": -0.0 }
+            })
+        }));
+        let mut indexed_base = warper_refill_base();
+        let mut oracle_base = indexed_base.clone();
+        let mut indexed_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut indexed_activity = prepare_route_activity(&indexed_entities);
+        let mut oracle_activity = prepare_route_activity(&oracle_entities);
+        let mut ledger = Ledger::default();
+
+        // Initial construction deliberately takes the 75% dense oracle path.
+        let (_, initial_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert!(initial_scan.dense_fallback);
+        assert_eq!(initial_scan.selected_station_rows, 132);
+        assert_eq!(initial_scan.reservation_rows_visited, 132);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            0,
+        );
+
+        // 1s: a belt/local-buffer delivery wakes exactly one station.
+        indexed_entities[1]["inputs"]["space_warper"] = Value::from(7.0);
+        oracle_entities[1]["inputs"]["space_warper"] = Value::from(7.0);
+        indexed_activity.wake_warper_refill_from_changed_stations(&[1]);
+        let (_, one_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert_eq!(one_scan.selected_station_rows, 1);
+        assert_eq!(one_scan.reservation_rows_visited, 0);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            1,
+        );
+
+        // 5s: a quantum download reaches one endpoint. The caller supplies
+        // that stable endpoint index, so no other station row is revisited.
+        indexed_entities[2]["outputs"]["space_warper"] = Value::from(9.0);
+        oracle_entities[2]["outputs"]["space_warper"] = Value::from(9.0);
+        indexed_activity.wake_warper_refill_from_changed_stations(&[2]);
+        let (_, five_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert_eq!(five_scan.selected_station_rows, 1);
+        assert_eq!(five_scan.reservation_rows_visited, 0);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            5,
+        );
+
+        // A tray change is detected from the compact per-planet snapshot and
+        // wakes the two source-planet candidates without an entity scan.
+        indexed_base["tray"]["space_warper"] = Value::from(6.0);
+        oracle_base["tray"]["space_warper"] = Value::from(6.0);
+        let (_, tray_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert_eq!(tray_scan.selected_station_rows, 2);
+        assert_eq!(tray_scan.reservation_rows_visited, 0);
+
+        // 60s: a completed route releases an output reservation. Both the
+        // indexed route ledger and the legacy peer-id scan must make exactly
+        // the same refill decision.
+        indexed_entities[3]["stationWarpers"] = Value::from(0.0);
+        oracle_entities[3]["stationWarpers"] = Value::from(0.0);
+        indexed_entities[3]["outputs"]["space_warper"] = Value::from(10.0);
+        oracle_entities[3]["outputs"]["space_warper"] = Value::from(10.0);
+        indexed_entities[1]["stationRoutes"] = json!([{
+            "scope": "remote",
+            "peerId": "remote-station/00003/Ω",
+            "itemId": "space_warper",
+            "cargo": 10.0,
+            "vehicleCount": 1.0,
+            "progress": 0.5
+        }]);
+        oracle_entities[1]["stationRoutes"] = indexed_entities[1]["stationRoutes"].clone();
+        ledger.reserved.insert((3, "space_warper".to_owned()), 10.0);
+        indexed_activity.wake_warper_refill_from_changed_stations(&[3]);
+        refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        indexed_entities[1]["stationRoutes"] = Value::Array(Vec::new());
+        oracle_entities[1]["stationRoutes"] = Value::Array(Vec::new());
+        ledger.reserved.clear();
+        indexed_activity.wake_warper_refill_from_changed_stations(&[1, 3]);
+        let (_, sixty_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert_eq!(sixty_scan.selected_station_rows, 2);
+        assert_eq!(sixty_scan.reservation_rows_visited, 0);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            60,
+        );
+
+        let (_, resting_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        assert_eq!(resting_scan.selected_station_rows, 0);
+        assert_eq!(resting_scan.reservation_rows_visited, 0);
+    }
+
+    #[test]
+    fn warper_refill_dense_and_mod_fallbacks_preserve_legacy_bytes() {
+        let mut source = (0..4)
+            .map(|index| warper_refill_station(index, "source_planet"))
+            .collect::<Vec<_>>();
+        source[0]["kind"] = Value::from("mod:opaque-station-shape");
+        source[0]["inputs"]["space_warper"] = Value::from(3.0);
+        let mut indexed_base = warper_refill_base();
+        let mut oracle_base = indexed_base.clone();
+        let mut indexed_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut indexed_activity = prepare_route_activity(&indexed_entities);
+        let mut oracle_activity = prepare_route_activity(&oracle_entities);
+        let ledger = Ledger::default();
+
+        let (_, scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert!(scan.directory_fallback);
+        assert_eq!(scan.selected_station_rows, 4);
+        assert_eq!(scan.reservation_rows_visited, 4);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            0,
+        );
+
+        // A MOD scope can reserve warpers even when every station row itself
+        // has a vanilla shape. The compact local/remote ledger cannot prove
+        // that dependency, so it must use the same full peer-id reservation
+        // oracle as the legacy implementation.
+        let mut mod_route_entities = (0..4)
+            .map(|index| warper_refill_station(index, "source_planet"))
+            .collect::<Vec<_>>();
+        mod_route_entities[0]["outputs"]["space_warper"] = Value::from(10.0);
+        mod_route_entities[1]["stationRoutes"] = json!([{
+            "scope": "mod:wormhole",
+            "peerId": "remote-station/00000/Ω",
+            "itemId": "space_warper",
+            "cargo": 10.0,
+            "vehicleCount": 1.0,
+            "progress": 0.5
+        }]);
+        let mut indexed_base = warper_refill_base();
+        let mut oracle_base = indexed_base.clone();
+        let mut indexed_entities = mod_route_entities.clone();
+        let mut oracle_entities = mod_route_entities;
+        let mut indexed_activity = prepare_route_activity(&indexed_entities);
+        let mut oracle_activity = prepare_route_activity(&oracle_entities);
+
+        let (_, mod_scan) = refill_station_warpers_with_scan(
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_activity,
+            &ledger,
+            false,
+        )
+        .unwrap();
+        refill_station_warpers_with_scan(
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_activity,
+            &ledger,
+            true,
+        )
+        .unwrap();
+        assert!(mod_scan.directory_fallback);
+        assert_eq!(mod_scan.selected_station_rows, 4);
+        assert_eq!(mod_scan.reservation_rows_visited, 4);
+        assert_warper_refill_bytes_equal(
+            &indexed_base,
+            &indexed_entities,
+            &oracle_base,
+            &oracle_entities,
+            0,
+        );
+    }
+
     fn dispatch_fixture_state(entities: &[Value]) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&dispatch_fixture_base()).unwrap();
@@ -5852,6 +6506,554 @@ mod tests {
             1,
             "warper arrival"
         );
+    }
+
+    #[test]
+    fn active_station_power_selection_matches_full_dispatch_and_route_oracle_at_1_5_60() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationWarpers"] = Value::from(1.0);
+        for index in 2..14 {
+            let mut dormant = route_activity_station(index);
+            dormant["buildingId"] = Value::from("planetary_logistics_station");
+            dormant["planetId"] = Value::from("source_planet");
+            for slot in dormant["stationSlots"]
+                .as_array_mut()
+                .expect("dormant slots")
+            {
+                slot["itemId"] = Value::Null;
+                slot["localMode"] = Value::from("storage");
+                slot["remoteMode"] = Value::from("storage");
+            }
+            entities.push(dormant);
+        }
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().expect("station power base");
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        let mut selection_activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let shared_ledger =
+            StationRouteLedger::build(&state, &entities, &local_directory, &selection_activity);
+        let mut ready = ready_station_indices(&state, base, &entities, &directory, &shared_ledger)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        assert_eq!(ready, vec![0, 1]);
+        let (selected, scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &ready,
+            &[],
+            &directory,
+            &selection_activity,
+        );
+        assert_eq!(selected, vec![0, 1]);
+        assert_eq!(scan.selected_station_rows, 2);
+        assert_eq!(scan.total_station_rows, 14);
+        assert!(!scan.dense_fallback);
+        assert!(!scan.directory_fallback);
+        assert!(!scan.runtime_fallback);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let full_powers = route_activity_powers(entities.len(), 1.0);
+            let sparse_powers = selected
+                .iter()
+                .map(|index| (*index, full_powers[index]))
+                .collect::<HashMap<_, _>>();
+            let mut indexed_base = base.clone();
+            let mut oracle_base = base.clone();
+            let mut indexed_entities = entities.clone();
+            let mut oracle_entities = entities.clone();
+            let mut indexed_activity = prepare_route_activity(&indexed_entities);
+            let mut oracle_activity = prepare_route_activity(&oracle_entities);
+            let mut indexed_ledger = build_ledger(&indexed_entities, &indexes(&indexed_entities));
+            let mut oracle_ledger = build_ledger(&oracle_entities, &indexes(&oracle_entities));
+
+            dispatch_with_ledger(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                &sparse_powers,
+                &mut indexed_activity,
+                &directory,
+                &mut indexed_ledger,
+            )
+            .unwrap();
+            dispatch_full_scan_oracle(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &full_powers,
+                &mut oracle_activity,
+                &directory,
+                &mut oracle_ledger,
+            )
+            .unwrap();
+            let indexed_indexes = indexes(&indexed_entities);
+            let oracle_indexes = indexes(&oracle_entities);
+            advance_routes_with_activity(
+                &mut indexed_entities,
+                seconds,
+                &sparse_powers,
+                &indexed_indexes,
+                &mut indexed_activity,
+            )
+            .unwrap();
+            advance_routes_with_activity(
+                &mut oracle_entities,
+                seconds,
+                &full_powers,
+                &oracle_indexes,
+                &mut oracle_activity,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&json!({
+                    "base": indexed_base,
+                    "entities": indexed_entities,
+                }))
+                .unwrap(),
+                serde_json::to_vec(&json!({
+                    "base": oracle_base,
+                    "entities": oracle_entities,
+                }))
+                .unwrap(),
+                "active station-power map diverged from full scan at {seconds}s"
+            );
+        }
+
+        // A ready-but-unpowered demand stays selected. Its exact false -> true
+        // transition therefore wakes dispatch without scanning dormant rows.
+        selection_activity.pending_dispatch_demand_indices.clear();
+        selection_activity
+            .pending_warper_refill_station_indices
+            .clear();
+        let off = selected
+            .iter()
+            .map(|index| (*index, 0.0))
+            .collect::<HashMap<_, _>>();
+        selection_activity.refresh_power_wakes(&directory, &selected, &off);
+        assert!(
+            selection_activity
+                .pending_dispatch_demand_indices
+                .is_empty()
+        );
+        let on = selected
+            .iter()
+            .map(|index| (*index, 1.0))
+            .collect::<HashMap<_, _>>();
+        selection_activity.refresh_power_wakes(&directory, &selected, &on);
+        assert_eq!(selection_activity.pending_dispatch_demand_indices, vec![1]);
+    }
+
+    #[test]
+    fn active_route_power_selection_includes_supply_demand_owner_and_waypoint_when_not_dispatchable()
+     {
+        let mut entities = dispatch_fixture_entities();
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        entities[1]["stationWarpers"] = Value::from(0.0);
+
+        let mut waypoint = route_activity_station(2);
+        waypoint["planetId"] = Value::from("relay_planet");
+        waypoint["stationHubEnabled"] = Value::from(true);
+        for slot in waypoint["stationSlots"]
+            .as_array_mut()
+            .expect("waypoint slots")
+        {
+            slot["itemId"] = Value::Null;
+            slot["remoteMode"] = Value::from("storage");
+        }
+        let mut owner = route_activity_station(3);
+        owner["planetId"] = Value::from("demand_planet");
+        for slot in owner["stationSlots"].as_array_mut().expect("owner slots") {
+            slot["itemId"] = Value::Null;
+            slot["remoteMode"] = Value::from("storage");
+        }
+        entities.extend([waypoint, owner]);
+        entities[1]["stationRoutes"] = json!([{
+            "id": "strict-active-route",
+            "slotIndex": 0,
+            "peerId": "remote-station/00000/Ω",
+            "itemId": "iron_ore",
+            "scope": "remote",
+            "cargo": 10.0,
+            "vehicleCount": 1.0,
+            "progress": 0.25,
+            "duration": 100.0,
+            "requiresWarp": true,
+            "waypointStationIds": ["remote-station/00002/Ω"],
+            "distanceLy": 4.0,
+            "warpersPerVessel": 2.0,
+            "vehicleStationId": "remote-station/00003/Ω"
+        }]);
+        for index in 4..20 {
+            let mut dormant = route_activity_station(index);
+            dormant["buildingId"] = Value::from("planetary_logistics_station");
+            dormant["planetId"] = Value::from("source_planet");
+            for slot in dormant["stationSlots"]
+                .as_array_mut()
+                .expect("dormant route slots")
+            {
+                slot["itemId"] = Value::Null;
+                slot["localMode"] = Value::from("storage");
+                slot["remoteMode"] = Value::from("storage");
+            }
+            entities.push(dormant);
+        }
+
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().expect("strict route base");
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        let activity = prepare_route_activity(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let mut ready = ready_station_indices(&state, base, &entities, &directory, &ledger)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        assert_eq!(
+            ready,
+            vec![0, 1, 2, 3],
+            "the active ledger must surface the pure supply, demand, separate vehicle owner and waypoint"
+        );
+        let (selected, scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &ready,
+            &[],
+            &directory,
+            &activity,
+        );
+        assert_eq!(selected, vec![0, 1, 2, 3]);
+        assert!(!scan.dense_fallback);
+        assert!(!scan.directory_fallback);
+        assert!(!scan.runtime_fallback);
+
+        let sparse_powers = selected
+            .iter()
+            .map(|index| (*index, 1.0))
+            .collect::<HashMap<_, _>>();
+        let full_powers = state
+            .factory_topology
+            .station_indices
+            .iter()
+            .map(|index| (*index, 1.0))
+            .collect::<HashMap<_, _>>();
+        let mut indexed_entities = entities.clone();
+        let mut oracle_entities = entities;
+        let mut indexed_activity = prepare_route_activity(&indexed_entities);
+        let mut oracle_activity = prepare_route_activity(&oracle_entities);
+        let indexed_indexes = indexes(&indexed_entities);
+        let oracle_indexes = indexes(&oracle_entities);
+        advance_routes_with_activity(
+            &mut indexed_entities,
+            5.0,
+            &sparse_powers,
+            &indexed_indexes,
+            &mut indexed_activity,
+        )
+        .unwrap();
+        advance_routes_with_activity(
+            &mut oracle_entities,
+            5.0,
+            &full_powers,
+            &oracle_indexes,
+            &mut oracle_activity,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&indexed_entities).unwrap(),
+            serde_json::to_vec(&oracle_entities).unwrap()
+        );
+        assert_eq!(
+            indexed_entities[1]["stationRoutes"][0]["progress"],
+            Value::from(0.3)
+        );
+    }
+
+    #[test]
+    fn late_quantum_supply_keeps_legacy_same_boundary_local_dispatch_with_full_power_oracle() {
+        let mut entities = dispatch_fixture_entities();
+        for (index, entity) in entities.iter_mut().enumerate() {
+            entity["planetId"] = Value::from("source_planet");
+            entity["stationDrones"] = Value::from(10.0);
+            entity["outputs"]["iron_ore"] = Value::from(0.0);
+            for slot in entity["stationSlots"]
+                .as_array_mut()
+                .expect("quantum local slots")
+            {
+                slot["itemId"] = Value::Null;
+                slot["localMode"] = Value::from("storage");
+                slot["remoteMode"] = Value::from("storage");
+            }
+            entity["stationSlots"][0]["itemId"] = Value::from("iron_ore");
+            entity["stationSlots"][0]["localMode"] =
+                Value::from(if index == 0 { "supply" } else { "demand" });
+        }
+        entities[0]["quantumMode"] = Value::from("quantum");
+        for index in 2..18 {
+            let mut dormant = route_activity_station(index);
+            dormant["planetId"] = Value::from("source_planet");
+            dormant["stationDrones"] = Value::from(10.0);
+            for slot in dormant["stationSlots"]
+                .as_array_mut()
+                .expect("quantum dormant slots")
+            {
+                slot["itemId"] = Value::Null;
+                slot["localMode"] = Value::from("storage");
+                slot["remoteMode"] = Value::from("storage");
+            }
+            entities.push(dormant);
+        }
+
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().expect("quantum local base");
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        let mut activity = prepare_route_activity(&entities);
+        activity.pending_dispatch_demand_indices.clear();
+        activity.pending_warper_refill_station_indices.clear();
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let pre_delivery_ledger =
+            StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        assert!(
+            crate::local_logistics::ready_station_indices(
+                &state,
+                base,
+                &entities,
+                &local_directory,
+                &pre_delivery_ledger,
+            )
+            .unwrap()
+            .is_empty(),
+            "the ordinary readiness snapshot must precede the quantum download"
+        );
+
+        // simple_factory proactively powers the indexed quantum endpoint even
+        // before delivery. The late-change list must nevertheless force the
+        // legacy full station map because its ordinary demand peer became
+        // relevant only after this snapshot.
+        let (selected, scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &[0],
+            &[0],
+            &directory,
+            &activity,
+        );
+        assert!(scan.runtime_fallback);
+        assert_eq!(selected, state.factory_topology.station_indices);
+
+        let mut indexed_entities = entities.clone();
+        let mut oracle_entities = entities;
+        indexed_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        oracle_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        let mut indexed_base = base.clone();
+        let mut oracle_base = base.clone();
+        let mut indexed_local = crate::local_logistics::prepare_step_directory(
+            &indexed_entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut oracle_local = crate::local_logistics::prepare_step_directory(
+            &oracle_entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let indexed_activity = prepare_route_activity(&indexed_entities);
+        let oracle_activity = prepare_route_activity(&oracle_entities);
+        let mut indexed_ledger =
+            StationRouteLedger::build(&state, &indexed_entities, &indexed_local, &indexed_activity);
+        let mut oracle_ledger =
+            StationRouteLedger::build(&state, &oracle_entities, &oracle_local, &oracle_activity);
+        let indexed_powers = selected
+            .iter()
+            .map(|index| (*index, 1.0))
+            .collect::<HashMap<_, _>>();
+        let full_powers = state
+            .factory_topology
+            .station_indices
+            .iter()
+            .map(|index| (*index, 1.0))
+            .collect::<HashMap<_, _>>();
+        crate::local_logistics::dispatch(
+            &state,
+            &mut indexed_base,
+            &mut indexed_entities,
+            &indexed_powers,
+            &mut indexed_local,
+            &mut indexed_ledger,
+        )
+        .unwrap();
+        crate::local_logistics::dispatch(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &full_powers,
+            &mut oracle_local,
+            &mut oracle_ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&json!({
+                "base": indexed_base,
+                "entities": indexed_entities,
+            }))
+            .unwrap(),
+            serde_json::to_vec(&json!({
+                "base": oracle_base,
+                "entities": oracle_entities,
+            }))
+            .unwrap()
+        );
+        assert_eq!(
+            indexed_entities[1]["stationRoutes"]
+                .as_array()
+                .expect("same-boundary local route")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn quantum_endpoint_download_is_not_a_legacy_remote_supply_in_sparse_or_full_dispatch() {
+        let mut entities = dispatch_fixture_entities();
+        entities[0]["stationTier"] = Value::from(2.0);
+        entities[0]["quantumMode"] = Value::from("quantum");
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        entities[0]["stationWarpers"] = Value::from(100.0);
+        entities[1]["stationWarpers"] = Value::from(100.0);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().expect("quantum remote base");
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        assert!(
+            !directory.supply_items_by_station.contains_key(&0),
+            "a quantum ILS must stay outside the traditional remote directory"
+        );
+
+        // The five-second download happens before both dispatch scopes. Even
+        // with fresh cargo, TS excludes a quantum-mode ILS from traditional
+        // remote routing. Consuming the pending queue before this boundary is
+        // therefore exact: both sparse and force-full remote dispatch create
+        // no route. Local drone behavior is covered by the preceding test.
+        let mut indexed_entities = entities.clone();
+        let mut oracle_entities = entities;
+        indexed_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        oracle_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        let mut indexed_base = base.clone();
+        let mut oracle_base = base.clone();
+        let mut indexed_activity = prepare_route_activity(&indexed_entities);
+        indexed_activity.pending_dispatch_demand_indices.clear();
+        let mut oracle_activity = prepare_route_activity(&oracle_entities);
+        oracle_activity.pending_dispatch_demand_indices.clear();
+        let mut indexed_ledger = build_ledger(&indexed_entities, &indexes(&indexed_entities));
+        let mut oracle_ledger = build_ledger(&oracle_entities, &indexes(&oracle_entities));
+        let powers = route_activity_powers(indexed_entities.len(), 1.0);
+
+        let indexed_scan = dispatch_with_ledger(
+            &state,
+            &mut indexed_base,
+            &mut indexed_entities,
+            &powers,
+            &mut indexed_activity,
+            &directory,
+            &mut indexed_ledger,
+        )
+        .unwrap();
+        let oracle_scan = dispatch_full_scan_oracle(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &powers,
+            &mut oracle_activity,
+            &directory,
+            &mut oracle_ledger,
+        )
+        .unwrap();
+        assert_eq!(indexed_scan.demand_rows_probed, 0);
+        assert_eq!(oracle_scan.demand_rows_probed, 2);
+        assert_eq!(
+            serde_json::to_vec(&json!({
+                "base": indexed_base,
+                "entities": indexed_entities,
+            }))
+            .unwrap(),
+            serde_json::to_vec(&json!({
+                "base": oracle_base,
+                "entities": oracle_entities,
+            }))
+            .unwrap()
+        );
+        assert!(indexed_entities.iter().all(|entity| {
+            entity["stationRoutes"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        }));
+    }
+
+    #[test]
+    fn station_power_selection_falls_back_for_dense_runtime_and_opaque_dependencies() {
+        let entities = (0..8)
+            .map(|index| {
+                let mut station = route_activity_station(index);
+                station["planetId"] = Value::from("source_planet");
+                station
+            })
+            .collect::<Vec<_>>();
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory = InterstellarPeerDirectory::build(
+            &state,
+            base.as_object().expect("power fallback base"),
+            &entities,
+        );
+        let mut activity = prepare_route_activity(&entities);
+        activity.pending_dispatch_demand_indices.clear();
+        activity.pending_warper_refill_station_indices.clear();
+
+        let (dense, dense_scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &[0, 1, 2, 3, 4, 5],
+            &[],
+            &directory,
+            &activity,
+        );
+        assert_eq!(dense, state.factory_topology.station_indices);
+        assert!(dense_scan.dense_fallback);
+
+        activity.pending_dispatch_demand_indices.push(7);
+        let (_, runtime_scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &[0],
+            &[],
+            &directory,
+            &activity,
+        );
+        assert!(runtime_scan.runtime_fallback);
+
+        activity.pending_dispatch_demand_indices.clear();
+        activity.opaque_route_demand_indices.push(7);
+        let (_, opaque_scan) = select_station_power_indices(
+            &state.factory_topology.station_indices,
+            &[0],
+            &[],
+            &directory,
+            &activity,
+        );
+        assert!(opaque_scan.directory_fallback);
     }
 
     #[test]

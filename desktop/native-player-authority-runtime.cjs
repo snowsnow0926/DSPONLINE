@@ -45,6 +45,57 @@ function requireLogicalId(value, label) {
   return value;
 }
 
+function requireChangeId(value, label, code) {
+  if (typeof value !== "string" || value.length < 1 || value.includes("\0") ||
+      Buffer.byteLength(value, "utf8") > 512) {
+    throw runtimeError(`${label} is invalid`, code);
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw runtimeError(`${label} is invalid`, code);
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw runtimeError(`${label} is invalid`, code);
+    }
+  }
+  return value;
+}
+
+function hasExactKeys(value, keys) {
+  return isRecord(value) && Reflect.ownKeys(value).every((key) =>
+    typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function normalizeStableChangeIds(value, label, code) {
+  if (!Array.isArray(value) || value.length > 65_536) throw runtimeError(`${label} is invalid`, code);
+  const normalized = value.map((entry, index) => requireChangeId(entry, `${label}[${index}]`, code));
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (Buffer.compare(Buffer.from(normalized[index - 1], "utf8"), Buffer.from(normalized[index], "utf8")) >= 0) {
+      throw runtimeError(`${label} is not strictly ordered`, code);
+    }
+  }
+  return Object.freeze(normalized);
+}
+
+function normalizeChangeReceipt(value, label, code) {
+  const changedEntityIds = normalizeStableChangeIds(value.changedEntityIds, `${label}.changedEntityIds`, code);
+  const changedBeltIds = normalizeStableChangeIds(value.changedBeltIds, `${label}.changedBeltIds`, code);
+  if (changedEntityIds.length + changedBeltIds.length > 65_536 || typeof value.topologyDirty !== "boolean") {
+    throw runtimeError(`${label} is invalid`, code);
+  }
+  return Object.freeze({ changedEntityIds, changedBeltIds, topologyDirty: value.topologyDirty });
+}
+
+function sameChangeReceipt(left, right) {
+  return left.topologyDirty === right.topologyDirty &&
+    left.changedEntityIds.length === right.changedEntityIds.length &&
+    left.changedBeltIds.length === right.changedBeltIds.length &&
+    left.changedEntityIds.every((id, index) => id === right.changedEntityIds[index]) &&
+    left.changedBeltIds.every((id, index) => id === right.changedBeltIds[index]);
+}
+
 function requireSafeInteger(value, minimum, label) {
   if (!Number.isSafeInteger(value) || value < minimum) throw runtimeError(`${label} is invalid`);
   return value;
@@ -156,7 +207,11 @@ function normalizeCommandRequest(value) {
 }
 
 function validateRecoveryReceipt(value, sessionId) {
-  if (!isRecord(value) || value.runId === undefined || value.duplicate !== true) {
+  const keys = [
+    "runId", "sequence", "commandId", "baseRevision", "revision", "settledDeadlineMs",
+    "checkpoint", "changedEntityIds", "changedBeltIds", "topologyDirty", "summary", "duplicate",
+  ];
+  if (!hasExactKeys(value, keys) || value.duplicate !== true) {
     throw runtimeError(
       "native player-authority recovery receipt is invalid",
       "NATIVE_PLAYER_AUTHORITY_COMMAND_RECOVERY_INVALID",
@@ -164,6 +219,7 @@ function validateRecoveryReceipt(value, sessionId) {
   }
   const runId = requireLogicalId(value.runId, "recovered runId");
   const sequence = requireSafeInteger(value.sequence, 1, "recovered sequence");
+  const commandId = requireLogicalId(value.commandId, "recovered commandId");
   const baseRevision = requireSafeInteger(value.baseRevision, 0, "recovered baseRevision");
   const revision = requireSafeInteger(value.revision, 1, "recovered revision");
   const settledDeadlineMs = requireSafeInteger(
@@ -185,17 +241,22 @@ function validateRecoveryReceipt(value, sessionId) {
     );
   }
   validateSummary(value.summary, revision, "recovered player-authority summary");
-  return { sessionId, runId, sequence, revision, settledDeadlineMs, checkpoint };
+  const changes = normalizeChangeReceipt(
+    value,
+    "recovered player-authority change receipt",
+    "NATIVE_PLAYER_AUTHORITY_COMMAND_RECOVERY_INVALID",
+  );
+  return { sessionId, runId, sequence, commandId, baseRevision, revision, settledDeadlineMs, checkpoint, changes };
 }
 
 function validateStartupRecoveryReceipt(value, ownerId) {
   const keys = [
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
-    "settledDeadlineMs", "nextDeadlineMs", "summary",
+    "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
+    "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
   ];
-  if (!isRecord(value) || Reflect.ownKeys(value).some((key) => typeof key !== "string" || !keys.includes(key)) ||
-      keys.some((key) => !Object.hasOwn(value, key)) || value.schemaVersion !== 1 ||
+  if (!hasExactKeys(value, keys) || value.schemaVersion !== 1 ||
       value.kind !== "native-core-player-authority-startup-recovery-v1" ||
       value.ownerId !== ownerId) {
     throw runtimeError(
@@ -233,15 +294,50 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     );
   }
   validateSummary(value.summary, revision, "startup recovery summary");
-  return { sessionId, runId, revision, checkpoint, nextSequence, nextDeadlineMs };
+  const changes = normalizeChangeReceipt(
+    value,
+    "startup recovery change receipt",
+    "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+  );
+  let lastCommand = null;
+  if (value.commandId === null || value.commandBaseRevision === null) {
+    if (value.commandId !== null || value.commandBaseRevision !== null ||
+        changes.changedEntityIds.length !== 0 || changes.changedBeltIds.length !== 0 || changes.topologyDirty) {
+      throw runtimeError(
+        "native player-authority startup command receipt is incomplete",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+  } else {
+    const commandId = requireLogicalId(value.commandId, "startup recovery commandId");
+    const baseRevision = requireSafeInteger(
+      value.commandBaseRevision,
+      0,
+      "startup recovery commandBaseRevision",
+    );
+    if (baseRevision + 1 !== revision) {
+      throw runtimeError(
+        "native player-authority startup command revision is not contiguous",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+    lastCommand = Object.freeze({ commandId, baseRevision, revision, checkpoint, ...changes });
+  }
+  return { sessionId, runId, revision, checkpoint, nextSequence, nextDeadlineMs, lastCommand };
 }
 
-function validateCommandReceipt(value, context, command) {
-  if (!isRecord(value) || value.sequence !== context.nextSequence ||
+function validateCommandReceipt(value, context, command, replay) {
+  const keys = [
+    "sequence", "commandId", "baseRevision", "revision", "settledDeadlineMs", "checkpoint",
+    "changedEntityIds", "changedBeltIds", "topologyDirty", "summary", "duplicate",
+  ];
+  const expectedSequence = replay ? context.nextSequence - 1 : context.nextSequence;
+  const expectedRevision = replay ? context.revision : context.revision + 1;
+  if (!hasExactKeys(value, keys) || value.sequence !== expectedSequence ||
       value.commandId !== command.commandId || value.baseRevision !== command.baseRevision ||
-      value.revision !== command.baseRevision + 1 || value.revision !== context.revision + 1 ||
+      value.revision !== command.baseRevision + 1 || value.revision !== expectedRevision ||
       value.settledDeadlineMs !== context.nextDeadlineMs - TICK_MILLISECONDS ||
-      typeof value.duplicate !== "boolean") {
+      typeof value.duplicate !== "boolean" || (replay && value.duplicate !== true)) {
     throw runtimeError(
       "native player-authority command receipt is not the requested next event",
       "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
@@ -254,8 +350,25 @@ function validateCommandReceipt(value, context, command) {
       "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
     );
   }
+  if (replay && !sameCheckpoint(checkpoint, context.checkpoint)) {
+    throw runtimeError(
+      "native player-authority replayed command checkpoint changed",
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    );
+  }
   validateSummary(value.summary, value.revision, "native player-authority command summary");
-  return { checkpoint, summary: value.summary };
+  const changes = normalizeChangeReceipt(
+    value,
+    "native player-authority command change receipt",
+    "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+  );
+  if (replay && (!context.lastCommand || !sameChangeReceipt(changes, context.lastCommand))) {
+    throw runtimeError(
+      "native player-authority replayed command change receipt differs",
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    );
+  }
+  return { checkpoint, summary: value.summary, changes };
 }
 
 function frozenSnapshot(runtime) {
@@ -376,6 +489,7 @@ class NativePlayerAuthorityRuntime {
     }
     this.transition("recovering");
     this.currentOperation = "recovery";
+    let recoveredCommand = null;
     let operation;
     operation = Promise.resolve()
       .then(() => this.registry.recoverPlayerAuthorityCommand(this.ownerId, { sessionId }))
@@ -393,7 +507,15 @@ class NativePlayerAuthorityRuntime {
           checkpoint: recovered.checkpoint,
           nextSequence,
           nextDeadlineMs,
+          lastCommand: Object.freeze({
+            commandId: recovered.commandId,
+            baseRevision: recovered.baseRevision,
+            revision: recovered.revision,
+            checkpoint: recovered.checkpoint,
+            ...recovered.changes,
+          }),
         };
+        recoveredCommand = this.context.lastCommand;
         this.transition("active");
       })
       .catch((cause) => {
@@ -412,7 +534,13 @@ class NativePlayerAuthorityRuntime {
         this.currentOperation = null;
         this.pump();
       })
-      .then(() => this.snapshot());
+      .then(() => Object.freeze({
+        ...this.snapshot(),
+        previousRevision: recoveredCommand.baseRevision,
+        changedEntityIds: recoveredCommand.changedEntityIds,
+        changedBeltIds: recoveredCommand.changedBeltIds,
+        topologyDirty: recoveredCommand.topologyDirty,
+      }));
     this.inFlight = operation;
     return operation;
   }
@@ -440,7 +568,13 @@ class NativePlayerAuthorityRuntime {
       this.context = recovered;
       const snapshot = this.transition("active");
       this.pump();
-      return snapshot;
+      return recovered.lastCommand ? Object.freeze({
+        ...snapshot,
+        previousRevision: recovered.lastCommand.baseRevision,
+        changedEntityIds: recovered.lastCommand.changedEntityIds,
+        changedBeltIds: recovered.lastCommand.changedBeltIds,
+        topologyDirty: recovered.lastCommand.topologyDirty,
+      }) : snapshot;
     } catch (cause) {
       const error = cause instanceof NativePlayerAuthorityRuntimeError
         ? cause
@@ -479,6 +613,7 @@ class NativePlayerAuthorityRuntime {
         checkpoint: active.checkpoint,
         nextSequence,
         nextDeadlineMs,
+        lastCommand: null,
       };
       this.transition("active");
     } catch (cause) {
@@ -495,6 +630,7 @@ class NativePlayerAuthorityRuntime {
       return Promise.reject(runtimeError("native player-authority runtime is not accepting commands"));
     }
     let request;
+    let replay = false;
     try {
       request = normalizeCommandRequest(rawRequest);
       if (this.commandQueue.length >= 64) {
@@ -503,12 +639,17 @@ class NativePlayerAuthorityRuntime {
           "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_FULL",
         );
       }
+      replay = !this.inFlight && !this.activeCommand && this.commandQueue.length === 0 &&
+        this.context.lastCommand?.commandId === request.commandId &&
+        this.context.lastCommand?.baseRevision === request.baseRevision &&
+        this.context.lastCommand?.revision === this.context.revision;
       let projectedRevision = this.context.revision;
-      if (this.currentOperation === "tick" || this.currentOperation === "command") {
+      if (!replay && (this.currentOperation === "tick" || this.currentOperation === "command")) {
         projectedRevision += 1;
       }
-      projectedRevision += this.commandQueue.length;
-      if (!Number.isSafeInteger(projectedRevision) || request.baseRevision !== projectedRevision) {
+      if (!replay) projectedRevision += this.commandQueue.length;
+      if (!Number.isSafeInteger(projectedRevision) ||
+          (!replay && request.baseRevision !== projectedRevision)) {
         throw runtimeError(
           "native player-authority command base revision is not the queued revision",
           "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
@@ -523,7 +664,7 @@ class NativePlayerAuthorityRuntime {
       resolveCommand = resolve;
       rejectCommand = reject;
     });
-    this.commandQueue.push({ request, promise, resolve: resolveCommand, reject: rejectCommand });
+    this.commandQueue.push({ request, replay, promise, resolve: resolveCommand, reject: rejectCommand });
     this.pump();
     return promise;
   }
@@ -563,17 +704,26 @@ class NativePlayerAuthorityRuntime {
           "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN",
         );
       }
-      const validated = validateCommandReceipt(receipt, context, entry.request);
-      const nextSequence = context.nextSequence + 1;
-      if (!Number.isSafeInteger(nextSequence)) {
-        throw runtimeError("native player-authority event sequence exceeds the safe integer range");
+      const validated = validateCommandReceipt(receipt, context, entry.request, entry.replay);
+      if (!entry.replay) {
+        const nextSequence = context.nextSequence + 1;
+        if (!Number.isSafeInteger(nextSequence)) {
+          throw runtimeError("native player-authority event sequence exceeds the safe integer range");
+        }
+        context.revision = receipt.revision;
+        context.checkpoint = validated.checkpoint;
+        context.nextSequence = nextSequence;
       }
-      context.revision = receipt.revision;
-      context.checkpoint = validated.checkpoint;
-      context.nextSequence = nextSequence;
+      context.lastCommand = Object.freeze({
+        commandId: entry.request.commandId,
+        baseRevision: entry.request.baseRevision,
+        revision: receipt.revision,
+        checkpoint: validated.checkpoint,
+        ...validated.changes,
+      });
       this.activeCommand = null;
       this.transition("active");
-      return { ok: true };
+      return { ok: true, command: context.lastCommand };
     }).catch((cause) => {
       const error = cause instanceof NativePlayerAuthorityRuntimeError
         ? cause
@@ -592,7 +742,13 @@ class NativePlayerAuthorityRuntime {
       this.currentOperation = null;
       if (outcome.ok) {
         const snapshot = this.snapshot();
-        entry.resolve(snapshot);
+        entry.resolve(Object.freeze({
+          ...snapshot,
+          previousRevision: outcome.command.baseRevision,
+          changedEntityIds: outcome.command.changedEntityIds,
+          changedBeltIds: outcome.command.changedBeltIds,
+          topologyDirty: outcome.command.topologyDirty,
+        }));
         resolveInFlight(snapshot);
         this.pump();
       } else {
@@ -682,6 +838,7 @@ class NativePlayerAuthorityRuntime {
       context.checkpoint = validated.checkpoint;
       context.nextSequence = nextSequence;
       context.nextDeadlineMs = nextDeadlineMs;
+      context.lastCommand = null;
       this.transition("active");
     }).catch((cause) => {
       const error = cause instanceof NativePlayerAuthorityRuntimeError

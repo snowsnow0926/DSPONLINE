@@ -190,6 +190,15 @@ function logicalIdArray(value, label, maximumEntries = 1_000_000, maximumLength 
   if (!Array.isArray(value) || value.length > maximumEntries) throw protocolError(label);
   return value.map((entry, index) => logicalId(entry, `${label}[${index}]`, maximumLength));
 }
+function stableOpaqueIdArray(value, label, maximumEntries = 65_536) {
+  const ids = opaqueIdArray(value, label, maximumEntries);
+  for (let index = 1; index < ids.length; index += 1) {
+    if (Buffer.compare(Buffer.from(ids[index - 1], "utf8"), Buffer.from(ids[index], "utf8")) >= 0) {
+      throw protocolError(label);
+    }
+  }
+  return ids;
+}
 function opaqueIdArray(value, label, maximumEntries) {
   if (!Array.isArray(value) || value.length > maximumEntries) throw protocolError(label);
   const seen = new Set();
@@ -1368,7 +1377,10 @@ function normalizeCoreCommand(value) {
   const previousRevision = safeInteger(source.previousRevision, "native command previous revision");
   const revision = safeInteger(source.revision, "native command revision");
   if (revision < previousRevision) throw protocolError("native command revision chain");
-  return { previousRevision, revision, changedEntityIds: logicalIdArray(source.changedEntityIds, "native changed entity IDs"), changedBeltIds: logicalIdArray(source.changedBeltIds, "native changed belt IDs"), topologyDirty: boolean(source.topologyDirty, "native topology dirty flag") };
+  const changedEntityIds = stableOpaqueIdArray(source.changedEntityIds, "native changed entity IDs");
+  const changedBeltIds = stableOpaqueIdArray(source.changedBeltIds, "native changed belt IDs");
+  if (changedEntityIds.length + changedBeltIds.length > 65_536) throw protocolError("native changed ID budget");
+  return { previousRevision, revision, changedEntityIds, changedBeltIds, topologyDirty: boolean(source.topologyDirty, "native topology dirty flag") };
 }
 
 function normalizeBeltScheduler(value) {

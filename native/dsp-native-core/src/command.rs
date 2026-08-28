@@ -49,7 +49,7 @@ pub struct SimulationCommandPatch {
     pub removed_belt_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandApplyResult {
     pub previous_revision: u64,
@@ -165,6 +165,159 @@ fn command_requires_production_history_rebuild(command: &SimulationCommandPatch)
         })
 }
 
+fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
+    matches!(
+        change.path.first(),
+        Some(PathSegment::Key(key)) if matches!(
+            key.as_str(),
+            "paused"
+                | "elapsedSeconds"
+                | "lastSavedAt"
+                | "totalProduced"
+                | "productionHistory"
+                | "metrics"
+                | "planetMetrics"
+                | "powerGridMetrics"
+                | "canvasBookmarks"
+                | "canvasRegions"
+                | "planetViewports"
+                | "timeWarp"
+                | "idleSettlement"
+        )
+    )
+}
+
+fn entity_change_is_projection_safe(change: &ValuePatch) -> bool {
+    matches!(
+        change.path.first(),
+        Some(PathSegment::Key(key)) if matches!(
+            key.as_str(),
+            "position"
+                | "inputs"
+                | "outputs"
+                | "progress"
+                | "routingCursor"
+                | "utilization"
+                | "productionRate"
+                | "powerFactor"
+                | "stationProgress"
+                | "stationTrips"
+                | "stationLastTransfer"
+                | "stationDrones"
+                | "stationVessels"
+                | "stationWarpers"
+                | "stationCongestion"
+                | "stationDispatchCursor"
+                | "stationLastSupplyPeerBySlot"
+                | "stationRoutes"
+                | "fuelRemainingMj"
+                | "powerOutputKw"
+                | "powerInputKw"
+                | "storedEnergyMj"
+                | "orbitalCargoProgress"
+                | "orbitalCargoTotalUploaded"
+                | "blackHolePorts"
+                | "proliferatorBonusProgress"
+        )
+    )
+}
+
+fn belt_change_is_projection_safe(change: &ValuePatch) -> bool {
+    matches!(
+        change.path.first(),
+        Some(PathSegment::Key(key)) if matches!(
+            key.as_str(),
+            "progress" | "totalTransferred" | "congestion" | "lastFlow" | "monitorEnabled"
+        )
+    )
+}
+
+impl SimulationCommandPatch {
+    /// Derives the renderer invalidation receipt solely from a command that
+    /// has already passed authoritative command validation. This makes the
+    /// receipt reproducible after WAL/checkpoint/lease crash boundaries
+    /// without trusting a renderer-provided dirty set.
+    pub fn deterministic_apply_result(
+        &self,
+        previous_revision: u64,
+        revision: u64,
+    ) -> anyhow::Result<CommandApplyResult> {
+        if revision
+            != previous_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("native command change receipt revision is exhausted"))?
+        {
+            bail!("native command change receipt revision is not contiguous")
+        }
+        let mut changed_entity_ids = self
+            .changed_entities
+            .iter()
+            .map(|record| record.id.clone())
+            .chain(self.removed_entity_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        for addition in &self.added_entities {
+            changed_entity_ids.push(
+                addition
+                    .value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("native command added entity ID is missing"))?
+                    .to_owned(),
+            );
+        }
+        changed_entity_ids.sort_unstable();
+        changed_entity_ids.dedup();
+
+        let mut changed_belt_ids = self
+            .changed_belts
+            .iter()
+            .map(|record| record.id.clone())
+            .chain(self.removed_belt_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        for addition in &self.added_belts {
+            changed_belt_ids.push(
+                addition
+                    .value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("native command added belt ID is missing"))?
+                    .to_owned(),
+            );
+        }
+        changed_belt_ids.sort_unstable();
+        changed_belt_ids.dedup();
+
+        let topology_dirty = !self.added_entities.is_empty()
+            || !self.removed_entity_ids.is_empty()
+            || !self.added_belts.is_empty()
+            || !self.removed_belt_ids.is_empty()
+            || self
+                .top_level_changes
+                .iter()
+                .any(|change| !top_level_change_is_projection_safe(change))
+            || self.changed_entities.iter().any(|record| {
+                record
+                    .changes
+                    .iter()
+                    .any(|change| !entity_change_is_projection_safe(change))
+            })
+            || self.changed_belts.iter().any(|record| {
+                record
+                    .changes
+                    .iter()
+                    .any(|change| !belt_change_is_projection_safe(change))
+            });
+
+        Ok(CommandApplyResult {
+            previous_revision,
+            revision,
+            changed_entity_ids,
+            changed_belt_ids,
+            topology_dirty,
+        })
+    }
+}
+
 impl CoreState {
     pub fn apply_command(
         &mut self,
@@ -204,7 +357,6 @@ impl CoreState {
         };
         next.install_base_from_command(base, rebuild_production_history);
 
-        let mut changed_entity_ids = Vec::new();
         for record in &command.changed_entities {
             let index = *next
                 .entity_index
@@ -213,9 +365,7 @@ impl CoreState {
             let mut value = next.parse_entity(index)?;
             apply_record_changes(&mut value, &record.changes)?;
             next.replace_entity_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
-            changed_entity_ids.push(record.id.clone());
         }
-        let mut topology_dirty = false;
         if !command.removed_entity_ids.is_empty() {
             let removed = command
                 .removed_entity_ids
@@ -238,7 +388,6 @@ impl CoreState {
                     })
                     .unwrap_or(false)
             });
-            topology_dirty = true;
         }
         if !command.added_entities.is_empty() {
             let mut additions = command.added_entities.clone();
@@ -261,12 +410,9 @@ impl CoreState {
                     addition.index,
                     Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );
-                changed_entity_ids.push(id.to_owned());
             }
-            topology_dirty = true;
         }
 
-        let mut changed_belt_ids = Vec::new();
         for record in &command.changed_belts {
             let index = *next
                 .belt_index
@@ -275,7 +421,6 @@ impl CoreState {
             let mut value = next.parse_belt(index)?;
             apply_record_changes(&mut value, &record.changes)?;
             next.replace_belt_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
-            changed_belt_ids.push(record.id.clone());
         }
         if !command.removed_belt_ids.is_empty() {
             let removed = command
@@ -299,7 +444,6 @@ impl CoreState {
                     })
                     .unwrap_or(false)
             });
-            topology_dirty = true;
         }
         if !command.added_belts.is_empty() {
             let mut additions = command.added_belts.clone();
@@ -322,9 +466,7 @@ impl CoreState {
                     addition.index,
                     Arc::<str>::from(serde_json::to_string(&addition.value)?),
                 );
-                changed_belt_ids.push(id.to_owned());
             }
-            topology_dirty = true;
         }
         next.revision += 1;
         let only_pause_changed = command.changed_entities.is_empty()
@@ -355,14 +497,12 @@ impl CoreState {
             next.invalidate_factory_static_admission();
         }
         let previous_revision = self.revision;
+        // Derive the deterministic receipt before publishing the candidate.
+        // Even a malformed future command shape must therefore leave the
+        // source state untouched if receipt construction fails.
+        let result = command.deterministic_apply_result(previous_revision, next.revision)?;
         *self = next;
-        Ok(CommandApplyResult {
-            previous_revision,
-            revision: self.revision,
-            changed_entity_ids,
-            changed_belt_ids,
-            topology_dirty,
-        })
+        Ok(result)
     }
 }
 
@@ -410,5 +550,86 @@ mod tests {
         assert!(command_requires_production_history_rebuild(
             &command_for_path(vec![PathSegment::Index(0)])
         ));
+    }
+
+    #[test]
+    fn deterministic_change_receipt_is_sorted_deduplicated_and_topology_aware() {
+        let paused = command_for_path(vec![PathSegment::Key("paused".to_owned())]);
+        assert!(
+            !paused
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let unknown = command_for_path(vec![PathSegment::Key("futureTopology".to_owned())]);
+        assert!(
+            unknown
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+
+        let mut command = command_for_path(Vec::new());
+        command.top_level_changes.clear();
+        command.changed_entities = vec![
+            RecordPatch {
+                id: "entity-z".to_owned(),
+                changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("position".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(serde_json::json!({ "x": 1, "y": 2 })),
+                }],
+            },
+            RecordPatch {
+                id: "entity-a".to_owned(),
+                changes: Vec::new(),
+            },
+            RecordPatch {
+                id: "entity-z".to_owned(),
+                changes: Vec::new(),
+            },
+        ];
+        command.removed_entity_ids = vec!["entity-m".to_owned(), "entity-a".to_owned()];
+        command.added_entities = vec![AddedRecord {
+            index: 0,
+            value: serde_json::json!({ "id": "entity-b" }),
+        }];
+        command.changed_belts = vec![RecordPatch {
+            id: "belt-z".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("monitorEnabled".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::Bool(true)),
+            }],
+        }];
+        command.removed_belt_ids = vec!["belt-a".to_owned()];
+        let result = command.deterministic_apply_result(1, 2).unwrap();
+        assert_eq!(
+            result.changed_entity_ids,
+            ["entity-a", "entity-b", "entity-m", "entity-z"]
+        );
+        assert_eq!(result.changed_belt_ids, ["belt-a", "belt-z"]);
+        assert!(result.topology_dirty);
+
+        command.added_entities.clear();
+        command.removed_entity_ids.clear();
+        command.removed_belt_ids.clear();
+        let safe = command.deterministic_apply_result(1, 2).unwrap();
+        assert!(!safe.topology_dirty);
+        command.changed_entities[0].changes[0].path = vec![PathSegment::Key("recipeId".to_owned())];
+        assert!(
+            command
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        command.changed_entities[0].changes[0].path = vec![PathSegment::Key("position".to_owned())];
+        command.changed_belts[0].changes[0].path = vec![PathSegment::Key("source".to_owned())];
+        assert!(
+            command
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
     }
 }

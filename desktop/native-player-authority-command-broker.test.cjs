@@ -33,6 +33,17 @@ function snapshot(revision = 17, overrides = {}) {
   };
 }
 
+function commandResult(request, overrides = {}) {
+  return {
+    ...snapshot(request.baseRevision + 1),
+    previousRevision: request.baseRevision,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+    ...overrides,
+  };
+}
+
 function brokerFixture(options = {}) {
   let current = options.snapshot ?? snapshot();
   const calls = [];
@@ -41,7 +52,7 @@ function brokerFixture(options = {}) {
     async commitCommand(request) {
       calls.push(request);
       if (options.commit) return options.commit(request, current);
-      current = snapshot(request.baseRevision + 1);
+      current = commandResult(request);
       return current;
     },
   };
@@ -58,9 +69,9 @@ test("trusted renderer command crosses only the main-owned durable runtime", asy
   assert.deepEqual(result, {
     previousRevision: 17,
     revision: 18,
-    changedEntityIds: [],
-    changedBeltIds: [],
-    topologyDirty: true,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
   });
   assert.equal(calls.length, 1);
   assert.match(calls[0].commandId, /^renderer-17-[a-f0-9]{40}$/);
@@ -73,20 +84,21 @@ test("identical lost-response retry derives the same durable command ID", async 
   const { broker, setSnapshot } = brokerFixture({
     commit: async (request) => {
       ids.push(request.commandId);
-      return snapshot(request.baseRevision + 1);
+      return commandResult(request);
     },
   });
   const request = { sessionId: "core-1", command: command() };
-  await broker.commit(7, request);
-  setSnapshot(snapshot());
-  await broker.commit(7, request);
+  const first = await broker.commit(7, request);
+  setSnapshot(snapshot(18));
+  const replay = await broker.commit(7, request);
   assert.equal(ids.length, 2);
   assert.equal(ids[0], ids[1]);
+  assert.deepEqual(replay, first);
 });
 
 test("queued future revision remains owned by the runtime FIFO", async () => {
   const { broker, calls } = brokerFixture({
-    commit: async (request) => snapshot(request.baseRevision + 1),
+    commit: async (request) => commandResult(request),
   });
   await assert.doesNotReject(broker.commit(7, {
     sessionId: "core-1",
@@ -105,7 +117,7 @@ test("untrusted, stale, malformed and oversized requests fail before runtime mut
   });
   await t.test("stale base revision", async () => {
     await assert.rejects(
-      broker.commit(7, { sessionId: "core-1", command: command(16) }),
+      broker.commit(7, { sessionId: "core-1", command: command(15) }),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
     );
   });
@@ -136,8 +148,30 @@ test("session drift and a non-contiguous or unsettled receipt fail closed", asyn
     );
     assert.equal(calls.length, 0);
   });
-  for (const receipt of [snapshot(19), snapshot(18, { inFlight: true })]) {
+  for (const receipt of [
+    commandResult({ baseRevision: 17 }, { revision: 19 }),
+    commandResult({ baseRevision: 17 }, { inFlight: true }),
+  ]) {
     await t.test(`bad receipt ${receipt.revision}/${receipt.inFlight}`, async () => {
+      const { broker } = brokerFixture({ commit: async () => receipt });
+      await assert.rejects(
+        broker.commit(7, { sessionId: "core-1", command: command() }),
+        (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+      );
+    });
+  }
+  for (const [label, receipt] of [
+    ["unordered entity IDs", commandResult({ baseRevision: 17 }, {
+      changedEntityIds: ["entity-z", "entity-a"],
+    })],
+    ["duplicate belt IDs", commandResult({ baseRevision: 17 }, {
+      changedBeltIds: ["belt-a", "belt-a"],
+    })],
+    ["invalid topology flag", commandResult({ baseRevision: 17 }, {
+      topologyDirty: "renderer-says-dirty",
+    })],
+  ]) {
+    await t.test(label, async () => {
       const { broker } = brokerFixture({ commit: async () => receipt });
       await assert.rejects(
         broker.commit(7, { sessionId: "core-1", command: command() }),

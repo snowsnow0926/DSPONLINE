@@ -34,6 +34,13 @@ const PLAYER_AUTHORITY_CATALOG_KIND: &str = "native-core-player-authority-recove
 const PLAYER_AUTHORITY_CATALOG_FILE: &str = "player-authority-catalog-v1.json";
 const MAX_PLAYER_AUTHORITY_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 1;
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND: &str =
+    "native-core-player-authority-command-change-receipt-v1";
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE: &str = "player-authority-command-receipt-v1.json";
+const MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_IDS: usize = 65_536;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const WAL_FRAME_HEADER_BYTES: u64 = 8;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
 const SAVE_SLOTS: [&str; 2] = ["normal-main", "speedrun-main"];
@@ -386,6 +393,40 @@ struct PlayerAuthorityCatalogPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlayerAuthorityCatalogEnvelope {
     payload: PlayerAuthorityCatalogPayload,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PlayerAuthorityCommandChangeReceipt {
+    pub command_id: String,
+    pub command_request_sha256: String,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub sequence: u64,
+    pub checkpoint: ExactRealtimeCheckpoint,
+    pub changed_entity_ids: Vec<String>,
+    pub changed_belt_ids: Vec<String>,
+    pub topology_dirty: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCommandReceiptPayload {
+    schema_version: u16,
+    kind: String,
+    slot: String,
+    mode: String,
+    state_version: u16,
+    run_id: String,
+    registry_fingerprint: String,
+    receipt: PlayerAuthorityCommandChangeReceipt,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCommandReceiptEnvelope {
+    payload: PlayerAuthorityCommandReceiptPayload,
     checksum: String,
 }
 
@@ -928,6 +969,186 @@ impl SaveStore {
             bail!("native player-authority recovery catalog payload is not normalized")
         }
         Ok(catalog)
+    }
+
+    /// Persists the exact invalidation receipt after the command checkpoint
+    /// is published but before its lease ACK. A failure therefore leaves the
+    /// command pending and retryable; an ACK can never outlive its receipt.
+    pub(crate) fn write_player_authority_command_change_receipt(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        receipt: &PlayerAuthorityCommandChangeReceipt,
+    ) -> anyhow::Result<()> {
+        let current = self.require_exact_realtime_lease()?;
+        if &current != expected_lease {
+            bail!("native player-authority command receipt lease changed")
+        }
+        let pending = current.pending_command.as_ref().ok_or_else(|| {
+            anyhow!("native player-authority command receipt has no pending command")
+        })?;
+        validate_player_authority_command_change_receipt(receipt)?;
+        if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || current.phase != ExactRealtimeLeasePhase::Active
+            || !current.startup_resume_enabled
+            || current.pending_tick.is_some()
+            || pending.command_id != receipt.command_id
+            || pending.request_sha256 != receipt.command_request_sha256
+            || pending.base_revision != receipt.base_revision
+            || pending.expected_revision != receipt.revision
+            || pending.sequence != receipt.sequence
+        {
+            bail!("native player-authority command receipt identity conflicts")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main command receipt checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != current.registry_fingerprint
+            || published.generation != receipt.checkpoint.generation
+            || published.root_hash != receipt.checkpoint.root_hash
+            || published.revision != receipt.checkpoint.revision
+        {
+            bail!("native player-authority command receipt checkpoint is stale")
+        }
+        let payload = PlayerAuthorityCommandReceiptPayload {
+            schema_version: PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION,
+            kind: PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND.to_owned(),
+            slot: "normal-main".to_owned(),
+            mode: "normal".to_owned(),
+            state_version: 47,
+            run_id: current.run_id,
+            registry_fingerprint: current.registry_fingerprint,
+            receipt: receipt.clone(),
+        };
+        let envelope = PlayerAuthorityCommandReceiptEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES {
+            bail!("native player-authority command receipt exceeds its byte budget")
+        }
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            validate_save_regular_file_type(
+                metadata.file_type(),
+                "native player-authority command receipt",
+            )?;
+        }
+        self.atomic_replace_budgeted(&path, &bytes)?;
+        sync_directory(&directory)?;
+        if fs::read(&path)? != bytes {
+            bail!("native player-authority command receipt readback differs")
+        }
+        Ok(())
+    }
+
+    /// Reads only the receipt for the currently acknowledged latest command.
+    /// A stale sidecar left behind by a later tick is deliberately ignored by
+    /// callers and can never make that tick look like a topology mutation.
+    pub(crate) fn read_player_authority_command_change_receipt(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+    ) -> anyhow::Result<PlayerAuthorityCommandChangeReceipt> {
+        let current = self.require_exact_realtime_lease()?;
+        if &current != expected_lease {
+            bail!("native player-authority acknowledged receipt lease changed")
+        }
+        if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || current.phase != ExactRealtimeLeasePhase::Active
+            || !current.startup_resume_enabled
+            || current.pending_tick.is_some()
+            || current.pending_command.is_some()
+            || current.acknowledged.command_id.as_deref()
+                != current.acknowledged.last_player_command_id.as_deref()
+        {
+            bail!("native player-authority lease has no latest acknowledged command receipt")
+        }
+        let command_id = current
+            .acknowledged
+            .last_player_command_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("native player-authority acknowledged command ID is missing"))?;
+        let command_base_revision =
+            current.acknowledged.command_base_revision.ok_or_else(|| {
+                anyhow!("native player-authority acknowledged command base is missing")
+            })?;
+        let command_request_sha256 = current
+            .acknowledged
+            .command_request_sha256
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow!("native player-authority acknowledged command hash is missing")
+            })?;
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(
+            metadata.file_type(),
+            "native player-authority command receipt",
+        )?;
+        if metadata.len() == 0 || metadata.len() > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES {
+            bail!("native player-authority command receipt size is invalid")
+        }
+        let file = File::open(&path)?;
+        validate_save_regular_file_type(
+            file.metadata()?.file_type(),
+            "native player-authority command receipt",
+        )?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+        file.take(MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let after = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(
+            after.file_type(),
+            "native player-authority command receipt",
+        )?;
+        if bytes.len() as u64 != metadata.len()
+            || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES
+            || after.len() != metadata.len()
+        {
+            bail!("native player-authority command receipt changed while reading")
+        }
+        let envelope = serde_json::from_slice::<PlayerAuthorityCommandReceiptEnvelope>(&bytes)?;
+        if envelope.payload.schema_version != PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION
+            || envelope.payload.kind != PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND
+            || envelope.payload.slot != "normal-main"
+            || envelope.payload.mode != "normal"
+            || envelope.payload.state_version != 47
+            || envelope.payload.run_id != current.run_id
+            || envelope.payload.registry_fingerprint != current.registry_fingerprint
+            || envelope.checksum != sha256_hex(&serde_json::to_vec(&envelope.payload)?)
+        {
+            bail!("native player-authority command receipt integrity is invalid")
+        }
+        let receipt = envelope.payload.receipt;
+        validate_player_authority_command_change_receipt(&receipt)?;
+        if receipt.command_id != command_id
+            || receipt.command_request_sha256 != command_request_sha256
+            || receipt.base_revision != command_base_revision
+            || receipt.revision != current.acknowledged.revision
+            || receipt.sequence != current.acknowledged.sequence
+            || receipt.checkpoint != current.acknowledged.checkpoint
+        {
+            bail!("native player-authority command receipt does not match its durable ACK")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main command receipt checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != current.registry_fingerprint
+            || published.generation != receipt.checkpoint.generation
+            || published.root_hash != receipt.checkpoint.root_hash
+            || published.revision != receipt.checkpoint.revision
+        {
+            bail!("native player-authority acknowledged command receipt is stale")
+        }
+        Ok(receipt)
     }
 
     fn player_authority_recovery_directory(&self) -> anyhow::Result<PathBuf> {
@@ -2924,6 +3145,62 @@ fn validate_command_id(value: &str) -> anyhow::Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
     {
         bail!("native WAL command ID is invalid")
+    }
+    Ok(())
+}
+
+fn validate_player_authority_command_change_receipt(
+    receipt: &PlayerAuthorityCommandChangeReceipt,
+) -> anyhow::Result<()> {
+    validate_command_id(&receipt.command_id)?;
+    if receipt.command_request_sha256.len() != 64
+        || !receipt
+            .command_request_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("native player-authority command receipt request hash is invalid")
+    }
+    if receipt.base_revision > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.revision > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.sequence == 0
+        || receipt.sequence > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.revision
+            != receipt.base_revision.checked_add(1).ok_or_else(|| {
+                anyhow!("native player-authority command receipt revision overflow")
+            })?
+        || receipt.checkpoint.revision != receipt.revision
+        || receipt.checkpoint.generation == 0
+        || receipt.checkpoint.generation > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.checkpoint.root_hash.len() != 64
+        || !receipt
+            .checkpoint
+            .root_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("native player-authority command receipt revision/checkpoint is invalid")
+    }
+    let total_ids = receipt
+        .changed_entity_ids
+        .len()
+        .checked_add(receipt.changed_belt_ids.len())
+        .ok_or_else(|| anyhow!("native player-authority command receipt ID count overflow"))?;
+    if total_ids > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_IDS {
+        bail!("native player-authority command receipt contains too many IDs")
+    }
+    for (label, ids) in [
+        ("entity", &receipt.changed_entity_ids),
+        ("belt", &receipt.changed_belt_ids),
+    ] {
+        for id in ids {
+            if id.is_empty() || id.len() > 512 || id.contains('\0') {
+                bail!("native player-authority command receipt {label} ID is invalid")
+            }
+        }
+        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            bail!("native player-authority command receipt {label} IDs are not strictly ordered")
+        }
     }
     Ok(())
 }

@@ -93,6 +93,37 @@ function assertActiveSnapshot(snapshot, request, label) {
   }
 }
 
+function normalizeStableChangeIds(value, label) {
+  if (!Array.isArray(value) || value.length > 65_536) {
+    throw brokerError(label, "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID");
+  }
+  const ids = value.map((id) => {
+    if (typeof id !== "string" || id.length < 1 || id.includes("\0") ||
+        Buffer.byteLength(id, "utf8") > 512) {
+      throw brokerError(label, "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID");
+    }
+    for (let index = 0; index < id.length; index += 1) {
+      const unit = id.charCodeAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = id.charCodeAt(index + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) {
+          throw brokerError(label, "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID");
+        }
+        index += 1;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        throw brokerError(label, "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID");
+      }
+    }
+    return id;
+  });
+  for (let index = 1; index < ids.length; index += 1) {
+    if (Buffer.compare(Buffer.from(ids[index - 1], "utf8"), Buffer.from(ids[index], "utf8")) >= 0) {
+      throw brokerError(label, "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID");
+    }
+  }
+  return Object.freeze(ids);
+}
+
 class NativePlayerAuthorityCommandBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime || typeof options.runtime.snapshot !== "function" ||
@@ -123,7 +154,7 @@ class NativePlayerAuthorityCommandBroker {
     const request = normalizeRequest(rawRequest);
     const before = this.runtime.snapshot();
     assertActiveSnapshot(before, request, "runtime");
-    if (request.baseRevision < before.revision) {
+    if (request.baseRevision + 1 < before.revision) {
       throw brokerError(
         "native player-authority command revision is stale",
         "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
@@ -141,21 +172,34 @@ class NativePlayerAuthorityCommandBroker {
       );
     }
     assertActiveSnapshot(result, request, "receipt");
-    if (result.revision !== request.baseRevision + 1 || result.inFlight !== false) {
+    if (result.previousRevision !== request.baseRevision ||
+        result.revision !== request.baseRevision + 1 || result.inFlight !== false ||
+        typeof result.topologyDirty !== "boolean") {
       throw brokerError(
         "native player-authority command receipt is not a settled contiguous revision",
         "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
       );
     }
-    // The durable authority receipt does not expose the internal dirty set.
-    // Returning topologyDirty=true makes every existing renderer consumer
-    // conservatively refresh its bounded native projections.
+    const changedEntityIds = normalizeStableChangeIds(
+      result.changedEntityIds,
+      "native player-authority entity receipt is invalid",
+    );
+    const changedBeltIds = normalizeStableChangeIds(
+      result.changedBeltIds,
+      "native player-authority belt receipt is invalid",
+    );
+    if (changedEntityIds.length + changedBeltIds.length > 65_536) {
+      throw brokerError(
+        "native player-authority change receipt exceeds its ID budget",
+        "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+      );
+    }
     return Object.freeze({
       previousRevision: request.baseRevision,
       revision: result.revision,
-      changedEntityIds: Object.freeze([]),
-      changedBeltIds: Object.freeze([]),
-      topologyDirty: true,
+      changedEntityIds,
+      changedBeltIds,
+      topologyDirty: result.topologyDirty,
     });
   }
 }

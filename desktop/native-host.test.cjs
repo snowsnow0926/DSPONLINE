@@ -722,6 +722,11 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
     nextSequence: 5,
     settledDeadlineMs: 10_000,
     nextDeadlineMs: 11_000,
+    commandId: null,
+    commandBaseRevision: null,
+    changedEntityIds: [],
+    changedBeltIds: [],
+    topologyDirty: false,
     summary: {
       revision: 11,
       stateVersion: 47,
@@ -756,6 +761,37 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
     }),
     (error) => error.code === "NATIVE_CORE_SESSION_INVALID",
   );
+  const commandReceipt = {
+    ...receipt,
+    sessionId: "core-restarted-command",
+    commandId: "durable-command-4",
+    commandBaseRevision: 10,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+  };
+  const commandRegistry = new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: commandReceipt,
+    },
+    request() { throw new Error("command startup adoption must not call the Host"); },
+  });
+  const adoptedCommand = commandRegistry.takePlayerAuthorityStartupRecovery(
+    "main-player-authority",
+  );
+  assert.deepEqual(adoptedCommand.changedEntityIds, ["entity-a", "entity-z"]);
+  assert.deepEqual(adoptedCommand.changedBeltIds, ["belt-a"]);
+  assert.equal(adoptedCommand.topologyDirty, false);
+  assert.throws(() => new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: {
+        ...commandReceipt,
+        changedEntityIds: ["entity-z", "entity-a"],
+      },
+    },
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
   receipt.summary.revision = 999;
   const adopted = registry.takePlayerAuthorityStartupRecovery("main-player-authority");
   assert.equal(adopted.summary.revision, 11);

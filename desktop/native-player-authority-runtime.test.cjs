@@ -12,6 +12,15 @@ const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
 
+function changeReceipt(overrides = {}) {
+  return {
+    changedEntityIds: [],
+    changedBeltIds: [],
+    topologyDirty: true,
+    ...overrides,
+  };
+}
+
 function summary(revision, authorityEligible = true) {
   return {
     revision,
@@ -98,6 +107,7 @@ function fixture(overrides = {}) {
         revision,
         settledDeadlineMs: 10_000,
         duplicate: false,
+        ...changeReceipt(),
         checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
         summary: summary(revision),
       };
@@ -305,6 +315,11 @@ test("a command queued behind an in-flight tick waits and uses the next exact re
           revision: 9,
           settledDeadlineMs: 11_000,
           duplicate: false,
+          ...changeReceipt({
+            changedEntityIds: ["entity-a", "entity-z"],
+            changedBeltIds: ["belt-a"],
+            topologyDirty: false,
+          }),
           checkpoint: { generation: 5, rootHash: HASH_A, revision: 9 },
           summary: summary(9),
         };
@@ -347,6 +362,11 @@ test("lost command response stays uncertain and retries the exact same command w
           revision: 8,
           settledDeadlineMs: 10_000,
           duplicate: true,
+          ...changeReceipt({
+            changedEntityIds: ["entity-a", "entity-z"],
+            changedBeltIds: ["belt-a"],
+            topologyDirty: false,
+          }),
           checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
           summary: summary(8),
         };
@@ -367,9 +387,18 @@ test("lost command response stays uncertain and retries the exact same command w
   const recovered = await value.runtime.retryUncertain();
   assert.equal(recovered.phase, "active");
   assert.equal(recovered.revision, 8);
+  assert.equal(recovered.previousRevision, 7);
+  assert.deepEqual(recovered.changedEntityIds, ["entity-a", "entity-z"]);
+  assert.deepEqual(recovered.changedBeltIds, ["belt-a"]);
+  assert.equal(recovered.topologyDirty, false);
+  const replay = await value.runtime.commitCommand(playerCommand(7, "uncertain-command", 1));
+  assert.deepEqual(replay.changedEntityIds, recovered.changedEntityIds);
+  assert.deepEqual(replay.changedBeltIds, recovered.changedBeltIds);
+  assert.equal(replay.topologyDirty, recovered.topologyDirty);
+  assert.equal(value.runtime.snapshot().nextSequence, 2);
   assert.deepEqual(
     value.calls.filter(([operation]) => operation === "command").map((call) => call[2].commandId),
-    ["uncertain-command", "uncertain-command"],
+    ["uncertain-command", "uncertain-command", "uncertain-command"],
   );
 });
 
@@ -399,6 +428,38 @@ test("an uncertain first command rejects every non-durable queued command", asyn
   );
 });
 
+test("malformed Host change IDs fault the command without advancing runtime context", async () => {
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityCommand(ownerId, request) {
+        value.calls.push(["command", ownerId, request]);
+        return {
+          sequence: 1,
+          commandId: request.commandId,
+          baseRevision: request.baseRevision,
+          revision: 8,
+          settledDeadlineMs: 10_000,
+          duplicate: false,
+          ...changeReceipt({ changedEntityIds: ["entity-z", "entity-a"] }),
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+          summary: summary(8),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await assert.rejects(
+    value.runtime.commitCommand(playerCommand(7, "malformed-change-receipt", 1)),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  assert.equal(value.runtime.snapshot().nextSequence, 1);
+});
+
 test("process-start recovery needs no renderer command payload and resumes the next event", async () => {
   const value = fixture({
     registry: {
@@ -412,6 +473,7 @@ test("process-start recovery needs no renderer command payload and resumes the n
           revision: 11,
           settledDeadlineMs: 15_000,
           duplicate: true,
+          ...changeReceipt({ changedEntityIds: ["entity-a"], topologyDirty: false }),
           checkpoint: { generation: 8, rootHash: HASH_A, revision: 11 },
           summary: summary(11),
         };
@@ -431,7 +493,24 @@ test("process-start recovery needs no renderer command payload and resumes the n
 });
 
 test("durable startup receipt adopts the main-owned Rust session and continues its exact clock", async () => {
-  const value = fixture();
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityCommand(ownerId, request) {
+        value.calls.push(["command", ownerId, request]);
+        return {
+          sequence: 4,
+          commandId: request.commandId,
+          baseRevision: request.baseRevision,
+          revision: 11,
+          settledDeadlineMs: 10_000,
+          duplicate: true,
+          ...changeReceipt({ changedEntityIds: ["entity-a"], topologyDirty: false }),
+          checkpoint: { generation: 8, rootHash: HASH_A, revision: 11 },
+          summary: summary(11),
+        };
+      },
+    },
+  });
   const recoveredSummary = {
     ...summary(11),
     registryFingerprint: "builtin:test",
@@ -449,6 +528,9 @@ test("durable startup receipt adopts the main-owned Rust session and continues i
     nextSequence: 5,
     settledDeadlineMs: 10_000,
     nextDeadlineMs: 11_000,
+    commandId: "durable-command-4",
+    commandBaseRevision: 10,
+    ...changeReceipt({ changedEntityIds: ["entity-a"], topologyDirty: false }),
     summary: recoveredSummary,
   });
   assert.equal(resumed.phase, "active");
@@ -457,6 +539,15 @@ test("durable startup receipt adopts the main-owned Rust session and continues i
   assert.equal(resumed.nextSequence, 5);
   assert.equal(value.timers.length, 1);
   assert.equal(value.timers[0].delay, 1_000);
+
+  const replay = await value.runtime.commitCommand(
+    playerCommand(10, "durable-command-4", { recovered: true }),
+  );
+  assert.equal(replay.previousRevision, 10);
+  assert.deepEqual(replay.changedEntityIds, ["entity-a"]);
+  assert.deepEqual(replay.changedBeltIds, []);
+  assert.equal(replay.topologyDirty, false);
+  assert.equal(value.runtime.snapshot().nextSequence, 5);
 
   value.setNow(11_000);
   const ticked = await value.runtime.settleDue();
@@ -488,6 +579,9 @@ test("clean startup immediately after activation resumes revision and sequence z
     nextSequence: 1,
     settledDeadlineMs: 10_000,
     nextDeadlineMs: 11_000,
+    commandId: null,
+    commandBaseRevision: null,
+    ...changeReceipt({ topologyDirty: false }),
     summary: { ...summary(0), registryFingerprint: "builtin:test" },
   });
   assert.equal(resumed.phase, "active");
@@ -523,6 +617,9 @@ test("startup receipt owner and session ownership mismatches fault closed", () =
     nextSequence: 5,
     settledDeadlineMs: 10_000,
     nextDeadlineMs: 11_000,
+    commandId: null,
+    commandBaseRevision: null,
+    ...changeReceipt({ topologyDirty: false }),
     summary: { ...summary(11), registryFingerprint: "builtin:test" },
   }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
   assert.equal(value.runtime.snapshot().phase, "faulted");
@@ -544,6 +641,7 @@ test("queued command captures immutable JSON bytes before an uncertain retry", a
           revision: 8,
           settledDeadlineMs: 10_000,
           duplicate: true,
+          ...changeReceipt(),
           checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
           summary: summary(8),
         };
@@ -641,6 +739,7 @@ test("safe-integer exhaustion cannot partially advance command or tick context",
           revision: 8,
           settledDeadlineMs: 10_000,
           duplicate: false,
+          ...changeReceipt(),
           checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
           summary: summary(8),
         };

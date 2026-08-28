@@ -17,7 +17,10 @@ use crate::exact_realtime_lease::{
     ExactRealtimeStateProof, decode_player_authority_command_payload,
     player_authority_command_request_sha256,
 };
-use crate::save_store::{SaveCommitResult, SaveStore, WalEntry, json_values_bitwise_equal};
+use crate::save_store::{
+    PlayerAuthorityCommandChangeReceipt, SaveCommitResult, SaveStore, WalEntry,
+    json_values_bitwise_equal,
+};
 
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -476,6 +479,9 @@ pub struct CoreCommitPlayerAuthorityCommandResult {
     pub revision: u64,
     pub settled_deadline_ms: u64,
     pub checkpoint: ExactRealtimeCheckpoint,
+    pub changed_entity_ids: Vec<String>,
+    pub changed_belt_ids: Vec<String>,
+    pub topology_dirty: bool,
     pub summary: CoreStateSummary,
     pub duplicate: bool,
 }
@@ -506,6 +512,11 @@ pub struct CorePlayerAuthorityStartupRecoveryReceipt {
     pub next_sequence: u64,
     pub settled_deadline_ms: u64,
     pub next_deadline_ms: u64,
+    pub command_id: Option<String>,
+    pub command_base_revision: Option<u64>,
+    pub changed_entity_ids: Vec<String>,
+    pub changed_belt_ids: Vec<String>,
+    pub topology_dirty: bool,
     pub summary: CoreStateSummary,
 }
 
@@ -526,6 +537,7 @@ enum PlayerAuthorityCommandFault {
     AfterStage,
     AfterWal,
     AfterCheckpoint,
+    AfterReceipt,
     AfterLeaseAcknowledge,
 }
 
@@ -1267,6 +1279,18 @@ impl CoreRegistry {
             .latest_published_checkpoint_identity("normal-main")?
             .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
         let catalog = store.read_player_authority_recovery_catalog(&lease, &published)?;
+        let preexisting_command_changes = if !recovering_command
+            && lease
+                .acknowledged
+                .last_player_command_id
+                .as_ref()
+                .is_some_and(|command_id| {
+                    lease.acknowledged.command_id.as_ref() == Some(command_id)
+                }) {
+            Some(store.read_player_authority_command_change_receipt(&lease)?)
+        } else {
+            None
+        };
         let opened = self.open(
             store,
             &published.slot,
@@ -1340,6 +1364,18 @@ impl CoreRegistry {
             .checked_add(1_000)
             .filter(|value| *value <= MAX_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native player-authority startup deadline is exhausted"))?;
+        let command_changes = if recovering_command {
+            match store.read_player_authority_command_change_receipt(&acknowledged) {
+                Ok(changes) => Some(changes),
+                Err(error) => {
+                    self.sessions.remove(&opened.session_id);
+                    return Err(error)
+                        .context("validate recovered player-authority command change receipt");
+                }
+            }
+        } else {
+            preexisting_command_changes
+        };
         let receipt = CorePlayerAuthorityStartupRecoveryReceipt {
             schema_version: 1,
             kind: "native-core-player-authority-startup-recovery-v1",
@@ -1353,6 +1389,23 @@ impl CoreRegistry {
             next_sequence,
             settled_deadline_ms: acknowledged.acknowledged.settled_deadline_ms,
             next_deadline_ms,
+            command_id: command_changes
+                .as_ref()
+                .map(|changes| changes.command_id.clone()),
+            command_base_revision: command_changes
+                .as_ref()
+                .map(|changes| changes.base_revision),
+            changed_entity_ids: command_changes
+                .as_ref()
+                .map(|changes| changes.changed_entity_ids.clone())
+                .unwrap_or_default(),
+            changed_belt_ids: command_changes
+                .as_ref()
+                .map(|changes| changes.changed_belt_ids.clone())
+                .unwrap_or_default(),
+            topology_dirty: command_changes
+                .as_ref()
+                .is_some_and(|changes| changes.topology_dirty),
             summary,
         };
         self.player_authority_startup_recovery = Some(receipt.clone());
@@ -1459,6 +1512,9 @@ impl CoreRegistry {
                     PlayerAuthorityCommandFault::AfterCheckpoint
                 }
                 PlayerAuthorityCommandFault::AfterCheckpoint => {
+                    PlayerAuthorityCommandFault::AfterReceipt
+                }
+                PlayerAuthorityCommandFault::AfterReceipt => {
                     PlayerAuthorityCommandFault::AfterLeaseAcknowledge
                 }
                 PlayerAuthorityCommandFault::AfterLeaseAcknowledge => {
@@ -1555,6 +1611,7 @@ impl CoreRegistry {
             {
                 bail!("native player-authority duplicate command checkpoint is no longer current");
             }
+            let changes = store.read_player_authority_command_change_receipt(&initial)?;
             return Ok(CoreCommitPlayerAuthorityCommandResult {
                 sequence: initial.acknowledged.sequence,
                 command_id: request.command_id,
@@ -1562,6 +1619,9 @@ impl CoreRegistry {
                 revision: initial_summary.revision,
                 settled_deadline_ms: initial.acknowledged.settled_deadline_ms,
                 checkpoint,
+                changed_entity_ids: changes.changed_entity_ids,
+                changed_belt_ids: changes.changed_belt_ids,
+                topology_dirty: changes.topology_dirty,
                 summary: initial_summary,
                 duplicate: true,
             });
@@ -1586,7 +1646,7 @@ impl CoreRegistry {
             bail!("native player-authority command base revision is not current");
         }
 
-        if initial.pending_command.is_none() {
+        let command_changes = if initial.pending_command.is_none() {
             let mut preflight = self.session(session_id)?.clone();
             let applied = preflight.apply_command(&request.command)?;
             if applied.previous_revision != request.base_revision
@@ -1594,7 +1654,15 @@ impl CoreRegistry {
             {
                 bail!("native player-authority command preflight revision is invalid")
             }
-        }
+            applied
+        } else {
+            request.command.deterministic_apply_result(
+                request.base_revision,
+                request.base_revision.checked_add(1).ok_or_else(|| {
+                    anyhow!("native player-authority command revision is exhausted")
+                })?,
+            )?
+        };
 
         let staged = store.stage_player_authority_command(
             &authority_session_id,
@@ -1716,6 +1784,20 @@ impl CoreRegistry {
         };
         after_durable_boundary()?;
 
+        let durable_changes = PlayerAuthorityCommandChangeReceipt {
+            command_id: pending.command_id.clone(),
+            command_request_sha256: pending.request_sha256.clone(),
+            base_revision: pending.base_revision,
+            revision: summary.revision,
+            sequence: pending.sequence,
+            checkpoint: checkpoint.clone(),
+            changed_entity_ids: command_changes.changed_entity_ids,
+            changed_belt_ids: command_changes.changed_belt_ids,
+            topology_dirty: command_changes.topology_dirty,
+        };
+        store.write_player_authority_command_change_receipt(&staged, &durable_changes)?;
+        after_durable_boundary()?;
+
         let proof = ExactRealtimeStateProof {
             revision: summary.revision,
             canonical_sha256: summary.canonical_sha256.clone(),
@@ -1747,6 +1829,9 @@ impl CoreRegistry {
             revision: summary.revision,
             settled_deadline_ms: pending.settled_deadline_ms,
             checkpoint,
+            changed_entity_ids: durable_changes.changed_entity_ids,
+            changed_belt_ids: durable_changes.changed_belt_ids,
+            topology_dirty: durable_changes.topology_dirty,
             summary,
             duplicate: resumed || committed_duplicate || checkpoint_reused,
         })
@@ -3329,6 +3414,37 @@ mod tests {
         }
     }
 
+    fn player_authority_entity_position_command(
+        base_revision: u64,
+        command_id: &str,
+        x: f64,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "vein",
+                    "changes": [{
+                        "path": ["position"],
+                        "operation": "set",
+                        "value": { "x": x, "y": 2.0 }
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn exact_pending_lease() -> ExactRealtimeLease {
         let checkpoint = ExactRealtimeCheckpoint {
             generation: 1,
@@ -3814,11 +3930,71 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_command_change_receipt_is_exact_and_survives_clean_restart() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let request = || {
+            player_authority_entity_position_command(
+                entry_checkpoint.revision,
+                "position-command-1",
+                12.5,
+            )
+        };
+        let committed = registry
+            .commit_player_authority_command(&mut store, &session_id, request())
+            .unwrap();
+        assert_eq!(committed.changed_entity_ids, ["vein"]);
+        assert!(committed.changed_belt_ids.is_empty());
+        assert!(!committed.topology_dirty);
+
+        let duplicate = registry
+            .commit_player_authority_command(&mut store, &session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.changed_entity_ids, committed.changed_entity_ids);
+        assert_eq!(duplicate.changed_belt_ids, committed.changed_belt_ids);
+        assert_eq!(duplicate.topology_dirty, committed.topology_dirty);
+        assert_eq!(duplicate.checkpoint, committed.checkpoint);
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let startup = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("acknowledged command must provide a startup receipt");
+        assert_eq!(startup.command_id.as_deref(), Some("position-command-1"));
+        assert_eq!(
+            startup.command_base_revision,
+            Some(entry_checkpoint.revision)
+        );
+        assert_eq!(startup.changed_entity_ids, committed.changed_entity_ids);
+        assert_eq!(startup.changed_belt_ids, committed.changed_belt_ids);
+        assert_eq!(startup.topology_dirty, committed.topology_dirty);
+
+        let restarted_duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &startup.session_id, request())
+            .unwrap();
+        assert!(restarted_duplicate.duplicate);
+        assert_eq!(
+            restarted_duplicate.changed_entity_ids,
+            committed.changed_entity_ids
+        );
+        assert_eq!(
+            restarted_duplicate.changed_belt_ids,
+            committed.changed_belt_ids
+        );
+        assert_eq!(restarted_duplicate.topology_dirty, committed.topology_dirty);
+    }
+
+    #[test]
     fn player_authority_command_resumes_each_boundary_after_core_registry_restart() {
         for fault in [
             PlayerAuthorityCommandFault::AfterStage,
             PlayerAuthorityCommandFault::AfterWal,
             PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
             PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
         ] {
             let (_root, mut store, mut registry, session_id, entry_checkpoint) =
@@ -3857,6 +4033,9 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
             assert!(recovered.duplicate, "{fault:?}");
             assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
+            assert!(recovered.changed_entity_ids.is_empty());
+            assert!(recovered.changed_belt_ids.is_empty());
+            assert!(recovered.topology_dirty);
             let lease = store.require_exact_realtime_lease().unwrap();
             assert_eq!(lease.acknowledged.sequence, 1);
             assert_eq!(lease.acknowledged.revision, recovered.revision);
@@ -3909,6 +4088,17 @@ mod tests {
         assert_eq!(recovered.settled_deadline_ms, 42_000);
         assert_eq!(recovered.next_deadline_ms, 43_000);
         assert_eq!(recovered.checkpoint.revision, recovered.revision);
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("process-restart-command")
+        );
+        assert_eq!(
+            recovered.command_base_revision,
+            Some(entry_checkpoint.revision)
+        );
+        assert!(recovered.changed_entity_ids.is_empty());
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(recovered.topology_dirty);
         assert_eq!(recovered.summary.revision, recovered.revision);
         let lease = reopened_store.require_exact_realtime_lease().unwrap();
         assert_ne!(
@@ -4290,6 +4480,109 @@ mod tests {
                 .pending_command
                 .is_none()
         );
+    }
+
+    #[test]
+    fn player_authority_command_receipt_write_failure_keeps_pending_checkpoint_recoverable() {
+        let probe = Arc::new(MutableDiskSpaceProbe::available());
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture_with_probe(probe.clone());
+        let boundaries = std::cell::Cell::new(0_u8);
+        let request = || {
+            player_authority_entity_position_command(
+                entry_checkpoint.revision,
+                "receipt-low-space-command",
+                7.0,
+            )
+        };
+        let error = registry
+            .commit_player_authority_command_impl(&mut store, &session_id, request(), || {
+                let next = boundaries.get() + 1;
+                boundaries.set(next);
+                if next == 3 {
+                    probe.set(0);
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(crate::disk_budget::LOW_SPACE_ERROR),
+            "{error:#}"
+        );
+        let publication = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(publication.revision, entry_checkpoint.revision + 1);
+        let pending = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(
+            pending.pending_command.as_ref().unwrap().command_id,
+            "receipt-low-space-command"
+        );
+        assert_eq!(pending.acknowledged.revision, entry_checkpoint.revision);
+
+        probe.set(u64::MAX);
+        let recovered = registry
+            .commit_player_authority_command(&mut store, &session_id, request())
+            .unwrap();
+        assert!(recovered.duplicate);
+        assert_eq!(recovered.changed_entity_ids, ["vein"]);
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(!recovered.topology_dirty);
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn corrupted_acknowledged_command_receipt_blocks_clean_startup_before_session_rebind() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_entity_position_command(
+                    entry_checkpoint.revision,
+                    "corrupt-receipt-command",
+                    3.0,
+                ),
+            )
+            .unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let publication_before = store.recover("normal-main").unwrap().unwrap();
+        drop(registry);
+        drop(store);
+
+        let receipt_path = root
+            .path()
+            .join("authority")
+            .join("normal-main")
+            .join("player-authority-command-receipt-v1.json");
+        let mut envelope =
+            serde_json::from_slice::<Value>(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), json!(true));
+        std::fs::write(&receipt_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let error = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field"), "{error:#}");
+        assert!(reopened_registry.sessions.is_empty());
+        assert_eq!(
+            reopened_store.require_exact_realtime_lease().unwrap(),
+            lease_before
+        );
+        let publication_after = reopened_store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(publication_after.generation, publication_before.generation);
+        assert_eq!(publication_after.root_hash, publication_before.root_hash);
+        assert_eq!(publication_after.revision, publication_before.revision);
     }
 
     #[test]

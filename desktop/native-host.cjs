@@ -623,17 +623,57 @@ function normalizePlayerAuthorityCheckpoint(value, label) {
   };
 }
 
+function normalizeStablePlayerAuthorityChangeIds(value, label) {
+  if (!Array.isArray(value) || value.length > 65_536) {
+    throw new NativeHostError(label, "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+  }
+  for (const id of value) {
+    if (typeof id !== "string" || id.length < 1 || id.includes("\0") ||
+        Buffer.byteLength(id, "utf8") > 512) {
+      throw new NativeHostError(label, "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+    }
+    for (let index = 0; index < id.length; index += 1) {
+      const unit = id.charCodeAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = id.charCodeAt(index + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) {
+          throw new NativeHostError(label, "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+        }
+        index += 1;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        throw new NativeHostError(label, "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+      }
+    }
+  }
+  for (let index = 1; index < value.length; index += 1) {
+    if (Buffer.compare(Buffer.from(value[index - 1], "utf8"), Buffer.from(value[index], "utf8")) >= 0) {
+      throw new NativeHostError(label, "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+    }
+  }
+  return Object.freeze([...value]);
+}
+
 function normalizePlayerAuthorityStartupRecovery(value) {
   exactObjectKeys(value, [
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
-    "settledDeadlineMs", "nextDeadlineMs", "summary",
+    "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
+    "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
   ], "native player-authority startup recovery receipt");
   const checkpoint = normalizePlayerAuthorityCheckpoint(
     value.checkpoint,
     "native player-authority startup checkpoint",
   );
   const summary = value.summary;
+  const changedEntityIds = normalizeStablePlayerAuthorityChangeIds(
+    value.changedEntityIds,
+    "native player-authority startup entity receipt is invalid",
+  );
+  const changedBeltIds = normalizeStablePlayerAuthorityChangeIds(
+    value.changedBeltIds,
+    "native player-authority startup belt receipt is invalid",
+  );
+  const hasCommand = value.commandId !== null || value.commandBaseRevision !== null;
   if (value.schemaVersion !== 1 ||
     value.kind !== NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY ||
     value.ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID ||
@@ -647,6 +687,13 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     !Number.isSafeInteger(value.settledDeadlineMs) || value.settledDeadlineMs < 0 ||
     !Number.isSafeInteger(value.nextDeadlineMs) ||
     value.nextDeadlineMs !== value.settledDeadlineMs + 1_000 ||
+    changedEntityIds.length + changedBeltIds.length > 65_536 ||
+    typeof value.topologyDirty !== "boolean" ||
+    hasCommand && (!validLogicalId(value.commandId, 128) ||
+      !Number.isSafeInteger(value.commandBaseRevision) || value.commandBaseRevision < 0 ||
+      value.commandBaseRevision + 1 !== value.revision) ||
+    !hasCommand && (value.commandId !== null || value.commandBaseRevision !== null ||
+      changedEntityIds.length !== 0 || changedBeltIds.length !== 0 || value.topologyDirty) ||
     !summary || typeof summary !== "object" || Array.isArray(summary) ||
     summary.revision !== value.revision || summary.stateVersion !== 47 ||
     summary.mode !== "normal" || summary.paused !== false ||
@@ -671,6 +718,11 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     nextSequence: value.nextSequence,
     settledDeadlineMs: value.settledDeadlineMs,
     nextDeadlineMs: value.nextDeadlineMs,
+    commandId: value.commandId,
+    commandBaseRevision: value.commandBaseRevision,
+    changedEntityIds,
+    changedBeltIds,
+    topologyDirty: value.topologyDirty,
     summary: Object.freeze(JSON.parse(JSON.stringify(summary))),
   });
 }

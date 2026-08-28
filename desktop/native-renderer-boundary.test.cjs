@@ -78,6 +78,34 @@ test("player-authority clock state is exact, bounded and contains no writer iden
   }
 });
 
+test("native command change receipts are stable ordered and duplicate-free", () => {
+  const receipt = {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommand", receipt), receipt);
+  assert.deepEqual(
+    normalizeRendererNativeResult("coreCommand", {
+      ...receipt,
+      changedEntityIds: ["MOD-物品/Ω"],
+    }).changedEntityIds,
+    ["MOD-物品/Ω"],
+  );
+  for (const invalid of [
+    { ...receipt, changedEntityIds: ["entity-z", "entity-a"] },
+    { ...receipt, changedEntityIds: ["entity-a", "entity-a"] },
+    { ...receipt, changedBeltIds: ["belt-a", "belt-a"] },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreCommand", invalid),
+      /native changed/i,
+    );
+  }
+});
+
 function coreSummary(revision = 2) {
   return {
     revision,

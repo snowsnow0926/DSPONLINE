@@ -23,7 +23,13 @@ const expectedTransferContract = JSON.parse(fs.readFileSync(path.join(__dirname,
 const builderEntry = require.resolve("electron-builder/cli");
 const mode = process.argv[2] || "pack";
 const outputDirectory = resolvePerformanceEditionOutputDirectory(repositoryRoot);
-const releaseChannel = resolveReleaseChannel(process.env.DSP_RELEASE_CHANNEL);
+// A local directory package should inherit the edition metadata when the
+// caller does not explicitly override its channel. Falling back inside
+// `resolveReleaseChannel` alone would silently label this Beta performance
+// edition as Stable.
+const releaseChannel = resolveReleaseChannel(
+  process.env.DSP_RELEASE_CHANNEL || packageMetadata.releaseChannel,
+);
 const updateBaseUrl = optionalHttpsUrl(process.env.DSP_UPDATE_BASE_URL, "Desktop update base URL");
 const cloudApiBaseUrl = optionalHttpsUrl(process.env.DSP_DESKTOP_API_BASE_URL, "Desktop cloud API base URL");
 if (mode === "dist" && (!updateBaseUrl || !cloudApiBaseUrl)) {

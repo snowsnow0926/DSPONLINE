@@ -251,6 +251,10 @@ test("packaging output is fixed outside release and pack.cjs has no free output-
   assert.equal(packSource.includes("DSP_DESKTOP_OUTPUT_DIR"), false);
   assert.match(packSource, /resolvePerformanceEditionOutputDirectory\(repositoryRoot\)/);
   assert.match(packSource, /verifyPackagedPerformanceEditionIdentity/);
+  assert.match(
+    packSource,
+    /process\.env\.DSP_RELEASE_CHANNEL \|\| packageMetadata\.releaseChannel/,
+  );
 });
 
 test("main applies isolated data identity before locks or userData reads and binds the Windows taskbar identity", () => {

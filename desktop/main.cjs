@@ -42,6 +42,9 @@ const {
   NativePlayerAuthorityCommandBroker,
 } = require("./native-player-authority-command-broker.cjs");
 const {
+  NativePlayerAuthorityMacroBroker,
+} = require("./native-player-authority-macro-broker.cjs");
+const {
   NativePlayerAuthorityProjectionBroker,
 } = require("./native-player-authority-projection-broker.cjs");
 const {
@@ -143,6 +146,7 @@ let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
+let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityStateBroker = null;
 let nativeHostQuitDrainPromise = null;
@@ -373,6 +377,16 @@ async function initializeNativeHost() {
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
     });
+    // Main-process-only. The renderer has no IPC/preload entry for macro
+    // lifecycle or authority identities. A later gameplay coordinator may
+    // supply only bounded integer millisecond budgets to this broker; IDs,
+    // current revision, durable retry and finish identity stay in main/Rust.
+    nativePlayerAuthorityMacroBroker = new NativePlayerAuthorityMacroBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      ...(playerAuthorityStartupRecovery?.recoveredMacroOperationId
+        ? { recoveredOperationId: playerAuthorityStartupRecovery.recoveredMacroOperationId }
+        : {}),
+    });
     nativePlayerAuthorityProjectionBroker = new NativePlayerAuthorityProjectionBroker({
       runtime: nativePlayerAuthorityRuntime,
       registry: nativeCoreSessions,
@@ -395,7 +409,9 @@ async function initializeNativeHost() {
         leasePhase: "active",
         code: null,
         normalWindowAllowed: true,
-        message: "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
+        message: playerAuthorityStartupRecovery.macroSessionId
+          ? "已恢复 Windows 原生纯挂机结算；普通确定性时钟保持暂停"
+          : "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
       }
       : inspectedExactRealtimeStartup;
     nativeHostState = {
@@ -436,6 +452,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityRuntime?.shutdownForProcessExit();
     nativePlayerAuthorityRuntime = null;
     nativePlayerAuthorityCommandBroker = null;
+    nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
     nativePlayerAuthorityStateBroker = null;
   }

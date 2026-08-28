@@ -23,10 +23,13 @@ const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
 const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
 const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-tick-v1";
 const NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY = "native-core-player-authority-command-v1";
+const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
+  "native-core-player-authority-pure-idle-macro-v1";
 const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
   "native-core-player-authority-startup-recovery-v1";
 const MAIN_PLAYER_AUTHORITY_OWNER_ID = "main-player-authority";
 const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
+const MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
@@ -660,12 +663,25 @@ function normalizeStablePlayerAuthorityChangeIds(value, label) {
 }
 
 function normalizePlayerAuthorityStartupRecovery(value) {
-  exactObjectKeys(value, [
+  const baseKeys = [
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
     "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
     "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
-  ], "native player-authority startup recovery receipt");
+  ];
+  const macroKeys = [
+    "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
+    "macroSimulationMilliseconds", "macroWallMilliseconds",
+  ];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      baseKeys.some((key) => !Object.hasOwn(value, key)) ||
+      Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
+        !baseKeys.includes(key) && !macroKeys.includes(key))) {
+    throw new NativeHostError(
+      "native host returned an invalid player-authority startup recovery receipt",
+      "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+    );
+  }
   const checkpoint = normalizePlayerAuthorityCheckpoint(
     value.checkpoint,
     "native player-authority startup checkpoint",
@@ -680,6 +696,21 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     "native player-authority startup belt receipt is invalid",
   );
   const hasCommand = value.commandId !== null || value.commandBaseRevision !== null;
+  const presentMacroKeys = macroKeys.filter((key) => Object.hasOwn(value, key));
+  const hasMacro = presentMacroKeys.length > 0;
+  const validMacro = !hasMacro || (
+    presentMacroKeys.length === macroKeys.length && !hasCommand &&
+    changedEntityIds.length === 0 && changedBeltIds.length === 0 && !value.topologyDirty &&
+    validLogicalId(value.macroSessionId, 128) &&
+    validLogicalId(value.recoveredMacroOperationId, 128) &&
+    validLogicalId(value.macroAlgorithmVersion, 128) &&
+    Number.isSafeInteger(value.macroSimulationMilliseconds) &&
+    value.macroSimulationMilliseconds >= 1 &&
+    value.macroSimulationMilliseconds <= MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS &&
+    Number.isSafeInteger(value.macroWallMilliseconds) &&
+    value.macroWallMilliseconds >= 1 &&
+    value.macroWallMilliseconds <= MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS
+  );
   if (value.schemaVersion !== 1 ||
     value.kind !== NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY ||
     value.ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID ||
@@ -695,6 +726,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     value.nextDeadlineMs !== value.settledDeadlineMs + 1_000 ||
     changedEntityIds.length + changedBeltIds.length > 65_536 ||
     typeof value.topologyDirty !== "boolean" ||
+    !validMacro ||
     hasCommand && (!validLogicalId(value.commandId, 128) ||
       !Number.isSafeInteger(value.commandBaseRevision) || value.commandBaseRevision < 0 ||
       value.commandBaseRevision + 1 !== value.revision) ||
@@ -729,6 +761,13 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     changedEntityIds,
     changedBeltIds,
     topologyDirty: value.topologyDirty,
+    ...(hasMacro ? {
+      macroSessionId: value.macroSessionId,
+      recoveredMacroOperationId: value.recoveredMacroOperationId,
+      macroAlgorithmVersion: value.macroAlgorithmVersion,
+      macroSimulationMilliseconds: value.macroSimulationMilliseconds,
+      macroWallMilliseconds: value.macroWallMilliseconds,
+    } : {}),
     summary: Object.freeze(JSON.parse(JSON.stringify(summary))),
   });
 }
@@ -766,6 +805,13 @@ class NativeCoreSessionRegistry {
         );
       }
       const receipt = normalizePlayerAuthorityStartupRecovery(startupRecovery);
+      if (receipt.macroSessionId !== undefined &&
+          !client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY)) {
+        throw new NativeHostError(
+          "native host supplied macro recovery without its macro capability",
+          "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+        );
+      }
       this.sessions.set(receipt.sessionId, {
         ownerId: MAIN_PLAYER_AUTHORITY_OWNER_ID,
         slot: "normal-main",
@@ -1331,6 +1377,98 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  commitPlayerAuthorityMacroAdvance(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "player-authority macro advances require the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide durable player-authority macro advances",
+        "NATIVE_CORE_PLAYER_AUTHORITY_MACRO_ADVANCE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "macroSessionId", "operationId", "baseRevision",
+      "simulationMilliseconds", "wallMilliseconds",
+    ], "native player-authority macro advance request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.macroSessionId, 128) ||
+      !validLogicalId(request.operationId, 128) ||
+      !Number.isSafeInteger(request.baseRevision) || request.baseRevision < 0 ||
+      !Number.isSafeInteger(request.simulationMilliseconds) || request.simulationMilliseconds < 1 ||
+      request.simulationMilliseconds > MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS ||
+      !Number.isSafeInteger(request.wallMilliseconds) || request.wallMilliseconds < 1 ||
+      request.wallMilliseconds > MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS) {
+      throw new TypeError("native player-authority macro advance request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityMacroAdvance",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        macroSessionId: request.macroSessionId,
+        operationId: request.operationId,
+        baseRevision: request.baseRevision,
+        simulationMilliseconds: request.simulationMilliseconds,
+        wallMilliseconds: request.wallMilliseconds,
+      },
+    }, 300_000);
+  }
+
+  finishPlayerAuthorityMacroSession(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "player-authority macro finish requires the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide durable player-authority macro advances",
+        "NATIVE_CORE_PLAYER_AUTHORITY_MACRO_ADVANCE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "macroSessionId",
+    ], "native player-authority macro finish request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.macroSessionId, 128)) {
+      throw new TypeError("native player-authority macro finish request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreFinishPlayerAuthorityMacroSession",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        macroSessionId: request.macroSessionId,
+      },
+    }, 300_000);
+  }
+
+  recoverPlayerAuthorityMacroAdvance(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "player-authority macro recovery requires the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide durable player-authority macro advances",
+        "NATIVE_CORE_PLAYER_AUTHORITY_MACRO_ADVANCE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, ["sessionId"], "native player-authority macro recovery request");
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreRecoverPlayerAuthorityMacroAdvance",
+      sessionId: request.sessionId,
+    }, 300_000);
+  }
+
   checkpoint(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
@@ -1562,6 +1700,7 @@ module.exports = {
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,

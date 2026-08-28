@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use crate::exact_realtime_lease::{
     ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePurpose,
-    ExactRealtimeStateProof, decode_player_authority_command_payload,
-    player_authority_command_request_sha256,
+    ExactRealtimePendingAdvance, ExactRealtimeStateProof, decode_player_authority_command_payload,
+    player_authority_command_request_sha256, player_authority_macro_request_sha256,
 };
 use crate::save_store::{
     PlayerAuthorityCommandChangeReceipt, SaveCommitResult, SaveStore, WalEntry,
@@ -56,6 +56,8 @@ fn command_palette_search_request_bytes(
 pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
 pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority-tick-v1";
 pub const PLAYER_AUTHORITY_COMMAND_CAPABILITY: &str = "native-core-player-authority-command-v1";
+pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
+    "native-core-player-authority-pure-idle-macro-v1";
 pub const PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY: &str =
     "native-core-player-authority-startup-recovery-v1";
 
@@ -350,10 +352,14 @@ fn require_exact_realtime_result_revision(
     revision: u64,
 ) -> anyhow::Result<()> {
     if let Some(lease) = lease {
-        let expected_revision = match (lease.pending_tick.as_ref(), lease.pending_command.as_ref())
-        {
-            (Some(pending), None) => Some(pending.expected_revision),
-            (None, Some(pending)) => Some(pending.expected_revision),
+        let expected_revision = match (
+            lease.pending_tick.as_ref(),
+            lease.pending_command.as_ref(),
+            lease.pending_advance.as_ref(),
+        ) {
+            (Some(pending), None, None) => Some(pending.expected_revision),
+            (None, Some(pending), None) => Some(pending.expected_revision),
+            (None, None, Some(pending)) => Some(pending.expected_revision),
             _ => None,
         };
         if expected_revision != Some(revision) {
@@ -361,6 +367,74 @@ fn require_exact_realtime_result_revision(
         }
     }
     Ok(())
+}
+
+fn milliseconds_to_seconds(value: u64) -> f64 {
+    value as f64 / 1_000.0
+}
+
+fn require_authorized_operation_matches_pending(
+    lease: &ExactRealtimeLease,
+    request: &CoreCommitOperationRequest,
+) -> anyhow::Result<()> {
+    match (
+        lease.pending_tick.as_ref(),
+        lease.pending_command.as_ref(),
+        lease.pending_advance.as_ref(),
+    ) {
+        (Some(pending), None, None)
+            if request.command_id == pending.command_id
+                && request.base_revision == pending.base_revision
+                && request.command.is_none()
+                && request.simulation_seconds.to_bits()
+                    == (pending.simulation_seconds as f64).to_bits()
+                && request.wall_seconds.to_bits() == (pending.wall_seconds as f64).to_bits()
+                && request.advance_mode == CoreAdvanceMode::Exact =>
+        {
+            Ok(())
+        }
+        (None, Some(pending), None)
+            if request.command_id == pending.command_id
+                && request.base_revision == pending.base_revision
+                && request.simulation_seconds.to_bits() == 0.0_f64.to_bits()
+                && request.wall_seconds.to_bits() == 0.0_f64.to_bits()
+                && request.advance_mode == CoreAdvanceMode::Exact
+                && request.command.as_ref().is_some_and(|command| {
+                    serde_json::to_value(command)
+                        .ok()
+                        .is_some_and(|value| json_values_bitwise_equal(&value, &pending.command))
+                }) =>
+        {
+            Ok(())
+        }
+        (None, None, Some(pending))
+            if request.command_id == pending.command_id
+                && request.base_revision == pending.base_revision
+                && request.command.is_none()
+                && request.simulation_seconds.to_bits()
+                    == milliseconds_to_seconds(pending.simulation_milliseconds).to_bits()
+                && request.wall_seconds.to_bits()
+                    == milliseconds_to_seconds(pending.wall_milliseconds).to_bits()
+                && request.advance_mode == CoreAdvanceMode::PureIdleMacroV10 =>
+        {
+            Ok(())
+        }
+        _ => bail!("native exact realtime operation differs from its durable pending event"),
+    }
+}
+
+fn macro_operation_from_pending(
+    pending: &ExactRealtimePendingAdvance,
+) -> CoreCommitOperationRequest {
+    CoreCommitOperationRequest {
+        command_id: pending.command_id.clone(),
+        base_revision: pending.base_revision,
+        command: None,
+        simulation_seconds: milliseconds_to_seconds(pending.simulation_milliseconds),
+        wall_seconds: milliseconds_to_seconds(pending.wall_milliseconds),
+        advance_mode: CoreAdvanceMode::PureIdleMacroV10,
+        include_diagnostics: true,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -472,6 +546,24 @@ pub struct CoreCommitPlayerAuthorityCommandRequest {
     pub command: SimulationCommandPatch,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityMacroAdvanceRequest {
+    pub run_id: String,
+    pub macro_session_id: String,
+    pub operation_id: String,
+    pub base_revision: u64,
+    pub simulation_milliseconds: u64,
+    pub wall_milliseconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreFinishPlayerAuthorityMacroSessionRequest {
+    pub run_id: String,
+    pub macro_session_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointAcknowledgeExactRealtimeResult {
@@ -516,6 +608,31 @@ pub struct CoreCommitPlayerAuthorityCommandResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CoreCommitPlayerAuthorityMacroAdvanceResult {
+    pub acknowledged_sequence: u64,
+    pub macro_session_id: String,
+    pub operation_id: String,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub simulation_milliseconds: u64,
+    pub wall_milliseconds: u64,
+    pub algorithm_version: String,
+    pub settled_deadline_ms: u64,
+    pub checkpoint: ExactRealtimeCheckpoint,
+    pub summary: CoreStateSummary,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreRecoverPlayerAuthorityMacroAdvanceResult {
+    pub run_id: String,
+    #[serde(flatten)]
+    pub committed: CoreCommitPlayerAuthorityMacroAdvanceResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CoreRecoverPlayerAuthorityCommandResult {
     pub run_id: String,
     #[serde(flatten)]
@@ -545,6 +662,16 @@ pub struct CorePlayerAuthorityStartupRecoveryReceipt {
     pub changed_entity_ids: Vec<String>,
     pub changed_belt_ids: Vec<String>,
     pub topology_dirty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovered_macro_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_algorithm_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_simulation_milliseconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_wall_milliseconds: Option<u64>,
     pub summary: CoreStateSummary,
 }
 
@@ -566,6 +693,16 @@ enum PlayerAuthorityCommandFault {
     AfterWal,
     AfterCheckpoint,
     AfterReceipt,
+    AfterLeaseAcknowledge,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlayerAuthorityMacroFault {
+    None,
+    AfterStage,
+    AfterWal,
+    AfterCheckpoint,
     AfterLeaseAcknowledge,
 }
 
@@ -1057,6 +1194,9 @@ impl CoreRegistry {
         if initial.pending_command.is_some() {
             bail!("native player-authority gameplay command is pending before realtime tick");
         }
+        if initial.pending_advance.is_some() || initial.macro_session.is_some() {
+            bail!("native player-authority macro session must finish before realtime tick");
+        }
         if initial.pending_tick.is_none() && request.sequence == initial.acknowledged.sequence {
             if initial_summary.revision != initial.acknowledged.revision
                 || initial_summary.canonical_sha256 != initial.acknowledged.proof.canonical_sha256
@@ -1246,6 +1386,7 @@ impl CoreRegistry {
             || lease.acknowledged.revision != summary.revision
             || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
         {
             bail!("native player-authority lease ACK did not close the tick");
         }
@@ -1256,6 +1397,428 @@ impl CoreRegistry {
             summary,
             duplicate: resumed || committed_duplicate || checkpoint_reused,
         })
+    }
+
+    /// Settles one bounded PureIdleMacroV10 window as a single durable player
+    /// operation even when the three ten-second calibration slices span
+    /// multiple internal revisions. A fresh request is preflighted once; a
+    /// restart reuses the staged identity and any existing WAL/checkpoint.
+    pub fn commit_player_authority_macro_advance(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityMacroAdvanceResult> {
+        self.commit_player_authority_macro_advance_internal(
+            store,
+            session_id,
+            request,
+            #[cfg(test)]
+            PlayerAuthorityMacroFault::None,
+        )
+    }
+
+    #[cfg(not(test))]
+    fn commit_player_authority_macro_advance_internal(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityMacroAdvanceResult> {
+        self.commit_player_authority_macro_advance_impl(store, session_id, request, || Ok(()))
+    }
+
+    #[cfg(test)]
+    fn commit_player_authority_macro_advance_internal(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityMacroAdvanceRequest,
+        fault: PlayerAuthorityMacroFault,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityMacroAdvanceResult> {
+        let reached = std::cell::Cell::new(PlayerAuthorityMacroFault::None);
+        self.commit_player_authority_macro_advance_impl(store, session_id, request, || {
+            let next = match reached.get() {
+                PlayerAuthorityMacroFault::None => PlayerAuthorityMacroFault::AfterStage,
+                PlayerAuthorityMacroFault::AfterStage => PlayerAuthorityMacroFault::AfterWal,
+                PlayerAuthorityMacroFault::AfterWal => PlayerAuthorityMacroFault::AfterCheckpoint,
+                PlayerAuthorityMacroFault::AfterCheckpoint => {
+                    PlayerAuthorityMacroFault::AfterLeaseAcknowledge
+                }
+                PlayerAuthorityMacroFault::AfterLeaseAcknowledge => {
+                    PlayerAuthorityMacroFault::AfterLeaseAcknowledge
+                }
+            };
+            reached.set(next);
+            if next == fault {
+                bail!("injected native player-authority macro lost response at {next:?}")
+            }
+            Ok(())
+        })
+    }
+
+    fn commit_player_authority_macro_advance_impl(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityMacroAdvanceRequest,
+        mut after_durable_boundary: impl FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityMacroAdvanceResult> {
+        validate_session_id(session_id)?;
+        if request.base_revision > MAX_SAFE_INTEGER
+            || request.simulation_milliseconds == 0
+            || request.wall_milliseconds == 0
+            || request.simulation_milliseconds > 30 * 24 * 60 * 60 * 1_000
+            || request.wall_milliseconds > 30 * 24 * 60 * 60 * 1_000
+        {
+            bail!("native player-authority macro budget is invalid");
+        }
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        let initial = store.require_exact_realtime_lease()?;
+        if initial.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || initial.authority_session_id.as_deref() != Some(authority_session_id.as_str())
+            || initial.run_id != request.run_id
+            || initial.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || !initial.startup_resume_enabled
+        {
+            bail!("native player-authority macro lease session/run identity conflicts");
+        }
+        let initial_summary = self.status(session_id)?;
+        let initial_state = self.session(session_id)?;
+        if initial_state.identity.slot != "normal-main"
+            || initial_state.identity.mode != "normal"
+            || initial_state.identity.state_version != 47
+            || initial_state.identity.registry_fingerprint != initial.registry_fingerprint
+            || initial_summary.mode != "normal"
+            || initial_summary.state_version != 47
+            || initial_summary.registry_fingerprint != initial.registry_fingerprint
+            || initial_summary.paused
+        {
+            bail!("native player-authority macro requires a running v47 normal-main session");
+        }
+        if initial.pending_tick.is_some() || initial.pending_command.is_some() {
+            bail!("another native player-authority event is pending before the macro advance");
+        }
+        if let Some(session) = initial.macro_session.as_ref()
+            && session.session_id != request.macro_session_id
+        {
+            bail!("native player-authority macro session identity conflicts");
+        }
+
+        // Immediate replay after ACK uses the request-bound command digest as
+        // its durable receipt. Once another event commits, the old operation
+        // is intentionally outside the one-event recovery window.
+        if initial.pending_advance.is_none()
+            && request.base_revision < initial.acknowledged.revision
+            && let Some(session) = initial.macro_session.as_ref()
+        {
+            let request_sha256 = player_authority_macro_request_sha256(
+                &request.run_id,
+                &request.macro_session_id,
+                &request.operation_id,
+                request.base_revision,
+                request.simulation_milliseconds,
+                request.wall_milliseconds,
+                &session.algorithm_version,
+                &initial.registry_fingerprint,
+                initial.acknowledged.settled_deadline_ms,
+            )?;
+            if let Some(last) = session.last_acknowledged_advance.as_ref()
+                && last.operation_id == request.operation_id
+                && last.base_revision == request.base_revision
+                && last.simulation_milliseconds == request.simulation_milliseconds
+                && last.wall_milliseconds == request.wall_milliseconds
+                && last.request_sha256 == request_sha256
+                && initial.acknowledged.command_id.as_deref() == Some(last.command_id.as_str())
+            {
+                if initial_summary.revision != initial.acknowledged.revision
+                    || initial_summary.canonical_sha256
+                        != initial.acknowledged.proof.canonical_sha256
+                    || initial_summary.domain_sha256 != initial.acknowledged.proof.domain_sha256
+                {
+                    bail!("native player-authority duplicate macro differs from its durable ACK");
+                }
+                let latest = store
+                    .latest_published_checkpoint_identity("normal-main")?
+                    .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+                let checkpoint = initial.acknowledged.checkpoint.clone();
+                if latest.generation != checkpoint.generation
+                    || latest.root_hash != checkpoint.root_hash
+                    || latest.revision != checkpoint.revision
+                    || initial_state.identity.generation != checkpoint.generation
+                    || initial_state.identity.root_hash != checkpoint.root_hash
+                    || initial_state.identity.revision != checkpoint.revision
+                {
+                    bail!(
+                        "native player-authority duplicate macro checkpoint is no longer current"
+                    );
+                }
+                return Ok(CoreCommitPlayerAuthorityMacroAdvanceResult {
+                    acknowledged_sequence: initial.acknowledged.sequence,
+                    macro_session_id: request.macro_session_id,
+                    operation_id: request.operation_id,
+                    base_revision: request.base_revision,
+                    revision: initial_summary.revision,
+                    simulation_milliseconds: request.simulation_milliseconds,
+                    wall_milliseconds: request.wall_milliseconds,
+                    algorithm_version: session.algorithm_version.clone(),
+                    settled_deadline_ms: initial.acknowledged.settled_deadline_ms,
+                    checkpoint,
+                    summary: initial_summary,
+                    duplicate: true,
+                });
+            }
+            bail!("native player-authority macro base revision is not current");
+        }
+
+        let resumed = initial.pending_advance.is_some();
+        let mut prepared_candidate = None;
+        let (expected_revision, algorithm_version) =
+            if let Some(pending) = initial.pending_advance.as_ref() {
+                if pending.macro_session_id != request.macro_session_id
+                    || pending.operation_id != request.operation_id
+                    || pending.base_revision != request.base_revision
+                    || pending.simulation_milliseconds != request.simulation_milliseconds
+                    || pending.wall_milliseconds != request.wall_milliseconds
+                    || !matches!(
+                        initial_summary.revision,
+                        revision
+                            if revision == pending.base_revision
+                                || revision == pending.expected_revision
+                    )
+                {
+                    bail!("native player-authority pending macro conflicts with the request");
+                }
+                (pending.expected_revision, pending.algorithm_version.clone())
+            } else {
+                if request.base_revision != initial.acknowledged.revision {
+                    bail!("native player-authority macro base revision is not current");
+                }
+                let mut prepared = initial_state.clone();
+                let advanced = prepared.advance(&CoreAdvanceRequest {
+                    base_revision: request.base_revision,
+                    simulation_seconds: milliseconds_to_seconds(request.simulation_milliseconds),
+                    wall_seconds: milliseconds_to_seconds(request.wall_milliseconds),
+                    advance_mode: CoreAdvanceMode::PureIdleMacroV10,
+                    include_diagnostics: false,
+                })?;
+                if !advanced.supported || prepared.revision <= request.base_revision {
+                    bail!(
+                        "native player-authority macro preflight was rejected: {}",
+                        advanced.reason.as_deref().unwrap_or("no revision progress")
+                    );
+                }
+                let algorithm_version = advanced
+                    .algorithm_version
+                    .ok_or_else(|| anyhow!("native player-authority macro algorithm is missing"))?
+                    .to_owned();
+                if let Some(session) = initial.macro_session.as_ref()
+                    && session.algorithm_version != algorithm_version
+                {
+                    bail!("native player-authority macro algorithm changed inside the session");
+                }
+                let expected_revision = prepared.revision;
+                prepared_candidate = Some(prepared);
+                (expected_revision, algorithm_version)
+            };
+
+        let staged = store.stage_player_authority_macro_advance(
+            &authority_session_id,
+            &request.run_id,
+            &request.macro_session_id,
+            &request.operation_id,
+            request.base_revision,
+            expected_revision,
+            request.simulation_milliseconds,
+            request.wall_milliseconds,
+            &algorithm_version,
+        )?;
+        after_durable_boundary()?;
+        let pending = staged
+            .pending_advance
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority staged macro advance is missing"))?
+            .clone();
+        let published_before_commit = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        let state_before_commit = self.session(session_id)?;
+        let checkpoint_already_published = published_before_commit.revision
+            == pending.expected_revision
+            && state_before_commit.identity.generation == published_before_commit.generation
+            && state_before_commit.identity.root_hash == published_before_commit.root_hash
+            && state_before_commit.identity.revision == published_before_commit.revision
+            && state_before_commit.revision == pending.expected_revision;
+        let committed_duplicate = if checkpoint_already_published {
+            true
+        } else {
+            let operation = macro_operation_from_pending(&pending);
+            let committed = self.commit_operation_internal_with_prepared(
+                store,
+                session_id,
+                operation,
+                Some(CoreLeaseAuthorization::PlayerAuthority {
+                    lease: staged.clone(),
+                    authority_session_id: authority_session_id.clone(),
+                }),
+                prepared_candidate,
+            )?;
+            if committed.revision != pending.expected_revision
+                || committed.current_revision != pending.expected_revision
+            {
+                bail!("native player-authority WAL result differs from the pending macro advance");
+            }
+            committed.duplicate
+        };
+        after_durable_boundary()?;
+
+        let summary = self.status(session_id)?;
+        if summary.revision != pending.expected_revision {
+            bail!("native player-authority macro state differs from its durable WAL");
+        }
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if latest.mode != "normal"
+            || latest.state_version != 47
+            || latest.registry_fingerprint != staged.registry_fingerprint
+        {
+            bail!("native player-authority macro publication identity changed");
+        }
+        let (checkpoint, checkpoint_reused) = if latest.revision == pending.expected_revision {
+            let state = self.session(session_id)?;
+            if state.identity.generation != latest.generation
+                || state.identity.root_hash != latest.root_hash
+                || state.identity.revision != latest.revision
+            {
+                bail!("native player-authority session is not based on its macro checkpoint");
+            }
+            (
+                ExactRealtimeCheckpoint {
+                    generation: latest.generation,
+                    root_hash: latest.root_hash,
+                    revision: latest.revision,
+                },
+                true,
+            )
+        } else {
+            if latest.revision != pending.base_revision
+                || latest.generation != staged.acknowledged.checkpoint.generation
+                || latest.root_hash != staged.acknowledged.checkpoint.root_hash
+            {
+                bail!(
+                    "native player-authority macro cannot checkpoint across an unproven publication"
+                );
+            }
+            let authorization = CoreLeaseAuthorization::PlayerAuthority {
+                lease: staged.clone(),
+                authority_session_id: authority_session_id.clone(),
+            };
+            let published = self.checkpoint_internal(
+                store,
+                session_id,
+                pending.settled_deadline_ms,
+                Some(&authorization),
+            )?;
+            if published.checkpoint.slot != "normal-main"
+                || published.checkpoint.revision != pending.expected_revision
+                || published.summary.revision != pending.expected_revision
+                || published.summary.canonical_sha256 != summary.canonical_sha256
+                || published.summary.domain_sha256 != summary.domain_sha256
+            {
+                bail!("native player-authority macro checkpoint differs from its durable WAL");
+            }
+            (
+                ExactRealtimeCheckpoint {
+                    generation: published.checkpoint.generation,
+                    root_hash: published.checkpoint.root_hash,
+                    revision: published.checkpoint.revision,
+                },
+                false,
+            )
+        };
+        after_durable_boundary()?;
+
+        let proof = ExactRealtimeStateProof {
+            revision: summary.revision,
+            canonical_sha256: summary.canonical_sha256.clone(),
+            domain_sha256: summary.domain_sha256.clone(),
+        };
+        let lease = store.acknowledge_player_authority_macro_advance(
+            &authority_session_id,
+            &request.run_id,
+            proof,
+            checkpoint.clone(),
+        )?;
+        after_durable_boundary()?;
+        if lease.acknowledged.sequence != pending.expected_sequence
+            || lease.acknowledged.revision != summary.revision
+            || lease.pending_advance.is_some()
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+        {
+            bail!("native player-authority lease ACK did not close the macro advance");
+        }
+        Ok(CoreCommitPlayerAuthorityMacroAdvanceResult {
+            acknowledged_sequence: lease.acknowledged.sequence,
+            macro_session_id: pending.macro_session_id,
+            operation_id: pending.operation_id,
+            base_revision: pending.base_revision,
+            revision: summary.revision,
+            simulation_milliseconds: pending.simulation_milliseconds,
+            wall_milliseconds: pending.wall_milliseconds,
+            algorithm_version: pending.algorithm_version,
+            settled_deadline_ms: pending.settled_deadline_ms,
+            checkpoint,
+            summary,
+            duplicate: resumed || committed_duplicate || checkpoint_reused,
+        })
+    }
+
+    /// Ends a native macro session at its latest ACKed checkpoint. This does
+    /// not mutate GameState or WAL; it only releases the private lease fence so
+    /// the next exact tick or gameplay command can begin.
+    pub fn finish_player_authority_macro_session(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreFinishPlayerAuthorityMacroSessionRequest,
+    ) -> anyhow::Result<CorePlayerAuthorityLeaseResult> {
+        validate_session_id(session_id)?;
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        let summary = self.status(session_id)?;
+        let state = self.session(session_id)?;
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.authority_session_id.as_deref() != Some(authority_session_id.as_str())
+            || lease.run_id != request.run_id
+            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || summary.revision != lease.acknowledged.revision
+            || summary.canonical_sha256 != lease.acknowledged.proof.canonical_sha256
+            || summary.domain_sha256 != lease.acknowledged.proof.domain_sha256
+            || state.identity.generation != latest.generation
+            || state.identity.root_hash != latest.root_hash
+            || state.identity.revision != latest.revision
+            || latest.generation != lease.acknowledged.checkpoint.generation
+            || latest.root_hash != lease.acknowledged.checkpoint.root_hash
+            || latest.revision != lease.acknowledged.checkpoint.revision
+        {
+            bail!("native player-authority macro finish identity conflicts");
+        }
+        let lease = store.finish_player_authority_macro_session(
+            &authority_session_id,
+            &request.run_id,
+            &request.macro_session_id,
+        )?;
+        Ok(CorePlayerAuthorityLeaseResult { lease, summary })
     }
 
     /// Commits one zero-time gameplay command as a durable player-authority
@@ -1277,10 +1840,9 @@ impl CoreRegistry {
         )
     }
 
-    /// Recovers a command that was durably staged by a previous host process.
-    /// The complete normalized payload comes from the lease, while the new
-    /// SaveStore lifetime and opened CoreRegistry session prove exclusive
-    /// ownership of the exact normal-main checkpoint before rebinding.
+    /// Reopens a durable player-authority session and recovers either a staged
+    /// command or a staged macro advance from a previous host process. The
+    /// legacy method name remains stable for existing host startup wiring.
     pub fn recover_player_authority_pending_command_on_startup(
         &mut self,
         store: &mut SaveStore,
@@ -1297,12 +1859,17 @@ impl CoreRegistry {
             return Ok(None);
         }
         let recovering_command = lease.pending_command.is_some();
-        if !recovering_command && !lease.startup_resume_enabled {
+        let recovering_macro = lease.pending_advance.is_some();
+        if !recovering_command && !recovering_macro && !lease.startup_resume_enabled {
             return Ok(None);
         }
         if lease.pending_tick.is_some() {
             bail!("native player-authority startup recovery found competing pending work")
         }
+        if recovering_command && recovering_macro {
+            bail!("native player-authority startup recovery found multiple pending operations")
+        }
+        let pending_macro = lease.pending_advance.clone();
         let published = store
             .latest_published_checkpoint_identity("normal-main")?
             .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
@@ -1335,6 +1902,9 @@ impl CoreRegistry {
         if recovering_command {
             self.recover_player_authority_pending_command(store, &opened.session_id)
                 .context("recover durable player-authority command during host startup")?;
+        } else if recovering_macro {
+            self.recover_player_authority_pending_macro_advance(store, &opened.session_id)
+                .context("recover durable player-authority macro advance during host startup")?;
         } else {
             let summary = self.status(&opened.session_id)?;
             if summary.revision != lease.acknowledged.revision
@@ -1363,6 +1933,7 @@ impl CoreRegistry {
             || acknowledged.authority_session_id.as_deref() != Some(authority_session_id.as_str())
             || acknowledged.pending_tick.is_some()
             || acknowledged.pending_command.is_some()
+            || acknowledged.pending_advance.is_some()
             || acknowledged.acknowledged.revision != summary.revision
             || summary.canonical_sha256 != acknowledged.acknowledged.proof.canonical_sha256
             || summary.domain_sha256 != acknowledged.acknowledged.proof.domain_sha256
@@ -1404,6 +1975,14 @@ impl CoreRegistry {
         } else {
             preexisting_command_changes
         };
+        let macro_session_id = acknowledged
+            .macro_session
+            .as_ref()
+            .map(|session| session.session_id.clone());
+        let acknowledged_macro = acknowledged
+            .macro_session
+            .as_ref()
+            .and_then(|session| session.last_acknowledged_advance.clone());
         let receipt = CorePlayerAuthorityStartupRecoveryReceipt {
             schema_version: 1,
             kind: "native-core-player-authority-startup-recovery-v1",
@@ -1434,10 +2013,118 @@ impl CoreRegistry {
             topology_dirty: command_changes
                 .as_ref()
                 .is_some_and(|changes| changes.topology_dirty),
+            macro_session_id,
+            recovered_macro_operation_id: pending_macro
+                .as_ref()
+                .map(|pending| pending.operation_id.clone())
+                .or_else(|| {
+                    acknowledged_macro
+                        .as_ref()
+                        .map(|advance| advance.operation_id.clone())
+                }),
+            macro_algorithm_version: acknowledged
+                .macro_session
+                .as_ref()
+                .map(|session| session.algorithm_version.clone()),
+            macro_simulation_milliseconds: pending_macro
+                .as_ref()
+                .map(|pending| pending.simulation_milliseconds)
+                .or_else(|| {
+                    acknowledged_macro
+                        .as_ref()
+                        .map(|advance| advance.simulation_milliseconds)
+                }),
+            macro_wall_milliseconds: pending_macro
+                .as_ref()
+                .map(|pending| pending.wall_milliseconds)
+                .or_else(|| {
+                    acknowledged_macro
+                        .as_ref()
+                        .map(|advance| advance.wall_milliseconds)
+                }),
             summary,
         };
         self.player_authority_startup_recovery = Some(receipt.clone());
         Ok(Some(receipt))
+    }
+
+    pub fn recover_player_authority_pending_macro_advance(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+    ) -> anyhow::Result<CoreRecoverPlayerAuthorityMacroAdvanceResult> {
+        validate_session_id(session_id)?;
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+        {
+            bail!("native player-authority recovery requires one active pending macro advance")
+        }
+        let pending = lease
+            .pending_advance
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow!("native player-authority recovery has no pending macro advance")
+            })?
+            .clone();
+        let summary = self.status(session_id)?;
+        let state = self.session(session_id)?;
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if state.identity.slot != "normal-main"
+            || state.identity.mode != "normal"
+            || state.identity.state_version != 47
+            || state.identity.registry_fingerprint != lease.registry_fingerprint
+            || summary.mode != "normal"
+            || summary.state_version != 47
+            || summary.registry_fingerprint != lease.registry_fingerprint
+            || summary.paused
+            || !matches!(summary.revision, revision if revision == pending.base_revision || revision == pending.expected_revision)
+            || latest.mode != "normal"
+            || latest.state_version != 47
+            || latest.registry_fingerprint != lease.registry_fingerprint
+            || state.identity.generation != latest.generation
+            || state.identity.root_hash != latest.root_hash
+            || state.identity.revision != latest.revision
+        {
+            bail!("native player-authority macro recovery session/publication identity conflicts")
+        }
+        let publication_is_acknowledged = latest.generation
+            == lease.acknowledged.checkpoint.generation
+            && latest.root_hash == lease.acknowledged.checkpoint.root_hash
+            && latest.revision == lease.acknowledged.checkpoint.revision;
+        if !publication_is_acknowledged && latest.revision != pending.expected_revision {
+            bail!(
+                "native player-authority macro recovery publication is outside the pending advance"
+            )
+        }
+        if summary.revision == pending.base_revision
+            && (summary.canonical_sha256 != lease.acknowledged.proof.canonical_sha256
+                || summary.domain_sha256 != lease.acknowledged.proof.domain_sha256)
+        {
+            bail!("native player-authority macro recovery base proof conflicts")
+        }
+
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        store.rebind_pending_player_authority_macro_advance(&lease, &authority_session_id)?;
+        let run_id = lease.run_id;
+        let committed = self.commit_player_authority_macro_advance(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityMacroAdvanceRequest {
+                run_id: run_id.clone(),
+                macro_session_id: pending.macro_session_id,
+                operation_id: pending.operation_id,
+                base_revision: pending.base_revision,
+                simulation_milliseconds: pending.simulation_milliseconds,
+                wall_milliseconds: pending.wall_milliseconds,
+            },
+        )?;
+        Ok(CoreRecoverPlayerAuthorityMacroAdvanceResult { run_id, committed })
     }
 
     pub fn recover_player_authority_pending_command(
@@ -1451,6 +2138,7 @@ impl CoreRegistry {
         if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
             || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
             || lease.pending_tick.is_some()
+            || lease.pending_advance.is_some()
         {
             bail!("native player-authority recovery requires one active pending command")
         }
@@ -1604,6 +2292,9 @@ impl CoreRegistry {
 
         if initial.pending_tick.is_some() {
             bail!("native player-authority tick is pending before gameplay command");
+        }
+        if initial.pending_advance.is_some() || initial.macro_session.is_some() {
+            bail!("native player-authority macro session must finish before gameplay command");
         }
         if initial.pending_command.is_none()
             && initial.acknowledged.last_player_command_id.as_deref()
@@ -1847,6 +2538,7 @@ impl CoreRegistry {
                 != Some(pending.command_id.as_str())
             || lease.acknowledged.revision != summary.revision
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
         {
             bail!("native player-authority lease ACK did not close the command");
         }
@@ -2156,6 +2848,23 @@ impl CoreRegistry {
         request: CoreCommitOperationRequest,
         lease_authorization: Option<CoreLeaseAuthorization>,
     ) -> anyhow::Result<CoreCommitOperationResult> {
+        self.commit_operation_internal_with_prepared(
+            store,
+            session_id,
+            request,
+            lease_authorization,
+            None,
+        )
+    }
+
+    fn commit_operation_internal_with_prepared(
+        &mut self,
+        store: &SaveStore,
+        session_id: &str,
+        request: CoreCommitOperationRequest,
+        lease_authorization: Option<CoreLeaseAuthorization>,
+        prepared_state: Option<CoreState>,
+    ) -> anyhow::Result<CoreCommitOperationResult> {
         validate_session_id(session_id)?;
         if request.base_revision > MAX_SAFE_INTEGER
             || !request.simulation_seconds.is_finite()
@@ -2169,6 +2878,9 @@ impl CoreRegistry {
             && command.base_revision != request.base_revision
         {
             bail!("native authoritative command base revision is invalid");
+        }
+        if let Some(authorization) = lease_authorization.as_ref() {
+            require_authorized_operation_matches_pending(authorization.lease(), &request)?;
         }
 
         let (slot, fingerprint, current_revision) = {
@@ -2270,30 +2982,45 @@ impl CoreRegistry {
         if current_revision != request.base_revision {
             bail!("native authoritative operation base revision is not current");
         }
-        let mut prepared = self.session(session_id)?.clone();
-        if let Some(command) = request.command.as_ref() {
-            if matches!(
-                lease_authorization.as_ref(),
-                Some(CoreLeaseAuthorization::PlayerAuthority { .. })
-            ) {
-                prepared.apply_player_authority_command(command)?;
-            } else {
-                prepared.apply_command(command)?;
+        let prepared = match prepared_state {
+            Some(prepared) => {
+                if request.command.is_some()
+                    || prepared.identity.slot != slot
+                    || prepared.identity.registry_fingerprint != fingerprint
+                    || prepared.revision <= request.base_revision
+                {
+                    bail!("native authoritative prepared candidate identity conflicts")
+                }
+                prepared
             }
-        }
-        let advanced = prepared.advance(&CoreAdvanceRequest {
-            base_revision: prepared.revision,
-            simulation_seconds: request.simulation_seconds,
-            wall_seconds: request.wall_seconds,
-            advance_mode: request.advance_mode,
-            include_diagnostics: false,
-        })?;
-        if !advanced.supported {
-            bail!(
-                "native authoritative operation reached unsupported domain: {}",
-                advanced.reason.as_deref().unwrap_or("unknown")
-            );
-        }
+            None => {
+                let mut prepared = self.session(session_id)?.clone();
+                if let Some(command) = request.command.as_ref() {
+                    if matches!(
+                        lease_authorization.as_ref(),
+                        Some(CoreLeaseAuthorization::PlayerAuthority { .. })
+                    ) {
+                        prepared.apply_player_authority_command(command)?;
+                    } else {
+                        prepared.apply_command(command)?;
+                    }
+                }
+                let advanced = prepared.advance(&CoreAdvanceRequest {
+                    base_revision: prepared.revision,
+                    simulation_seconds: request.simulation_seconds,
+                    wall_seconds: request.wall_seconds,
+                    advance_mode: request.advance_mode,
+                    include_diagnostics: false,
+                })?;
+                if !advanced.supported {
+                    bail!(
+                        "native authoritative operation reached unsupported domain: {}",
+                        advanced.reason.as_deref().unwrap_or("unknown")
+                    );
+                }
+                prepared
+            }
+        };
         if prepared.revision <= request.base_revision {
             bail!("native authoritative operation made no revision progress");
         }
@@ -3153,6 +3880,31 @@ mod tests {
         catalog
     }
 
+    fn player_authority_macro_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        catalog["buildings"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "wind_turbine",
+                "kind": "power",
+                "speed": 1,
+                "inputCapacity": 0,
+                "outputCapacity": 0,
+                "powerDemandKw": 0,
+                "powerGenerationKw": 1_000_000_000_000_000_000_u64,
+            }),
+            json!({
+                "id": "time_warp_device",
+                "kind": "machine",
+                "speed": 1,
+                "inputCapacity": 0,
+                "outputCapacity": 0,
+                "powerDemandKw": 0,
+                "powerGenerationKw": 0,
+            }),
+        ]);
+        catalog
+    }
+
     fn utf16_fnv(text: &str) -> String {
         let mut hash = 0x811c9dc5_u32;
         for unit in text.encode_utf16() {
@@ -3489,8 +4241,112 @@ mod tests {
         player_authority_fixture_from_bytes(serde_json::to_vec(&envelope).unwrap())
     }
 
+    fn player_authority_macro_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["timeWarp"] = json!({
+            "controllerEntityId": "controller",
+            "enabled": true,
+            "requestedMultiplier": 15,
+            "effectiveMultiplier": 15,
+            "pendingSimulationSeconds": 0,
+            "pendingWallSeconds": 0,
+            "requiredPowerKw": 10_000_000_000_000_000_u64,
+            "allocatedPowerKw": 10_000_000_000_000_000_u64
+        });
+        envelope["state"]["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": {},
+            "itemCapacities": { "iron_ore": "10000000000" },
+            "routingCursors": {},
+            "uploadRoutingCursors": {}
+        });
+        envelope["state"]["entities"] = json!([
+            {
+                "id": "wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "position": { "x": 0, "y": 0 },
+                "interactionLocked": false,
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            },
+            {
+                "id": "controller",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "position": { "x": 1, "y": 0 },
+                "interactionLocked": false,
+                "buildingId": "time_warp_device",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 1,
+                "productionRate": 0
+            },
+            {
+                "id": "vein",
+                "kind": "vein",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "position": { "x": 2, "y": 0 },
+                "interactionLocked": false,
+                "resourceId": "iron_ore",
+                "extractorBuildingId": "mining_machine",
+                "minerCount": 2,
+                "inputs": {},
+                "outputs": { "iron_ore": 0 },
+                "resourceCapacity": 1000000,
+                "resourceRemaining": 1000000,
+                "resourceDepletionRemainder": 0,
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }
+        ]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        player_authority_fixture_from_parts(
+            serde_json::to_vec(&envelope).unwrap(),
+            player_authority_macro_catalog(),
+        )
+    }
+
     fn player_authority_fixture_from_bytes(
         bytes: Vec<u8>,
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(bytes, player_authority_catalog())
+    }
+
+    fn player_authority_fixture_from_parts(
+        bytes: Vec<u8>,
+        catalog: Value,
     ) -> (
         tempfile::TempDir,
         SaveStore,
@@ -3507,7 +4363,7 @@ mod tests {
                 Cursor::new(bytes.clone()),
                 bytes.len() as u64,
                 EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
-                player_authority_catalog(),
+                catalog.clone(),
             )
             .unwrap();
         let checkpoint = ExactRealtimeCheckpoint {
@@ -3538,7 +4394,7 @@ mod tests {
                 "player-authority-run",
                 &checkpoint,
                 &summary.registry_fingerprint,
-                player_authority_catalog(),
+                catalog,
             )
             .unwrap();
         store
@@ -3649,6 +4505,21 @@ mod tests {
                 "removedBeltIds": []
             }))
             .unwrap(),
+        }
+    }
+
+    fn player_authority_macro_request(
+        base_revision: u64,
+        macro_session_id: &str,
+        operation_id: &str,
+    ) -> CoreCommitPlayerAuthorityMacroAdvanceRequest {
+        CoreCommitPlayerAuthorityMacroAdvanceRequest {
+            run_id: "player-authority-run".to_owned(),
+            macro_session_id: macro_session_id.to_owned(),
+            operation_id: operation_id.to_owned(),
+            base_revision,
+            simulation_milliseconds: 60_000,
+            wall_milliseconds: 4_000,
         }
     }
 
@@ -3889,6 +4760,9 @@ mod tests {
                 settled_deadline_ms: 11_000,
             }),
             pending_command: None,
+            pending_advance: None,
+            macro_session: None,
+            last_finished_macro_session_id: None,
             startup_resume_enabled: false,
             pause: None,
             finalization: None,
@@ -6833,6 +7707,360 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn player_authority_macro_lifecycle_is_durable_idempotent_and_fences_exact_events() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_macro_fixture();
+        let request = || {
+            player_authority_macro_request(
+                entry_checkpoint.revision,
+                "macro-session-1",
+                "macro-operation-1",
+            )
+        };
+
+        let committed = registry
+            .commit_player_authority_macro_advance(&mut store, &session_id, request())
+            .unwrap();
+        let revision_span = committed.revision - entry_checkpoint.revision;
+        assert!((1..=3).contains(&revision_span));
+        assert_eq!(committed.acknowledged_sequence, revision_span);
+        assert_eq!(committed.settled_deadline_ms, 46_000);
+        assert_eq!(committed.checkpoint.revision, committed.revision);
+        assert_eq!(committed.macro_session_id, "macro-session-1");
+        assert_eq!(committed.operation_id, "macro-operation-1");
+        assert!(!committed.algorithm_version.is_empty());
+        assert!(!committed.duplicate);
+        let committed_hash = committed.summary.canonical_sha256.clone();
+        let committed_checkpoint = committed.checkpoint.clone();
+        let lease = store.require_exact_realtime_lease().unwrap();
+        assert!(lease.pending_advance.is_none());
+        assert_eq!(
+            lease.macro_session.as_ref().unwrap().session_id,
+            "macro-session-1"
+        );
+        assert_eq!(lease.acknowledged.sequence, revision_span);
+        assert_eq!(lease.acknowledged.revision, committed.revision);
+
+        let duplicate = registry
+            .commit_player_authority_macro_advance(&mut store, &session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.checkpoint, committed_checkpoint);
+        assert_eq!(duplicate.summary.canonical_sha256, committed_hash);
+
+        let tick_error = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: revision_span + 1,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{tick_error:#}").contains("macro session"));
+        let command_error = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_command(committed.revision, "command-during-macro", json!(3)),
+            )
+            .unwrap_err();
+        assert!(format!("{command_error:#}").contains("macro session"));
+
+        let finish = || CoreFinishPlayerAuthorityMacroSessionRequest {
+            run_id: "player-authority-run".to_owned(),
+            macro_session_id: "macro-session-1".to_owned(),
+        };
+        let finished = registry
+            .finish_player_authority_macro_session(&mut store, &session_id, finish())
+            .unwrap();
+        assert!(finished.lease.macro_session.is_none());
+        assert_eq!(
+            finished.lease.last_finished_macro_session_id.as_deref(),
+            Some("macro-session-1")
+        );
+        let finished_retry = registry
+            .finish_player_authority_macro_session(&mut store, &session_id, finish())
+            .unwrap();
+        assert_eq!(finished_retry.lease, finished.lease);
+
+        let tick = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: revision_span + 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(tick.revision, committed.revision + 1);
+    }
+
+    #[test]
+    fn player_authority_macro_reuses_each_durable_boundary_without_double_advancing() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_macro_fixture();
+        let clean = clean_registry
+            .commit_player_authority_macro_advance(
+                &mut clean_store,
+                &clean_session,
+                player_authority_macro_request(
+                    clean_checkpoint.revision,
+                    "macro-session-boundary",
+                    "macro-operation-boundary",
+                ),
+            )
+            .unwrap();
+
+        for fault in [
+            PlayerAuthorityMacroFault::AfterStage,
+            PlayerAuthorityMacroFault::AfterWal,
+            PlayerAuthorityMacroFault::AfterCheckpoint,
+            PlayerAuthorityMacroFault::AfterLeaseAcknowledge,
+        ] {
+            let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+                player_authority_macro_fixture();
+            let request = || {
+                player_authority_macro_request(
+                    entry_checkpoint.revision,
+                    "macro-session-boundary",
+                    "macro-operation-boundary",
+                )
+            };
+            let error = registry
+                .commit_player_authority_macro_advance_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    fault,
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("lost response"), "{fault:?}");
+            let durable_after_fault = store.require_exact_realtime_lease().unwrap();
+            if fault == PlayerAuthorityMacroFault::AfterLeaseAcknowledge {
+                assert!(durable_after_fault.pending_advance.is_none());
+                assert_eq!(durable_after_fault.acknowledged.revision, clean.revision);
+            } else {
+                assert_eq!(
+                    durable_after_fault
+                        .pending_advance
+                        .as_ref()
+                        .unwrap()
+                        .operation_id,
+                    "macro-operation-boundary"
+                );
+                assert_eq!(
+                    durable_after_fault.acknowledged.revision,
+                    entry_checkpoint.revision
+                );
+            }
+
+            let recovered = registry
+                .commit_player_authority_macro_advance(&mut store, &session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(
+                recovered.summary.domain_sha256, clean.summary.domain_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(recovered.checkpoint, clean.checkpoint, "{fault:?}");
+            let durable = store.require_exact_realtime_lease().unwrap();
+            assert!(durable.pending_advance.is_none(), "{fault:?}");
+            assert_eq!(durable.acknowledged.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                durable.acknowledged.sequence, clean.acknowledged_sequence,
+                "{fault:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn player_authority_macro_recovers_after_process_restart_at_every_boundary() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_macro_fixture();
+        let clean = clean_registry
+            .commit_player_authority_macro_advance(
+                &mut clean_store,
+                &clean_session,
+                player_authority_macro_request(
+                    clean_checkpoint.revision,
+                    "macro-session-restart",
+                    "macro-operation-restart",
+                ),
+            )
+            .unwrap();
+
+        for fault in [
+            PlayerAuthorityMacroFault::AfterStage,
+            PlayerAuthorityMacroFault::AfterWal,
+            PlayerAuthorityMacroFault::AfterCheckpoint,
+            PlayerAuthorityMacroFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, entry_checkpoint) =
+                player_authority_macro_fixture();
+            let error = registry
+                .commit_player_authority_macro_advance_internal(
+                    &mut store,
+                    &session_id,
+                    player_authority_macro_request(
+                        entry_checkpoint.revision,
+                        "macro-session-restart",
+                        "macro-operation-restart",
+                    ),
+                    fault,
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("lost response"), "{fault:?}");
+            drop(registry);
+            drop(store);
+
+            let mut reopened_store = SaveStore::open(root.path()).unwrap();
+            let mut reopened_registry = resumable_player_authority_registry_for_test();
+            let receipt = reopened_registry
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .expect("active macro session must yield a startup receipt");
+            assert_eq!(
+                receipt.macro_session_id.as_deref(),
+                Some("macro-session-restart")
+            );
+            assert_eq!(
+                receipt.macro_algorithm_version.as_deref(),
+                Some(clean.algorithm_version.as_str())
+            );
+            assert_eq!(
+                receipt.recovered_macro_operation_id.as_deref(),
+                Some("macro-operation-restart")
+            );
+            assert_eq!(receipt.macro_simulation_milliseconds, Some(60_000));
+            assert_eq!(receipt.macro_wall_milliseconds, Some(4_000));
+            assert_eq!(receipt.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                receipt.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(
+                receipt.summary.domain_sha256, clean.summary.domain_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(receipt.checkpoint, clean.checkpoint, "{fault:?}");
+            let durable = reopened_store.require_exact_realtime_lease().unwrap();
+            assert!(durable.pending_advance.is_none(), "{fault:?}");
+            assert_eq!(durable.acknowledged.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                durable.acknowledged.sequence, clean.acknowledged_sequence,
+                "{fault:?}"
+            );
+
+            // The startup receipt and rebound session are also replay-safe.
+            let repeated = reopened_registry
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap()
+                .unwrap();
+            assert_eq!(repeated.session_id, receipt.session_id);
+            assert_eq!(repeated.revision, receipt.revision);
+
+            let continued = reopened_registry
+                .commit_player_authority_macro_advance(
+                    &mut reopened_store,
+                    &receipt.session_id,
+                    player_authority_macro_request(
+                        receipt.revision,
+                        "macro-session-restart",
+                        "macro-operation-after-restart",
+                    ),
+                )
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(continued.revision > receipt.revision, "{fault:?}");
+            assert_eq!(
+                continued.algorithm_version, clean.algorithm_version,
+                "{fault:?}"
+            );
+            assert_eq!(
+                reopened_store
+                    .require_exact_realtime_lease()
+                    .unwrap()
+                    .macro_session
+                    .as_ref()
+                    .unwrap()
+                    .session_id,
+                "macro-session-restart"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_macro_retry_fails_closed_and_preserves_the_staged_checkpoint() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_macro_fixture();
+        let valid = || {
+            player_authority_macro_request(
+                entry_checkpoint.revision,
+                "macro-session-conflict",
+                "macro-operation-conflict",
+            )
+        };
+        let error = registry
+            .commit_player_authority_macro_advance_internal(
+                &mut store,
+                &session_id,
+                valid(),
+                PlayerAuthorityMacroFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let summary_before = registry.status(&session_id).unwrap();
+        let checkpoint_before = store.recover("normal-main").unwrap().unwrap();
+
+        for conflicting in [
+            player_authority_macro_request(
+                entry_checkpoint.revision,
+                "macro-session-other",
+                "macro-operation-conflict",
+            ),
+            player_authority_macro_request(
+                entry_checkpoint.revision,
+                "macro-session-conflict",
+                "macro-operation-other",
+            ),
+            CoreCommitPlayerAuthorityMacroAdvanceRequest {
+                simulation_milliseconds: 60_001,
+                ..valid()
+            },
+        ] {
+            let conflict = registry
+                .commit_player_authority_macro_advance(&mut store, &session_id, conflicting)
+                .unwrap_err();
+            assert!(format!("{conflict:#}").contains("conflict"), "{conflict:#}");
+            assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
+            let summary_after = registry.status(&session_id).unwrap();
+            assert_eq!(summary_after.revision, summary_before.revision);
+            assert_eq!(
+                summary_after.canonical_sha256,
+                summary_before.canonical_sha256
+            );
+            let checkpoint_after = store.recover("normal-main").unwrap().unwrap();
+            assert_eq!(checkpoint_after.generation, checkpoint_before.generation);
+            assert_eq!(checkpoint_after.root_hash, checkpoint_before.root_hash);
+            assert_eq!(checkpoint_after.revision, checkpoint_before.revision);
+        }
+
+        let recovered = registry
+            .commit_player_authority_macro_advance(&mut store, &session_id, valid())
+            .unwrap();
+        assert!(recovered.duplicate);
+        assert!(recovered.revision > entry_checkpoint.revision);
     }
 
     #[test]

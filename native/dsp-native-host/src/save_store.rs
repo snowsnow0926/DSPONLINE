@@ -819,7 +819,8 @@ impl SaveStore {
                 || lease.checkpoint != *checkpoint
                 || lease.acknowledged.checkpoint != *checkpoint
                 || lease.pending_tick.is_some()
-                || lease.pending_command.is_some())
+                || lease.pending_command.is_some()
+                || lease.pending_advance.is_some())
         {
             bail!("native player-authority recovery catalog lease identity conflicts")
         }
@@ -906,13 +907,19 @@ impl SaveStore {
             lease.phase == ExactRealtimeLeasePhase::Active
                 && published.revision == pending.expected_revision
         });
+        let published_is_pending_advance = lease.pending_advance.as_ref().is_some_and(|pending| {
+            lease.phase == ExactRealtimeLeasePhase::Active
+                && published.revision == pending.expected_revision
+        });
         if lease.slot != "normal-main"
             || lease.mode != "normal"
             || published.slot != lease.slot
             || published.mode != lease.mode
             || published.state_version != 47
             || published.registry_fingerprint != lease.registry_fingerprint
-            || !(published_is_acknowledged || published_is_pending_command)
+            || !(published_is_acknowledged
+                || published_is_pending_command
+                || published_is_pending_advance)
         {
             bail!("native player-authority recovery lease/checkpoint publication conflicts")
         }

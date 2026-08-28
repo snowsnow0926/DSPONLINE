@@ -2,7 +2,7 @@ use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
-use dsp_native_core::SimulationCommandPatch;
+use dsp_native_core::{CoreAdvanceMode, SimulationCommandPatch};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json, to_value};
 use sha2::{Digest, Sha256};
@@ -31,6 +31,13 @@ pub(crate) const MAX_PENDING_PLAYER_COMMAND_BYTES: usize = 1_750_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const EXACT_TICK_SECONDS: u64 = 1;
 const EXACT_TICK_MILLISECONDS: u64 = 1_000;
+const MACRO_SESSION_SCHEMA_VERSION: u16 = 1;
+const MACRO_ADVANCE_SCHEMA_VERSION: u16 = 1;
+const MACRO_ADVANCE_KIND: &str = "native-player-authority-pure-idle-macro-advance-v1";
+const MACRO_ACKNOWLEDGED_ADVANCE_KIND: &str = "native-player-authority-pure-idle-macro-ack-v1";
+const MACRO_ADVANCE_MODE: CoreAdvanceMode = CoreAdvanceMode::PureIdleMacroV10;
+const MAX_MACRO_ADVANCE_MILLISECONDS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_MACRO_REVISION_SPAN: u64 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -113,6 +120,63 @@ pub struct ExactRealtimePendingCommand {
     pub settled_deadline_ms: u64,
 }
 
+/// Private lifecycle identity for one continuous native pure-idle macro
+/// session. It never enters GameState v47 or the public save envelope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExactRealtimeMacroSession {
+    pub schema_version: u16,
+    pub session_id: String,
+    pub advance_mode: CoreAdvanceMode,
+    pub algorithm_version: String,
+    pub started_revision: u64,
+    pub started_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_acknowledged_advance: Option<ExactRealtimeAcknowledgedAdvance>,
+}
+
+/// Last ACKed macro operation retained for one active macro session. This is
+/// the durable response receipt when the host exits after clearing pending
+/// work but before the caller observes the ACK.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExactRealtimeAcknowledgedAdvance {
+    pub schema_version: u16,
+    pub kind: String,
+    pub operation_id: String,
+    pub command_id: String,
+    pub request_sha256: String,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub simulation_milliseconds: u64,
+    pub wall_milliseconds: u64,
+    pub settled_deadline_ms: u64,
+}
+
+/// One durably staged PureIdleMacroV10 operation. Budgets use integer
+/// milliseconds so a restart reconstructs bit-identical floating-point
+/// seconds without accepting a renderer-supplied result revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExactRealtimePendingAdvance {
+    pub schema_version: u16,
+    pub kind: String,
+    pub sequence: u64,
+    pub expected_sequence: u64,
+    pub operation_id: String,
+    pub command_id: String,
+    pub request_sha256: String,
+    pub macro_session_id: String,
+    pub base_revision: u64,
+    pub expected_revision: u64,
+    pub simulation_milliseconds: u64,
+    pub wall_milliseconds: u64,
+    pub advance_mode: CoreAdvanceMode,
+    pub algorithm_version: String,
+    pub registry_fingerprint: String,
+    pub settled_deadline_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExactRealtimePause {
@@ -174,6 +238,13 @@ pub struct ExactRealtimeLease {
     pub pending_tick: Option<ExactRealtimePendingTick>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_command: Option<ExactRealtimePendingCommand>,
+    /// Optional fields keep every pre-macro v2 lease byte-for-byte stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_advance: Option<ExactRealtimePendingAdvance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_session: Option<ExactRealtimeMacroSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_finished_macro_session_id: Option<String>,
     /// Set only after CoreRegistry has verified the fixed recovery catalog at
     /// player-authority activation. It lets a later Host process reopen the
     /// already-ACKed session without treating an arbitrary legacy active
@@ -453,6 +524,9 @@ impl SaveStore {
             },
             pending_tick: None,
             pending_command: None,
+            pending_advance: None,
+            macro_session: None,
+            last_finished_macro_session_id: None,
             startup_resume_enabled: false,
             pause: None,
             finalization: None,
@@ -498,6 +572,8 @@ impl SaveStore {
             ExactRealtimeLeasePhase::Prepared | ExactRealtimeLeasePhase::Active
         ) || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
         {
             bail!("native player-authority lease cannot activate from its current phase")
         }
@@ -526,6 +602,9 @@ impl SaveStore {
         }
         if lease.pending_command.is_some() {
             bail!("a native player-authority gameplay command is already pending")
+        }
+        if lease.pending_advance.is_some() || lease.macro_session.is_some() {
+            bail!("a native player-authority macro session must finish before a realtime tick")
         }
         if let Some(current) = lease.pending_tick.as_ref() {
             if current.sequence == sequence {
@@ -592,6 +671,9 @@ impl SaveStore {
         if lease.pending_tick.is_some() {
             bail!("a native player-authority realtime tick is already pending")
         }
+        if lease.pending_advance.is_some() || lease.macro_session.is_some() {
+            bail!("a native player-authority macro session must finish before a gameplay command")
+        }
         if let Some(current) = lease.pending_command.as_ref() {
             if current.command_id == command_id
                 && current.base_revision == base_revision
@@ -632,6 +714,157 @@ impl SaveStore {
         self.write_exact_realtime_lease(&lease)
     }
 
+    /// Stages one bounded PureIdleMacroV10 operation after CoreRegistry has
+    /// completed a disposable preflight and derived the exact result revision
+    /// and algorithm identity. The durable lease owns every remaining input;
+    /// recovery never asks the renderer to reconstruct the request.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_player_authority_macro_advance(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        macro_session_id: &str,
+        operation_id: &str,
+        base_revision: u64,
+        expected_revision: u64,
+        simulation_milliseconds: u64,
+        wall_milliseconds: u64,
+        algorithm_version: &str,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_logical_id(macro_session_id, 128, "player-authority macro session ID")?;
+        validate_logical_id(operation_id, 128, "player-authority macro operation ID")?;
+        validate_safe_integer(base_revision, 0, "player-authority macro base revision")?;
+        validate_safe_integer(
+            expected_revision,
+            1,
+            "player-authority macro expected revision",
+        )?;
+        validate_macro_budget(simulation_milliseconds, wall_milliseconds)?;
+        validate_logical_id(algorithm_version, 256, "player-authority macro algorithm")?;
+
+        let mut lease = self.require_exact_realtime_lease()?;
+        require_player_authority_identity(&lease, authority_session_id, run_id)?;
+        if lease.phase != ExactRealtimeLeasePhase::Active || !lease.startup_resume_enabled {
+            bail!(
+                "only a restart-recoverable active player-authority lease can stage a macro advance"
+            )
+        }
+        if lease.pending_tick.is_some() || lease.pending_command.is_some() {
+            bail!("another native player-authority event is pending before the macro advance")
+        }
+        let revision_span = expected_revision
+            .checked_sub(base_revision)
+            .filter(|span| (1..=MAX_MACRO_REVISION_SPAN).contains(span))
+            .ok_or_else(|| anyhow!("native player-authority macro revision span is invalid"))?;
+        let sequence = safe_add(
+            lease.acknowledged.sequence,
+            1,
+            "player-authority macro sequence",
+        )?;
+        let expected_sequence = safe_add(
+            lease.acknowledged.sequence,
+            revision_span,
+            "player-authority macro expected sequence",
+        )?;
+        let settled_deadline_ms = safe_add(
+            lease.acknowledged.settled_deadline_ms,
+            wall_milliseconds,
+            "player-authority macro deadline",
+        )?;
+        let request_sha256 = player_authority_macro_request_sha256(
+            &lease.run_id,
+            macro_session_id,
+            operation_id,
+            base_revision,
+            simulation_milliseconds,
+            wall_milliseconds,
+            algorithm_version,
+            &lease.registry_fingerprint,
+            settled_deadline_ms,
+        )?;
+        let command_id = derive_macro_advance_command_id(&request_sha256)?;
+        let pending = ExactRealtimePendingAdvance {
+            schema_version: MACRO_ADVANCE_SCHEMA_VERSION,
+            kind: MACRO_ADVANCE_KIND.to_owned(),
+            sequence,
+            expected_sequence,
+            operation_id: operation_id.to_owned(),
+            command_id,
+            request_sha256,
+            macro_session_id: macro_session_id.to_owned(),
+            base_revision,
+            expected_revision,
+            simulation_milliseconds,
+            wall_milliseconds,
+            advance_mode: MACRO_ADVANCE_MODE,
+            algorithm_version: algorithm_version.to_owned(),
+            registry_fingerprint: lease.registry_fingerprint.clone(),
+            settled_deadline_ms,
+        };
+        if let Some(current) = lease.pending_advance.as_ref() {
+            if current == &pending {
+                return Ok(lease);
+            }
+            bail!("a different native player-authority macro advance is already pending")
+        }
+        if base_revision != lease.acknowledged.revision {
+            bail!("native player-authority macro base revision is not current")
+        }
+        match lease.macro_session.as_ref() {
+            Some(session)
+                if session.session_id == macro_session_id
+                    && session.advance_mode == MACRO_ADVANCE_MODE
+                    && session.algorithm_version == algorithm_version => {}
+            Some(_) => bail!("native player-authority macro session identity conflicts"),
+            None => {
+                lease.macro_session = Some(ExactRealtimeMacroSession {
+                    schema_version: MACRO_SESSION_SCHEMA_VERSION,
+                    session_id: macro_session_id.to_owned(),
+                    advance_mode: MACRO_ADVANCE_MODE,
+                    algorithm_version: algorithm_version.to_owned(),
+                    started_revision: base_revision,
+                    started_sequence: lease.acknowledged.sequence,
+                    last_acknowledged_advance: None,
+                });
+                lease.last_finished_macro_session_id = None;
+            }
+        }
+        lease.pending_advance = Some(pending);
+        self.write_exact_realtime_lease(&lease)
+    }
+
+    /// Closes a macro session only at an acknowledged checkpoint boundary.
+    /// A repeated finish request after a lost response is idempotent.
+    pub(crate) fn finish_player_authority_macro_session(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        macro_session_id: &str,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_logical_id(macro_session_id, 128, "player-authority macro session ID")?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        require_player_authority_identity(&lease, authority_session_id, run_id)?;
+        if lease.phase != ExactRealtimeLeasePhase::Active
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+        {
+            bail!("native player-authority macro session cannot finish with unresolved work")
+        }
+        let Some(session) = lease.macro_session.as_ref() else {
+            if lease.last_finished_macro_session_id.as_deref() == Some(macro_session_id) {
+                return Ok(lease);
+            }
+            bail!("native player-authority macro session is not active")
+        };
+        if session.session_id != macro_session_id {
+            bail!("native player-authority macro session identity conflicts")
+        }
+        lease.macro_session = None;
+        lease.last_finished_macro_session_id = Some(macro_session_id.to_owned());
+        self.write_exact_realtime_lease(&lease)
+    }
+
     /// Rebinds only an already-staged player command after a new SaveStore
     /// lifetime has acquired the exclusive root lock. The core recovery path
     /// proves the exact checkpoint/WAL state before calling this method; no
@@ -654,8 +887,42 @@ impl SaveStore {
             || lease.phase != ExactRealtimeLeasePhase::Active
             || lease.pending_tick.is_some()
             || lease.pending_command.is_none()
+            || lease.pending_advance.is_some()
         {
             bail!("native player-authority recovery requires one pending command")
+        }
+        if lease.authority_session_id.as_deref() == Some(authority_session_id) {
+            return Ok(lease);
+        }
+        lease.authority_session_id = Some(authority_session_id.to_owned());
+        self.write_exact_realtime_lease(&lease)
+    }
+
+    /// Rebinds only an already-staged macro advance after a new SaveStore
+    /// lifetime has proven exclusive ownership of the same durable root.
+    pub(crate) fn rebind_pending_player_authority_macro_advance(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_logical_id(
+            authority_session_id,
+            128,
+            "player-authority macro recovery session ID",
+        )?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        if &lease != expected_lease {
+            bail!("native player-authority macro recovery lease changed")
+        }
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != ExactRealtimeLeasePhase::Active
+            || !lease.startup_resume_enabled
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_none()
+            || lease.macro_session.is_none()
+        {
+            bail!("native player-authority recovery requires one pending macro advance")
         }
         if lease.authority_session_id.as_deref() == Some(authority_session_id) {
             return Ok(lease);
@@ -687,6 +954,7 @@ impl SaveStore {
             || !lease.startup_resume_enabled
             || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
         {
             bail!("native player-authority lease is not safely resumable")
         }
@@ -706,6 +974,8 @@ impl SaveStore {
             || lease.phase != ExactRealtimeLeasePhase::Active
             || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
         {
             bail!("test fixture requires one idle active player-authority lease")
         }
@@ -725,6 +995,8 @@ impl SaveStore {
             ExactRealtimeLeasePhase::Prepared | ExactRealtimeLeasePhase::Paused
         ) || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
         {
             bail!("native exact realtime lease cannot activate from its current phase")
         }
@@ -992,6 +1264,83 @@ impl SaveStore {
         self.write_exact_realtime_lease(&lease)
     }
 
+    /// Closes one staged macro advance only after its exact multi-revision
+    /// result is the current normal-main publication. Advancing the logical
+    /// sequence by the same revision span preserves the legacy v2 invariant
+    /// `entry revision + sequence == acknowledged revision` without adding a
+    /// new mandatory field to existing lease bytes.
+    pub(crate) fn acknowledge_player_authority_macro_advance(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        proof: ExactRealtimeStateProof,
+        checkpoint: ExactRealtimeCheckpoint,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_state_proof(&proof)?;
+        validate_checkpoint(&checkpoint)?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        require_player_authority_identity(&lease, authority_session_id, run_id)?;
+        if lease.phase != ExactRealtimeLeasePhase::Active {
+            bail!("only an active native player-authority lease can acknowledge a macro advance")
+        }
+        let pending = lease
+            .pending_advance
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority ACK has no pending macro advance"))?
+            .clone();
+        let session = lease
+            .macro_session
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority macro session is missing"))?;
+        if session.session_id != pending.macro_session_id
+            || session.algorithm_version != pending.algorithm_version
+            || proof.revision != pending.expected_revision
+            || checkpoint.revision != pending.expected_revision
+        {
+            bail!("native player-authority macro ACK identity differs from the pending advance")
+        }
+        let expected_publication =
+            published_checkpoint_identity(&checkpoint, &lease.registry_fingerprint);
+        let published = self
+            .latest_published_checkpoint_identity(NORMAL_SLOT)?
+            .ok_or_else(|| anyhow!("normal-main has no published checkpoint for authority ACK"))?;
+        if published != expected_publication {
+            bail!("native player-authority macro ACK checkpoint is not current")
+        }
+        let last_player_command_id = lease.acknowledged.last_player_command_id.clone();
+        let command_base_revision = lease.acknowledged.command_base_revision;
+        let command_request_sha256 = lease.acknowledged.command_request_sha256.clone();
+        lease.acknowledged = ExactRealtimeAcknowledged {
+            sequence: pending.expected_sequence,
+            command_id: Some(pending.command_id.clone()),
+            command_base_revision,
+            command_request_sha256,
+            last_player_command_id,
+            revision: pending.expected_revision,
+            proof,
+            checkpoint,
+            settled_deadline_ms: pending.settled_deadline_ms,
+        };
+        lease
+            .macro_session
+            .as_mut()
+            .ok_or_else(|| anyhow!("native player-authority macro session is missing"))?
+            .last_acknowledged_advance = Some(ExactRealtimeAcknowledgedAdvance {
+            schema_version: MACRO_ADVANCE_SCHEMA_VERSION,
+            kind: MACRO_ACKNOWLEDGED_ADVANCE_KIND.to_owned(),
+            operation_id: pending.operation_id,
+            command_id: pending.command_id,
+            request_sha256: pending.request_sha256,
+            base_revision: pending.base_revision,
+            revision: pending.expected_revision,
+            simulation_milliseconds: pending.simulation_milliseconds,
+            wall_milliseconds: pending.wall_milliseconds,
+            settled_deadline_ms: pending.settled_deadline_ms,
+        });
+        lease.pending_advance = None;
+        self.write_exact_realtime_lease(&lease)
+    }
+
     fn begin_exact_realtime_finalizing(
         &self,
         run_id: &str,
@@ -1008,6 +1357,8 @@ impl SaveStore {
             ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
         ) || lease.pending_tick.is_some()
             || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
         {
             bail!("native exact realtime lease cannot finalize with unresolved work")
         }
@@ -1252,14 +1603,19 @@ impl SaveStore {
             ExactRealtimeLeasePurpose::PlayerAuthority => match (
                 current.pending_tick.as_ref(),
                 current.pending_command.as_ref(),
+                current.pending_advance.as_ref(),
             ) {
-                (Some(pending), None)
+                (Some(pending), None, None)
                     if pending.command_id == command_id
                         && pending.base_revision == base_revision
                         && pending.expected_revision == revision
                         && pending.simulation_seconds == EXACT_TICK_SECONDS
                         && pending.wall_seconds == EXACT_TICK_SECONDS => {}
-                (None, Some(pending))
+                (None, Some(pending), None)
+                    if pending.command_id == command_id
+                        && pending.base_revision == base_revision
+                        && pending.expected_revision == revision => {}
+                (None, None, Some(pending))
                     if pending.command_id == command_id
                         && pending.base_revision == base_revision
                         && pending.expected_revision == revision => {}
@@ -1379,6 +1735,16 @@ impl SaveStore {
                 || pending.settled_deadline_ms != saved_at_ms
             {
                 bail!("native exact realtime checkpoint differs from the pending command")
+            }
+            return Ok(());
+        }
+        if let Some(pending) = current.pending_advance.as_ref() {
+            if expected_purpose != ExactRealtimeLeasePurpose::PlayerAuthority
+                || current.phase != ExactRealtimeLeasePhase::Active
+                || pending.expected_revision != revision
+                || pending.settled_deadline_ms != saved_at_ms
+            {
+                bail!("native exact realtime checkpoint differs from the pending macro advance")
             }
             return Ok(());
         }
@@ -1546,7 +1912,12 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
     let purpose = lease.purpose()?;
     match purpose {
         ExactRealtimeLeasePurpose::Experiment => {
-            if lease.authority_session_id.is_some() || lease.startup_resume_enabled {
+            if lease.authority_session_id.is_some()
+                || lease.startup_resume_enabled
+                || lease.pending_advance.is_some()
+                || lease.macro_session.is_some()
+                || lease.last_finished_macro_session_id.is_some()
+            {
                 bail!("native experiment lease cannot bind a player-authority session")
             }
         }
@@ -1615,6 +1986,12 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
     if lease.pending_tick.is_some() && lease.pending_command.is_some() {
         bail!("native player-authority lease has multiple pending operations")
     }
+    let pending_operation_count = usize::from(lease.pending_tick.is_some())
+        + usize::from(lease.pending_command.is_some())
+        + usize::from(lease.pending_advance.is_some());
+    if pending_operation_count > 1 {
+        bail!("native player-authority lease has multiple pending operations")
+    }
     if let Some(pending) = lease.pending_tick.as_ref() {
         validate_pending_tick(pending, &lease.run_id)?;
         if pending.sequence != safe_add(lease.acknowledged.sequence, 1, "pending sequence")?
@@ -1646,11 +2023,94 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
             bail!("native player-authority pending command is not the next durable event")
         }
     }
+    if let Some(session) = lease.macro_session.as_ref() {
+        if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != ExactRealtimeLeasePhase::Active
+            || !lease.startup_resume_enabled
+        {
+            bail!("native player-authority macro session is not restart recoverable")
+        }
+        validate_macro_session(session)?;
+        if session.started_revision < lease.checkpoint.revision
+            || session.started_revision > lease.acknowledged.revision
+            || session.started_sequence > lease.acknowledged.sequence
+            || session.started_revision - lease.checkpoint.revision != session.started_sequence
+        {
+            bail!("native player-authority macro session entry chain is invalid")
+        }
+        if let Some(acknowledged) = session.last_acknowledged_advance.as_ref() {
+            validate_acknowledged_macro_advance(
+                acknowledged,
+                &lease.run_id,
+                &session.session_id,
+                &session.algorithm_version,
+                &lease.registry_fingerprint,
+            )?;
+            if acknowledged.revision != lease.acknowledged.revision
+                || lease.acknowledged.command_id.as_deref()
+                    != Some(acknowledged.command_id.as_str())
+                || acknowledged.settled_deadline_ms != lease.acknowledged.settled_deadline_ms
+            {
+                bail!("native player-authority macro ACK receipt differs from the lease ACK")
+            }
+        } else if lease.pending_advance.is_none() {
+            bail!("native player-authority macro session has no pending or acknowledged advance")
+        }
+    }
+    if let Some(finished) = lease.last_finished_macro_session_id.as_deref() {
+        if purpose != ExactRealtimeLeasePurpose::PlayerAuthority || lease.macro_session.is_some() {
+            bail!("native player-authority finished macro identity conflicts")
+        }
+        validate_logical_id(finished, 128, "finished macro session ID")?;
+    }
+    if let Some(pending) = lease.pending_advance.as_ref() {
+        if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != ExactRealtimeLeasePhase::Active
+            || !lease.startup_resume_enabled
+        {
+            bail!("native player-authority pending macro advance is not restart recoverable")
+        }
+        validate_pending_advance(pending, &lease.run_id)?;
+        let session = lease
+            .macro_session
+            .as_ref()
+            .ok_or_else(|| anyhow!("native pending macro advance has no session"))?;
+        let revision_span = pending
+            .expected_revision
+            .checked_sub(pending.base_revision)
+            .ok_or_else(|| anyhow!("native pending macro revision underflow"))?;
+        if pending.sequence != safe_add(lease.acknowledged.sequence, 1, "pending sequence")?
+            || pending.expected_sequence
+                != safe_add(
+                    lease.acknowledged.sequence,
+                    revision_span,
+                    "pending macro expected sequence",
+                )?
+            || pending.base_revision != lease.acknowledged.revision
+            || pending.settled_deadline_ms
+                != safe_add(
+                    lease.acknowledged.settled_deadline_ms,
+                    pending.wall_milliseconds,
+                    "pending macro deadline",
+                )?
+            || pending.registry_fingerprint != lease.registry_fingerprint
+            || pending.macro_session_id != session.session_id
+            || pending.advance_mode != session.advance_mode
+            || pending.algorithm_version != session.algorithm_version
+        {
+            bail!("native player-authority pending macro advance is not the next durable event")
+        }
+    } else if lease.macro_session.is_some() && pending_operation_count > 0 {
+        bail!("native player-authority macro session contains a non-macro pending event")
+    }
     match lease.phase {
         ExactRealtimeLeasePhase::Prepared => {
             if lease.acknowledged.sequence != 0
                 || lease.pending_tick.is_some()
                 || lease.pending_command.is_some()
+                || lease.pending_advance.is_some()
+                || lease.macro_session.is_some()
+                || lease.last_finished_macro_session_id.is_some()
                 || lease.startup_resume_enabled
                 || lease.pause.is_some()
                 || lease.finalization.is_some()
@@ -1676,6 +2136,8 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
         ExactRealtimeLeasePhase::Finalizing => {
             if lease.pending_tick.is_some()
                 || lease.pending_command.is_some()
+                || lease.pending_advance.is_some()
+                || lease.macro_session.is_some()
                 || lease.finalization.is_none()
             {
                 bail!("finalizing native exact realtime lease has unresolved work")
@@ -1783,6 +2245,136 @@ fn validate_pending_command(
     Ok(())
 }
 
+fn validate_macro_session(value: &ExactRealtimeMacroSession) -> anyhow::Result<()> {
+    if value.schema_version != MACRO_SESSION_SCHEMA_VERSION
+        || value.advance_mode != MACRO_ADVANCE_MODE
+    {
+        bail!("native player-authority macro session schema is invalid")
+    }
+    validate_logical_id(&value.session_id, 128, "macro session ID")?;
+    validate_logical_id(&value.algorithm_version, 256, "macro algorithm")?;
+    validate_safe_integer(value.started_revision, 0, "macro session revision")?;
+    validate_safe_integer(value.started_sequence, 0, "macro session sequence")
+}
+
+fn validate_macro_budget(
+    simulation_milliseconds: u64,
+    wall_milliseconds: u64,
+) -> anyhow::Result<()> {
+    validate_safe_integer(simulation_milliseconds, 1, "macro simulation milliseconds")?;
+    validate_safe_integer(wall_milliseconds, 1, "macro wall milliseconds")?;
+    if simulation_milliseconds > MAX_MACRO_ADVANCE_MILLISECONDS
+        || wall_milliseconds > MAX_MACRO_ADVANCE_MILLISECONDS
+    {
+        bail!("native player-authority macro budget exceeds the bounded window")
+    }
+    Ok(())
+}
+
+fn validate_acknowledged_macro_advance(
+    value: &ExactRealtimeAcknowledgedAdvance,
+    run_id: &str,
+    macro_session_id: &str,
+    algorithm_version: &str,
+    registry_fingerprint: &str,
+) -> anyhow::Result<()> {
+    if value.schema_version != MACRO_ADVANCE_SCHEMA_VERSION
+        || value.kind != MACRO_ACKNOWLEDGED_ADVANCE_KIND
+    {
+        bail!("native player-authority acknowledged macro schema is invalid")
+    }
+    validate_logical_id(&value.operation_id, 128, "acknowledged macro operation ID")?;
+    validate_logical_id(&value.command_id, 128, "acknowledged macro command ID")?;
+    validate_sha256(&value.request_sha256, "acknowledged macro request")?;
+    validate_safe_integer(value.base_revision, 0, "acknowledged macro base revision")?;
+    validate_safe_integer(value.revision, 1, "acknowledged macro revision")?;
+    value
+        .revision
+        .checked_sub(value.base_revision)
+        .filter(|span| (1..=MAX_MACRO_REVISION_SPAN).contains(span))
+        .ok_or_else(|| anyhow!("acknowledged macro revision span is invalid"))?;
+    validate_macro_budget(value.simulation_milliseconds, value.wall_milliseconds)?;
+    validate_safe_integer(value.settled_deadline_ms, 0, "acknowledged macro deadline")?;
+    let request_sha256 = player_authority_macro_request_sha256(
+        run_id,
+        macro_session_id,
+        &value.operation_id,
+        value.base_revision,
+        value.simulation_milliseconds,
+        value.wall_milliseconds,
+        algorithm_version,
+        registry_fingerprint,
+        value.settled_deadline_ms,
+    )?;
+    if request_sha256 != value.request_sha256
+        || derive_macro_advance_command_id(&request_sha256)? != value.command_id
+    {
+        bail!("native player-authority acknowledged macro request identity conflicts")
+    }
+    Ok(())
+}
+
+fn validate_pending_advance(
+    value: &ExactRealtimePendingAdvance,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    if value.schema_version != MACRO_ADVANCE_SCHEMA_VERSION
+        || value.kind != MACRO_ADVANCE_KIND
+        || value.advance_mode != MACRO_ADVANCE_MODE
+    {
+        bail!("native player-authority pending macro schema is invalid")
+    }
+    validate_safe_integer(value.sequence, 1, "pending macro sequence")?;
+    validate_safe_integer(
+        value.expected_sequence,
+        value.sequence,
+        "pending macro expected sequence",
+    )?;
+    validate_logical_id(&value.operation_id, 128, "pending macro operation ID")?;
+    validate_logical_id(&value.command_id, 128, "pending macro command ID")?;
+    validate_sha256(&value.request_sha256, "pending macro request")?;
+    validate_logical_id(&value.macro_session_id, 128, "pending macro session ID")?;
+    validate_safe_integer(value.base_revision, 0, "pending macro base revision")?;
+    validate_safe_integer(
+        value.expected_revision,
+        1,
+        "pending macro expected revision",
+    )?;
+    let revision_span = value
+        .expected_revision
+        .checked_sub(value.base_revision)
+        .filter(|span| (1..=MAX_MACRO_REVISION_SPAN).contains(span))
+        .ok_or_else(|| anyhow!("pending macro revision span is invalid"))?;
+    if value.expected_sequence - value.sequence + 1 != revision_span {
+        bail!("pending macro sequence span differs from its revision span")
+    }
+    validate_macro_budget(value.simulation_milliseconds, value.wall_milliseconds)?;
+    validate_logical_id(&value.algorithm_version, 256, "pending macro algorithm")?;
+    validate_logical_id(
+        &value.registry_fingerprint,
+        256,
+        "pending macro registry fingerprint",
+    )?;
+    validate_safe_integer(value.settled_deadline_ms, 0, "pending macro deadline")?;
+    let request_sha256 = player_authority_macro_request_sha256(
+        run_id,
+        &value.macro_session_id,
+        &value.operation_id,
+        value.base_revision,
+        value.simulation_milliseconds,
+        value.wall_milliseconds,
+        &value.algorithm_version,
+        &value.registry_fingerprint,
+        value.settled_deadline_ms,
+    )?;
+    if request_sha256 != value.request_sha256
+        || derive_macro_advance_command_id(&request_sha256)? != value.command_id
+    {
+        bail!("native player-authority pending macro request identity conflicts")
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_player_authority_command_payload(
     value: &Value,
 ) -> anyhow::Result<SimulationCommandPatch> {
@@ -1856,6 +2448,54 @@ pub(crate) fn player_authority_command_request_sha256(
         "baseRevision": base_revision,
         "command": command,
     })))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn player_authority_macro_request_sha256(
+    run_id: &str,
+    macro_session_id: &str,
+    operation_id: &str,
+    base_revision: u64,
+    simulation_milliseconds: u64,
+    wall_milliseconds: u64,
+    algorithm_version: &str,
+    registry_fingerprint: &str,
+    settled_deadline_ms: u64,
+) -> anyhow::Result<String> {
+    validate_logical_id(run_id, 128, "player-authority run ID")?;
+    validate_logical_id(macro_session_id, 128, "player-authority macro session ID")?;
+    validate_logical_id(operation_id, 128, "player-authority macro operation ID")?;
+    validate_safe_integer(base_revision, 0, "player-authority macro base revision")?;
+    validate_macro_budget(simulation_milliseconds, wall_milliseconds)?;
+    validate_logical_id(algorithm_version, 256, "player-authority macro algorithm")?;
+    validate_logical_id(
+        registry_fingerprint,
+        256,
+        "player-authority macro registry fingerprint",
+    )?;
+    validate_safe_integer(
+        settled_deadline_ms,
+        0,
+        "player-authority macro settled deadline",
+    )?;
+    Ok(json_value_bitwise_sha256(&json!({
+        "kind": MACRO_ADVANCE_KIND,
+        "runId": run_id,
+        "macroSessionId": macro_session_id,
+        "operationId": operation_id,
+        "baseRevision": base_revision,
+        "simulationMilliseconds": simulation_milliseconds,
+        "wallMilliseconds": wall_milliseconds,
+        "advanceMode": MACRO_ADVANCE_MODE,
+        "algorithmVersion": algorithm_version,
+        "registryFingerprint": registry_fingerprint,
+        "settledDeadlineMs": settled_deadline_ms,
+    })))
+}
+
+pub(crate) fn derive_macro_advance_command_id(request_sha256: &str) -> anyhow::Result<String> {
+    validate_sha256(request_sha256, "player-authority macro request")?;
+    Ok(format!("pam:{}", &request_sha256[..48]))
 }
 
 fn validate_public_primary_proof(
@@ -2268,6 +2908,9 @@ mod tests {
         let lease = prepare(&mut store);
         let value = to_value(&lease).unwrap();
         assert!(value.get("pendingCommand").is_none());
+        assert!(value.get("pendingAdvance").is_none());
+        assert!(value.get("macroSession").is_none());
+        assert!(value.get("lastFinishedMacroSessionId").is_none());
         let acknowledged = value.get("acknowledged").unwrap();
         assert!(acknowledged.get("commandBaseRevision").is_none());
         assert!(acknowledged.get("commandRequestSha256").is_none());
@@ -2276,6 +2919,85 @@ mod tests {
             serde_json::from_value::<ExactRealtimeLease>(value).unwrap(),
             lease
         );
+    }
+
+    #[test]
+    fn player_authority_macro_stage_binds_the_full_request_and_never_overwrites_conflicts() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let checkpoint = publish_checkpoint(&mut store, 7);
+        store
+            .prepare_player_authority_lease(
+                "core-1".to_owned(),
+                RUN_ID.to_owned(),
+                FINGERPRINT.to_owned(),
+                checkpoint,
+                proof(7),
+                10_000,
+            )
+            .unwrap();
+        store
+            .activate_player_authority_lease("core-1", RUN_ID, FINGERPRINT)
+            .unwrap();
+
+        let staged = store
+            .stage_player_authority_macro_advance(
+                "core-1",
+                RUN_ID,
+                "macro-session-1",
+                "macro-operation-1",
+                7,
+                10,
+                60_000,
+                4_000,
+                "native-pure-idle-macro-v10:test",
+            )
+            .unwrap();
+        let pending = staged.pending_advance.as_ref().unwrap();
+        assert_eq!(pending.sequence, 1);
+        assert_eq!(pending.expected_sequence, 3);
+        assert_eq!(pending.base_revision, 7);
+        assert_eq!(pending.expected_revision, 10);
+        assert_eq!(pending.settled_deadline_ms, 14_000);
+        assert_eq!(pending.advance_mode, CoreAdvanceMode::PureIdleMacroV10);
+        assert_eq!(pending.registry_fingerprint, FINGERPRINT);
+        assert_eq!(pending.macro_session_id, "macro-session-1");
+        assert_eq!(pending.operation_id, "macro-operation-1");
+        let macro_session = staged.macro_session.as_ref().unwrap();
+        assert_eq!(macro_session.session_id, "macro-session-1");
+        assert_eq!(macro_session.started_revision, 7);
+        assert_eq!(macro_session.started_sequence, 0);
+
+        let duplicate = store
+            .stage_player_authority_macro_advance(
+                "core-1",
+                RUN_ID,
+                "macro-session-1",
+                "macro-operation-1",
+                7,
+                10,
+                60_000,
+                4_000,
+                "native-pure-idle-macro-v10:test",
+            )
+            .unwrap();
+        assert_eq!(duplicate, staged);
+
+        let conflict = store
+            .stage_player_authority_macro_advance(
+                "core-1",
+                RUN_ID,
+                "macro-session-1",
+                "macro-operation-1",
+                7,
+                10,
+                60_001,
+                4_000,
+                "native-pure-idle-macro-v10:test",
+            )
+            .unwrap_err();
+        assert!(format!("{conflict:#}").contains("different"));
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), staged);
     }
 
     #[test]

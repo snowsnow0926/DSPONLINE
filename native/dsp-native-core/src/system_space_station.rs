@@ -5,6 +5,7 @@ use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use serde_json::{Map, Value, json};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const MAX_DIGITS: usize = 256;
@@ -48,6 +49,37 @@ struct AllocationResult {
 #[derive(Debug)]
 struct HubEntry {
     system_id: String,
+}
+
+/// Runs only the read-only, per-entity elevator admission probe in parallel.
+/// Ordered collection and the serial grouping pass preserve the legacy entity
+/// order exactly; inventory allocation and every fairness cursor remain on the
+/// deterministic serial commit path below.
+fn collect_station_groups_with_runtime<K, F>(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    classify: F,
+) -> Vec<(K, Vec<usize>)>
+where
+    K: PartialEq + Send,
+    F: Fn(usize, &Value) -> Option<K> + Send + Sync,
+{
+    let admitted = runtime.indexed_map(entities, classify);
+    let mut stations_by_system = Vec::<(K, Vec<usize>)>::new();
+    for (entity_index, system_id) in admitted.into_iter().enumerate() {
+        let Some(system_id) = system_id else {
+            continue;
+        };
+        if let Some((_, indexes)) = stations_by_system
+            .iter_mut()
+            .find(|(candidate, _)| candidate == &system_id)
+        {
+            indexes.push(entity_index);
+        } else {
+            stations_by_system.push((system_id, vec![entity_index]));
+        }
+    }
+    stations_by_system
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -761,32 +793,21 @@ pub(crate) fn settle_hubs(
         Value::from(busy.saturating_sub(released)),
     );
 
-    let mut stations_by_system = Vec::<(String, Vec<usize>)>::new();
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let Some(entity) = entity.as_object() else {
-            continue;
-        };
-        let Some(system_id) = entity_system_id(state, entity) else {
-            continue;
-        };
-        if !is_elevator(entity)
-            || stations
-                .get(system_id)
-                .and_then(Value::as_object)
-                .and_then(|hub| string_at(hub, "status"))
-                != Some("operational")
-        {
-            continue;
-        }
-        if let Some((_, indexes)) = stations_by_system
-            .iter_mut()
-            .find(|(candidate, _)| candidate == system_id)
-        {
-            indexes.push(entity_index);
-        } else {
-            stations_by_system.push((system_id.to_owned(), vec![entity_index]));
-        }
-    }
+    let mut stations_by_system =
+        collect_station_groups_with_runtime(deterministic_runtime(), entities, |_, entity| {
+            let entity = entity.as_object()?;
+            let system_id = entity_system_id(state, entity)?;
+            (is_elevator(entity)
+                && stations
+                    .get(system_id)
+                    .and_then(Value::as_object)
+                    .and_then(|hub| string_at(hub, "status"))
+                    == Some("operational"))
+            .then_some(system_id)
+        })
+        .into_iter()
+        .map(|(system_id, indexes)| (system_id.to_owned(), indexes))
+        .collect::<Vec<_>>();
 
     for (system_id, station_indexes) in &mut stations_by_system {
         station_indexes.sort_by(|left, right| {
@@ -1201,7 +1222,53 @@ pub(crate) fn boundary_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
     use serde_json::json;
+
+    #[test]
+    fn elevator_admission_probe_is_identical_at_every_worker_limit() {
+        let entities = (0..(PARALLEL_MIN_ITEMS * 2 + 17))
+            .map(|index| match index % 11 {
+                0 => Value::Null,
+                1 => json!({ "id": format!("ordinary-{index}"), "system": "a", "enabled": true, "elevator": false }),
+                _ => json!({
+                    "id": format!("elevator-{index}"),
+                    "system": if index % 3 == 0 { "gamma" } else if index % 3 == 1 { "alpha" } else { "beta" },
+                    "enabled": index % 5 != 0,
+                    "elevator": true,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let classify = |_: usize, entity: &Value| {
+            let entity = entity.as_object()?;
+            if entity.get("enabled").and_then(Value::as_bool) != Some(true)
+                || entity.get("elevator").and_then(Value::as_bool) != Some(true)
+            {
+                return None;
+            }
+            match entity.get("system").and_then(Value::as_str) {
+                Some("gamma") => Some(0_u8),
+                Some("alpha") => Some(1_u8),
+                Some("beta") => Some(2_u8),
+                _ => None,
+            }
+        };
+        let expected = collect_station_groups_with_runtime(
+            &DeterministicRuntime::for_test(1),
+            &entities,
+            classify,
+        );
+        assert_eq!(expected.first().map(|entry| entry.0), Some(2));
+        for workers in [2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(runtime.worker_count_for_items(entities.len()), workers);
+            assert_eq!(
+                collect_station_groups_with_runtime(&runtime, &entities, classify),
+                expected,
+                "elevator probe/group order diverged at {workers} workers",
+            );
+        }
+    }
 
     #[test]
     fn mode_transition_reports_only_an_actual_topology_change() {

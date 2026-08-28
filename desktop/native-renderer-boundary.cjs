@@ -199,6 +199,13 @@ function stableOpaqueIdArray(value, label, maximumEntries = 65_536) {
   }
   return ids;
 }
+function stableLogicalIdArray(value, label, maximumEntries, maximumLength = 160) {
+  const ids = logicalIdArray(value, label, maximumEntries, maximumLength);
+  for (let index = 1; index < ids.length; index += 1) {
+    if (ids[index - 1] >= ids[index]) throw protocolError(label);
+  }
+  return ids;
+}
 function opaqueIdArray(value, label, maximumEntries) {
   if (!Array.isArray(value) || value.length > maximumEntries) throw protocolError(label);
   const seen = new Set();
@@ -403,6 +410,46 @@ function normalizeRecipeWorkspaceProjectionContext(value, label) {
     itemIds,
     selectedItemId: opaqueId(source.selectedItemId, `${label} selected item`),
     location,
+  };
+}
+
+function normalizeCommandPaletteEntitySearchContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "query", "cursor",
+    "limit", "buildingIds", "resourceIds", "planetIds",
+  ], label);
+  let encoded;
+  try {
+    encoded = JSON.stringify(source);
+  } catch {
+    throw protocolError(`${label} byte budget`);
+  }
+  if (Buffer.byteLength(encoded, "utf8") > 32_768) throw protocolError(`${label} byte budget`);
+  const query = boundedReadModelText(source.query, `${label} query`, 256, 1);
+  const buildingIds = stableLogicalIdArray(source.buildingIds, `${label} building IDs`, 256);
+  const resourceIds = stableLogicalIdArray(source.resourceIds, `${label} resource IDs`, 256);
+  const planetIds = stableLogicalIdArray(source.planetIds, `${label} planet IDs`, 256);
+  const limit = safeInteger(source.limit, `${label} limit`, 1);
+  if (query.length < 2 || Buffer.byteLength(query, "utf8") > 256 ||
+      query.trim() !== query || query.toLocaleLowerCase("zh-CN") !== query ||
+      /[\u0000-\u001f\u007f]/.test(query) || limit > 16 ||
+      buildingIds.length + resourceIds.length + planetIds.length > 256) {
+    throw protocolError(label);
+  }
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    query,
+    cursor: safeInteger(source.cursor, `${label} cursor`),
+    limit,
+    buildingIds,
+    resourceIds,
+    planetIds,
   };
 }
 
@@ -1848,6 +1895,116 @@ function normalizeCoreRecipeWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
+    "request", "totalCount", "rows", "nextCursor",
+  ], "native command palette entity-search projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "command-palette-entity-search-v1") {
+    throw protocolError("native command palette entity-search identity");
+  }
+  requireProjectionByteBudget(source, "native command palette entity-search projection");
+  const projectionContext = normalizeCommandPaletteEntitySearchContext(
+    context,
+    "native command palette entity-search context",
+  );
+  const revision = safeInteger(source.revision, "native command palette entity-search revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native command palette entity-search registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native command palette entity-search identity binding");
+  }
+  const limitsSource = exactObject(source.limits, [
+    "queryBytes", "selectorIds", "rows", "requestBytes", "projectionBytes",
+  ], "native command palette entity-search limits");
+  const limits = Object.fromEntries(Object.entries(limitsSource).map(([key, entry]) => [
+    key,
+    safeInteger(entry, `native command palette entity-search limits.${key}`, 1),
+  ]));
+  if (limits.queryBytes !== 256 || limits.selectorIds !== 256 || limits.rows !== 16 ||
+      limits.requestBytes !== 32_768 || limits.projectionBytes !== 1_048_576) {
+    throw protocolError("native command palette entity-search limit binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "query", "cursor", "limit", "buildingIds", "resourceIds", "planetIds",
+  ], "native command palette entity-search echoed request");
+  const echoed = normalizeCommandPaletteEntitySearchContext({
+    sessionId: projectionContext.sessionId,
+    expectedRevision: projectionContext.expectedRevision,
+    expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+    ...requestSource,
+  }, "native command palette entity-search echoed request");
+  for (const key of ["query", "cursor", "limit"]) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native command palette entity-search request binding");
+    }
+  }
+  for (const key of ["buildingIds", "resourceIds", "planetIds"]) {
+    if (echoed[key].length !== projectionContext[key].length ||
+        echoed[key].some((id, index) => id !== projectionContext[key][index])) {
+      throw protocolError("native command palette entity-search selector binding");
+    }
+  }
+  const totalCount = safeInteger(source.totalCount, "native command palette entity-search total count");
+  if (echoed.cursor > totalCount || !Array.isArray(source.rows) || source.rows.length > echoed.limit) {
+    throw protocolError("native command palette entity-search cardinality");
+  }
+  const entityIds = new Set();
+  const rows = source.rows.map((row, index) => {
+    const label = `native command palette entity-search rows[${index}]`;
+    const entry = exactObject(row, [
+      "entityId", "buildingId", "resourceId", "planetId", "recipeId", "positionX", "positionY",
+    ], label);
+    const entityId = opaqueId(entry.entityId, `${label}.entityId`);
+    if (entityIds.has(entityId)) throw protocolError(`${label}.entityId`);
+    entityIds.add(entityId);
+    const optionalCatalogId = (id, idLabel) => id === null ? null : logicalId(id, idLabel, 160);
+    const positionX = finiteNumber(entry.positionX, `${label}.positionX`, -10_000_000);
+    const positionY = finiteNumber(entry.positionY, `${label}.positionY`, -10_000_000);
+    if (positionX > 10_000_000 || positionY > 10_000_000) throw protocolError(`${label}.position`);
+    return {
+      entityId,
+      buildingId: optionalCatalogId(entry.buildingId, `${label}.buildingId`),
+      resourceId: optionalCatalogId(entry.resourceId, `${label}.resourceId`),
+      planetId: logicalId(entry.planetId, `${label}.planetId`, 160),
+      recipeId: optionalCatalogId(entry.recipeId, `${label}.recipeId`),
+      positionX,
+      positionY,
+    };
+  });
+  const expectedRows = Math.min(echoed.limit, totalCount - echoed.cursor);
+  if (rows.length !== expectedRows) throw protocolError("native command palette entity-search page size");
+  const consumed = echoed.cursor + rows.length;
+  const nextCursor = source.nextCursor === null
+    ? null
+    : safeInteger(source.nextCursor, "native command palette entity-search next cursor", 1);
+  if (nextCursor !== (consumed < totalCount ? consumed : null)) {
+    throw protocolError("native command palette entity-search cursor chain");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "command-palette-entity-search-v1",
+    revision,
+    registryFingerprint,
+    limits,
+    request: {
+      query: echoed.query,
+      cursor: echoed.cursor,
+      limit: echoed.limit,
+      buildingIds: echoed.buildingIds,
+      resourceIds: echoed.resourceIds,
+      planetIds: echoed.planetIds,
+    },
+    totalCount,
+    rows,
+    nextCursor,
+  };
+}
+
 function normalizeCoreCommand(value) {
   const source = exactObject(value, ["previousRevision", "revision", "changedEntityIds", "changedBeltIds", "topologyDirty"], "native core command result");
   const previousRevision = safeInteger(source.previousRevision, "native command previous revision");
@@ -2035,6 +2192,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,
+  coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,
   coreCommit: normalizeCoreCommit,

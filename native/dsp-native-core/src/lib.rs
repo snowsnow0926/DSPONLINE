@@ -9,6 +9,7 @@ mod campaign;
 pub mod canonical;
 pub mod catalog;
 pub mod command;
+mod command_palette;
 mod construction;
 mod construction_planner;
 mod deterministic_runtime;

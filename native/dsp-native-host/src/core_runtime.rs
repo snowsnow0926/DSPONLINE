@@ -24,6 +24,34 @@ use crate::save_store::{
 
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
+
+#[allow(clippy::too_many_arguments)]
+fn command_palette_search_request_bytes(
+    session_id: &str,
+    expected_revision: u64,
+    expected_registry_fingerprint: &str,
+    query: &str,
+    cursor: usize,
+    limit: usize,
+    building_ids: &[String],
+    resource_ids: &[String],
+    planet_ids: &[String],
+) -> anyhow::Result<usize> {
+    Ok(serde_json::to_vec(&json!({
+        "operation": "coreCommandPaletteEntitySearchProjection",
+        "sessionId": session_id,
+        "expectedRevision": expected_revision,
+        "expectedRegistryFingerprint": expected_registry_fingerprint,
+        "query": query,
+        "cursor": cursor,
+        "limit": limit,
+        "buildingIds": building_ids,
+        "resourceIds": resource_ids,
+        "planetIds": planet_ids,
+    }))?
+    .len())
+}
 
 pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
 pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority-tick-v1";
@@ -2012,6 +2040,46 @@ impl CoreRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn command_palette_entity_search_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        query: &str,
+        cursor: usize,
+        limit: usize,
+        building_ids: &[String],
+        resource_ids: &[String],
+        planet_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        if command_palette_search_request_bytes(
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            query,
+            cursor,
+            limit,
+            building_ids,
+            resource_ids,
+            planet_ids,
+        )? > MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES
+        {
+            bail!("native command palette entity-search request exceeds the IPC byte limit");
+        }
+        self.session(session_id)?
+            .command_palette_entity_search_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                query,
+                cursor,
+                limit,
+                building_ids,
+                resource_ids,
+                planet_ids,
+            )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,
@@ -2970,6 +3038,43 @@ mod tests {
     struct MutableDiskSpaceProbe(AtomicU64);
 
     const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
+    #[test]
+    fn command_palette_host_request_byte_accounting_includes_the_full_envelope() {
+        assert!(
+            command_palette_search_request_bytes(
+                "core-1",
+                7,
+                "builtin:test",
+                "熔炉",
+                0,
+                16,
+                &["smelter".to_owned()],
+                &[],
+                &[],
+            )
+            .unwrap()
+                <= MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES
+        );
+        let oversized = (0..205)
+            .map(|index| format!("mod_{index:03}_{}", "x".repeat(150)))
+            .collect::<Vec<_>>();
+        assert!(
+            command_palette_search_request_bytes(
+                &"s".repeat(128),
+                u64::MAX,
+                &"f".repeat(256),
+                "mod",
+                0,
+                16,
+                &oversized,
+                &[],
+                &[],
+            )
+            .unwrap()
+                > MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES
+        );
+    }
 
     impl MutableDiskSpaceProbe {
         fn available() -> Self {

@@ -366,6 +366,39 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     selectedItemId: "iron_ore",
     location: null,
   }), /recipe workspace projection request is invalid/);
+  await registry.commandPaletteEntitySearchProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    query: "熔炉",
+    cursor: 0,
+    limit: 16,
+    buildingIds: ["smelter"],
+    resourceIds: [],
+    planetIds: ["home"],
+  });
+  assert.throws(() => registry.commandPaletteEntitySearchProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    query: "熔炉",
+    cursor: 0,
+    limit: 17,
+    buildingIds: [],
+    resourceIds: [],
+    planetIds: [],
+  }), /command palette entity-search request is invalid/);
+  assert.throws(() => registry.commandPaletteEntitySearchProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    query: "熔炉",
+    cursor: 0,
+    limit: 16,
+    buildingIds: Array.from({ length: 205 }, (_, index) => `mod_${String(index).padStart(3, "0")}_${"x".repeat(150)}`),
+    resourceIds: [],
+    planetIds: [],
+  }), /bounded IPC limit/);
   assert.throws(() => registry.recipeWorkspaceProjection(7, {
     sessionId: "core-1",
     expectedRevision: 2,
@@ -380,7 +413,8 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), [
     "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2",
-    "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection", "coreCheckpoint", "coreClose",
+    "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection",
+    "coreCommandPaletteEntitySearchProjection", "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
     operation: "coreViewportProjectionV2",
@@ -413,6 +447,18 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     locationPlanetId: "home",
     locationCursor: 0,
     locationLimit: 32,
+  });
+  assert.deepEqual(calls[6], {
+    operation: "coreCommandPaletteEntitySearchProjection",
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    query: "熔炉",
+    cursor: 0,
+    limit: 16,
+    buildingIds: ["smelter"],
+    resourceIds: [],
+    planetIds: ["home"],
   });
 });
 

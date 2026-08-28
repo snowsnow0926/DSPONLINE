@@ -604,6 +604,20 @@ function nativeRecipeWorkspaceProjectionResultContext(request) {
   };
 }
 
+function nativeCommandPaletteEntitySearchResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    query: request?.query,
+    cursor: request?.cursor,
+    limit: request?.limit,
+    buildingIds: request?.buildingIds ?? [],
+    resourceIds: request?.resourceIds ?? [],
+    planetIds: request?.planetIds ?? [],
+  };
+}
+
 async function waitForResponseAck(record, expectedBytes) {
   if (record.cancelled) throw Object.assign(new Error("云存档上传已取消"), { name: "AbortError", code: "ABORTED" });
   await new Promise((resolve, reject) => {
@@ -1136,6 +1150,24 @@ ipcMain.handle("desktop:native-core-recipe-workspace-projection", async (event, 
       return await nativePlayerAuthorityProjectionBroker.read(ownerId, "recipe-workspace-v1", request);
     }
     return await nativeCoreSessions.recipeWorkspaceProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
+  return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生命令面板设备搜索失败，请重试",
+    resultContext: nativeCommandPaletteEntitySearchResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "command-palette-entity-search-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.commandPaletteEntitySearchProjection(ownerId, request);
   });
 });
 

@@ -138,6 +138,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreStatisticsProjection: (request) => invokeNative("desktop:native-core-statistics-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生统计投影请求失败，请重试" }, request),
   getNativeCoreTechnologyProjection: (request) => invokeNative("desktop:native-core-technology-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生科研投影请求失败，请重试" }, request),
   getNativeCoreRecipeWorkspaceProjection: (request) => invokeNative("desktop:native-core-recipe-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生生产资料库投影请求失败，请重试" }, request),
+  getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),
   advanceNativeCore: (request) => invokeNative("desktop:native-core-advance", { fallbackCode: "NATIVE_CORE_ADVANCE_FAILED", message: "原生影子模拟推进失败，请重试" }, request),

@@ -10,6 +10,10 @@ const CONTROL_REQUEST_KIND = 1;
 const CONTROL_RESPONSE_KIND = 2;
 const MAX_FRAME_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
+const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES = 32_768;
+const MAX_COMMAND_PALETTE_QUERY_BYTES = 256;
+const MAX_COMMAND_PALETTE_SELECTOR_IDS = 256;
+const MAX_COMMAND_PALETTE_ROWS = 16;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
@@ -1008,6 +1012,50 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  commandPaletteEntitySearchProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "query", "cursor",
+      "limit", "buildingIds", "resourceIds", "planetIds",
+    ]);
+    const buildingIds = request?.buildingIds ?? [];
+    const resourceIds = request?.resourceIds ?? [];
+    const planetIds = request?.planetIds ?? [];
+    const selectorCount = buildingIds.length + resourceIds.length + planetIds.length;
+    const validSelectorIds = (values) => Array.isArray(values) &&
+      values.every((id, index) => validLogicalId(id, 160) && (index === 0 || values[index - 1] < id));
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      typeof request.query !== "string" || request.query.length < 2 ||
+      Buffer.byteLength(request.query, "utf8") > MAX_COMMAND_PALETTE_QUERY_BYTES ||
+      request.query.trim() !== request.query || request.query.toLocaleLowerCase("zh-CN") !== request.query ||
+      /[\u0000-\u001f\u007f]/.test(request.query) ||
+      !Number.isSafeInteger(request.cursor) || request.cursor < 0 ||
+      !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > MAX_COMMAND_PALETTE_ROWS ||
+      selectorCount > MAX_COMMAND_PALETTE_SELECTOR_IDS ||
+      !validSelectorIds(buildingIds) || !validSelectorIds(resourceIds) || !validSelectorIds(planetIds)) {
+      throw new TypeError("native command palette entity-search request is invalid");
+    }
+    const hostRequest = {
+      operation: "coreCommandPaletteEntitySearchProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      query: request.query,
+      cursor: request.cursor,
+      limit: request.limit,
+      buildingIds,
+      resourceIds,
+      planetIds,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES) {
+      throw new RangeError("native command palette entity-search request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
   applyCommand(ownerId, sessionId, command) {
     this.assertOwner(ownerId, sessionId);
     return this.requestOwned(ownerId, sessionId, {
@@ -1438,6 +1486,7 @@ module.exports = {
   FRAME_MAGIC,
   FRAME_PROTOCOL_VERSION,
   MAX_FRAME_PAYLOAD_BYTES,
+  MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,

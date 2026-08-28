@@ -204,6 +204,21 @@ pub enum ControlRequest {
         #[serde(default)]
         location_limit: usize,
     },
+    CoreCommandPaletteEntitySearchProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        query: String,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+        #[serde(default)]
+        building_ids: Vec<String>,
+        #[serde(default)]
+        resource_ids: Vec<String>,
+        #[serde(default)]
+        planet_ids: Vec<String>,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -574,6 +589,47 @@ mod tests {
                 assert_eq!(location_limit, 0);
             }
             _ => panic!("recipe workspace defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn command_palette_protocol_preserves_bounded_search_page_selectors() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreCommandPaletteEntitySearchProjection",
+            "sessionId": "core-1",
+            "expectedRevision": 42,
+            "expectedRegistryFingerprint": "builtin:test",
+            "query": "熔炉",
+            "cursor": 16,
+            "limit": 16,
+            "buildingIds": ["smelter"],
+            "resourceIds": ["iron_ore"],
+            "planetIds": ["home"]
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreCommandPaletteEntitySearchProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                query,
+                cursor,
+                limit,
+                building_ids,
+                resource_ids,
+                planet_ids,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(expected_revision, 42);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(query, "熔炉");
+                assert_eq!(cursor, 16);
+                assert_eq!(limit, 16);
+                assert_eq!(building_ids, ["smelter"]);
+                assert_eq!(resource_ids, ["iron_ore"]);
+                assert_eq!(planet_ids, ["home"]);
+            }
+            _ => panic!("command palette search decoded as the wrong variant"),
         }
     }
 }

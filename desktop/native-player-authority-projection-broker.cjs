@@ -16,6 +16,7 @@ const PROJECTION_METHODS = Object.freeze({
   "statistics-v1": "statisticsProjection",
   "technology-v1": "technologyProjection",
   "recipe-workspace-v1": "recipeWorkspaceProjection",
+  "command-palette-entity-search-v1": "commandPaletteEntitySearchProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

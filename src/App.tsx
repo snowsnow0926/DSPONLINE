@@ -403,6 +403,16 @@ import {
   type RecipeWorkspaceSelector,
 } from "./game/recipeWorkspaceReadModel";
 import {
+  createCommandPaletteNativeEntityFocusPlan,
+  createCommandPaletteEntitySearchSelector,
+  selectNativeCommandPaletteEntitySearchReadModel,
+  type CommandPaletteNativeEntityTarget,
+} from "./game/commandPaletteEntitySearchReadModel";
+import {
+  NativeCommandPaletteEntitySearchStore,
+  createNativePlayerAuthorityCommandPaletteEntitySearchSource,
+} from "./game/nativeCommandPaletteEntitySearchStore";
+import {
   RECIPE_FOCUS_NATIVE_BASE_FIELDS,
   createWebRecipeFocusReadModel,
   selectNativeRecipeFocusReadModel,
@@ -1499,6 +1509,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
   const [operationsOpen, setOperationsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteEntitySearchRequest, setCommandPaletteEntitySearchRequest] = useState({
+    query: "",
+    cursor: 0,
+  });
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [galaxyOpen, setGalaxyOpen] = useState(false);
   const [galaxyFocusTab, setGalaxyFocusTab] = useState<"ranking" | "speedrun" | "cloud" | "account" | null>(null);
@@ -2032,6 +2046,63 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeRecipeWorkspaceStore.getSnapshot,
   );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const commandPaletteEntitySearchSelector = useMemo(
+    () => createCommandPaletteEntitySearchSelector(
+      commandPaletteEntitySearchRequest.query,
+      commandPaletteEntitySearchRequest.cursor,
+    ),
+    [
+      commandPaletteEntitySearchRequest.cursor,
+      commandPaletteEntitySearchRequest.query,
+      recipeWorkspaceRegistryFingerprint,
+    ],
+  );
+  const updateCommandPaletteEntitySearchRequest = useCallback((query: string, cursor: number) => {
+    setCommandPaletteEntitySearchRequest((current) => current.query === query && current.cursor === cursor
+      ? current
+      : { query, cursor });
+  }, []);
+  const nativeCommandPaletteEntitySearchStoreRef = useRef<NativeCommandPaletteEntitySearchStore | null>(null);
+  if (nativeCommandPaletteEntitySearchStoreRef.current === null) {
+    nativeCommandPaletteEntitySearchStoreRef.current = new NativeCommandPaletteEntitySearchStore();
+  }
+  const nativeCommandPaletteEntitySearchStore = nativeCommandPaletteEntitySearchStoreRef.current;
+  const nativeCommandPaletteEntitySearchSnapshot = useSyncExternalStore(
+    nativeCommandPaletteEntitySearchStore.subscribe,
+    nativeCommandPaletteEntitySearchStore.getSnapshot,
+    nativeCommandPaletteEntitySearchStore.getSnapshot,
+  );
+  const nativeCommandPaletteEntitySearchReadModel = useMemo(
+    () => selectNativeCommandPaletteEntitySearchReadModel(
+      nativeCommandPaletteEntitySearchSnapshot.frame,
+      {
+        enabled: Boolean(nativePlayerAuthorityActiveFrame),
+        sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+        expectedRevision: factoryThinViewExpectedRevision,
+        expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+        selector: commandPaletteEntitySearchSelector,
+      },
+    ),
+    [
+      commandPaletteEntitySearchSelector,
+      factoryThinViewExpectedRevision,
+      nativeCommandPaletteEntitySearchSnapshot.frame,
+      nativePlayerAuthorityActiveFrame,
+      recipeWorkspaceRegistryFingerprint,
+    ],
+  );
+  const commandPaletteEntitySearchStatus = !commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
+      commandPaletteEntitySearchSelector.query.length < 2
+    ? "empty"
+    : commandPaletteEntitySearchSelector.truncated
+      ? "truncated"
+      : !nativePlayerAuthorityActiveFrame
+        ? "unavailable"
+        : nativeCommandPaletteEntitySearchReadModel
+          ? "ready"
+          : nativeCommandPaletteEntitySearchSnapshot.status === "unavailable"
+            ? "unavailable"
+            : "loading";
   const nativeRecipeWorkspaceReadModel = useMemo(
     () => selectNativeRecipeWorkspaceReadModel(nativeRecipeWorkspaceSnapshot.frame, {
       enabled: Boolean(nativePlayerAuthorityBoundFrame),
@@ -2471,6 +2542,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recipeWorkspaceRegistryFingerprint,
     recipeWorkspaceSelector,
     recipesOpen,
+  ]);
+  useEffect(() => {
+    if (!commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
+        commandPaletteEntitySearchSelector.query.length < 2) {
+      nativeCommandPaletteEntitySearchStore.clear();
+      return;
+    }
+    if (commandPaletteEntitySearchSelector.truncated) {
+      nativeCommandPaletteEntitySearchStore.markTruncated(factoryThinViewExpectedRevision);
+      return;
+    }
+    if (!nativePlayerAuthorityActiveFrame) {
+      nativeCommandPaletteEntitySearchStore.clear();
+      return;
+    }
+    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
+    if (!sessionId) {
+      nativeCommandPaletteEntitySearchStore.markUnavailable(factoryThinViewExpectedRevision);
+      return;
+    }
+    const source = createNativePlayerAuthorityCommandPaletteEntitySearchSource(
+      desktopBridge,
+      sessionId,
+    );
+    if (!source) {
+      nativeCommandPaletteEntitySearchStore.markUnavailable(factoryThinViewExpectedRevision);
+      return;
+    }
+    void nativeCommandPaletteEntitySearchStore.refresh(
+      source,
+      sessionId,
+      factoryThinViewExpectedRevision,
+      recipeWorkspaceRegistryFingerprint,
+      commandPaletteEntitySearchSelector,
+    );
+  }, [
+    commandPaletteEntitySearchSelector,
+    commandPaletteOpen,
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativeCommandPaletteEntitySearchStore,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    recipeWorkspaceRegistryFingerprint,
   ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
@@ -5849,13 +5964,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const openCommandPalette = useCallback(() => {
     if (nextMobileShell) mobileNavigation.openModal("command");
+    nativeCommandPaletteEntitySearchStore.clear();
+    setCommandPaletteEntitySearchRequest({ query: "", cursor: 0 });
     setCommandPaletteOpen(true);
-  }, [mobileNavigation.openModal, nextMobileShell]);
+  }, [mobileNavigation.openModal, nativeCommandPaletteEntitySearchStore, nextMobileShell]);
 
   const closeCommandPalette = useCallback(() => {
+    nativeCommandPaletteEntitySearchStore.clear();
+    setCommandPaletteEntitySearchRequest({ query: "", cursor: 0 });
     setCommandPaletteOpen(false);
     if (nextMobileShell) mobileNavigation.dismissModal("command");
-  }, [mobileNavigation.dismissModal, nextMobileShell]);
+  }, [mobileNavigation.dismissModal, nativeCommandPaletteEntitySearchStore, nextMobileShell]);
 
   const returnToMenuSafely = useCallback(async () => {
     if (returnToMenuSaveInFlightRef.current) return;
@@ -8722,7 +8841,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`已定位连续拉线目标：${batchConnectionEntityLabel(target)}`);
   }, [focusEntityIds, onPlanetChange]);
 
-  const focusPlacedEntity = useCallback((entityId: string) => {
+  const focusPlacedEntity = useCallback((entityId: string, nativeTarget?: CommandPaletteNativeEntityTarget) => {
+    if (nativeTarget) {
+      const authority = selectActiveNativePlayerAuthorityFrame(
+        nativePlayerAuthorityClock.getSnapshot(),
+        nativeCoreProjectionSessionId,
+      );
+      const focusPlan = createCommandPaletteNativeEntityFocusPlan(
+        gameRef.current,
+        nativeTarget,
+        authority,
+        contentPackRuntimeSnapshotRef.current.fingerprint,
+      );
+      if (!focusPlan) {
+        setNotice("原生命令搜索结果已过期，本次定位已安全取消");
+        return;
+      }
+      if (focusPlan.changePlanet && !onPlanetChange(focusPlan.planetId)) return;
+      setSelectedEntityIds([entityId]);
+      setSelectedBeltId(null);
+      setSelectedBeltIds([]);
+      setInspectorTab("inspect");
+      setMobilePanel("inspector");
+      if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
+      void setCenter(focusPlan.centerX, focusPlan.centerY, {
+        zoom: 1.05,
+        duration: focusPlan.duration,
+      });
+      setNotice(`已定位：${nativeTarget.label}`);
+      return;
+    }
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
     if (gameRef.current.activePlanetId !== entity.planetId && !onPlanetChange(entity.planetId)) return;
@@ -8734,7 +8882,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 50);
     setNotice(`已定位：${entity.buildingId ? getBuilding(entity.buildingId).name : entity.resourceId ? ITEMS[entity.resourceId].name : entity.id}`);
-  }, [focusEntityIds, mobileNavigation.replaceModalWithSheet, nextMobileShell, onPlanetChange]);
+  }, [focusEntityIds, mobileNavigation.replaceModalWithSheet, nativeCoreProjectionSessionId, nativePlayerAuthorityClock, nextMobileShell, onPlanetChange, setCenter]);
 
   const locateProductionLine = useCallback((itemId: ItemId, planetId: PlanetId) => {
     const location = getProductionLineLocations(gameRef.current, itemId).find((candidate) => candidate.planetId === planetId);
@@ -14194,6 +14342,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onPauseToggle={togglePause}
         onTogglePerformance={() => updateSettings({ performanceMode: !gameRef.current.settings.performanceMode })}
         onToggleReducedMotion={() => updateSettings({ reducedMotion: !gameRef.current.settings.reducedMotion })}
+        entitySearchMode={nativePlayerAuthorityBoundFrame ? "native" : "web"}
+        nativeEntitySearch={nativeCommandPaletteEntitySearchReadModel}
+        nativeEntitySearchStatus={commandPaletteEntitySearchStatus}
+        onEntitySearchRequest={updateCommandPaletteEntitySearchRequest}
       />
       <Suspense fallback={<WorkspaceLoading />}>
         {constructionCenterOpen ? (

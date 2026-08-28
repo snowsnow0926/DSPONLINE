@@ -39,6 +39,10 @@ function fixture(initialSnapshot = {}) {
       calls.push(["recipe-workspace-v1", ownerId, request]);
       return { projectionType: "recipe-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
     },
+    async commandPaletteEntitySearchProjection(ownerId, request) {
+      calls.push(["command-palette-entity-search-v1", ownerId, request]);
+      return { projectionType: "command-palette-entity-search-v1", schemaVersion: 1, revision: request.expectedRevision };
+    },
   };
   const broker = new NativePlayerAuthorityProjectionBroker({
     runtime: { snapshot: () => ({ ...snapshot }) },
@@ -57,7 +61,7 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1"]) {
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "command-palette-entity-search-v1"]) {
     const request = { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
@@ -68,6 +72,7 @@ test("active same-session same-revision reads use only the main owner identity",
     ["statistics-v1", "main-player-authority"],
     ["technology-v1", "main-player-authority"],
     ["recipe-workspace-v1", "main-player-authority"],
+    ["command-palette-entity-search-v1", "main-player-authority"],
   ]);
 });
 
@@ -147,6 +152,7 @@ test("main routes only matching authority reads through the broker and exposes n
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "statistics-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
+  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"command-palette-entity-search-v1",[\s\S]*?request/);
   assert.match(preload, /getNativePlayerAuthorityState/);
   assert.match(preload, /onNativePlayerAuthorityState/);
   assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);

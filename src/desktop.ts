@@ -94,6 +94,8 @@ export interface DesktopBridge {
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
   getNativeCoreRecipeWorkspaceProjection?: (request: DesktopNativeCoreRecipeWorkspaceProjectionRequest) => Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
+  /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
+  getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
@@ -844,6 +846,52 @@ export interface DesktopNativeCoreRecipeWorkspaceProjectionResult {
     entities: Array<{ id: string; x: number; y: number }>;
     nextCursor: number | null;
   };
+}
+
+export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  query: string;
+  cursor: number;
+  limit: number;
+  buildingIds: string[];
+  resourceIds: string[];
+  planetIds: string[];
+}
+
+export interface DesktopNativeCoreCommandPaletteEntitySearchRow {
+  entityId: string;
+  buildingId: string | null;
+  resourceId: string | null;
+  planetId: string;
+  recipeId: string | null;
+  positionX: number;
+  positionY: number;
+}
+
+export interface DesktopNativeCoreCommandPaletteEntitySearchResult {
+  schemaVersion: 1;
+  projectionType: "command-palette-entity-search-v1";
+  revision: number;
+  registryFingerprint: string;
+  limits: {
+    queryBytes: 256;
+    selectorIds: 256;
+    rows: 16;
+    requestBytes: 32768;
+    projectionBytes: 1048576;
+  };
+  request: {
+    query: string;
+    cursor: number;
+    limit: number;
+    buildingIds: string[];
+    resourceIds: string[];
+    planetIds: string[];
+  };
+  totalCount: number;
+  rows: DesktopNativeCoreCommandPaletteEntitySearchRow[];
+  nextCursor: number | null;
 }
 
 export type DesktopNativeCoreProjectionTransferRequest =

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow, bail};
 use num_bigint::BigUint;
@@ -253,6 +253,21 @@ pub struct BeltSchedulerDiagnostics {
     pub(crate) mask_cow_pages: usize,
     #[serde(skip)]
     pub(crate) dirty_validation_rows: usize,
+    /// A carried revision can move its factory-sized scratch buffers into the
+    /// next exact transaction. These fields remain process-local evidence and
+    /// never widen the host protocol or persisted v47 state.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) runtime_workspace_reused: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) runtime_workspace_initialized_route_rows: usize,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) runtime_workspace_initialized_group_rows: usize,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) runtime_workspace_initialized_target_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,11 +445,41 @@ impl SealedTouchedRoutes {
 /// be installed on a rebuilt route graph. It is deliberately absent from v47,
 /// checkpoints and canonical hashes: a process restart may rebuild the same
 /// seed with one bounded full topology inspection without changing gameplay.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct BeltActivitySnapshot {
     routes: Arc<PreparedRoutes>,
     active_group_indices: Box<[u32]>,
     active_queue_enabled: bool,
+    reusable_runtime: Mutex<Option<BeltReusableRuntime>>,
+}
+
+#[derive(Debug)]
+struct BeltReusableRuntime {
+    active_groups: Vec<bool>,
+    workspace: BeltWorkspace,
+}
+
+impl BeltActivitySnapshot {
+    fn take_reusable_runtime(&self) -> Option<BeltReusableRuntime> {
+        self.reusable_runtime.lock().ok()?.take()
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        (self.active_group_indices.len() * size_of::<u32>()) as u64
+            + self
+                .reusable_runtime
+                .lock()
+                .ok()
+                .and_then(|buffers| buffers.as_ref().map(BeltReusableRuntime::estimated_bytes))
+                .unwrap_or(0)
+    }
+}
+
+impl BeltReusableRuntime {
+    fn estimated_bytes(&self) -> u64 {
+        self.active_groups.capacity().div_ceil(u8::BITS as usize) as u64
+            + self.workspace.estimated_bytes()
+    }
 }
 
 enum ActiveGroupIndices<'a> {
@@ -561,7 +606,34 @@ pub(crate) struct BeltRuntime {
 }
 
 impl BeltRuntime {
+    #[cfg(test)]
     fn empty(belt_count: usize, prepared_routes: &PreparedRoutes) -> Self {
+        Self::empty_with_reusable(belt_count, prepared_routes, None)
+    }
+
+    fn empty_with_reusable(
+        belt_count: usize,
+        prepared_routes: &PreparedRoutes,
+        reusable: Option<BeltReusableRuntime>,
+    ) -> Self {
+        let group_count = prepared_routes.groups.len();
+        let target_slot_count = expand_compact_index(prepared_routes.target_slot_count);
+        let reusable = reusable.filter(|buffers| {
+            buffers.active_groups.len() == group_count
+                && buffers
+                    .workspace
+                    .matches_dimensions(belt_count, group_count, target_slot_count)
+        });
+        #[cfg(test)]
+        let runtime_workspace_reused = reusable.is_some();
+        let (active_groups, workspace) = reusable
+            .map(|buffers| (buffers.active_groups, buffers.workspace))
+            .unwrap_or_else(|| {
+                (
+                    vec![false; group_count],
+                    BeltWorkspace::new(belt_count, group_count, target_slot_count),
+                )
+            });
         Self {
             source: None,
             progress: BeltPagedColumn::default(),
@@ -571,19 +643,38 @@ impl BeltRuntime {
             total_dirty: BeltPagedColumn::with_len_default(belt_count),
             touched_routes: TouchedRoutes::default(),
             belt_capacity: prepared_routes.total_capacity,
-            active_groups: vec![false; prepared_routes.groups.len()],
-            active_group_indices: Vec::with_capacity(prepared_routes.groups.len()),
+            active_groups,
+            // A carried snapshot repopulates only its sorted O(active) rows.
+            // Reserving every topology group here recreated a factory-sized
+            // allocation on every otherwise sparse revision.
+            active_group_indices: Vec::new(),
             active_queue_enabled: false,
             diagnostics: BeltSchedulerDiagnostics {
                 route_count: prepared_routes.routes.len(),
                 group_count: prepared_routes.groups.len(),
+                #[cfg(test)]
+                runtime_workspace_reused,
+                #[cfg(test)]
+                runtime_workspace_initialized_route_rows: if runtime_workspace_reused {
+                    0
+                } else {
+                    belt_count
+                },
+                #[cfg(test)]
+                runtime_workspace_initialized_group_rows: if runtime_workspace_reused {
+                    0
+                } else {
+                    group_count
+                },
+                #[cfg(test)]
+                runtime_workspace_initialized_target_rows: if runtime_workspace_reused {
+                    0
+                } else {
+                    target_slot_count
+                },
                 ..BeltSchedulerDiagnostics::default()
             },
-            workspace: BeltWorkspace::new(
-                belt_count,
-                prepared_routes.groups.len(),
-                expand_compact_index(prepared_routes.target_slot_count),
-            ),
+            workspace,
         }
     }
 
@@ -666,7 +757,11 @@ impl BeltRuntime {
         carried: Option<Arc<BeltActivitySnapshot>>,
     ) -> anyhow::Result<Self> {
         let belt_count = state.validate_belt_runtime_topology()?;
-        let mut runtime = Self::empty(belt_count, prepared_routes);
+        let reusable = carried
+            .as_ref()
+            .filter(|snapshot| Arc::ptr_eq(&snapshot.routes, prepared_routes))
+            .and_then(|snapshot| snapshot.take_reusable_runtime());
+        let mut runtime = Self::empty_with_reusable(belt_count, prepared_routes, reusable);
         runtime.source = Some(state.belt_commit_source());
         // Each clone copies only the fixed 64-entry top directory. Pages stay
         // shared with the source revision until an active route writes them.
@@ -723,13 +818,18 @@ impl BeltRuntime {
     }
 
     pub(crate) fn activity_snapshot(
-        &self,
+        &mut self,
         routes: &Arc<PreparedRoutes>,
     ) -> Arc<BeltActivitySnapshot> {
+        let reusable_runtime = BeltReusableRuntime {
+            active_groups: std::mem::take(&mut self.active_groups),
+            workspace: std::mem::take(&mut self.workspace),
+        };
         Arc::new(BeltActivitySnapshot {
             routes: Arc::clone(routes),
-            active_group_indices: self.active_group_indices.clone().into_boxed_slice(),
+            active_group_indices: std::mem::take(&mut self.active_group_indices).into_boxed_slice(),
             active_queue_enabled: self.active_queue_enabled,
+            reusable_runtime: Mutex::new(Some(reusable_runtime)),
         })
     }
 
@@ -1274,7 +1374,7 @@ impl Group {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct BeltWorkspace {
     post_actions: Vec<BeltPostAction>,
     target_free: Vec<f64>,
@@ -1305,6 +1405,38 @@ impl BeltWorkspace {
             selected_route_indices: Vec::with_capacity(belt_count),
             pending_wake_group_indices: Vec::with_capacity(group_count.min(1_024)),
         }
+    }
+
+    fn matches_dimensions(
+        &self,
+        belt_count: usize,
+        group_count: usize,
+        target_slot_count: usize,
+    ) -> bool {
+        self.post_actions.len() == belt_count
+            && self.groups.len() == group_count
+            && self.target_free.len() == target_slot_count
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        let group_nested_bytes = self
+            .groups
+            .iter()
+            .map(|group| {
+                group.candidates.capacity() * size_of::<Candidate>()
+                    + group.inactive_routes.capacity() * size_of::<usize>()
+            })
+            .sum::<usize>();
+        (self.post_actions.capacity() * size_of::<BeltPostAction>()
+            + self.target_free.capacity() * size_of::<f64>()
+            + self.touched_target_slots.capacity() * size_of::<u32>()
+            + self.groups.capacity() * size_of::<Group>()
+            + group_nested_bytes
+            + self.usable_candidate_indices.capacity() * size_of::<usize>()
+            + self.active_candidate_indices.capacity() * size_of::<usize>()
+            + self.selected_group_indices.capacity() * size_of::<u32>()
+            + self.selected_route_indices.capacity() * size_of::<u32>()
+            + self.pending_wake_group_indices.capacity() * size_of::<u32>()) as u64
     }
 
     fn reset_target_free(&mut self) {
@@ -4156,6 +4288,88 @@ mod tests {
             total_capacity: 0.0,
             group_by_key: Arc::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn carried_activity_moves_factory_sized_workspace_once_without_reinitializing_rows() {
+        let belt_count = 4_097;
+        let target_slot_count = 257;
+        let mut prepared = kernel_prepared_routes(belt_count);
+        prepared.groups = vec![
+            PreparedGroup {
+                source_index: 0,
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![0].into_boxed_slice(),
+            },
+            PreparedGroup {
+                source_index: 1,
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![1].into_boxed_slice(),
+            },
+            PreparedGroup {
+                source_index: 2,
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![2].into_boxed_slice(),
+            },
+        ];
+        prepared.target_slot_count = compact_index(target_slot_count, "test target slots").unwrap();
+        let prepared = Arc::new(prepared);
+
+        let mut first = BeltRuntime::empty(belt_count, &prepared);
+        first.active_groups[0] = true;
+        first.active_groups[2] = true;
+        first.active_group_indices = vec![0, 2];
+        let post_actions_ptr = first.workspace.post_actions.as_ptr();
+        let groups_ptr = first.workspace.groups.as_ptr();
+        let target_free_ptr = first.workspace.target_free.as_ptr();
+        assert!(!first.diagnostics.runtime_workspace_reused);
+        assert_eq!(
+            first.diagnostics.runtime_workspace_initialized_route_rows,
+            belt_count
+        );
+        assert_eq!(
+            first.diagnostics.runtime_workspace_initialized_group_rows,
+            3
+        );
+        assert_eq!(
+            first.diagnostics.runtime_workspace_initialized_target_rows,
+            target_slot_count
+        );
+
+        let snapshot = first.activity_snapshot(&prepared);
+        assert!(
+            snapshot.estimated_bytes()
+                >= (belt_count * size_of::<BeltPostAction>() + target_slot_count * size_of::<f64>())
+                    as u64
+        );
+        let reusable = snapshot.take_reusable_runtime().unwrap();
+        let second = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(reusable));
+
+        assert!(second.diagnostics.runtime_workspace_reused);
+        assert_eq!(
+            second.diagnostics.runtime_workspace_initialized_route_rows,
+            0
+        );
+        assert_eq!(
+            second.diagnostics.runtime_workspace_initialized_group_rows,
+            0
+        );
+        assert_eq!(
+            second.diagnostics.runtime_workspace_initialized_target_rows,
+            0
+        );
+        assert_eq!(second.active_groups, [true, false, true]);
+        assert_eq!(second.workspace.post_actions.as_ptr(), post_actions_ptr);
+        assert_eq!(second.workspace.groups.as_ptr(), groups_ptr);
+        assert_eq!(second.workspace.target_free.as_ptr(), target_free_ptr);
+        assert!(snapshot.take_reusable_runtime().is_none());
+        assert_eq!(snapshot.estimated_bytes(), (2 * size_of::<u32>()) as u64);
     }
 
     #[test]

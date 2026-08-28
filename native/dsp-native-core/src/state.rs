@@ -4919,6 +4919,11 @@ impl CoreState {
                 .map(|directory| directory.estimated_bytes())
                 .unwrap_or(0)
             + self.factory_topology.estimated_bytes();
+        let belt_activity_runtime_bytes = self
+            .prepared_belt_activity
+            .as_ref()
+            .map(|activity| activity.estimated_bytes())
+            .unwrap_or(0);
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + numeric_columns
@@ -4926,6 +4931,7 @@ impl CoreState {
             + self.belt_dynamics.estimated_bytes()
             + index_overhead
             + topology_index_bytes
+            + belt_activity_runtime_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);

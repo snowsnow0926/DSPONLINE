@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use serde_json::{Map, Number, Value};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -57,6 +58,66 @@ const DEFINITIONS: [Definition; 4] = [
         reserve: 24.0,
     },
 ];
+
+#[derive(Debug, Clone, PartialEq)]
+struct ExporterProbe {
+    entity_index: usize,
+    allocated_power: bool,
+    power_factor: f64,
+    paused: bool,
+    buffered_by_definition: [f64; DEFINITIONS.len()],
+}
+
+fn collect_ordered_exporter_probes_with_runtime<R, F>(
+    runtime: &DeterministicRuntime,
+    entity_indices: &[usize],
+    probe: F,
+) -> anyhow::Result<Vec<R>>
+where
+    R: Send,
+    F: Fn(usize) -> anyhow::Result<R> + Send + Sync,
+{
+    // Indexed collection retains topology order. All workers finish before
+    // the first error is selected, so scheduling can neither choose the
+    // visible error nor reorder the serial shared-ledger replay.
+    runtime
+        .indexed_map(entity_indices, |_, entity_index| probe(*entity_index))
+        .into_iter()
+        .collect()
+}
+
+fn probe_exporter(
+    entities: &[Value],
+    effective_power: &HashMap<usize, f64>,
+    allocated_power: &HashMap<usize, f64>,
+    entity_index: usize,
+) -> anyhow::Result<ExporterProbe> {
+    let entity = entities
+        .get(entity_index)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native galactic exporter is invalid"))?;
+    let mut buffered_by_definition = [0.0; DEFINITIONS.len()];
+    for (definition_index, definition) in DEFINITIONS.iter().enumerate() {
+        buffered_by_definition[definition_index] = finite_number(
+            entity
+                .get("inputs")
+                .and_then(Value::as_object)
+                .and_then(|inputs| inputs.get(definition.item_id)),
+        )
+        .floor()
+        .max(0.0);
+    }
+    Ok(ExporterProbe {
+        entity_index,
+        allocated_power: allocated_power.contains_key(&entity_index),
+        power_factor: effective_power.get(&entity_index).copied().unwrap_or(0.0),
+        paused: entity
+            .get("galacticExporterPaused")
+            .and_then(Value::as_bool)
+            != Some(false),
+        buffered_by_definition,
+    })
+}
 
 fn finite_number(value: Option<&Value>) -> f64 {
     value
@@ -390,30 +451,40 @@ fn activity_active(endgame: &Map<String, Value>) -> bool {
         && clock < finite_number(activity.get("endsAtMs"))
 }
 
-pub(crate) fn ready_exporter_indices(state: &CoreState, entities: &[Value]) -> Vec<usize> {
-    state
-        .factory_topology
-        .galactic_material_exporter_indices
-        .iter()
-        .copied()
-        .filter(|&index| {
-            let Some(entity) = entities.get(index).and_then(Value::as_object) else {
-                return false;
-            };
-            entity
-                .get("galacticExporterPaused")
-                .and_then(Value::as_bool)
-                == Some(false)
-                && DEFINITIONS.iter().any(|definition| {
-                    finite_number(
-                        entity
-                            .get("inputs")
-                            .and_then(Value::as_object)
-                            .and_then(|inputs| inputs.get(definition.item_id)),
-                    ) >= 1.0
-                })
-        })
+fn ready_exporter_indices_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+) -> Vec<usize> {
+    runtime
+        .indexed_map(
+            &state.factory_topology.galactic_material_exporter_indices,
+            |_, &index| {
+                let Some(entity) = entities.get(index).and_then(Value::as_object) else {
+                    return None;
+                };
+                (entity
+                    .get("galacticExporterPaused")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                    && DEFINITIONS.iter().any(|definition| {
+                        finite_number(
+                            entity
+                                .get("inputs")
+                                .and_then(Value::as_object)
+                                .and_then(|inputs| inputs.get(definition.item_id)),
+                        ) >= 1.0
+                    }))
+                .then_some(index)
+            },
+        )
+        .into_iter()
+        .flatten()
         .collect()
+}
+
+pub(crate) fn ready_exporter_indices(state: &CoreState, entities: &[Value]) -> Vec<usize> {
+    ready_exporter_indices_with_runtime(deterministic_runtime(), state, entities)
 }
 
 pub(crate) fn operating_blocked(entity: &Map<String, Value>) -> bool {
@@ -439,7 +510,8 @@ pub(crate) fn operating_blocked(entity: &Map<String, Value>) -> bool {
     buffered >= 1.0 && finite_number(entity.get("powerFactor")) <= EPSILON
 }
 
-pub(crate) fn run(
+fn run_with_runtime(
+    runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -452,55 +524,51 @@ pub(crate) fn run(
         .and_then(|value| value.as_object().cloned())
         .ok_or_else(|| anyhow!("native galactic endgame state is missing"))?;
     let physical_active = activity_active(&endgame);
-    for &index in &state.factory_topology.galactic_material_exporter_indices {
+    let probes = collect_ordered_exporter_probes_with_runtime(
+        runtime,
+        &state.factory_topology.galactic_material_exporter_indices,
+        |entity_index| probe_exporter(entities, effective_power, allocated_power, entity_index),
+    )?;
+    let mut ordered_definition_indices = [0_usize, 1, 2, 3];
+    ordered_definition_indices.sort_by(|left, right| {
+        let priority = |definition_index: usize| {
+            let definition = DEFINITIONS[definition_index];
+            endgame
+                .get("exportProjects")
+                .and_then(Value::as_object)
+                .and_then(|projects| projects.get(definition.id))
+                .and_then(Value::as_object)
+                .map(|project| finite_number(project.get("priority")))
+                .unwrap_or(0.0)
+        };
+        priority(*right)
+            .partial_cmp(&priority(*left))
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| DEFINITIONS[*left].item_id.cmp(DEFINITIONS[*right].item_id))
+    });
+    for probe in probes {
         let entity = entities
-            .get_mut(index)
+            .get_mut(probe.entity_index)
             .and_then(Value::as_object_mut)
             .ok_or_else(|| anyhow!("native galactic exporter is invalid"))?;
-        let power = effective_power.get(&index).copied().unwrap_or(0.0);
-        if allocated_power.contains_key(&index) {
-            set_number(entity, "powerFactor", (power * 10_000.0).round() / 10_000.0)?;
+        if probe.allocated_power {
+            set_number(
+                entity,
+                "powerFactor",
+                (probe.power_factor * 10_000.0).round() / 10_000.0,
+            )?;
         } else {
             entity.remove("powerFactor");
         }
         set_number(entity, "productionRate", 0.0)?;
         set_number(entity, "utilization", 0.0)?;
-        if !physical_active
-            || entity
-                .get("galacticExporterPaused")
-                .and_then(Value::as_bool)
-                != Some(false)
-            || power <= EPSILON
-        {
+        if !physical_active || probe.paused || probe.power_factor <= EPSILON {
             continue;
         }
-        let mut ordered = DEFINITIONS;
-        ordered.sort_by(|left, right| {
-            let priority = |definition: Definition| {
-                endgame
-                    .get("exportProjects")
-                    .and_then(Value::as_object)
-                    .and_then(|projects| projects.get(definition.id))
-                    .and_then(Value::as_object)
-                    .map(|project| finite_number(project.get("priority")))
-                    .unwrap_or(0.0)
-            };
-            priority(*right)
-                .partial_cmp(&priority(*left))
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.item_id.cmp(right.item_id))
-        });
         let mut delivered = 0.0;
-        for definition in ordered {
-            let amount = entity
-                .get("inputs")
-                .and_then(Value::as_object)
-                .map(|inputs| {
-                    finite_number(inputs.get(definition.item_id))
-                        .floor()
-                        .max(0.0)
-                })
-                .unwrap_or(0.0);
+        for definition_index in ordered_definition_indices {
+            let definition = DEFINITIONS[definition_index];
+            let amount = probe.buffered_by_definition[definition_index];
             if amount < 1.0 {
                 continue;
             }
@@ -515,7 +583,11 @@ pub(crate) fn run(
         set_number(
             entity,
             "utilization",
-            if delivered > 0.0 { power } else { 0.0 },
+            if delivered > 0.0 {
+                probe.power_factor
+            } else {
+                0.0
+            },
         )?;
         set_number(entity, "productionRate", delivered * 60.0)?;
     }
@@ -592,6 +664,25 @@ pub(crate) fn run(
     Ok(())
 }
 
+pub(crate) fn run(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    effective_power: &HashMap<usize, f64>,
+    allocated_power: &HashMap<usize, f64>,
+    seconds: f64,
+) -> anyhow::Result<()> {
+    run_with_runtime(
+        deterministic_runtime(),
+        state,
+        base,
+        entities,
+        effective_power,
+        allocated_power,
+        seconds,
+    )
+}
+
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     let endgame = base
@@ -630,4 +721,89 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+
+    fn exporter(index: usize) -> Value {
+        serde_json::json!({
+            "id": format!("exporter-{index}"),
+            "galacticExporterPaused": index % 7 == 0,
+            "inputs": {
+                "universe_matrix": index as f64,
+                "solar_sail": (index % 11) as f64,
+                "small_carrier_rocket": (index % 13) as f64,
+                "antimatter_fuel_rod": (index % 17) as f64,
+            },
+        })
+    }
+
+    #[test]
+    fn exporter_probe_is_read_only_and_captures_the_complete_local_row() {
+        let entities = vec![exporter(19)];
+        let before = entities.clone();
+        let effective_power = HashMap::from([(0, 0.625)]);
+        let allocated_power = HashMap::from([(0, 42.0)]);
+        let probe = probe_exporter(&entities, &effective_power, &allocated_power, 0).unwrap();
+
+        assert_eq!(entities, before);
+        assert_eq!(probe.entity_index, 0);
+        assert!(probe.allocated_power);
+        assert_eq!(probe.power_factor, 0.625);
+        assert!(!probe.paused);
+        assert_eq!(probe.buffered_by_definition, [19.0, 8.0, 6.0, 2.0]);
+    }
+
+    #[test]
+    fn exporter_probe_plan_is_identical_for_one_two_four_and_eight_workers() {
+        let entities = (0..PARALLEL_MIN_ITEMS + 113)
+            .map(exporter)
+            .collect::<Vec<_>>();
+        let indices = (0..entities.len()).collect::<Vec<_>>();
+        let effective_power = indices
+            .iter()
+            .copied()
+            .filter(|index| index % 3 != 0)
+            .map(|index| (index, (index % 101) as f64 / 100.0))
+            .collect::<HashMap<_, _>>();
+        let allocated_power = indices
+            .iter()
+            .copied()
+            .filter(|index| index % 5 != 0)
+            .map(|index| (index, 1.0))
+            .collect::<HashMap<_, _>>();
+        let mut baseline = None;
+
+        for worker_limit in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            let probes =
+                collect_ordered_exporter_probes_with_runtime(&runtime, &indices, |entity_index| {
+                    probe_exporter(&entities, &effective_power, &allocated_power, entity_index)
+                })
+                .unwrap();
+            if let Some(expected) = &baseline {
+                assert_eq!(&probes, expected);
+            } else {
+                baseline = Some(probes);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_exporter_probe_reports_the_lowest_topology_error() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let indices = (0..PARALLEL_MIN_ITEMS + 257).collect::<Vec<_>>();
+        let error =
+            collect_ordered_exporter_probes_with_runtime(&runtime, &indices, |entity_index| {
+                if matches!(entity_index, 17 | 4_111) {
+                    return Err(anyhow!("probe-{entity_index}"));
+                }
+                Ok(entity_index)
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "probe-17");
+    }
 }

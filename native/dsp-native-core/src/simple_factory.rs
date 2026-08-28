@@ -3636,6 +3636,7 @@ fn simulate_step(
     // the source revision's runtime cache if any later simulation stage fails.
     let buffer_changed_station_indices =
         crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
+    local_step_runtime.wake_ready_from_changed_stations(&buffer_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &buffer_changed_station_indices,
         interstellar_peer_directory,
@@ -3647,6 +3648,16 @@ fn simulate_step(
     );
     profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
+    // Quantum upload can consume a remote-supply output while freeing the
+    // same station's local-demand capacity. Wake both reverse graphs from the
+    // stable endpoint index; the readiness probes still decide whether the
+    // scalar inventory change made either side active.
+    local_step_runtime.wake_ready_from_changed_stations(&indexed_quantum_endpoint_indices);
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &indexed_quantum_endpoint_indices,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     profile_mark!("quantum-supply-buffers");
     profile_mark!("belt-route-index");
     let mut belt_changed_entity_indices = Vec::new();
@@ -3667,6 +3678,7 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    local_step_runtime.wake_ready_from_changed_stations(&belt_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &belt_changed_entity_indices,
         interstellar_peer_directory,
@@ -3771,6 +3783,7 @@ fn simulate_step(
         base,
         entities,
         interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
         &step_route_ledger,
     )?);
     profile_mark!("interstellar-ready-stations");
@@ -4613,8 +4626,9 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    local_step_runtime.wake_ready_from_changed_stations(&late_logistics_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
-        &belt_changed_entity_indices,
+        &late_logistics_changed_entity_indices,
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
@@ -4712,6 +4726,7 @@ fn simulate_step(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    local_step_runtime.wake_ready_from_changed_stations(&warper_changed_station_indices);
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -4786,6 +4801,8 @@ fn simulate_step(
         &remote_route_changed_station_indices,
         interstellar_step_runtime,
     );
+    local_step_runtime.wake_ready_from_changed_stations(&local_route_changed_station_indices);
+    local_step_runtime.wake_ready_from_changed_stations(&remote_route_changed_station_indices);
     profile_mark!("interstellar-route-advance");
     // Route advance can complete the final flight and release an output
     // reservation. Rebuild the already-required congestion ledger once here
@@ -4819,6 +4836,7 @@ fn simulate_step(
         interstellar_peer_directory,
         interstellar_step_runtime,
     );
+    local_step_runtime.wake_ready_from_changed_stations(&post_route_warper_changed_station_indices);
     if profile_enabled {
         let scan = congestion_route_ledger.scan();
         eprintln!(
@@ -4994,6 +5012,16 @@ fn simulate_step(
                 &indexed_quantum_endpoint_indices,
             )?;
         }
+        local_step_runtime.wake_ready_from_changed_stations(&indexed_quantum_endpoint_indices);
+        crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+            &indexed_quantum_endpoint_indices,
+            interstellar_peer_directory,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+        );
+        crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+            &indexed_quantum_endpoint_indices,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+        );
         // Elevator and quantum attachment transitions can change traditional
         // peer membership. Stable five-second settlements retain the
         // cross-revision wake caches; an actual transition rebuilds once.

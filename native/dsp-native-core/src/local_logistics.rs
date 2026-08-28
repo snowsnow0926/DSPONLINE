@@ -18,6 +18,8 @@ const CARGO_PER_DRONE: f64 = 25.0;
 const BASE_TRIP_SECONDS: f64 = 8.0;
 const LOCAL_ROUTE_DENSE_NUMERATOR: usize = 3;
 const LOCAL_ROUTE_DENSE_DENOMINATOR: usize = 4;
+const LOCAL_READY_DENSE_NUMERATOR: usize = 3;
+const LOCAL_READY_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -364,13 +366,49 @@ pub(crate) struct LocalPeerDirectory {
     by_planet_item: Arc<HashMap<usize, HashMap<String, LocalPeers>>>,
     station_slots: Arc<HashMap<usize, Vec<Slot>>>,
     station_planets: Arc<HashMap<usize, usize>>,
+    has_local_pair: bool,
     local_waiting_station_indices: Arc<[usize]>,
     local_route_demand_indices: Vec<usize>,
     buffer_active_station_indices: Vec<usize>,
     buffer_activity_initialized: bool,
+    /// Stations that were inventory/capacity ready at the previous power
+    /// boundary. They remain active while unpowered so a later grid recovery
+    /// can be observed without scanning every dormant station.
+    ready_station_indices: Vec<usize>,
+    /// Stable topology-order rows whose readiness may have changed since the
+    /// previous probe. Reverse peer expansion is installed only after the
+    /// inventory mutation that produced the wake has succeeded.
+    pending_readiness_station_indices: Vec<usize>,
+    readiness_all_pending: bool,
+    readiness_full_scan_required: bool,
+    readiness_signature: Option<LocalReadinessSignature>,
     runtime_reset_station_indices: Vec<usize>,
     local_congestion_reset_station_indices: Vec<usize>,
     interstellar_congestion_reset_station_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalReadinessSignature {
+    cargo_capacity_bits: u64,
+    buffer_limit_bits: u64,
+}
+
+impl LocalReadinessSignature {
+    fn capture(base: &Map<String, Value>) -> Self {
+        Self {
+            cargo_capacity_bits: cargo_capacity(base).to_bits(),
+            buffer_limit_bits: normalized_buffer_limit(base).to_bits(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalReadyStationScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    pub signature_fallback: bool,
 }
 
 impl LocalPeerDirectory {
@@ -380,6 +418,8 @@ impl LocalPeerDirectory {
             + self.local_waiting_station_indices.len() * std::mem::size_of::<usize>()
             + (self.local_route_demand_indices.capacity()
                 + self.buffer_active_station_indices.capacity()
+                + self.ready_station_indices.capacity()
+                + self.pending_readiness_station_indices.capacity()
                 + self.runtime_reset_station_indices.capacity()
                 + self.local_congestion_reset_station_indices.capacity()
                 + self
@@ -418,6 +458,10 @@ impl LocalPeerDirectory {
 
     fn has_local_routes(&self) -> bool {
         !self.local_route_demand_indices.is_empty()
+    }
+
+    fn has_local_pair(&self) -> bool {
+        self.has_local_pair
     }
 
     pub(crate) fn active_local_route_demand_indices(&self) -> &[usize] {
@@ -487,6 +531,95 @@ impl LocalPeerDirectory {
             target.extend(opposite.iter().map(|(peer_index, _)| *peer_index));
         }
         true
+    }
+
+    fn force_full_readiness(&mut self) {
+        self.readiness_full_scan_required = true;
+        self.readiness_all_pending = true;
+        self.pending_readiness_station_indices.clear();
+    }
+
+    /// Wake the exact local endpoints whose inventory, capacity, vehicle
+    /// availability or route reservation can be affected by these station
+    /// rows. Any stale reverse key fails closed to the persisted full order.
+    pub(crate) fn wake_ready_from_changed_stations(&mut self, changed_station_indices: &[usize]) {
+        if self.readiness_all_pending || self.readiness_full_scan_required {
+            return;
+        }
+        let mut dependencies = Vec::new();
+        if !self.append_station_power_dependencies(changed_station_indices, &mut dependencies) {
+            self.force_full_readiness();
+            return;
+        }
+        if dependencies
+            .iter()
+            .any(|index| !self.station_ranks.contains_key(index))
+        {
+            self.force_full_readiness();
+            return;
+        }
+        self.pending_readiness_station_indices.extend(dependencies);
+        self.pending_readiness_station_indices
+            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+        self.pending_readiness_station_indices.dedup();
+    }
+
+    fn readiness_scan_indices(
+        &self,
+        base: &Map<String, Value>,
+        ledger: &StationRouteLedger,
+    ) -> (Vec<usize>, LocalReadinessSignature, LocalReadyStationScan) {
+        let signature = LocalReadinessSignature::capture(base);
+        let signature_fallback = self.readiness_signature != Some(signature);
+        let mut directory_fallback = self.readiness_full_scan_required;
+        let mut selected = Vec::new();
+        if !directory_fallback && !self.readiness_all_pending && !signature_fallback {
+            selected.extend_from_slice(&self.ready_station_indices);
+            selected.extend_from_slice(&self.pending_readiness_station_indices);
+            selected.extend(
+                ledger
+                    .active_station_indices()
+                    .into_iter()
+                    .filter(|index| self.station_ranks.contains_key(index)),
+            );
+            directory_fallback |= selected
+                .iter()
+                .any(|index| !self.station_ranks.contains_key(index));
+            selected
+                .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+            selected.dedup();
+        }
+        let dense_fallback = !directory_fallback
+            && !self.readiness_all_pending
+            && !signature_fallback
+            && !selected.is_empty()
+            && selected.len().saturating_mul(LOCAL_READY_DENSE_DENOMINATOR)
+                >= self
+                    .station_indices
+                    .len()
+                    .saturating_mul(LOCAL_READY_DENSE_NUMERATOR);
+        if directory_fallback || self.readiness_all_pending || signature_fallback || dense_fallback
+        {
+            selected.clear();
+            selected.extend_from_slice(&self.station_indices);
+        }
+        let scan = LocalReadyStationScan {
+            selected_station_rows: selected.len(),
+            total_station_rows: self.station_indices.len(),
+            dense_fallback,
+            directory_fallback,
+            signature_fallback,
+        };
+        (selected, signature, scan)
+    }
+
+    fn commit_readiness(&mut self, planned: &[Option<usize>], signature: LocalReadinessSignature) {
+        self.ready_station_indices.clear();
+        self.ready_station_indices
+            .extend(planned.iter().flatten().copied());
+        self.pending_readiness_station_indices.clear();
+        self.readiness_all_pending = false;
+        self.readiness_signature = Some(signature);
     }
 
     pub(crate) fn runtime_reset_station_indices(&self) -> &[usize] {
@@ -664,6 +797,23 @@ struct LocalPeers {
     demand: Vec<(usize, usize)>,
 }
 
+fn readiness_directory_is_exact(
+    station_indices: &[usize],
+    station_ranks: &HashMap<usize, usize>,
+    station_slots: &HashMap<usize, Vec<Slot>>,
+    station_planets: &HashMap<usize, usize>,
+) -> bool {
+    station_indices.windows(2).all(|pair| pair[0] < pair[1])
+        && station_indices.len() == station_ranks.len()
+        && station_indices.len() == station_slots.len()
+        && station_indices.len() == station_planets.len()
+        && station_indices.iter().enumerate().all(|(rank, index)| {
+            station_ranks.get(index) == Some(&rank)
+                && station_slots.contains_key(index)
+                && station_planets.contains_key(index)
+        })
+}
+
 fn build_peer_directory(
     entities: &[Value],
     station_indices: &[usize],
@@ -754,6 +904,14 @@ fn build_peer_directory(
         peers.supply.shrink_to_fit();
         peers.demand.shrink_to_fit();
     }
+    let has_local_demand = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.demand.is_empty());
+    let has_local_supply = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.supply.is_empty());
     let mut local_waiting_station_indices = by_planet_item
         .values()
         .flat_map(HashMap::values)
@@ -783,6 +941,12 @@ fn build_peer_directory(
         .enumerate()
         .map(|(rank, station_index)| (station_index, rank))
         .collect::<HashMap<_, _>>();
+    let readiness_full_scan_required = !readiness_directory_is_exact(
+        station_indices,
+        &station_ranks,
+        &station_slots,
+        &station_planets,
+    );
     Ok(LocalPeerDirectory {
         station_indices: Arc::from(station_indices),
         runtime_station_indices: Arc::from(runtime_station_indices),
@@ -790,10 +954,16 @@ fn build_peer_directory(
         by_planet_item: Arc::new(by_planet_item),
         station_slots: Arc::new(station_slots),
         station_planets: Arc::new(station_planets),
+        has_local_pair: has_local_demand && has_local_supply,
         local_waiting_station_indices: Arc::from(local_waiting_station_indices),
         local_route_demand_indices,
         buffer_active_station_indices: Vec::new(),
         buffer_activity_initialized: false,
+        ready_station_indices: Vec::new(),
+        pending_readiness_station_indices: Vec::new(),
+        readiness_all_pending: true,
+        readiness_full_scan_required,
+        readiness_signature: None,
         // A newly imported/rebuilt directory cannot prove which station was
         // active in the previous JS/native step. Clear every persisted runtime
         // display once; successful native steps replace this with the exact
@@ -839,20 +1009,6 @@ fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
                 .map(|id| (id.to_owned(), index))
         })
         .collect()
-}
-
-fn directory_has_local_pair(directory: &LocalPeerDirectory) -> bool {
-    let has_demand = directory
-        .by_planet_item
-        .values()
-        .flat_map(HashMap::values)
-        .any(|peers| !peers.demand.is_empty());
-    let has_supply = directory
-        .by_planet_item
-        .values()
-        .flat_map(HashMap::values)
-        .any(|peers| !peers.supply.is_empty());
-    has_demand && has_supply
 }
 
 fn station_capacity(
@@ -1296,6 +1452,7 @@ fn plan_ready_station_indices_with<F, L>(
     runtime: &DeterministicRuntime,
     entities: &[Value],
     directory: &LocalPeerDirectory,
+    station_indices: &[usize],
     ledger: &L,
     cargo_capacity: f64,
     station_capacity: F,
@@ -1305,7 +1462,7 @@ where
     L: LocalLedgerView + ?Sized,
 {
     runtime.indexed_try_map(
-        directory.station_indices.as_ref(),
+        station_indices,
         |_, station_index| -> anyhow::Result<Option<usize>> {
             let station_index = *station_index;
             let station = entities[station_index].as_object().expect("station object");
@@ -1397,22 +1554,37 @@ pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    directory: &LocalPeerDirectory,
+    directory: &mut LocalPeerDirectory,
     route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<HashSet<usize>> {
-    if !directory_has_local_pair(directory) && !directory.has_local_routes() {
-        return Ok(HashSet::new());
+    ready_station_indices_with_scan(state, base, entities, directory, route_ledger)
+        .map(|(ready, _)| ready)
+}
+
+fn ready_station_indices_with_scan(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<(HashSet<usize>, LocalReadyStationScan)> {
+    if !directory.has_local_pair() && !directory.has_local_routes() {
+        return Ok((HashSet::new(), LocalReadyStationScan::default()));
     }
     let buffer_limit = normalized_buffer_limit(base);
+    let (station_indices, signature, scan) = directory.readiness_scan_indices(base, route_ledger);
     let planned = plan_ready_station_indices_with(
         deterministic_runtime(),
         entities,
         directory,
+        &station_indices,
         route_ledger,
         cargo_capacity(base),
         |_, demand, demand_slot| station_capacity(state, demand, demand_slot, buffer_limit),
     )?;
-    Ok(replay_ready_station_indices(planned))
+    let ready = replay_ready_station_indices(planned.clone());
+    directory.commit_readiness(&planned, signature);
+    Ok((ready, scan))
 }
 
 fn add_max_field(
@@ -1446,7 +1618,7 @@ fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
 ) -> anyhow::Result<()> {
-    if !directory_has_local_pair(directory) && !directory.has_local_routes() {
+    if !directory.has_local_pair() && !directory.has_local_routes() {
         return Ok(());
     }
     let buffer_limit = normalized_buffer_limit(base);
@@ -2033,7 +2205,7 @@ pub(crate) fn update_congestion(
 ) -> anyhow::Result<LocalCongestionScan> {
     let runtime = deterministic_runtime();
     let (station_indices, scan) = select_congestion_station_indices(directory, route_ledger);
-    let updates = if !directory_has_local_pair(directory) && !directory.has_local_routes() {
+    let updates = if !directory.has_local_pair() && !directory.has_local_routes() {
         plan_idle_congestion_updates(runtime, entities, &station_indices)
     } else {
         runtime.indexed_try_map(
@@ -2961,6 +3133,7 @@ mod tests {
             &DeterministicRuntime::for_test(worker_count),
             &entities,
             &directory,
+            directory.station_indices.as_ref(),
             &ledger,
             25.0,
             |demand_index, _, _| Ok(if demand_index % 2 == 0 { 100.0 } else { 10.0 }),
@@ -3009,6 +3182,7 @@ mod tests {
                 &DeterministicRuntime::for_test(worker_count),
                 &entities,
                 &directory,
+                directory.station_indices.as_ref(),
                 &ledger,
                 25.0,
                 |demand_index, _, _| {
@@ -3040,6 +3214,7 @@ mod tests {
             &DeterministicRuntime::for_test(8),
             &entities,
             &directory,
+            directory.station_indices.as_ref(),
             &ledger,
             25.0,
             |_, _, _| {
@@ -3052,6 +3227,236 @@ mod tests {
         .unwrap();
         assert_eq!(planned.len(), directory.station_indices.len());
         assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    fn sparse_readiness_matrix(count: usize, demand_count: usize) -> Vec<Value> {
+        assert!(demand_count < count);
+        let mut entities = (0..count)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index <= demand_count {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        entities
+    }
+
+    #[test]
+    fn sparse_readiness_wake_matches_full_power_dispatch_and_route_oracle_at_1_5_60() {
+        let count = 32;
+        let source = sparse_readiness_matrix(count, 1);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().expect("local readiness base");
+        let mut initialized_directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let initial_activity = crate::interstellar_logistics::prepare_route_activity(&source);
+        let initial_ledger =
+            StationRouteLedger::build(&state, &source, &initialized_directory, &initial_activity);
+        let (initial_ready, initial_scan) = ready_station_indices_with_scan(
+            &state,
+            base,
+            &source,
+            &mut initialized_directory,
+            &initial_ledger,
+        )
+        .unwrap();
+        assert!(initial_ready.is_empty());
+        assert_eq!(initial_scan.selected_station_rows, count);
+        assert!(initial_scan.signature_fallback);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let mut indexed_entities = source.clone();
+            indexed_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+            let mut oracle_entities = indexed_entities.clone();
+            let mut indexed_base = base.clone();
+            let mut oracle_base = base.clone();
+            let mut indexed_directory = initialized_directory.clone();
+            let mut oracle_directory = initialized_directory.clone();
+            indexed_directory.wake_ready_from_changed_stations(&[0]);
+
+            let indexed_activity =
+                crate::interstellar_logistics::prepare_route_activity(&indexed_entities);
+            let oracle_activity =
+                crate::interstellar_logistics::prepare_route_activity(&oracle_entities);
+            let mut indexed_ledger = StationRouteLedger::build(
+                &state,
+                &indexed_entities,
+                &indexed_directory,
+                &indexed_activity,
+            );
+            let mut oracle_ledger = StationRouteLedger::build(
+                &state,
+                &oracle_entities,
+                &oracle_directory,
+                &oracle_activity,
+            );
+            let (indexed_ready, scan) = ready_station_indices_with_scan(
+                &state,
+                &indexed_base,
+                &indexed_entities,
+                &mut indexed_directory,
+                &indexed_ledger,
+            )
+            .unwrap();
+            assert_eq!(scan.selected_station_rows, 2, "sparse scan at {seconds}s");
+            assert_eq!(scan.total_station_rows, count);
+            assert!(!scan.dense_fallback);
+            assert!(!scan.directory_fallback);
+            assert!(!scan.signature_fallback);
+
+            let full_planned = plan_ready_station_indices_with(
+                &DeterministicRuntime::for_test(4),
+                &oracle_entities,
+                &oracle_directory,
+                oracle_directory.station_indices.as_ref(),
+                &oracle_ledger,
+                cargo_capacity(&oracle_base),
+                |_, demand, slot| {
+                    station_capacity(&state, demand, slot, normalized_buffer_limit(&oracle_base))
+                },
+            )
+            .unwrap();
+            let full_ready = replay_ready_station_indices(full_planned);
+            let mut indexed_ready_ordered = indexed_ready.iter().copied().collect::<Vec<_>>();
+            let mut full_ready_ordered = full_ready.iter().copied().collect::<Vec<_>>();
+            indexed_ready_ordered.sort_unstable();
+            full_ready_ordered.sort_unstable();
+            assert_eq!(indexed_ready_ordered, vec![0, 1]);
+            assert_eq!(indexed_ready_ordered, full_ready_ordered);
+
+            let indexed_powers = indexed_ready
+                .iter()
+                .map(|index| (*index, 1.0))
+                .collect::<HashMap<_, _>>();
+            let oracle_powers = full_ready
+                .iter()
+                .map(|index| (*index, 1.0))
+                .collect::<HashMap<_, _>>();
+            dispatch(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                &indexed_powers,
+                &mut indexed_directory,
+                &mut indexed_ledger,
+            )
+            .unwrap();
+            dispatch(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &oracle_powers,
+                &mut oracle_directory,
+                &mut oracle_ledger,
+            )
+            .unwrap();
+            advance_routes(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                seconds,
+                &indexed_powers,
+                &mut indexed_directory,
+            )
+            .unwrap();
+            advance_routes(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                seconds,
+                &oracle_powers,
+                &mut oracle_directory,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&json!({
+                    "base": indexed_base,
+                    "entities": indexed_entities,
+                }))
+                .unwrap(),
+                serde_json::to_vec(&json!({
+                    "base": oracle_base,
+                    "entities": oracle_entities,
+                }))
+                .unwrap(),
+                "sparse local readiness diverged from full scan at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_uses_exact_three_quarter_dense_signature_and_mismatch_fallbacks() {
+        let count = 16;
+        let mut entities = sparse_readiness_matrix(count, 11);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+
+        entities[0]["outputs"]["iron_ore"] = Value::from(1_000.0);
+        directory.wake_ready_from_changed_stations(&[0]);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let (_, dense_scan) = ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(dense_scan.selected_station_rows, count);
+        assert!(dense_scan.dense_fallback);
+        assert!(!dense_scan.directory_fallback);
+
+        base["settings"]["logisticsBufferLimit"] = Value::from(2_000.0);
+        let (_, _, signature_scan) =
+            directory.readiness_scan_indices(base.as_object().unwrap(), &ledger);
+        assert_eq!(signature_scan.selected_station_rows, count);
+        assert!(signature_scan.signature_fallback);
+
+        let mut substituted_ranks = directory.station_ranks.as_ref().clone();
+        let rank = substituted_ranks.remove(&0).unwrap();
+        substituted_ranks.insert(count + 9, rank);
+        assert_eq!(substituted_ranks.len(), directory.station_ranks.len());
+        assert!(!readiness_directory_is_exact(
+            directory.station_indices.as_ref(),
+            &substituted_ranks,
+            &directory.station_slots,
+            &directory.station_planets,
+        ));
+
+        let mut mismatched_indices = directory.station_indices.to_vec();
+        mismatched_indices[1] = mismatched_indices[0];
+        let mismatched = build_peer_directory(
+            &entities,
+            &mismatched_indices,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let (_, _, mismatch_scan) =
+            mismatched.readiness_scan_indices(base.as_object().unwrap(), &ledger);
+        assert_eq!(mismatch_scan.selected_station_rows, count);
+        assert!(mismatch_scan.directory_fallback);
     }
 
     fn run_route_step(
@@ -3166,6 +3571,7 @@ mod tests {
             &runtime,
             entities,
             directory,
+            directory.station_indices.as_ref(),
             &legacy,
             25.0,
             |_, _, _| Ok(100_000.0),
@@ -3175,6 +3581,7 @@ mod tests {
             &runtime,
             entities,
             directory,
+            directory.station_indices.as_ref(),
             &shared,
             25.0,
             |_, _, _| Ok(100_000.0),

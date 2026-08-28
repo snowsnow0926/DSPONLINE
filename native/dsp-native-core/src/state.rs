@@ -2229,6 +2229,14 @@ impl EntityBeltAdjacency {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FactoryTopology {
     pub station_indices: Vec<usize>,
+    /// Stable persisted-row order for exact orbital collectors. The normal
+    /// simulation path can visit only these producers instead of discovering
+    /// them with an O(all entities) scan on every revision.
+    pub orbital_collector_indices: Vec<usize>,
+    /// Non-station rows carrying the built-in collector ID are accepted by
+    /// legacy/MOD saves. Preserve their permissive full-scan behavior rather
+    /// than assuming that the canonical station shape is exhaustive.
+    pub orbital_collector_full_scan_required: bool,
     pub quantum_endpoint_indices: Vec<usize>,
     pub construction_center_indices: Vec<usize>,
     pub time_warp_indices: Vec<usize>,
@@ -2263,6 +2271,7 @@ pub(crate) struct FactoryTopology {
 impl FactoryTopology {
     fn shrink_to_fit(&mut self) {
         self.station_indices.shrink_to_fit();
+        self.orbital_collector_indices.shrink_to_fit();
         self.quantum_endpoint_indices.shrink_to_fit();
         self.construction_center_indices.shrink_to_fit();
         self.time_warp_indices.shrink_to_fit();
@@ -2294,6 +2303,7 @@ impl FactoryTopology {
 
     fn estimated_bytes(&self) -> u64 {
         let index_capacity = self.station_indices.capacity()
+            + self.orbital_collector_indices.capacity()
             + self.quantum_endpoint_indices.capacity()
             + self.construction_center_indices.capacity()
             + self.time_warp_indices.capacity()
@@ -3545,6 +3555,10 @@ impl CoreState {
             let kind = object_string(object, "kind").unwrap_or_default();
             let building = object_string(object, "buildingId").unwrap_or_default();
             let recipe = object_string(object, "recipeId").unwrap_or_default();
+            if building == "orbital_collector" {
+                factory_topology.orbital_collector_indices.push(index);
+                factory_topology.orbital_collector_full_scan_required |= kind != "station";
+            }
             if kind == "station" {
                 factory_topology.station_indices.push(index);
                 if matches!(

@@ -21,6 +21,8 @@ const REMOTE_ROUTE_DENSE_NUMERATOR: usize = 3;
 const REMOTE_ROUTE_DENSE_DENOMINATOR: usize = 4;
 const REMOTE_DISPATCH_DENSE_NUMERATOR: usize = 3;
 const REMOTE_DISPATCH_DENSE_DENOMINATOR: usize = 4;
+const ORBITAL_COLLECTOR_DENSE_NUMERATOR: usize = 3;
+const ORBITAL_COLLECTOR_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -1702,13 +1704,137 @@ fn orbital_yield(base: &Map<String, Value>, planet_id: &str, item_id: &str) -> f
         .unwrap_or(0.0)
 }
 
-pub(crate) fn run_orbital_collectors(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrbitalCollectorScanDiagnostics {
+    selected_rows: usize,
+    total_rows: usize,
+    dense_fallback: bool,
+    directory_fallback: bool,
+}
+
+fn orbital_collector_scan<'a>(
+    state: &'a CoreState,
+    entities: &[Value],
+    force_full_scan: bool,
+) -> (Option<&'a [usize]>, OrbitalCollectorScanDiagnostics) {
+    let topology = &state.factory_topology;
+    let indexed = topology.orbital_collector_indices.as_slice();
+    let directory_fallback = topology.orbital_collector_full_scan_required
+        || indexed.windows(2).any(|pair| pair[0] >= pair[1])
+        || indexed.iter().copied().any(|index| {
+            entities
+                .get(index)
+                .and_then(Value::as_object)
+                .and_then(|entity| string_at(entity, "buildingId"))
+                != Some("orbital_collector")
+        });
+    let dense_fallback = !force_full_scan
+        && !directory_fallback
+        && !indexed.is_empty()
+        && indexed
+            .len()
+            .saturating_mul(ORBITAL_COLLECTOR_DENSE_DENOMINATOR)
+            >= entities
+                .len()
+                .saturating_mul(ORBITAL_COLLECTOR_DENSE_NUMERATOR);
+    let full_scan = force_full_scan || directory_fallback || dense_fallback;
+    (
+        (!full_scan).then_some(indexed),
+        OrbitalCollectorScanDiagnostics {
+            selected_rows: if full_scan {
+                entities.len()
+            } else {
+                indexed.len()
+            },
+            total_rows: entities.len(),
+            dense_fallback,
+            directory_fallback,
+        },
+    )
+}
+
+fn run_orbital_collector(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entity: &mut Value,
+    seconds: f64,
+    output_credits: &crate::belts::OutputCredits,
+    infinite_multiplier: f64,
+) -> anyhow::Result<()> {
+    let Some(entity) = entity.as_object_mut() else {
+        return Ok(());
+    };
+    if string_at(entity, "buildingId") != Some("orbital_collector") {
+        return Ok(());
+    }
+    let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
+    let item_id = string_at(entity, "storedItemId")
+        .ok_or_else(|| anyhow!("native orbital collector item is missing"))?
+        .to_owned();
+    if orbital_yield(base, &planet_id, &item_id) <= 0.0 {
+        bail!("native orbital collector item has no configured yield");
+    }
+    entity.insert("storedItemId".to_owned(), Value::from(item_id.clone()));
+    entity.insert("stationMode".to_owned(), Value::from("supply"));
+    let capacity = station_capacity(state, base, entity, &orbital_slot(entity))?;
+    let incoming = (item_amount(entity, "inputs", &item_id) + EPSILON).floor();
+    let stored = (item_amount(entity, "outputs", &item_id) + EPSILON).floor();
+    let buffered = incoming.min((capacity - stored).max(0.0));
+    set_item_amount(entity, "inputs", &item_id, incoming - buffered)?;
+    let current = stored + buffered;
+    set_item_amount(entity, "outputs", &item_id, current)?;
+    let entity_id = string_at(entity, "id").unwrap_or_default();
+    let credit = crate::belts::output_credit(state, output_credits, entity_id, &item_id);
+    let free = (capacity - current).max(0.0) + credit;
+    if free < 1.0 {
+        set_number(entity, "progress", 0.0)?;
+        return Ok(());
+    }
+    let profile_multiplier = base
+        .get("galaxy")
+        .and_then(Value::as_object)
+        .and_then(|galaxy| galaxy.get("profiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| profiles.get(&planet_id))
+        .and_then(Value::as_object)
+        .and_then(|profile| profile.get("orbitalYieldMultiplier"))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(1.0);
+    let rate = orbital_yield(base, &planet_id, &item_id)
+        * finite_number(entity.get("machineCount"))
+        * profile_multiplier
+        * infinite_multiplier;
+    let progress = rounded(finite_number(entity.get("progress")) + rate * seconds, 6);
+    let produced = free.min((progress + EPSILON).floor());
+    set_item_amount(entity, "outputs", &item_id, current + produced)?;
+    set_number(
+        entity,
+        "progress",
+        if produced >= free {
+            0.0
+        } else {
+            rounded(progress - produced, 6)
+        },
+    )?;
+    set_number(entity, "utilization", 1.0)?;
+    set_number(entity, "productionRate", rounded(rate * 60.0, 2))?;
+    let total_produced = base
+        .get_mut("totalProduced")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native total-produced record is missing"))?;
+    let total = finite_number(total_produced.get(&item_id));
+    set_number(total_produced, &item_id, (total + produced).floor())?;
+    Ok(())
+}
+
+fn run_orbital_collectors_with_scan(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
     output_credits: &crate::belts::OutputCredits,
-) -> anyhow::Result<()> {
+    force_full_scan: bool,
+) -> anyhow::Result<OrbitalCollectorScanDiagnostics> {
     let infinite_multiplier = 1.0
         + base
             .get("endgame")
@@ -1721,69 +1847,42 @@ pub(crate) fn run_orbital_collectors(
             .map(|value| finite_number(Some(value)).floor().clamp(0.0, 1_000.0))
             .unwrap_or(0.0)
             * 0.1;
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
-        if string_at(entity, "buildingId") != Some("orbital_collector") {
-            continue;
+    let (indexed, diagnostics) = orbital_collector_scan(state, entities, force_full_scan);
+    if let Some(indexed) = indexed {
+        for &index in indexed {
+            run_orbital_collector(
+                state,
+                base,
+                &mut entities[index],
+                seconds,
+                output_credits,
+                infinite_multiplier,
+            )?;
         }
-        let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
-        let item_id = string_at(entity, "storedItemId")
-            .ok_or_else(|| anyhow!("native orbital collector item is missing"))?
-            .to_owned();
-        if orbital_yield(base, &planet_id, &item_id) <= 0.0 {
-            bail!("native orbital collector item has no configured yield");
+    } else {
+        for entity in entities {
+            run_orbital_collector(
+                state,
+                base,
+                entity,
+                seconds,
+                output_credits,
+                infinite_multiplier,
+            )?;
         }
-        entity.insert("storedItemId".to_owned(), Value::from(item_id.clone()));
-        entity.insert("stationMode".to_owned(), Value::from("supply"));
-        let capacity = station_capacity(state, base, entity, &orbital_slot(entity))?;
-        let incoming = (item_amount(entity, "inputs", &item_id) + EPSILON).floor();
-        let stored = (item_amount(entity, "outputs", &item_id) + EPSILON).floor();
-        let buffered = incoming.min((capacity - stored).max(0.0));
-        set_item_amount(entity, "inputs", &item_id, incoming - buffered)?;
-        let current = stored + buffered;
-        set_item_amount(entity, "outputs", &item_id, current)?;
-        let entity_id = string_at(entity, "id").unwrap_or_default();
-        let credit = crate::belts::output_credit(state, output_credits, entity_id, &item_id);
-        let free = (capacity - current).max(0.0) + credit;
-        if free < 1.0 {
-            set_number(entity, "progress", 0.0)?;
-            continue;
-        }
-        let profile_multiplier = base
-            .get("galaxy")
-            .and_then(Value::as_object)
-            .and_then(|galaxy| galaxy.get("profiles"))
-            .and_then(Value::as_object)
-            .and_then(|profiles| profiles.get(&planet_id))
-            .and_then(Value::as_object)
-            .and_then(|profile| profile.get("orbitalYieldMultiplier"))
-            .map(|value| finite_number(Some(value)))
-            .unwrap_or(1.0);
-        let rate = orbital_yield(base, &planet_id, &item_id)
-            * finite_number(entity.get("machineCount"))
-            * profile_multiplier
-            * infinite_multiplier;
-        let progress = rounded(finite_number(entity.get("progress")) + rate * seconds, 6);
-        let produced = free.min((progress + EPSILON).floor());
-        set_item_amount(entity, "outputs", &item_id, current + produced)?;
-        set_number(
-            entity,
-            "progress",
-            if produced >= free {
-                0.0
-            } else {
-                rounded(progress - produced, 6)
-            },
-        )?;
-        set_number(entity, "utilization", 1.0)?;
-        set_number(entity, "productionRate", rounded(rate * 60.0, 2))?;
-        let total_produced = base
-            .get_mut("totalProduced")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native total-produced record is missing"))?;
-        let total = finite_number(total_produced.get(&item_id));
-        set_number(total_produced, &item_id, (total + produced).floor())?;
     }
-    Ok(())
+    Ok(diagnostics)
+}
+
+pub(crate) fn run_orbital_collectors(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+    output_credits: &crate::belts::OutputCredits,
+) -> anyhow::Result<()> {
+    run_orbital_collectors_with_scan(state, base, entities, seconds, output_credits, false)
+        .map(|_| ())
 }
 
 trait EntityIndexLookup {
@@ -4367,7 +4466,7 @@ mod tests {
                         kind: "terrestrial".to_owned(),
                         orbit_index: 1,
                         simulation_order: 0,
-                        orbital_yields: HashMap::new(),
+                        orbital_yields: HashMap::from([("iron_ore".to_owned(), 2.5)]),
                     },
                     PlanetDefinition {
                         id: "demand_planet".to_owned(),
@@ -4411,21 +4510,38 @@ mod tests {
                         fuel_energy_mj: 0.0,
                     },
                 ],
-                buildings: vec![BuildingDefinition {
-                    id: "interstellar_logistics_station".to_owned(),
-                    kind: "station".to_owned(),
-                    speed: 1.0,
-                    input_capacity: 1_000_000.0,
-                    output_capacity: 1_000_000.0,
-                    power_demand_kw: 1.0,
-                    power_generation_kw: 0.0,
-                    power_charge_kw: 0.0,
-                    energy_capacity_mj: 0.0,
-                    fuel_item_ids: Vec::new(),
-                    fuel_efficiency: 1.0,
-                    family: None,
-                    accepts: None,
-                }],
+                buildings: vec![
+                    BuildingDefinition {
+                        id: "interstellar_logistics_station".to_owned(),
+                        kind: "station".to_owned(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 1_000_000.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "orbital_collector".to_owned(),
+                        kind: "station".to_owned(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 10_000.0,
+                        power_demand_kw: 0.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
+                ],
                 recipes: Vec::new(),
                 constructions: Vec::new(),
                 belts: vec![BeltDefinition {
@@ -4462,7 +4578,11 @@ mod tests {
             },
             "galaxy": {
                 "profiles": {
-                    "source_planet": { "travelTimeMultiplier": 1.0 },
+                    "source_planet": {
+                        "travelTimeMultiplier": 1.0,
+                        "orbitalYieldMultiplier": 1.25,
+                        "orbitalYields": { "iron_ore": 2.5 }
+                    },
                     "demand_planet": { "travelTimeMultiplier": 1.0 },
                     "relay_planet": { "travelTimeMultiplier": 1.0 },
                     "locked_planet": { "travelTimeMultiplier": 1.0 }
@@ -4575,6 +4695,62 @@ mod tests {
             dispatch_fixture_catalog(),
         )
         .unwrap()
+    }
+
+    fn orbital_collector_fixture(index: usize) -> Value {
+        let mut entity = route_activity_station(index);
+        entity["buildingId"] = Value::from("orbital_collector");
+        entity["planetId"] = Value::from("source_planet");
+        entity["storedItemId"] = Value::from("iron_ore");
+        entity["machineCount"] = Value::from(2.0);
+        entity["inputs"] = json!({ "iron_ore": (index % 3) as f64 });
+        entity["outputs"] = json!({ "iron_ore": (index % 7) as f64 });
+        entity["progress"] = Value::from((index % 5) as f64 * 0.125);
+        entity["mod:collector/opaque"] = json!({
+            "index": index,
+            "signedZero": -0.0,
+            "text": "保持原样"
+        });
+        entity
+    }
+
+    fn orbital_collector_matrix(count: usize, collectors: &[usize]) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                if collectors.contains(&index) {
+                    orbital_collector_fixture(index)
+                } else {
+                    route_activity_station(index)
+                }
+            })
+            .collect()
+    }
+
+    fn run_orbital_collector_fixture(
+        state: &CoreState,
+        source: &[Value],
+        seconds: f64,
+        force_full_scan: bool,
+    ) -> (Vec<u8>, OrbitalCollectorScanDiagnostics) {
+        let mut base = dispatch_fixture_base().as_object().unwrap().clone();
+        let mut entities = source.to_vec();
+        let diagnostics = run_orbital_collectors_with_scan(
+            state,
+            &mut base,
+            &mut entities,
+            seconds,
+            &crate::belts::OutputCredits::default(),
+            force_full_scan,
+        )
+        .unwrap();
+        (
+            serde_json::to_vec(&json!({
+                "base": base,
+                "entities": entities,
+            }))
+            .unwrap(),
+            diagnostics,
+        )
     }
 
     fn run_route_activity_step(
@@ -5153,6 +5329,111 @@ mod tests {
             .unwrap(),
             scan,
         )
+    }
+
+    #[test]
+    fn orbital_collector_index_matches_full_scan_at_one_five_and_sixty_seconds() {
+        let source = orbital_collector_matrix(128, &[7, 63, 127]);
+        let state = dispatch_fixture_state(&source);
+        assert_eq!(
+            state.factory_topology.orbital_collector_indices,
+            [7, 63, 127]
+        );
+        assert!(!state.factory_topology.orbital_collector_full_scan_required);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let indexed = run_orbital_collector_fixture(&state, &source, seconds, false);
+            let oracle = run_orbital_collector_fixture(&state, &source, seconds, true);
+            assert_eq!(
+                indexed.0, oracle.0,
+                "indexed orbital settlement diverged at {seconds} seconds"
+            );
+            assert_eq!(indexed.1.selected_rows, 3);
+            assert_eq!(indexed.1.total_rows, 128);
+            assert!(!indexed.1.dense_fallback);
+            assert!(!indexed.1.directory_fallback);
+        }
+    }
+
+    #[test]
+    fn orbital_collector_scan_falls_back_at_three_quarters_and_for_mod_shape() {
+        let dense_source = orbital_collector_matrix(4, &[0, 1, 2]);
+        let dense_state = dispatch_fixture_state(&dense_source);
+        let dense = run_orbital_collector_fixture(&dense_state, &dense_source, 5.0, false);
+        let dense_oracle = run_orbital_collector_fixture(&dense_state, &dense_source, 5.0, true);
+        assert_eq!(dense.0, dense_oracle.0);
+        assert_eq!(dense.1.selected_rows, 4);
+        assert!(dense.1.dense_fallback);
+        assert!(!dense.1.directory_fallback);
+
+        let mut mod_source = orbital_collector_matrix(16, &[7]);
+        mod_source[7]["kind"] = Value::from("mod:orbital_station");
+        let mod_state = dispatch_fixture_state(&mod_source);
+        assert!(
+            mod_state
+                .factory_topology
+                .orbital_collector_full_scan_required
+        );
+        let indexed = run_orbital_collector_fixture(&mod_state, &mod_source, 5.0, false);
+        let oracle = run_orbital_collector_fixture(&mod_state, &mod_source, 5.0, true);
+        assert_eq!(indexed.0, oracle.0);
+        assert_eq!(indexed.1.selected_rows, 16);
+        assert!(!indexed.1.dense_fallback);
+        assert!(indexed.1.directory_fallback);
+        let settled: Value = serde_json::from_slice(&indexed.0).unwrap();
+        assert_eq!(
+            settled["entities"][7]["mod:collector/opaque"],
+            mod_source[7]["mod:collector/opaque"]
+        );
+    }
+
+    #[test]
+    fn stale_orbital_collector_index_replays_full_scan_and_failure_keeps_state_immutable() {
+        let source = orbital_collector_matrix(16, &[2, 9]);
+        let state = dispatch_fixture_state(&source);
+        let mut stale = source.clone();
+        stale[2]["buildingId"] = Value::from("interstellar_logistics_station");
+        let indexed = run_orbital_collector_fixture(&state, &stale, 1.0, false);
+        let oracle = run_orbital_collector_fixture(&state, &stale, 1.0, true);
+        assert_eq!(indexed.0, oracle.0);
+        assert!(indexed.1.directory_fallback);
+
+        let mut invalid = source.clone();
+        invalid[9]["storedItemId"] = Value::Null;
+        let invalid_state = dispatch_fixture_state(&invalid);
+        let state_before = invalid_state.canonical_sha256().unwrap();
+        let mut indexed_base = dispatch_fixture_base().as_object().unwrap().clone();
+        let mut indexed_entities = invalid.clone();
+        let indexed_error = run_orbital_collectors_with_scan(
+            &invalid_state,
+            &mut indexed_base,
+            &mut indexed_entities,
+            1.0,
+            &crate::belts::OutputCredits::default(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(invalid_state.canonical_sha256().unwrap(), state_before);
+
+        let mut oracle_base = dispatch_fixture_base().as_object().unwrap().clone();
+        let mut oracle_entities = invalid;
+        let oracle_error = run_orbital_collectors_with_scan(
+            &invalid_state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            1.0,
+            &crate::belts::OutputCredits::default(),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(indexed_error.to_string(), oracle_error.to_string());
+        assert_eq!(
+            indexed_error.to_string(),
+            "native orbital collector item is missing"
+        );
+        assert_eq!(indexed_base, oracle_base);
+        assert_eq!(indexed_entities, oracle_entities);
+        assert_eq!(invalid_state.canonical_sha256().unwrap(), state_before);
     }
 
     #[test]

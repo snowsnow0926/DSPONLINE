@@ -13,7 +13,6 @@ import type {
   WindowsNativeCoreShadow,
 } from "./nativeCore";
 import {
-  NativeCoreAuthorityPausedError,
   WindowsNativeCoreBetaController,
 } from "./nativeCoreBetaController";
 import type { NativeCoreRevisionProof } from "./nativeCoreAuthority";
@@ -338,7 +337,7 @@ async function openController(session: FakeNativeSession, now = 1_000) {
   return controller;
 }
 
-async function readyController(session: FakeNativeSession) {
+async function gatedController(session: FakeNativeSession) {
   session.eligible = true;
   const controller = await openController(session);
   await controller.mirrorJavaScriptOperation({
@@ -355,7 +354,6 @@ async function readyController(session: FakeNativeSession) {
     ipcFrameShare: 0.19,
     processTreeMemoryImprovementRatio: 0.3,
   });
-  controller.promoteToAuthority(proof(2), true);
   return controller;
 }
 
@@ -536,98 +534,31 @@ describe("Windows native core invitation-Beta controller", () => {
     expect(gated.authority.reason).toContain("native-domain-coverage-incomplete");
   });
 
-  it("retries an uncertain durable command with the same ID and publishes only a bounded projection", async () => {
+  it("keeps JavaScript authoritative until the main process owns a durable Rust player lease", async () => {
     const session = new FakeNativeSession();
-    const controller = await readyController(session);
-    session.uncertainOnce = true;
-    const result = await controller.commitAuthoritativeOperation({
-      commandId: "authority-2",
-      baseRevision: 2,
-      simulationSeconds: 1,
-      wallSeconds: 1,
-      projection: { baseFields: ["metrics", "metrics"], entityIds: ["entity-1"], beltIds: [] },
-    });
-    expect(result.commit).toMatchObject({ revision: 3, duplicate: true });
-    expect(result.projection).toMatchObject({ revision: 3, entities: [{ id: "entity-1" }] });
-    expect(result.state).toMatchObject({ phase: "native-authoritative", authority: "native", latestVerifiedProof: { revision: 3 } });
-    expect(result.state.exactCompatibleFallback).toEqual(proof(2));
-    expect(session.projectionCalls).toBe(1);
-  });
-
-  it("preserves the pure-idle mode when retrying an uncertain authoritative commit", async () => {
-    const session = new FakeNativeSession();
-    const controller = await readyController(session);
-    session.uncertainOnce = true;
-
-    const result = await controller.commitAuthoritativeOperation({
-      commandId: "authority-pure-idle-retry",
-      baseRevision: 2,
-      simulationSeconds: 600,
-      wallSeconds: 40,
-      advanceMode: "pure-idle-conservative-v2",
+    const controller = await gatedController(session);
+    expect(controller.snapshot().authority).toMatchObject({
+      phase: "native-ready",
+      authority: "javascript",
+      shadowRevision: 2,
     });
 
-    expect(result.commit).toMatchObject({ revision: 3, duplicate: true });
-    const retryRequests = session.commitRequests.filter((request) =>
-      request.commandId === "authority-pure-idle-retry");
-    expect(retryRequests).toHaveLength(2);
-    expect(retryRequests.map((request) => ({
-      commandId: request.commandId,
-      baseRevision: request.baseRevision,
-      advanceMode: request.advanceMode,
-    }))).toEqual([
-      {
-        commandId: "authority-pure-idle-retry",
-        baseRevision: 2,
-        advanceMode: "pure-idle-conservative-v2",
-      },
-      {
-        commandId: "authority-pure-idle-retry",
-        baseRevision: 2,
-        advanceMode: "pure-idle-conservative-v2",
-      },
-    ]);
-  });
-
-  it("pauses on an unconfirmed native failure and never silently installs the older JavaScript checkpoint", async () => {
-    const session = new FakeNativeSession();
-    const controller = await readyController(session);
-    session.alwaysFail = true;
+    expect(() => controller.promoteToAuthority(proof(2), true)).toThrow(/主进程 Rust 持久租约/);
     await expect(controller.commitAuthoritativeOperation({
-      commandId: "authority-failure",
+      commandId: "phantom-authority-operation",
       baseRevision: 2,
       simulationSeconds: 1,
       wallSeconds: 1,
-    })).rejects.toBeInstanceOf(NativeCoreAuthorityPausedError);
-    expect(controller.snapshot().authority).toMatchObject({ phase: "paused-core-crash", authority: "none" });
-  });
-
-  it("refuses an older fallback after durable native progress and requires exact recovery", async () => {
-    const session = new FakeNativeSession();
-    const controller = await readyController(session);
-    await controller.commitAuthoritativeOperation({
-      commandId: "authority-2",
-      baseRevision: 2,
-      simulationSeconds: 1,
-      wallSeconds: 1,
-    });
-    await controller.notifyCoreExit("test-crash");
-    const refused = await controller.explicitFallbackToJavaScript(proof(2));
-    expect(refused.authority).toMatchObject({ phase: "paused-recovery-required", authority: "none" });
-  });
-
-  it("rejects an oversized projection before committing a player operation", async () => {
-    const session = new FakeNativeSession();
-    const controller = await readyController(session);
-    await expect(controller.commitAuthoritativeOperation({
-      commandId: "authority-oversized",
-      baseRevision: 2,
-      simulationSeconds: 1,
-      wallSeconds: 1,
-      projection: { entityIds: Array.from({ length: 4_097 }, (_, index) => `entity-${index}`) },
-    })).rejects.toThrow(/单帧上限/);
+    })).rejects.toThrow(/不是权威状态/);
     expect(session.current.revision).toBe(2);
-    expect(controller.snapshot().authority.authority).toBe("native");
+    expect(controller.snapshot().authority).toMatchObject({ phase: "native-ready", authority: "javascript" });
+    expect(session.commitRequests).toHaveLength(1);
+  });
+
+  it("requires explicit player opt-in before consulting any authority transition", async () => {
+    const controller = await gatedController(new FakeNativeSession());
+    expect(() => controller.promoteToAuthority(proof(2), false)).toThrow(/明确选择/);
+    expect(controller.snapshot().authority).toMatchObject({ phase: "native-ready", authority: "javascript" });
   });
 
   it("drops a diverged shadow without affecting the JavaScript authority", async () => {

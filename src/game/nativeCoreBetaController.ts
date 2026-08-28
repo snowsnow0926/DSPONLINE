@@ -22,7 +22,6 @@ import {
   createNativeCoreAuthorityState,
   fallbackNativeCoreToJavaScript,
   handleNativeCoreExit,
-  promoteNativeCoreAuthority,
   recordNativeCoreAuthorityCheckpoint,
   recordNativeCoreAuthorityProgress,
   recordNativeCoreGateEvidence,
@@ -367,8 +366,14 @@ export class WindowsNativeCoreBetaController {
 
   promoteToAuthority(exactCompatibleCheckpoint: NativeCoreRevisionProof, userOptIn: boolean): NativeCoreBetaControllerSnapshot {
     if (!userOptIn) throw new Error("原生权威必须由邀请 Beta 玩家明确选择");
-    this.authorityState = promoteNativeCoreAuthority(this.authorityState, exactCompatibleCheckpoint);
-    return this.snapshot();
+    // This controller lives in the renderer and can prove only shadow
+    // equality. It must never manufacture a player-authority transition from
+    // a caller-provided checkpoint: the durable Rust lease, its bound host
+    // session and the first acknowledged native commit are main-process-only
+    // facts. Until that coordinator hands ownership over atomically, keep the
+    // JavaScript factory running and fail closed without changing state.
+    void exactCompatibleCheckpoint;
+    throw new Error("原生权威尚未获得主进程 Rust 持久租约，已保持 JavaScript 权威");
   }
 
   async commitAuthoritativeOperation(input: {

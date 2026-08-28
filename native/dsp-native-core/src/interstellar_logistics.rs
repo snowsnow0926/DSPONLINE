@@ -8,6 +8,7 @@ use serde_json::{Map, Number, Value, json};
 use crate::catalog::PlanetDefinition;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::{CoreState, ExactRowIdIndex, SharedArc};
+use crate::station_route_ledger::StationRouteLedger;
 
 const EPSILON: f64 = 0.0001;
 const SLOT_COUNT: usize = 5;
@@ -60,6 +61,64 @@ struct Ledger {
     active_remote_stations: HashSet<usize>,
 }
 
+trait InterstellarLedgerView: Sync {
+    fn remote_busy(&self, station_index: usize) -> f64;
+    fn local_busy(&self, station_index: usize) -> f64;
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64;
+    fn is_active_remote_station(&self, station_index: usize) -> bool;
+    fn active_progress(&self, station_index: usize) -> f64;
+}
+
+impl InterstellarLedgerView for Ledger {
+    fn remote_busy(&self, station_index: usize) -> f64 {
+        self.busy.get(&station_index).copied().unwrap_or(0.0)
+    }
+
+    fn local_busy(&self, station_index: usize) -> f64 {
+        self.local_busy.get(&station_index).copied().unwrap_or(0.0)
+    }
+
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64 {
+        self.in_flight
+            .get(&(station_index, item_id.to_owned()))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn is_active_remote_station(&self, station_index: usize) -> bool {
+        self.active_remote_stations.contains(&station_index)
+    }
+
+    fn active_progress(&self, station_index: usize) -> f64 {
+        self.active_progress
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+}
+
+impl InterstellarLedgerView for StationRouteLedger {
+    fn remote_busy(&self, station_index: usize) -> f64 {
+        self.remote_busy_floor(station_index)
+    }
+
+    fn local_busy(&self, station_index: usize) -> f64 {
+        self.local_busy_raw(station_index)
+    }
+
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64 {
+        StationRouteLedger::interstellar_in_flight(self, station_index, item_id)
+    }
+
+    fn is_active_remote_station(&self, station_index: usize) -> bool {
+        StationRouteLedger::is_active_remote_station(self, station_index)
+    }
+
+    fn active_progress(&self, station_index: usize) -> f64 {
+        StationRouteLedger::active_progress(self, station_index)
+    }
+}
+
 #[derive(Debug, Default)]
 struct LocalSupplyDirectory {
     by_planet_item: HashMap<String, HashMap<String, Vec<usize>>>,
@@ -74,17 +133,31 @@ pub(crate) struct InterstellarRouteActivity {
     station_indices: Arc<[usize]>,
     station_ranks: Arc<HashMap<usize, usize>>,
     active_demand_indices: Vec<usize>,
+    /// Route-bearing rows that cannot be maintained by the legacy local or
+    /// remote wake queues (custom station kinds and opaque/MOD scopes). They
+    /// remain in the shared ledger scan until a record command rebuilds the
+    /// topology, preserving the old permissive route-summary semantics.
+    opaque_route_demand_indices: Vec<usize>,
 }
 
 impl InterstellarRouteActivity {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         (self.station_indices.len() * std::mem::size_of::<usize>()
             + self.station_ranks.capacity() * std::mem::size_of::<(usize, usize)>()
-            + self.active_demand_indices.capacity() * std::mem::size_of::<usize>()) as u64
+            + (self.active_demand_indices.capacity() + self.opaque_route_demand_indices.capacity())
+                * std::mem::size_of::<usize>()) as u64
     }
 
     fn has_remote_routes(&self) -> bool {
         !self.active_demand_indices.is_empty()
+    }
+
+    pub(crate) fn active_remote_route_demand_indices(&self) -> &[usize] {
+        &self.active_demand_indices
+    }
+
+    pub(crate) fn opaque_route_demand_indices(&self) -> &[usize] {
+        &self.opaque_route_demand_indices
     }
 
     fn route_scan_indices(&self) -> (Vec<usize>, bool) {
@@ -304,6 +377,40 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
                 })
         })
         .collect::<Vec<_>>();
+    let opaque_route_demand_indices = entities
+        .iter()
+        .enumerate()
+        .filter_map(|(entity_index, entity)| {
+            let entity = entity.as_object()?;
+            let building = string_at(entity, "buildingId");
+            let local_trackable = string_at(entity, "kind") == Some("station")
+                && matches!(
+                    building,
+                    Some("planetary_logistics_station" | "interstellar_logistics_station")
+                )
+                && !(building == Some("interstellar_logistics_station")
+                    && finite_number(entity.get("stationTier")).floor() == 2.0
+                    && string_at(entity, "stationOperationMode") == Some("elevator"));
+            let remote_trackable = string_at(entity, "kind") == Some("station")
+                && matches!(
+                    building,
+                    Some("interstellar_logistics_station" | "orbital_collector")
+                );
+            entity
+                .get("stationRoutes")
+                .and_then(Value::as_array)
+                .is_some_and(|routes| {
+                    routes.iter().filter_map(Value::as_object).any(|route| {
+                        match string_at(route, "scope") {
+                            Some("local") => !local_trackable,
+                            Some("remote") => !remote_trackable,
+                            _ => true,
+                        }
+                    })
+                })
+                .then_some(entity_index)
+        })
+        .collect::<Vec<_>>();
     let station_ranks = station_indices
         .iter()
         .copied()
@@ -314,6 +421,17 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
         station_indices: Arc::from(station_indices),
         station_ranks: Arc::new(station_ranks),
         active_demand_indices,
+        opaque_route_demand_indices,
+    }
+}
+
+pub(crate) fn refresh_route_activity_after_topology_change(
+    entities: &[Value],
+    topology_changed: bool,
+    runtime: &mut Arc<InterstellarRouteActivity>,
+) {
+    if topology_changed {
+        *runtime = Arc::new(prepare_route_activity(entities));
     }
 }
 
@@ -1397,18 +1515,19 @@ struct ReadyProbeEnvironment<P, E, C> {
     station_capacity: C,
 }
 
-fn plan_ready_station_indices_with<P, E, C>(
+fn plan_ready_station_indices_with<P, E, C, L>(
     runtime: &DeterministicRuntime,
     base: &Map<String, Value>,
     entities: &[Value],
     station_indices: &[usize],
-    ledger: &Ledger,
+    ledger: &L,
     probes: ReadyProbeEnvironment<P, E, C>,
 ) -> anyhow::Result<Vec<Option<usize>>>
 where
     P: Fn(usize, usize) -> anyhow::Result<Vec<(usize, usize)>> + Send + Sync,
     E: Fn(usize, usize, &Slot) -> anyhow::Result<Option<RouteEconomics>> + Send + Sync,
     C: Fn(usize, &Map<String, Value>, &Slot) -> anyhow::Result<f64> + Send + Sync,
+    L: InterstellarLedgerView + ?Sized,
 {
     runtime.indexed_try_map(
         station_indices,
@@ -1421,7 +1540,7 @@ where
             if traditional_remote_disabled(station) {
                 return Ok(None);
             }
-            if ledger.active_remote_stations.contains(&station_index) {
+            if ledger.is_active_remote_station(station_index) {
                 return Ok(Some(station_index));
             }
             let station_slots = slots(station)?;
@@ -1470,20 +1589,15 @@ where
                         .floor();
                     let free = ((probes.station_capacity)(demand_index, demand, demand_slot)?
                         - item_amount(demand, "outputs", item_id)
-                        - ledger
-                            .in_flight
-                            .get(&(demand_index, item_id.to_owned()))
-                            .copied()
-                            .unwrap_or(0.0))
+                        - ledger.in_flight(demand_index, item_id))
                     .max(0.0)
                     .floor();
                     for (owner_index, owner_slot) in
                         [(demand_index, demand_slot), (supply_index, supply_slot)]
                     {
                         let owner = entities[owner_index].as_object().expect("station object");
-                        let has_vehicle = installed_vessels(owner)
-                            - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
-                            > 0.0;
+                        let has_vehicle =
+                            installed_vessels(owner) - ledger.remote_busy(owner_index) > 0.0;
                         let warp_ready = !economics.requires_warp
                             || (completed_tech(base, "space_warp")
                                 && owner
@@ -1519,6 +1633,7 @@ pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
+    route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<HashSet<usize>> {
     let station_indices = &state.factory_topology.station_indices;
     if !station_indices.iter().copied().any(|index| {
@@ -1528,14 +1643,12 @@ pub(crate) fn ready_station_indices(
     }) {
         return Ok(HashSet::new());
     }
-    let indexes = &state.entity_index;
-    let ledger = build_ledger(entities, indexes);
     let planned = plan_ready_station_indices_with(
         deterministic_runtime(),
         base,
         entities,
         station_indices,
-        &ledger,
+        route_ledger,
         ReadyProbeEnvironment {
             peer_matches: |station_index, slot_index| {
                 peer_matches(state, base, entities, station_index, slot_index)
@@ -2168,16 +2281,17 @@ struct CongestionUpdate {
     active_progress: f64,
 }
 
-fn plan_congestion_updates_with<F>(
+fn plan_congestion_updates_with<F, L>(
     runtime: &DeterministicRuntime,
     entities: &[Value],
     station_indices: &[usize],
-    ledger: &Ledger,
+    ledger: &L,
     local_supply_directory: &LocalSupplyDirectory,
     remote_peer_waiting: F,
 ) -> anyhow::Result<Vec<Option<CongestionUpdate>>>
 where
     F: Fn(usize, usize, &Slot) -> anyhow::Result<bool> + Send + Sync,
+    L: InterstellarLedgerView + ?Sized,
 {
     runtime.indexed_try_map(
         station_indices,
@@ -2211,12 +2325,8 @@ where
             }
             let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
                 + vessel_capacity(station);
-            let local_busy = ledger
-                .local_busy
-                .get(&station_index)
-                .copied()
-                .unwrap_or(0.0);
-            let busy = local_busy + ledger.busy.get(&station_index).copied().unwrap_or(0.0);
+            let local_busy = ledger.local_busy(station_index);
+            let busy = local_busy + ledger.remote_busy(station_index);
             let fleet_load = if installed > 0.0 {
                 busy / installed
             } else if waiting > 0.0 {
@@ -2231,11 +2341,7 @@ where
                     0.0
                 })
                 .clamp(0.0, 1.0);
-            let active_progress = ledger
-                .active_progress
-                .get(&station_index)
-                .copied()
-                .unwrap_or(0.0);
+            let active_progress = ledger.active_progress(station_index);
             Ok(Some(CongestionUpdate {
                 station_index,
                 congestion: rounded(congestion, 3),
@@ -2266,6 +2372,7 @@ pub(crate) fn update_congestion(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
+    route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<()> {
     let station_indices = &state.factory_topology.station_indices;
     if !station_indices.iter().copied().any(|index| {
@@ -2275,14 +2382,12 @@ pub(crate) fn update_congestion(
     }) {
         return Ok(());
     }
-    let indexes = &state.entity_index;
-    let ledger = build_ledger(entities, indexes);
     let local_supply_directory = build_local_supply_directory(entities, station_indices);
     let updates = plan_congestion_updates_with(
         deterministic_runtime(),
         entities,
         station_indices,
-        &ledger,
+        route_ledger,
         &local_supply_directory,
         |station_index, slot_index, _| {
             Ok(!peer_matches(state, base, entities, station_index, slot_index)?.is_empty())
@@ -3383,6 +3488,235 @@ mod tests {
         (entities, activity, scan_count, dense)
     }
 
+    fn assert_shared_interstellar_ledger_matches_legacy(
+        state: &CoreState,
+        entities: &[Value],
+        activity: &InterstellarRouteActivity,
+    ) {
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let shared = StationRouteLedger::build(state, entities, &local_directory, activity);
+        let full = StationRouteLedger::build_full_oracle(state, entities, &local_directory);
+        let legacy = build_ledger(entities, &state.entity_index);
+
+        for station_index in 0..entities.len() {
+            assert_eq!(
+                shared.remote_busy_floor(station_index),
+                legacy.busy.get(&station_index).copied().unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.local_busy_raw(station_index),
+                legacy
+                    .local_busy
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.interstellar_in_flight(station_index, "iron_ore"),
+                legacy
+                    .in_flight
+                    .get(&(station_index, "iron_ore".to_owned()))
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.is_active_remote_station(station_index),
+                legacy.active_remote_stations.contains(&station_index)
+            );
+            assert_eq!(
+                shared.active_progress(station_index),
+                legacy
+                    .active_progress
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.remote_busy_floor(station_index),
+                full.remote_busy_floor(station_index)
+            );
+            assert_eq!(
+                shared.local_busy_raw(station_index),
+                full.local_busy_raw(station_index)
+            );
+            assert_eq!(
+                shared.interstellar_in_flight(station_index, "iron_ore"),
+                full.interstellar_in_flight(station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.active_progress(station_index),
+                full.active_progress(station_index)
+            );
+        }
+
+        let runtime = DeterministicRuntime::for_test(4);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().unwrap();
+        let ready_environment = || ReadyProbeEnvironment {
+            peer_matches: |station_index, _| Ok(vec![(if station_index == 0 { 1 } else { 0 }, 0)]),
+            route_economics: |_, _, _: &Slot| Ok(Some(direct_ready_economics())),
+            station_capacity: |_, _: &Map<String, Value>, _: &Slot| Ok(1_000_000_000.0),
+        };
+        let legacy_ready = plan_ready_station_indices_with(
+            &runtime,
+            base,
+            entities,
+            activity.station_indices.as_ref(),
+            &legacy,
+            ready_environment(),
+        )
+        .unwrap();
+        let shared_ready = plan_ready_station_indices_with(
+            &runtime,
+            base,
+            entities,
+            activity.station_indices.as_ref(),
+            &shared,
+            ready_environment(),
+        )
+        .unwrap();
+        assert_eq!(shared_ready, legacy_ready);
+
+        let local_supply =
+            build_local_supply_directory(entities, activity.station_indices.as_ref());
+        let legacy_congestion = plan_congestion_updates_with(
+            &runtime,
+            entities,
+            activity.station_indices.as_ref(),
+            &legacy,
+            &local_supply,
+            |_, _, _| Ok(false),
+        )
+        .unwrap();
+        let shared_congestion = plan_congestion_updates_with(
+            &runtime,
+            entities,
+            activity.station_indices.as_ref(),
+            &shared,
+            &local_supply,
+            |_, _, _| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(shared_congestion, legacy_congestion);
+    }
+
+    #[test]
+    fn shared_station_route_ledger_matches_interstellar_oracle_at_1_5_60_seconds() {
+        let count = 256;
+        let active = vec![
+            (7, false, vec![]),
+            (113, true, vec![]),
+            (251, true, vec![89]),
+        ];
+        let source = route_activity_matrix(count, &active, 0.125, 120.0);
+        let state = dispatch_fixture_state(&source);
+        let source_hash = state.canonical_sha256().unwrap();
+        let powers = route_activity_powers(count, 1.0);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let (entities, activity, _, _) =
+                run_route_activity_step(&source, seconds, false, &powers);
+            let local_directory = crate::local_logistics::prepare_step_directory(
+                &entities,
+                &state.factory_topology.station_indices,
+            )
+            .unwrap();
+            let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+            assert_eq!(
+                ledger.scan(),
+                crate::station_route_ledger::StationRouteLedgerScan {
+                    selected_demands: active.len(),
+                    total_candidate_rows: count,
+                    dense_fallback: false,
+                },
+                "unexpected shared-ledger scan at {seconds}s"
+            );
+            assert_shared_interstellar_ledger_matches_legacy(&state, &entities, &activity);
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn shared_station_route_ledger_preserves_mixed_legacy_and_opaque_route_domains() {
+        let mut entities = (0..8).map(route_activity_station).collect::<Vec<_>>();
+        entities[1]["buildingId"] = Value::from("planetary_logistics_station");
+        entities[1]["stationRoutes"] = json!([{
+            "id": "pls-remote-route",
+            "scope": "remote",
+            "peerId": "remote-station/00000/Ω",
+            "vehicleStationId": "remote-station/00001/Ω",
+            "itemId": "iron_ore",
+            "cargo": 5.0,
+            "vehicleCount": 2.75,
+            "progress": 0.4,
+            "waypointStationIds": []
+        }]);
+        entities.push(json!({
+            "id": "mod-machine-route-owner",
+            "kind": "machine",
+            "buildingId": "mod:custom/router",
+            "stationRoutes": [
+                {
+                    "id": "mod-local-route",
+                    "scope": "local",
+                    "peerId": "remote-station/00001/Ω",
+                    "vehicleStationId": "remote-station/00000/Ω",
+                    "itemId": "iron_ore",
+                    "cargo": 7.0,
+                    "vehicleCount": 1.5,
+                    "progress": 0.6,
+                    "waypointStationIds": []
+                },
+                {
+                    "id": "mod-unknown-route",
+                    "scope": "mod:unknown",
+                    "peerId": "remote-station/00002/Ω",
+                    "progress": 0.9,
+                    "waypointStationIds": ["remote-station/00003/Ω"]
+                }
+            ]
+        }));
+        let state = dispatch_fixture_state(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let activity = prepare_route_activity(&entities);
+        assert!(activity.active_remote_route_demand_indices().is_empty());
+        assert_eq!(activity.opaque_route_demand_indices(), &[1, 8]);
+
+        let shared = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        assert_eq!(
+            shared.scan(),
+            crate::station_route_ledger::StationRouteLedgerScan {
+                selected_demands: 2,
+                total_candidate_rows: 9,
+                dense_fallback: false,
+            }
+        );
+        assert_eq!(shared.local_in_flight(1, "iron_ore"), 5.0);
+        assert_eq!(shared.local_busy_floor(0), 0.0);
+        assert!(!shared.is_active_local_station(0));
+        assert_eq!(shared.remote_busy_floor(1), 2.0);
+        assert_eq!(shared.local_busy_raw(0), 1.5);
+        assert_eq!(shared.interstellar_in_flight(8, "iron_ore"), 7.0);
+        assert_eq!(shared.active_progress(3), 0.9);
+        assert_shared_interstellar_ledger_matches_legacy(&state, &entities, &activity);
+
+        let legacy_local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        assert!(legacy_local.contains_local_station(1));
+        assert!(!legacy_local.contains_local_station(8));
+    }
+
     #[test]
     fn warper_arrival_allows_dispatch_and_immediately_wakes_remote_route() {
         let mut entities = dispatch_fixture_entities();
@@ -3401,6 +3735,17 @@ mod tests {
         .unwrap();
         assert!(!activity.has_remote_routes());
         assert!(entities[1]["stationRoutes"].as_array().unwrap().is_empty());
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        assert_eq!(
+            StationRouteLedger::build(&state, &entities, &local_directory, &activity)
+                .scan()
+                .selected_demands,
+            0
+        );
 
         entities[1]["stationWarpers"] = Value::from(1.0);
         dispatch(
@@ -3422,6 +3767,18 @@ mod tests {
             Value::from(true)
         );
         assert_eq!(entities[1]["stationWarpers"], Value::from(0.0));
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        assert_eq!(
+            StationRouteLedger::build(&state, &entities, &local_directory, &activity)
+                .scan()
+                .selected_demands,
+            1,
+            "warper/inventory-triggered dispatch must wake the shared ledger"
+        );
     }
 
     #[test]
@@ -3518,6 +3875,45 @@ mod tests {
     }
 
     #[test]
+    fn elevator_transition_reclassifies_legacy_local_route_as_opaque_without_stale_arc() {
+        let mut entities = dispatch_fixture_entities();
+        entities[1]["stationRoutes"] = json!([{
+            "id": "local-route-before-elevator",
+            "scope": "local",
+            "peerId": "remote-station/00000/Ω",
+            "vehicleStationId": "remote-station/00001/Ω",
+            "itemId": "iron_ore",
+            "cargo": 4.0,
+            "vehicleCount": 1.0,
+            "progress": 0.25,
+            "waypointStationIds": []
+        }]);
+        let mut runtime = Arc::new(prepare_route_activity(&entities));
+        assert!(runtime.opaque_route_demand_indices().is_empty());
+        let stable = Arc::clone(&runtime);
+        refresh_route_activity_after_topology_change(&entities, false, &mut runtime);
+        assert!(Arc::ptr_eq(&stable, &runtime));
+
+        entities[1]["stationTier"] = Value::from(2);
+        entities[1]["stationOperationMode"] = Value::from("elevator");
+        refresh_route_activity_after_topology_change(&entities, true, &mut runtime);
+        assert!(!Arc::ptr_eq(&stable, &runtime));
+        assert_eq!(runtime.station_indices.as_ref(), &[0, 1]);
+        assert_eq!(runtime.opaque_route_demand_indices(), &[1]);
+        let state = dispatch_fixture_state(&entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        assert!(!local_directory.contains_local_station(1));
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &runtime);
+        assert_eq!(ledger.scan().selected_demands, 1);
+        assert_eq!(ledger.local_busy_raw(1), 1.0);
+        assert_eq!(ledger.interstellar_in_flight(1, "iron_ore"), 4.0);
+    }
+
+    #[test]
     fn sparse_remote_route_advance_matches_full_oracle_for_direct_warp_and_relay_at_1_5_60() {
         let count = 256;
         let active = vec![
@@ -3562,6 +3958,22 @@ mod tests {
         let (indices, dense) = activity.route_scan_indices();
         assert!(dense);
         assert_eq!(indices, activity.station_indices.as_ref());
+        let state = dispatch_fixture_state(&source);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &source,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let shared = StationRouteLedger::build(&state, &source, &local_directory, &activity);
+        assert_eq!(
+            shared.scan(),
+            crate::station_route_ledger::StationRouteLedgerScan {
+                selected_demands: count,
+                total_candidate_rows: count,
+                dense_fallback: true,
+            }
+        );
+        assert_shared_interstellar_ledger_matches_legacy(&state, &source, &activity);
         for seconds in [1.0, 5.0, 60.0] {
             let scheduled = run_route_activity_step(
                 &source,

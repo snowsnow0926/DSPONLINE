@@ -3551,12 +3551,38 @@ fn simulate_step(
     }
     profile_mark!("power-source-index");
 
-    let mut ready_stations =
-        crate::local_logistics::ready_station_indices(state, base, entities, local_step_runtime)?;
+    // Local and interstellar readiness consume the same immutable route
+    // snapshot. The active queues preserve persisted row order; a dense set
+    // falls back to the complete station ledger without changing dispatch
+    // fairness or command authority.
+    let ready_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+        state,
+        entities,
+        local_step_runtime,
+        interstellar_route_activity.as_ref(),
+    );
+    if profile_enabled {
+        let scan = ready_route_ledger.scan();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-ready\t{}/{}\tdense={}",
+            scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
+        );
+    }
+    let mut ready_stations = crate::local_logistics::ready_station_indices(
+        state,
+        base,
+        entities,
+        local_step_runtime,
+        &ready_route_ledger,
+    )?;
     profile_mark!("local-ready-stations");
     ready_stations.extend(crate::interstellar_logistics::ready_station_indices(
-        state, base, entities,
+        state,
+        base,
+        entities,
+        &ready_route_ledger,
     )?);
+    drop(ready_route_ledger);
     profile_mark!("interstellar-ready-stations");
     ready_stations.extend(indexed_quantum_endpoint_indices.iter().copied().filter(
         |&entity_index| {
@@ -4462,9 +4488,35 @@ fn simulate_step(
     )?;
     profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::update_congestion(state, entities, local_step_runtime)?;
+    // Route completion can remove the final active demand, so congestion must
+    // use a fresh post-advance snapshot rather than the readiness ledger.
+    let congestion_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+        state,
+        entities,
+        local_step_runtime,
+        interstellar_step_runtime,
+    );
+    if profile_enabled {
+        let scan = congestion_route_ledger.scan();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-congestion\t{}/{}\tdense={}",
+            scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
+        );
+    }
+    crate::local_logistics::update_congestion(
+        state,
+        entities,
+        local_step_runtime,
+        &congestion_route_ledger,
+    )?;
     profile_mark!("local-congestion");
-    crate::interstellar_logistics::update_congestion(state, base, entities)?;
+    crate::interstellar_logistics::update_congestion(
+        state,
+        base,
+        entities,
+        &congestion_route_ledger,
+    )?;
+    drop(congestion_route_ledger);
     profile_mark!("interstellar-congestion");
     let exporter_powers = state
         .factory_topology
@@ -4599,6 +4651,11 @@ fn simulate_step(
             station_mode_topology_changed,
             local_step_directory,
         )?;
+        crate::interstellar_logistics::refresh_route_activity_after_topology_change(
+            entities,
+            station_mode_topology_changed,
+            interstellar_route_activity,
+        );
     }
     profile_mark!("local-directory-boundary-refresh");
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {

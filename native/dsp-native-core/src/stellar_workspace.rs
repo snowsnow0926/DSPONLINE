@@ -6,7 +6,8 @@
 //! tied to an exact native revision and catalog fingerprint so the renderer
 //! cannot accidentally combine rows from two authorities.
 
-use std::collections::{BTreeMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -15,10 +16,22 @@ use crate::state::CoreState;
 
 const STAR_MAP_SCHEMA: &str = "star-map-overview-v1";
 const STELLAR_INDUSTRY_SCHEMA: &str = "stellar-industry-v1";
+const STELLAR_INDUSTRY_V2_SCHEMA: &str = "stellar-industry-v2";
 const MAX_PAGE_ROWS: usize = 64;
 const MAX_REQUEST_BYTES: usize = 32_768;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_LABEL_BYTES: usize = 512;
+const MAX_QUERY_BYTES: usize = 512;
+const MAX_PATH_VISITS: usize = 200_000;
+const STATION_SLOT_COUNT: usize = 5;
+const DRONES_PER_BUILDING: f64 = 50.0;
+const VESSELS_PER_BUILDING: f64 = 10.0;
+const CARGO_PER_DRONE: f64 = 25.0;
+const CARGO_PER_VESSEL: f64 = 100.0;
+const PLANETARY_TRIP_SECONDS: f64 = 8.0;
+const INTERSTELLAR_TRIP_SECONDS: f64 = 30.0;
+const WARP_TRIP_SECONDS: f64 = 12.0;
+const LONG_WARP_LEG_LY: f64 = 12.0;
 
 #[derive(Debug, Default, Clone)]
 struct PlanetLogisticsSummary {
@@ -47,6 +60,117 @@ struct SystemDirectoryEntry<'a> {
     system_id: &'a str,
     planet_indices: Vec<usize>,
     first_simulation_order: u16,
+}
+
+#[derive(Debug, Clone)]
+struct RouteSlot {
+    item_id: Option<String>,
+    local_mode: String,
+    remote_mode: String,
+    minimum_load: f64,
+    min_stock: f64,
+    max_stock: f64,
+    priority: usize,
+    route_policy: String,
+    warper_budget: usize,
+}
+
+impl Default for RouteSlot {
+    fn default() -> Self {
+        Self {
+            item_id: None,
+            local_mode: "storage".to_owned(),
+            remote_mode: "storage".to_owned(),
+            minimum_load: 1.0,
+            min_stock: 0.0,
+            max_stock: 0.0,
+            priority: 1,
+            route_policy: "relay-preferred".to_owned(),
+            warper_budget: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StoredStationRoute {
+    scope: String,
+    slot_index: usize,
+    peer_id: String,
+    item_id: String,
+    vehicle_count: f64,
+    cargo: f64,
+    owner_id: String,
+}
+
+#[derive(Debug)]
+struct RouteStation {
+    id: String,
+    building_id: String,
+    planet_index: usize,
+    machine_count: f64,
+    outputs: HashMap<String, f64>,
+    slots: Vec<RouteSlot>,
+    routes: Vec<StoredStationRoute>,
+    stored_item_id: Option<String>,
+    installed_drones: f64,
+    installed_vessels: f64,
+    available_warpers: f64,
+    warp_enabled: bool,
+    congestion: f64,
+    explicit_power_factor: Option<f64>,
+    power_grid_id: String,
+    power_covered: bool,
+    hub_enabled: bool,
+    hub_priority: f64,
+    quantum_remote_disabled: bool,
+    elevator: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RoutePeer {
+    station_index: usize,
+    slot_index: usize,
+    slot: RouteSlot,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedRoutePath {
+    station_indices: Vec<usize>,
+    distance_ly: f64,
+    duration_seconds: f64,
+    max_leg_distance_ly: f64,
+    score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RouteEconomicsProjection {
+    distance_ly: f64,
+    orbit_span: usize,
+    requires_warp: bool,
+    duration_seconds: f64,
+    cargo_per_trip: f64,
+    throughput_per_minute: f64,
+    warpers_per_trip: f64,
+    power_kw: f64,
+    energy_mj_per_trip: f64,
+    route_available: bool,
+    route_kind: &'static str,
+    waypoint_station_indices: Vec<usize>,
+    hop_count: usize,
+    max_leg_distance_ly: f64,
+    warpers_per_vessel: f64,
+    route_planning_complete: bool,
+}
+
+#[derive(Debug)]
+struct RouteSnapshotProjection {
+    id: String,
+    scope: &'static str,
+    priority: usize,
+    status: &'static str,
+    row: Value,
+    source_planet_index: Option<usize>,
+    target_planet_index: usize,
 }
 
 fn checked_add(target: &mut usize, amount: usize, label: &'static str) -> anyhow::Result<()> {
@@ -266,6 +390,1608 @@ fn next_cursor(
         .checked_add(row_count)
         .ok_or_else(|| anyhow!("native stellar projection cursor overflow"))?;
     Ok((consumed < total_count).then_some(consumed))
+}
+
+fn rounded(value: f64, digits: i32) -> f64 {
+    let scale = 10_f64.powi(digits);
+    (value * scale).round() / scale
+}
+
+fn route_filter_is_valid(route_filter: &str) -> bool {
+    matches!(route_filter, "all" | "remote" | "issues")
+}
+
+fn validate_route_query(query: &str) -> anyhow::Result<()> {
+    if query.len() > MAX_QUERY_BYTES || query.chars().any(char::is_control) {
+        bail!("native stellar route query is invalid");
+    }
+    Ok(())
+}
+
+fn normalized_route_slot(state: &CoreState, value: &Value) -> anyhow::Result<RouteSlot> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("native stellar route slot is invalid"))?;
+    let mode = |key: &str| match object.get(key).and_then(Value::as_str) {
+        Some(value @ ("supply" | "demand" | "storage")) => value.to_owned(),
+        _ => "storage".to_owned(),
+    };
+    let minimum_load = finite_number(object.get("minimumLoad"));
+    let minimum_load = [0.1, 0.25, 0.5, 1.0]
+        .into_iter()
+        .find(|candidate| (minimum_load - candidate).abs() <= f64::EPSILON)
+        .unwrap_or(1.0);
+    let route_policy = object
+        .get("routePolicy")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "direct" | "relay-preferred" | "relay-required"))
+        .unwrap_or("relay-preferred");
+    let item_id = object
+        .get("itemId")
+        .and_then(Value::as_str)
+        .filter(|item_id| state.catalog.items.contains_key(*item_id))
+        .map(str::to_owned);
+    Ok(RouteSlot {
+        item_id,
+        local_mode: mode("localMode"),
+        remote_mode: mode("remoteMode"),
+        minimum_load,
+        min_stock: non_negative_integer(object.get("minStock")),
+        max_stock: non_negative_integer(object.get("maxStock")),
+        priority: object
+            .get("priority")
+            .and_then(Value::as_u64)
+            .filter(|priority| matches!(*priority, 0 | 2))
+            .unwrap_or(1) as usize,
+        route_policy: route_policy.to_owned(),
+        warper_budget: object
+            .get("warperBudget")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map(f64::floor)
+            .unwrap_or(2.0)
+            .clamp(1.0, 4.0) as usize,
+    })
+}
+
+fn normalized_route_slots(
+    state: &CoreState,
+    station: &Map<String, Value>,
+    building_id: &str,
+) -> anyhow::Result<Vec<RouteSlot>> {
+    if building_id == "orbital_collector" {
+        return Ok(Vec::new());
+    }
+    let mut slots = match station.get("stationSlots") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .take(STATION_SLOT_COUNT)
+            .map(|value| normalized_route_slot(state, value))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => bail!("native stellar station slots are invalid"),
+    };
+    if slots.is_empty()
+        && let Some(item_id) = station
+            .get("storedItemId")
+            .and_then(Value::as_str)
+            .filter(|item_id| state.catalog.items.contains_key(*item_id))
+    {
+        let legacy_mode = if station.get("stationMode").and_then(Value::as_str) == Some("demand") {
+            "demand"
+        } else {
+            "supply"
+        };
+        let mut slot = RouteSlot {
+            item_id: Some(item_id.to_owned()),
+            ..RouteSlot::default()
+        };
+        if building_id == "planetary_logistics_station" {
+            slot.local_mode = legacy_mode.to_owned();
+        } else if building_id == "interstellar_logistics_station" {
+            slot.remote_mode = legacy_mode.to_owned();
+        }
+        slots.push(slot);
+    }
+    slots.resize_with(STATION_SLOT_COUNT, RouteSlot::default);
+    Ok(slots)
+}
+
+fn stored_station_routes(
+    state: &CoreState,
+    station: &Map<String, Value>,
+    station_id: &str,
+) -> anyhow::Result<Vec<StoredStationRoute>> {
+    let routes = match station.get("stationRoutes") {
+        Some(Value::Array(routes)) => routes,
+        Some(Value::Null) | None => return Ok(Vec::new()),
+        Some(_) => bail!("native stellar station routes are invalid"),
+    };
+    routes
+        .iter()
+        .map(|value| {
+            let route = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native stellar station route is invalid"))?;
+            let scope = route
+                .get("scope")
+                .and_then(Value::as_str)
+                .filter(|scope| matches!(*scope, "local" | "remote"))
+                .ok_or_else(|| anyhow!("native stellar station route scope is invalid"))?;
+            let slot_index = route
+                .get("slotIndex")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < STATION_SLOT_COUNT)
+                .ok_or_else(|| anyhow!("native stellar station route slot is invalid"))?;
+            let bounded_identifier = |key: &str| {
+                route
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= MAX_LABEL_BYTES
+                            && !value.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| anyhow!("native stellar station route {key} is invalid"))
+            };
+            let peer_id = bounded_identifier("peerId")?;
+            let item_id = bounded_identifier("itemId")?;
+            if !state.catalog.items.contains_key(item_id) {
+                bail!("native stellar station route item is unknown");
+            }
+            let owner_id = route
+                .get("vehicleStationId")
+                .map(|_| bounded_identifier("vehicleStationId"))
+                .transpose()?
+                .unwrap_or(station_id);
+            let non_negative_safe_integer = |key: &str| {
+                route
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .filter(|value| {
+                        value.is_finite()
+                            && *value >= 0.0
+                            && value.floor() == *value
+                            && *value <= 9_007_199_254_740_991.0
+                    })
+                    .ok_or_else(|| anyhow!("native stellar station route {key} is invalid"))
+            };
+            Ok(StoredStationRoute {
+                scope: scope.to_owned(),
+                slot_index,
+                peer_id: peer_id.to_owned(),
+                item_id: item_id.to_owned(),
+                vehicle_count: non_negative_safe_integer("vehicleCount")?,
+                cargo: non_negative_safe_integer("cargo")?,
+                owner_id: owner_id.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn load_route_stations(state: &CoreState) -> anyhow::Result<Vec<RouteStation>> {
+    let powered_grids = state
+        .factory_topology
+        .power_source_indices
+        .iter()
+        .filter_map(|&entity_index| {
+            Some((
+                *state
+                    .factory_topology
+                    .entity_planet_indices
+                    .get(entity_index)?,
+                *state
+                    .factory_topology
+                    .entity_grid_indices
+                    .get(entity_index)?,
+            ))
+        })
+        .collect::<HashSet<_>>();
+    state
+        .factory_topology
+        .station_indices
+        .iter()
+        .map(|&entity_index| {
+            let value = state.parse_entity(entity_index)?;
+            let station = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native stellar route station is not an object"))?;
+            let id = state.entities.ids[entity_index].to_owned();
+            let planet_index = state
+                .factory_topology
+                .entity_planet_indices
+                .get(entity_index)
+                .copied()
+                .ok_or_else(|| anyhow!("native stellar route station planet is missing"))?;
+            if planet_index >= state.catalog.planets.len() {
+                bail!("native stellar route station planet is invalid");
+            }
+            let grid_index = state
+                .factory_topology
+                .entity_grid_indices
+                .get(entity_index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            let building_id = station
+                .get("buildingId")
+                .and_then(Value::as_str)
+                .unwrap_or("station")
+                .to_owned();
+            let outputs = station
+                .get("outputs")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|values| values.iter())
+                .filter_map(|(item_id, value)| {
+                    value
+                        .as_f64()
+                        .filter(|amount| amount.is_finite())
+                        .map(|amount| (item_id.to_owned(), amount.floor().max(0.0)))
+                })
+                .collect();
+            let routes = stored_station_routes(state, station, &id)?;
+            let slots = normalized_route_slots(state, station, &building_id)?;
+            let explicit_power_factor = station
+                .get("powerFactor")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .map(|value| value.clamp(0.0, 1.0));
+            Ok(RouteStation {
+                id,
+                building_id: building_id.clone(),
+                planet_index,
+                machine_count: non_negative_integer(station.get("machineCount")),
+                outputs,
+                slots,
+                routes,
+                stored_item_id: station
+                    .get("storedItemId")
+                    .and_then(Value::as_str)
+                    .filter(|item_id| state.catalog.items.contains_key(*item_id))
+                    .map(str::to_owned),
+                installed_drones: non_negative_integer(station.get("stationDrones")),
+                installed_vessels: non_negative_integer(station.get("stationVessels")),
+                available_warpers: non_negative_integer(station.get("stationWarpers")),
+                warp_enabled: station
+                    .get("stationWarpEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                congestion: non_negative_number(station.get("stationCongestion")).clamp(0.0, 1.0),
+                explicit_power_factor,
+                power_grid_id: station
+                    .get("powerGridId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("grid-a")
+                    .to_owned(),
+                power_covered: powered_grids.contains(&(planet_index, grid_index)),
+                hub_enabled: station
+                    .get("stationHubEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                hub_priority: station
+                    .get("stationHubPriority")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(1.0),
+                quantum_remote_disabled: station.get("quantumMode").and_then(Value::as_str)
+                    == Some("quantum")
+                    || station
+                        .get("quantumTransition")
+                        .is_some_and(|value| !value.is_null()),
+                elevator: building_id == "interstellar_logistics_station"
+                    && non_negative_integer(station.get("stationTier")) == 2.0
+                    && station.get("stationOperationMode").and_then(Value::as_str)
+                        == Some("elevator"),
+            })
+        })
+        .collect()
+}
+
+fn completed_technology(base: &Map<String, Value>, technology_id: &str) -> bool {
+    base.get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .any(|value| value.as_str() == Some(technology_id))
+        })
+}
+
+fn galactic_logistics_level(base: &Map<String, Value>) -> f64 {
+    base.get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("infiniteResearch"))
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("galactic_logistics"))
+        .and_then(Value::as_object)
+        .and_then(|progress| progress.get("level"))
+        .map(|value| finite_number(Some(value)).floor().clamp(0.0, 1_000.0))
+        .unwrap_or(0.0)
+}
+
+fn route_cargo_capacity(base: &Map<String, Value>, scope: &str) -> f64 {
+    let multiplier =
+        (1.0 + if completed_technology(base, "logistics_capacity_1") {
+            0.5
+        } else {
+            0.0
+        } + if completed_technology(base, "logistics_capacity_2") {
+            0.5
+        } else {
+            0.0
+        }) * (1.0 + galactic_logistics_level(base) * 0.05);
+    let base_capacity = if scope == "local" {
+        CARGO_PER_DRONE
+    } else {
+        CARGO_PER_VESSEL
+    };
+    (base_capacity * multiplier).round()
+}
+
+fn route_speed_multiplier(base: &Map<String, Value>) -> f64 {
+    let research =
+        1.0 + if completed_technology(base, "logistics_engine_1") {
+            0.5
+        } else {
+            0.0
+        } + if completed_technology(base, "logistics_engine_2") {
+            0.5
+        } else {
+            0.0
+        };
+    let difficulty = match base
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("difficulty"))
+        .and_then(Value::as_str)
+        .unwrap_or("standard")
+    {
+        "relaxed" => 1.1,
+        "hard" => 0.9,
+        _ => 1.0,
+    };
+    research * (1.0 + galactic_logistics_level(base) * 0.05) * difficulty
+}
+
+fn route_travel_multiplier(base: &Map<String, Value>, planet_id: &str) -> f64 {
+    planet_profile(base, planet_id)
+        .and_then(|profile| profile.get("travelTimeMultiplier"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0)
+}
+
+fn route_system_distance(
+    base: &Map<String, Value>,
+    source_system: &str,
+    target_system: &str,
+) -> f64 {
+    if source_system == target_system {
+        return 0.0;
+    }
+    let coordinate = |system_id: &str, key: &str| {
+        system_profile(base, system_id)
+            .and_then(|profile| profile.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+    };
+    let dx = coordinate(source_system, "positionX") - coordinate(target_system, "positionX");
+    let dy = coordinate(source_system, "positionY") - coordinate(target_system, "positionY");
+    rounded(dx.hypot(dy).max(0.1), 4)
+}
+
+fn route_buffer_limit(base: &Map<String, Value>) -> f64 {
+    base.get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("logisticsBufferLimit"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(1_000_000.0)
+        .floor()
+        .clamp(1_000.0, 100_000_000.0)
+}
+
+fn route_station_capacity(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    station: &RouteStation,
+    slot: &RouteSlot,
+) -> anyhow::Result<f64> {
+    let building = state
+        .catalog
+        .buildings
+        .get(&station.building_id)
+        .ok_or_else(|| anyhow!("native stellar route station building is missing"))?;
+    let count = station.machine_count.floor().max(1.0);
+    let limit = route_buffer_limit(base);
+    let base_capacity = building.output_capacity.max(0.0).floor();
+    let rated = if base_capacity == 0.0 {
+        0.0
+    } else if base_capacity > limit / count {
+        limit
+    } else {
+        (base_capacity * count).min(limit)
+    };
+    Ok(if slot.max_stock > 0.0 {
+        rated.min(slot.max_stock)
+    } else {
+        rated
+    })
+}
+
+fn route_station_power_factor(state: &CoreState, station: &RouteStation) -> (f64, bool) {
+    if station.building_id == "orbital_collector" {
+        return (1.0, true);
+    }
+    // Match getEntityPowerFactor(): a persisted factor is meaningful only
+    // when the station's exact planet/grid has a power source. The compact
+    // topology proves coverage without scanning every entity for every row.
+    if !station.power_covered {
+        return (0.0, true);
+    }
+    if let Some(value) = station.explicit_power_factor {
+        return (value, true);
+    }
+    let planet_id = &state.catalog.planets[station.planet_index].id;
+    let metric = state
+        .base_value()
+        .get("powerGridMetrics")
+        .and_then(Value::as_object)
+        .and_then(|planets| planets.get(planet_id))
+        .and_then(Value::as_object)
+        .and_then(|grids| grids.get(&station.power_grid_id))
+        .and_then(Value::as_object)
+        .and_then(|grid| grid.get("powerFactor"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite());
+    metric.map_or((0.0, false), |value| (value.clamp(0.0, 1.0), true))
+}
+
+fn station_building_power_kw(state: &CoreState, station: &RouteStation) -> anyhow::Result<f64> {
+    let building = state
+        .catalog
+        .buildings
+        .get(&station.building_id)
+        .ok_or_else(|| anyhow!("native stellar route building power is missing"))?;
+    Ok(building.power_demand_kw.max(0.0) * station.machine_count.max(1.0))
+}
+
+fn route_system_unlocked(base: &Map<String, Value>, system_id: &str) -> bool {
+    base.get("exploration")
+        .and_then(Value::as_object)
+        .and_then(|exploration| exploration.get("unlockedSystemIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|systems| {
+            systems
+                .iter()
+                .any(|value| value.as_str() == Some(system_id))
+        })
+}
+
+fn route_leg(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    source_index: usize,
+    target_index: usize,
+) -> (f64, f64) {
+    let source_planet = &state.catalog.planets[stations[source_index].planet_index];
+    let target_planet = &state.catalog.planets[stations[target_index].planet_index];
+    let distance = route_system_distance(base, &source_planet.system_id, &target_planet.system_id);
+    let environment = (route_travel_multiplier(base, &source_planet.id)
+        + route_travel_multiplier(base, &target_planet.id))
+        / 2.0;
+    let distance_factor = 0.75 + distance / 24.0;
+    let long_leg_penalty = if distance > LONG_WARP_LEG_LY {
+        1.0 + (distance - LONG_WARP_LEG_LY) / 14.0
+    } else {
+        1.0
+    };
+    (
+        distance,
+        WARP_TRIP_SECONDS / route_speed_multiplier(base)
+            * environment
+            * distance_factor
+            * long_leg_penalty,
+    )
+}
+
+fn collect_route_path(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    station_indices: Vec<usize>,
+) -> PlannedRoutePath {
+    let mut distance_ly = 0.0;
+    let mut duration_seconds = 0.0;
+    let mut max_leg_distance_ly = 0.0_f64;
+    for leg in station_indices.windows(2) {
+        let (distance, duration) = route_leg(state, base, stations, leg[0], leg[1]);
+        distance_ly += distance;
+        duration_seconds += duration;
+        max_leg_distance_ly = max_leg_distance_ly.max(distance);
+    }
+    let priority_bonus = station_indices[1..station_indices.len() - 1]
+        .iter()
+        .map(|index| stations[*index].hub_priority * 0.025)
+        .sum::<f64>();
+    PlannedRoutePath {
+        station_indices,
+        distance_ly,
+        duration_seconds,
+        max_leg_distance_ly,
+        score: duration_seconds * (1.0 - priority_bonus).max(0.85),
+    }
+}
+
+fn compare_route_paths(
+    left: &PlannedRoutePath,
+    right: &PlannedRoutePath,
+    stations: &[RouteStation],
+) -> Ordering {
+    left.score
+        .partial_cmp(&right.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.station_indices.len().cmp(&right.station_indices.len()))
+        .then_with(|| {
+            let ids = |path: &PlannedRoutePath| {
+                path.station_indices
+                    .iter()
+                    .map(|index| stations[*index].id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            };
+            ids(left).cmp(&ids(right))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_route_paths(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    target_index: usize,
+    route_policy: &str,
+    maximum_hops: usize,
+    path: &mut Vec<usize>,
+    remaining_hubs: &[usize],
+    best: &mut Option<PlannedRoutePath>,
+    visits: &mut usize,
+) -> bool {
+    if *visits >= MAX_PATH_VISITS {
+        return false;
+    }
+    *visits += 1;
+    let hops_used = path.len() - 1;
+    if hops_used >= maximum_hops {
+        return true;
+    }
+    let mut direct = path.clone();
+    direct.push(target_index);
+    if route_policy != "relay-required" || direct.len() > 2 {
+        let candidate = collect_route_path(state, base, stations, direct);
+        if best
+            .as_ref()
+            .is_none_or(|current| compare_route_paths(&candidate, current, stations).is_lt())
+        {
+            *best = Some(candidate);
+        }
+    }
+    if route_policy == "direct" || hops_used + 1 >= maximum_hops {
+        return true;
+    }
+    let Some(&current) = path.last() else {
+        return false;
+    };
+    for hub_index in remaining_hubs {
+        let (distance, _) = route_leg(state, base, stations, current, *hub_index);
+        if distance > LONG_WARP_LEG_LY * 1.5 {
+            continue;
+        }
+        path.push(*hub_index);
+        let next_hubs = remaining_hubs
+            .iter()
+            .copied()
+            .filter(|candidate| candidate != hub_index)
+            .collect::<Vec<_>>();
+        if !visit_route_paths(
+            state,
+            base,
+            stations,
+            target_index,
+            route_policy,
+            maximum_hops,
+            path,
+            &next_hubs,
+            best,
+            visits,
+        ) {
+            path.pop();
+            return false;
+        }
+        path.pop();
+    }
+    true
+}
+
+fn route_hub_representatives(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+) -> Vec<usize> {
+    let mut by_system = BTreeMap::<&str, usize>::new();
+    for (station_index, station) in stations.iter().enumerate() {
+        if station.building_id != "interstellar_logistics_station" || !station.hub_enabled {
+            continue;
+        }
+        let system_id = state.catalog.planets[station.planet_index]
+            .system_id
+            .as_str();
+        if !route_system_unlocked(base, system_id) {
+            continue;
+        }
+        let replace = by_system.get(system_id).is_none_or(|previous_index| {
+            let previous = &stations[*previous_index];
+            station.hub_priority > previous.hub_priority
+                || (station.hub_priority == previous.hub_priority && station.id < previous.id)
+        });
+        if replace {
+            by_system.insert(system_id, station_index);
+        }
+    }
+    let mut hubs = by_system.into_values().collect::<Vec<_>>();
+    hubs.sort_unstable_by(|left, right| stations[*left].id.cmp(&stations[*right].id));
+    hubs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_route_path(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    hub_representatives: &[usize],
+    source_index: usize,
+    target_index: usize,
+    route_policy: &str,
+    warper_budget: usize,
+) -> (Option<PlannedRoutePath>, bool) {
+    let source_system = &state.catalog.planets[stations[source_index].planet_index].system_id;
+    let target_system = &state.catalog.planets[stations[target_index].planet_index].system_id;
+    let hubs = hub_representatives
+        .iter()
+        .copied()
+        .filter(|index| {
+            let system_id = &state.catalog.planets[stations[*index].planet_index].system_id;
+            system_id != source_system && system_id != target_system
+        })
+        .collect::<Vec<_>>();
+    let mut best = None;
+    let mut visits = 0_usize;
+    let complete = visit_route_paths(
+        state,
+        base,
+        stations,
+        target_index,
+        route_policy,
+        warper_budget.clamp(1, 4),
+        &mut vec![source_index],
+        &hubs,
+        &mut best,
+        &mut visits,
+    );
+    if !complete {
+        return (None, false);
+    }
+    (best, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_economics_projection(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    hub_representatives: &[usize],
+    source_index: usize,
+    target_index: usize,
+    installed_vehicles: f64,
+    demand_slot: &RouteSlot,
+) -> anyhow::Result<RouteEconomicsProjection> {
+    let source = &stations[source_index];
+    let target = &stations[target_index];
+    let source_planet = &state.catalog.planets[source.planet_index];
+    let target_planet = &state.catalog.planets[target.planet_index];
+    let requires_warp = source_planet.system_id != target_planet.system_id;
+    let (path, route_planning_complete) = if requires_warp {
+        plan_route_path(
+            state,
+            base,
+            stations,
+            hub_representatives,
+            source_index,
+            target_index,
+            &demand_slot.route_policy,
+            demand_slot.warper_budget,
+        )
+    } else {
+        (None, true)
+    };
+    let route_available = !requires_warp || route_planning_complete && path.is_some();
+    let direct_distance =
+        route_system_distance(base, &source_planet.system_id, &target_planet.system_id);
+    let distance_ly = path
+        .as_ref()
+        .map_or(if requires_warp { direct_distance } else { 0.0 }, |path| {
+            path.distance_ly
+        });
+    let orbit_span = source_planet
+        .orbit_index
+        .abs_diff(target_planet.orbit_index)
+        .max(1) as usize;
+    let environment = (route_travel_multiplier(base, &source_planet.id)
+        + route_travel_multiplier(base, &target_planet.id))
+        / 2.0;
+    let duration_seconds = rounded(
+        if requires_warp {
+            path.as_ref().map_or(
+                WARP_TRIP_SECONDS / route_speed_multiplier(base) * environment * 4.0,
+                |path| path.duration_seconds,
+            )
+        } else {
+            INTERSTELLAR_TRIP_SECONDS / route_speed_multiplier(base)
+                * environment
+                * (0.9 + orbit_span as f64 * 0.1)
+        },
+        2,
+    );
+    let vessels = installed_vehicles.floor().max(1.0);
+    let cargo_per_trip = route_cargo_capacity(base, "remote") * vessels;
+    let waypoint_station_indices = path.as_ref().map_or_else(Vec::new, |path| {
+        path.station_indices[1..path.station_indices.len() - 1].to_vec()
+    });
+    let hop_count = if requires_warp {
+        path.as_ref().map_or(demand_slot.warper_budget, |path| {
+            path.station_indices.len() - 1
+        })
+    } else {
+        0
+    };
+    let hub_power_kw = waypoint_station_indices
+        .iter()
+        .map(|index| station_building_power_kw(state, &stations[*index]))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .sum::<f64>();
+    let drive_power_kw = if requires_warp {
+        900.0 * hop_count as f64
+    } else {
+        240.0
+    } * vessels;
+    let power_kw = rounded(
+        station_building_power_kw(state, source)?
+            + station_building_power_kw(state, target)?
+            + hub_power_kw
+            + drive_power_kw,
+        2,
+    );
+    Ok(RouteEconomicsProjection {
+        distance_ly: rounded(distance_ly, 2),
+        orbit_span,
+        requires_warp,
+        duration_seconds,
+        cargo_per_trip,
+        throughput_per_minute: rounded(cargo_per_trip * 60.0 / duration_seconds.max(1.0), 2),
+        warpers_per_trip: if requires_warp {
+            vessels * hop_count as f64
+        } else {
+            0.0
+        },
+        power_kw,
+        energy_mj_per_trip: rounded(power_kw * duration_seconds / 1_000.0, 2),
+        route_available,
+        route_kind: if !requires_warp {
+            "local"
+        } else if waypoint_station_indices.is_empty() {
+            "direct"
+        } else {
+            "relay"
+        },
+        waypoint_station_indices,
+        hop_count,
+        max_leg_distance_ly: rounded(
+            path.as_ref()
+                .map_or(distance_ly, |path| path.max_leg_distance_ly),
+            2,
+        ),
+        warpers_per_vessel: if requires_warp { hop_count as f64 } else { 0.0 },
+        route_planning_complete,
+    })
+}
+
+#[derive(Debug, Default)]
+struct RouteSupplyDirectories {
+    local: HashMap<(usize, String), Vec<RoutePeer>>,
+    remote: HashMap<String, Vec<RoutePeer>>,
+}
+
+fn orbital_route_slot(station: &RouteStation) -> Option<RouteSlot> {
+    station.stored_item_id.as_ref().map(|item_id| RouteSlot {
+        item_id: Some(item_id.clone()),
+        remote_mode: "supply".to_owned(),
+        ..RouteSlot::default()
+    })
+}
+
+fn route_supply_directories(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+) -> RouteSupplyDirectories {
+    let mut result = RouteSupplyDirectories::default();
+    for (station_index, station) in stations.iter().enumerate() {
+        if station.elevator {
+            continue;
+        }
+        if station.building_id == "orbital_collector" {
+            if station.quantum_remote_disabled {
+                continue;
+            }
+            if let Some(slot) = orbital_route_slot(station)
+                && let Some(item_id) = slot.item_id.clone()
+            {
+                let system_id = &state.catalog.planets[station.planet_index].system_id;
+                if route_system_unlocked(base, system_id) {
+                    result.remote.entry(item_id).or_default().push(RoutePeer {
+                        station_index,
+                        slot_index: 0,
+                        slot,
+                    });
+                }
+            }
+            continue;
+        }
+        for (slot_index, slot) in station.slots.iter().enumerate() {
+            let Some(item_id) = slot.item_id.as_ref() else {
+                continue;
+            };
+            if slot.local_mode == "supply" {
+                result
+                    .local
+                    .entry((station.planet_index, item_id.clone()))
+                    .or_default()
+                    .push(RoutePeer {
+                        station_index,
+                        slot_index,
+                        slot: slot.clone(),
+                    });
+            }
+            if station.building_id == "interstellar_logistics_station"
+                && !station.quantum_remote_disabled
+                && slot.remote_mode == "supply"
+            {
+                let system_id = &state.catalog.planets[station.planet_index].system_id;
+                if route_system_unlocked(base, system_id) {
+                    result
+                        .remote
+                        .entry(item_id.clone())
+                        .or_default()
+                        .push(RoutePeer {
+                            station_index,
+                            slot_index,
+                            slot: slot.clone(),
+                        });
+                }
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_route_peer(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    directories: &RouteSupplyDirectories,
+    hub_representatives: &[usize],
+    economics_cache: &mut HashMap<(usize, usize, String, usize), RouteEconomicsProjection>,
+    target_index: usize,
+    target_slot: &RouteSlot,
+    scope: &str,
+) -> anyhow::Result<Option<RoutePeer>> {
+    let target = &stations[target_index];
+    let Some(item_id) = target_slot.item_id.as_ref() else {
+        return Ok(None);
+    };
+    if target.elevator
+        || scope == "remote"
+            && (target.building_id != "interstellar_logistics_station"
+                || target.quantum_remote_disabled)
+    {
+        return Ok(None);
+    }
+    let candidates = if scope == "local" {
+        directories
+            .local
+            .get(&(target.planet_index, item_id.clone()))
+    } else {
+        directories.remote.get(item_id)
+    };
+    let mut ranked = Vec::new();
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.station_index == target_index {
+            continue;
+        }
+        let source = &stations[candidate.station_index];
+        if scope == "local" && source.planet_index != target.planet_index
+            || scope == "remote" && source.planet_index == target.planet_index
+        {
+            continue;
+        }
+        let (route_available, route_duration) = if scope == "remote" {
+            let cache_key = (
+                candidate.station_index,
+                target_index,
+                target_slot.route_policy.clone(),
+                target_slot.warper_budget,
+            );
+            if !economics_cache.contains_key(&cache_key) {
+                let economics = route_economics_projection(
+                    state,
+                    base,
+                    stations,
+                    hub_representatives,
+                    candidate.station_index,
+                    target_index,
+                    1.0,
+                    target_slot,
+                )?;
+                economics_cache.insert(cache_key.clone(), economics);
+            }
+            let economics = &economics_cache[&cache_key];
+            (economics.route_available, economics.duration_seconds)
+        } else {
+            (true, 0.0)
+        };
+        ranked.push((candidate.clone(), route_available, route_duration));
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.0.slot.priority.cmp(&left.0.slot.priority))
+            .then_with(|| left.2.partial_cmp(&right.2).unwrap_or(Ordering::Equal))
+            .then_with(|| {
+                stations[left.0.station_index]
+                    .id
+                    .cmp(&stations[right.0.station_index].id)
+            })
+            .then_with(|| left.0.slot_index.cmp(&right.0.slot_index))
+    });
+    Ok(ranked.into_iter().next().map(|value| value.0))
+}
+
+fn route_status_label(status: &str) -> &'static str {
+    match status {
+        "active" => "运输中",
+        "ready" => "等待发船",
+        "missing-source" => "缺少供应站",
+        "missing-vehicle" => "缺少运输载具",
+        "missing-hub" => "缺少中转枢纽",
+        "missing-warper" => "缺少翘曲器",
+        "missing-stock" => "供应库存不足",
+        "target-full" => "需求库存已满",
+        "no-power" => "站点电力不足",
+        _ => "无法验证",
+    }
+}
+
+fn route_status_is_issue(status: &str) -> bool {
+    !matches!(status, "active" | "ready" | "missing-stock" | "target-full")
+}
+
+fn route_building_label(building_id: &str) -> &str {
+    match building_id {
+        "planetary_logistics_station" => "行星站",
+        "interstellar_logistics_station" => "星际站",
+        "orbital_collector" => "轨道采集器",
+        _ => building_id,
+    }
+}
+
+fn route_endpoint_label(state: &CoreState, station: &RouteStation) -> (String, bool) {
+    let (planet_display_name, _) = planet_label(state, station.planet_index);
+    let raw = format!(
+        "{} · {}",
+        planet_display_name,
+        route_building_label(&station.building_id)
+    );
+    bounded_label(Some(&raw), &station.id)
+}
+
+fn route_path_labels(
+    state: &CoreState,
+    stations: &[RouteStation],
+    source_index: Option<usize>,
+    waypoint_station_indices: &[usize],
+    target_index: usize,
+    distance_ly: f64,
+) -> (String, bool, Vec<String>, Vec<String>, Vec<String>) {
+    let station_indices = source_index
+        .into_iter()
+        .chain(waypoint_station_indices.iter().copied())
+        .chain(std::iter::once(target_index))
+        .collect::<Vec<_>>();
+    let waypoint_station_ids = waypoint_station_indices
+        .iter()
+        .map(|index| stations[*index].id.clone())
+        .collect::<Vec<_>>();
+    let waypoint_planet_ids = waypoint_station_indices
+        .iter()
+        .map(|index| {
+            state.catalog.planets[stations[*index].planet_index]
+                .id
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let waypoint_labels = waypoint_station_indices
+        .iter()
+        .map(|index| route_endpoint_label(state, &stations[*index]).0)
+        .collect::<Vec<_>>();
+    let mut labels = Vec::new();
+    for station_index in station_indices {
+        let station = &stations[station_index];
+        let label = if distance_ly > 0.0 {
+            let system_id = &state.catalog.planets[station.planet_index].system_id;
+            system_label(state, system_id).0
+        } else {
+            planet_label(state, station.planet_index).0
+        };
+        if labels.last() != Some(&label) {
+            labels.push(label);
+        }
+    }
+    let raw = labels.join(" → ");
+    let (label, truncated) = bounded_label(Some(&raw), "待匹配");
+    (
+        label,
+        truncated,
+        waypoint_station_ids,
+        waypoint_planet_ids,
+        waypoint_labels,
+    )
+}
+
+fn route_station_output(station: &RouteStation, item_id: &str) -> f64 {
+    station.outputs.get(item_id).copied().unwrap_or(0.0)
+}
+
+fn route_installed_vehicles(station: &RouteStation, scope: &str) -> f64 {
+    if scope == "local" {
+        station.installed_drones
+    } else {
+        station.installed_vessels
+    }
+}
+
+fn route_vehicle_capacity(station: &RouteStation, scope: &str) -> f64 {
+    let per_building = if scope == "local" {
+        DRONES_PER_BUILDING
+    } else {
+        VESSELS_PER_BUILDING
+    };
+    per_building * station.machine_count.floor().max(0.0)
+}
+
+fn route_scope_matches(
+    state: &CoreState,
+    snapshot: &RouteSnapshotProjection,
+    system_id: Option<&str>,
+    planet_id: Option<&str>,
+) -> bool {
+    let target_planet = &state.catalog.planets[snapshot.target_planet_index];
+    let source_planet = snapshot
+        .source_planet_index
+        .map(|index| &state.catalog.planets[index]);
+    system_id.is_none_or(|system_id| {
+        target_planet.system_id == system_id
+            || source_planet.is_some_and(|planet| planet.system_id == system_id)
+    }) && planet_id.is_none_or(|planet_id| {
+        target_planet.id == planet_id || source_planet.is_some_and(|planet| planet.id == planet_id)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_route_snapshot(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    stations: &[RouteStation],
+    hub_representatives: &[usize],
+    busy_vehicles: &HashMap<(String, String), f64>,
+    economics_cache: &mut HashMap<(usize, usize, String, usize), RouteEconomicsProjection>,
+    target_index: usize,
+    target_slot_index: usize,
+    target_slot: &RouteSlot,
+    scope: &'static str,
+    source_peer: Option<RoutePeer>,
+) -> anyhow::Result<RouteSnapshotProjection> {
+    let target = &stations[target_index];
+    let item_id = target_slot
+        .item_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("native stellar demand route item is missing"))?;
+    let source_index = source_peer.as_ref().map(|peer| peer.station_index);
+    let source = source_index.map(|index| &stations[index]);
+    let active_routes = target
+        .routes
+        .iter()
+        .filter(|route| {
+            route.scope == scope
+                && route.slot_index == target_slot_index
+                && source.is_none_or(|source| route.peer_id == source.id)
+        })
+        .collect::<Vec<_>>();
+    let active_vehicles = active_routes
+        .iter()
+        .map(|route| route.vehicle_count)
+        .sum::<f64>();
+    let active_cargo = active_routes.iter().map(|route| route.cargo).sum::<f64>();
+    let active_item_consistent = active_routes.iter().all(|route| route.item_id == item_id);
+
+    let mut vehicle_station_indices = vec![target_index];
+    if let Some(source_index) = source_index
+        && stations[source_index].building_id != "orbital_collector"
+        && source_index != target_index
+    {
+        vehicle_station_indices.push(source_index);
+    }
+    vehicle_station_indices.retain(|index| stations[*index].building_id != "orbital_collector");
+    let installed_vehicles = vehicle_station_indices
+        .iter()
+        .map(|index| route_installed_vehicles(&stations[*index], scope))
+        .sum::<f64>();
+    let installed_vehicle_capacity = vehicle_station_indices
+        .iter()
+        .map(|index| route_vehicle_capacity(&stations[*index], scope))
+        .sum::<f64>();
+    let available_by_station = vehicle_station_indices
+        .iter()
+        .map(|index| {
+            let station = &stations[*index];
+            let busy = busy_vehicles
+                .get(&(station.id.clone(), scope.to_owned()))
+                .copied()
+                .unwrap_or(0.0);
+            (
+                *index,
+                (route_installed_vehicles(station, scope) - busy).max(0.0),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let available_vehicles = available_by_station.values().sum::<f64>();
+
+    let economics = if scope == "remote"
+        && let Some(source_index) = source_index
+    {
+        Some(route_economics_projection(
+            state,
+            base,
+            stations,
+            hub_representatives,
+            source_index,
+            target_index,
+            installed_vehicles.max(1.0),
+            target_slot,
+        )?)
+    } else {
+        None
+    };
+    if let (Some(source_index), Some(economics)) = (source_index, economics.as_ref()) {
+        economics_cache.insert(
+            (
+                source_index,
+                target_index,
+                target_slot.route_policy.clone(),
+                target_slot.warper_budget,
+            ),
+            economics.clone(),
+        );
+    }
+    let duration_seconds = economics.as_ref().map_or(
+        PLANETARY_TRIP_SECONDS / route_speed_multiplier(base),
+        |economics| economics.duration_seconds,
+    );
+    let cargo_capacity = route_cargo_capacity(base, scope);
+    let throughput_per_minute = if installed_vehicles > 0.0 {
+        cargo_capacity * installed_vehicles * 60.0 / duration_seconds.max(1.0)
+    } else {
+        0.0
+    };
+    let fallback_power_kw = state
+        .catalog
+        .buildings
+        .get(&target.building_id)
+        .ok_or_else(|| anyhow!("native stellar target station building is missing"))?
+        .power_demand_kw
+        .max(0.0)
+        + 120.0 * installed_vehicles;
+    let power_kw = economics
+        .as_ref()
+        .map_or(fallback_power_kw, |economics| economics.power_kw);
+    let energy_mj_per_trip = economics
+        .as_ref()
+        .map_or(power_kw * duration_seconds / 1_000.0, |economics| {
+            economics.energy_mj_per_trip
+        });
+
+    let required_warpers = economics
+        .as_ref()
+        .map_or(0.0, |economics| economics.warpers_per_vessel);
+    let requires_warp = economics
+        .as_ref()
+        .is_some_and(|economics| economics.requires_warp);
+    let warp_vehicle_ready = !requires_warp
+        || vehicle_station_indices.iter().any(|index| {
+            let station = &stations[*index];
+            available_by_station.get(index).copied().unwrap_or(0.0) > 0.0
+                && station.warp_enabled
+                && station.available_warpers >= required_warpers
+        });
+    let local_vehicle_power_ready = scope != "local"
+        || vehicle_station_indices.iter().any(|index| {
+            available_by_station.get(index).copied().unwrap_or(0.0) > 0.0
+                && route_station_power_factor(state, &stations[*index]).0 > 0.0
+        });
+    let active_owner_id = active_routes.first().map(|route| route.owner_id.as_str());
+    let dispatch_station_index = active_owner_id
+        .and_then(|owner_id| {
+            vehicle_station_indices
+                .iter()
+                .copied()
+                .find(|index| stations[*index].id == owner_id)
+        })
+        .or_else(|| {
+            vehicle_station_indices.iter().copied().find(|index| {
+                let station = &stations[*index];
+                available_by_station.get(index).copied().unwrap_or(0.0) > 0.0
+                    && (!requires_warp
+                        || station.warp_enabled && station.available_warpers >= required_warpers)
+            })
+        })
+        .or_else(|| {
+            vehicle_station_indices
+                .iter()
+                .copied()
+                .find(|index| available_by_station.get(index).copied().unwrap_or(0.0) > 0.0)
+        });
+    let dispatch_direction = dispatch_station_index.map_or("unassigned", |dispatch_index| {
+        if source_index == Some(dispatch_index) {
+            "supply-delivery"
+        } else {
+            "demand-pickup"
+        }
+    });
+
+    let source_reserve = source_peer.as_ref().map_or(0.0, |peer| peer.slot.min_stock);
+    let source_stock = source.map_or(0.0, |source| {
+        (route_station_output(source, item_id) - source_reserve).max(0.0)
+    });
+    let target_stock = route_station_output(target, item_id);
+    let target_limit = route_station_capacity(state, base, target, target_slot)?;
+    let target_free = (target_limit - target_stock - active_cargo).max(0.0);
+    let minimum_cargo = (cargo_capacity * target_slot.minimum_load).ceil();
+
+    let waypoint_station_indices = economics.as_ref().map_or(&[][..], |economics| {
+        economics.waypoint_station_indices.as_slice()
+    });
+    let route_station_indices = source_index
+        .into_iter()
+        .chain(std::iter::once(target_index))
+        .chain(waypoint_station_indices.iter().copied())
+        .collect::<Vec<_>>();
+    let route_power = route_station_indices
+        .iter()
+        .map(|index| route_station_power_factor(state, &stations[*index]))
+        .collect::<Vec<_>>();
+    let route_power_ready = route_power.iter().all(|(factor, _)| *factor > 0.0);
+    let power_proof_complete = route_power.iter().all(|(_, proven)| *proven);
+    let source_power_factor = source_index
+        .map(|index| route_station_power_factor(state, &stations[index]).0)
+        .unwrap_or(0.0);
+    let target_power_factor = route_station_power_factor(state, target).0;
+    let route_available = source.is_some()
+        && economics
+            .as_ref()
+            .is_none_or(|economics| economics.route_available);
+    let route_planning_complete = source.is_some()
+        && economics
+            .as_ref()
+            .is_none_or(|economics| economics.route_planning_complete);
+    let status = if source.is_none() {
+        "missing-source"
+    } else if active_vehicles > 0.0 {
+        "active"
+    } else if available_vehicles < 1.0 {
+        "missing-vehicle"
+    } else if requires_warp && !route_available {
+        "missing-hub"
+    } else if requires_warp && (!completed_technology(base, "space_warp") || !warp_vehicle_ready) {
+        "missing-warper"
+    } else if scope == "remote" && !route_power_ready
+        || scope == "local" && !local_vehicle_power_ready
+    {
+        "no-power"
+    } else if source_stock < minimum_cargo {
+        "missing-stock"
+    } else if target_free < minimum_cargo {
+        "target-full"
+    } else {
+        "ready"
+    };
+
+    let target_planet = &state.catalog.planets[target.planet_index];
+    let source_planet = source.map(|source| &state.catalog.planets[source.planet_index]);
+    let (target_station_label, target_station_label_truncated) =
+        route_endpoint_label(state, target);
+    let (target_planet_label, target_planet_label_truncated) =
+        planet_label(state, target.planet_index);
+    let (source_station_label, source_station_label_truncated) = source.map_or_else(
+        || ("未匹配".to_owned(), false),
+        |source| route_endpoint_label(state, source),
+    );
+    let (source_planet_label, source_planet_label_truncated) =
+        source.map_or((None, false), |source| {
+            let (label, truncated) = planet_label(state, source.planet_index);
+            (Some(label), truncated)
+        });
+    let distance_ly = economics
+        .as_ref()
+        .map_or(0.0, |economics| economics.distance_ly);
+    let (
+        route_path_label,
+        route_path_label_truncated,
+        waypoint_station_ids,
+        waypoint_planet_ids,
+        waypoint_station_labels,
+    ) = route_path_labels(
+        state,
+        stations,
+        source_index,
+        waypoint_station_indices,
+        target_index,
+        distance_ly,
+    );
+    let source_congestion = source.map_or(0.0, |source| source.congestion);
+    let waypoint_congestion = waypoint_station_indices
+        .iter()
+        .map(|index| stations[*index].congestion)
+        .fold(0.0_f64, f64::max);
+    let route_congestion = source_congestion
+        .max(target.congestion)
+        .max(waypoint_congestion);
+    let item = state
+        .catalog
+        .items
+        .get(item_id)
+        .ok_or_else(|| anyhow!("native stellar route item is missing"))?;
+    let (item_label, item_label_truncated) = bounded_label(Some(&item.name), item_id);
+    let route_id = format!(
+        "{}:{}:{}:{}",
+        scope,
+        target.id,
+        target_slot_index,
+        source.map_or("unbound", |source| source.id.as_str())
+    );
+    let mut row = json!({
+        "id": route_id.clone(),
+        "scope": scope,
+        "itemId": item_id,
+        "itemLabel": item_label,
+        "itemLabelTruncated": item_label_truncated,
+        "sourceStationId": source.map(|source| source.id.as_str()),
+        "sourceStationLabel": source_station_label,
+        "sourceStationLabelTruncated": source_station_label_truncated,
+        "sourceBuildingId": source.map(|source| source.building_id.as_str()),
+        "sourceBuildingLabel": source.map(|source| route_building_label(&source.building_id)),
+        "sourceSlotIndex": source_peer.as_ref().map(|peer| peer.slot_index),
+        "sourcePlanetId": source_planet.map(|planet| planet.id.as_str()),
+        "sourcePlanetLabel": source_planet_label,
+        "sourcePlanetLabelTruncated": source_planet_label_truncated,
+        "targetStationId": target.id,
+        "targetStationLabel": target_station_label,
+        "targetStationLabelTruncated": target_station_label_truncated,
+        "targetBuildingId": target.building_id,
+        "targetBuildingLabel": route_building_label(&target.building_id),
+        "targetSlotIndex": target_slot_index,
+        "targetPlanetId": target_planet.id,
+        "targetPlanetLabel": target_planet_label,
+        "targetPlanetLabelTruncated": target_planet_label_truncated,
+    })
+    .as_object()
+    .expect("literal stellar route identity")
+    .clone();
+    row.extend(
+        json!({
+            "sourceStock": source_stock,
+            "sourceReserve": source_reserve,
+            "sourceSlotMinStock": source_peer.as_ref().map_or(0.0, |peer| peer.slot.min_stock),
+            "sourceSlotMaxStock": source_peer.as_ref().map_or(0.0, |peer| peer.slot.max_stock),
+            "targetStock": target_stock,
+            "targetLimit": target_limit,
+            "targetFree": target_free,
+            "targetSlotMinStock": target_slot.min_stock,
+            "targetSlotMaxStock": target_slot.max_stock,
+            "minimumLoad": target_slot.minimum_load,
+            "minimumCargo": minimum_cargo,
+            "priority": target_slot.priority,
+            "installedVehicles": installed_vehicles,
+            "installedVehicleCapacity": installed_vehicle_capacity,
+            "availableVehicles": available_vehicles,
+            "activeVehicles": active_vehicles,
+            "activeRouteCount": active_routes.len(),
+            "activeCargo": active_cargo,
+            "activeRouteItemConsistent": active_item_consistent,
+        })
+        .as_object()
+        .expect("literal stellar route inventory")
+        .clone(),
+    );
+    row.extend(
+        json!({
+            "distanceLy": distance_ly,
+            "orbitSpan": economics.as_ref().map_or(0, |economics| economics.orbit_span),
+            "durationSeconds": duration_seconds,
+            "cargoPerTrip": economics.as_ref().map_or(cargo_capacity * installed_vehicles.max(1.0), |economics| economics.cargo_per_trip),
+            "throughputPerMinute": throughput_per_minute,
+            "economicsThroughputPerMinute": economics.as_ref().map_or(throughput_per_minute, |economics| economics.throughput_per_minute),
+            "powerKw": power_kw,
+            "energyMjPerTrip": energy_mj_per_trip,
+            "warpersPerTrip": economics.as_ref().map_or(0.0, |economics| economics.warpers_per_trip),
+            "warpersPerVessel": required_warpers,
+            "availableWarpers": dispatch_station_index.map_or(0.0, |index| {
+                if stations[index].warp_enabled { stations[index].available_warpers } else { 0.0 }
+            }),
+            "dispatchStationId": dispatch_station_index.map(|index| stations[index].id.as_str()),
+            "dispatchPlanetId": dispatch_station_index.map(|index| state.catalog.planets[stations[index].planet_index].id.as_str()),
+            "dispatchDirection": dispatch_direction,
+            "routeKind": economics.as_ref().map_or("local", |economics| economics.route_kind),
+            "routeAvailable": route_available,
+            "routePlanningComplete": route_planning_complete,
+            "routePathLabel": route_path_label,
+            "routePathLabelTruncated": route_path_label_truncated,
+            "waypointStationIds": waypoint_station_ids,
+            "waypointPlanetIds": waypoint_planet_ids,
+            "waypointStationLabels": waypoint_station_labels,
+            "hopCount": economics.as_ref().map_or(0, |economics| economics.hop_count),
+            "maxLegDistanceLy": economics.as_ref().map_or(0.0, |economics| economics.max_leg_distance_ly),
+            "routePolicy": target_slot.route_policy,
+            "warperBudget": target_slot.warper_budget,
+        })
+        .as_object()
+        .expect("literal stellar route economics")
+        .clone(),
+    );
+    row.extend(
+        json!({
+            "requiresWarp": requires_warp,
+            "warpVehicleReady": warp_vehicle_ready,
+            "localVehiclePowerReady": local_vehicle_power_ready,
+            "sourcePowerFactor": source_power_factor,
+            "targetPowerFactor": target_power_factor,
+            "routePowerReady": route_power_ready,
+            "powerProofComplete": power_proof_complete,
+            "sourceCongestion": source_congestion,
+            "targetCongestion": target.congestion,
+            "waypointMaxCongestion": waypoint_congestion,
+            "routeCongestion": route_congestion,
+            "status": status,
+            "statusLabel": route_status_label(status),
+        })
+        .as_object()
+        .expect("literal stellar route diagnostics")
+        .clone(),
+    );
+    let row = Value::Object(row);
+    Ok(RouteSnapshotProjection {
+        id: route_id,
+        scope,
+        priority: target_slot.priority,
+        status,
+        row,
+        source_planet_index: source.map(|source| source.planet_index),
+        target_planet_index: target.planet_index,
+    })
+}
+
+fn build_route_snapshots(state: &CoreState) -> anyhow::Result<Vec<RouteSnapshotProjection>> {
+    let base = state.base_value();
+    let stations = load_route_stations(state)?;
+    let directories = route_supply_directories(state, base, &stations);
+    let hub_representatives = route_hub_representatives(state, base, &stations);
+    let mut busy_vehicles = HashMap::<(String, String), f64>::new();
+    for station in &stations {
+        for route in &station.routes {
+            *busy_vehicles
+                .entry((route.owner_id.clone(), route.scope.clone()))
+                .or_default() += route.vehicle_count;
+        }
+    }
+    let mut economics_cache = HashMap::new();
+    let mut snapshots = Vec::new();
+    for (target_index, target) in stations.iter().enumerate() {
+        if target.building_id == "orbital_collector" {
+            continue;
+        }
+        let scopes: &[&'static str] = if target.building_id == "interstellar_logistics_station" {
+            &["local", "remote"]
+        } else {
+            &["local"]
+        };
+        for &scope in scopes {
+            for (target_slot_index, target_slot) in target.slots.iter().enumerate() {
+                let mode = if scope == "local" {
+                    target_slot.local_mode.as_str()
+                } else {
+                    target_slot.remote_mode.as_str()
+                };
+                if target_slot.item_id.is_none() || mode != "demand" {
+                    continue;
+                }
+                let source_peer = select_route_peer(
+                    state,
+                    base,
+                    &stations,
+                    &directories,
+                    &hub_representatives,
+                    &mut economics_cache,
+                    target_index,
+                    target_slot,
+                    scope,
+                )?;
+                snapshots.push(build_route_snapshot(
+                    state,
+                    base,
+                    &stations,
+                    &hub_representatives,
+                    &busy_vehicles,
+                    &mut economics_cache,
+                    target_index,
+                    target_slot_index,
+                    target_slot,
+                    scope,
+                    source_peer,
+                )?);
+            }
+        }
+    }
+    snapshots.sort_by(|left, right| {
+        (right.status == "active")
+            .cmp(&(left.status == "active"))
+            .then_with(|| right.priority.cmp(&left.priority))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(snapshots)
+}
+
+fn route_query_matches(snapshot: &RouteSnapshotProjection, normalized_query: &str) -> bool {
+    if normalized_query.is_empty() {
+        return true;
+    }
+    [
+        "itemId",
+        "itemLabel",
+        "sourceStationLabel",
+        "sourcePlanetLabel",
+        "targetStationLabel",
+        "targetPlanetLabel",
+        "routePathLabel",
+        "statusLabel",
+    ]
+    .iter()
+    .filter_map(|key| snapshot.row.get(*key).and_then(Value::as_str))
+    .any(|value| value.to_lowercase().contains(normalized_query))
 }
 
 fn scan_stations(
@@ -947,6 +2673,169 @@ impl CoreState {
             "stations": station_page,
         }))
     }
+
+    /// Extends the v1 stellar-industry read model with an independently
+    /// pageable route table. Route rows are calculated scalars tied to this
+    /// exact revision; station-slot and station-route arrays never cross the
+    /// native boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stellar_industry_v2_projection(
+        &self,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        system_id: Option<&str>,
+        planet_id: Option<&str>,
+        planet_cursor: usize,
+        planet_limit: usize,
+        station_cursor: usize,
+        station_limit: usize,
+        route_cursor: usize,
+        route_limit: usize,
+        route_filter: &str,
+        query: &str,
+    ) -> anyhow::Result<Value> {
+        validate_identity(self, expected_revision, expected_registry_fingerprint)?;
+        validate_page(route_cursor, route_limit)?;
+        if !route_filter_is_valid(route_filter) {
+            bail!("native stellar route filter is invalid");
+        }
+        validate_route_query(query)?;
+        let request = json!({
+            "expectedRevision": expected_revision,
+            "expectedRegistryFingerprint": expected_registry_fingerprint,
+            "systemId": system_id,
+            "planetId": planet_id,
+            "planetCursor": planet_cursor,
+            "planetLimit": planet_limit,
+            "stationCursor": station_cursor,
+            "stationLimit": station_limit,
+            "routeCursor": route_cursor,
+            "routeLimit": route_limit,
+            "routeFilter": route_filter,
+            "query": query,
+        });
+        validate_request(&request)?;
+
+        // Reuse the v1 implementation rather than duplicating its stable
+        // planet/station read model. The final byte gate is repeated after
+        // the route page is attached.
+        let mut projection = self.stellar_industry_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            system_id,
+            planet_id,
+            planet_cursor,
+            planet_limit,
+            station_cursor,
+            station_limit,
+        )?;
+        let effective_system_id = planet_id
+            .and_then(|planet_id| {
+                self.catalog
+                    .planets
+                    .iter()
+                    .find(|planet| planet.id == planet_id)
+            })
+            .map(|planet| planet.system_id.as_str())
+            .or(system_id);
+        let mut scoped = build_route_snapshots(self)?
+            .into_iter()
+            .filter(|snapshot| route_scope_matches(self, snapshot, effective_system_id, planet_id))
+            .collect::<Vec<_>>();
+        let scope_total_count = scoped.len();
+        let active_count = scoped
+            .iter()
+            .filter(|snapshot| snapshot.status == "active")
+            .count();
+        let blocked_count = scoped
+            .iter()
+            .filter(|snapshot| route_status_is_issue(snapshot.status))
+            .count();
+        let remote_count = scoped
+            .iter()
+            .filter(|snapshot| snapshot.scope == "remote")
+            .count();
+        let planning_incomplete_count = scoped
+            .iter()
+            .filter(|snapshot| {
+                snapshot
+                    .row
+                    .get("routePlanningComplete")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+            })
+            .count();
+        let power_unproven_count = scoped
+            .iter()
+            .filter(|snapshot| {
+                snapshot
+                    .row
+                    .get("powerProofComplete")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+            })
+            .count();
+        let mut status_counts = BTreeMap::<&str, usize>::new();
+        for snapshot in &scoped {
+            *status_counts.entry(snapshot.status).or_default() += 1;
+        }
+        let normalized_query = query.trim().to_lowercase();
+        scoped.retain(|snapshot| {
+            (route_filter != "remote" || snapshot.scope == "remote")
+                && (route_filter != "issues" || route_status_is_issue(snapshot.status))
+                && route_query_matches(snapshot, &normalized_query)
+        });
+        if route_cursor > scoped.len() {
+            bail!("native stellar route cursor is invalid");
+        }
+        let filtered_count = scoped.len();
+        let route_rows = scoped
+            .into_iter()
+            .skip(route_cursor)
+            .take(route_limit)
+            .map(|snapshot| snapshot.row)
+            .collect::<Vec<_>>();
+        let route_page = page_value(route_cursor, route_limit, filtered_count, route_rows)?;
+        let object = projection
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native stellar v1 projection is invalid"))?;
+        object.insert("schemaVersion".to_owned(), json!(2));
+        object.insert(
+            "projectionType".to_owned(),
+            json!(STELLAR_INDUSTRY_V2_SCHEMA),
+        );
+        object.insert("request".to_owned(), request);
+        let limits = object
+            .get_mut("limits")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native stellar projection limits are invalid"))?;
+        limits.insert("queryBytes".to_owned(), json!(MAX_QUERY_BYTES));
+        limits.insert("pathVisits".to_owned(), json!(MAX_PATH_VISITS));
+        object.insert(
+            "routeSummary".to_owned(),
+            json!({
+                "scopeTotalCount": scope_total_count,
+                "filteredCount": filtered_count,
+                "activeCount": active_count,
+                "blockedCount": blocked_count,
+                "remoteCount": remote_count,
+                "routePlanningIncompleteCount": planning_incomplete_count,
+                "powerUnprovenCount": power_unproven_count,
+                "statusCounts": status_counts,
+            }),
+        );
+        let route_truncated = route_page["nextCursor"].is_number();
+        object.insert("routes".to_owned(), route_page);
+        let already_truncated = object
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        object.insert(
+            "truncated".to_owned(),
+            json!(already_truncated || route_truncated),
+        );
+        finish_projection(projection)
+    }
 }
 
 #[cfg(test)]
@@ -1045,7 +2934,32 @@ mod tests {
                 { "itemId": "iron_ore", "localMode": "storage", "remoteMode": "supply" },
                 { "itemId": "iron_ore", "localMode": "storage", "remoteMode": "demand" }
             ],
-            "stationRoutes": [{ "vehicleCount": 1, "cargo": 100 }]
+            "stationRoutes": [{
+                "scope": "remote",
+                "slotIndex": 1,
+                "peerId": id,
+                "itemId": "iron_ore",
+                "vehicleCount": 1,
+                "cargo": 100,
+                "vehicleStationId": id,
+                "requiresWarp": false,
+                "waypointStationIds": [],
+                "warpersPerVessel": 0
+            }]
+        })
+        .to_string()
+    }
+
+    fn power_source(id: &str, planet_id: &str) -> String {
+        json!({
+            "id": id,
+            "kind": "power",
+            "planetId": planet_id,
+            "position": { "x": 0, "y": 0 },
+            "machineCount": 0,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {}
         })
         .to_string()
     }
@@ -1104,6 +3018,9 @@ mod tests {
             station("station-home", "home", 99.0, 101.0, 1, "legacy", 0.2),
             station("station-ashen", "ashen", -10.0, 25.0, 2, "legacy", 0.9),
             station("station-tau", "tau-one", 1.0, 2.0, 2, "quantum", 0.0),
+            power_source("power-home", "home"),
+            power_source("power-ashen", "ashen"),
+            power_source("power-tau", "tau-one"),
         ];
         CoreState::from_public_v47_parts(
             CoreCheckpointIdentity {
@@ -1120,6 +3037,212 @@ mod tests {
             entities,
             Vec::new(),
             catalog(planets, "stellar-test"),
+        )
+        .unwrap()
+    }
+
+    fn route_state() -> CoreState {
+        let planets = vec![
+            planet("source-world", "源星", "alpha", 0, 1),
+            planet("hub-world", "枢纽星", "beta", 1, 1),
+            planet("target-world", "目标星", "gamma", 2, 1),
+        ];
+        let empty_slot = || {
+            json!({
+                "localMode": "storage",
+                "remoteMode": "storage",
+                "minimumLoad": 1,
+                "minStock": 0,
+                "maxStock": 0,
+                "priority": 1,
+                "routePolicy": "relay-preferred",
+                "warperBudget": 2
+            })
+        };
+        let source_slots = vec![
+            json!({
+                "itemId": "iron_ore",
+                "localMode": "storage",
+                "remoteMode": "supply",
+                "minimumLoad": 1,
+                "minStock": 50,
+                "maxStock": 500,
+                "priority": 2,
+                "routePolicy": "relay-preferred",
+                "warperBudget": 2
+            }),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+        ];
+        let target_slots = vec![
+            json!({
+                "itemId": "iron_ore",
+                "localMode": "storage",
+                "remoteMode": "demand",
+                "minimumLoad": 0.5,
+                "minStock": 11,
+                "maxStock": 200,
+                "priority": 2,
+                "routePolicy": "relay-required",
+                "warperBudget": 2
+            }),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+        ];
+        let storage_slots = vec![
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+            empty_slot(),
+        ];
+        let entity = |id: &str,
+                      planet_id: &str,
+                      outputs: Value,
+                      slots: Vec<Value>,
+                      vessels: u64,
+                      warpers: u64,
+                      congestion: f64,
+                      extra: Value| {
+            let mut value = json!({
+                "id": id,
+                "kind": "station",
+                "planetId": planet_id,
+                "position": { "x": 0, "y": 0 },
+                "buildingId": "interstellar_logistics_station",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": outputs,
+                "stationTier": 1,
+                "quantumMode": "legacy",
+                "powerFactor": 1,
+                "stationCongestion": congestion,
+                "stationDrones": 0,
+                "stationVessels": vessels,
+                "stationWarpers": warpers,
+                "stationWarpEnabled": true,
+                "stationSlots": slots,
+                "stationRoutes": []
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value.to_string()
+        };
+        let entities = vec![
+            entity(
+                "station-source",
+                "source-world",
+                json!({ "iron_ore": 500 }),
+                source_slots,
+                2,
+                10,
+                0.2,
+                json!({}),
+            ),
+            entity(
+                "station-hub",
+                "hub-world",
+                json!({}),
+                storage_slots,
+                0,
+                0,
+                0.6,
+                json!({ "stationHubEnabled": true, "stationHubPriority": 2 }),
+            ),
+            entity(
+                "station-target",
+                "target-world",
+                json!({ "iron_ore": 25 }),
+                target_slots,
+                3,
+                0,
+                0.9,
+                json!({
+                    "stationRoutes": [{
+                        "scope": "remote",
+                        "slotIndex": 0,
+                        "peerId": "station-source",
+                        "itemId": "iron_ore",
+                        "vehicleCount": 1,
+                        "cargo": 50,
+                        "vehicleStationId": "station-source",
+                        "requiresWarp": true,
+                        "waypointStationIds": ["station-hub"],
+                        "warpersPerVessel": 2
+                    }]
+                }),
+            ),
+            power_source("power-source", "source-world"),
+            power_source("power-hub", "hub-world"),
+            power_source("power-target", "target-world"),
+        ];
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "source-world",
+            "paused": false,
+            "settings": { "difficulty": "standard", "logisticsBufferLimit": 1_000_000 },
+            "tray": {},
+            "planetTrays": {},
+            "research": { "completedTechIds": ["space_warp"] },
+            "endgame": { "infiniteResearch": {} },
+            "exploration": {
+                "unlockedSystemIds": ["alpha", "beta", "gamma"],
+                "colonizedPlanetIds": ["source-world", "hub-world", "target-world"],
+                "missions": [],
+                "surveyProgressBySystem": { "alpha": 1, "beta": 1, "gamma": 1 }
+            },
+            "galaxy": {
+                "seed": 9,
+                "systemProfiles": {
+                    "alpha": { "positionX": 0, "positionY": 0 },
+                    "beta": { "positionX": 8, "positionY": 0 },
+                    "gamma": { "positionX": 16, "positionY": 0 }
+                },
+                "profiles": {
+                    "source-world": { "travelTimeMultiplier": 1 },
+                    "hub-world": { "travelTimeMultiplier": 1 },
+                    "target-world": { "travelTimeMultiplier": 1 }
+                },
+                "planetMetadata": {},
+                "systemMetadata": {
+                    "alpha": { "customName": "阿尔法" },
+                    "beta": { "customName": "贝塔" },
+                    "gamma": { "customName": "伽马" }
+                },
+                "planetRoles": {}
+            },
+            "planetMetrics": {
+                "source-world": { "generationKw": 1, "demandKw": 1, "powerFactor": 1 },
+                "hub-world": { "generationKw": 1, "demandKw": 1, "powerFactor": 1 },
+                "target-world": { "generationKw": 1, "demandKw": 1, "powerFactor": 1 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 2,
+                root_hash: "c".repeat(64),
+                revision: 55,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "stellar-route-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            entities,
+            Vec::new(),
+            catalog(planets, "stellar-route-test"),
         )
         .unwrap()
     }
@@ -1196,6 +3319,231 @@ mod tests {
     }
 
     #[test]
+    fn stellar_industry_v2_routes_are_revision_bound_complete_and_read_only() {
+        let state = route_state();
+        let before = state.canonical_sha256().unwrap();
+        let v1 = state
+            .stellar_industry_projection(
+                55,
+                "stellar-route-test",
+                None,
+                None,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+            )
+            .unwrap();
+        let first = state
+            .stellar_industry_v2_projection(
+                55,
+                "stellar-route-test",
+                None,
+                None,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                "all",
+                "",
+            )
+            .unwrap();
+        assert_eq!(first["schemaVersion"], 2);
+        assert_eq!(first["projectionType"], STELLAR_INDUSTRY_V2_SCHEMA);
+        assert_eq!(first["revision"], 55);
+        assert_eq!(first["registryFingerprint"], "stellar-route-test");
+        assert_eq!(first["request"]["routeCursor"], 0);
+        assert_eq!(first["request"]["routeLimit"], MAX_PAGE_ROWS);
+        assert_eq!(first["request"]["routeFilter"], "all");
+        assert_eq!(first["request"]["query"], "");
+        assert_eq!(first["limits"]["pageRows"], MAX_PAGE_ROWS);
+        assert_eq!(first["limits"]["queryBytes"], MAX_QUERY_BYTES);
+        assert_eq!(first["planets"], v1["planets"]);
+        assert_eq!(first["stations"], v1["stations"]);
+        assert_eq!(first["routes"]["totalCount"], 1);
+        assert_eq!(first["routes"]["nextCursor"], Value::Null);
+        assert_eq!(first["routeSummary"]["scopeTotalCount"], 1);
+        assert_eq!(first["routeSummary"]["activeCount"], 1);
+        assert_eq!(first["routeSummary"]["blockedCount"], 0);
+        let route = &first["routes"]["rows"][0];
+        assert_eq!(route["id"], "remote:station-target:0:station-source");
+        assert_eq!(route["scope"], "remote");
+        assert_eq!(route["itemId"], "iron_ore");
+        assert_eq!(route["itemLabel"], "铁矿");
+        assert_eq!(route["sourceStationId"], "station-source");
+        assert_eq!(route["sourceSlotIndex"], 0);
+        assert_eq!(route["sourcePlanetId"], "source-world");
+        assert_eq!(route["targetStationId"], "station-target");
+        assert_eq!(route["targetSlotIndex"], 0);
+        assert_eq!(route["targetPlanetId"], "target-world");
+        assert!(
+            route["sourceStationLabel"]
+                .as_str()
+                .unwrap()
+                .contains("源星")
+        );
+        assert!(
+            route["targetStationLabel"]
+                .as_str()
+                .unwrap()
+                .contains("目标星")
+        );
+        assert_eq!(route["sourceStock"], 450.0);
+        assert_eq!(route["sourceReserve"], 50.0);
+        assert_eq!(route["sourceSlotMinStock"], 50.0);
+        assert_eq!(route["sourceSlotMaxStock"], 500.0);
+        assert_eq!(route["targetStock"], 25.0);
+        assert_eq!(route["targetLimit"], 200.0);
+        assert_eq!(route["targetFree"], 125.0);
+        assert_eq!(route["targetSlotMinStock"], 11.0);
+        assert_eq!(route["targetSlotMaxStock"], 200.0);
+        assert_eq!(route["minimumLoad"], 0.5);
+        assert_eq!(route["minimumCargo"], 50.0);
+        assert_eq!(route["priority"], 2);
+        assert_eq!(route["installedVehicles"], 5.0);
+        assert_eq!(route["availableVehicles"], 4.0);
+        assert_eq!(route["activeVehicles"], 1.0);
+        assert_eq!(route["activeCargo"], 50.0);
+        assert_eq!(route["dispatchStationId"], "station-source");
+        assert_eq!(route["dispatchPlanetId"], "source-world");
+        assert_eq!(route["dispatchDirection"], "supply-delivery");
+        assert_eq!(route["routeKind"], "relay");
+        assert_eq!(route["routeAvailable"], true);
+        assert_eq!(route["routePlanningComplete"], true);
+        assert_eq!(route["waypointStationIds"], json!(["station-hub"]));
+        assert_eq!(route["waypointPlanetIds"], json!(["hub-world"]));
+        assert!(
+            route["routePathLabel"]
+                .as_str()
+                .unwrap()
+                .contains("阿尔法 → 贝塔 → 伽马")
+        );
+        assert_eq!(route["hopCount"], 2);
+        assert_eq!(route["warpersPerVessel"], 2.0);
+        assert_eq!(route["warpersPerTrip"], 10.0);
+        assert_eq!(route["availableWarpers"], 10.0);
+        assert_eq!(route["routePolicy"], "relay-required");
+        assert_eq!(route["warperBudget"], 2);
+        assert_eq!(route["requiresWarp"], true);
+        assert_eq!(route["routePowerReady"], true);
+        assert_eq!(route["powerProofComplete"], true);
+        assert_eq!(route["sourceCongestion"], 0.2);
+        assert_eq!(route["targetCongestion"], 0.9);
+        assert_eq!(route["waypointMaxCongestion"], 0.6);
+        assert_eq!(route["routeCongestion"], 0.9);
+        assert_eq!(route["status"], "active");
+        assert_eq!(route["statusLabel"], "运输中");
+        for field in [
+            "distanceLy",
+            "orbitSpan",
+            "durationSeconds",
+            "throughputPerMinute",
+            "powerKw",
+            "energyMjPerTrip",
+            "maxLegDistanceLy",
+        ] {
+            assert!(route[field].as_f64().is_some(), "missing {field}");
+        }
+        let repeated = state
+            .stellar_industry_v2_projection(
+                55,
+                "stellar-route-test",
+                None,
+                None,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                "all",
+                "",
+            )
+            .unwrap();
+        assert_eq!(first, repeated);
+        assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_PROJECTION_BYTES);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn stellar_industry_v2_route_filter_query_and_scope_are_server_side() {
+        let state = state();
+        let before = state.canonical_sha256().unwrap();
+        let all = state
+            .stellar_industry_v2_projection(
+                41,
+                "stellar-test",
+                None,
+                None,
+                0,
+                3,
+                0,
+                3,
+                0,
+                3,
+                "all",
+                "",
+            )
+            .unwrap();
+        assert_eq!(all["routeSummary"]["scopeTotalCount"], 3);
+        assert_eq!(all["routeSummary"]["remoteCount"], 3);
+        assert_eq!(all["routeSummary"]["blockedCount"], 1);
+        assert_eq!(all["routes"]["totalCount"], 3);
+
+        let issues = state
+            .stellar_industry_v2_projection(
+                41,
+                "stellar-test",
+                None,
+                None,
+                0,
+                3,
+                0,
+                3,
+                0,
+                1,
+                "issues",
+                "远境",
+            )
+            .unwrap();
+        assert_eq!(issues["routes"]["totalCount"], 1);
+        assert_eq!(issues["routes"]["rows"][0]["targetPlanetId"], "tau-one");
+        assert_eq!(issues["routes"]["rows"][0]["sourceStationLabel"], "未匹配");
+        assert_eq!(issues["routes"]["rows"][0]["status"], "missing-source");
+        assert_eq!(issues["request"]["routeFilter"], "issues");
+        assert_eq!(issues["request"]["query"], "远境");
+
+        let helios = state
+            .stellar_industry_v2_projection(
+                41,
+                "stellar-test",
+                Some("helios"),
+                None,
+                0,
+                2,
+                0,
+                2,
+                0,
+                2,
+                "remote",
+                "iron_ore",
+            )
+            .unwrap();
+        assert_eq!(helios["routeSummary"]["scopeTotalCount"], 2);
+        assert_eq!(helios["routes"]["totalCount"], 2);
+        assert!(
+            helios["routes"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| route["scope"] == "remote")
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
     fn stellar_projections_reject_stale_unknown_mismatched_and_unbounded_requests() {
         let state = state();
         let before = state.canonical_sha256().unwrap();
@@ -1258,7 +3606,137 @@ mod tests {
                 .stellar_industry_projection(41, "stellar-test", Some("helios"), None, 0, 1, 3, 1,)
                 .is_err()
         );
+        assert!(
+            state
+                .stellar_industry_v2_projection(
+                    40,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    "all",
+                    "",
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_industry_v2_projection(
+                    41,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    MAX_PAGE_ROWS + 1,
+                    "all",
+                    "",
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_industry_v2_projection(
+                    41,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    "blocked",
+                    "",
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_industry_v2_projection(
+                    41,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    "all",
+                    &"q".repeat(MAX_QUERY_BYTES + 1),
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_industry_v2_projection(
+                    41,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    4,
+                    1,
+                    "all",
+                    "",
+                )
+                .is_err()
+        );
         assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn stellar_industry_v2_fails_closed_on_unprovable_route_ledger() {
+        let source = state();
+        let mut entities = (0..source.factory_topology.entity_planet_indices.len())
+            .map(|index| source.parse_entity(index).unwrap())
+            .collect::<Vec<_>>();
+        entities[1]["stationRoutes"][0]["cargo"] = json!("not-an-integer");
+        let malformed = CoreState::from_public_v47_parts(
+            source.identity.clone(),
+            source.base_value().clone(),
+            entities
+                .into_iter()
+                .map(|entity| entity.to_string())
+                .collect(),
+            Vec::new(),
+            (*source.catalog).clone(),
+        )
+        .unwrap();
+        let before = malformed.canonical_sha256().unwrap();
+        assert!(
+            malformed
+                .stellar_industry_v2_projection(
+                    41,
+                    "stellar-test",
+                    None,
+                    None,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    "all",
+                    "",
+                )
+                .is_err()
+        );
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 
     #[test]
@@ -1361,5 +3839,59 @@ mod tests {
             true
         );
         assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_PROJECTION_BYTES);
+
+        let v2 = state
+            .stellar_industry_v2_projection(
+                7,
+                "stellar-large-test",
+                Some("many"),
+                None,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                0,
+                MAX_PAGE_ROWS,
+                "all",
+                "",
+            )
+            .unwrap();
+        assert_eq!(v2["projectionType"], STELLAR_INDUSTRY_V2_SCHEMA);
+        assert_eq!(v2["routes"]["rows"].as_array().unwrap().len(), 64);
+        assert_eq!(v2["routes"]["nextCursor"], 64);
+        assert_eq!(v2["routes"]["totalCount"], 70);
+        assert!(serde_json::to_vec(&v2).unwrap().len() <= MAX_PROJECTION_BYTES);
+        let tail = state
+            .stellar_industry_v2_projection(
+                7,
+                "stellar-large-test",
+                Some("many"),
+                None,
+                0,
+                1,
+                0,
+                1,
+                64,
+                6,
+                "all",
+                "",
+            )
+            .unwrap();
+        assert_eq!(tail["routes"]["cursor"], 64);
+        assert_eq!(tail["routes"]["rows"].as_array().unwrap().len(), 6);
+        assert_eq!(tail["routes"]["nextCursor"], Value::Null);
+        let head_ids = v2["routes"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["id"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        assert!(
+            tail["routes"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| !head_ids.contains(route["id"].as_str().unwrap()))
+        );
     }
 }

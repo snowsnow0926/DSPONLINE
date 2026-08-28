@@ -3,6 +3,7 @@ use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use serde_json::{Map, Number, Value};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const PORT_COUNT: usize = 4;
@@ -16,6 +17,32 @@ struct CargoInput {
     port_index: usize,
     available: BigUint,
     planned: BigUint,
+}
+
+#[derive(Debug)]
+struct CargoRequestProbe {
+    item_id: String,
+    port_index: usize,
+    buffered_amount: u64,
+}
+
+#[derive(Debug)]
+struct ActiveTerminalProbe {
+    entity_index: usize,
+    entity_id: Option<String>,
+    binding: Value,
+    planet_id: String,
+    power_factor: f64,
+    progress: f64,
+    routing_cursor: usize,
+    requests: Vec<CargoRequestProbe>,
+}
+
+#[derive(Debug)]
+struct TerminalProbe {
+    entity_index: usize,
+    reconcile_binding: bool,
+    active: Option<ActiveTerminalProbe>,
 }
 
 fn finite_number(value: Option<&Value>) -> f64 {
@@ -556,6 +583,85 @@ fn reconcile_binding(
     set_number(entity, "orbitalCargoProgress", 0.0)
 }
 
+fn collect_ordered_terminal_probes_with_runtime<R, F>(
+    runtime: &DeterministicRuntime,
+    entity_indices: &[usize],
+    probe: F,
+) -> anyhow::Result<Vec<R>>
+where
+    R: Send,
+    F: Fn(usize) -> anyhow::Result<R> + Send + Sync,
+{
+    // Collect every result before choosing an error. `indexed_map` retains
+    // the topology order, so a parallel failure always reports the lowest
+    // original terminal position instead of the first worker to finish.
+    runtime
+        .indexed_map(entity_indices, |_, entity_index| probe(*entity_index))
+        .into_iter()
+        .collect()
+}
+
+fn probe_terminal(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    entity_index: usize,
+) -> anyhow::Result<TerminalProbe> {
+    let entity = entities
+        .get(entity_index)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native orbital cargo terminal is invalid"))?;
+    let binding = entity
+        .get("orbitalCargoBinding")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let binding_valid = binding_is_valid(base, Some(&binding));
+    if !binding_valid || binding.is_null() {
+        return Ok(TerminalProbe {
+            entity_index,
+            reconcile_binding: !binding_valid,
+            active: None,
+        });
+    }
+
+    let ports = port_items(state, entity);
+    let buffered = entity.get("inputs").and_then(Value::as_object);
+    let mut seen = Vec::<String>::with_capacity(PORT_COUNT);
+    let mut requests = Vec::<CargoRequestProbe>::with_capacity(PORT_COUNT);
+    for (port_index, item_id) in ports.into_iter().enumerate() {
+        let Some(item_id) = item_id else {
+            continue;
+        };
+        if seen.iter().any(|seen| seen == &item_id) {
+            continue;
+        }
+        seen.push(item_id.clone());
+        requests.push(CargoRequestProbe {
+            buffered_amount: finite_number(buffered.and_then(|inputs| inputs.get(&item_id)))
+                .floor()
+                .max(0.0) as u64,
+            item_id,
+            port_index,
+        });
+    }
+
+    Ok(TerminalProbe {
+        entity_index,
+        reconcile_binding: false,
+        active: Some(ActiveTerminalProbe {
+            entity_index,
+            entity_id: string_at(entity, "id").map(str::to_owned),
+            binding,
+            planet_id: string_at(entity, "planetId").unwrap_or_default().to_owned(),
+            power_factor: finite_number(entity.get("powerFactor")).clamp(0.0, 1.0),
+            progress: finite_number(entity.get("orbitalCargoProgress")).max(0.0),
+            routing_cursor: finite_number(entity.get("routingCursor")).floor().max(0.0) as usize
+                % PORT_COUNT,
+            requests,
+        }),
+    })
+}
+
 fn next_active_port(inputs: &[CargoInput], active: &[usize], after_port: usize) -> Option<usize> {
     (0..PORT_COUNT)
         .map(|offset| (after_port + offset + 1) % PORT_COUNT)
@@ -566,7 +672,8 @@ fn next_active_port(inputs: &[CargoInput], active: &[usize], after_port: usize) 
         })
 }
 
-pub(crate) fn settle(
+fn settle_with_runtime(
+    runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -580,84 +687,51 @@ pub(crate) fn settle(
     {
         return Ok(());
     }
-    for &index in &state.factory_topology.orbital_cargo_terminal_indices {
-        let entity = entities[index]
+    // Entity-local terminal snapshots are independent. Parse and normalize
+    // them on the shared deterministic pool, then replay every shared target,
+    // inventory and cursor mutation in the original ID order below. Nothing
+    // is written until all probes (and the lowest-index error) are known.
+    let probes = collect_ordered_terminal_probes_with_runtime(
+        runtime,
+        &state.factory_topology.orbital_cargo_terminal_indices,
+        |entity_index| probe_terminal(state, base, entities, entity_index),
+    )?;
+    for probe in &probes {
+        if !probe.reconcile_binding {
+            continue;
+        }
+        let entity = entities[probe.entity_index]
             .as_object_mut()
-            .ok_or_else(|| anyhow!("native orbital cargo terminal is invalid"))?;
+            .expect("validated orbital cargo terminal disappeared before replay");
         reconcile_binding(base, entity)?;
     }
-    let mut terminal_indices = state
-        .factory_topology
-        .orbital_cargo_terminal_indices
-        .iter()
-        .copied()
-        .filter(|&index| {
-            entities[index]
-                .as_object()
-                .and_then(|entity| entity.get("orbitalCargoBinding"))
-                .is_some_and(|binding| !binding.is_null())
-        })
+    let mut terminals = probes
+        .into_iter()
+        .filter_map(|probe| probe.active)
         .collect::<Vec<_>>();
-    terminal_indices.sort_by(|left, right| {
-        entities[*left]
-            .as_object()
-            .and_then(|entity| string_at(entity, "id"))
-            .cmp(
-                &entities[*right]
-                    .as_object()
-                    .and_then(|entity| string_at(entity, "id")),
-            )
-    });
-    if terminal_indices.is_empty() {
+    terminals.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
+    if terminals.is_empty() {
         return Ok(());
     }
-    for entity_index in terminal_indices {
-        let (binding, planet_id, ports, power_factor, progress, routing_cursor, buffered) = {
-            let entity = entities[entity_index]
-                .as_object()
-                .ok_or_else(|| anyhow!("native orbital cargo terminal is invalid"))?;
-            let binding = entity
-                .get("orbitalCargoBinding")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let planet_id = string_at(entity, "planetId").unwrap_or_default().to_owned();
-            let ports = port_items(state, entity);
-            let power_factor = finite_number(entity.get("powerFactor")).clamp(0.0, 1.0);
-            let progress = finite_number(entity.get("orbitalCargoProgress")).max(0.0);
-            let routing_cursor =
-                finite_number(entity.get("routingCursor")).floor().max(0.0) as usize % PORT_COUNT;
-            let buffered = entity
-                .get("inputs")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            (
-                binding,
-                planet_id,
-                ports,
-                power_factor,
-                progress,
-                routing_cursor,
-                buffered,
-            )
-        };
-        let mut seen = Vec::<String>::new();
+    for terminal in terminals {
+        let ActiveTerminalProbe {
+            entity_index,
+            binding,
+            planet_id,
+            power_factor,
+            progress,
+            routing_cursor,
+            requests,
+            ..
+        } = terminal;
         let mut inputs = Vec::<CargoInput>::new();
-        for (port_index, item_id) in ports.into_iter().enumerate() {
-            let Some(item_id) = item_id else {
-                continue;
-            };
-            if seen.iter().any(|seen| seen == &item_id) {
-                continue;
-            }
-            seen.push(item_id.clone());
-            let buffered_amount = finite_number(buffered.get(&item_id)).floor().max(0.0) as u64;
-            let remaining = target_remaining(base, Some(&binding), &item_id, &planet_id);
-            let available = BigUint::from(buffered_amount).min(remaining);
+        for request in requests {
+            let remaining = target_remaining(base, Some(&binding), &request.item_id, &planet_id);
+            let available = BigUint::from(request.buffered_amount).min(remaining);
             if !available.is_zero() {
                 inputs.push(CargoInput {
-                    item_id,
-                    port_index,
+                    item_id: request.item_id,
+                    port_index: request.port_index,
                     available,
                     planned: BigUint::zero(),
                 });
@@ -797,4 +871,376 @@ pub(crate) fn settle(
         reconcile_binding(base, entity)?;
     }
     Ok(())
+}
+
+pub(crate) fn settle(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+) -> anyhow::Result<()> {
+    settle_with_runtime(deterministic_runtime(), state, base, entities, seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
+        RuntimeCatalog,
+    };
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    fn fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "orbital-terminal-parallel-test".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "home".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: vec![ItemDefinition {
+                    id: "iron_ore".to_owned(),
+                    name: "iron_ore".to_owned(),
+                    kind: "solid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                }],
+                buildings: vec![BuildingDefinition {
+                    id: "orbital_cargo_terminal".to_owned(),
+                    kind: "storage".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 1_000_000.0,
+                    output_capacity: 0.0,
+                    power_demand_kw: 1.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                }],
+                recipes: Vec::new(),
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "orbital-terminal-parallel-test",
+        )
+        .unwrap()
+    }
+
+    fn fixture_base() -> Value {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "paused": false,
+            "activePlanetId": "home",
+            "exploration": { "colonizedPlanetIds": ["home"] },
+            "orbitalStation": {
+                "status": "core-building",
+                "construction": {
+                    "stageRequirements": [{
+                        "stageId": "core",
+                        "costs": [{ "itemId": "iron_ore", "amount": "1000000000" }],
+                        "delivered": { "iron_ore": "0" },
+                        "fleetCosts": {},
+                        "deliveredFleet": {}
+                    }]
+                },
+                "contractBoard": {
+                    "taskDay": 0,
+                    "lastConfirmedWallClockMs": 0,
+                    "offers": [],
+                    "accepted": [],
+                    "history": [],
+                    "settledIds": []
+                },
+                "totals": { "exportedByItem": {} }
+            },
+            "mod:base/opaque": { "signedZero": -0.0, "text": "必须保持原样" }
+        })
+    }
+
+    fn terminal_entity(index: usize, count: usize) -> Value {
+        let buffered = 200 + index % 37;
+        json!({
+            "id": format!("terminal/{:05}/Ω", count - index),
+            "kind": "storage",
+            "planetId": "home",
+            "buildingId": "orbital_cargo_terminal",
+            "inputs": { "iron_ore": buffered },
+            "outputs": {},
+            "powerFactor": if index.is_multiple_of(41) { 0.0 } else { 0.25 + (index % 4) as f64 * 0.25 },
+            "orbitalCargoProgress": (index % 13) as f64 / 13.0,
+            "routingCursor": index % PORT_COUNT,
+            "orbitalCargoTotalUploaded": "0",
+            "orbitalCargoBinding": { "kind": "construction" },
+            "orbitalCargoPortItems": ["iron_ore", "iron_ore", null, null],
+            "utilization": -1,
+            "productionRate": -1,
+            "mod:terminal/opaque": {
+                "index": index,
+                "signedZero": -0.0,
+                "text": "保持原样"
+            }
+        })
+    }
+
+    fn terminal_matrix(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| terminal_entity(index, count))
+            .collect()
+    }
+
+    fn fixture_state(entities: &[Value]) -> CoreState {
+        let entity_count = entities.len();
+        let base = serde_json::to_vec(&fixture_base()).unwrap();
+        let entities = serde_json::to_vec(entities).unwrap();
+        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base, 0, 1),
+            ("entities:00000000", "entities", &entities, 0, entity_count),
+            ("belts:00000000", "belts", &belts, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base.len() + entities.len() + belts.len(),
+            "entityCount": entity_count,
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entities,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belts,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "orbital-terminal-parallel-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn run_terminal_matrix(
+        state: &CoreState,
+        source: &[Value],
+        worker_count: usize,
+    ) -> (Value, Vec<Value>) {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut base = fixture_base();
+        let mut entities = source.to_vec();
+        settle_with_runtime(
+            &runtime,
+            state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            0.375,
+        )
+        .unwrap();
+        (base, entities)
+    }
+
+    #[test]
+    fn terminal_probe_and_serial_replay_are_byte_exact_at_all_worker_limits() {
+        let source = terminal_matrix(PARALLEL_MIN_ITEMS + 137);
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        assert_eq!(
+            state.factory_topology.orbital_cargo_terminal_indices.len(),
+            source.len()
+        );
+
+        let baseline = run_terminal_matrix(&state, &source, 1);
+        let baseline_bytes = serde_json::to_vec(&baseline).unwrap();
+        for worker_count in [2, 4, 8] {
+            let observed = run_terminal_matrix(&state, &source, worker_count);
+            assert_eq!(
+                serde_json::to_vec(&observed).unwrap(),
+                baseline_bytes,
+                "orbital terminal state diverged for {worker_count} workers"
+            );
+        }
+
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        assert_ne!(baseline.1, source);
+        assert!(
+            station_integer(
+                baseline
+                    .0
+                    .get("orbitalStation")
+                    .and_then(Value::as_object)
+                    .and_then(|station| station.get("construction"))
+                    .and_then(Value::as_object)
+                    .and_then(|construction| construction.get("stageRequirements"))
+                    .and_then(Value::as_array)
+                    .and_then(|stages| stages.first())
+                    .and_then(Value::as_object)
+                    .and_then(|stage| stage.get("delivered"))
+                    .and_then(Value::as_object)
+                    .and_then(|delivered| delivered.get("iron_ore"))
+            ) > BigUint::zero()
+        );
+        for (before, after) in source.iter().zip(&baseline.1) {
+            assert_eq!(
+                serde_json::to_vec(&before["mod:terminal/opaque"]).unwrap(),
+                serde_json::to_vec(&after["mod:terminal/opaque"]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn large_probe_batches_enter_rayon_and_small_batches_stay_serial() {
+        let large = (0..PARALLEL_MIN_ITEMS + 73).collect::<Vec<_>>();
+        let large_saw_worker = AtomicBool::new(false);
+        let observed = collect_ordered_terminal_probes_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &large,
+            |entity_index| {
+                if rayon::current_thread_index().is_some() {
+                    large_saw_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(entity_index)
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, large);
+        assert!(large_saw_worker.load(AtomicOrdering::SeqCst));
+
+        let small = (0..31).collect::<Vec<_>>();
+        let small_saw_worker = AtomicBool::new(false);
+        let observed = collect_ordered_terminal_probes_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &small,
+            |entity_index| {
+                if rayon::current_thread_index().is_some() {
+                    small_saw_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(entity_index)
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, small);
+        assert!(!small_saw_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    #[test]
+    fn parallel_probe_failure_uses_lowest_index_and_leaves_candidate_unchanged() {
+        let indices = (0..PARALLEL_MIN_ITEMS + 97).collect::<Vec<_>>();
+        for worker_count in [1, 2, 4, 8] {
+            let later_visited = AtomicBool::new(false);
+            let error = collect_ordered_terminal_probes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &indices,
+                |entity_index| {
+                    if entity_index == PARALLEL_MIN_ITEMS + 41 {
+                        later_visited.store(true, AtomicOrdering::SeqCst);
+                        return Err(anyhow!("later terminal failure"));
+                    }
+                    if entity_index == 7 {
+                        return Err(anyhow!("lowest terminal failure"));
+                    }
+                    Ok(entity_index)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "lowest terminal failure");
+            assert!(later_visited.load(AtomicOrdering::SeqCst));
+        }
+
+        let source = terminal_matrix(PARALLEL_MIN_ITEMS + 97);
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let mut base = fixture_base();
+            let mut candidate = source.clone();
+            candidate[1]["orbitalCargoBinding"] = json!({ "kind": "invalid" });
+            candidate[7] = Value::Null;
+            candidate[PARALLEL_MIN_ITEMS + 41] = Value::Null;
+            let base_bytes = serde_json::to_vec(&base).unwrap();
+            let candidate_bytes = serde_json::to_vec(&candidate).unwrap();
+            let error = settle_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut candidate,
+                1.0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "native orbital cargo terminal is invalid"
+            );
+            assert_eq!(serde_json::to_vec(&base).unwrap(), base_bytes);
+            assert_eq!(serde_json::to_vec(&candidate).unwrap(), candidate_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        }
+    }
 }

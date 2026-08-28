@@ -11,7 +11,7 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/new NativeFactoryThinViewStore\(\)/);
     expect(app).toMatch(/useSyncExternalStore\([\s\S]*?nativeFactoryThinViewStore\.subscribe/);
     expect(app).toMatch(/createWebFactoryRunStatusReadModel\(game\)/);
-    expect(app).toMatch(/nativeFactoryThinViewStore\.refresh\(controller,[\s\S]*?expectedRevision:\s*factoryThinViewExpectedRevision/);
+    expect(app).toMatch(/nativeFactoryThinViewStore\.refresh\(projectionSource,[\s\S]*?expectedRevision:\s*factoryThinViewExpectedRevision/);
     expect(app).toMatch(/selectFactoryRunStatusReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/<FactoryRunStatus model=\{factoryRunStatusReadModel\} \/>/);
     expect(app).not.toMatch(/<span className=\{game\.paused \? "paused" : "running"\}>\{game\.paused/);

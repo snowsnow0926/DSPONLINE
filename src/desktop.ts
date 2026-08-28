@@ -23,11 +23,54 @@ export interface DesktopReleaseInfo {
   update: DesktopUpdateStatus;
 }
 
+export type DesktopNativePlayerAuthorityPhase =
+  | "idle"
+  | "activating"
+  | "recovering"
+  | "active"
+  | "uncertain"
+  | "faulted"
+  | "shutdown";
+
+export type DesktopNativePlayerAuthorityOperation =
+  | "activation"
+  | "recovery"
+  | "tick"
+  | "command";
+
+/**
+ * Bounded, renderer-safe view of the main-owned Rust authority clock.
+ *
+ * This is deliberately a clock/identity receipt rather than gameplay state.
+ * It contains no owner ID, fencing token, checkpoint, command, save payload or
+ * authority-control capability.
+ */
+export interface DesktopNativePlayerAuthorityState {
+  readonly schemaVersion: 1;
+  readonly phase: DesktopNativePlayerAuthorityPhase;
+  readonly sessionId: string | null;
+  readonly runId: string | null;
+  readonly revision: number | null;
+  readonly acknowledgedSequence: number | null;
+  readonly nextSequence: number | null;
+  readonly nextDeadlineMs: number | null;
+  readonly inFlight: boolean;
+  readonly currentOperation: DesktopNativePlayerAuthorityOperation | null;
+  readonly queuedCommands: number;
+  readonly lastErrorCode: string | null;
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
   getReleaseInfo: () => Promise<DesktopReleaseInfo>;
   getNativePerformanceStatus: () => Promise<DesktopNativePerformanceStatus>;
+  /** Current Windows authority host only; absent on Web and rollback shells. */
+  getNativePlayerAuthorityState?: () => Promise<DesktopNativePlayerAuthorityState>;
+  /** Read-only transition notifications; unsubscribe removes only this listener. */
+  onNativePlayerAuthorityState?: (
+    listener: (state: DesktopNativePlayerAuthorityState) => void,
+  ) => () => void;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
   getNativePerformancePolicy: () => Promise<DesktopNativePerformancePolicyStatus>;
   setNativePerformancePolicy: (request: DesktopNativePerformancePolicy) => Promise<DesktopNativePerformancePolicyStatus>;

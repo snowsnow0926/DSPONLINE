@@ -18,6 +18,22 @@ function localNativeError(options) {
   return createRendererNativeError(null, options);
 }
 
+function subscribeNativePlayerAuthorityState(listener) {
+  if (typeof listener !== "function") {
+    throw new TypeError("Windows 原生玩家权威状态监听器无效");
+  }
+  const handler = (_event, state) => listener(state);
+  let subscribed = true;
+  ipcRenderer.on("desktop:native-player-authority-state-changed", handler);
+  return () => {
+    if (!subscribed) return;
+    subscribed = false;
+    // Remove only the wrapper installed for this listener. Other renderer
+    // consumers must never be disconnected by an unrelated unsubscribe.
+    ipcRenderer.removeListener("desktop:native-player-authority-state-changed", handler);
+  };
+}
+
 function requestNativeCoreProjectionTransfer(request) {
   return new Promise((resolve, reject) => {
     if (!request || typeof request !== "object" || typeof request.sessionId !== "string" ||
@@ -96,6 +112,11 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   setFontScale: (scale) => ipcRenderer.invoke("desktop:set-font-scale", scale),
   getReleaseInfo: () => ipcRenderer.invoke("desktop:release-info"),
   getNativePerformanceStatus: () => invokeNative("desktop:native-status", { fallbackCode: "NATIVE_STATUS_FAILED", message: "无法读取 Windows 原生性能服务状态" }),
+  // Read-only and optional at the TypeScript boundary for rollback hosts. No
+  // activation, ticking, command, checkpoint, lease or recovery control is
+  // exposed to the renderer.
+  getNativePlayerAuthorityState: () => invokeNative("desktop:native-player-authority-state", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", message: "无法读取 Windows 原生玩家权威时钟" }),
+  onNativePlayerAuthorityState: subscribeNativePlayerAuthorityState,
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
   getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
   setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),

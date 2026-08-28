@@ -396,6 +396,12 @@ import {
   selectFactoryViewportReadModel,
 } from "./game/nativeFactoryThinViewBridge";
 import {
+  NativePlayerAuthorityClockController,
+  createNativePlayerAuthorityProjectionSource,
+  selectActiveNativePlayerAuthorityFrame,
+  selectBoundNativePlayerAuthorityFrame,
+} from "./game/nativePlayerAuthorityClock";
+import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
@@ -1574,7 +1580,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, [canvasRenderSnapshot.runtimeRevision, game.paused, nodes.length]);
   const [notice, setNotice] = useState<string | null>(null);
-  const windowsNativeCoreAvailable = Boolean(getDesktopBridge());
+  const desktopBridge = getDesktopBridge();
+  const windowsNativeCoreAvailable = Boolean(desktopBridge);
   const [windowsNativeCoreBetaEnabled, setWindowsNativeCoreBetaEnabled] = useState(() =>
     windowsNativeCoreAvailable && readWindowsNativeCoreBetaEnabled());
   const [windowsNativeCoreBetaStatus, setWindowsNativeCoreBetaStatus] = useState<
@@ -1896,6 +1903,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // distinguish a real unmount from that ordinary dependency turnover.
   const lifecycleSaveEffectGenerationRef = useRef(0);
   const simulationStateRevisionRef = useRef(durableSimulationRuntimeEnabled ? loaded.runtimeRecovery?.stateRevision ?? 0 : 0);
+  const nativeCoreProjectionSessionId = windowsNativeCoreBetaControllerRef.current.snapshot().authority.sessionId;
+  const nativePlayerAuthorityClockRef = useRef<NativePlayerAuthorityClockController | null>(null);
+  if (nativePlayerAuthorityClockRef.current === null) {
+    nativePlayerAuthorityClockRef.current = new NativePlayerAuthorityClockController(desktopBridge);
+  }
+  const nativePlayerAuthorityClock = nativePlayerAuthorityClockRef.current;
+  const nativePlayerAuthorityClockSnapshot = useSyncExternalStore(
+    nativePlayerAuthorityClock.subscribe,
+    nativePlayerAuthorityClock.getSnapshot,
+    nativePlayerAuthorityClock.getSnapshot,
+  );
+  useEffect(() => {
+    nativePlayerAuthorityClock.bindSession(nativeCoreProjectionSessionId);
+  }, [nativeCoreProjectionSessionId, nativePlayerAuthorityClock]);
+  useEffect(() => {
+    nativePlayerAuthorityClock.start();
+    return () => nativePlayerAuthorityClock.stop();
+  }, [nativePlayerAuthorityClock]);
+  const nativePlayerAuthorityBoundFrame = selectBoundNativePlayerAuthorityFrame(
+    nativePlayerAuthorityClockSnapshot,
+    nativeCoreProjectionSessionId,
+  );
+  const nativePlayerAuthorityActiveFrame = selectActiveNativePlayerAuthorityFrame(
+    nativePlayerAuthorityClockSnapshot,
+    nativeCoreProjectionSessionId,
+  );
   const nativeFactoryThinViewStoreRef = useRef<NativeFactoryThinViewStore | null>(null);
   if (nativeFactoryThinViewStoreRef.current === null) {
     nativeFactoryThinViewStoreRef.current = new NativeFactoryThinViewStore();
@@ -1906,7 +1939,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryThinViewStore.getSnapshot,
     nativeFactoryThinViewStore.getSnapshot,
   );
-  const factoryThinViewExpectedRevision = simulationStateRevisionRef.current;
+  // Once main proves that it owns this exact native session, its durable Rust
+  // revision becomes the projection clock. A concurrently advancing legacy JS
+  // mirror must never overwrite that revision. Uncertain/faulted phases retain
+  // the last confirmed frame but do not issue another native read.
+  const factoryThinViewExpectedRevision = nativePlayerAuthorityBoundFrame?.revision ??
+    simulationStateRevisionRef.current;
+  const nativeFactoryThinViewMode = nativePlayerAuthorityActiveFrame
+    ? "native-authoritative"
+    : nativePlayerAuthorityBoundFrame
+      ? "native-authoritative-paused"
+      : windowsNativeCoreAvailable && windowsNativeCoreBetaEnabled &&
+          ["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)
+        ? "javascript-shadow"
+        : "inactive";
+  const nativeFactoryThinViewActive = nativeFactoryThinViewMode === "native-authoritative" ||
+    nativeFactoryThinViewMode === "javascript-shadow";
   const factoryThinViewAllSelectedEntityIds = useMemo(
     () => [...new Set(selectedEntityIds)],
     [selectedEntityIds],
@@ -2025,8 +2073,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ),
     [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],
   );
-  const nativeFactoryThinViewActive = windowsNativeCoreAvailable && windowsNativeCoreBetaEnabled &&
-    ["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus);
   const webFactoryViewportReadModel = useMemo(
     () => createWebFactoryViewportReadModel(game, {
       planetId: game.activePlanetId,
@@ -2071,6 +2117,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ],
   );
   useEffect(() => {
+    if (nativeFactoryThinViewMode === "native-authoritative-paused") {
+      // Preserve the last complete frame for diagnostics/read-only rendering,
+      // but never advance it after an uncertain or faulted authority receipt.
+      return;
+    }
     if (!nativeFactoryThinViewActive) {
       nativeFactoryThinViewStore.clear();
       return;
@@ -2085,12 +2136,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryThinViewStore.clear();
       return;
     }
-    const controller = windowsNativeCoreBetaControllerRef.current;
-    if (!controller) {
+    const projectionSource = nativeFactoryThinViewMode === "native-authoritative"
+      ? createNativePlayerAuthorityProjectionSource(
+          desktopBridge,
+          nativePlayerAuthorityActiveFrame?.sessionId ?? "",
+        )
+      : windowsNativeCoreBetaControllerRef.current;
+    if (!projectionSource) {
       nativeFactoryThinViewStore.clear();
       return;
     }
-    void nativeFactoryThinViewStore.refresh(controller, {
+    void nativeFactoryThinViewStore.refresh(projectionSource, {
       expectedRevision: factoryThinViewExpectedRevision,
       factory: {
         selectedEntityIds: factoryThinViewSelectedEntityIds,
@@ -2110,6 +2166,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }).catch(() => undefined);
   }, [
     canvasRenderSnapshot.runtimeRevision,
+    desktopBridge,
     factoryThinViewExpectedRevision,
     factoryThinViewSelectedBeltIds,
     factoryThinViewSelectedEntityIds,
@@ -2119,6 +2176,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryViewportBounds,
     nativeFactoryThinViewStore,
     nativeFactoryThinViewActive,
+    nativeFactoryThinViewMode,
+    nativeCoreProjectionSessionId,
     windowsNativeCoreAvailable,
     windowsNativeCoreBetaEnabled,
     windowsNativeCoreBetaStatus,

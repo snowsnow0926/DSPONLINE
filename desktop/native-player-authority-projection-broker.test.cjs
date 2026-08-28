@@ -135,6 +135,8 @@ test("main routes only matching authority reads through the broker and exposes n
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "viewport-v2", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "factory-read-model-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "statistics-v1", request\)/);
-  assert.doesNotMatch(preload, /PlayerAuthority|player-authority/);
+  assert.match(preload, /getNativePlayerAuthorityState/);
+  assert.match(preload, /onNativePlayerAuthorityState/);
+  assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);
   assert.doesNotMatch(broker, /\.preparePlayerAuthority|\.activatePlayerAuthority|\.commitPlayerAuthorityTick|\.applyCommand|\.advance\(/);
 });

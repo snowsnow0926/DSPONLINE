@@ -208,6 +208,123 @@ impl DeterministicRuntime {
             });
     }
 
+    /// Updates three equally sized structure-of-arrays slices in index order.
+    /// Every length is validated before the first mutable element is exposed,
+    /// so a malformed caller cannot leave a partially updated state behind.
+    pub(crate) fn indexed_for_each_mut3<A, B, C, F>(
+        &self,
+        first: &mut [A],
+        second: &mut [B],
+        third: &mut [C],
+        update: F,
+    ) -> Result<()>
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        F: Fn(usize, &mut A, &mut B, &mut C) + Send + Sync,
+    {
+        let item_count = first.len();
+        anyhow::ensure!(
+            second.len() == item_count && third.len() == item_count,
+            "indexed_for_each_mut3 length mismatch: first={item_count}, second={}, third={}",
+            second.len(),
+            third.len()
+        );
+
+        if self.worker_count_for_items(item_count) == 1 {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .enumerate()
+                .for_each(|(index, ((first, second), third))| {
+                    update(index, first, second, third);
+                });
+            return Ok(());
+        }
+
+        self.pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                first
+                    .par_iter_mut()
+                    .zip(second.par_iter_mut())
+                    .zip(third.par_iter_mut())
+                    .enumerate()
+                    .for_each(|(index, ((first, second), third))| {
+                        update(index, first, second, third);
+                    });
+            });
+        Ok(())
+    }
+
+    /// Updates five equally sized structure-of-arrays slices in index order.
+    /// Like the three-slice variant, validation is atomic with respect to
+    /// mutation: a length error is returned before the callback can run.
+    pub(crate) fn indexed_for_each_mut5<A, B, C, D, E, F>(
+        &self,
+        first: &mut [A],
+        second: &mut [B],
+        third: &mut [C],
+        fourth: &mut [D],
+        fifth: &mut [E],
+        update: F,
+    ) -> Result<()>
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        D: Send,
+        E: Send,
+        F: Fn(usize, &mut A, &mut B, &mut C, &mut D, &mut E) + Send + Sync,
+    {
+        let item_count = first.len();
+        anyhow::ensure!(
+            second.len() == item_count
+                && third.len() == item_count
+                && fourth.len() == item_count
+                && fifth.len() == item_count,
+            "indexed_for_each_mut5 length mismatch: first={item_count}, second={}, third={}, fourth={}, fifth={}",
+            second.len(),
+            third.len(),
+            fourth.len(),
+            fifth.len()
+        );
+
+        if self.worker_count_for_items(item_count) == 1 {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .zip(fourth.iter_mut())
+                .zip(fifth.iter_mut())
+                .enumerate()
+                .for_each(|(index, ((((first, second), third), fourth), fifth))| {
+                    update(index, first, second, third, fourth, fifth);
+                });
+            return Ok(());
+        }
+
+        self.pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                first
+                    .par_iter_mut()
+                    .zip(second.par_iter_mut())
+                    .zip(third.par_iter_mut())
+                    .zip(fourth.par_iter_mut())
+                    .zip(fifth.par_iter_mut())
+                    .enumerate()
+                    .for_each(|(index, ((((first, second), third), fourth), fifth))| {
+                        update(index, first, second, third, fourth, fifth);
+                    });
+            });
+        Ok(())
+    }
+
     /// Destroys two retired, destructor-order-independent batches before
     /// returning. Large batches transfer every item into fixed ownership
     /// chunks on this runtime's existing pool; `install` joins all chunks, so
@@ -534,6 +651,176 @@ mod tests {
             slot.1 = rayon::current_thread_index();
         });
         assert!(mutable.iter().all(|(_, worker)| worker.is_none()));
+    }
+
+    fn run_indexed_for_each_mut3(worker_limit: usize) -> (Vec<u64>, Vec<u64>, Vec<u8>) {
+        let runtime = DeterministicRuntime::for_test(worker_limit);
+        let item_count = PARALLEL_MIN_ITEMS + 257;
+        let mut first = (0..item_count)
+            .map(|index| (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .collect::<Vec<_>>();
+        let mut second = (0..item_count)
+            .map(|index| !(index as u64).rotate_left((index % 64) as u32))
+            .collect::<Vec<_>>();
+        let mut visits = vec![0_u8; item_count];
+
+        runtime
+            .indexed_for_each_mut3(
+                &mut first,
+                &mut second,
+                &mut visits,
+                |index, a, b, visits| {
+                    let original_a = *a;
+                    let original_b = *b;
+                    *a = original_a
+                        .wrapping_add(original_b.rotate_left((index % 61) as u32))
+                        .wrapping_mul(0xd6e8_feb8_6659_fd93);
+                    *b = original_b.wrapping_sub(original_a.rotate_right((index % 59) as u32))
+                        ^ (index as u64).wrapping_mul(0xa076_1d64_78bd_642f);
+                    *visits = visits.checked_add(1).expect("index must be visited once");
+                },
+            )
+            .unwrap();
+
+        assert!(visits.iter().all(|visits| *visits == 1));
+        (first, second, visits)
+    }
+
+    fn run_indexed_for_each_mut5(
+        worker_limit: usize,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u32>, Vec<i64>, Vec<u8>) {
+        let runtime = DeterministicRuntime::for_test(worker_limit);
+        let item_count = PARALLEL_MIN_ITEMS + 257;
+        let mut first = (0..item_count)
+            .map(|index| (index as u64).wrapping_mul(0xe703_7ed1_a0b4_28db))
+            .collect::<Vec<_>>();
+        let mut second = (0..item_count)
+            .map(|index| (index as u64).wrapping_add(0x8ebc_6af0_9c88_c6e3))
+            .collect::<Vec<_>>();
+        let mut third = (0..item_count)
+            .map(|index| (index as u32).rotate_left((index % 31) as u32))
+            .collect::<Vec<_>>();
+        let mut fourth = (0..item_count)
+            .map(|index| (index as i64).wrapping_mul(-1_000_003))
+            .collect::<Vec<_>>();
+        let mut visits = vec![0_u8; item_count];
+
+        runtime
+            .indexed_for_each_mut5(
+                &mut first,
+                &mut second,
+                &mut third,
+                &mut fourth,
+                &mut visits,
+                |index, a, b, c, d, visits| {
+                    let original_a = *a;
+                    let original_b = *b;
+                    let original_c = *c;
+                    let original_d = *d;
+                    *a = original_a.rotate_left((original_c % 64) as u32)
+                        ^ original_b
+                        ^ index as u64;
+                    *b = original_b
+                        .wrapping_mul(0x94d0_49bb_1331_11eb)
+                        .wrapping_add(original_d as u64);
+                    *c = original_c
+                        .wrapping_add(index as u32)
+                        .rotate_right((index % 31) as u32);
+                    *d = original_d
+                        .wrapping_sub(original_a as i64)
+                        .wrapping_add(original_b as i64);
+                    *visits = visits.checked_add(1).expect("index must be visited once");
+                },
+            )
+            .unwrap();
+
+        assert!(visits.iter().all(|visits| *visits == 1));
+        (first, second, third, fourth, visits)
+    }
+
+    #[test]
+    fn multi_slice_updates_are_bitwise_identical_at_every_worker_limit() {
+        let expected_three = run_indexed_for_each_mut3(1);
+        let expected_five = run_indexed_for_each_mut5(1);
+        for worker_limit in [1, 2, 4, 8] {
+            assert_eq!(run_indexed_for_each_mut3(worker_limit), expected_three);
+            assert_eq!(run_indexed_for_each_mut5(worker_limit), expected_five);
+        }
+    }
+
+    #[test]
+    fn indexed_for_each_mut3_rejects_mismatch_before_any_mutation() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let mut first = vec![10_u64, 20, 30, 40];
+        let mut second = vec![50_u64, 60, 70];
+        let mut third = vec![80_u64, 90, 100, 110];
+        let before_first = first.clone();
+        let before_second = second.clone();
+        let before_third = third.clone();
+        let calls = AtomicUsize::new(0);
+
+        let error = runtime
+            .indexed_for_each_mut3(&mut first, &mut second, &mut third, |_, a, b, c| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                *a = 0;
+                *b = 0;
+                *c = 0;
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "indexed_for_each_mut3 length mismatch: first=4, second=3, third=4"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(first, before_first);
+        assert_eq!(second, before_second);
+        assert_eq!(third, before_third);
+    }
+
+    #[test]
+    fn indexed_for_each_mut5_rejects_mismatch_before_any_mutation() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let mut first = vec![1_i32, 2, 3, 4];
+        let mut second = vec![5_i32, 6, 7, 8];
+        let mut third = vec![9_i32, 10, 11, 12];
+        let mut fourth = vec![13_i32, 14, 15, 16];
+        let mut fifth = vec![17_i32, 18, 19];
+        let before_first = first.clone();
+        let before_second = second.clone();
+        let before_third = third.clone();
+        let before_fourth = fourth.clone();
+        let before_fifth = fifth.clone();
+        let calls = AtomicUsize::new(0);
+
+        let error = runtime
+            .indexed_for_each_mut5(
+                &mut first,
+                &mut second,
+                &mut third,
+                &mut fourth,
+                &mut fifth,
+                |_, a, b, c, d, e| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    *a = 0;
+                    *b = 0;
+                    *c = 0;
+                    *d = 0;
+                    *e = 0;
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "indexed_for_each_mut5 length mismatch: first=4, second=4, third=4, fourth=4, fifth=3"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(first, before_first);
+        assert_eq!(second, before_second);
+        assert_eq!(third, before_third);
+        assert_eq!(fourth, before_fourth);
+        assert_eq!(fifth, before_fifth);
     }
 
     #[test]

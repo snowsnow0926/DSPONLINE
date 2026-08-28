@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -154,6 +154,11 @@ impl BeltCommitBatch {
     pub(crate) fn patch_count(&self) -> usize {
         self.patches.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn patch_indices(&self) -> Vec<usize> {
+        self.patches.iter().map(|patch| patch.index).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -212,6 +217,13 @@ pub struct BeltSchedulerDiagnostics {
     pub changed_belt_records: usize,
     pub write_back_patch_records: usize,
     pub write_back_workers: usize,
+    /// Test-visible accounting for the write-back evidence walk. These are
+    /// deliberately excluded from the host protocol: they protect the
+    /// O(active) implementation boundary without widening the renderer API.
+    #[serde(skip)]
+    pub(crate) write_back_flow_checks: usize,
+    #[serde(skip)]
+    pub(crate) write_back_evidence_checks: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +279,120 @@ enum ActiveSelection {
         selected_group_indices: Vec<u32>,
         selected_route_indices: Vec<u32>,
     },
+}
+
+/// Complete in-process evidence for belt rows whose mutable columns may have
+/// changed since the runtime was cloned from its exact source revision.
+///
+/// The sparse form is a set while simulation is running so repeated exact
+/// steps cannot grow it with duplicates. Sealing converts it to a stable,
+/// sorted list and rejects out-of-range evidence before write-back indexes any
+/// flat column. `All` is selected only by the existing full/dense activity
+/// decision; there is intentionally no additional touched-row threshold.
+#[derive(Debug)]
+enum TouchedRoutes {
+    Sparse(HashSet<u32>),
+    All,
+}
+
+impl Default for TouchedRoutes {
+    fn default() -> Self {
+        Self::Sparse(HashSet::new())
+    }
+}
+
+#[derive(Debug)]
+enum TouchedRouteEvidence {
+    Sparse(Box<[u32]>),
+    All,
+}
+
+#[derive(Debug)]
+struct SealedTouchedRoutes {
+    evidence: Arc<TouchedRouteEvidence>,
+    seal: Arc<TouchedRouteEvidence>,
+}
+
+impl TouchedRoutes {
+    fn record_selection(&mut self, prepared_routes: &PreparedRoutes, selection: &ActiveSelection) {
+        match selection {
+            ActiveSelection::All | ActiveSelection::Dense { .. } => *self = Self::All,
+            ActiveSelection::Mask {
+                selected_group_indices,
+                ..
+            } => {
+                if let Self::Sparse(indices) = self {
+                    for group_index in selected_group_indices.iter().copied() {
+                        indices.extend(
+                            prepared_routes.groups[expand_compact_index(group_index)]
+                                .route_indices
+                                .iter()
+                                .copied(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_index(&mut self, index: usize) -> anyhow::Result<()> {
+        if let Self::Sparse(indices) = self {
+            indices.insert(compact_index(index, "touched route index")?);
+        }
+        Ok(())
+    }
+
+    fn seal(self, belt_count: usize) -> anyhow::Result<SealedTouchedRoutes> {
+        let evidence = match self {
+            Self::All => TouchedRouteEvidence::All,
+            Self::Sparse(indices) => {
+                let mut indices = indices.into_iter().collect::<Vec<_>>();
+                indices.sort_unstable();
+                if indices
+                    .last()
+                    .is_some_and(|&index| expand_compact_index(index) >= belt_count)
+                {
+                    bail!("native touched belt evidence is outside the topology");
+                }
+                debug_assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+                TouchedRouteEvidence::Sparse(indices.into_boxed_slice())
+            }
+        };
+        let evidence = Arc::new(evidence);
+        Ok(SealedTouchedRoutes {
+            seal: Arc::clone(&evidence),
+            evidence,
+        })
+    }
+
+    #[cfg(test)]
+    fn signature(&self) -> Option<Vec<u32>> {
+        match self {
+            Self::All => None,
+            Self::Sparse(indices) => {
+                let mut indices = indices.iter().copied().collect::<Vec<_>>();
+                indices.sort_unstable();
+                Some(indices)
+            }
+        }
+    }
+}
+
+impl SealedTouchedRoutes {
+    fn unseal(self) -> anyhow::Result<TouchedRouteEvidence> {
+        if !Arc::ptr_eq(&self.evidence, &self.seal) {
+            bail!("native touched belt evidence seal is invalid");
+        }
+        let Self { evidence, seal } = self;
+        drop(seal);
+        Arc::try_unwrap(evidence)
+            .map_err(|_| anyhow!("native touched belt evidence ownership is invalid"))
+    }
+
+    #[cfg(test)]
+    fn forge_evidence_for_test(&mut self, evidence: TouchedRouteEvidence) {
+        self.evidence = Arc::new(evidence);
+    }
 }
 
 /// Runtime-only activity proof carried between consecutive native revisions.
@@ -389,6 +515,7 @@ pub(crate) struct BeltRuntime {
     congestion: Vec<f64>,
     last_flow: Vec<f64>,
     total_dirty: Vec<bool>,
+    touched_routes: TouchedRoutes,
     belt_capacity: f64,
     // Runtime-only source/item wake state. A group may sleep only when its
     // source has no cargo and every persisted belt signal is exactly idle.
@@ -413,6 +540,7 @@ impl BeltRuntime {
             congestion: Vec::with_capacity(belt_count),
             last_flow: Vec::with_capacity(belt_count),
             total_dirty: vec![false; belt_count],
+            touched_routes: TouchedRoutes::default(),
             belt_capacity: prepared_routes.total_capacity,
             active_groups: vec![false; prepared_routes.groups.len()],
             active_group_indices: Vec::with_capacity(prepared_routes.groups.len()),
@@ -521,6 +649,20 @@ impl BeltRuntime {
             .congestion
             .clone_from(&state.belt_dynamics.congestion);
         runtime.last_flow.clone_from(&state.belt_dynamics.last_flow);
+        // The historical write-back canonicalizes absent/non-numeric
+        // progress, lastFlow and congestion fields even if no transfer occurs.
+        // Seed those rows into the same complete mutation evidence so sparse
+        // write-back preserves byte/value semantics without rediscovering
+        // them in a second full scan at commit time. totalTransferred remains
+        // absent until an actual transfer marks it dirty.
+        let required_mask = (1 << BeltDynamicColumns::PROGRESS)
+            | (1 << BeltDynamicColumns::LAST_FLOW)
+            | (1 << BeltDynamicColumns::CONGESTION);
+        for (index, &mask) in state.belt_dynamics.number_mask.iter().enumerate() {
+            if mask & required_mask != required_mask {
+                runtime.touched_routes.record_index(index)?;
+            }
+        }
         runtime.finish_activity(state, entities, prepared_routes, carried)
     }
 
@@ -578,20 +720,27 @@ impl BeltRuntime {
             .zip(&state.belt_dynamics.total_transferred)
             .map(|(next, previous)| next.to_bits() != previous.to_bits())
             .collect::<Vec<_>>();
-        Ok(Self {
+        let mut runtime = Self {
             source: Some(state.belt_commit_source()),
             progress: dynamics.progress,
             total_transferred: dynamics.total_transferred,
             congestion: dynamics.congestion,
             last_flow: dynamics.last_flow,
             total_dirty,
+            touched_routes: TouchedRoutes::default(),
             belt_capacity: 0.0,
             active_groups: Vec::new(),
             active_group_indices: Vec::new(),
             active_queue_enabled: false,
             diagnostics: BeltSchedulerDiagnostics::default(),
             workspace: BeltWorkspace::new(belt_count, 0, 0),
-        })
+        };
+        for index in 0..belt_count {
+            if runtime.record_needs_write(&state.belt_dynamics, index) {
+                runtime.touched_routes.record_index(index)?;
+            }
+        }
+        Ok(runtime)
     }
 
     #[cfg(test)]
@@ -717,26 +866,77 @@ impl BeltRuntime {
         {
             bail!("native belt runtime topology changed");
         }
+        let touched = std::mem::take(&mut self.touched_routes)
+            .seal(belt_count)?
+            .unseal()?;
+
+        // Keep the historical aggregate in exact persisted row order. This
+        // intentionally remains O(B) until the aggregate itself has a closed
+        // incremental proof; the touched evidence below removes the separate
+        // sparse write-back rediscovery scan without changing float order.
+        let mut flow = 0.0;
+        for last_flow in &self.last_flow {
+            flow += last_flow.max(0.0);
+        }
+        self.diagnostics.write_back_flow_checks = belt_count;
+
         let mut changed_count = 0_usize;
         let mut number_mask = state.belt_dynamics.number_mask.clone();
-        let mut flow = 0.0;
-        for (index, persisted_mask) in number_mask.iter_mut().enumerate() {
-            if !self.total_dirty[index]
-                && self.total_transferred[index].to_bits()
-                    != state.belt_dynamics.total_transferred[index].to_bits()
-            {
-                bail!("native belt transfer total changed without a dirty marker");
-            }
-            flow += self.last_flow[index].max(0.0);
-            let changed = self.record_needs_write(&state.belt_dynamics, index);
-            changed_count += usize::from(changed);
-            if changed {
-                *persisted_mask |= (1 << BeltDynamicColumns::PROGRESS)
-                    | (1 << BeltDynamicColumns::LAST_FLOW)
-                    | (1 << BeltDynamicColumns::CONGESTION);
-                if self.total_dirty[index] {
-                    *persisted_mask |= 1 << BeltDynamicColumns::TOTAL_TRANSFERRED;
+        let mut sparse_patches = None;
+        let mut all_changed_indices = None;
+        match touched {
+            TouchedRouteEvidence::Sparse(indices) => {
+                self.diagnostics.write_back_evidence_checks = indices.len();
+                let mut patches = Vec::with_capacity(indices.len());
+                for compact in indices.iter().copied() {
+                    let index = expand_compact_index(compact);
+                    if !self.total_dirty[index]
+                        && self.total_transferred[index].to_bits()
+                            != state.belt_dynamics.total_transferred[index].to_bits()
+                    {
+                        bail!("native belt transfer total changed without a dirty marker");
+                    }
+                    let changed = self.record_needs_write(&state.belt_dynamics, index);
+                    changed_count += usize::from(changed);
+                    if !changed {
+                        continue;
+                    }
+                    number_mask[index] |= (1 << BeltDynamicColumns::PROGRESS)
+                        | (1 << BeltDynamicColumns::LAST_FLOW)
+                        | (1 << BeltDynamicColumns::CONGESTION);
+                    if self.total_dirty[index] {
+                        number_mask[index] |= 1 << BeltDynamicColumns::TOTAL_TRANSFERRED;
+                    }
+                    // Sparse evidence validates the dirty-total invariant and
+                    // materializes this exact row in the same ordered pass.
+                    patches.push(self.raw_patch_for_index(state, index)?);
                 }
+                sparse_patches = Some(patches);
+            }
+            TouchedRouteEvidence::All => {
+                self.diagnostics.write_back_evidence_checks = belt_count;
+                let mut changed_indices = Vec::new();
+                for index in 0..belt_count {
+                    if !self.total_dirty[index]
+                        && self.total_transferred[index].to_bits()
+                            != state.belt_dynamics.total_transferred[index].to_bits()
+                    {
+                        bail!("native belt transfer total changed without a dirty marker");
+                    }
+                    let changed = self.record_needs_write(&state.belt_dynamics, index);
+                    changed_count += usize::from(changed);
+                    if !changed {
+                        continue;
+                    }
+                    number_mask[index] |= (1 << BeltDynamicColumns::PROGRESS)
+                        | (1 << BeltDynamicColumns::LAST_FLOW)
+                        | (1 << BeltDynamicColumns::CONGESTION);
+                    if self.total_dirty[index] {
+                        number_mask[index] |= 1 << BeltDynamicColumns::TOTAL_TRANSFERRED;
+                    }
+                    changed_indices.push(compact_index(index, "changed belt index")?);
+                }
+                all_changed_indices = Some(changed_indices);
             }
         }
         // Preserve the historical dense threshold: a dense write-back
@@ -759,13 +959,18 @@ impl BeltRuntime {
                 },
             )?
         } else {
-            let mut patches = Vec::with_capacity(plan.patch_count);
-            for index in 0..belt_count {
-                if self.record_needs_write(&state.belt_dynamics, index) {
-                    patches.push(self.raw_patch_for_index(state, index)?);
+            if let Some(patches) = sparse_patches {
+                debug_assert_eq!(patches.len(), plan.patch_count);
+                patches
+            } else {
+                let changed_indices = all_changed_indices
+                    .ok_or_else(|| anyhow!("native belt write-back evidence is missing"))?;
+                let mut patches = Vec::with_capacity(plan.patch_count);
+                for compact in changed_indices {
+                    patches.push(self.raw_patch_for_index(state, expand_compact_index(compact))?);
                 }
+                patches
             }
-            patches
         };
         if !self.belt_capacity.is_finite() || !flow.is_finite() {
             bail!("native belt aggregate is non-finite");
@@ -811,6 +1016,15 @@ impl BeltRuntime {
             },
             self.diagnostics,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_patches_with_worker_count_for_test(
+        self,
+        state: &CoreState,
+        workers: usize,
+    ) -> anyhow::Result<(BeltCommitBatch, BeltFlowAggregate, BeltSchedulerDiagnostics)> {
+        self.into_patches_with_runtime(state, &DeterministicRuntime::for_test(workers))
     }
 }
 
@@ -1114,6 +1328,12 @@ fn advance_belt_clocks_with_runtime(
     if seconds <= 0.0 || runtime.progress.is_empty() {
         return Ok(());
     }
+    // Every mutable column borrow below is dominated by this evidence write.
+    // The selection is an over-approximation by design: rows whose rounded
+    // values remain bitwise equal are filtered exactly during write-back.
+    runtime
+        .touched_routes
+        .record_selection(prepared_routes, selection);
     let flow_decay = 0.8_f64.powf(seconds);
     let congestion_decay = 0.85_f64.powf(seconds);
     match selection {
@@ -1243,6 +1463,12 @@ fn apply_belt_post_actions_with_runtime(
     flow_window_seconds: f64,
     executor: &DeterministicRuntime,
 ) -> anyhow::Result<()> {
+    // Post actions can reset progress or advance totalTransferred even when a
+    // zero-second boundary skips the clock phase, so they independently seal
+    // the complete selected route set into the mutation evidence.
+    runtime
+        .touched_routes
+        .record_selection(prepared_routes, selection);
     let BeltRuntime {
         progress,
         total_transferred,
@@ -3221,6 +3447,7 @@ mod tests {
                 .map(|index| (index % 67) as f64 * 0.125)
                 .collect(),
             total_dirty: vec![false; route_count],
+            touched_routes: TouchedRoutes::default(),
             belt_capacity: 0.0,
             active_groups: Vec::new(),
             active_group_indices: Vec::new(),
@@ -3230,9 +3457,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn touched_routes_seal_sorts_deduplicates_and_crosses_255_256_as_u32() {
+        let mut touched = TouchedRoutes::default();
+        for index in [256_usize, 1, 255, 256, 0, 255] {
+            touched.record_index(index).unwrap();
+        }
+        let evidence = touched.seal(300).unwrap().unseal().unwrap();
+        match evidence {
+            TouchedRouteEvidence::Sparse(indices) => {
+                assert_eq!(&*indices, &[0, 1, 255, 256]);
+            }
+            TouchedRouteEvidence::All => panic!("sparse evidence unexpectedly became all"),
+        }
+    }
+
+    #[test]
+    fn touched_routes_noop_and_existing_dense_selection_are_explicit() {
+        let evidence = TouchedRoutes::default()
+            .seal(300)
+            .unwrap()
+            .unseal()
+            .unwrap();
+        assert!(matches!(
+            evidence,
+            TouchedRouteEvidence::Sparse(indices) if indices.is_empty()
+        ));
+
+        let mut touched = TouchedRoutes::default();
+        touched.record_selection(
+            &empty_prepared_routes(),
+            &ActiveSelection::Dense {
+                selected_group_indices: vec![0],
+                selected_route_indices: vec![255, 256],
+            },
+        );
+        assert!(matches!(
+            touched.seal(300).unwrap().unseal().unwrap(),
+            TouchedRouteEvidence::All
+        ));
+    }
+
+    #[test]
+    fn touched_routes_seal_rejects_out_of_range_and_forged_evidence_atomically() {
+        let mut outside = TouchedRoutes::default();
+        outside.record_index(300).unwrap();
+        assert!(outside.seal(300).is_err());
+
+        let mut touched = TouchedRoutes::default();
+        touched.record_index(255).unwrap();
+        let mut sealed = touched.seal(300).unwrap();
+        sealed.forge_evidence_for_test(TouchedRouteEvidence::Sparse(vec![256].into_boxed_slice()));
+        assert!(sealed.unseal().is_err());
+    }
+
     fn runtime_kernel_signature(
         runtime: &BeltRuntime,
-    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, Vec<bool>) {
+    ) -> (
+        Vec<u64>,
+        Vec<u64>,
+        Vec<u64>,
+        Vec<u64>,
+        Vec<bool>,
+        Option<Vec<u32>>,
+    ) {
         (
             runtime
                 .progress
@@ -3255,6 +3543,7 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect(),
             runtime.total_dirty.clone(),
+            runtime.touched_routes.signature(),
         )
     }
 
@@ -3334,6 +3623,98 @@ mod tests {
                     "workers={workers}, seconds={seconds}, defer={defer_reset}, window={flow_window}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sparse_touched_evidence_covers_clock_reset_and_total_at_one_two_four_and_eight_workers() {
+        let route = |source_group: usize, belt_sort_rank: usize| Route {
+            capacity: 6.0,
+            source_index: compact_index(source_group, "test source index").unwrap(),
+            target_index: 0,
+            source_group: compact_index(source_group, "test source group").unwrap(),
+            target_slot: 0,
+            belt_sort_rank: compact_index(belt_sort_rank, "test belt rank").unwrap(),
+            target_port_index: None,
+            priority: 1,
+        };
+        let prepared = PreparedRoutes {
+            routes: vec![route(0, 0), route(1, 0), route(1, 1), route(0, 1)],
+            groups: vec![
+                PreparedGroup {
+                    source_index: 0,
+                    item_symbol: 0,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![0, 3].into_boxed_slice(),
+                },
+                PreparedGroup {
+                    source_index: 1,
+                    item_symbol: 0,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![1, 2].into_boxed_slice(),
+                },
+            ],
+            target_slot_count: 1,
+            total_capacity: 24.0,
+            group_by_key: Arc::new(HashMap::new()),
+        };
+        let run = |workers| {
+            let mut runtime = kernel_runtime(4);
+            let untouched_before = (
+                runtime.progress[0].to_bits(),
+                runtime.progress[3].to_bits(),
+                runtime.total_transferred[0].to_bits(),
+                runtime.total_transferred[3].to_bits(),
+            );
+            let selection = ActiveSelection::Mask {
+                selected_group_indices: vec![1],
+                selected_route_indices: vec![1, 2],
+            };
+            let executor = DeterministicRuntime::for_test(workers);
+            advance_belt_clocks_with_runtime(
+                &mut runtime,
+                &prepared,
+                &selection,
+                1.0,
+                100.0,
+                &executor,
+            )
+            .unwrap();
+            runtime.workspace.post_actions[1] = BeltPostAction::ResetProgress;
+            runtime.workspace.post_actions[2] = BeltPostAction::Flow {
+                available: 10.0,
+                free: 10.0,
+                moved: 2.0,
+            };
+            apply_belt_post_actions_with_runtime(
+                &mut runtime,
+                &prepared,
+                &selection,
+                1.0,
+                false,
+                1.0,
+                &executor,
+            )
+            .unwrap();
+            assert_eq!(runtime.progress[1].to_bits(), 0.0_f64.to_bits());
+            assert!(runtime.total_dirty[2]);
+            assert_eq!(
+                (
+                    runtime.progress[0].to_bits(),
+                    runtime.progress[3].to_bits(),
+                    runtime.total_transferred[0].to_bits(),
+                    runtime.total_transferred[3].to_bits(),
+                ),
+                untouched_before
+            );
+            assert_eq!(runtime.touched_routes.signature(), Some(vec![1, 2]));
+            runtime_kernel_signature(&runtime)
+        };
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(run(workers), expected, "workers={workers}");
         }
     }
 

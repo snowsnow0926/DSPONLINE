@@ -7403,6 +7403,177 @@ mod tests {
     }
 
     #[test]
+    fn sparse_touched_belt_writeback_checks_only_evidence_and_preserves_raw_semantics() {
+        let belts = (0..300)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":if index == 17 { -0.0 } else { 0.0 },
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":index as f64 / 10.0,
+                    "modPayload":{"opaque":format!("模组-{index}"),"raw":[index,255,256]}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let untouched_raw = state.belt_raw[17].clone();
+
+        let unchanged = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        let (unchanged_batch, unchanged_flow, unchanged_diagnostics) =
+            unchanged.into_patches(&state).unwrap();
+        assert_eq!(unchanged_batch.patch_count(), 0);
+        assert_eq!(unchanged_diagnostics.write_back_flow_checks, 300);
+        assert_eq!(unchanged_diagnostics.write_back_evidence_checks, 0);
+        let expected_unchanged_flow = state
+            .belt_dynamics
+            .last_flow
+            .iter()
+            .fold(0.0, |sum, value| sum + value.max(0.0));
+        assert_eq!(
+            unchanged_flow.flow.to_bits(),
+            expected_unchanged_flow.to_bits()
+        );
+
+        let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+        dynamics.congestion[1] = 0.5;
+        dynamics.progress[255] = -0.0;
+        dynamics.progress[256] = 12.5;
+        dynamics.total_transferred[256] += 7.0;
+        dynamics.last_flow[256] = 42.25;
+        let expected_flow = dynamics
+            .last_flow
+            .iter()
+            .fold(0.0, |sum, value| sum + value.max(0.0));
+        let runtime = crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
+        let (batch, aggregate, diagnostics) = runtime.into_patches(&state).unwrap();
+        assert_eq!(batch.patch_indices(), [1, 255, 256]);
+        assert_eq!(diagnostics.changed_belt_records, 3);
+        assert_eq!(diagnostics.write_back_patch_records, 3);
+        assert_eq!(diagnostics.write_back_flow_checks, 300);
+        assert_eq!(diagnostics.write_back_evidence_checks, 3);
+        assert_eq!(aggregate.flow.to_bits(), expected_flow.to_bits());
+
+        let mut committed = state.clone();
+        committed
+            .commit_simulated_state(
+                committed.base_value().clone(),
+                committed.parse_entities_parallel().unwrap(),
+                batch,
+                8,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            committed.parse_belt(255).unwrap()["progress"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            committed.parse_belt(256).unwrap()["totalTransferred"],
+            263.0
+        );
+        assert_eq!(
+            committed.parse_belt(256).unwrap()["modPayload"]["opaque"],
+            "模组-256"
+        );
+        assert!(Arc::ptr_eq(&committed.belt_raw[17], &untouched_raw));
+        assert_eq!(
+            committed.parse_belt(17).unwrap()["progress"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn dense_touched_writeback_is_bitwise_equal_at_one_two_four_and_eight_workers() {
+        let belt_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let belts = (0..belt_count)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":0,
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":0,
+                    "modPayload":{"row":index}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let source =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let changed_count = belt_count / 3 + 1;
+        let run = |workers| {
+            let mut state = source.clone();
+            let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+            for index in 0..changed_count {
+                dynamics.progress[index] = index as f64 + 0.25;
+                if index % 3 == 0 {
+                    dynamics.total_transferred[index] += 1.0;
+                }
+            }
+            let runtime =
+                crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
+            let (batch, aggregate, diagnostics) = runtime
+                .into_patches_with_worker_count_for_test(&state, workers)
+                .unwrap();
+            assert_eq!(batch.patch_count(), belt_count);
+            assert_eq!(diagnostics.changed_belt_records, changed_count);
+            assert_eq!(diagnostics.write_back_evidence_checks, changed_count);
+            assert_eq!(diagnostics.write_back_flow_checks, belt_count);
+            state
+                .commit_simulated_state(
+                    state.base_value().clone(),
+                    state.parse_entities_parallel().unwrap(),
+                    batch,
+                    8,
+                    true,
+                )
+                .unwrap();
+            (
+                state.canonical_sha256().unwrap(),
+                aggregate.flow.to_bits(),
+                diagnostics.write_back_workers,
+            )
+        };
+        let expected = run(1);
+        assert_eq!(expected.2, 1);
+        for workers in [2, 4, 8] {
+            let actual = run(workers);
+            assert_eq!(actual.0, expected.0, "workers={workers}");
+            assert_eq!(actual.1, expected.1, "workers={workers}");
+            assert_eq!(actual.2, workers, "workers={workers}");
+        }
+    }
+
+    #[test]
     fn belt_runtime_and_commit_seals_reject_stale_sources_and_unmarked_totals() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),

@@ -38,7 +38,7 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3 均不变；本
 
 ## 生产预检与切换边界
 
-2026-08-28 只读预检：香港 generation 43、上海 generation 25；两端 Web/API current 均为 `1.2.2-8b9c93e13270`，previous 均为 `1.1.9-c3f4eff6cb5a`，pending absent，API/proxy active、`NRestarts=0`、local health/ready 200、schema v8/layout v3、Nginx 检查通过。香港根盘 60%，上海 75%；上海 download current 为 1.2.2。预检未修改生产。
+2026-08-28 只读预检：香港 generation 43、上海 generation 25；两端 Web/API current 均为 `1.2.2-8b9c93e13270`，previous 均为 `1.1.9-c3f4eff6cb5a`，pending absent，API/proxy active、`NRestarts=0`、local health/ready 200、schema v8/layout v3、Nginx 检查通过。香港根盘 60%、约 28.6 GB 可用，活动库约 4.04 GB；上海根盘 75%、约 15.6 GB 可用，活动库约 0.46 MB。服务器自身严格 TLS 公网探针确认香港 version/health/ready 为 1.2.2 / 200，`/canary/previous/` 302 到 1.1.9；下载站 version、Android/Windows stable 均为 1.2.2，Android minimum code 继续为 1000002。上海 download current 为 1.2.2。预检未修改生产。
 
 正式切换固定顺序：
 

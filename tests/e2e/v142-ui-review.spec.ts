@@ -522,7 +522,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.4");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
   await expect(dialog).toContainText("96 MiB 以上大存档可压缩上传");
   await expect(dialog).toContainText("当前标签页可明确强制接管");
   await expect(dialog).toContainText("黑雾建筑可复用通用配方");

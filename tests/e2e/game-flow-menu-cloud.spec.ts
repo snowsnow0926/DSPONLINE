@@ -1604,7 +1604,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.4");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await expect(releaseNotes).toContainText("96 MiB 以上大存档可压缩上传");
   await expect(releaseNotes).toContainText("当前标签页可明确强制接管");
   await expect(releaseNotes).toContainText("黑雾建筑可复用通用配方");
@@ -1637,7 +1637,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.4");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1684,7 +1684,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.4");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1696,7 +1696,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.4");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-844x390.png", fullPage: true });

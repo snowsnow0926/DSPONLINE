@@ -387,6 +387,7 @@ import { FACTORY_READ_MODEL_LIMITS } from "./game/factoryReadModels";
 import {
   selectFactoryConstructionHeadlineReadModel,
   selectFactoryInspectorSummaryReadModel,
+  selectFactoryMultiSelectionSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
   selectFactorySelectionToolbarReadModel,
@@ -395,6 +396,7 @@ import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryInspectorSummaryReadModel,
+  createWebFactoryMultiSelectionSummaryReadModel,
   createWebFactoryRunStatusReadModel,
   createWebFactorySelectionToolbarReadModel,
 } from "./game/webFactoryReadModelAdapter";
@@ -11627,6 +11629,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : game.entities.filter((entity) => selectedEntityIdSet.has(entity.id) && entity.planetId === game.activePlanetId),
   [game.activePlanetId, game.entities, selectedEntityIdSet, selectedEntityIds.length]);
   const selectedEntity = selectedEntities.length === 1 ? selectedEntities[0] : null;
+  const selectedBeltsForMultiSummary = useMemo(() => {
+    if (selectedEntities.length <= 1 || factoryThinViewAllSelectedBeltIds.length === 0) return [];
+    const selectedIds = new Set(factoryThinViewAllSelectedBeltIds);
+    return game.belts.filter((belt) => selectedIds.has(belt.id) && belt.planetId === game.activePlanetId);
+  }, [factoryThinViewAllSelectedBeltIds, game.activePlanetId, game.belts, selectedEntities.length]);
+  const webFactoryMultiSelectionSummaryReadModel = useMemo(
+    () => createWebFactoryMultiSelectionSummaryReadModel(
+      game,
+      selectedEntities,
+      selectedBeltsForMultiSummary,
+      {
+        selectedEntityIds: factoryThinViewAllSelectedEntityIds,
+        selectedBeltIds: factoryThinViewAllSelectedBeltIds,
+      },
+    ),
+    [
+      factoryThinViewAllSelectedBeltIds,
+      factoryThinViewAllSelectedEntityIds,
+      game.activePlanetId,
+      selectedBeltsForMultiSummary,
+      selectedEntities,
+    ],
+  );
+  const factoryMultiSelectionSummaryReadModel = useMemo(
+    () => selectFactoryMultiSelectionSummaryReadModel(
+      webFactoryMultiSelectionSummaryReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+      {
+        requestedEntityIds: factoryThinViewSelectedEntityIds,
+        requestedBeltIds: factoryThinViewSelectedBeltIds,
+        requestTruncated:
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+      },
+    ),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      webFactoryMultiSelectionSummaryReadModel,
+    ],
+  );
   const selectedBelt = useMemo(() => selectedBeltId
     ? canvasGame.belts.find((belt) => belt.id === selectedBeltId && belt.planetId === canvasGame.activePlanetId) ?? null
     : null,
@@ -13241,6 +13289,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <StableInspectorPanel
           game={panelGame}
           inspectorReadModel={factoryInspectorSummaryReadModel}
+          multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
+          multiSelectedBelts={selectedBeltsForMultiSummary}
           fabricatorFocusItemId={fabricatorFocusItemId}
           selectedEntities={selectedEntities}
           selectedEntity={selectedEntity}

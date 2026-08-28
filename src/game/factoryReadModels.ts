@@ -81,6 +81,22 @@ export interface FactoryInspectorSummaryReadModel {
   readonly belt: SelectedBeltReadModel | null;
 }
 
+/**
+ * Complete bounded rows used to derive the desktop multi-selection summary.
+ * This renderer-only wrapper reuses the existing atomic selection projection;
+ * it does not add fields to the native IPC contract.
+ */
+export interface FactoryMultiSelectionSummaryReadModel {
+  readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly activePlanetId: string;
+  readonly requestedEntityCount: number;
+  readonly requestedBeltCount: number;
+  readonly entityRows: BoundedReadModelRows<SelectedEntityReadModel>;
+  readonly beltRows: BoundedReadModelRows<SelectedBeltReadModel>;
+}
+
 /** Bounded headline used by the visible blueprint construction workspace. */
 export interface FactoryConstructionHeadlineReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;

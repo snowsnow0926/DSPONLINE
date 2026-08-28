@@ -11,6 +11,7 @@ import {
   type ConstructionTargetReadModel,
   type FactoryConstructionHeadlineReadModel,
   type FactoryInspectorSummaryReadModel,
+  type FactoryMultiSelectionSummaryReadModel,
   type FactoryReadModelBundle,
   type FactoryReadModelRequest,
   type FactoryRunStatusReadModel,
@@ -296,6 +297,55 @@ export function createWebFactoryInspectorSummaryReadModel(
     activePlanetId: state.activePlanetId,
     entity,
     belt,
+  };
+}
+
+/**
+ * Web fallback and semantic reference for the desktop multi-selection summary.
+ * The caller supplies its already-selected records, avoiding another scan of a
+ * potentially huge factory. Rows retain the exact ordered native request IDs.
+ */
+export function createWebFactoryMultiSelectionSummaryReadModel(
+  state: GameState,
+  selectedEntities: readonly GameState["entities"][number][],
+  selectedBelts: readonly GameState["belts"][number][],
+  request: Pick<FactoryReadModelRequest, "selectedEntityIds" | "selectedBeltIds">,
+): FactoryMultiSelectionSummaryReadModel {
+  const requestedEntityIds = request.selectedEntityIds ?? [];
+  const requestedBeltIds = request.selectedBeltIds ?? [];
+  const entityIds = uniquePrefix(requestedEntityIds, FACTORY_READ_MODEL_LIMITS.selectedEntityRows);
+  const beltIds = uniquePrefix(requestedBeltIds, FACTORY_READ_MODEL_LIMITS.selectedBeltRows);
+  const entitiesById = new Map(selectedEntities
+    .filter((entity) => entity.planetId === state.activePlanetId)
+    .map((entity) => [entity.id, entity] as const));
+  const beltsById = new Map(selectedBelts
+    .filter((belt) => belt.planetId === state.activePlanetId)
+    .map((belt) => [belt.id, belt] as const));
+  const entityRows = entityIds.flatMap((id) => {
+    const entity = entitiesById.get(id);
+    return entity ? [selectedEntityRow(entity)] : [];
+  });
+  const beltRows = beltIds.flatMap((id) => {
+    const belt = beltsById.get(id);
+    return belt ? [selectedBeltRow(belt)] : [];
+  });
+  return {
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: state.activePlanetId,
+    requestedEntityCount: requestedEntityIds.length,
+    requestedBeltCount: requestedBeltIds.length,
+    entityRows: {
+      rows: entityRows,
+      totalCount: entityRows.length,
+      truncated: requestedEntityIds.length > entityIds.length,
+    },
+    beltRows: {
+      rows: beltRows,
+      totalCount: beltRows.length,
+      truncated: requestedBeltIds.length > beltIds.length,
+    },
   };
 }
 

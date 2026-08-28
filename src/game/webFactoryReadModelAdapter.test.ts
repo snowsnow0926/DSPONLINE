@@ -16,6 +16,7 @@ import type {
 import {
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryInspectorSummaryReadModel,
+  createWebFactoryMultiSelectionSummaryReadModel,
   createWebFactoryReadModels,
   createWebFactoryRunStatusReadModel,
   createWebFactorySelectionToolbarReadModel,
@@ -171,6 +172,59 @@ describe("Web/PWA factory read-model adapter", () => {
     expect(beltModel.belt).toMatchObject({ beltId: "belt-inspected", lastFlow: 7 });
     expect(entityModel).not.toHaveProperty("entities");
     expect(beltModel).not.toHaveProperty("belts");
+  });
+
+  it("projects desktop multi-selection rows in request order and marks over-limit input as truncated", () => {
+    const state = createInitialState();
+    const first = {
+      ...makeEntity(state.entities[0], "multi-first"),
+      powerFactor: 0.8,
+      inputs: { iron_ore: 2 },
+      outputs: { iron_ingot: 1 },
+    };
+    const second = {
+      ...makeEntity(state.entities[1], "multi-second"),
+      powerFactor: 0.6,
+      inputs: { iron_ore: 5 },
+      outputs: { iron_ingot: 3 },
+    };
+    const belt = {
+      ...makeBelt("multi-belt", first.id, second.id),
+      totalTransferred: 12,
+      congestion: 0.25,
+    };
+    const ordered = createWebFactoryMultiSelectionSummaryReadModel(
+      state,
+      [first, second],
+      [belt],
+      { selectedEntityIds: [second.id, first.id], selectedBeltIds: [belt.id] },
+    );
+
+    expect(ordered).toMatchObject({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      requestedEntityCount: 2,
+      requestedBeltCount: 1,
+      entityRows: { totalCount: 2, truncated: false },
+      beltRows: { totalCount: 1, truncated: false },
+    });
+    expect(ordered.entityRows.rows.map((row) => row.entityId)).toEqual([second.id, first.id]);
+    expect(ordered.beltRows.rows.map((row) => row.beltId)).toEqual([belt.id]);
+
+    const manyEntities = Array.from({ length: FACTORY_READ_MODEL_LIMITS.selectedEntityRows + 1 }, (_, index) => ({
+      ...first,
+      id: `multi-${index}`,
+    }));
+    const overLimit = createWebFactoryMultiSelectionSummaryReadModel(
+      state,
+      manyEntities,
+      [],
+      { selectedEntityIds: manyEntities.map((entity) => entity.id), selectedBeltIds: [] },
+    );
+    expect(overLimit.requestedEntityCount).toBe(FACTORY_READ_MODEL_LIMITS.selectedEntityRows + 1);
+    expect(overLimit.entityRows.rows).toHaveLength(FACTORY_READ_MODEL_LIMITS.selectedEntityRows);
+    expect(overLimit.entityRows.truncated).toBe(true);
   });
 
   it("returns detached bounded projections without full GameState, entity, or belt objects", () => {

@@ -138,4 +138,30 @@ describe("factory thin-view App consumption", () => {
     expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);
     expect(panels).toMatch(/getBeltLaneAdjustmentCheck\(game, belt\.id/);
   });
+
+  it("derives the desktop multi-selection display from complete bounded rows only", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
+    const summary = panels.slice(
+      panels.indexOf("export function DesktopMultiSelectionLiveSummary"),
+      panels.indexOf("function EjectorOrbitTargetControl"),
+    );
+
+    expect(app).toMatch(/createWebFactoryMultiSelectionSummaryReadModel\([\s\S]*?factoryThinViewAllSelectedEntityIds[\s\S]*?factoryThinViewAllSelectedBeltIds/);
+    expect(app).toMatch(/selectFactoryMultiSelectionSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/requestTruncated:[\s\S]*?selectedEntityRows[\s\S]*?selectedBeltRows/);
+    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?multiSelectionReadModel=\{factoryMultiSelectionSummaryReadModel\}[\s\S]*?multiSelectedBelts=\{selectedBeltsForMultiSummary\}/);
+    expect(panels).toMatch(/<DesktopMultiSelectionLiveSummary game=\{game\} entities=\{entities\} belts=\{belts\} readModel=\{readModel\} \/>/);
+    expect(summary).toMatch(/data-factory-read-model-source=\{source\}/);
+    expect(summary).toMatch(/readModel\.entityRows\.rows/);
+    expect(summary).toMatch(/readModel\.beltRows\.rows/);
+    expect(summary).not.toMatch(/onClick=|onChange=|canUpgrade|commitGame/);
+
+    // Existing batch controls and their eligibility still use GameState and
+    // original entity IDs, never the renderer-only projection rows.
+    expect(panels).toMatch(/getRecipesForBuilding\(machines\[0\]\.buildingId!/);
+    expect(panels).toMatch(/isTechnologyCompleted\(game, "proliferator_1"\)/);
+    expect(panels).toMatch(/onRecipeChange\(machines\.map\(\(entity\) => entity\.id\)/);
+    expect(panels).toMatch(/onInstallSprayCoater\(sprayEligible\.map\(\(entity\) => entity\.id\)/);
+  });
 });

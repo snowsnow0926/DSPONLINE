@@ -4,6 +4,7 @@ import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
 import type {
   FactoryConstructionHeadlineReadModel,
   FactoryInspectorSummaryReadModel,
+  FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
   PlanetNavigationReadModel,
@@ -14,6 +15,7 @@ import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore
 import {
   selectFactoryConstructionHeadlineReadModel,
   selectFactoryInspectorSummaryReadModel,
+  selectFactoryMultiSelectionSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
   selectFactorySelectionToolbarReadModel,
@@ -150,6 +152,25 @@ const inspectorBinding = {
   requestedBeltIds: selectionBinding.requestedBeltIds,
   requestTruncated: false,
 } as const;
+
+const multiSelectionWeb: FactoryMultiSelectionSummaryReadModel = {
+  schema: "factory-read-model-v1",
+  source: "web-game-state",
+  revision: null,
+  activePlanetId: "home",
+  requestedEntityCount: selectionBinding.requestedEntityIds.length,
+  requestedBeltCount: selectionBinding.requestedBeltIds.length,
+  entityRows: {
+    rows: [selectedEntity("entity-open", false), selectedEntity("entity-locked", true)],
+    totalCount: 2,
+    truncated: false,
+  },
+  beltRows: {
+    rows: [selectedBelt("belt-inspected"), selectedBelt("belt-selected")],
+    totalCount: 2,
+    truncated: false,
+  },
+};
 
 function factory(revision: number, paused = false): DesktopNativeCoreFactoryReadModelResult {
   const emptyRows = { rows: [], totalCount: 0, truncated: false };
@@ -548,6 +569,140 @@ describe("native factory thin-view compact inspector bridge", () => {
       },
     };
     expect(selectFactoryInspectorSummaryReadModel(entityWeb, nestedTruncation, 21, inspectorBinding)).toBe(entityWeb);
+  });
+});
+
+describe("native factory thin-view desktop multi-selection bridge", () => {
+  it("selects complete ordered rows only from the exact atomic revision", () => {
+    const selected = selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      selectionSnapshot(),
+      21,
+      inspectorBinding,
+    );
+    expect(selected).toEqual({ ...multiSelectionWeb, source: "native-core", revision: 21 });
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      selectionSnapshot(20),
+      21,
+      inspectorBinding,
+    )).toBe(multiSelectionWeb);
+  });
+
+  it("fails closed for reordered, nested-truncated, or semantically drifted rows", () => {
+    const current = selectionSnapshot();
+    const reordered: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              rows: [...current.frame!.factory.selection.entityRows.rows].reverse(),
+              totalCount: 2,
+              truncated: false,
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      reordered,
+      21,
+      inspectorBinding,
+    )).toBe(multiSelectionWeb);
+
+    const nestedTruncated: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              ...current.frame!.factory.selection.entityRows,
+              rows: current.frame!.factory.selection.entityRows.rows.map((row, index) => index === 0
+                ? { ...row, outputItems: { rows: [], totalCount: 1, truncated: true } }
+                : row),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      nestedTruncated,
+      21,
+      inspectorBinding,
+    )).toBe(multiSelectionWeb);
+
+    const missingPower: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              ...current.frame!.factory.selection.entityRows,
+              rows: current.frame!.factory.selection.entityRows.rows.map((row, index) => index === 0
+                ? { ...row, powerFactor: null }
+                : row),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      missingPower,
+      21,
+      inspectorBinding,
+    )).toBe(multiSelectionWeb);
+  });
+
+  it("keeps the complete Web fallback for over-limit or incomplete bindings", () => {
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      selectionSnapshot(),
+      21,
+      { ...inspectorBinding, requestTruncated: true },
+    )).toBe(multiSelectionWeb);
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      multiSelectionWeb,
+      selectionSnapshot(),
+      21,
+      {
+        ...inspectorBinding,
+        requestedEntityIds: Array.from({ length: 65 }, (_, index) => `entity-${index}`),
+      },
+    )).toBe(multiSelectionWeb);
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      { ...multiSelectionWeb, entityRows: { ...multiSelectionWeb.entityRows, truncated: true } },
+      selectionSnapshot(),
+      21,
+      inspectorBinding,
+    ).source).toBe("web-game-state");
+    const nestedWebTruncation: FactoryMultiSelectionSummaryReadModel = {
+      ...multiSelectionWeb,
+      entityRows: {
+        ...multiSelectionWeb.entityRows,
+        rows: multiSelectionWeb.entityRows.rows.map((row, index) => index === 0
+          ? { ...row, inputItems: { rows: [], totalCount: 1, truncated: true } }
+          : row),
+      },
+    };
+    expect(selectFactoryMultiSelectionSummaryReadModel(
+      nestedWebTruncation,
+      selectionSnapshot(),
+      21,
+      inspectorBinding,
+    )).toBe(nestedWebTruncation);
   });
 });
 

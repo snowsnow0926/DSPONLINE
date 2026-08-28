@@ -1,6 +1,7 @@
 import type {
   FactoryConstructionHeadlineReadModel,
   FactoryInspectorSummaryReadModel,
+  FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
   ItemQuantityReadModel,
@@ -136,12 +137,16 @@ export function selectFactorySelectionToolbarReadModel(
   });
 }
 
+function hasCompleteItemRows(rows: SelectedEntityReadModel["inputItems"]): boolean {
+  return !rows.truncated && rows.totalCount === rows.rows.length &&
+    rows.rows.length <= FACTORY_READ_MODEL_LIMITS.itemRows;
+}
+
 function sameItemRows(
   web: SelectedEntityReadModel["inputItems"],
   native: SelectedEntityReadModel["inputItems"],
 ): boolean {
-  if (web.truncated || native.truncated ||
-    web.totalCount !== web.rows.length || native.totalCount !== native.rows.length ||
+  if (!hasCompleteItemRows(web) || !hasCompleteItemRows(native) ||
     web.rows.length !== native.rows.length) {
     return false;
   }
@@ -229,6 +234,69 @@ export function selectFactoryInspectorSummaryReadModel(
     return web;
   }
   return Object.freeze({ ...web, source: "native-core", revision: expectedRevision, belt });
+}
+
+/**
+ * Selects complete native rows for the desktop multi-selection summary only.
+ * The store binds the frame to one native session/request token; this selector
+ * additionally proves exact revision, planet, request order, row completeness
+ * and every row semantic before any native aggregate becomes visible.
+ */
+export function selectFactoryMultiSelectionSummaryReadModel(
+  web: FactoryMultiSelectionSummaryReadModel,
+  native: NativeFactoryThinViewSnapshot,
+  expectedRevision: number,
+  binding: FactoryInspectorNativeBinding,
+): FactoryMultiSelectionSummaryReadModel {
+  const webEntities = web.entityRows;
+  const webBelts = web.beltRows;
+  if (web.source !== "web-game-state" || web.revision !== null || binding.requestTruncated ||
+    binding.requestedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+    binding.requestedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows ||
+    !hasUniqueIds(binding.requestedEntityIds) || !hasUniqueIds(binding.requestedBeltIds) ||
+    web.requestedEntityCount !== binding.requestedEntityIds.length ||
+    web.requestedBeltCount !== binding.requestedBeltIds.length ||
+    webEntities.truncated || webBelts.truncated ||
+    webEntities.totalCount !== webEntities.rows.length || webBelts.totalCount !== webBelts.rows.length ||
+    !hasExactOrderedIds(webEntities.rows, binding.requestedEntityIds, (row) => row.entityId) ||
+    !hasExactOrderedIds(webBelts.rows, binding.requestedBeltIds, (row) => row.beltId) ||
+    webEntities.rows.some((row) => row.planetId !== web.activePlanetId || row.powerFactor === null ||
+      !hasCompleteItemRows(row.inputItems) || !hasCompleteItemRows(row.outputItems)) ||
+    webBelts.rows.some((row) => row.planetId !== web.activePlanetId ||
+      row.totalTransferred === null || row.congestion === null)) {
+    return web;
+  }
+
+  const frame = native.status === "ready" && native.requestedRevision === expectedRevision
+    ? native.frame
+    : null;
+  const factory = frame?.factory;
+  const selection = factory?.selection;
+  if (!frame || frame.revision !== expectedRevision || frame.planetId !== web.activePlanetId ||
+    !factory || factory.revision !== expectedRevision || factory.shell.source !== "native-core" ||
+    factory.shell.activePlanetId !== web.activePlanetId || selection?.schema !== web.schema ||
+    selection.activePlanetId !== web.activePlanetId || selection.entityRows.truncated ||
+    selection.beltRows.truncated ||
+    selection.requestedEntityCount !== binding.requestedEntityIds.length ||
+    selection.requestedBeltCount !== binding.requestedBeltIds.length ||
+    selection.entityRows.totalCount !== selection.entityRows.rows.length ||
+    selection.beltRows.totalCount !== selection.beltRows.rows.length ||
+    !hasExactOrderedIds(selection.entityRows.rows, binding.requestedEntityIds, (row) => row.entityId) ||
+    !hasExactOrderedIds(selection.beltRows.rows, binding.requestedBeltIds, (row) => row.beltId) ||
+    selection.entityRows.rows.some((row, index) => row.planetId !== web.activePlanetId ||
+      row.powerFactor === null || !sameSelectedEntityRow(webEntities.rows[index]!, row)) ||
+    selection.beltRows.rows.some((row, index) => row.planetId !== web.activePlanetId ||
+      row.totalTransferred === null || row.congestion === null || !sameSelectedBeltRow(webBelts.rows[index]!, row))) {
+    return web;
+  }
+
+  return Object.freeze({
+    ...web,
+    source: "native-core",
+    revision: expectedRevision,
+    entityRows: selection.entityRows,
+    beltRows: selection.beltRows,
+  });
 }
 
 /**

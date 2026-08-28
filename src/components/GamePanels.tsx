@@ -73,6 +73,7 @@ import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConst
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYields, specializationApplies } from "../game/galaxy";
 import type {
   FactoryInspectorSummaryReadModel,
+  FactoryMultiSelectionSummaryReadModel,
   PlanetNavigationReadModel,
   SelectedBeltReadModel,
   SelectedEntityReadModel,
@@ -420,6 +421,8 @@ type InspectorTab = "inspect" | "fabricate";
 interface InspectorPanelProps {
   game: GameState;
   inspectorReadModel: FactoryInspectorSummaryReadModel;
+  multiSelectionReadModel: FactoryMultiSelectionSummaryReadModel;
+  multiSelectedBelts: BeltConnection[];
   selectedEntities: FactoryEntity[];
   selectedEntity: FactoryEntity | null;
   selectedBelt: BeltConnection | null;
@@ -647,6 +650,156 @@ export function DesktopInspectorLiveSummary({ game, entity, belt, readModel }: {
   return null;
 }
 
+function exactNativeMultiSelectionRows(
+  game: GameState,
+  entities: readonly FactoryEntity[],
+  belts: readonly BeltConnection[],
+  readModel: FactoryMultiSelectionSummaryReadModel,
+): boolean {
+  if (readModel.source !== "native-core" || !Number.isSafeInteger(readModel.revision) ||
+    (readModel.revision ?? -1) < 0 || readModel.schema !== "factory-read-model-v1" ||
+    readModel.activePlanetId !== game.activePlanetId || readModel.entityRows.truncated ||
+    readModel.beltRows.truncated || readModel.requestedEntityCount !== entities.length ||
+    readModel.requestedBeltCount !== belts.length ||
+    readModel.entityRows.totalCount !== readModel.entityRows.rows.length ||
+    readModel.beltRows.totalCount !== readModel.beltRows.rows.length ||
+    readModel.entityRows.rows.length !== entities.length || readModel.beltRows.rows.length !== belts.length) {
+    return false;
+  }
+  const entitiesById = new Map(entities.map((entity) => [entity.id, entity] as const));
+  const beltsById = new Map(belts.map((belt) => [belt.id, belt] as const));
+  if (entitiesById.size !== entities.length || beltsById.size !== belts.length) return false;
+  return readModel.entityRows.rows.every((row) => {
+    const entity = entitiesById.get(row.entityId);
+    return Boolean(entity && row.planetId === game.activePlanetId && row.powerFactor !== null &&
+      desktopEntitySummaryMatches(entity, row));
+  }) && readModel.beltRows.rows.every((row) => {
+    const belt = beltsById.get(row.beltId);
+    return Boolean(belt && row.planetId === game.activePlanetId && row.totalTransferred !== null &&
+      row.congestion !== null && desktopBeltSummaryMatches(belt, row));
+  });
+}
+
+function addMultiSelectionItemAmount(totals: Map<ItemId, number>, itemId: string, amount: number): void {
+  totals.set(itemId as ItemId, (totals.get(itemId as ItemId) ?? 0) + amount);
+}
+
+function sortedMultiSelectionItemTotals(totals: ReadonlyMap<ItemId, number>): Array<readonly [ItemId, number]> {
+  return [...totals]
+    .filter(([, amount]) => amount !== 0)
+    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]) || compareInspectorItemIds(left[0], right[0]));
+}
+
+/** Pure display aggregate; all multi-select commands keep the full GameState. */
+export function DesktopMultiSelectionLiveSummary({ game, entities, belts, readModel }: {
+  game: GameState;
+  entities: readonly FactoryEntity[];
+  belts: readonly BeltConnection[];
+  readModel: FactoryMultiSelectionSummaryReadModel;
+}) {
+  const useNative = exactNativeMultiSelectionRows(game, entities, belts, readModel);
+  const source = useNative ? "native-core" : "web-game-state";
+  const inputTotals = new Map<ItemId, number>();
+  const outputTotals = new Map<ItemId, number>();
+  let equipmentCount = 0;
+  let entityWeight = 0;
+  let weightedProgress = 0;
+  let weightedUtilization = 0;
+  let weightedPowerFactor = 0;
+  let productionRate = 0;
+
+  if (useNative) {
+    for (const row of readModel.entityRows.rows) {
+      const weight = Math.max(1, row.machineCount + row.minerCount);
+      equipmentCount += row.machineCount + row.minerCount;
+      entityWeight += weight;
+      weightedProgress += row.progress * weight;
+      weightedUtilization += row.utilization * weight;
+      weightedPowerFactor += row.powerFactor! * weight;
+      productionRate += row.productionRate;
+      for (const item of row.inputItems.rows) addMultiSelectionItemAmount(inputTotals, item.itemId, item.amount);
+      for (const item of row.outputItems.rows) addMultiSelectionItemAmount(outputTotals, item.itemId, item.amount);
+    }
+  } else {
+    for (const entity of entities) {
+      const weight = Math.max(1, entity.machineCount + entity.minerCount);
+      equipmentCount += entity.machineCount + entity.minerCount;
+      entityWeight += weight;
+      weightedProgress += entity.progress * weight;
+      weightedUtilization += entity.utilization * weight;
+      weightedPowerFactor += getEntityPowerFactor(game, entity) * weight;
+      productionRate += entity.productionRate;
+      for (const [itemId, amount] of rawInspectorItemRows(entity.inputs as NumericItemRecord)) {
+        addMultiSelectionItemAmount(inputTotals, itemId, amount);
+      }
+      for (const [itemId, amount] of rawInspectorItemRows(entity.outputs as NumericItemRecord)) {
+        addMultiSelectionItemAmount(outputTotals, itemId, amount);
+      }
+    }
+  }
+
+  let beltFlow = 0;
+  let beltCongestion = 0;
+  let maxBeltCongestion = 0;
+  let beltProgress = 0;
+  let beltTransferred = 0;
+  let beltStackSize = 0;
+  if (useNative) {
+    for (const row of readModel.beltRows.rows) {
+      beltFlow += row.lastFlow;
+      beltCongestion += row.congestion!;
+      maxBeltCongestion = Math.max(maxBeltCongestion, row.congestion!);
+      beltProgress += row.progress;
+      beltTransferred += row.totalTransferred!;
+      beltStackSize += row.stackSize ?? 1;
+    }
+  } else {
+    for (const belt of belts) {
+      const congestion = belt.congestion ?? 0;
+      beltFlow += belt.lastFlow;
+      beltCongestion += congestion;
+      maxBeltCongestion = Math.max(maxBeltCongestion, congestion);
+      beltProgress += belt.progress;
+      beltTransferred += belt.totalTransferred ?? 0;
+      beltStackSize += belt.stackSize ?? 1;
+    }
+  }
+  const inputRows = sortedMultiSelectionItemTotals(inputTotals);
+  const outputRows = sortedMultiSelectionItemTotals(outputTotals);
+  const averageProgress = entityWeight > 0 ? weightedProgress / entityWeight : 0;
+  const averageUtilization = entityWeight > 0 ? weightedUtilization / entityWeight : 0;
+  const averagePowerFactor = entityWeight > 0 ? weightedPowerFactor / entityWeight : 1;
+  const beltCount = belts.length;
+
+  return <section
+    className="batch-control desktop-multi-selection-live-summary"
+    aria-label="选区实时动态摘要"
+    data-factory-read-model-source={source}
+    data-factory-read-model-revision={useNative ? readModel.revision : "web"}
+  >
+    <header><Gauge size={14} /><span>选区实时动态</span><strong>{entities.length} 节点 · {beltCount} 线路</strong></header>
+    <dl className="metric-ledger">
+      <div><dt>设备总数</dt><dd>{equipmentCount}</dd></div>
+      <div><dt>平均周期进度</dt><dd>{Math.round(averageProgress * 100)}%</dd></div>
+      <div><dt>平均利用率</dt><dd>{Math.round(averageUtilization * 100)}%</dd></div>
+      <div><dt>合计近期产出</dt><dd>{productionRate.toFixed(1)}/min</dd></div>
+      <div><dt>平均供电系数</dt><dd>{Math.round(averagePowerFactor * 100)}%</dd></div>
+      {inputRows.slice(0, 4).map(([itemId, amount]) => <div key={`multi-input-${itemId}`}><dt>输入合计 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>)}
+      {outputRows.slice(0, 4).map(([itemId, amount]) => <div key={`multi-output-${itemId}`}><dt>输出合计 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>)}
+      {inputRows.length > 4 ? <div><dt>其余输入物料</dt><dd>{inputRows.length - 4} 种</dd></div> : null}
+      {outputRows.length > 4 ? <div><dt>其余输出物料</dt><dd>{outputRows.length - 4} 种</dd></div> : null}
+      {beltCount > 0 ? <>
+        <div><dt>线路合计流量</dt><dd>{beltFlow.toFixed(2)}/s</dd></div>
+        <div><dt>平均线路拥堵</dt><dd>{Math.round(beltCongestion / beltCount * 100)}%</dd></div>
+        <div><dt>最高线路拥堵</dt><dd>{Math.round(maxBeltCongestion * 100)}%</dd></div>
+        <div><dt>平均在途进度</dt><dd>{Math.round(beltProgress / beltCount * 100)}%</dd></div>
+        <div><dt>平均货物堆叠</dt><dd>×{(beltStackSize / beltCount).toFixed(2)}</dd></div>
+        <div><dt>线路累计运输</dt><dd><QuantityValue value={beltTransferred} interactive={false} /></dd></div>
+      </> : null}
+    </dl>
+  </section>;
+}
+
 function EjectorOrbitTargetControl({ game, entities, onChange, batch = false }: {
   game: GameState;
   entities: FactoryEntity[];
@@ -675,9 +828,11 @@ function EjectorOrbitTargetControl({ game, entities, onChange, batch = false }: 
   </section>;
 }
 
-function MultiSelectionInspector({ game, entities, onRecipeChange, onEjectorOrbitChange, onInstallSprayCoater, onProliferatorConfiguration }: {
+function MultiSelectionInspector({ game, entities, belts, readModel, onRecipeChange, onEjectorOrbitChange, onInstallSprayCoater, onProliferatorConfiguration }: {
   game: GameState;
   entities: FactoryEntity[];
+  belts: BeltConnection[];
+  readModel: FactoryMultiSelectionSummaryReadModel;
   onRecipeChange: (entityIds: string[], recipeId: RecipeId) => void;
   onEjectorOrbitChange: (entityIds: string[], orbitId: string) => void;
   onInstallSprayCoater: (entityIds: string[]) => void;
@@ -717,6 +872,7 @@ function MultiSelectionInspector({ game, entities, onRecipeChange, onEjectorOrbi
   return (
     <div className="inspector-content multi-selection-inspector">
       <div className="inspector-identity"><i className="building-mark"><Layers3 size={18} /></i><div><span>画布多选</span><strong>已选择 {entities.length} 个节点</strong></div></div>
+      <DesktopMultiSelectionLiveSummary game={game} entities={entities} belts={belts} readModel={readModel} />
       <dl className="metric-ledger">
         <div><dt>设备总数</dt><dd>{equipmentCount}</dd></div>
         <div><dt>运行节点</dt><dd>{running}/{entities.length}</dd></div>
@@ -2229,7 +2385,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </button>
       </div>
       {props.tab === "fabricate" ? <Fabricator game={props.game} focusItemId={props.fabricatorFocusItemId} onCraft={props.onCraft} onCraftItem={props.onCraftItem} onQueueCraftItem={props.onQueueCraftItem} onCancelCraftQueue={props.onCancelCraftQueue} /> : props.selectedEntities.length > 1 ? (
-        <MultiSelectionInspector game={props.game} entities={props.selectedEntities} onRecipeChange={props.onBatchRecipeChange} onEjectorOrbitChange={props.onBatchEjectorOrbitChange} onInstallSprayCoater={props.onBatchInstallSprayCoater} onProliferatorConfiguration={props.onBatchProliferatorConfiguration} />
+        <MultiSelectionInspector game={props.game} entities={props.selectedEntities} belts={props.multiSelectedBelts} readModel={props.multiSelectionReadModel} onRecipeChange={props.onBatchRecipeChange} onEjectorOrbitChange={props.onBatchEjectorOrbitChange} onInstallSprayCoater={props.onBatchInstallSprayCoater} onProliferatorConfiguration={props.onBatchProliferatorConfiguration} />
       ) : props.selectedEntity ? (
         <div className={`inspector-entity-shell${props.selectedEntity.interactionLocked ? " inspector-entity-shell--locked" : ""}`} style={layoutStyle} data-collapsed-sections={layoutPreference.collapsed.join(" ")}>
           {props.selectedEntity.interactionLocked ? <div className="inspector-lock-banner"><LockKeyhole size={16} /><span><strong>建筑已锁定</strong><small>模拟与物流继续运行，修改操作已禁用</small></span><button type="button" onClick={() => props.onEntityLockChange(props.selectedEntity!.id, false)}><Unlock size={16} />解锁</button></div> : null}

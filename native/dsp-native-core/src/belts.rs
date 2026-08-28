@@ -2096,6 +2096,9 @@ fn prepare_routes_from_rows(
         group.route_indices = route_indices.into_boxed_slice();
     }
     sort_prepared_group_routes(&mut routes, &mut groups, &state.belts.ids)?;
+    routes.shrink_to_fit();
+    groups.shrink_to_fit();
+    group_by_key.shrink_to_fit();
     Ok(PreparedRoutes {
         routes,
         groups,

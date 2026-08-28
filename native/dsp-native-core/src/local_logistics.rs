@@ -336,7 +336,15 @@ fn build_peer_directory(
     for peers in by_planet_item.values_mut().flat_map(HashMap::values_mut) {
         sort_matches(&mut peers.supply);
         sort_matches(&mut peers.demand);
+        peers.supply.shrink_to_fit();
+        peers.demand.shrink_to_fit();
     }
+    for items in by_planet_item.values_mut() {
+        items.shrink_to_fit();
+    }
+    by_planet_item.shrink_to_fit();
+    station_slots.shrink_to_fit();
+    station_planets.shrink_to_fit();
     Ok(LocalPeerDirectory {
         station_indices: station_indices.to_vec(),
         by_planet_item,

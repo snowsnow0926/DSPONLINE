@@ -1093,6 +1093,24 @@ pub(crate) struct EntityColumns {
     pub position_y: Vec<f64>,
 }
 
+impl EntityColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            ids: ExactRowIds::default(),
+            kinds: Vec::with_capacity(rows),
+            planets: Vec::with_capacity(rows),
+            buildings: Vec::with_capacity(rows),
+            recipes: Vec::with_capacity(rows),
+            resources: Vec::with_capacity(rows),
+            stored_items: Vec::with_capacity(rows),
+            machine_counts: Vec::with_capacity(rows),
+            miner_counts: Vec::with_capacity(rows),
+            position_x: Vec::with_capacity(rows),
+            position_y: Vec::with_capacity(rows),
+        }
+    }
+}
+
 /// Exact JSON shape retained by the resident entity columns. Raw entity JSON
 /// remains authoritative, but consumers can distinguish an absent field from
 /// an explicit `null`, a finite number, and a malformed/MOD value without
@@ -1336,6 +1354,22 @@ pub(crate) struct BeltColumns {
     pub priorities: Vec<u8>,
 }
 
+impl BeltColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            ids: ExactRowIds::default(),
+            planets: Vec::with_capacity(rows),
+            sources: Vec::with_capacity(rows),
+            targets: Vec::with_capacity(rows),
+            items: Vec::with_capacity(rows),
+            lanes: Vec::with_capacity(rows),
+            tiers: Vec::with_capacity(rows),
+            stack_sizes: Vec::with_capacity(rows),
+            priorities: Vec::with_capacity(rows),
+        }
+    }
+}
+
 /// Compact authoritative mirror of the four mutable belt signals. The raw JSON
 /// records remain the persistence/canonical source of truth; these columns are
 /// rebuilt from raw records on load/topology commands and replaced only with a
@@ -1357,6 +1391,16 @@ impl BeltDynamicColumns {
     pub(crate) const CONGESTION: usize = 2;
     pub(crate) const LAST_FLOW: usize = 3;
     const VALID_MASK: u8 = (1 << 4) - 1;
+
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            progress: Vec::with_capacity(rows),
+            total_transferred: Vec::with_capacity(rows),
+            congestion: Vec::with_capacity(rows),
+            last_flow: Vec::with_capacity(rows),
+            number_mask: Vec::with_capacity(rows),
+        }
+    }
 
     fn signals_from_object(object: &Map<String, Value>) -> [Option<f64>; 4] {
         let read = |key: &str| {
@@ -1516,6 +1560,34 @@ pub(crate) struct FactoryTopology {
 }
 
 impl FactoryTopology {
+    fn shrink_to_fit(&mut self) {
+        self.station_indices.shrink_to_fit();
+        self.quantum_endpoint_indices.shrink_to_fit();
+        self.construction_center_indices.shrink_to_fit();
+        self.time_warp_indices.shrink_to_fit();
+        self.logistics_buffer_indices.shrink_to_fit();
+        self.material_delivery_hub_indices.shrink_to_fit();
+        self.orbital_cargo_terminal_indices.shrink_to_fit();
+        self.galactic_material_exporter_indices.shrink_to_fit();
+        self.space_station_launcher_indices.shrink_to_fit();
+        self.power_source_indices.shrink_to_fit();
+        self.vein_indices.shrink_to_fit();
+        self.ordinary_machine_indices.shrink_to_fit();
+        self.non_station_indices.shrink_to_fit();
+        self.research_entity_indices.shrink_to_fit();
+        self.entity_planet_indices.shrink_to_fit();
+        self.entity_grid_indices.shrink_to_fit();
+        for indices in self
+            .entities_by_planet
+            .iter_mut()
+            .chain(self.belts_by_planet.iter_mut())
+        {
+            indices.shrink_to_fit();
+        }
+        self.entities_by_planet.shrink_to_fit();
+        self.belts_by_planet.shrink_to_fit();
+    }
+
     fn estimated_bytes(&self) -> u64 {
         let index_capacity = self.station_indices.capacity()
             + self.quantum_endpoint_indices.capacity()
@@ -2579,11 +2651,11 @@ impl CoreState {
             bail!("native core parsed record count is inconsistent");
         }
         self.symbols = Symbols::default().into();
-        self.entities = EntityColumns::default().into();
+        self.entities = EntityColumns::with_capacity(entity_values.len()).into();
         self.entity_dynamics = EntityDynamicColumns::default().into();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
-        self.belts = BeltColumns::default().into();
-        self.belt_dynamics = BeltDynamicColumns::default().into();
+        self.belts = BeltColumns::with_capacity(self.belt_raw.len()).into();
+        self.belt_dynamics = BeltDynamicColumns::with_capacity(self.belt_raw.len()).into();
         self.entity_index = ExactRowIdIndex::default().into();
         self.belt_index = ExactRowIdIndex::default().into();
         let mut entity_ids = Vec::<Box<str>>::with_capacity(entity_values.len());
@@ -2793,6 +2865,10 @@ impl CoreState {
         entity_dynamics.validate(entity_values.len())?;
         self.entity_dynamics = entity_dynamics.into();
         self.belt_dynamics.validate(self.belt_raw.len())?;
+        // These immutable indexes live for the complete native session. Trim
+        // geometric growth slack once, after construction, so a large save
+        // does not retain several MiB of unreachable topology capacity.
+        factory_topology.shrink_to_fit();
         self.factory_topology = Arc::new(factory_topology);
         // Record commands may alter station slots or elevator mode. The next
         // admitted advance recompiles this immutable directory from the new
@@ -4689,6 +4765,55 @@ mod tests {
         let advanced = state.summary().unwrap();
         assert_eq!(advanced.elapsed_seconds, 1.0);
         assert_ne!(advanced.canonical_sha256, summary.canonical_sha256);
+    }
+
+    #[test]
+    fn resident_columns_and_factory_topology_drop_geometric_capacity_slack() {
+        let entities = (0..17)
+            .map(|index| {
+                json!({
+                    "id": format!("vein-{index}"),
+                    "kind": "vein",
+                    "planetId": "home",
+                    "resourceId": "iron_ore",
+                    "minerCount": 1,
+                    "inputs": {},
+                    "outputs": {"iron_ore": 1},
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        for capacity in [
+            state.entities.kinds.capacity(),
+            state.entities.planets.capacity(),
+            state.entities.buildings.capacity(),
+            state.entities.recipes.capacity(),
+            state.entities.resources.capacity(),
+            state.entities.stored_items.capacity(),
+            state.entities.machine_counts.capacity(),
+            state.entities.miner_counts.capacity(),
+            state.entities.position_x.capacity(),
+            state.entities.position_y.capacity(),
+        ] {
+            assert_eq!(capacity, entities.len());
+        }
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            (state.factory_topology.vein_indices.len()
+                + state.factory_topology.non_station_indices.len()
+                + state.factory_topology.entity_planet_indices.len()
+                + state.factory_topology.entity_grid_indices.len()
+                + state.factory_topology.entities_by_planet[0].len()) as u64
+                * size_of::<usize>() as u64
+        );
     }
 
     #[test]

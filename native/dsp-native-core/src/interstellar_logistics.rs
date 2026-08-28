@@ -372,6 +372,9 @@ pub(crate) struct InterstellarRouteActivity {
     /// Only the scalar tray amount for these planets is compared between
     /// revisions; a changed tray wakes that planet's candidates.
     warper_refill_planets: Arc<[(String, Arc<[usize]>)]>,
+    /// Represents the initial/topology-reset wake without cloning the complete
+    /// immutable candidate index into every transactional revision.
+    warper_refill_all_pending: bool,
     pending_warper_refill_station_indices: Vec<usize>,
     warper_tray_amount_bits: Vec<Option<u64>>,
     /// A non-station row masquerading as a vanilla ILS, or a vanilla ILS
@@ -470,6 +473,9 @@ impl InterstellarRouteActivity {
     }
 
     fn wake_warper_refill_station(&mut self, station_index: usize) {
+        if self.warper_refill_all_pending {
+            return;
+        }
         if self
             .warper_refill_station_indices
             .binary_search(&station_index)
@@ -493,12 +499,14 @@ impl InterstellarRouteActivity {
     }
 
     fn wake_all_warper_refill_stations(&mut self) {
+        self.warper_refill_all_pending = true;
         self.pending_warper_refill_station_indices.clear();
-        self.pending_warper_refill_station_indices
-            .extend_from_slice(&self.warper_refill_station_indices);
     }
 
     fn wake_changed_warper_trays(&mut self, base: &Map<String, Value>) {
+        if self.warper_refill_all_pending {
+            return;
+        }
         let mut changed = Vec::new();
         for (planet_rank, (planet_id, station_indices)) in
             self.warper_refill_planets.iter().enumerate()
@@ -530,8 +538,12 @@ impl InterstellarRouteActivity {
         entity_count: usize,
         force_full_scan: bool,
     ) -> (Option<Vec<usize>>, WarperRefillScan) {
-        let active = self.pending_warper_refill_station_indices.len();
         let total = self.warper_refill_station_indices.len();
+        let active = if self.warper_refill_all_pending {
+            total
+        } else {
+            self.pending_warper_refill_station_indices.len()
+        };
         let dense_fallback = active > 0
             && active.saturating_mul(WARPER_REFILL_DENSE_DENOMINATOR)
                 >= total.saturating_mul(WARPER_REFILL_DENSE_NUMERATOR);
@@ -545,6 +557,7 @@ impl InterstellarRouteActivity {
                 &mut self.pending_warper_refill_station_indices,
             ))
         };
+        self.warper_refill_all_pending = false;
         (
             selected,
             WarperRefillScan {
@@ -972,86 +985,84 @@ impl InterstellarPeerDirectory {
     }
 }
 
-fn route_activity_station_indices(entities: &[Value]) -> Vec<usize> {
-    // Keep every station that can ever participate in a remote route in this
-    // immutable order, including an ILS currently in elevator mode. A runtime
-    // transition back to legacy can then dispatch and wake a route without a
-    // five-second O(all) directory rebuild. Record/topology commands still
-    // rebuild the cache through CoreState::rebuild_indexes.
-    entities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entity)| {
-            entity.as_object().and_then(|object| {
-                (string_at(object, "kind") == Some("station")
-                    && matches!(
-                        string_at(object, "buildingId"),
-                        Some("interstellar_logistics_station" | "orbital_collector")
-                    ))
-                .then_some(index)
-            })
-        })
-        .collect()
-}
-
 pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteActivity {
-    let station_indices = route_activity_station_indices(entities);
+    // Build every immutable route/refill index in one persisted-order pass.
+    // These predicates used to rescan the complete entity JSON three times at
+    // open; keeping them adjacent also makes their shared kind/building/route
+    // lookups explicit without changing any permissive legacy predicate.
+    let mut station_indices = Vec::new();
+    let mut active_demand_indices = Vec::new();
+    let mut opaque_route_demand_indices = Vec::new();
+    let mut pending_dispatch_demand_indices = Vec::new();
     let mut warper_refill_station_indices = Vec::new();
-    let mut warper_planet_ranks = HashMap::<String, usize>::new();
+    let mut warper_planet_ranks = HashMap::<&str, usize>::new();
     let mut warper_refill_planets = Vec::<(String, Vec<usize>)>::new();
     let mut warper_refill_full_scan_required = false;
     for (entity_index, entity) in entities.iter().enumerate() {
         let Some(entity) = entity.as_object() else {
             continue;
         };
-        if string_at(entity, "buildingId") != Some("interstellar_logistics_station") {
-            continue;
+        let kind = string_at(entity, "kind");
+        let building = string_at(entity, "buildingId");
+        let routes = entity.get("stationRoutes").and_then(Value::as_array);
+        let remote_trackable = kind == Some("station")
+            && matches!(
+                building,
+                Some("interstellar_logistics_station" | "orbital_collector")
+            );
+
+        // Keep every station that can ever participate in a remote route in
+        // immutable persisted order, including an ILS currently in elevator
+        // mode. Runtime transitions therefore need no O(all) rebuild.
+        if remote_trackable {
+            station_indices.push(entity_index);
+            if routes.is_some_and(|routes| {
+                routes
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|route| string_at(route, "scope") == Some("remote"))
+            }) {
+                active_demand_indices.push(entity_index);
+            }
+            if is_legacy_interstellar_station(entity)
+                && !traditional_remote_disabled(entity)
+                && entity
+                    .get("stationSlots")
+                    .and_then(Value::as_array)
+                    .is_some_and(|slots| {
+                        slots.iter().filter_map(Value::as_object).any(|slot| {
+                            slot.get("itemId").is_some_and(|value| !value.is_null())
+                                && string_at(slot, "remoteMode") == Some("demand")
+                        })
+                    })
+            {
+                pending_dispatch_demand_indices.push(entity_index);
+            }
         }
-        warper_refill_station_indices.push(entity_index);
-        if string_at(entity, "kind") != Some("station") {
-            warper_refill_full_scan_required = true;
+
+        if building == Some("interstellar_logistics_station") {
+            warper_refill_station_indices.push(entity_index);
+            if kind != Some("station") {
+                warper_refill_full_scan_required = true;
+            }
+            if let Some(planet_id) = string_at(entity, "planetId") {
+                let planet_rank = if let Some(rank) = warper_planet_ranks.get(planet_id).copied() {
+                    rank
+                } else {
+                    let rank = warper_refill_planets.len();
+                    warper_planet_ranks.insert(planet_id, rank);
+                    warper_refill_planets.push((planet_id.to_owned(), Vec::new()));
+                    rank
+                };
+                warper_refill_planets[planet_rank].1.push(entity_index);
+            } else {
+                warper_refill_full_scan_required = true;
+            }
         }
-        let Some(planet_id) = string_at(entity, "planetId") else {
-            warper_refill_full_scan_required = true;
-            continue;
-        };
-        let planet_rank = if let Some(rank) = warper_planet_ranks.get(planet_id).copied() {
-            rank
-        } else {
-            let rank = warper_refill_planets.len();
-            warper_planet_ranks.insert(planet_id.to_owned(), rank);
-            warper_refill_planets.push((planet_id.to_owned(), Vec::new()));
-            rank
-        };
-        warper_refill_planets[planet_rank].1.push(entity_index);
-    }
-    let warper_refill_planets = warper_refill_planets
-        .into_iter()
-        .map(|(planet_id, indices)| (planet_id, Arc::from(indices)))
-        .collect::<Vec<_>>();
-    let active_demand_indices = station_indices
-        .iter()
-        .copied()
-        .filter(|&station_index| {
-            entities[station_index]
-                .as_object()
-                .and_then(|station| station.get("stationRoutes"))
-                .and_then(Value::as_array)
-                .is_some_and(|routes| {
-                    routes
-                        .iter()
-                        .filter_map(Value::as_object)
-                        .any(|route| string_at(route, "scope") == Some("remote"))
-                })
-        })
-        .collect::<Vec<_>>();
-    let opaque_route_demand_indices = entities
-        .iter()
-        .enumerate()
-        .filter_map(|(entity_index, entity)| {
-            let entity = entity.as_object()?;
+
+        if routes.is_some() {
             let building = string_at(entity, "buildingId");
-            let local_trackable = string_at(entity, "kind") == Some("station")
+            let local_trackable = kind == Some("station")
                 && matches!(
                     building,
                     Some("planetary_logistics_station" | "interstellar_logistics_station")
@@ -1059,25 +1070,22 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
                 && !(building == Some("interstellar_logistics_station")
                     && finite_number(entity.get("stationTier")).floor() == 2.0
                     && string_at(entity, "stationOperationMode") == Some("elevator"));
-            let remote_trackable = string_at(entity, "kind") == Some("station")
-                && matches!(
-                    building,
-                    Some("interstellar_logistics_station" | "orbital_collector")
-                );
-            entity
-                .get("stationRoutes")
-                .and_then(Value::as_array)
-                .is_some_and(|routes| {
-                    routes.iter().filter_map(Value::as_object).any(|route| {
-                        match string_at(route, "scope") {
-                            Some("local") => !local_trackable,
-                            Some("remote") => !remote_trackable,
-                            _ => true,
-                        }
-                    })
+            if routes.is_some_and(|routes| {
+                routes.iter().filter_map(Value::as_object).any(|route| {
+                    match string_at(route, "scope") {
+                        Some("local") => !local_trackable,
+                        Some("remote") => !remote_trackable,
+                        _ => true,
+                    }
                 })
-                .then_some(entity_index)
-        })
+            }) {
+                opaque_route_demand_indices.push(entity_index);
+            }
+        }
+    }
+    let warper_refill_planets = warper_refill_planets
+        .into_iter()
+        .map(|(planet_id, indices)| (planet_id, Arc::from(indices)))
         .collect::<Vec<_>>();
     // The legacy refill path reserves space warpers for every route shape,
     // including MOD-defined scopes. The compact ledger intentionally only
@@ -1085,26 +1093,6 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
     // closed to the persisted-order legacy scan instead of treating its cargo
     // as available inventory.
     warper_refill_full_scan_required |= !opaque_route_demand_indices.is_empty();
-    let pending_dispatch_demand_indices = station_indices
-        .iter()
-        .copied()
-        .filter(|&station_index| {
-            entities[station_index]
-                .as_object()
-                .filter(|station| {
-                    is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
-                })
-                .and_then(|station| station.get("stationSlots"))
-                .and_then(Value::as_array)
-                .is_some_and(|slots| {
-                    slots.iter().filter_map(Value::as_object).any(|slot| {
-                        slot.get("itemId").is_some_and(|value| !value.is_null())
-                            && string_at(slot, "remoteMode") == Some("demand")
-                    })
-                })
-        })
-        .collect::<Vec<_>>();
-    let pending_warper_refill_station_indices = warper_refill_station_indices.clone();
     InterstellarRouteActivity {
         station_indices: Arc::from(station_indices),
         active_demand_indices,
@@ -1113,7 +1101,8 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
         powered_station_indices: Vec::new(),
         warper_refill_station_indices: Arc::from(warper_refill_station_indices),
         warper_refill_planets: Arc::from(warper_refill_planets),
-        pending_warper_refill_station_indices,
+        warper_refill_all_pending: true,
+        pending_warper_refill_station_indices: Vec::new(),
         warper_tray_amount_bits: Vec::new(),
         warper_refill_full_scan_required,
     }
@@ -1214,8 +1203,13 @@ pub(crate) fn select_station_power_indices(
         || invalid_order
         || missing_dependency;
     let ready = |station_index: &usize| ready_station_indices.binary_search(station_index).is_ok();
-    let runtime_fallback = route_activity
-        .pending_dispatch_demand_indices
+    let runtime_fallback = (route_activity.warper_refill_all_pending
+        && route_activity
+            .warper_refill_station_indices
+            .iter()
+            .any(|station_index| !ready(station_index)))
+        || route_activity
+            .pending_dispatch_demand_indices
         .iter()
         .chain(route_activity.pending_warper_refill_station_indices.iter())
         .any(|station_index| !ready(station_index))
@@ -4951,6 +4945,92 @@ mod tests {
         base.as_object().expect("warper base object").clone()
     }
 
+    #[test]
+    fn single_pass_route_activity_preserves_persisted_order_and_fail_closed_membership() {
+        let mut supply = route_activity_station(1);
+        supply["stationSlots"][0]["remoteMode"] = Value::from("supply");
+
+        let mut demand = route_activity_station(2);
+        demand["stationRoutes"] = Value::Array(vec![route_activity_remote_route(
+            1,
+            2,
+            0.25,
+            1.0,
+            false,
+            &[],
+        )]);
+
+        let mut orbital = route_activity_station(3);
+        orbital["buildingId"] = Value::from("orbital_collector");
+        orbital["stationRoutes"] = Value::Array(vec![route_activity_remote_route(
+            2,
+            3,
+            0.25,
+            1.0,
+            false,
+            &[],
+        )]);
+
+        let mut local = route_activity_station(4);
+        local["buildingId"] = Value::from("planetary_logistics_station");
+        local["stationRoutes"] = json!([{ "scope": "local" }]);
+
+        let mut opaque = route_activity_station(5);
+        opaque["kind"] = Value::from("mod:station");
+        opaque
+            .as_object_mut()
+            .expect("opaque station")
+            .remove("planetId");
+        opaque["stationRoutes"] = json!([{ "scope": "remote" }]);
+
+        let mut elevator = route_activity_station(6);
+        elevator["stationTier"] = Value::from(2);
+        elevator["stationOperationMode"] = Value::from("elevator");
+        elevator["stationRoutes"] = json!([{ "scope": "local" }]);
+
+        let entities = vec![
+            Value::Null,
+            supply,
+            demand,
+            orbital,
+            local,
+            opaque,
+            elevator,
+        ];
+        let activity = prepare_route_activity(&entities);
+
+        assert_eq!(activity.station_indices.as_ref(), &[1, 2, 3, 6]);
+        assert_eq!(activity.active_demand_indices, vec![2, 3]);
+        assert_eq!(activity.opaque_route_demand_indices, vec![5, 6]);
+        assert_eq!(activity.pending_dispatch_demand_indices, vec![2]);
+        assert_eq!(
+            activity.warper_refill_station_indices.as_ref(),
+            &[1, 2, 5, 6]
+        );
+        assert_eq!(
+            activity
+                .warper_refill_planets
+                .iter()
+                .map(|(planet_id, indices)| (planet_id.as_str(), indices.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("remote-planet/001", &[1][..]),
+                ("remote-planet/002", &[2][..]),
+                ("remote-planet/006", &[6][..]),
+            ]
+        );
+        assert!(activity.warper_refill_full_scan_required);
+        assert!(activity.warper_refill_all_pending);
+        assert!(activity.pending_warper_refill_station_indices.is_empty());
+
+        let source = Arc::new(activity);
+        let mut transactional = Arc::clone(&source);
+        let copied = Arc::make_mut(&mut transactional);
+        assert!(copied.warper_refill_all_pending);
+        assert_eq!(copied.pending_warper_refill_station_indices.capacity(), 0);
+        assert!(source.warper_refill_all_pending);
+    }
+
     fn assert_warper_refill_bytes_equal(
         indexed_base: &Map<String, Value>,
         indexed_entities: &[Value],
@@ -6632,6 +6712,7 @@ mod tests {
         selection_activity
             .pending_warper_refill_station_indices
             .clear();
+        selection_activity.warper_refill_all_pending = false;
         let off = selected
             .iter()
             .map(|index| (*index, 0.0))
@@ -6822,6 +6903,7 @@ mod tests {
         let mut activity = prepare_route_activity(&entities);
         activity.pending_dispatch_demand_indices.clear();
         activity.pending_warper_refill_station_indices.clear();
+        activity.warper_refill_all_pending = false;
         let local_directory = crate::local_logistics::prepare_step_directory(
             &entities,
             &state.factory_topology.station_indices,
@@ -7023,6 +7105,7 @@ mod tests {
         let mut activity = prepare_route_activity(&entities);
         activity.pending_dispatch_demand_indices.clear();
         activity.pending_warper_refill_station_indices.clear();
+        activity.warper_refill_all_pending = false;
 
         let (dense, dense_scan) = select_station_power_indices(
             &state.factory_topology.station_indices,

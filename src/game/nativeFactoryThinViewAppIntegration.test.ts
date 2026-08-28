@@ -110,4 +110,32 @@ describe("factory thin-view App consumption", () => {
     expect(panels).toMatch(/getBeltLaneAdjustmentCheck\(game, belt\.id/);
     expect(panels).toMatch(/onBeltLaneCountChange/);
   });
+
+  it("feeds the desktop inspector display summary from the same fail-closed atomic selection", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
+    const summary = panels.slice(
+      panels.indexOf("export function DesktopInspectorLiveSummary"),
+      panels.indexOf("function EjectorOrbitTargetControl"),
+    );
+
+    expect(app).toMatch(/const factoryInspectorSummaryReadModel = useMemo\([\s\S]*?selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
+    expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
+    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?inspectorReadModel=\{factoryInspectorSummaryReadModel\}/);
+    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{props\.game\} entity=\{props\.selectedEntity\} belt=\{null\} readModel=\{props\.inspectorReadModel\}/);
+    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{props\.game\} entity=\{null\} belt=\{props\.selectedBelt\} readModel=\{props\.inspectorReadModel\}/);
+    expect(summary).toMatch(/data-factory-read-model-source=\{source\}/);
+    expect(panels).toMatch(/completeInspectorItemRowsMatch/);
+    expect(summary).toMatch(/displayEntity\.inputItems\.rows/);
+    expect(summary).toMatch(/displayBelt\?\.lastFlow/);
+    expect(summary).not.toMatch(/onClick=|onChange=|canUpgrade|commitGame/);
+
+    // Native rows remain display-only. Every specialized control and command
+    // still receives the original full-state entity/belt records.
+    expect(panels).toMatch(/<EntityInspector game=\{props\.game\} entity=\{props\.selectedEntity\}/);
+    expect(panels).toMatch(/<BeltInspector game=\{props\.game\} belt=\{props\.selectedBelt\}/);
+    expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);
+    expect(panels).toMatch(/getBeltLaneAdjustmentCheck\(game, belt\.id/);
+  });
 });

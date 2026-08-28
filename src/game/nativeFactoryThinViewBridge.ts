@@ -174,7 +174,7 @@ function sameSelectedBeltRow(web: SelectedBeltReadModel, native: SelectedBeltRea
 }
 
 /**
- * Selects only the compact inspector's live display fields from a complete
+ * Selects only the mobile/desktop inspectors' live display fields from a complete
  * atomic native selection. GameState remains the source for every action,
  * eligibility check and specialized inspector control.
  */

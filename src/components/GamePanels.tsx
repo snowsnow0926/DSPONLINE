@@ -71,7 +71,12 @@ import { CAMPAIGN_TASKS, getCampaignSnapshot, getCampaignTaskDeficits } from "..
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConstructionId, getBeltTier, getBuilding, getBuildingUpgradeTarget, getConstructionCatalogIds, getConstructionDefinition, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getNextBeltTier, getPlanet, getProliferator, getRecipe, getRecipesForBuilding, getTechnology, isConstructionDeployable, isConstructionInCategory, isConveyorBeltId } from "../game/content";
  import { MATERIAL_DELIVERY_SLOT_COUNT, MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, MAX_MANUAL_CRAFT_BATCHES, MAX_PLANET_TRAY_ITEM_LIMIT, MIN_PLANET_TRAY_ITEM_LIMIT, PORTABLE_FLEET_ITEM_IDS, POWER_GRID_IDS, POWER_GRID_LABELS, canPlaceBuildingOnPlanet, canQueueHandcraftRecipe, canSetBeltStackSize, canUpgradeBelt, canUpgradeEntity, findInterstellarPeer, findPlanetaryPeer, getBeltCapacity, getBeltLaneAdjustmentCheck, getBeltNetworkIds, getConstructionAutomationStatus, getConstructionCraftDeficits, getConstructionQuickCraftPlan, getDysonEngineeringSnapshot, getDysonShellCapacity, getEjectorOrbitTargetStatus, getEntityExtraProductBonus, getEntityOperatingStatus, getEntityOutputCapacity, getEntityPowerFactor, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getInterstellarCargoCapacity, getInterstellarTripSeconds, getMaterialDeliveryItems, getMaterialDeliverySlots, getMaxConstructionQuickCraftBatches, getMaxRecursiveHandcraftBatches, getMiningSpeedMultiplier, getOrbitalCollectorQuantumStatus, getPlanetaryCargoCapacity, getPlanetaryTripSeconds, getPlanetMetrics, getPlanetTrayItemLimit, getPowerGridMetrics, getProliferatorSprayCost, getQuantumAttachmentStatus, getRayReceiverCapacityKw, getRecursiveHandcraftPlan, getResourceReserveSnapshot, getSprayCoaterInstallCheck, getSprayCoaterRemovalRefund, getStationActiveRoutes, getStationBusyVehicleCount, getStationDroneCapacity, getStationFleetDiagnostic, getStationMinimumCargo, getStationSlotCapacity, getStationSlots, getStationVesselCapacity, getStationWarperAutoRefillTarget, getStationWarperCapacity, getStationWarperRefillSnapshot, getTimeWarpRequiredPowerKw, isEntityInPowerCoverage, isHandcraftableRecipe, isPlanetColonized, isPortableFleetItem, isProliferatorEligible, isTechnologyCompleted, stationRouteRequiresWarp } from "../game/engine";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYields, specializationApplies } from "../game/galaxy";
-import type { PlanetNavigationReadModel } from "../game/factoryReadModels";
+import type {
+  FactoryInspectorSummaryReadModel,
+  PlanetNavigationReadModel,
+  SelectedBeltReadModel,
+  SelectedEntityReadModel,
+} from "../game/factoryReadModels";
 import { analyzeBeltNetwork } from "../game/network";
 import { ACTIVITY_MATERIAL_IDS } from "../game/activity";
 import { getOrbitalCargoPortItems } from "../game/stationCargoTerminal";
@@ -414,6 +419,7 @@ type InspectorTab = "inspect" | "fabricate";
 
 interface InspectorPanelProps {
   game: GameState;
+  inspectorReadModel: FactoryInspectorSummaryReadModel;
   selectedEntities: FactoryEntity[];
   selectedEntity: FactoryEntity | null;
   selectedBelt: BeltConnection | null;
@@ -495,6 +501,150 @@ interface InspectorPanelProps {
   galacticActivityStatus: GalacticActivityPublicStatus | null;
   fabricatorFocusItemId?: ItemId | null;
   onOpenTutorial?: (sectionId?: string) => void;
+}
+
+type NumericItemRecord = Readonly<Record<string, number | undefined>>;
+
+function compareInspectorItemIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function completeInspectorItemRowsMatch(
+  record: NumericItemRecord,
+  rows: SelectedEntityReadModel["inputItems"],
+): boolean {
+  const entries = Object.entries(record)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort(([left], [right]) => compareInspectorItemIds(left, right));
+  return !rows.truncated && rows.totalCount === rows.rows.length &&
+    rows.rows.length === entries.length && rows.rows.every((row, index) => {
+      const entry = entries[index];
+      return entry?.[0] === row.itemId && entry[1] === row.amount;
+    });
+}
+
+function desktopEntitySummaryMatches(entity: FactoryEntity, row: SelectedEntityReadModel): boolean {
+  return row.entityId === entity.id && row.planetId === entity.planetId && row.kind === entity.kind &&
+    row.position.x === entity.position.x && row.position.y === entity.position.y &&
+    row.interactionLocked === entity.interactionLocked && row.buildingId === (entity.buildingId ?? null) &&
+    row.resourceId === (entity.resourceId ?? null) && row.recipeId === (entity.recipeId ?? null) &&
+    row.storedItemId === (entity.storedItemId ?? null) && row.fuelItemId === (entity.fuelItemId ?? null) &&
+    row.machineCount === entity.machineCount && row.minerCount === entity.minerCount &&
+    row.progress === entity.progress && row.utilization === entity.utilization &&
+    row.productionRate === entity.productionRate && row.powerFactor === (entity.powerFactor ?? null) &&
+    completeInspectorItemRowsMatch(entity.inputs as NumericItemRecord, row.inputItems) &&
+    completeInspectorItemRowsMatch(entity.outputs as NumericItemRecord, row.outputItems);
+}
+
+function desktopBeltSummaryMatches(belt: BeltConnection, row: SelectedBeltReadModel): boolean {
+  return row.beltId === belt.id && row.planetId === belt.planetId &&
+    row.sourceEntityId === belt.source && row.targetEntityId === belt.target &&
+    row.itemId === belt.itemId && row.lanes === belt.lanes && row.tier === belt.tier &&
+    row.sorterTier === belt.sorterTier && row.stackSize === (belt.stackSize ?? null) &&
+    row.priority === belt.priority && row.progress === belt.progress && row.lastFlow === belt.lastFlow &&
+    row.totalTransferred === (belt.totalTransferred ?? null) && row.congestion === (belt.congestion ?? null);
+}
+
+function rawInspectorItemRows(record: NumericItemRecord): Array<readonly [ItemId, number]> {
+  return Object.entries(record)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort(([left], [right]) => compareInspectorItemIds(left, right))
+    .map(([itemId, amount]) => [itemId as ItemId, amount] as const);
+}
+
+function readModelInspectorItemRows(
+  rows: SelectedEntityReadModel["inputItems"]["rows"],
+): Array<readonly [ItemId, number]> {
+  return rows.map((row) => [row.itemId as ItemId, row.amount] as const);
+}
+
+/**
+ * Display-only desktop binding for the bounded atomic factory projection.
+ * The App-level bridge owns session/revision/request-order validation. This
+ * final component additionally refuses a wrong planet, selection, truncated
+ * item ledger or any semantic drift from the full command-authority record.
+ */
+export function DesktopInspectorLiveSummary({ game, entity, belt, readModel }: {
+  game: GameState;
+  entity: FactoryEntity | null;
+  belt: BeltConnection | null;
+  readModel: FactoryInspectorSummaryReadModel;
+}) {
+  const validSource = readModel.source === "native-core"
+    ? Number.isSafeInteger(readModel.revision) && (readModel.revision ?? -1) >= 0
+    : readModel.source === "web-game-state" && readModel.revision === null;
+  const commonMatch = readModel.schema === "factory-read-model-v1" && validSource &&
+    readModel.activePlanetId === game.activePlanetId;
+  const displayEntity = commonMatch && entity && !belt && readModel.belt === null && readModel.entity &&
+    entity.planetId === game.activePlanetId && desktopEntitySummaryMatches(entity, readModel.entity)
+    ? readModel.entity
+    : null;
+  const displayBelt = commonMatch && !entity && belt && readModel.entity === null && readModel.belt &&
+    belt.planetId === game.activePlanetId && desktopBeltSummaryMatches(belt, readModel.belt)
+    ? readModel.belt
+    : null;
+  const source = displayEntity || displayBelt ? readModel.source : "web-game-state";
+  const revision = source === "native-core" ? readModel.revision : null;
+
+  if (entity) {
+    const progress = displayEntity?.progress ?? entity.progress;
+    const utilization = displayEntity?.utilization ?? entity.utilization;
+    const productionRate = displayEntity?.productionRate ?? entity.productionRate;
+    const powerFactor = displayEntity?.powerFactor ?? entity.powerFactor ?? getEntityPowerFactor(game, entity);
+    const inputRows = displayEntity
+      ? readModelInspectorItemRows(displayEntity.inputItems.rows)
+      : rawInspectorItemRows(entity.inputs as NumericItemRecord);
+    const outputRows = displayEntity
+      ? readModelInspectorItemRows(displayEntity.outputItems.rows)
+      : rawInspectorItemRows(entity.outputs as NumericItemRecord);
+    return <section
+      className="inspector-content desktop-inspector-live-summary"
+      aria-label="实时运行摘要"
+      data-factory-read-model-source={source}
+      data-factory-read-model-revision={revision ?? "web"}
+    >
+      <div className="inspector-identity"><i className="building-mark"><Gauge size={18} /></i><div><span>桌面薄读投影</span><strong>实时运行摘要</strong></div></div>
+      <dl className="metric-ledger">
+        <div><dt>建筑堆叠</dt><dd>×{displayEntity?.machineCount ?? entity.machineCount}</dd></div>
+        <div><dt>采集设备</dt><dd>×{displayEntity?.minerCount ?? entity.minerCount}</dd></div>
+        <div><dt>周期进度</dt><dd>{Math.round(progress * 100)}%</dd></div>
+        <div><dt>当前利用率</dt><dd>{Math.round(utilization * 100)}%</dd></div>
+        <div><dt>近期产出</dt><dd>{productionRate.toFixed(1)}/min</dd></div>
+        <div><dt>供电系数</dt><dd>{Math.round(powerFactor * 100)}%</dd></div>
+        {inputRows.length > 0 ? inputRows.map(([itemId, amount]) => <div key={`input-${itemId}`}><dt>输入 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>) : <div><dt>输入缓存</dt><dd>暂无</dd></div>}
+        {outputRows.length > 0 ? outputRows.map(([itemId, amount]) => <div key={`output-${itemId}`}><dt>输出 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>) : <div><dt>输出缓存</dt><dd>暂无</dd></div>}
+      </dl>
+    </section>;
+  }
+
+  if (belt) {
+    const itemId = (displayBelt?.itemId ?? belt.itemId) as ItemId;
+    const stackSize = displayBelt?.stackSize ?? belt.stackSize ?? 1;
+    const congestion = displayBelt?.congestion ?? belt.congestion ?? 0;
+    const totalTransferred = displayBelt?.totalTransferred ?? belt.totalTransferred ?? 0;
+    const priority = displayBelt?.priority ?? belt.priority;
+    return <section
+      className="inspector-content desktop-inspector-live-summary"
+      aria-label="实时线路摘要"
+      data-factory-read-model-source={source}
+      data-factory-read-model-revision={revision ?? "web"}
+    >
+      <div className="inspector-identity"><ItemMark itemId={itemId} /><div><span>桌面薄读投影</span><strong>{getItem(itemId).name}实时线路摘要</strong></div></div>
+      <dl className="metric-ledger">
+        <div><dt>传送带等级</dt><dd>Mk.{beltTierRoman((displayBelt?.tier ?? belt.tier) as BeltTier)}</dd></div>
+        <div><dt>并行线路</dt><dd>×{displayBelt?.lanes ?? belt.lanes}</dd></div>
+        <div><dt>分拣器等级</dt><dd>Mk.{displayBelt?.sorterTier ?? belt.sorterTier}</dd></div>
+        <div><dt>近期流量</dt><dd>{(displayBelt?.lastFlow ?? belt.lastFlow).toFixed(2)}/s</dd></div>
+        <div><dt>货物堆叠</dt><dd>×{stackSize}</dd></div>
+        <div><dt>线路优先级</dt><dd>{priority === 2 ? "高" : priority === 1 ? "标准" : "低"}</dd></div>
+        <div><dt>在途进度</dt><dd>{Math.round((displayBelt?.progress ?? belt.progress) * 100)}%</dd></div>
+        <div><dt>拥堵指数</dt><dd className={congestion > 0.8 ? "status-text status-text--blocked" : undefined}>{Math.round(congestion * 100)}%</dd></div>
+        <div><dt>累计运输</dt><dd><QuantityValue value={totalTransferred} interactive={false} /></dd></div>
+      </dl>
+    </section>;
+  }
+
+  return null;
 }
 
 function EjectorOrbitTargetControl({ game, entities, onChange, batch = false }: {
@@ -2084,12 +2234,16 @@ export function InspectorPanel(props: InspectorPanelProps) {
         <div className={`inspector-entity-shell${props.selectedEntity.interactionLocked ? " inspector-entity-shell--locked" : ""}`} style={layoutStyle} data-collapsed-sections={layoutPreference.collapsed.join(" ")}>
           {props.selectedEntity.interactionLocked ? <div className="inspector-lock-banner"><LockKeyhole size={16} /><span><strong>建筑已锁定</strong><small>模拟与物流继续运行，修改操作已禁用</small></span><button type="button" onClick={() => props.onEntityLockChange(props.selectedEntity!.id, false)}><Unlock size={16} />解锁</button></div> : null}
           <InspectorLayoutControls preference={layoutPreference} onChange={updateLayoutPreference} />
+          <DesktopInspectorLiveSummary game={props.game} entity={props.selectedEntity} belt={null} readModel={props.inspectorReadModel} />
           <fieldset className="inspector-lockable" disabled={props.selectedEntity.interactionLocked}>
           <EntityInspector game={props.game} entity={props.selectedEntity} onRecipeChange={props.onRecipeChange} onEjectorOrbitChange={props.onEjectorOrbitChange} onLogisticsItemChange={props.onLogisticsItemChange} onMaterialDeliverySlotChange={props.onMaterialDeliverySlotChange} onPickEntityInput={props.onPickEntityInput} onOpenOrbitalStation={props.onOpenOrbitalStation} onOrbitalCargoPortClear={props.onOrbitalCargoPortClear} onFuelChange={props.onFuelChange} onEnergyModeChange={props.onEnergyModeChange} onPowerGridChange={props.onPowerGridChange} onPowerPriorityChange={props.onPowerPriorityChange} onGenerationPriorityChange={props.onGenerationPriorityChange} onStationModeChange={props.onStationModeChange} onStationVesselAdjust={props.onStationVesselAdjust} onStationDroneAdjust={props.onStationDroneAdjust} onStationFleetTarget={props.onStationFleetTarget} onStationFleetFill={props.onStationFleetFill} onStationWarperAdjust={props.onStationWarperAdjust} onStationWarpEnabled={props.onStationWarpEnabled} onStationWarperAutoRefillChange={props.onStationWarperAutoRefillChange} onStationWarperTargetChange={props.onStationWarperTargetChange} onStationHubChange={props.onStationHubChange} onStationMinimumLoadChange={props.onStationMinimumLoadChange} onStationSlotItemChange={props.onStationSlotItemChange} onStationSlotModeChange={props.onStationSlotModeChange} onStationSlotMinimumLoadChange={props.onStationSlotMinimumLoadChange} onStationSlotLimitsChange={props.onStationSlotLimitsChange} onStationSlotPriorityChange={props.onStationSlotPriorityChange} onStationSlotRoutePolicyChange={props.onStationSlotRoutePolicyChange} onStationSlotWarperBudgetChange={props.onStationSlotWarperBudgetChange} onSplitterModeChange={props.onSplitterModeChange} onInstallSprayCoater={props.onInstallSprayCoater} onRemoveSprayCoater={props.onRemoveSprayCoater} onOpenResourceSettings={props.onOpenResourceSettings} onProliferatorConfiguration={props.onProliferatorConfiguration} onSetTarget={props.onEntityStackTarget} onUpgrade={props.onUpgradeEntity} onUpgradeInterstellarStation={props.onUpgradeInterstellarStation} onQuantumAttachment={props.onQuantumAttachment} onOrbitalCollectorQuantumMode={props.onOrbitalCollectorQuantumMode} onRemove={props.onRemoveEntity} onOpenConstructionCenter={props.onOpenConstructionCenter} onGalacticExporterPausedChange={props.onGalacticExporterPausedChange} onBlackHolePausedChange={props.onBlackHolePausedChange} onTimeWarpControllerChange={props.onTimeWarpControllerChange} onTimeWarpEnabledChange={props.onTimeWarpEnabledChange} onTimeWarpRequestedMultiplierChange={props.onTimeWarpRequestedMultiplierChange} onOpenTutorial={props.onOpenTutorial} galacticActivityStatus={props.galacticActivityStatus} />
           </fieldset>
         </div>
       ) : props.selectedBelt ? (
-        <BeltInspector game={props.game} belt={props.selectedBelt} hasCopiedConfiguration={props.hasCopiedBeltConfiguration} focused={props.focusedBeltNetworkId === props.selectedBelt.id} onPriorityChange={props.onBeltPriorityChange} onLaneCountChange={props.onBeltLaneCountChange} onStackSizeChange={props.onBeltStackSizeChange} onMonitorChange={props.onBeltMonitorChange} onRouteModeChange={props.onBeltRouteModeChange} onRouteOffsetChange={props.onBeltRouteOffsetChange} onApplyConfigurationToNetwork={props.onApplyBeltConfigurationToNetwork} onFocusNetwork={props.onFocusBeltNetwork} onUpgrade={props.onUpgradeBelt} onUpgradeNetwork={props.onUpgradeBeltNetwork} onCopyConfiguration={props.onCopyBeltConfiguration} onPasteConfiguration={props.onPasteBeltConfiguration} onRemove={props.onRemoveBelt} onRemoveNetwork={props.onRemoveBeltNetwork} />
+        <>
+          <DesktopInspectorLiveSummary game={props.game} entity={null} belt={props.selectedBelt} readModel={props.inspectorReadModel} />
+          <BeltInspector game={props.game} belt={props.selectedBelt} hasCopiedConfiguration={props.hasCopiedBeltConfiguration} focused={props.focusedBeltNetworkId === props.selectedBelt.id} onPriorityChange={props.onBeltPriorityChange} onLaneCountChange={props.onBeltLaneCountChange} onStackSizeChange={props.onBeltStackSizeChange} onMonitorChange={props.onBeltMonitorChange} onRouteModeChange={props.onBeltRouteModeChange} onRouteOffsetChange={props.onBeltRouteOffsetChange} onApplyConfigurationToNetwork={props.onApplyBeltConfigurationToNetwork} onFocusNetwork={props.onFocusBeltNetwork} onUpgrade={props.onUpgradeBelt} onUpgradeNetwork={props.onUpgradeBeltNetwork} onCopyConfiguration={props.onCopyBeltConfiguration} onPasteConfiguration={props.onPasteBeltConfiguration} onRemove={props.onRemoveBelt} onRemoveNetwork={props.onRemoveBeltNetwork} />
+        </>
       ) : <InspectorEmpty game={props.game} onOpenTutorial={props.onOpenTutorial} />}
     </aside>
   );

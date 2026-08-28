@@ -13240,6 +13240,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <RuntimeRenderProfile id="inspector">
         <StableInspectorPanel
           game={panelGame}
+          inspectorReadModel={factoryInspectorSummaryReadModel}
           fabricatorFocusItemId={fabricatorFocusItemId}
           selectedEntities={selectedEntities}
           selectedEntity={selectedEntity}

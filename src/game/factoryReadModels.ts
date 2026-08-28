@@ -69,7 +69,7 @@ export interface FactorySelectionToolbarReadModel {
 }
 
 /**
- * Bounded live fields rendered by the compact mobile entity/belt inspector.
+ * Bounded live fields rendered by the mobile and desktop entity/belt inspectors.
  * Command eligibility and mutations deliberately remain outside this model.
  */
 export interface FactoryInspectorSummaryReadModel {

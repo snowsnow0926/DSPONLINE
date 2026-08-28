@@ -271,7 +271,7 @@ function selectedBeltRow(belt: GameState["belts"][number]): SelectedBeltReadMode
 }
 
 /**
- * Web/PWA fallback for the compact inspector's live display fields.
+ * Web/PWA fallback for the mobile and desktop inspectors' live display fields.
  *
  * The caller already owns the selected records, so this adapter performs no
  * factory-wide lookup. Entity display takes precedence over a belt exactly as

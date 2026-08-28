@@ -78,6 +78,97 @@ test("player-authority clock state is exact, bounded and contains no writer iden
   }
 });
 
+test("player-authority macro status is an exact scalar-only discriminated union", () => {
+  const state = {
+    schemaVersion: 2,
+    statusKind: "macro",
+    phase: "macro-active",
+    revision: 13,
+    acknowledgedSequence: 6,
+    nextSequence: 7,
+    nextDeadlineMs: 17_000,
+    inFlight: false,
+    currentOperation: null,
+    simulationBudgetMilliseconds: 60_000,
+    wallBudgetMilliseconds: 4_000,
+    simulationProgressMilliseconds: 60_000,
+    wallProgressMilliseconds: 4_000,
+    pausedReason: "macro-window-active",
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  assert.doesNotMatch(JSON.stringify(state), /session|runId|operationId|algorithm|error/i);
+
+  const uncertain = {
+    ...state,
+    phase: "macro-uncertain",
+    inFlight: false,
+    simulationProgressMilliseconds: null,
+    wallProgressMilliseconds: null,
+    pausedReason: "macro-advance-uncertain",
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", uncertain), uncertain);
+
+  for (const valid of [
+    {
+      ...state,
+      phase: "macro-committing",
+      inFlight: true,
+      currentOperation: "advance",
+      simulationProgressMilliseconds: 0,
+      wallProgressMilliseconds: 0,
+      pausedReason: "macro-advance-committing",
+    },
+    {
+      ...state,
+      phase: "macro-finishing",
+      inFlight: true,
+      currentOperation: "finish",
+      pausedReason: "macro-finish-committing",
+    },
+    {
+      ...state,
+      phase: "faulted",
+      currentOperation: "advance",
+      pausedReason: "macro-runtime-faulted",
+    },
+    {
+      ...state,
+      phase: "shutdown",
+      currentOperation: "finish",
+      pausedReason: "macro-runtime-shutdown",
+    },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", valid), valid);
+  }
+
+  for (const invalid of [
+    { ...state, sessionId: "core-secret" },
+    { ...state, runId: "run-secret" },
+    { ...state, macroSessionId: "macro-secret" },
+    { ...state, operationId: "operation-secret" },
+    { ...state, algorithmVersion: "algorithm-secret" },
+    { ...state, lastErrorCode: "NATIVE_PRIVATE_ERROR" },
+    { ...state, nextSequence: 8 },
+    { ...state, phase: "macro-unknown" },
+    { ...state, currentOperation: "operation-secret" },
+    { ...state, simulationBudgetMilliseconds: null },
+    { ...state, simulationBudgetMilliseconds: 0 },
+    { ...state, wallBudgetMilliseconds: 30 * 24 * 60 * 60 * 1_000 + 1 },
+    { ...state, simulationProgressMilliseconds: 60_001 },
+    { ...state, wallProgressMilliseconds: null },
+    { ...state, phase: "macro-committing", currentOperation: null, pausedReason: "macro-advance-committing" },
+    { ...state, phase: "macro-finishing", currentOperation: "advance", pausedReason: "macro-finish-committing" },
+    { ...uncertain, inFlight: true, currentOperation: null },
+    { ...uncertain, currentOperation: "finish", pausedReason: "macro-advance-uncertain" },
+    { ...state, phase: "shutdown", pausedReason: "macro-runtime-faulted" },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i,
+    );
+  }
+});
+
 test("native command change receipts are stable ordered and duplicate-free", () => {
   const receipt = {
     previousRevision: 17,

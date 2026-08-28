@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   DesktopBridge,
+  DesktopNativePlayerAuthorityClockState,
+  DesktopNativePlayerAuthorityMacroState,
   DesktopNativePlayerAuthorityState,
 } from "../desktop";
 import {
@@ -10,9 +12,12 @@ import {
   normalizeNativePlayerAuthorityClockFrame,
   selectActiveNativePlayerAuthorityFrame,
   selectBoundNativePlayerAuthorityFrame,
+  selectNativePlayerAuthorityMacroStatus,
 } from "./nativePlayerAuthorityClock";
 
-function activeFrame(overrides: Partial<DesktopNativePlayerAuthorityState> = {}): DesktopNativePlayerAuthorityState {
+function activeFrame(
+  overrides: Partial<DesktopNativePlayerAuthorityClockState> = {},
+): DesktopNativePlayerAuthorityClockState {
   return {
     schemaVersion: 1,
     phase: "active",
@@ -30,7 +35,29 @@ function activeFrame(overrides: Partial<DesktopNativePlayerAuthorityState> = {})
   };
 }
 
-function clockFixture(initial = activeFrame()) {
+function macroFrame(
+  overrides: Partial<DesktopNativePlayerAuthorityMacroState> = {},
+): DesktopNativePlayerAuthorityMacroState {
+  return {
+    schemaVersion: 2,
+    statusKind: "macro",
+    phase: "macro-active",
+    revision: 12,
+    acknowledgedSequence: 6,
+    nextSequence: 7,
+    nextDeadlineMs: 12_000,
+    inFlight: false,
+    currentOperation: null,
+    simulationBudgetMilliseconds: 60_000,
+    wallBudgetMilliseconds: 4_000,
+    simulationProgressMilliseconds: 60_000,
+    wallProgressMilliseconds: 4_000,
+    pausedReason: "macro-window-active",
+    ...overrides,
+  };
+}
+
+function clockFixture(initial: DesktopNativePlayerAuthorityState = activeFrame()) {
   let pulled: unknown = initial;
   let listener: ((state: DesktopNativePlayerAuthorityState) => void) | null = null;
   const unsubscribe = vi.fn();
@@ -101,6 +128,72 @@ describe("native player-authority clock validation", () => {
       lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RECOVERY_FAILED",
     }).sessionId).toBeNull();
   });
+
+  it("accepts only the exact macro scalar schema and rejects every identity or malformed budget", () => {
+    const normalized = normalizeNativePlayerAuthorityClockFrame(macroFrame());
+    expect(normalized).toEqual(macroFrame());
+    expect(Object.isFrozen(normalized)).toBe(true);
+    expect(JSON.stringify(normalized)).not.toMatch(/session|runId|operationId|algorithm|error/i);
+
+    for (const valid of [
+      macroFrame({
+        phase: "macro-committing",
+        inFlight: true,
+        currentOperation: "advance",
+        simulationProgressMilliseconds: 0,
+        wallProgressMilliseconds: 0,
+        pausedReason: "macro-advance-committing",
+      }),
+      macroFrame({
+        phase: "macro-finishing",
+        inFlight: true,
+        currentOperation: "finish",
+        pausedReason: "macro-finish-committing",
+      }),
+      macroFrame({
+        phase: "faulted",
+        currentOperation: "advance",
+        pausedReason: "macro-runtime-faulted",
+      }),
+      macroFrame({
+        phase: "shutdown",
+        currentOperation: "finish",
+        pausedReason: "macro-runtime-shutdown",
+      }),
+    ]) {
+      expect(normalizeNativePlayerAuthorityClockFrame(valid)).toEqual(valid);
+    }
+
+    for (const malformed of [
+      { ...macroFrame(), sessionId: "core-secret" },
+      { ...macroFrame(), runId: "run-secret" },
+      { ...macroFrame(), macroSessionId: "macro-secret" },
+      { ...macroFrame(), operationId: "operation-secret" },
+      { ...macroFrame(), algorithmVersion: "algorithm-secret" },
+      { ...macroFrame(), lastErrorCode: "NATIVE_PRIVATE_ERROR" },
+      { ...macroFrame(), nextSequence: 9 },
+      { ...macroFrame(), phase: "macro-unknown" },
+      { ...macroFrame(), simulationBudgetMilliseconds: null },
+      { ...macroFrame(), wallBudgetMilliseconds: 30 * 24 * 60 * 60 * 1_000 + 1 },
+      { ...macroFrame(), simulationProgressMilliseconds: 60_001 },
+      { ...macroFrame(), wallProgressMilliseconds: null },
+      {
+        ...macroFrame(),
+        phase: "macro-committing",
+        currentOperation: null,
+        pausedReason: "macro-advance-committing",
+      },
+      {
+        ...macroFrame(),
+        phase: "macro-uncertain",
+        inFlight: true,
+        currentOperation: null,
+        pausedReason: "macro-advance-uncertain",
+      },
+    ]) {
+      expect(() => normalizeNativePlayerAuthorityClockFrame(malformed)).toThrow(/native player-authority/i);
+    }
+  });
 });
 
 describe("NativePlayerAuthorityClockController", () => {
@@ -154,6 +247,17 @@ describe("NativePlayerAuthorityClockController", () => {
     expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(11);
   });
 
+  it("preserves legacy v1 pull reconciliation when startup observes an in-flight tick", async () => {
+    const value = clockFixture(activeFrame({ inFlight: true, currentOperation: "tick" }));
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    value.setPulled(activeFrame());
+    await settlePromises();
+
+    expect(value.bridge.getNativePlayerAuthorityState).toHaveBeenCalledTimes(2);
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(10);
+  });
+
   it("drops malformed, stale, regressing, cross-run and cross-session pushes", async () => {
     const value = clockFixture();
     value.controller.bindSession("core-a");
@@ -192,6 +296,119 @@ describe("NativePlayerAuthorityClockController", () => {
       expect(selectBoundNativePlayerAuthorityFrame(snapshot, "core-a")?.phase).toBe(phase);
       expect(selectActiveNativePlayerAuthorityFrame(snapshot, "core-a")).toBeNull();
     }
+  });
+
+  it("rejects macro v2 until the bound session has supplied one validated v1 identity", async () => {
+    const value = clockFixture(macroFrame());
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+
+    expect(value.controller.getSnapshot().currentFrame).toBeNull();
+    expect(value.controller.getSnapshot().lastConfirmedFrame).toBeNull();
+    expect(selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a")).toBeNull();
+
+    value.emit(activeFrame());
+    value.emit(macroFrame());
+    expect(selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a")?.phase)
+      .toBe("macro-active");
+  });
+
+  it("accepts macro push/pull progress but makes every active projection selector null", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+    value.setPulled(macroFrame());
+
+    value.emit(macroFrame({
+      phase: "macro-committing",
+      revision: 10,
+      acknowledgedSequence: 4,
+      nextSequence: 5,
+      nextDeadlineMs: 10_000,
+      inFlight: false,
+      currentOperation: "advance",
+      simulationBudgetMilliseconds: null,
+      wallBudgetMilliseconds: null,
+      simulationProgressMilliseconds: null,
+      wallProgressMilliseconds: null,
+      pausedReason: "macro-advance-committing",
+    }));
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")).toBeNull();
+    expect(selectBoundNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(10);
+    expect(selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a"))
+      .toMatchObject({ phase: "macro-committing", revision: 10 });
+
+    await settlePromises();
+    expect(value.bridge.getNativePlayerAuthorityState).toHaveBeenCalledTimes(2);
+    const status = selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a");
+    expect(status).toMatchObject({
+      phase: "macro-active",
+      revision: 12,
+      simulationBudgetMilliseconds: 60_000,
+      simulationProgressMilliseconds: 60_000,
+    });
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")).toBeNull();
+    expect(selectBoundNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(10);
+  });
+
+  it("drops stale macro revisions, discontinuous sequences, deadline regressions, and identity leaks", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+    value.emit(macroFrame());
+    const accepted = value.controller.getSnapshot().currentFrame;
+
+    for (const rejected of [
+      macroFrame({ revision: 11, acknowledgedSequence: 5, nextSequence: 6, nextDeadlineMs: 11_000 }),
+      macroFrame({ revision: 13, acknowledgedSequence: 6, nextSequence: 7, nextDeadlineMs: 13_000 }),
+      macroFrame({ revision: 12, acknowledgedSequence: 6, nextSequence: 7, nextDeadlineMs: 9_000 }),
+      { ...macroFrame(), sessionId: "core-a" },
+      { ...macroFrame(), operationId: "operation-secret" },
+    ]) value.emit(rejected);
+
+    expect(value.controller.getSnapshot().currentFrame).toBe(accepted);
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")).toBeNull();
+  });
+
+  it("keeps macro uncertainty paused and resumes v1 only for the original session and run", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+    value.emit(macroFrame());
+    value.emit(macroFrame({
+      phase: "macro-uncertain",
+      inFlight: false,
+      currentOperation: null,
+      simulationProgressMilliseconds: null,
+      wallProgressMilliseconds: null,
+      pausedReason: "macro-finish-uncertain",
+    }));
+    expect(selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a")?.pausedReason)
+      .toBe("macro-finish-uncertain");
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")).toBeNull();
+
+    value.emit(activeFrame({
+      sessionId: "core-a",
+      runId: "run-other",
+      revision: 12,
+      acknowledgedSequence: 6,
+      nextSequence: 7,
+      nextDeadlineMs: 12_000,
+    }));
+    expect(value.controller.getSnapshot().currentFrame?.schemaVersion).toBe(2);
+
+    value.emit(activeFrame({
+      revision: 12,
+      acknowledgedSequence: 6,
+      nextSequence: 7,
+      nextDeadlineMs: 12_000,
+    }));
+    expect(selectNativePlayerAuthorityMacroStatus(value.controller.getSnapshot(), "core-a")).toBeNull();
+    expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(12);
   });
 
   it("requires an explicit rebind before another session can replace the frame", async () => {

@@ -2704,7 +2704,7 @@ function normalizeCoreClose(value) {
   return { closed: boolean(source.closed, "native core closed flag") };
 }
 
-function normalizePlayerAuthorityState(value) {
+function normalizePlayerAuthorityV1State(value) {
   const source = exactObject(value, [
     "schemaVersion", "phase", "sessionId", "runId", "revision", "acknowledgedSequence",
     "nextSequence", "nextDeadlineMs", "inFlight", "currentOperation", "queuedCommands",
@@ -2770,6 +2770,128 @@ function normalizePlayerAuthorityState(value) {
     queuedCommands,
     lastErrorCode,
   };
+}
+
+function normalizePlayerAuthorityMacroState(value) {
+  const source = exactObject(value, [
+    "schemaVersion", "statusKind", "phase", "revision", "acknowledgedSequence",
+    "nextSequence", "nextDeadlineMs", "inFlight", "currentOperation",
+    "simulationBudgetMilliseconds", "wallBudgetMilliseconds",
+    "simulationProgressMilliseconds", "wallProgressMilliseconds", "pausedReason",
+  ], "native player-authority macro state");
+  if (source.schemaVersion !== 2 || source.statusKind !== "macro") {
+    throw protocolError("native player-authority macro state schema");
+  }
+  const phase = oneOf(source.phase, [
+    "macro-active", "macro-committing", "macro-finishing", "macro-uncertain",
+    "faulted", "shutdown",
+  ], "native player-authority macro phase");
+  const revision = safeInteger(source.revision, "native player-authority macro revision");
+  const acknowledgedSequence = safeInteger(
+    source.acknowledgedSequence,
+    "native player-authority macro acknowledged sequence",
+  );
+  const nextSequence = safeInteger(
+    source.nextSequence,
+    "native player-authority macro next sequence",
+    1,
+  );
+  const nextDeadlineMs = safeInteger(
+    source.nextDeadlineMs,
+    "native player-authority macro next deadline",
+  );
+  if (acknowledgedSequence + 1 !== nextSequence) {
+    throw protocolError("native player-authority macro sequence");
+  }
+  const currentOperation = oneOf(
+    source.currentOperation,
+    [null, "advance", "finish"],
+    "native player-authority macro operation",
+  );
+  const inFlight = boolean(source.inFlight, "native player-authority macro in-flight flag");
+  const maximumBudget = 30 * 24 * 60 * 60 * 1_000;
+  const nullableBudget = (entry, label) => {
+    if (entry === null) return null;
+    const result = safeInteger(entry, label, 1);
+    if (result > maximumBudget) throw protocolError(label);
+    return result;
+  };
+  const simulationBudgetMilliseconds = nullableBudget(
+    source.simulationBudgetMilliseconds,
+    "native player-authority macro simulation budget",
+  );
+  const wallBudgetMilliseconds = nullableBudget(
+    source.wallBudgetMilliseconds,
+    "native player-authority macro wall budget",
+  );
+  if ((simulationBudgetMilliseconds === null) !== (wallBudgetMilliseconds === null)) {
+    throw protocolError("native player-authority macro budget group");
+  }
+  const nullableProgress = (entry, maximum, label) => {
+    if (entry === null) return null;
+    const result = safeInteger(entry, label);
+    if (maximum === null || result > maximum) throw protocolError(label);
+    return result;
+  };
+  const simulationProgressMilliseconds = nullableProgress(
+    source.simulationProgressMilliseconds,
+    simulationBudgetMilliseconds,
+    "native player-authority macro simulation progress",
+  );
+  const wallProgressMilliseconds = nullableProgress(
+    source.wallProgressMilliseconds,
+    wallBudgetMilliseconds,
+    "native player-authority macro wall progress",
+  );
+  if ((simulationProgressMilliseconds === null) !== (wallProgressMilliseconds === null)) {
+    throw protocolError("native player-authority macro progress group");
+  }
+  const pausedReason = oneOf(source.pausedReason, [
+    "macro-window-active", "macro-advance-committing", "macro-finish-committing",
+    "macro-advance-uncertain", "macro-finish-uncertain", "macro-runtime-faulted",
+    "macro-runtime-shutdown",
+  ], "native player-authority macro paused reason");
+  const phaseShapeIsValid = phase === "macro-active"
+    ? !inFlight && currentOperation === null && pausedReason === "macro-window-active"
+    : phase === "macro-committing"
+      ? currentOperation === "advance" && pausedReason === "macro-advance-committing"
+      : phase === "macro-finishing"
+        ? currentOperation === "finish" && pausedReason === "macro-finish-committing"
+        : phase === "macro-uncertain"
+          ? inFlight === (currentOperation !== null) &&
+            (pausedReason === "macro-advance-uncertain"
+              ? currentOperation === null || currentOperation === "advance"
+              : pausedReason === "macro-finish-uncertain" &&
+                (currentOperation === null || currentOperation === "finish"))
+          : phase === "faulted"
+            ? pausedReason === "macro-runtime-faulted"
+            : pausedReason === "macro-runtime-shutdown";
+  if (!phaseShapeIsValid) throw protocolError("native player-authority macro phase status");
+  return {
+    schemaVersion: 2,
+    statusKind: "macro",
+    phase,
+    revision,
+    acknowledgedSequence,
+    nextSequence,
+    nextDeadlineMs,
+    inFlight,
+    currentOperation,
+    simulationBudgetMilliseconds,
+    wallBudgetMilliseconds,
+    simulationProgressMilliseconds,
+    wallProgressMilliseconds,
+    pausedReason,
+  };
+}
+
+function normalizePlayerAuthorityState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw protocolError("native player-authority state");
+  }
+  if (value.schemaVersion === 1) return normalizePlayerAuthorityV1State(value);
+  if (value.schemaVersion === 2) return normalizePlayerAuthorityMacroState(value);
+  throw protocolError("native player-authority state schema");
 }
 
 const RESULT_NORMALIZERS = Object.freeze({

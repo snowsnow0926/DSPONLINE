@@ -38,6 +38,25 @@ export type DesktopNativePlayerAuthorityOperation =
   | "tick"
   | "command";
 
+export type DesktopNativePlayerAuthorityMacroPhase =
+  | "macro-active"
+  | "macro-committing"
+  | "macro-finishing"
+  | "macro-uncertain"
+  | "faulted"
+  | "shutdown";
+
+export type DesktopNativePlayerAuthorityMacroOperation = "advance" | "finish";
+
+export type DesktopNativePlayerAuthorityMacroPausedReason =
+  | "macro-window-active"
+  | "macro-advance-committing"
+  | "macro-finish-committing"
+  | "macro-advance-uncertain"
+  | "macro-finish-uncertain"
+  | "macro-runtime-faulted"
+  | "macro-runtime-shutdown";
+
 /**
  * Bounded, renderer-safe view of the main-owned Rust authority clock.
  *
@@ -45,7 +64,7 @@ export type DesktopNativePlayerAuthorityOperation =
  * It contains no owner ID, fencing token, checkpoint, command, save payload or
  * authority-control capability.
  */
-export interface DesktopNativePlayerAuthorityState {
+export interface DesktopNativePlayerAuthorityClockState {
   readonly schemaVersion: 1;
   readonly phase: DesktopNativePlayerAuthorityPhase;
   readonly sessionId: string | null;
@@ -59,6 +78,36 @@ export interface DesktopNativePlayerAuthorityState {
   readonly queuedCommands: number;
   readonly lastErrorCode: string | null;
 }
+
+/**
+ * Identity-free renderer status for a main-owned productive macro window.
+ * Optional `never` identity fields document that callers may probe them while
+ * still guaranteeing that a valid wire object cannot contain those keys.
+ */
+export interface DesktopNativePlayerAuthorityMacroState {
+  readonly schemaVersion: 2;
+  readonly statusKind: "macro";
+  readonly phase: DesktopNativePlayerAuthorityMacroPhase;
+  readonly revision: number;
+  readonly acknowledgedSequence: number;
+  readonly nextSequence: number;
+  readonly nextDeadlineMs: number;
+  readonly inFlight: boolean;
+  readonly currentOperation: DesktopNativePlayerAuthorityMacroOperation | null;
+  readonly simulationBudgetMilliseconds: number | null;
+  readonly wallBudgetMilliseconds: number | null;
+  readonly simulationProgressMilliseconds: number | null;
+  readonly wallProgressMilliseconds: number | null;
+  readonly pausedReason: DesktopNativePlayerAuthorityMacroPausedReason;
+  readonly sessionId?: never;
+  readonly runId?: never;
+  readonly queuedCommands?: never;
+  readonly lastErrorCode?: never;
+}
+
+export type DesktopNativePlayerAuthorityState =
+  | DesktopNativePlayerAuthorityClockState
+  | DesktopNativePlayerAuthorityMacroState;
 
 export interface DesktopBridge {
   isDesktop: true;

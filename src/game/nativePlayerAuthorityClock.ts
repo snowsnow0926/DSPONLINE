@@ -2,6 +2,11 @@ import type {
   DesktopBridge,
   DesktopNativeCoreFactoryReadModelRequest,
   DesktopNativeCoreViewportProjectionV2Request,
+  DesktopNativePlayerAuthorityClockState,
+  DesktopNativePlayerAuthorityMacroOperation,
+  DesktopNativePlayerAuthorityMacroPausedReason,
+  DesktopNativePlayerAuthorityMacroPhase,
+  DesktopNativePlayerAuthorityMacroState,
   DesktopNativePlayerAuthorityOperation,
   DesktopNativePlayerAuthorityPhase,
   DesktopNativePlayerAuthorityState,
@@ -10,7 +15,8 @@ import type { NativeFactoryThinViewSource } from "./nativeFactoryThinViewStore";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
-const STATE_KEYS = Object.freeze([
+const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
+const CLOCK_STATE_KEYS = Object.freeze([
   "schemaVersion",
   "phase",
   "sessionId",
@@ -24,7 +30,23 @@ const STATE_KEYS = Object.freeze([
   "queuedCommands",
   "lastErrorCode",
 ] as const);
-const PHASES = new Set<DesktopNativePlayerAuthorityPhase>([
+const MACRO_STATE_KEYS = Object.freeze([
+  "schemaVersion",
+  "statusKind",
+  "phase",
+  "revision",
+  "acknowledgedSequence",
+  "nextSequence",
+  "nextDeadlineMs",
+  "inFlight",
+  "currentOperation",
+  "simulationBudgetMilliseconds",
+  "wallBudgetMilliseconds",
+  "simulationProgressMilliseconds",
+  "wallProgressMilliseconds",
+  "pausedReason",
+] as const);
+const CLOCK_PHASES = new Set<DesktopNativePlayerAuthorityPhase>([
   "idle",
   "activating",
   "recovering",
@@ -33,12 +55,34 @@ const PHASES = new Set<DesktopNativePlayerAuthorityPhase>([
   "faulted",
   "shutdown",
 ]);
-const OPERATIONS = new Set<DesktopNativePlayerAuthorityOperation | null>([
+const CLOCK_OPERATIONS = new Set<DesktopNativePlayerAuthorityOperation | null>([
   null,
   "activation",
   "recovery",
   "tick",
   "command",
+]);
+const MACRO_PHASES = new Set<DesktopNativePlayerAuthorityMacroPhase>([
+  "macro-active",
+  "macro-committing",
+  "macro-finishing",
+  "macro-uncertain",
+  "faulted",
+  "shutdown",
+]);
+const MACRO_OPERATIONS = new Set<DesktopNativePlayerAuthorityMacroOperation | null>([
+  null,
+  "advance",
+  "finish",
+]);
+const MACRO_PAUSED_REASONS = new Set<DesktopNativePlayerAuthorityMacroPausedReason>([
+  "macro-window-active",
+  "macro-advance-committing",
+  "macro-finish-committing",
+  "macro-advance-uncertain",
+  "macro-finish-uncertain",
+  "macro-runtime-faulted",
+  "macro-runtime-shutdown",
 ]);
 
 type NativePlayerAuthorityStateSource = Pick<
@@ -52,7 +96,7 @@ export interface NativePlayerAuthorityClockSnapshot {
   /** Latest accepted phase transition for the explicitly bound session. */
   readonly currentFrame: DesktopNativePlayerAuthorityState | null;
   /** Last settled active receipt; terminal phases deliberately retain it. */
-  readonly lastConfirmedFrame: DesktopNativePlayerAuthorityState | null;
+  readonly lastConfirmedFrame: DesktopNativePlayerAuthorityClockState | null;
 }
 
 const EMPTY_CLOCK_SNAPSHOT: NativePlayerAuthorityClockSnapshot = Object.freeze({
@@ -66,11 +110,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasExactStateKeys(value: Record<string, unknown>): boolean {
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Reflect.ownKeys(value);
-  return keys.length === STATE_KEYS.length && keys.every(
-    (key) => typeof key === "string" && (STATE_KEYS as readonly string[]).includes(key),
-  ) && STATE_KEYS.every((key) => Object.hasOwn(value, key));
+  return keys.length === expected.length && keys.every(
+    (key) => typeof key === "string" && expected.includes(key),
+  ) && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function nullableLogicalId(value: unknown): string | null {
@@ -88,7 +132,7 @@ function nullableSafeInteger(value: unknown, minimum: number): number | null {
   return value as number;
 }
 
-function hasCompleteIdentity(state: DesktopNativePlayerAuthorityState): state is DesktopNativePlayerAuthorityState & {
+function hasCompleteIdentity(state: DesktopNativePlayerAuthorityClockState): state is DesktopNativePlayerAuthorityClockState & {
   sessionId: string;
   runId: string;
   revision: number;
@@ -100,7 +144,7 @@ function hasCompleteIdentity(state: DesktopNativePlayerAuthorityState): state is
     state.acknowledgedSequence !== null && state.nextSequence !== null && state.nextDeadlineMs !== null;
 }
 
-function isSettledActiveFrame(state: DesktopNativePlayerAuthorityState): boolean {
+function isSettledActiveFrame(state: DesktopNativePlayerAuthorityClockState): boolean {
   return state.phase === "active" && hasCompleteIdentity(state) && !state.inFlight &&
     state.currentOperation === null && state.lastErrorCode === null;
 }
@@ -110,12 +154,11 @@ function isSettledActiveFrame(state: DesktopNativePlayerAuthorityState): boolean
  * Main-process normalization is a separate defense and is never trusted as a
  * substitute for this exact schema check.
  */
-export function normalizeNativePlayerAuthorityClockFrame(
-  value: unknown,
-): DesktopNativePlayerAuthorityState {
-  if (!isRecord(value) || !hasExactStateKeys(value) || value.schemaVersion !== 1 ||
-    typeof value.phase !== "string" || !PHASES.has(value.phase as DesktopNativePlayerAuthorityPhase) ||
-    typeof value.inFlight !== "boolean" || !OPERATIONS.has(value.currentOperation as DesktopNativePlayerAuthorityOperation | null) ||
+function normalizeClockState(value: Record<string, unknown>): DesktopNativePlayerAuthorityClockState {
+  if (!hasExactKeys(value, CLOCK_STATE_KEYS) || value.schemaVersion !== 1 ||
+    typeof value.phase !== "string" || !CLOCK_PHASES.has(value.phase as DesktopNativePlayerAuthorityPhase) ||
+    typeof value.inFlight !== "boolean" ||
+    !CLOCK_OPERATIONS.has(value.currentOperation as DesktopNativePlayerAuthorityOperation | null) ||
     !Number.isSafeInteger(value.queuedCommands) || (value.queuedCommands as number) < 0 ||
     (value.queuedCommands as number) > 64) {
     throw new TypeError("native player-authority clock frame is invalid");
@@ -162,16 +205,118 @@ export function normalizeNativePlayerAuthorityClockFrame(
   });
 }
 
-function identityFrameIsOrderedAfter(
+function normalizeMacroState(value: Record<string, unknown>): DesktopNativePlayerAuthorityMacroState {
+  if (!hasExactKeys(value, MACRO_STATE_KEYS) || value.schemaVersion !== 2 || value.statusKind !== "macro" ||
+    typeof value.phase !== "string" || !MACRO_PHASES.has(value.phase as DesktopNativePlayerAuthorityMacroPhase) ||
+    typeof value.inFlight !== "boolean" ||
+    !MACRO_OPERATIONS.has(value.currentOperation as DesktopNativePlayerAuthorityMacroOperation | null) ||
+    typeof value.pausedReason !== "string" ||
+    !MACRO_PAUSED_REASONS.has(value.pausedReason as DesktopNativePlayerAuthorityMacroPausedReason)) {
+    throw new TypeError("native player-authority macro frame is invalid");
+  }
+  const revision = nullableSafeInteger(value.revision, 0);
+  const acknowledgedSequence = nullableSafeInteger(value.acknowledgedSequence, 0);
+  const nextSequence = nullableSafeInteger(value.nextSequence, 1);
+  const nextDeadlineMs = nullableSafeInteger(value.nextDeadlineMs, 0);
+  if (revision === null || acknowledgedSequence === null || nextSequence === null || nextDeadlineMs === null ||
+    acknowledgedSequence + 1 !== nextSequence) {
+    throw new TypeError("native player-authority macro clock is invalid");
+  }
+  const nullableBudget = (entry: unknown): number | null => {
+    const result = nullableSafeInteger(entry, 1);
+    if (result !== null && result > MAX_MACRO_BUDGET_MILLISECONDS) {
+      throw new TypeError("native player-authority macro budget is invalid");
+    }
+    return result;
+  };
+  const simulationBudgetMilliseconds = nullableBudget(value.simulationBudgetMilliseconds);
+  const wallBudgetMilliseconds = nullableBudget(value.wallBudgetMilliseconds);
+  if ((simulationBudgetMilliseconds === null) !== (wallBudgetMilliseconds === null)) {
+    throw new TypeError("native player-authority macro budget group is partial");
+  }
+  const nullableProgress = (entry: unknown, maximum: number | null): number | null => {
+    const result = nullableSafeInteger(entry, 0);
+    if (result !== null && (maximum === null || result > maximum)) {
+      throw new TypeError("native player-authority macro progress is invalid");
+    }
+    return result;
+  };
+  const simulationProgressMilliseconds = nullableProgress(
+    value.simulationProgressMilliseconds,
+    simulationBudgetMilliseconds,
+  );
+  const wallProgressMilliseconds = nullableProgress(
+    value.wallProgressMilliseconds,
+    wallBudgetMilliseconds,
+  );
+  if ((simulationProgressMilliseconds === null) !== (wallProgressMilliseconds === null)) {
+    throw new TypeError("native player-authority macro progress group is partial");
+  }
+  const phase = value.phase as DesktopNativePlayerAuthorityMacroPhase;
+  const currentOperation = value.currentOperation as DesktopNativePlayerAuthorityMacroOperation | null;
+  const pausedReason = value.pausedReason as DesktopNativePlayerAuthorityMacroPausedReason;
+  const phaseShapeIsValid = phase === "macro-active"
+    ? !value.inFlight && currentOperation === null && pausedReason === "macro-window-active"
+    : phase === "macro-committing"
+      ? currentOperation === "advance" && pausedReason === "macro-advance-committing"
+      : phase === "macro-finishing"
+        ? currentOperation === "finish" && pausedReason === "macro-finish-committing"
+        : phase === "macro-uncertain"
+          ? value.inFlight === (currentOperation !== null) &&
+            (pausedReason === "macro-advance-uncertain"
+              ? currentOperation === null || currentOperation === "advance"
+              : pausedReason === "macro-finish-uncertain" &&
+                (currentOperation === null || currentOperation === "finish"))
+          : phase === "faulted"
+            ? pausedReason === "macro-runtime-faulted"
+            : pausedReason === "macro-runtime-shutdown";
+  if (!phaseShapeIsValid) throw new TypeError("native player-authority macro phase status is invalid");
+  return Object.freeze({
+    schemaVersion: 2,
+    statusKind: "macro",
+    phase,
+    revision,
+    acknowledgedSequence,
+    nextSequence,
+    nextDeadlineMs,
+    inFlight: value.inFlight,
+    currentOperation,
+    simulationBudgetMilliseconds,
+    wallBudgetMilliseconds,
+    simulationProgressMilliseconds,
+    wallProgressMilliseconds,
+    pausedReason,
+  });
+}
+
+export function normalizeNativePlayerAuthorityClockFrame(
+  value: unknown,
+): DesktopNativePlayerAuthorityState {
+  if (!isRecord(value)) throw new TypeError("native player-authority clock frame is invalid");
+  if (value.schemaVersion === 1) return normalizeClockState(value);
+  if (value.schemaVersion === 2) return normalizeMacroState(value);
+  throw new TypeError("native player-authority clock frame schema is invalid");
+}
+
+function clockFrameIsOrderedAfter(
   previous: DesktopNativePlayerAuthorityState,
   candidate: DesktopNativePlayerAuthorityState,
 ): boolean {
-  if (!hasCompleteIdentity(previous) || !hasCompleteIdentity(candidate) ||
-    candidate.sessionId !== previous.sessionId || candidate.runId !== previous.runId) return false;
+  if (previous.revision === null || previous.acknowledgedSequence === null ||
+    previous.nextDeadlineMs === null || candidate.revision === null ||
+    candidate.acknowledgedSequence === null || candidate.nextDeadlineMs === null) return false;
   const sequenceDelta = candidate.acknowledgedSequence - previous.acknowledgedSequence;
   const revisionDelta = candidate.revision - previous.revision;
   return sequenceDelta >= 0 && revisionDelta >= 0 && sequenceDelta === revisionDelta &&
     candidate.nextDeadlineMs >= previous.nextDeadlineMs;
+}
+
+function identityFrameMatches(
+  previous: DesktopNativePlayerAuthorityClockState,
+  candidate: DesktopNativePlayerAuthorityClockState,
+): boolean {
+  return hasCompleteIdentity(previous) && hasCompleteIdentity(candidate) &&
+    candidate.sessionId === previous.sessionId && candidate.runId === previous.runId;
 }
 
 /**
@@ -180,17 +325,21 @@ function identityFrameIsOrderedAfter(
  * A session must be explicitly bound from the renderer's already-open native
  * controller before any identity-bearing frame is accepted. Pushes cannot
  * switch sessions or runs, and a malformed/stale frame cannot erase the last
- * settled receipt. An in-flight active transition triggers a pull after the
- * main microtask settles so the renderer observes the durable frame, not the
- * transitional callback snapshot.
+ * settled receipt. Identity-free macro v2 frames are accepted only after a v1
+ * identity for the explicitly bound session, and are ordered against the same
+ * revision/sequence/deadline clock. Macro transitional pushes trigger one pull
+ * after the main microtask settles. The legacy v1 clock retains its existing
+ * reconciliation behavior, including a repeated pull while an exact tick is
+ * still reported in flight.
  */
 export class NativePlayerAuthorityClockController {
   private snapshot: NativePlayerAuthorityClockSnapshot = EMPTY_CLOCK_SNAPSHOT;
   private readonly listeners = new Set<() => void>();
   private expectedSessionId: string | null = null;
   private currentFrame: DesktopNativePlayerAuthorityState | null = null;
-  private lastIdentityFrame: DesktopNativePlayerAuthorityState | null = null;
-  private lastConfirmedFrame: DesktopNativePlayerAuthorityState | null = null;
+  private lastIdentityFrame: DesktopNativePlayerAuthorityClockState | null = null;
+  private lastOrderedFrame: DesktopNativePlayerAuthorityState | null = null;
+  private lastConfirmedFrame: DesktopNativePlayerAuthorityClockState | null = null;
   private unsubscribe: (() => void) | null = null;
   private started = false;
   private requestGeneration = 0;
@@ -213,6 +362,7 @@ export class NativePlayerAuthorityClockController {
     this.expectedSessionId = sessionId;
     this.currentFrame = null;
     this.lastIdentityFrame = null;
+    this.lastOrderedFrame = null;
     this.lastConfirmedFrame = null;
     this.requestGeneration += 1;
     this.publish(this.started ? "loading" : this.source ? "ready" : "unsupported");
@@ -231,7 +381,7 @@ export class NativePlayerAuthorityClockController {
     this.requestGeneration += 1;
     this.publish("loading");
     try {
-      const unsubscribe = subscribe((value) => this.ingest(value));
+      const unsubscribe = subscribe((value) => this.ingest(value, true));
       if (typeof unsubscribe !== "function") throw new TypeError("native authority unsubscribe is invalid");
       this.unsubscribe = unsubscribe;
     } catch {
@@ -258,7 +408,7 @@ export class NativePlayerAuthorityClockController {
     try {
       const value: unknown = await getState();
       if (!this.started || generation !== this.requestGeneration) return;
-      const accepted = this.ingest(value);
+      const accepted = this.ingest(value, false);
       if (!accepted && this.snapshot.availability === "loading") this.publish("ready");
     } catch {
       if (this.started && generation === this.requestGeneration && this.snapshot.availability === "loading") {
@@ -267,21 +417,39 @@ export class NativePlayerAuthorityClockController {
     }
   }
 
-  private ingest(value: unknown): boolean {
+  private ingest(value: unknown, pushed: boolean): boolean {
     let candidate: DesktopNativePlayerAuthorityState;
     try {
       candidate = normalizeNativePlayerAuthorityClockFrame(value);
     } catch {
       return false;
     }
+    if (candidate.schemaVersion === 2) {
+      if (this.expectedSessionId === null || !this.lastIdentityFrame ||
+        !hasCompleteIdentity(this.lastIdentityFrame) ||
+        this.lastIdentityFrame.sessionId !== this.expectedSessionId ||
+        !this.lastOrderedFrame || !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
+      this.lastOrderedFrame = candidate;
+      this.currentFrame = candidate;
+      this.publish("ready");
+      if (pushed && (candidate.inFlight ||
+        ["macro-committing", "macro-finishing"].includes(candidate.phase))) {
+        this.scheduleSettledPull();
+      }
+      return true;
+    }
     if (!hasCompleteIdentity(candidate)) {
       // Identity-free transitions cannot prove that they belong to an already
-      // bound player session. They are accepted only before a session exists.
+      // bound player session. Macro v2 uses the separately guarded branch.
       if (this.expectedSessionId !== null) return false;
+      this.lastIdentityFrame = null;
+      this.lastOrderedFrame = null;
     } else {
       if (candidate.sessionId !== this.expectedSessionId) return false;
-      if (this.lastIdentityFrame && !identityFrameIsOrderedAfter(this.lastIdentityFrame, candidate)) return false;
+      if (this.lastIdentityFrame && !identityFrameMatches(this.lastIdentityFrame, candidate)) return false;
+      if (this.lastOrderedFrame && !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
       this.lastIdentityFrame = candidate;
+      this.lastOrderedFrame = candidate;
     }
     this.currentFrame = candidate;
     if (isSettledActiveFrame(candidate)) this.lastConfirmedFrame = candidate;
@@ -318,10 +486,10 @@ export class NativePlayerAuthorityClockController {
 export function selectBoundNativePlayerAuthorityFrame(
   snapshot: NativePlayerAuthorityClockSnapshot,
   sessionId: string | null,
-): DesktopNativePlayerAuthorityState | null {
+): DesktopNativePlayerAuthorityClockState | null {
   if (sessionId === null || snapshot.expectedSessionId !== sessionId) return null;
   const current = snapshot.currentFrame;
-  if (current?.sessionId === sessionId) return current;
+  if (current?.schemaVersion === 1 && current.sessionId === sessionId) return current;
   const confirmed = snapshot.lastConfirmedFrame;
   return confirmed?.sessionId === sessionId ? confirmed : null;
 }
@@ -329,7 +497,8 @@ export function selectBoundNativePlayerAuthorityFrame(
 export function selectActiveNativePlayerAuthorityFrame(
   snapshot: NativePlayerAuthorityClockSnapshot,
   sessionId: string | null,
-): DesktopNativePlayerAuthorityState | null {
+): DesktopNativePlayerAuthorityClockState | null {
+  if (snapshot.currentFrame?.schemaVersion === 2) return null;
   const current = selectBoundNativePlayerAuthorityFrame(snapshot, sessionId);
   if (!current || !isSettledActiveFrame(current)) return null;
   const confirmed = snapshot.lastConfirmedFrame;
@@ -338,6 +507,14 @@ export function selectActiveNativePlayerAuthorityFrame(
     confirmed.acknowledgedSequence === current.acknowledgedSequence
     ? confirmed
     : null;
+}
+
+export function selectNativePlayerAuthorityMacroStatus(
+  snapshot: NativePlayerAuthorityClockSnapshot,
+  sessionId: string | null,
+): DesktopNativePlayerAuthorityMacroState | null {
+  if (sessionId === null || snapshot.expectedSessionId !== sessionId) return null;
+  return snapshot.currentFrame?.schemaVersion === 2 ? snapshot.currentFrame : null;
 }
 
 /**

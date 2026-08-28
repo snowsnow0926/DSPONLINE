@@ -21,5 +21,7 @@ test("preload exposes only pull/subscribe access to the bounded authority clock"
 
   assert.match(desktopTypes, /getNativePlayerAuthorityState\?:\s*\(\) => Promise<DesktopNativePlayerAuthorityState>/);
   assert.match(desktopTypes, /onNativePlayerAuthorityState\?:[\s\S]*?\) => \(\) => void/);
-  assert.match(desktopTypes, /interface DesktopNativePlayerAuthorityState[\s\S]*?schemaVersion:\s*1[\s\S]*?lastErrorCode:\s*string \| null/);
+  assert.match(desktopTypes, /interface DesktopNativePlayerAuthorityClockState[\s\S]*?schemaVersion:\s*1[\s\S]*?lastErrorCode:\s*string \| null/);
+  assert.match(desktopTypes, /interface DesktopNativePlayerAuthorityMacroState[\s\S]*?schemaVersion:\s*2[\s\S]*?statusKind:\s*"macro"[\s\S]*?pausedReason:\s*DesktopNativePlayerAuthorityMacroPausedReason/);
+  assert.match(desktopTypes, /type DesktopNativePlayerAuthorityState\s*=\s*\| DesktopNativePlayerAuthorityClockState\s*\| DesktopNativePlayerAuthorityMacroState/);
 });

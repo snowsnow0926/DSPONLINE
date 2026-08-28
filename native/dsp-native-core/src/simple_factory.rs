@@ -4648,6 +4648,7 @@ fn simulate_step(
             &state.factory_topology.station_indices,
             &ready_logistics_station_indices,
             &late_logistics_changed_entity_indices,
+            local_step_runtime,
             interstellar_peer_directory,
             interstellar_route_activity,
         );

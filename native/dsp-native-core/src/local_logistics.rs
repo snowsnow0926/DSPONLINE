@@ -29,7 +29,7 @@ struct Slot {
     priority: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LocalMode {
     Supply,
     Demand,
@@ -430,6 +430,63 @@ impl LocalPeerDirectory {
 
     pub(crate) fn shared_station_ranks(&self) -> Arc<HashMap<usize, usize>> {
         Arc::clone(&self.station_ranks)
+    }
+
+    /// Append the exact local power rows that can become dispatchable when
+    /// one of `changed_station_indices` mutates after readiness was sampled.
+    /// Non-local rows are irrelevant. A missing indexed local row signals a
+    /// stale or incomplete directory so the caller can fail closed.
+    pub(crate) fn append_station_power_dependencies(
+        &self,
+        changed_station_indices: &[usize],
+        target: &mut Vec<usize>,
+    ) -> bool {
+        let mut dependency_keys = Vec::new();
+        let mut seen_dependency_keys = HashSet::new();
+        for &station_index in changed_station_indices {
+            if !self.station_ranks.contains_key(&station_index) {
+                continue;
+            }
+            let Some(station_slots) = self.station_slots.get(&station_index) else {
+                return false;
+            };
+            let Some(planet_key) = self.station_planets.get(&station_index).copied() else {
+                return false;
+            };
+            target.push(station_index);
+            for slot in station_slots {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Storage {
+                    continue;
+                }
+                let key = (planet_key, item_id, slot.local_mode);
+                if seen_dependency_keys.insert(key) {
+                    dependency_keys.push(key);
+                }
+            }
+        }
+        // A dense initial refill wake commonly contains both endpoints of the
+        // same item bucket. Expand each immutable bucket/direction once so a
+        // same-item fanout remains linear instead of transiently materializing
+        // one peer list per changed station.
+        for (planet_key, item_id, local_mode) in dependency_keys {
+            let Some(peers) = self
+                .by_planet_item
+                .get(&planet_key)
+                .and_then(|items| items.get(item_id))
+            else {
+                return false;
+            };
+            let opposite = match local_mode {
+                LocalMode::Supply => peers.demand.as_slice(),
+                LocalMode::Demand => peers.supply.as_slice(),
+                LocalMode::Storage => unreachable!("storage slots were filtered"),
+            };
+            target.extend(opposite.iter().map(|(peer_index, _)| *peer_index));
+        }
+        true
     }
 
     pub(crate) fn runtime_reset_station_indices(&self) -> &[usize] {

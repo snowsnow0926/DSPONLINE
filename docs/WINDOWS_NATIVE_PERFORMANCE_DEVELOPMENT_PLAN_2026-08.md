@@ -1562,7 +1562,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 | --- | ---: | --- | --- |
 | Rust 唯一玩家可见权威 | 约 65% | main-owned 连续时钟、durable 命令回执和启动恢复、同 revision 投影、接管前完整覆盖门禁；普通闭合配方、科研、火箭和太阳帆的部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
 | 完整薄 UI | 约 58% | 主画布、minimap、运行状态、星球导航、施工摘要/队列、选择工具栏、桌面/移动 inspector、多选与连接预览均可消费同 revision 有界 Rust 投影 | 科研、配方、星图、戴森、运营、银河、空间站等大工作区仍以完整 GameState 为主要输入；不是完整薄 renderer |
-| 真正 `O(active)` 物流 | 约 64% | 线路活动调度、本地活动线路/缓冲唤醒、星际 peer directory、跨 revision active demand queue 与反向唤醒；轨道采集器复用不可变拓扑索引；75% 稠密时稳定退化全扫描 | station power map、warper refill、ready/congestion、route-ledger 构建以及若干拓扑/全局阶段仍是 `O(S/E/R)` |
+| 真正 `O(active)` 物流 | 约 78% | 线路活动调度、本地活动线路/缓冲唤醒、星际 peer directory、跨 revision active demand queue 与反向唤醒；warper refill、station power 反向供需闭包、活动 route-ledger 与拥堵更新均有 75% 稠密稳定退化和 MOD/失配失败关闭；轨道采集器复用不可变拓扑索引 | 本地/星际 ready 外层仍扫描全部相应站点，若干拓扑/全局阶段仍是 `O(S/E/R)`；高扇出时精确匹配集合本身也可能自然退化为稠密路径 |
 | 全领域确定性原生并行 | 约 55% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、量子、施工、轨道终端、射线接收器、银河出口、任务指标和历史诊断等只读探针 | 共享状态的固定顺序提交、生产历史浮点累加、无采样任务扫描、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU/Windows 版本的 24 小时矩阵 |
 | 整体代码目标 | 约 72% | 上述切片已提交且有局部/完整回归 | 不能等同发布成熟度 |
 | 可放心发布成熟度 | 约 48% | 本机类型、单元、native 边界、Rust core 和 build 门禁通过 | 完整 E2E/server 本 HEAD 新鲜矩阵、真实大档全进程 A/B、24 小时、多硬件、Defender/磁盘故障、签名和灰度均未完成 |
@@ -1597,6 +1597,6 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
 2. 把科研、配方、星图、戴森、运营、银河和空间站工作区逐个替换为有界同 revision 投影；完成前 renderer 仍不是完整薄 UI。
-3. 将 station power、warper、ready/congestion 和 route-ledger 改为闭合反向唤醒/活动队列，并持续与稳定 full-scan oracle 做 1/5/60 秒严格等价；轨道采集器已闭合发现扫描，后续只需随整体物流门禁持续回归。
+3. 将剩余的本地/星际 ready 外层扫描改为闭合反向唤醒/活动队列；station power、warper、congestion、route-ledger 与轨道采集器已有稀疏路径，后续继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把高扇出自然稠密场景包装成稀疏收益。
 4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
 5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。

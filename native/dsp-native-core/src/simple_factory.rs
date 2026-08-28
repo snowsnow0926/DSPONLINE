@@ -288,6 +288,49 @@ enum MachineProductionEvent {
     Inline { item_id: String, produced: f64 },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct VeinSettlementContext {
+    production_buffer_limit: f64,
+    mining_research_multiplier: f64,
+    vein_level: f64,
+    finite_consumption_tenths: f64,
+    infinite_resource_mode: bool,
+    seconds: f64,
+}
+
+#[derive(Debug)]
+enum VeinSettlementDelta {
+    Noop,
+    Idle {
+        power_factor: f64,
+    },
+    Active {
+        resource: String,
+        power_factor: f64,
+        output_amount: f64,
+        finite_resource: Option<(f64, f64)>,
+        progress: f64,
+        production_rate: f64,
+        produced: f64,
+    },
+}
+
+#[derive(Debug)]
+struct VeinSettlementOutcome {
+    entity_index: usize,
+    result: anyhow::Result<VeinSettlementDelta>,
+}
+
+struct VeinProbeEnvironment<'a> {
+    state: &'a CoreState,
+    entities: &'a [Value],
+    profiles: &'a [PlanetProfile],
+    grids: &'a [GridRuntime],
+    power_factors: &'a HashMap<usize, f64>,
+    output_credits: &'a crate::belts::OutputCredits,
+    context: VeinSettlementContext,
+}
+
 fn rounded(value: f64, digits: i32) -> f64 {
     let scale = 10_f64.powi(digits);
     (value * scale).round() / scale
@@ -1279,6 +1322,205 @@ fn vein_is_infinite(
         || item_kind == "solid" && solid_consumption_tenths <= 0.0
         || resource == "water" && profile.ocean_type == "water"
         || resource == "sulfuric_acid" && profile.ocean_type == "sulfuric-acid"
+}
+
+fn probe_vein_settlement(
+    environment: &VeinProbeEnvironment<'_>,
+    entity_index: usize,
+) -> anyhow::Result<VeinSettlementDelta> {
+    let object = environment.entities[entity_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
+    let planet = environment.state.factory_topology.entity_planet_indices[entity_index];
+    let grid = environment.state.factory_topology.entity_grid_indices[entity_index];
+    if planet == usize::MAX || grid == usize::MAX {
+        bail!("native simple factory entity topology is unknown");
+    }
+    let miner_count = finite_number(object.get("minerCount"));
+    if miner_count <= 0.0 {
+        return Ok(VeinSettlementDelta::Noop);
+    }
+    let power_factor = if environment.grids[planet * GRID_IDS.len() + grid].has_power_source {
+        environment
+            .power_factors
+            .get(&entity_index)
+            .copied()
+            .unwrap_or(1.0)
+    } else {
+        0.0
+    };
+    let resource = string_at(object, "resourceId")
+        .ok_or_else(|| anyhow!("native simple factory vein resource is missing"))?
+        .to_owned();
+    let extractor = environment
+        .state
+        .catalog
+        .buildings
+        .get(extractor_id(&resource))
+        .ok_or_else(|| anyhow!("native simple factory extractor catalog is missing"))?;
+    let item_kind = environment
+        .state
+        .catalog
+        .items
+        .get(&resource)
+        .map(|item| item.kind.as_str())
+        .ok_or_else(|| anyhow!("native simple factory vein item catalog is missing"))?;
+    let previous_progress = finite_number(object.get("progress"));
+    let current = object
+        .get("outputs")
+        .and_then(Value::as_object)
+        .and_then(|outputs| outputs.get(&resource))
+        .map(|value| finite_number(Some(value)))
+        .unwrap_or(0.0)
+        .floor();
+    let capacity = stacked_capacity(
+        extractor.output_capacity,
+        miner_count,
+        environment.context.production_buffer_limit,
+    );
+    let entity_id = string_at(object, "id").unwrap_or_default();
+    let free = (capacity - current).max(0.0)
+        + crate::belts::output_credit(
+            environment.state,
+            environment.output_credits,
+            entity_id,
+            &resource,
+        );
+    let remaining_resource = finite_number(object.get("resourceRemaining"))
+        .floor()
+        .max(0.0);
+    let depletion_remainder = finite_number(object.get("resourceDepletionRemainder"))
+        .floor()
+        .clamp(0.0, 9.0);
+    let consumption_tenths = if item_kind == "solid" {
+        environment.context.finite_consumption_tenths
+    } else {
+        10.0
+    };
+    let infinite = vein_is_infinite(
+        &resource,
+        item_kind,
+        environment.profiles[planet],
+        environment.context.infinite_resource_mode,
+        environment.context.finite_consumption_tenths,
+    );
+    let output_allowance = if infinite {
+        f64::INFINITY
+    } else {
+        ((remaining_resource * 10.0 - depletion_remainder).max(0.0) / consumption_tenths).floor()
+    };
+    if free < 1.0 || power_factor <= EPSILON || output_allowance < 1.0 {
+        return Ok(VeinSettlementDelta::Idle { power_factor });
+    }
+    let mining_speed = (if item_kind == "solid" {
+        environment.context.mining_research_multiplier
+    } else {
+        1.0 + environment.context.vein_level * 0.1
+    }) * environment.profiles[planet].mining_multiplier;
+    let progress = rounded(
+        previous_progress
+            + extractor.speed
+                * mining_speed
+                * miner_count
+                * environment.context.seconds
+                * power_factor,
+        4,
+    );
+    let produced = free.min(output_allowance).min((progress + EPSILON).floor());
+    if object.get("outputs").and_then(Value::as_object).is_none() {
+        bail!("native simple factory vein outputs are missing");
+    }
+    let finite_resource = (!infinite).then(|| {
+        let accrued = depletion_remainder + produced.floor().max(0.0) * consumption_tenths;
+        let depleted = remaining_resource.min((accrued / 10.0).floor());
+        (remaining_resource - depleted, accrued - depleted * 10.0)
+    });
+    Ok(VeinSettlementDelta::Active {
+        resource,
+        power_factor,
+        output_amount: current + produced,
+        finite_resource,
+        progress: if produced >= free {
+            0.0
+        } else {
+            rounded(progress - produced, 4)
+        },
+        production_rate: rounded(
+            extractor.speed * mining_speed * miner_count * power_factor * 60.0,
+            2,
+        ),
+        produced,
+    })
+}
+
+fn collect_vein_settlement_outcomes_with_runtime<F>(
+    runtime: &DeterministicRuntime,
+    entity_indices: &[usize],
+    probe: F,
+) -> Vec<VeinSettlementOutcome>
+where
+    F: Fn(usize) -> anyhow::Result<VeinSettlementDelta> + Send + Sync,
+{
+    runtime.indexed_map(entity_indices, |_, entity_index| VeinSettlementOutcome {
+        entity_index: *entity_index,
+        result: probe(*entity_index),
+    })
+}
+
+fn collect_vein_settlement_outcomes(
+    runtime: &DeterministicRuntime,
+    entity_indices: &[usize],
+    environment: &VeinProbeEnvironment<'_>,
+) -> Vec<VeinSettlementOutcome> {
+    collect_vein_settlement_outcomes_with_runtime(runtime, entity_indices, |entity_index| {
+        probe_vein_settlement(environment, entity_index)
+    })
+}
+
+fn replay_vein_settlement(
+    entity: &mut Value,
+    delta: VeinSettlementDelta,
+) -> anyhow::Result<Option<(String, f64)>> {
+    let object = entity_object(entity)?;
+    match delta {
+        VeinSettlementDelta::Noop => Ok(None),
+        VeinSettlementDelta::Idle { power_factor } => {
+            set_number(object, "powerFactor", rounded(power_factor, 4))?;
+            set_number(object, "progress", 0.0)?;
+            set_number(object, "utilization", 0.0)?;
+            set_number(object, "productionRate", 0.0)?;
+            Ok(None)
+        }
+        VeinSettlementDelta::Active {
+            resource,
+            power_factor,
+            output_amount,
+            finite_resource,
+            progress,
+            production_rate,
+            produced,
+        } => {
+            set_number(object, "powerFactor", rounded(power_factor, 4))?;
+            object
+                .get_mut("outputs")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native simple factory vein outputs are missing"))?
+                .insert(
+                    resource.clone(),
+                    Number::from_f64(output_amount)
+                        .map(Value::Number)
+                        .unwrap_or(Value::from(0)),
+                );
+            if let Some((remaining, remainder)) = finite_resource {
+                set_number(object, "resourceRemaining", remaining)?;
+                set_number(object, "resourceDepletionRemainder", remainder)?;
+            }
+            set_number(object, "progress", progress)?;
+            set_number(object, "utilization", power_factor)?;
+            set_number(object, "productionRate", production_rate)?;
+            Ok(Some((resource, produced)))
+        }
+    }
 }
 
 fn specialization_applies(profile: PlanetProfile, building: &BuildingDefinition) -> bool {
@@ -3556,6 +3798,29 @@ fn simulate_step(
         .and_then(|settings| settings.get("resourceMode"))
         .and_then(Value::as_str)
         == Some("infinite");
+    let vein_context = VeinSettlementContext {
+        production_buffer_limit,
+        mining_research_multiplier,
+        vein_level,
+        finite_consumption_tenths,
+        infinite_resource_mode,
+        seconds,
+    };
+    let vein_settlement_outcomes = collect_vein_settlement_outcomes(
+        deterministic_runtime(),
+        &state.factory_topology.vein_indices,
+        &VeinProbeEnvironment {
+            state,
+            entities,
+            profiles: &profiles,
+            grids: &grids,
+            power_factors: &power_factors,
+            output_credits: &belt_reservation.output_credits,
+            context: vein_context,
+        },
+    );
+    let mut vein_settlement_outcomes = vein_settlement_outcomes.into_iter().peekable();
+    profile_mark!("vein-settlement-probes");
     let local_machine_settlement_plan =
         plan_local_machine_settlement(state, deterministic_runtime());
     if profile_enabled {
@@ -3590,6 +3855,29 @@ fn simulate_step(
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
             reset_research_progress_before_next_entity = false;
+        }
+        if vein_settlement_outcomes
+            .peek()
+            .is_some_and(|outcome| outcome.entity_index < entity_index)
+        {
+            bail!("native vein settlement plan order diverged");
+        }
+        if vein_settlement_outcomes
+            .peek()
+            .is_some_and(|outcome| outcome.entity_index == entity_index)
+        {
+            let outcome = vein_settlement_outcomes
+                .next()
+                .expect("peeked native vein settlement outcome disappeared");
+            let production = replay_vein_settlement(&mut entities[entity_index], outcome.result?)?;
+            if let Some((item_id, produced)) = production {
+                if let Some(events) = machine_production_events.as_mut() {
+                    events.push(MachineProductionEvent::Inline { item_id, produced });
+                } else {
+                    add_produced_item(&mut produced_by_item, &item_id, produced);
+                }
+            }
+            continue;
         }
         if local_machine_settlement_indices
             .as_mut()
@@ -3941,139 +4229,9 @@ fn simulate_step(
         if matches!(kind, "storage" | "splitter") {
             continue;
         }
-        let miner_count = finite_number(object.get("minerCount"));
-        if miner_count <= 0.0 {
-            continue;
-        }
-        let power_factor = if grids[grid_slot(planet, grid)].has_power_source {
-            power_factors.get(&entity_index).copied().unwrap_or(1.0)
-        } else {
-            0.0
-        };
-        set_number(object, "powerFactor", rounded(power_factor, 4))?;
-        let resource = string_at(object, "resourceId")
-            .ok_or_else(|| anyhow!("native simple factory vein resource is missing"))?
-            .to_owned();
-        let extractor = state
-            .catalog
-            .buildings
-            .get(extractor_id(&resource))
-            .ok_or_else(|| anyhow!("native simple factory extractor catalog is missing"))?;
-        let item_kind = state
-            .catalog
-            .items
-            .get(&resource)
-            .map(|item| item.kind.as_str())
-            .ok_or_else(|| anyhow!("native simple factory vein item catalog is missing"))?;
-        let previous_progress = finite_number(object.get("progress"));
-        let current = object
-            .get("outputs")
-            .and_then(Value::as_object)
-            .and_then(|outputs| outputs.get(&resource))
-            .map(|value| finite_number(Some(value)))
-            .unwrap_or(0.0)
-            .floor();
-        let capacity = stacked_capacity(
-            extractor.output_capacity,
-            miner_count,
-            production_buffer_limit,
-        );
-        let entity_id = string_at(object, "id").unwrap_or_default();
-        let free = (capacity - current).max(0.0)
-            + crate::belts::output_credit(
-                state,
-                &belt_reservation.output_credits,
-                entity_id,
-                &resource,
-            );
-        let remaining_resource = finite_number(object.get("resourceRemaining"))
-            .floor()
-            .max(0.0);
-        let depletion_remainder = finite_number(object.get("resourceDepletionRemainder"))
-            .floor()
-            .clamp(0.0, 9.0);
-        let solid_consumption_tenths = finite_consumption_tenths;
-        let consumption_tenths = if item_kind == "solid" {
-            solid_consumption_tenths
-        } else {
-            10.0
-        };
-        let infinite = vein_is_infinite(
-            &resource,
-            item_kind,
-            profiles[planet],
-            infinite_resource_mode,
-            solid_consumption_tenths,
-        );
-        let output_allowance = if infinite {
-            f64::INFINITY
-        } else {
-            ((remaining_resource * 10.0 - depletion_remainder).max(0.0) / consumption_tenths)
-                .floor()
-        };
-        if free < 1.0 || power_factor <= EPSILON || output_allowance < 1.0 {
-            set_number(object, "progress", 0.0)?;
-            set_number(object, "utilization", 0.0)?;
-            set_number(object, "productionRate", 0.0)?;
-            continue;
-        }
-        let mining_speed = (if item_kind == "solid" {
-            mining_research_multiplier
-        } else {
-            1.0 + vein_level * 0.1
-        }) * profiles[planet].mining_multiplier;
-        let progress = rounded(
-            previous_progress
-                + extractor.speed * mining_speed * miner_count * seconds * power_factor,
-            4,
-        );
-        let produced = free.min(output_allowance).min((progress + EPSILON).floor());
-        let outputs = object
-            .get_mut("outputs")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native simple factory vein outputs are missing"))?;
-        outputs.insert(
-            resource.clone(),
-            Number::from_f64(current + produced)
-                .map(Value::Number)
-                .unwrap_or(Value::from(0)),
-        );
-        if !infinite {
-            let accrued = depletion_remainder + produced.floor().max(0.0) * consumption_tenths;
-            let depleted = remaining_resource.min((accrued / 10.0).floor());
-            set_number(object, "resourceRemaining", remaining_resource - depleted)?;
-            set_number(
-                object,
-                "resourceDepletionRemainder",
-                accrued - depleted * 10.0,
-            )?;
-        }
-        set_number(
-            object,
-            "progress",
-            if produced >= free {
-                0.0
-            } else {
-                rounded(progress - produced, 4)
-            },
-        )?;
-        set_number(object, "utilization", power_factor)?;
-        set_number(
-            object,
-            "productionRate",
-            rounded(
-                extractor.speed * mining_speed * miner_count * power_factor * 60.0,
-                2,
-            ),
-        )?;
-        if let Some(events) = machine_production_events.as_mut() {
-            events.push(MachineProductionEvent::Inline {
-                item_id: resource,
-                produced,
-            });
-        } else {
-            add_produced_item(&mut produced_by_item, &resource, produced);
-        }
+    }
+    if vein_settlement_outcomes.next().is_some() {
+        bail!("native vein settlement plan was not fully replayed");
     }
     if local_machine_settlement_indices
         .as_mut()
@@ -4696,6 +4854,7 @@ mod tests {
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     fn fixture_checksum(bytes: &[u8]) -> String {
         let mut hash = 0x811c9dc5_u32;
@@ -4787,6 +4946,7 @@ mod tests {
                     "matrix_lab",
                     "em_rail_ejector",
                     "vertical_launching_silo",
+                    "mining_machine",
                 ]
                 .into_iter()
                 .map(fixture_building)
@@ -5026,6 +5186,110 @@ mod tests {
             .collect()
     }
 
+    fn vein_entity(index: usize) -> Value {
+        let mut entity = json!({
+            "id": format!("mod:矿点/{index:05}/Ω🚀"),
+            "kind": "vein",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "mining_machine",
+            "recipeId": null,
+            "machineCount": 1,
+            "minerCount": 1 + index % 3,
+            "resourceId": "iron_ore",
+            "resourceRemaining": 1000 + index % 17,
+            "resourceDepletionRemainder": index % 10,
+            "outputs": { "iron_ore": index % 7 },
+            "progress": (index % 13) as f64 / 13.0,
+            "utilization": -1,
+            "productionRate": -1,
+            "mod:vein/opaque": {
+                "index": index,
+                "signedZero": -0.0,
+                "text": "保持原样"
+            }
+        });
+        match index % 19 {
+            0 => entity["minerCount"] = Value::from(0),
+            1 => entity["outputs"]["iron_ore"] = Value::from(100),
+            2 => entity["resourceRemaining"] = Value::from(0),
+            _ => {}
+        }
+        entity
+    }
+
+    fn vein_matrix(count: usize) -> Vec<Value> {
+        (0..count).map(vein_entity).collect()
+    }
+
+    fn vein_power_factors(count: usize) -> HashMap<usize, f64> {
+        (0..count)
+            .filter_map(|index| match index % 11 {
+                3 => Some((index, 0.0)),
+                7 => Some((index, 0.5)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn finite_vein_context() -> VeinSettlementContext {
+        VeinSettlementContext {
+            production_buffer_limit: 100.0,
+            mining_research_multiplier: 1.25,
+            vein_level: 1.0,
+            finite_consumption_tenths: 9.0,
+            infinite_resource_mode: false,
+            seconds: 1.25,
+        }
+    }
+
+    fn run_vein_matrix(
+        state: &CoreState,
+        source: &[Value],
+        worker_count: usize,
+    ) -> (Vec<Value>, HashMap<String, f64>, Vec<usize>) {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut entities = source.to_vec();
+        let source_bytes = serde_json::to_vec(&entities).unwrap();
+        let profiles = [fixture_profile()];
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        grids[0].has_power_source = true;
+        let power_factors = vein_power_factors(entities.len());
+        let output_credits = crate::belts::OutputCredits::default();
+        let outcomes = collect_vein_settlement_outcomes(
+            &runtime,
+            &state.factory_topology.vein_indices,
+            &VeinProbeEnvironment {
+                state,
+                entities: &entities,
+                profiles: &profiles,
+                grids: &grids,
+                power_factors: &power_factors,
+                output_credits: &output_credits,
+                context: finite_vein_context(),
+            },
+        );
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source_bytes,
+            "vein probes must not mutate entity or MOD state"
+        );
+        let outcome_order = outcomes
+            .iter()
+            .map(|outcome| outcome.entity_index)
+            .collect::<Vec<_>>();
+        let mut produced = HashMap::new();
+        for outcome in outcomes {
+            if let Some((item_id, amount)) =
+                replay_vein_settlement(&mut entities[outcome.entity_index], outcome.result.unwrap())
+                    .unwrap()
+            {
+                add_produced_item(&mut produced, &item_id, amount);
+            }
+        }
+        (entities, produced, outcome_order)
+    }
+
     fn run_local_machine_matrix(
         state: &CoreState,
         source: &[Value],
@@ -5240,6 +5504,218 @@ mod tests {
                 .enumerate()
                 .all(|(index, &(value, workers))| value == index && workers == 4)
         );
+    }
+
+    #[test]
+    fn vein_settlement_is_byte_exact_for_one_two_four_and_eight_workers() {
+        let source = vein_matrix(PARALLEL_MIN_ITEMS + 47);
+        let state = fixture_state(&source);
+        let baseline = run_vein_matrix(&state, &source, 1);
+        let baseline_bytes = serde_json::to_vec(&baseline.0).unwrap();
+        let baseline_hash = fixture_checksum(&baseline_bytes);
+        assert_eq!(baseline_hash, "09403e1f");
+        for worker_count in [2, 4, 8] {
+            let observed = run_vein_matrix(&state, &source, worker_count);
+            let observed_bytes = serde_json::to_vec(&observed.0).unwrap();
+            assert_eq!(
+                fixture_checksum(&observed_bytes),
+                baseline_hash,
+                "vein result hash diverged for {worker_count} workers"
+            );
+            assert_eq!(
+                observed_bytes, baseline_bytes,
+                "vein entity bytes diverged for {worker_count} workers"
+            );
+            assert_eq!(observed.1, baseline.1);
+            assert_eq!(observed.2, baseline.2);
+        }
+        assert_eq!(baseline.2, (0..source.len()).collect::<Vec<_>>());
+        assert!(baseline.1.get("iron_ore").copied().unwrap_or(0.0) > 0.0);
+
+        let noop = baseline.0[0].as_object().unwrap();
+        assert_eq!(finite_number(noop.get("utilization")), -1.0);
+        let full = baseline.0[1].as_object().unwrap();
+        assert_eq!(finite_number(full.get("progress")), 0.0);
+        assert_eq!(finite_number(full.get("productionRate")), 0.0);
+        let depleted = baseline.0[2].as_object().unwrap();
+        assert_eq!(finite_number(depleted.get("utilization")), 0.0);
+        assert!(
+            finite_number(baseline.0[4].get("resourceRemaining"))
+                < finite_number(source[4].get("resourceRemaining"))
+        );
+        for (before, after) in source.iter().zip(&baseline.0) {
+            assert_eq!(
+                serde_json::to_vec(&before["mod:vein/opaque"]).unwrap(),
+                serde_json::to_vec(&after["mod:vein/opaque"]).unwrap(),
+                "parallel vein settlement changed an opaque MOD field"
+            );
+        }
+    }
+
+    #[test]
+    fn vein_settlement_failure_is_ordered_atomic_and_waits_for_all_probes() {
+        let source = vein_matrix(PARALLEL_MIN_ITEMS + 31);
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        let profiles = [fixture_profile()];
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        grids[0].has_power_source = true;
+        let power_factors = vein_power_factors(source.len());
+        let output_credits = crate::belts::OutputCredits::default();
+        let mut malformed = source.clone();
+        malformed[7].as_object_mut().unwrap().remove("resourceId");
+        let later_failure = PARALLEL_MIN_ITEMS + 13;
+        malformed[later_failure]["resourceId"] = Value::from("mod:missing-resource/Ω");
+        let malformed_bytes = serde_json::to_vec(&malformed).unwrap();
+
+        for worker_count in [1, 2, 4, 8] {
+            let visited_later_failure = AtomicBool::new(false);
+            let environment = VeinProbeEnvironment {
+                state: &state,
+                entities: &malformed,
+                profiles: &profiles,
+                grids: &grids,
+                power_factors: &power_factors,
+                output_credits: &output_credits,
+                context: finite_vein_context(),
+            };
+            let outcomes = collect_vein_settlement_outcomes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state.factory_topology.vein_indices,
+                |entity_index| {
+                    if entity_index == later_failure {
+                        visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                    }
+                    probe_vein_settlement(&environment, entity_index)
+                },
+            );
+            let failures = outcomes
+                .iter()
+                .filter_map(|outcome| {
+                    outcome
+                        .result
+                        .as_ref()
+                        .err()
+                        .map(|error| (outcome.entity_index, error.to_string()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                failures,
+                vec![
+                    (
+                        7,
+                        "native simple factory vein resource is missing".to_owned()
+                    ),
+                    (
+                        later_failure,
+                        "native simple factory vein item catalog is missing".to_owned()
+                    )
+                ]
+            );
+            let lowest = outcomes
+                .into_iter()
+                .find_map(|outcome| outcome.result.err())
+                .expect("malformed vein matrix must fail");
+            assert_eq!(
+                lowest.to_string(),
+                "native simple factory vein resource is missing"
+            );
+            assert!(visited_later_failure.load(AtomicOrdering::SeqCst));
+            assert_eq!(serde_json::to_vec(&malformed).unwrap(), malformed_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        }
+    }
+
+    #[test]
+    fn zero_miner_vein_still_validates_topology_before_noop() {
+        let source = vec![vein_entity(0)];
+        let mut state = fixture_state(&source);
+        std::sync::Arc::make_mut(&mut state.factory_topology).entity_planet_indices[0] = usize::MAX;
+        let profiles = [fixture_profile()];
+        let grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let output_credits = crate::belts::OutputCredits::default();
+        let source_bytes = serde_json::to_vec(&source).unwrap();
+        let result = probe_vein_settlement(
+            &VeinProbeEnvironment {
+                state: &state,
+                entities: &source,
+                profiles: &profiles,
+                grids: &grids,
+                power_factors: &HashMap::new(),
+                output_credits: &output_credits,
+                context: finite_vein_context(),
+            },
+            0,
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "native simple factory entity topology is unknown"
+        );
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn small_vein_probe_batches_stay_serial() {
+        let indices = (0..31).collect::<Vec<_>>();
+        let saw_rayon_worker = AtomicBool::new(false);
+        let outcomes = collect_vein_settlement_outcomes_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &indices,
+            |_| {
+                if rayon::current_thread_index().is_some() {
+                    saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(VeinSettlementDelta::Noop)
+            },
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.entity_index)
+                .collect::<Vec<_>>(),
+            indices
+        );
+        assert!(outcomes.iter().all(|outcome| outcome.result.is_ok()));
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    #[test]
+    fn infinite_vein_probe_never_depletes_the_persisted_resource_fields() {
+        let mut source = vec![vein_entity(5)];
+        source[0]["resourceRemaining"] = Value::from(0);
+        source[0]["resourceDepletionRemainder"] = Value::from(7);
+        source[0]["outputs"]["iron_ore"] = Value::from(0);
+        let state = fixture_state(&source);
+        let profiles = [fixture_profile()];
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        grids[0].has_power_source = true;
+        let output_credits = crate::belts::OutputCredits::default();
+        let mut context = finite_vein_context();
+        context.infinite_resource_mode = true;
+        let outcome = collect_vein_settlement_outcomes(
+            &DeterministicRuntime::for_test(8),
+            &state.factory_topology.vein_indices,
+            &VeinProbeEnvironment {
+                state: &state,
+                entities: &source,
+                profiles: &profiles,
+                grids: &grids,
+                power_factors: &HashMap::new(),
+                output_credits: &output_credits,
+                context,
+            },
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let mut candidate = source.clone();
+        let production = replay_vein_settlement(&mut candidate[0], outcome.result.unwrap())
+            .unwrap()
+            .expect("infinite vein must remain productive");
+        assert!(production.1 > 0.0);
+        assert_eq!(candidate[0]["resourceRemaining"], Value::from(0));
+        assert_eq!(candidate[0]["resourceDepletionRemainder"], Value::from(7));
     }
 
     #[test]

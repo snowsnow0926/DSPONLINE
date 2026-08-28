@@ -139,7 +139,7 @@ async function transferFor(value: Record<string, unknown>): Promise<DesktopNativ
       sessionId: "core-1",
       revision: Number(value.revision),
       sequence: 9,
-      projectionType: value.projectionType as "viewport-v1",
+      projectionType: value.projectionType as DesktopNativeCoreProjectionTransferResult["header"]["projectionType"],
       payloadLength: bodyBuffer.byteLength,
       sha256,
     },
@@ -165,6 +165,42 @@ describe("native core transferable projections", () => {
       sessionId: "core-1",
       projectionType: "viewport-v1",
     })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a schema-v2 viewport block without weakening the v1 transport envelope", async () => {
+    const value = {
+      schemaVersion: 2,
+      projectionType: "viewport-v2",
+      revision: 13,
+      planetId: "MOD-星球",
+      bounds: { minX: -1, minY: -1, maxX: 1, maxY: 1 },
+      base: {},
+      entities: [],
+      belts: [],
+      pinnedEntityIds: [],
+      pinnedBeltIds: [],
+      nextEntityCursor: null,
+      nextBeltCursor: null,
+      planetTotals: { entities: 0, belts: 0 },
+      viewportTotals: { entities: 0, belts: 0 },
+      worldBounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+      minimap: {
+        bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+        entityCount: 0,
+        beltCount: 0,
+        occupiedCellCount: 0,
+        cellSize: 512,
+      },
+      broadQueryFallback: false,
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "viewport-v2",
+    })).resolves.toEqual(value);
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor({ ...value, schemaVersion: 1 }), {
+      sessionId: "core-1",
+      projectionType: "viewport-v2",
+    })).rejects.toThrow(/正文身份无效/);
   });
 
   it("rejects a corrupted payload before installing it", async () => {

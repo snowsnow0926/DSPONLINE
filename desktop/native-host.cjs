@@ -48,8 +48,8 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "statistics-v1"].includes(projectionType) || !result || typeof result !== "object" ||
-    result.schemaVersion !== 1 || result.projectionType !== projectionType ||
+    !["viewport-v1", "viewport-v2", "statistics-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    result.schemaVersion !== (projectionType === "viewport-v2" ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
   }
@@ -271,6 +271,11 @@ class NativeHostClient {
 
 function validLogicalId(value, maximumLength) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+function validOpaqueId(value, maximumBytes = 512) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") &&
+    Buffer.byteLength(value, "utf8") <= maximumBytes;
 }
 
 function exactObjectKeys(value, keys, label) {
@@ -692,6 +697,46 @@ class NativeCoreSessionRegistry {
       entityCursor: request.entityCursor ?? 0,
       entityLimit: request.entityLimit,
       beltLimit: request.beltLimit,
+    });
+  }
+
+  viewportProjectionV2(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const baseFields = request?.baseFields ?? [];
+    const bounds = request?.bounds;
+    const pinnedEntityIds = request?.pinnedEntityIds ?? [];
+    const pinnedBeltIds = request?.pinnedBeltIds ?? [];
+    const finiteBound = (value) => Number.isFinite(value) && Math.abs(value) <= 10_000_000;
+    if (!Array.isArray(baseFields) || baseFields.length > 64 ||
+      baseFields.some((field) => !validLogicalId(field, 160) || field === "entities" || field === "belts") ||
+      !validOpaqueId(request?.planetId) || !bounds ||
+      !finiteBound(bounds.minX) || !finiteBound(bounds.minY) ||
+      !finiteBound(bounds.maxX) || !finiteBound(bounds.maxY) ||
+      bounds.minX > bounds.maxX || bounds.minY > bounds.maxY ||
+      !Number.isSafeInteger(request?.entityCursor ?? 0) || (request?.entityCursor ?? 0) < 0 ||
+      !Number.isSafeInteger(request?.entityLimit) || request.entityLimit < 1 || request.entityLimit > 4096 ||
+      !Number.isSafeInteger(request?.beltCursor ?? 0) || (request?.beltCursor ?? 0) < 0 ||
+      !Number.isSafeInteger(request?.beltLimit) || request.beltLimit < 1 || request.beltLimit > 8192 ||
+      !Array.isArray(pinnedEntityIds) || pinnedEntityIds.length > 32 ||
+      !Array.isArray(pinnedBeltIds) || pinnedBeltIds.length > 64 ||
+      pinnedEntityIds.some((id) => !validOpaqueId(id)) || pinnedBeltIds.some((id) => !validOpaqueId(id))) {
+      throw new TypeError("native core viewport v2 projection request is invalid");
+    }
+    return this.client.request({
+      operation: "coreViewportProjectionV2",
+      sessionId: request.sessionId,
+      baseFields,
+      planetId: request.planetId,
+      minX: bounds.minX,
+      minY: bounds.minY,
+      maxX: bounds.maxX,
+      maxY: bounds.maxY,
+      entityCursor: request.entityCursor ?? 0,
+      entityLimit: request.entityLimit,
+      beltCursor: request.beltCursor ?? 0,
+      beltLimit: request.beltLimit,
+      pinnedEntityIds,
+      pinnedBeltIds,
     });
   }
 

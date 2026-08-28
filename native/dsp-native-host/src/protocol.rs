@@ -127,6 +127,26 @@ pub enum ControlRequest {
         entity_limit: usize,
         belt_limit: usize,
     },
+    CoreViewportProjectionV2 {
+        session_id: String,
+        #[serde(default)]
+        base_fields: Vec<String>,
+        planet_id: String,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        #[serde(default)]
+        entity_cursor: usize,
+        entity_limit: usize,
+        #[serde(default)]
+        belt_cursor: usize,
+        belt_limit: usize,
+        #[serde(default)]
+        pinned_entity_ids: Vec<String>,
+        #[serde(default)]
+        pinned_belt_ids: Vec<String>,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,

@@ -841,6 +841,39 @@ impl CoreRegistry {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2(
+        &self,
+        session_id: &str,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.viewport_projection_v2(
+            base_fields,
+            planet_id,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            entity_cursor,
+            entity_limit,
+            belt_cursor,
+            belt_limit,
+            pinned_entity_ids,
+            pinned_belt_ids,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,
         session_id: &str,

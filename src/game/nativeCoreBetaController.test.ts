@@ -88,6 +88,8 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   alwaysFail = false;
   closed = false;
   projectionCalls = 0;
+  viewportProjectionV2Calls = 0;
+  viewportProjectionV2RevisionOffset = 0;
   statisticsProjectionCalls = 0;
   statisticsProjectionRevisionOffset = 0;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
@@ -125,6 +127,41 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
       belts: [],
       nextEntityCursor: null,
       truncatedBelts: false,
+    };
+  }
+
+  async viewportProjectionV2(request: {
+    expectedRevision: number;
+    planetId: string;
+    bounds: { minX: number; minY: number; maxX: number; maxY: number };
+    pinnedEntityIds?: string[];
+    pinnedBeltIds?: string[];
+  }) {
+    this.viewportProjectionV2Calls += 1;
+    return {
+      schemaVersion: 2 as const,
+      projectionType: "viewport-v2" as const,
+      revision: this.current.revision + this.viewportProjectionV2RevisionOffset,
+      planetId: request.planetId,
+      bounds: request.bounds,
+      base: {},
+      entities: (request.pinnedEntityIds ?? []).map((id) => ({ id })),
+      belts: (request.pinnedBeltIds ?? []).map((id) => ({ id })),
+      pinnedEntityIds: request.pinnedEntityIds ?? [],
+      pinnedBeltIds: request.pinnedBeltIds ?? [],
+      nextEntityCursor: null,
+      nextBeltCursor: null,
+      planetTotals: { entities: 1, belts: 1 },
+      viewportTotals: { entities: 0, belts: 0 },
+      worldBounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 },
+      minimap: {
+        bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 },
+        entityCount: 1,
+        beltCount: 1,
+        occupiedCellCount: 1,
+        cellSize: 512,
+      },
+      broadQueryFallback: false,
     };
   }
 
@@ -257,6 +294,44 @@ async function readyController(session: FakeNativeSession) {
 }
 
 describe("Windows native core invitation-Beta controller", () => {
+  it("serves viewport v2 only from a verified same-revision JavaScript shadow", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    const request = {
+      baseFields: ["paused"],
+      planetId: "home",
+      bounds: { minX: -5, minY: -5, maxX: 5, maxY: 5 },
+      entityCursor: 0,
+      entityLimit: 64,
+      beltCursor: 0,
+      beltLimit: 128,
+      pinnedEntityIds: ["selected-entity"],
+      pinnedBeltIds: ["selected-belt"],
+    };
+    await expect(controller.readVerifiedViewportProjectionV2(request, 1)).resolves.toMatchObject({
+      projectionType: "viewport-v2",
+      revision: 1,
+      pinnedEntityIds: ["selected-entity"],
+      pinnedBeltIds: ["selected-belt"],
+    });
+    expect(session.viewportProjectionV2Calls).toBe(1);
+
+    session.viewportProjectionV2RevisionOffset = 1;
+    await expect(controller.readVerifiedViewportProjectionV2(request, 1)).resolves.toBeNull();
+    expect(session.viewportProjectionV2Calls).toBe(2);
+    expect(controller.snapshot().authority).toMatchObject({ authority: "javascript", phase: "shadow" });
+
+    await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "viewport-unverified",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    await expect(controller.readVerifiedViewportProjectionV2(request, 2)).resolves.toBeNull();
+    expect(session.viewportProjectionV2Calls).toBe(2);
+  });
+
   it("serves statistics only from a verified same-revision JavaScript shadow", async () => {
     const session = new FakeNativeSession();
     const controller = await openController(session);

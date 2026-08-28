@@ -3,6 +3,8 @@ import type {
   DesktopNativeCoreProjectionResult,
   DesktopNativeCoreStatisticsProjectionRequest,
   DesktopNativeCoreStatisticsProjectionResult,
+  DesktopNativeCoreViewportProjectionV2Request,
+  DesktopNativeCoreViewportProjectionV2Result,
   DesktopNativeCoreSummary,
   DesktopNativeSaveCommitResult,
   DesktopNativeCoreExportResult,
@@ -527,6 +529,39 @@ export class WindowsNativeCoreBetaController {
     }
     try {
       const projection = await session.statisticsProjection(request);
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
+  }
+
+  /**
+   * Returns a viewport block only when the native shadow is still proven to be
+   * the exact renderer revision both before and after the asynchronous IPC.
+   * The main process independently binds expectedRevision to the response.
+   */
+  async readVerifiedViewportProjectionV2(
+    request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreViewportProjectionV2Result | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.viewportProjectionV2({ ...request, expectedRevision });
       const current = this.authorityState;
       if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
         !["shadow", "native-ready"].includes(current.phase) ||

@@ -62,6 +62,28 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
     sha256: require("node:crypto").createHash("sha256").update(transfer.payload).digest("hex"),
   });
   assert.equal(JSON.parse(transfer.payload).revision, 12);
+  const viewportV2Transfer = encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 8,
+    projectionType: "viewport-v2",
+    result: {
+      schemaVersion: 2,
+      projectionType: "viewport-v2",
+      revision: 13,
+      planetId: "home",
+      entities: [],
+      belts: [],
+    },
+  });
+  assert.equal(viewportV2Transfer.header.schemaVersion, 1);
+  assert.equal(viewportV2Transfer.header.projectionType, "viewport-v2");
+  assert.equal(JSON.parse(viewportV2Transfer.payload).schemaVersion, 2);
+  assert.throws(() => encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 9,
+    projectionType: "viewport-v2",
+    result: { schemaVersion: 1, projectionType: "viewport-v2", revision: 13 },
+  }), /projection transfer is invalid/);
   assert.throws(() => encodeNativeProjectionTransfer({
     sessionId: "core-1",
     sequence: 8,
@@ -275,13 +297,49 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     sessionId: "core-1", commandId: "authority-2", baseRevision: 1,
     simulationSeconds: 1, wallSeconds: 1,
   });
+  await registry.viewportProjectionV2(7, {
+    sessionId: "core-1",
+    baseFields: ["paused"],
+    planetId: "MOD-星球",
+    bounds: { minX: -100, minY: -50, maxX: 100, maxY: 50 },
+    entityCursor: 2,
+    entityLimit: 64,
+    beltCursor: 3,
+    beltLimit: 128,
+    pinnedEntityIds: ["MOD-建筑"],
+    pinnedBeltIds: ["MOD-线路"],
+  });
+  assert.throws(() => registry.viewportProjectionV2(7, {
+    sessionId: "core-1",
+    planetId: "home",
+    bounds: { minX: -1, minY: -1, maxX: 1, maxY: 1 },
+    entityLimit: 64,
+    beltLimit: 64,
+    pinnedEntityIds: ["bad\0id"],
+  }), /viewport v2 projection request is invalid/);
   assert.throws(() => registry.checkpoint(7, { sessionId: "core-1", savedAtMs: -1 }), /timestamp/);
   await registry.checkpoint(7, { sessionId: "core-1", savedAtMs: 2 });
   await registry.close(7, "core-1");
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), [
-    "coreOpen", "coreStatus", "coreCommitOperation", "coreCheckpoint", "coreClose",
+    "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2", "coreCheckpoint", "coreClose",
   ]);
+  assert.deepEqual(calls[3], {
+    operation: "coreViewportProjectionV2",
+    sessionId: "core-1",
+    baseFields: ["paused"],
+    planetId: "MOD-星球",
+    minX: -100,
+    minY: -50,
+    maxX: 100,
+    maxY: 50,
+    entityCursor: 2,
+    entityLimit: 64,
+    beltCursor: 3,
+    beltLimit: 128,
+    pinnedEntityIds: ["MOD-建筑"],
+    pinnedBeltIds: ["MOD-线路"],
+  });
 });
 
 test("v47 import keeps the selected path outside the renderer request and owner-binds the new session", async () => {

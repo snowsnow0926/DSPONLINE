@@ -381,6 +381,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-shadow-v1"));
   assert.ok(hello.capabilities.includes("native-core-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-viewport-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   const base = JSON.stringify({
@@ -511,6 +512,36 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.deepEqual(viewportProjection.entities.map((entity) => entity.id), ["vein"]);
   assert.deepEqual(viewportProjection.belts.map((belt) => belt.id), ["belt"]);
   assert.equal(viewportProjection.nextEntityCursor, null);
+  const viewportProjectionV2 = await client.request({
+    operation: "coreViewportProjectionV2",
+    sessionId: opened.sessionId,
+    baseFields: ["paused"],
+    planetId: "home",
+    minX: -10,
+    minY: -10,
+    maxX: 10,
+    maxY: 10,
+    entityCursor: 0,
+    entityLimit: 16,
+    beltCursor: 0,
+    beltLimit: 32,
+    pinnedEntityIds: ["vein"],
+    pinnedBeltIds: ["belt"],
+  });
+  assert.equal(viewportProjectionV2.schemaVersion, 2);
+  assert.equal(viewportProjectionV2.projectionType, "viewport-v2");
+  assert.equal(viewportProjectionV2.revision, 2);
+  assert.equal(viewportProjectionV2.planetId, "home");
+  assert.deepEqual(viewportProjectionV2.entities.map((entity) => entity.id), ["vein"]);
+  assert.deepEqual(viewportProjectionV2.belts.map((belt) => belt.id), ["belt"]);
+  assert.deepEqual(viewportProjectionV2.pinnedEntityIds, ["vein"]);
+  assert.deepEqual(viewportProjectionV2.pinnedBeltIds, ["belt"]);
+  assert.equal(viewportProjectionV2.nextEntityCursor, null);
+  assert.equal(viewportProjectionV2.nextBeltCursor, null);
+  assert.deepEqual(viewportProjectionV2.planetTotals, { entities: 1, belts: 1 });
+  assert.deepEqual(viewportProjectionV2.viewportTotals, { entities: 1, belts: 1 });
+  assert.equal(viewportProjectionV2.minimap.entityCount, 1);
+  assert.equal(viewportProjectionV2.minimap.beltCount, 1);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

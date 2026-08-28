@@ -460,9 +460,7 @@ fn ready_exporter_indices_with_runtime(
         .indexed_map(
             &state.factory_topology.galactic_material_exporter_indices,
             |_, &index| {
-                let Some(entity) = entities.get(index).and_then(Value::as_object) else {
-                    return None;
-                };
+                let entity = entities.get(index).and_then(Value::as_object)?;
                 (entity
                     .get("galacticExporterPaused")
                     .and_then(Value::as_bool)
@@ -731,7 +729,7 @@ mod tests {
     fn exporter(index: usize) -> Value {
         serde_json::json!({
             "id": format!("exporter-{index}"),
-            "galacticExporterPaused": index % 7 == 0,
+            "galacticExporterPaused": index.is_multiple_of(7),
             "inputs": {
                 "universe_matrix": index as f64,
                 "solar_sail": (index % 11) as f64,

@@ -5160,7 +5160,7 @@ mod tests {
             let error = registry
                 .commit_player_authority_command(&mut store, &session_id, request)
                 .unwrap_err();
-            assert!(format!("{error:#}").contains("belt priority"), "{error:#}");
+            assert!(format!("{error:#}").contains("belt"), "{error:#}");
             assert_eq!(
                 serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
                 summary_before

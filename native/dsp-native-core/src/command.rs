@@ -1,9 +1,33 @@
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::state::CoreState;
+
+const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
+
+const UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS: &[&str] = &[
+    "galactic_material_exporter",
+    "geothermal_power_station",
+    "material_delivery_hub",
+    "micro_black_hole_connector",
+    "orbital_cargo_terminal",
+    "space_station_construction_launcher",
+    "time_warp_device",
+];
+
+const UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS: &[&str] = &[
+    "construction_center",
+    "galactic_material_exporter",
+    "material_delivery_hub",
+    "micro_black_hole_connector",
+    "orbital_cargo_terminal",
+    "space_station_construction_launcher",
+    "time_warp_device",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -245,6 +269,712 @@ fn belt_change_is_projection_safe(change: &ValuePatch) -> bool {
     )
 }
 
+fn path_matches(path: &[PathSegment], expected: &[&str]) -> bool {
+    path.len() == expected.len()
+        && path
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| matches!(actual, PathSegment::Key(key) if key == expected))
+}
+
+fn require_exact_set_patch<'a>(
+    patches: &'a [ValuePatch],
+    expected_path: &[&str],
+) -> anyhow::Result<&'a Value> {
+    let mut found = None;
+    for patch in patches {
+        if !path_matches(&patch.path, expected_path) {
+            continue;
+        }
+        if found.is_some() {
+            bail!("native player-authority command repeats a protected patch")
+        }
+        if patch.operation != "set" {
+            bail!("native player-authority protected patch operation is invalid")
+        }
+        found = Some(
+            patch
+                .value
+                .as_ref()
+                .ok_or_else(|| anyhow!("native player-authority protected set has no value"))?,
+        );
+    }
+    found.ok_or_else(|| anyhow!("native player-authority protected patch is missing"))
+}
+
+fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority {label} is not a safe integer"))
+}
+
+fn normalized_construction_inventory(value: Option<&Value>) -> anyhow::Result<u64> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if value.is_null() {
+        return Ok(0);
+    }
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is invalid"))?;
+    let value = value.floor().max(0.0);
+    if value > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority construction inventory exceeds the safe integer limit")
+    }
+    Ok(value as u64)
+}
+
+fn technology_is_completed(state: &CoreState, technology_id: &str) -> bool {
+    state
+        .base_value()
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|completed| {
+            completed
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(technology_id))
+        })
+}
+
+fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str>) -> &'a str {
+    match family {
+        Some("smelter") => "arc_smelter",
+        Some("assembler") => "assembling_machine_mk1",
+        Some("chemical") => "chemical_plant",
+        _ => building_id,
+    }
+}
+
+fn default_placement_recipe(state: &CoreState, building_id: &str) -> Option<String> {
+    let building = state.catalog.buildings.get(building_id)?;
+    let base_building_id = recipe_building_base(building_id, building.family.as_deref());
+    state
+        .catalog
+        .snapshot
+        .recipes
+        .iter()
+        .find(|recipe| {
+            recipe.building_id == base_building_id
+                && recipe
+                    .required_tech_id
+                    .as_deref()
+                    .is_none_or(|technology_id| technology_is_completed(state, technology_id))
+        })
+        .map(|recipe| recipe.id.clone())
+}
+
+fn active_or_first_dyson_orbit(
+    state: &CoreState,
+    planet_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let system_id = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == planet_id)
+        .map(|planet| planet.system_id.as_str())
+        .ok_or_else(|| anyhow!("native player-authority placement planet is not in the catalog"))?;
+    let engineering = state
+        .base_value()
+        .get("dysonEngineering")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson engineering state is missing"))?;
+    let orbits = engineering
+        .get("orbitsBySystem")
+        .and_then(Value::as_object)
+        .and_then(|systems| systems.get(system_id))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority Dyson orbit directory is invalid"))?;
+    let active = engineering
+        .get("activeOrbitBySystem")
+        .and_then(Value::as_object)
+        .and_then(|systems| systems.get(system_id))
+        .and_then(Value::as_str);
+    if let Some(active) = active
+        && !active.is_empty()
+        && active.len() <= MAX_PLAYER_ORBIT_ID_BYTES
+        && orbits.iter().any(|orbit| {
+            orbit
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == active)
+        })
+    {
+        return Ok(Some(active.to_owned()));
+    }
+    orbits
+        .first()
+        .map(|orbit| {
+            orbit
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("native player-authority Dyson orbit ID is invalid"))
+        })
+        .transpose()
+}
+
+fn expected_ordinary_placement_entity(
+    state: &CoreState,
+    addition: &AddedRecord,
+) -> anyhow::Result<(String, u64)> {
+    if addition.index != state.entity_index.len() {
+        bail!("native player-authority building placement is not appended")
+    }
+    let entity = addition
+        .value
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority placed entity is not an object"))?;
+    let building_id = entity
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority placed building ID is missing"))?;
+    let building =
+        state.catalog.buildings.get(building_id).ok_or_else(|| {
+            anyhow!("native player-authority placed building is not in the catalog")
+        })?;
+    let construction = state
+        .catalog
+        .constructions
+        .get(building_id)
+        .ok_or_else(|| {
+            anyhow!("native player-authority placed building has no construction definition")
+        })?;
+    if construction
+        .required_tech_id
+        .as_deref()
+        .is_some_and(|technology_id| !technology_is_completed(state, technology_id))
+    {
+        bail!("native player-authority placed building technology is locked")
+    }
+    if matches!(building.kind.as_str(), "miner" | "station")
+        || !matches!(
+            building.kind.as_str(),
+            "machine" | "power" | "storage" | "splitter"
+        )
+        || UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS.contains(&building_id)
+    {
+        bail!("native player-authority building placement domain is not covered")
+    }
+    let machine_count = safe_json_integer(entity.get("machineCount"), "building stack")?;
+    // The current native catalog intentionally does not carry the optional
+    // MOD `stackLimit`. A single-unit placement is valid for every accepted
+    // catalog definition; larger placement batches stay fail-closed until
+    // that bound can be proved without changing the CORE protocol.
+    if machine_count != 1 {
+        bail!("native player-authority building placement must contain one unit")
+    }
+    let next_id = safe_json_integer(state.base_value().get("nextId"), "next entity ID")?;
+    if next_id == MAX_JAVASCRIPT_SAFE_INTEGER {
+        bail!("native player-authority next entity ID is exhausted")
+    }
+    let expected_id = format!("entity_{next_id}");
+    if entity.get("id").and_then(Value::as_str) != Some(expected_id.as_str()) {
+        bail!("native player-authority placed entity ID is not the next deterministic ID")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id)
+        || !state
+            .catalog
+            .planets
+            .iter()
+            .any(|planet| planet.id == active_planet_id && planet.kind == "terrestrial")
+    {
+        bail!("native player-authority placed entity planet is invalid")
+    }
+    let position = entity
+        .get("position")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority building position is invalid"))?;
+    let x = position
+        .get("x")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority building X position is invalid"))?;
+    let y = position
+        .get("y")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority building Y position is invalid"))?;
+
+    let entity_kind = match building.kind.as_str() {
+        "power" => "power",
+        "storage" => "storage",
+        "splitter" => "splitter",
+        _ => "machine",
+    };
+    let mut expected = serde_json::Map::new();
+    for (key, value) in [
+        ("id", Value::from(expected_id)),
+        ("kind", Value::from(entity_kind)),
+        ("planetId", Value::from(active_planet_id)),
+        ("position", serde_json::json!({ "x": x, "y": y })),
+        ("interactionLocked", Value::from(false)),
+        ("buildingId", Value::from(building_id)),
+        ("powerGridId", Value::from("grid-a")),
+        ("powerPriority", Value::from(2)),
+        ("machineCount", Value::from(machine_count)),
+        ("minerCount", Value::from(0)),
+        ("inputs", serde_json::json!({})),
+        ("outputs", serde_json::json!({})),
+        ("progress", Value::from(0)),
+        ("routingCursor", Value::from(0)),
+        ("utilization", Value::from(0)),
+        ("productionRate", Value::from(0)),
+    ] {
+        expected.insert(key.to_owned(), value);
+    }
+    if building.kind == "power" {
+        let generation_priority =
+            if building_id == "accumulator" || !building.fuel_item_ids.is_empty() {
+                1
+            } else if building_id == "energy_exchanger" {
+                2
+            } else {
+                3
+            };
+        expected.insert(
+            "generationPriority".to_owned(),
+            Value::from(generation_priority),
+        );
+        expected.insert("powerOutputKw".to_owned(), Value::from(0));
+        expected.insert("powerInputKw".to_owned(), Value::from(0));
+    }
+    if let Some(recipe_id) = default_placement_recipe(state, building_id) {
+        expected.insert("recipeId".to_owned(), Value::from(recipe_id));
+    }
+    if building_id == "em_rail_ejector"
+        && let Some(orbit_id) = active_or_first_dyson_orbit(state, active_planet_id)?
+    {
+        expected.insert("targetDysonOrbitId".to_owned(), Value::from(orbit_id));
+    }
+    if building.kind == "splitter" {
+        expected.insert("distributionMode".to_owned(), Value::from("balanced"));
+    }
+    if !building.fuel_item_ids.is_empty() {
+        expected.insert("fuelRemainingMj".to_owned(), Value::from(0));
+    }
+    if matches!(building_id, "accumulator" | "energy_exchanger") {
+        expected.insert("storedEnergyMj".to_owned(), Value::from(0));
+        expected.insert(
+            "energyMode".to_owned(),
+            Value::from(if building_id == "accumulator" {
+                "auto"
+            } else {
+                "charge"
+            }),
+        );
+    }
+    if addition.value != Value::Object(expected) {
+        bail!("native player-authority placed entity fields are not canonical")
+    }
+    Ok((building_id.to_owned(), machine_count))
+}
+
+fn validate_ordinary_building_placement(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.added_entities.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+        || command.top_level_changes.len() != 2
+    {
+        bail!("native player-authority building placement shape is invalid")
+    }
+    let (building_id, machine_count) =
+        expected_ordinary_placement_entity(state, &command.added_entities[0])?;
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    let available = safe_json_integer(construction.get(&building_id), "construction inventory")?;
+    let remaining = available.checked_sub(machine_count).ok_or_else(|| {
+        anyhow!("native player-authority building construction stock is insufficient")
+    })?;
+    let construction_value = require_exact_set_patch(
+        &command.top_level_changes,
+        &["construction", building_id.as_str()],
+    )?;
+    if construction_value.as_u64() != Some(remaining) {
+        bail!("native player-authority building construction debit is invalid")
+    }
+    let next_id = safe_json_integer(state.base_value().get("nextId"), "next entity ID")?;
+    if require_exact_set_patch(&command.top_level_changes, &["nextId"])?.as_u64()
+        != next_id.checked_add(1)
+    {
+        bail!("native player-authority building next ID increment is invalid")
+    }
+    Ok(())
+}
+
+fn ordinary_removal_entity(
+    state: &CoreState,
+    entity_id: &str,
+) -> anyhow::Result<(Value, String, u64)> {
+    let index = *state
+        .entity_index
+        .get(entity_id)
+        .ok_or_else(|| anyhow!("native player-authority removal entity is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority removal entity is invalid"))?;
+    if object.get("interactionLocked").and_then(Value::as_bool) == Some(true) {
+        bail!("native player-authority removal entity is locked")
+    }
+    let building_id = object
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority removal building ID is missing"))?
+        .to_owned();
+    let building =
+        state.catalog.buildings.get(&building_id).ok_or_else(|| {
+            anyhow!("native player-authority removal building is not in the catalog")
+        })?;
+    if !state.catalog.constructions.contains_key(&building_id)
+        || matches!(building.kind.as_str(), "miner" | "station")
+        || !matches!(
+            building.kind.as_str(),
+            "machine" | "power" | "storage" | "splitter"
+        )
+        || UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS.contains(&building_id.as_str())
+    {
+        bail!("native player-authority removal building domain is not covered")
+    }
+    let expected_kind = match building.kind.as_str() {
+        "power" => "power",
+        "storage" => "storage",
+        "splitter" => "splitter",
+        _ => "machine",
+    };
+    if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
+        bail!("native player-authority removal entity kind conflicts with the catalog")
+    }
+    let machine_count = safe_json_integer(object.get("machineCount"), "building stack")?;
+    if machine_count == 0 {
+        bail!("native player-authority removal building stack is empty")
+    }
+    Ok((entity, building_id, machine_count))
+}
+
+fn queue_or_blueprint_pruning_would_change(state: &CoreState, entity_id: &str) -> bool {
+    let queue = state
+        .base_value()
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if queue.iter().any(|entry| {
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending-materials");
+        status == "waiting-fleet"
+            && entry
+                .get("placedEntityIdsByKey")
+                .and_then(Value::as_object)
+                .is_some_and(|ids| ids.values().any(|value| value.as_str() == Some(entity_id)))
+    }) {
+        return true;
+    }
+    let referenced_versions = queue
+        .iter()
+        .filter_map(|entry| entry.get("blueprintVersionId").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    state
+        .base_value()
+        .get("blueprintVersions")
+        .and_then(Value::as_array)
+        .is_some_and(|versions| {
+            versions.iter().any(|version| {
+                version
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !referenced_versions.contains(id))
+            })
+        })
+}
+
+fn validate_ordinary_building_stack_decrease(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || command.top_level_changes.len() != 1
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority building stack decrease shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let (_, building_id, current) = ordinary_removal_entity(state, &record.id)?;
+    let target = require_exact_set_patch(&record.changes, &["machineCount"])?
+        .as_u64()
+        .filter(|value| *value <= MAX_PLAYER_BUILDING_STACK)
+        .ok_or_else(|| anyhow!("native player-authority building stack target is invalid"))?;
+    if target == 0 || target >= current {
+        bail!("native player-authority building stack command is not a decrease")
+    }
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    let previous = normalized_construction_inventory(construction.get(&building_id))?;
+    let expected = previous
+        .checked_add(current - target)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?;
+    if require_exact_set_patch(
+        &command.top_level_changes,
+        &["construction", building_id.as_str()],
+    )?
+    .as_u64()
+        != Some(expected)
+    {
+        bail!("native player-authority building stack refund is invalid")
+    }
+    Ok(())
+}
+
+fn validate_ordinary_building_removal(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.removed_entity_ids.len() != 1
+        || command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority ordinary building removal shape is invalid")
+    }
+    let entity_id = &command.removed_entity_ids[0];
+    let (entity, building_id, machine_count) = ordinary_removal_entity(state, entity_id)?;
+    let object = entity.as_object().expect("validated entity object");
+    if object.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true)
+        || ["inputs", "outputs"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_object)
+                .is_none_or(|inventory| inventory.values().any(|value| value.as_f64() != Some(0.0)))
+        })
+    {
+        bail!("native player-authority removal building owns buffered material")
+    }
+    for belt_index in 0..state.belt_index.len() {
+        let belt = state.parse_belt(belt_index)?;
+        if ["source", "target"]
+            .iter()
+            .any(|key| belt.get(*key).and_then(Value::as_str) == Some(entity_id))
+        {
+            bail!("native player-authority removal building still has an incident belt")
+        }
+    }
+    if queue_or_blueprint_pruning_would_change(state, entity_id) {
+        bail!("native player-authority removal requires queue or blueprint pruning")
+    }
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    let previous = normalized_construction_inventory(construction.get(&building_id))?;
+    let expected = previous
+        .checked_add(machine_count)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?;
+    if require_exact_set_patch(
+        &command.top_level_changes,
+        &["construction", building_id.as_str()],
+    )?
+    .as_u64()
+        != Some(expected)
+    {
+        bail!("native player-authority building removal refund is invalid")
+    }
+    Ok(())
+}
+
+fn validate_ejector_target_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty()
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority ejector target command shape is invalid")
+    }
+    let mut entity_ids = HashSet::new();
+    let mut shared_orbit_id: Option<&str> = None;
+    for record in &command.changed_entities {
+        if !entity_ids.insert(record.id.as_str()) || record.changes.len() != 1 {
+            bail!("native player-authority ejector target entity set is invalid")
+        }
+        let orbit_id = require_exact_set_patch(&record.changes, &["targetDysonOrbitId"])?
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+            .ok_or_else(|| anyhow!("native player-authority ejector target orbit ID is invalid"))?;
+        if shared_orbit_id.is_some_and(|candidate| candidate != orbit_id) {
+            bail!("native player-authority batch ejector targets disagree")
+        }
+        shared_orbit_id = Some(orbit_id);
+        let index = *state
+            .entity_index
+            .get(&record.id)
+            .ok_or_else(|| anyhow!("native player-authority ejector is missing"))?;
+        let mut entity = state.parse_entity(index)?;
+        let object = entity
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native player-authority ejector is invalid"))?;
+        if object.get("buildingId").and_then(Value::as_str) != Some("em_rail_ejector")
+            || !state.catalog.buildings.contains_key("em_rail_ejector")
+            || object.get("interactionLocked").and_then(Value::as_bool) == Some(true)
+            || object.get("targetDysonOrbitId").and_then(Value::as_str) == Some(orbit_id)
+        {
+            bail!("native player-authority ejector target transition is invalid")
+        }
+        object.insert(
+            "targetDysonOrbitId".to_owned(),
+            Value::from(orbit_id.to_owned()),
+        );
+        if !crate::dyson::valid_ejector_target(state, state.base_value(), object) {
+            bail!("native player-authority ejector target is outside its stellar system")
+        }
+    }
+    Ok(())
+}
+
+fn validate_player_pause_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority pause command shape is invalid")
+    }
+    let target = require_exact_set_patch(&command.top_level_changes, &["paused"])?
+        .as_bool()
+        .ok_or_else(|| anyhow!("native player-authority paused value is invalid"))?;
+    if state
+        .base_value()
+        .get("paused")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        bail!("native player-authority paused state is invalid")
+    }
+    // Setting true would make a durable retry ineligible under the active
+    // player-authority lease. Pause remains owned by its existing control
+    // path; accepting the running value is retained for protocol/retry tests.
+    if target {
+        bail!("native player-authority pause transition is not owned by this command path")
+    }
+    Ok(())
+}
+
+fn validate_player_position_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty()
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority entity position command shape is invalid")
+    }
+    let mut entity_ids = HashSet::new();
+    for record in &command.changed_entities {
+        if !entity_ids.insert(record.id.as_str()) || record.changes.is_empty() {
+            bail!("native player-authority entity position set is invalid")
+        }
+        let index = *state
+            .entity_index
+            .get(&record.id)
+            .ok_or_else(|| anyhow!("native player-authority moved entity is missing"))?;
+        let mut entity = state.parse_entity(index)?;
+        if entity.get("interactionLocked").and_then(Value::as_bool) == Some(true) {
+            bail!("native player-authority moved entity is locked")
+        }
+        let mut axes = HashSet::new();
+        for change in &record.changes {
+            let axis = match change.path.as_slice() {
+                [PathSegment::Key(position), PathSegment::Key(axis)]
+                    if position == "position" && matches!(axis.as_str(), "x" | "y") =>
+                {
+                    axis.as_str()
+                }
+                _ => bail!("native player-authority entity position patch is not canonical"),
+            };
+            if !axes.insert(axis) || change.operation != "set" {
+                bail!("native player-authority entity position axis is repeated or invalid")
+            }
+            let value = change
+                .value
+                .as_ref()
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| anyhow!("native player-authority entity position is invalid"))?;
+            entity
+                .get_mut("position")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native player-authority entity position state is invalid"))?
+                .insert(axis.to_owned(), Value::from(value));
+        }
+        let position = entity
+            .get("position")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native player-authority entity position state is invalid"))?;
+        if position.len() != 2
+            || !["x", "y"].iter().all(|axis| {
+                position
+                    .get(*axis)
+                    .and_then(Value::as_f64)
+                    .is_some_and(f64::is_finite)
+            })
+        {
+            bail!("native player-authority entity position state is invalid")
+        }
+    }
+    Ok(())
+}
+
 impl SimulationCommandPatch {
     /// Derives the renderer invalidation receipt solely from a command that
     /// has already passed authoritative command validation. This makes the
@@ -332,6 +1062,91 @@ impl SimulationCommandPatch {
 }
 
 impl CoreState {
+    /// Validates player-reachable topology/configuration commands before any
+    /// durable stage. The general command engine remains available to exact
+    /// simulation/replay, but a player-authority writer may only cross a
+    /// protected domain after one typed validator has proved its complete
+    /// field set, catalog references, inventory debit/refund and topology.
+    pub fn validate_player_authority_command(
+        &self,
+        command: &SimulationCommandPatch,
+    ) -> anyhow::Result<()> {
+        if command.protocol_version != crate::CORE_PROTOCOL_VERSION {
+            bail!("native player-authority command protocol version is unsupported")
+        }
+        if command.base_revision != self.revision {
+            bail!("native player-authority command base revision is not current")
+        }
+        let total = command.top_level_changes.len()
+            + command.changed_entities.len()
+            + command.added_entities.len()
+            + command.removed_entity_ids.len()
+            + command.changed_belts.len()
+            + command.added_belts.len()
+            + command.removed_belt_ids.len();
+        if total == 0 || total > 65_536 {
+            bail!("native player-authority command change count is invalid")
+        }
+        if command
+            .changed_entities
+            .iter()
+            .any(|record| record.changes.is_empty())
+            || command
+                .changed_belts
+                .iter()
+                .any(|record| record.changes.is_empty())
+        {
+            bail!("native player-authority command contains an empty record patch")
+        }
+        if !command.added_entities.is_empty() {
+            return validate_ordinary_building_placement(self, command);
+        }
+        if !command.removed_entity_ids.is_empty() {
+            return validate_ordinary_building_removal(self, command);
+        }
+        if command.changed_entities.iter().any(|record| {
+            record
+                .changes
+                .iter()
+                .any(|change| path_matches(&change.path, &["machineCount"]))
+        }) {
+            return validate_ordinary_building_stack_decrease(self, command);
+        }
+        if command.changed_entities.iter().any(|record| {
+            record
+                .changes
+                .iter()
+                .any(|change| path_matches(&change.path, &["targetDysonOrbitId"]))
+        }) {
+            return validate_ejector_target_command(self, command);
+        }
+        if !command.changed_entities.is_empty()
+            && command.changed_entities.iter().all(|record| {
+                record.changes.iter().all(|change| {
+                    matches!(
+                        change.path.as_slice(),
+                        [PathSegment::Key(position), PathSegment::Key(axis)]
+                            if position == "position" && matches!(axis.as_str(), "x" | "y")
+                    )
+                })
+            })
+        {
+            return validate_player_position_command(self, command);
+        }
+        if !command.top_level_changes.is_empty() {
+            return validate_player_pause_command(self, command);
+        }
+        bail!("native player-authority command domain is not typed yet")
+    }
+
+    pub fn apply_player_authority_command(
+        &mut self,
+        command: &SimulationCommandPatch,
+    ) -> anyhow::Result<CommandApplyResult> {
+        self.validate_player_authority_command(command)?;
+        self.apply_command(command)
+    }
+
     pub fn apply_command(
         &mut self,
         command: &SimulationCommandPatch,
@@ -522,6 +1337,10 @@ impl CoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        CoreCheckpointIdentity,
+        catalog::{CatalogSnapshot, RuntimeCatalog},
+    };
 
     #[test]
     fn patch_json_preserves_explicit_null_and_omitted_delete_value() {
@@ -680,5 +1499,385 @@ mod tests {
                 .unwrap()
                 .topology_dirty
         );
+    }
+
+    fn player_command_catalog() -> RuntimeCatalog {
+        let snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
+            "protocolVersion": crate::CORE_PROTOCOL_VERSION,
+            "registryFingerprint": "player-command-test",
+            "planets": [
+                { "id": "home", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 },
+                { "id": "ashen", "systemId": "sigma", "kind": "terrestrial", "orbitIndex": 1 },
+                { "id": "giant", "systemId": "helios", "kind": "gas-giant", "orbitIndex": 2 }
+            ],
+            "items": [
+                { "id": "iron_ore", "kind": "solid" },
+                { "id": "iron_ingot", "kind": "solid" },
+                { "id": "solar_sail", "kind": "solid" }
+            ],
+            "buildings": [
+                {
+                    "id": "arc_smelter", "kind": "machine", "speed": 1,
+                    "inputCapacity": 100, "outputCapacity": 100
+                },
+                {
+                    "id": "em_rail_ejector", "kind": "machine", "speed": 1,
+                    "inputCapacity": 100, "outputCapacity": 100
+                }
+            ],
+            "recipes": [
+                {
+                    "id": "iron_ingot", "buildingId": "arc_smelter", "duration": 1,
+                    "inputs": [{ "itemId": "iron_ore", "amount": 1 }],
+                    "outputs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                },
+                {
+                    "id": "solar_sail_launch", "buildingId": "em_rail_ejector", "duration": 1,
+                    "inputs": [{ "itemId": "solar_sail", "amount": 1 }],
+                    "outputs": []
+                }
+            ],
+            "constructions": [
+                {
+                    "id": "arc_smelter", "outputAmount": 1,
+                    "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                },
+                {
+                    "id": "em_rail_ejector", "outputAmount": 1,
+                    "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                }
+            ],
+            "belts": [{ "tier": 1, "speed": 6 }]
+        }))
+        .unwrap();
+        RuntimeCatalog::validate(snapshot, "player-command-test").unwrap()
+    }
+
+    fn player_command_entity(
+        id: &str,
+        building_id: &str,
+        x: f64,
+        target_orbit_id: Option<&str>,
+    ) -> String {
+        let mut entity = serde_json::json!({
+            "id": id,
+            "kind": "machine",
+            "planetId": "home",
+            "position": { "x": x, "y": 2.0 },
+            "interactionLocked": false,
+            "buildingId": building_id,
+            "powerGridId": "grid-a",
+            "powerPriority": 2,
+            "recipeId": if building_id == "arc_smelter" { "iron_ingot" } else { "solar_sail_launch" },
+            "machineCount": if building_id == "arc_smelter" { 3 } else { 1 },
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        });
+        if let Some(target_orbit_id) = target_orbit_id {
+            entity["targetDysonOrbitId"] = Value::from(target_orbit_id);
+        }
+        entity.to_string()
+    }
+
+    fn player_command_state() -> CoreState {
+        let base = serde_json::json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 100,
+            "paused": false,
+            "nextId": 9,
+            "construction": { "arc_smelter": 4, "em_rail_ejector": 0 },
+            "constructionQueue": [],
+            "blueprintVersions": [],
+            "totalProduced": { "iron_ingot": 10 },
+            "research": { "completedTechIds": [] },
+            "dysonEngineering": {
+                "activeOrbitBySystem": { "helios": "orbit-home-old", "sigma": "orbit-foreign" },
+                "orbitsBySystem": {
+                    "helios": [{ "id": "orbit-home-old" }, { "id": "orbit-home-new" }],
+                    "sigma": [{ "id": "orbit-foreign" }]
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 9,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "player-command-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            vec![
+                player_command_entity("smelter-a", "arc_smelter", 1.0, None),
+                player_command_entity("ejector-a", "em_rail_ejector", 3.0, Some("orbit-home-old")),
+                player_command_entity("ejector-b", "em_rail_ejector", 5.0, Some("orbit-home-old")),
+            ],
+            Vec::new(),
+            player_command_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn empty_player_command(revision: u64) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: revision,
+            top_level_changes: Vec::new(),
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+
+    fn ordinary_placement_command(revision: u64) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("construction".to_owned()),
+                    PathSegment::Key("arc_smelter".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(3)),
+            },
+            ValuePatch {
+                path: vec![PathSegment::Key("nextId".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(10)),
+            },
+        ];
+        command.added_entities = vec![AddedRecord {
+            index: 3,
+            value: serde_json::json!({
+                "id": "entity_9",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 12.0, "y": 24.0 },
+                "interactionLocked": false,
+                "buildingId": "arc_smelter",
+                "powerGridId": "grid-a",
+                "powerPriority": 2,
+                "recipeId": "iron_ingot",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_places_one_canonical_catalog_building_atomically() {
+        let mut state = player_command_state();
+        let command = ordinary_placement_command(state.revision);
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert!(applied.topology_dirty);
+        assert_eq!(applied.changed_entity_ids, ["entity_9"]);
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 3);
+        assert_eq!(state.base_value()["nextId"], 10);
+        assert!(state.entity_index.contains_key("entity_9"));
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_rejects_forged_or_untyped_state_without_mutation() {
+        for mut command in [
+            {
+                let mut command = ordinary_placement_command(9);
+                command.top_level_changes[0].value = Some(Value::from(2));
+                command
+            },
+            {
+                let mut command = ordinary_placement_command(9);
+                command.added_entities[0].value["machineCount"] = Value::from(2);
+                command.top_level_changes[0].value = Some(Value::from(2));
+                command
+            },
+            {
+                let mut command = empty_player_command(9);
+                command.top_level_changes = vec![ValuePatch {
+                    path: vec![
+                        PathSegment::Key("totalProduced".to_owned()),
+                        PathSegment::Key("iron_ingot".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(999_999)),
+                }];
+                command
+            },
+            {
+                let mut command = empty_player_command(9);
+                command.changed_entities = vec![RecordPatch {
+                    id: "smelter-a".to_owned(),
+                    changes: vec![ValuePatch {
+                        path: vec![PathSegment::Key("recipeId".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from("solar_sail_launch")),
+                    }],
+                }];
+                command
+            },
+        ] {
+            let mut state = player_command_state();
+            command.base_revision = state.revision;
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for top_level_key in [
+            "elapsedSeconds",
+            "historyRecordedAt",
+            "productionHistory",
+            "metrics",
+            "planetMetrics",
+            "powerGridMetrics",
+            "idleSettlement",
+            "dysonSphere",
+        ] {
+            let mut state = player_command_state();
+            let mut command = empty_player_command(state.revision);
+            command.top_level_changes = vec![ValuePatch {
+                path: vec![PathSegment::Key(top_level_key.to_owned())],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({ "forged": true })),
+            }];
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state.apply_player_authority_command(&command).is_err(),
+                "{top_level_key}"
+            );
+            assert_eq!(state.revision, 9, "{top_level_key}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{top_level_key}");
+        }
+    }
+
+    #[test]
+    fn player_authority_decreases_and_removes_empty_unwired_building() {
+        let mut state = player_command_state();
+        let mut decrease = empty_player_command(state.revision);
+        decrease.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("construction".to_owned()),
+                PathSegment::Key("arc_smelter".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(6)),
+        }];
+        decrease.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("machineCount".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(1)),
+            }],
+        }];
+        state.apply_player_authority_command(&decrease).unwrap();
+        assert_eq!(state.parse_entity(0).unwrap()["machineCount"], 1);
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 6);
+
+        let mut removal = empty_player_command(state.revision);
+        removal.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("construction".to_owned()),
+                PathSegment::Key("arc_smelter".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(7)),
+        }];
+        removal.removed_entity_ids = vec!["smelter-a".to_owned()];
+        let applied = state.apply_player_authority_command(&removal).unwrap();
+        assert!(applied.topology_dirty);
+        assert!(!state.entity_index.contains_key("smelter-a"));
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 7);
+    }
+
+    #[test]
+    fn player_authority_validates_position_and_system_local_ejector_targets() {
+        let mut moved = player_command_state();
+        let mut position = empty_player_command(moved.revision);
+        position.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("position".to_owned()),
+                        PathSegment::Key("x".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(8.5)),
+                },
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("position".to_owned()),
+                        PathSegment::Key("y".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(9.5)),
+                },
+            ],
+        }];
+        let result = moved.apply_player_authority_command(&position).unwrap();
+        assert!(!result.topology_dirty);
+        assert_eq!(moved.parse_entity(0).unwrap()["position"]["x"], 8.5);
+
+        let mut state = player_command_state();
+        let mut target = empty_player_command(state.revision);
+        target.changed_entities = ["ejector-a", "ejector-b"]
+            .into_iter()
+            .map(|id| RecordPatch {
+                id: id.to_owned(),
+                changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("targetDysonOrbitId".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from("orbit-home-new")),
+                }],
+            })
+            .collect();
+        state.apply_player_authority_command(&target).unwrap();
+        assert_eq!(
+            state.parse_entity(1).unwrap()["targetDysonOrbitId"],
+            "orbit-home-new"
+        );
+        assert_eq!(
+            state.parse_entity(2).unwrap()["targetDysonOrbitId"],
+            "orbit-home-new"
+        );
+
+        let mut rejected = player_command_state();
+        target.base_revision = rejected.revision;
+        target.changed_entities[0].changes[0].value = Some(Value::from("orbit-foreign"));
+        target.changed_entities.truncate(1);
+        let before = rejected.canonical_sha256().unwrap();
+        assert!(rejected.apply_player_authority_command(&target).is_err());
+        assert_eq!(rejected.canonical_sha256().unwrap(), before);
     }
 }

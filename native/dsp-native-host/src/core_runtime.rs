@@ -1648,7 +1648,7 @@ impl CoreRegistry {
 
         let command_changes = if initial.pending_command.is_none() {
             let mut preflight = self.session(session_id)?.clone();
-            let applied = preflight.apply_command(&request.command)?;
+            let applied = preflight.apply_player_authority_command(&request.command)?;
             if applied.previous_revision != request.base_revision
                 || applied.revision != request.base_revision + 1
             {
@@ -2134,6 +2134,13 @@ impl CoreRegistry {
                     bail!("native authoritative retry cannot prove revision continuity");
                 }
                 let state = self.session_mut(session_id)?;
+                if matches!(
+                    lease_authorization.as_ref(),
+                    Some(CoreLeaseAuthorization::PlayerAuthority { .. })
+                ) && let Some(command) = operation.command.as_ref()
+                {
+                    state.validate_player_authority_command(command)?;
+                }
                 state.replay_operation(
                     operation.base_revision,
                     operation.result_revision,
@@ -2197,7 +2204,14 @@ impl CoreRegistry {
         }
         let mut prepared = self.session(session_id)?.clone();
         if let Some(command) = request.command.as_ref() {
-            prepared.apply_command(command)?;
+            if matches!(
+                lease_authorization.as_ref(),
+                Some(CoreLeaseAuthorization::PlayerAuthority { .. })
+            ) {
+                prepared.apply_player_authority_command(command)?;
+            } else {
+                prepared.apply_command(command)?;
+            }
         }
         let advanced = prepared.advance(&CoreAdvanceRequest {
             base_revision: prepared.revision,
@@ -2946,7 +2960,6 @@ mod tests {
     use super::*;
     use crate::disk_budget::{DiskSpaceProbe, DiskSpaceQuery, MINIMUM_FREE_SPACE_RESERVE_BYTES};
     use sha2::{Digest, Sha256};
-    use std::fs;
     use std::io::Cursor;
     use std::path::Path;
     use std::sync::Arc;
@@ -2985,18 +2998,42 @@ mod tests {
                 "simulationOrder": 0,
                 "orbitalYields": {},
             }],
-            "items": [{ "id": "iron_ore", "name": "iron_ore", "kind": "solid" }],
-            "buildings": [{
-                "id": "mining_machine",
-                "kind": "miner",
-                "speed": 1,
-                "inputCapacity": 0,
-                "outputCapacity": 50,
-                "powerDemandKw": 1,
-                "powerGenerationKw": 0,
+            "items": [
+                { "id": "iron_ore", "name": "iron_ore", "kind": "solid" },
+                { "id": "iron_ingot", "name": "iron_ingot", "kind": "solid" }
+            ],
+            "buildings": [
+                {
+                    "id": "mining_machine",
+                    "kind": "miner",
+                    "speed": 1,
+                    "inputCapacity": 0,
+                    "outputCapacity": 50,
+                    "powerDemandKw": 1,
+                    "powerGenerationKw": 0,
+                },
+                {
+                    "id": "arc_smelter",
+                    "kind": "machine",
+                    "speed": 1,
+                    "inputCapacity": 100,
+                    "outputCapacity": 100,
+                    "powerDemandKw": 1,
+                    "powerGenerationKw": 0,
+                }
+            ],
+            "recipes": [{
+                "id": "iron_ingot",
+                "buildingId": "arc_smelter",
+                "duration": 1,
+                "inputs": [{ "itemId": "iron_ore", "amount": 1 }],
+                "outputs": [{ "itemId": "iron_ingot", "amount": 1 }]
             }],
-            "recipes": [],
-            "constructions": [],
+            "constructions": [{
+                "id": "arc_smelter",
+                "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }],
             "belts": [{ "tier": 1, "speed": 6 }],
             "proliferators": [],
             "technologies": [],
@@ -3095,11 +3132,13 @@ mod tests {
             ("manualMined", json!(0)),
             ("totalProduced", json!({})),
             ("blueprints", json!([])),
+            ("blueprintVersions", json!([])),
             ("handcraftQueue", json!([])),
             ("constructionQueue", json!([])),
             ("systemSpaceStations", json!({})),
             ("tray", json!({})),
             ("belts", json!([])),
+            ("nextId", json!(9)),
         ] {
             state.insert(key.to_owned(), value);
         }
@@ -3124,7 +3163,7 @@ mod tests {
             ),
             (
                 "construction",
-                json!({ "mining_machine": 0, "conveyor_belt_mk1": 0 }),
+                json!({ "mining_machine": 0, "conveyor_belt_mk1": 0, "arc_smelter": 2 }),
             ),
             ("planetMetrics", json!({ "home": {} })),
             ("powerGridMetrics", json!({ "home": {} })),
@@ -3263,6 +3302,8 @@ mod tests {
                 "kind": "vein",
                 "planetId": "home",
                 "gridId": "main",
+                "position": { "x": 1, "y": 2 },
+                "interactionLocked": false,
                 "resourceId": "iron_ore",
                 "extractorBuildingId": "mining_machine",
                 "minerCount": 2,
@@ -3417,6 +3458,7 @@ mod tests {
         command_id: &str,
         value: Value,
     ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let x = value.as_f64().unwrap_or(17.0);
         CoreCommitPlayerAuthorityCommandRequest {
             run_id: "player-authority-run".to_owned(),
             command_id: command_id.to_owned(),
@@ -3424,12 +3466,15 @@ mod tests {
             command: serde_json::from_value(json!({
                 "protocolVersion": 1,
                 "baseRevision": base_revision,
-                "topLevelChanges": [{
-                    "path": ["playerCommandProbe"],
-                    "operation": "set",
-                    "value": value
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "vein",
+                    "changes": [{
+                        "path": ["position", "x"],
+                        "operation": "set",
+                        "value": x
+                    }]
                 }],
-                "changedEntities": [],
                 "addedEntities": [],
                 "removedEntityIds": [],
                 "changedBelts": [],
@@ -3456,9 +3501,9 @@ mod tests {
                 "changedEntities": [{
                     "id": "vein",
                     "changes": [{
-                        "path": ["position"],
+                        "path": ["position", "x"],
                         "operation": "set",
-                        "value": { "x": x, "y": 2.0 }
+                        "value": x
                     }]
                 }],
                 "addedEntities": [],
@@ -3492,6 +3537,61 @@ mod tests {
             command_id: command_id.to_owned(),
             base_revision,
             command: decode_player_authority_command_payload(&command).unwrap(),
+        }
+    }
+
+    fn ordinary_building_placement_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [
+                    {
+                        "path": ["construction", "arc_smelter"],
+                        "operation": "set",
+                        "value": 1
+                    },
+                    {
+                        "path": ["nextId"],
+                        "operation": "set",
+                        "value": 10
+                    }
+                ],
+                "changedEntities": [],
+                "addedEntities": [{
+                    "index": 1,
+                    "value": {
+                        "id": "entity_9",
+                        "kind": "machine",
+                        "planetId": "home",
+                        "position": { "x": 12.5, "y": 24.5 },
+                        "interactionLocked": false,
+                        "buildingId": "arc_smelter",
+                        "powerGridId": "grid-a",
+                        "powerPriority": 2,
+                        "recipeId": "iron_ingot",
+                        "machineCount": 1,
+                        "minerCount": 0,
+                        "inputs": {},
+                        "outputs": {},
+                        "progress": 0,
+                        "routingCursor": 0,
+                        "utilization": 0,
+                        "productionRate": 0
+                    }
+                }],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
         }
     }
 
@@ -4039,6 +4139,132 @@ mod tests {
     }
 
     #[test]
+    fn typed_building_placement_recovers_retries_exports_and_reloads_exactly() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let source_hash = registry.status(&session_id).unwrap().canonical_sha256;
+        let source_checkpoint =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let request = || {
+            ordinary_building_placement_command(
+                entry_checkpoint.revision,
+                "ordinary-building-placement",
+            )
+        };
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            source_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            source_checkpoint
+        );
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_some()
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("typed placement must recover from its durable stage");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("ordinary-building-placement")
+        );
+        assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
+        assert_eq!(recovered.changed_entity_ids, ["entity_9"]);
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, recovered.revision);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "ordinary-building-placement-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let exported = std::fs::read(
+            root.path()
+                .join("exports/ordinary-building-placement-recovered.json"),
+        )
+        .unwrap();
+        let envelope: Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(envelope["state"]["nextId"], 10);
+        assert_eq!(envelope["state"]["construction"]["arc_smelter"], 1);
+        assert_eq!(envelope["state"]["entities"][1]["id"], "entity_9");
+
+        let reload_root = tempdir().unwrap();
+        let mut reload_store = SaveStore::open(reload_root.path()).unwrap();
+        let mut reload_registry = CoreRegistry::default();
+        let reloaded = reload_registry
+            .import_v47(
+                &mut reload_store,
+                Cursor::new(exported.clone()),
+                exported.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
+        assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
+        assert_eq!(reloaded_summary.entity_count, 2);
+    }
+
+    #[test]
+    fn forged_building_placement_fails_before_stage_and_preserves_checkpoint() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let mut request = ordinary_building_placement_command(
+            entry_checkpoint.revision,
+            "forged-building-placement",
+        );
+        request.command.top_level_changes[0].value = Some(Value::from(0));
+        let summary_before = serde_json::to_value(registry.status(&session_id).unwrap()).unwrap();
+        let checkpoint_before =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let error = registry
+            .commit_player_authority_command(&mut store, &session_id, request)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("construction debit is invalid"));
+        assert_eq!(
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            summary_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            checkpoint_before
+        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
+    }
+
+    #[test]
     fn missing_set_value_fails_before_player_command_is_staged() {
         let (_root, mut store, mut registry, session_id, entry_checkpoint) =
             player_authority_fixture();
@@ -4059,7 +4285,7 @@ mod tests {
                         base_revision: entry_checkpoint.revision,
                         top_level_changes: vec![dsp_native_core::command::ValuePatch {
                             path: vec![dsp_native_core::command::PathSegment::Key(
-                                "nullablePlayerCommandProbe".to_owned(),
+                                "paused".to_owned(),
                             )],
                             operation: "set".to_owned(),
                             value: None,
@@ -4074,7 +4300,7 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(format!("{error:#}").contains("set patch has no value"));
+        assert!(format!("{error:#}").contains("protected set has no value"));
         assert_eq!(
             serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
             summary_before
@@ -4087,111 +4313,50 @@ mod tests {
     }
 
     #[test]
-    fn nullable_and_delete_player_command_recovers_and_retries_without_drift() {
-        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+    fn untyped_nullable_and_delete_player_command_fails_before_durable_stage() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
             player_authority_fixture();
-        let seeded = registry
-            .commit_player_authority_command(
-                &mut store,
-                &session_id,
-                player_authority_raw_top_level_command(
-                    entry_checkpoint.revision,
-                    "nullable-delete-seed",
-                    vec![json!({
-                        "path": ["optionalPlayerCommandProbe"],
-                        "operation": "set",
-                        "value": 1
-                    })],
-                ),
-            )
-            .unwrap();
-        let request = || {
-            player_authority_raw_top_level_command(
-                seeded.revision,
-                "nullable-delete-command",
-                vec![
-                    json!({
-                        "path": ["nullablePlayerCommandProbe"],
-                        "operation": "set",
-                        "value": null
-                    }),
-                    json!({
-                        "path": ["optionalPlayerCommandProbe"],
-                        "operation": "delete"
-                    }),
-                ],
-            )
-        };
+        let summary_before = serde_json::to_value(registry.status(&session_id).unwrap()).unwrap();
+        let checkpoint_before =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let request = player_authority_raw_top_level_command(
+            entry_checkpoint.revision,
+            "nullable-delete-command",
+            vec![
+                json!({
+                    "path": ["nullablePlayerCommandProbe"],
+                    "operation": "set",
+                    "value": null
+                }),
+                json!({
+                    "path": ["optionalPlayerCommandProbe"],
+                    "operation": "delete"
+                }),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_value(&request.command).unwrap()["topLevelChanges"][0]["value"],
+            Value::Null
+        );
         let error = registry
             .commit_player_authority_command_internal(
                 &mut store,
                 &session_id,
-                request(),
+                request,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
-        assert!(format!("{error:#}").contains("lost response"));
-        let staged = store.require_exact_realtime_lease().unwrap();
-        let staged_command = &staged.pending_command.as_ref().unwrap().command;
+        assert!(format!("{error:#}").contains("pause command shape is invalid"));
         assert_eq!(
-            staged_command.pointer("/topLevelChanges/0/value"),
-            Some(&Value::Null)
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            summary_before
         );
         assert_eq!(
-            staged_command.pointer("/topLevelChanges/1/value"),
-            Some(&Value::Null)
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            checkpoint_before
         );
-        drop(registry);
-        drop(store);
-
-        let mut reopened_store = SaveStore::open(root.path()).unwrap();
-        let mut reopened_registry = resumable_player_authority_registry_for_test();
-        let recovered = reopened_registry
-            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
-            .unwrap()
-            .expect("staged nullable/delete command must recover");
-        assert_eq!(
-            recovered.command_id.as_deref(),
-            Some("nullable-delete-command")
-        );
-        assert_eq!(recovered.command_base_revision, Some(seeded.revision));
-        assert_eq!(recovered.revision, seeded.revision + 1);
-        reopened_registry
-            .export_v47(
-                &reopened_store,
-                &recovered.session_id,
-                "nullable-delete-recovered",
-                recovered.settled_deadline_ms,
-            )
-            .unwrap();
-        let envelope: Value = serde_json::from_slice(
-            &fs::read(root.path().join("exports/nullable-delete-recovered.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            envelope["state"].get("nullablePlayerCommandProbe"),
-            Some(&Value::Null)
-        );
-        assert!(
-            envelope["state"]
-                .get("optionalPlayerCommandProbe")
-                .is_none()
-        );
-        let recovered_hash = recovered.summary.canonical_sha256.clone();
-
-        let duplicate = reopened_registry
-            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
-            .unwrap();
-        assert!(duplicate.duplicate);
-        assert_eq!(duplicate.revision, recovered.revision);
-        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
-        assert!(
-            reopened_store
-                .require_exact_realtime_lease()
-                .unwrap()
-                .pending_command
-                .is_none()
-        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
     }
 
     #[test]
@@ -4239,9 +4404,9 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
             assert!(recovered.duplicate, "{fault:?}");
             assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
-            assert!(recovered.changed_entity_ids.is_empty());
+            assert_eq!(recovered.changed_entity_ids, ["vein"]);
             assert!(recovered.changed_belt_ids.is_empty());
-            assert!(recovered.topology_dirty);
+            assert!(!recovered.topology_dirty);
             let lease = store.require_exact_realtime_lease().unwrap();
             assert_eq!(lease.acknowledged.sequence, 1);
             assert_eq!(lease.acknowledged.revision, recovered.revision);
@@ -4274,8 +4439,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .command
-                .pointer("/topLevelChanges/0/value/persisted"),
-            Some(&json!(true))
+                .pointer("/changedEntities/0/changes/0/value"),
+            Some(&json!(17.0))
         );
         drop(registry);
         drop(store);
@@ -4302,9 +4467,9 @@ mod tests {
             recovered.command_base_revision,
             Some(entry_checkpoint.revision)
         );
-        assert!(recovered.changed_entity_ids.is_empty());
+        assert_eq!(recovered.changed_entity_ids, ["vein"]);
         assert!(recovered.changed_belt_ids.is_empty());
-        assert!(recovered.topology_dirty);
+        assert!(!recovered.topology_dirty);
         assert_eq!(recovered.summary.revision, recovered.revision);
         let lease = reopened_store.require_exact_realtime_lease().unwrap();
         assert_ne!(

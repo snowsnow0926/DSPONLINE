@@ -88,6 +88,79 @@ function viewportContext(overrides = {}) {
   };
 }
 
+function viewportV2Context(overrides = {}) {
+  return {
+    sessionId: "session-viewport-v2",
+    expectedRevision: 7,
+    baseFields: ["paused"],
+    planetId: "mod:星球/Ω",
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    entityCursor: 1,
+    entityLimit: 1,
+    beltCursor: 0,
+    beltLimit: 1,
+    pinnedEntityIds: ["mod:节点/Ω [selected]"],
+    pinnedBeltIds: ["mod:线路/β #pinned"],
+    ...overrides,
+  };
+}
+
+function viewportV2Projection(overrides = {}) {
+  const planetId = "mod:星球/Ω";
+  return {
+    schemaVersion: 2,
+    projectionType: "viewport-v2",
+    revision: 7,
+    planetId,
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    base: { paused: false },
+    entities: [
+      {
+        id: "mod:节点/Ω [selected]", kind: "vein", planetId,
+        position: { x: 20, y: 20 }, interactionLocked: false,
+        routingCursor: 0, machineCount: 0, minerCount: 1,
+        inputs: {}, outputs: { "mod:物品/铁矿 Ω": 2 },
+        progress: 0, utilization: 1, productionRate: 1,
+      },
+      {
+        id: "mod:节点/可见", kind: "vein", planetId,
+        position: { x: 2, y: 3 }, interactionLocked: false,
+        routingCursor: 0, machineCount: 0, minerCount: 1,
+        inputs: {}, outputs: { "mod:物品/铁矿 Ω": 1 },
+        progress: 0, utilization: 1, productionRate: 1,
+      },
+    ],
+    belts: [
+      {
+        id: "mod:线路/β #pinned", planetId, source: "mod:节点/Ω [selected]",
+        target: "mod:节点/远端", itemId: "mod:物品/铁矿 Ω", lanes: 1,
+        tier: 1, sorterTier: 1, progress: 0, priority: 1,
+      },
+      {
+        id: "mod:线路/可见", planetId, source: "mod:节点/可见",
+        target: "mod:节点/远端", itemId: "mod:物品/铁矿 Ω", lanes: 1,
+        tier: 1, sorterTier: 1, progress: 0, priority: 1,
+      },
+    ],
+    pinnedEntityIds: ["mod:节点/Ω [selected]"],
+    pinnedBeltIds: ["mod:线路/β #pinned"],
+    nextEntityCursor: 2,
+    nextBeltCursor: 1,
+    planetTotals: { entities: 4, belts: 3 },
+    viewportTotals: { entities: 3, belts: 2 },
+    worldBounds: { minX: -5, minY: -5, maxX: 30, maxY: 30 },
+    minimap: {
+      bounds: { minX: -5, minY: -5, maxX: 30, maxY: 30 },
+      entityCount: 4,
+      beltCount: 3,
+      occupiedCellCount: 2,
+      cellSize: 512,
+    },
+    broadQueryFallback: false,
+    ...overrides,
+  };
+}
+
 function statisticsContext(overrides = {}) {
   return {
     minElapsedSeconds: 0,
@@ -495,6 +568,90 @@ test("viewport and statistics projections use bounded formal schemas", () => {
   rejectsStatistics({ ...statistics, nextCursor: 9 }, statisticsContext({ cursor: 3 }));
 });
 
+test("viewport v2 binds independent pages and preserves bounded opaque selections", () => {
+  const projection = viewportV2Projection();
+  const context = viewportV2Context();
+  const normalized = normalizeRendererNativeResult("coreViewportProjectionV2", projection, context);
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.entities[0], projection.entities[0]);
+  assert.notEqual(normalized.entities[0].outputs, projection.entities[0].outputs);
+  assert.equal(normalized.entities[0].outputs["mod:物品/铁矿 Ω"], 2);
+  assert.deepEqual(normalized.pinnedEntityIds, ["mod:节点/Ω [selected]"]);
+  assert.deepEqual(normalized.pinnedBeltIds, ["mod:线路/β #pinned"]);
+  assert.equal(normalized.nextEntityCursor, 2);
+  assert.equal(normalized.nextBeltCursor, 1);
+
+  const rejectsViewportV2 = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreViewportProjectionV2", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+
+  // Session and revision are mandatory request selectors even though only the
+  // revision is echoed in the bounded projection body.
+  rejectsViewportV2(projection, viewportV2Context({ sessionId: "bad session" }));
+  rejectsViewportV2(projection, viewportV2Context({ expectedRevision: 8 }));
+  rejectsViewportV2(projection, { ...context, unexpected: true });
+  rejectsViewportV2({ ...projection, revision: 8 });
+
+  // Entity and belt pages advance independently and are both derived from
+  // their own cursor plus total, never from the other returned array length.
+  rejectsViewportV2({ ...projection, nextEntityCursor: 1 });
+  rejectsViewportV2({ ...projection, nextBeltCursor: null });
+  rejectsViewportV2({ ...projection, viewportTotals: { entities: 1, belts: 2 } });
+  rejectsViewportV2({ ...projection, viewportTotals: { entities: 3, belts: 4 } });
+  rejectsViewportV2({ ...projection, entities: [] });
+  rejectsViewportV2({ ...projection, belts: [...projection.belts, { ...projection.belts[1], id: "mod:线路/额外" }] });
+
+  // Only a resolved, explicitly requested pinned selection may be outside the
+  // requested viewport, and every returned pin must have a matching record.
+  rejectsViewportV2({ ...projection, pinnedEntityIds: ["mod:节点/未请求"] });
+  rejectsViewportV2({ ...projection, pinnedBeltIds: ["mod:线路/未请求"] });
+  rejectsViewportV2({ ...projection, entities: projection.entities.slice(1) });
+  rejectsViewportV2({ ...projection, belts: projection.belts.slice(1) });
+  rejectsViewportV2({
+    ...projection,
+    entities: projection.entities.map((entity) => entity.id === "mod:节点/可见"
+      ? { ...entity, position: { x: 11, y: 3 } }
+      : entity),
+  });
+  rejectsViewportV2({
+    ...projection,
+    pinnedEntityIds: [],
+    entities: projection.entities,
+  }, viewportV2Context({ pinnedEntityIds: [] }));
+
+  // Totals, world bounds and minimap are a closed read-model description.
+  rejectsViewportV2({ ...projection, planetTotals: { entities: 4, belts: 1 } });
+  rejectsViewportV2({ ...projection, worldBounds: { minX: -5, minY: -5, maxX: 10, maxY: 10 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, entityCount: 5 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, occupiedCellCount: 5 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, cellSize: 256 } });
+  rejectsViewportV2({ ...projection, broadQueryFallback: "false" });
+
+  // Opaque MOD identifiers are UTF-8 byte bounded and may contain Unicode,
+  // spaces and slashes, but never NUL or malformed surrogate halves.
+  rejectsViewportV2({
+    ...projection,
+    entities: [{ ...projection.entities[0], id: "mod:\0bad" }, projection.entities[1]],
+  });
+  rejectsViewportV2(projection, viewportV2Context({ planetId: "界".repeat(342) }));
+  rejectsViewportV2({
+    ...projection,
+    entities: [{ ...projection.entities[0], id: "mod:\ud800" }, projection.entities[1]],
+  });
+  rejectsViewportV2(projection, viewportV2Context({
+    pinnedEntityIds: ["mod:节点/Ω [selected]", "mod:节点/Ω [selected]"],
+  }));
+
+  // The renderer boundary independently retains the core's 1 MiB payload
+  // contract before cloning nested projection data.
+  rejectsViewportV2({
+    ...projection,
+    base: { paused: false, payload: new Array(16_384).fill("x".repeat(64)) },
+  }, viewportV2Context({ baseFields: ["paused", "payload"] }));
+});
+
 test("Electron main uses the dedicated native renderer boundary", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
@@ -505,11 +662,13 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?\.catch\(\(error\) => postNativeProjectionTransferError\(port, error\)\)/);
   assert.doesNotMatch(source, /desktop:native-core-projection-transfer[\s\S]*?\.catch\(\(error\) => postTransferError\(port, error\)\)/);
   assert.match(source, /function nativeViewportProjectionResultContext[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?bounds:\s*request\?\.bounds[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltLimit:/);
+  assert.match(source, /function nativeViewportProjectionV2ResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltCursor:[\s\S]*?beltLimit:[\s\S]*?pinnedEntityIds:[\s\S]*?pinnedBeltIds:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection"[\s\S]*?resultContext:\s*nativeViewportProjectionResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-viewport-projection-v2"[\s\S]*?runRendererNativeOperation\("coreViewportProjectionV2"[\s\S]*?resultContext:\s*nativeViewportProjectionV2ResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
-  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
+  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
   assert.match(source, /desktop:native-core-status[\s\S]*?runRendererNativeOperation\("coreSummary"/);
   assert.match(preload, /function invokeNative[\s\S]*?createRendererNativeRejection\(error, options\)/);
   assert.doesNotMatch(preload, /ipcRenderer\.invoke\("desktop:(?:native|set-native)/);
@@ -518,6 +677,6 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 24);
+  assert.equal(mainChannels.length, 25);
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

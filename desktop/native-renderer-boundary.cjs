@@ -9,6 +9,9 @@ const MAX_PROJECTION_NODES = 300_000;
 const MAX_PROJECTION_ARRAY_ENTRIES = 16_384;
 const MAX_PROJECTION_OBJECT_ENTRIES = 8_192;
 const MAX_PROJECTION_STRING_LENGTH = 4_096;
+const MAX_NATIVE_PROJECTION_BYTES = 1_048_576;
+const MAX_VIEWPORT_V2_OPAQUE_ID_BYTES = 512;
+const VIEWPORT_V2_SPATIAL_CELL_SIZE = 512;
 
 const PRIVATE_PROJECTION_KEYS = new Set([
   "sourcepath", "path", "filepath", "stderr", "stdout", "stack", "body",
@@ -143,6 +146,24 @@ function logicalId(value, label, maximum = 256) {
   if (!LOGICAL_ID_PATTERN.test(result)) throw protocolError(label);
   return result;
 }
+function opaqueId(value, label, maximumBytes = MAX_VIEWPORT_V2_OPAQUE_ID_BYTES) {
+  if (typeof value !== "string" || value.length < 1 || value.includes("\0") ||
+      Buffer.byteLength(value, "utf8") > maximumBytes) throw protocolError(label);
+  // JSON emitted by serde_json cannot contain unpaired UTF-16 surrogates.
+  // Reject them here too so two distinct renderer strings cannot collapse to
+  // the same replacement-character byte sequence at a later IPC boundary.
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw protocolError(label);
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw protocolError(label);
+    }
+  }
+  return value;
+}
 function recordKey(value, label) {
   const result = boundedString(value, label, 512);
   if (result.includes("..") || /[\\/]/.test(result)) throw protocolError(label);
@@ -168,6 +189,16 @@ function logicalIdArray(value, label, maximumEntries = 1_000_000, maximumLength 
   if (!Array.isArray(value) || value.length > maximumEntries) throw protocolError(label);
   return value.map((entry, index) => logicalId(entry, `${label}[${index}]`, maximumLength));
 }
+function opaqueIdArray(value, label, maximumEntries) {
+  if (!Array.isArray(value) || value.length > maximumEntries) throw protocolError(label);
+  const seen = new Set();
+  return value.map((entry, index) => {
+    const id = opaqueId(entry, `${label}[${index}]`);
+    if (seen.has(id)) throw protocolError(`${label}[${index}]`);
+    seen.add(id);
+    return id;
+  });
+}
 function stringHashRecord(value, label, maximumEntries = 4_096) {
   const source = jsonObject(value, label);
   const entries = Reflect.ownKeys(source);
@@ -179,6 +210,18 @@ function stringHashRecord(value, label, maximumEntries = 4_096) {
 }
 
 function projectionBudget() { return { nodes: 0 }; }
+
+function requireProjectionByteBudget(value, label) {
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw protocolError(`${label} byte budget`);
+  }
+  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError(`${label} byte budget`);
+  }
+}
 
 function claimProjectionNode(budget, label) {
   budget.nodes += 1;
@@ -255,6 +298,30 @@ function normalizeViewportProjectionContext(value, label) {
   };
 }
 
+function normalizeViewportProjectionV2Context(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "baseFields", "planetId", "bounds",
+    "entityCursor", "entityLimit", "beltCursor", "beltLimit",
+    "pinnedEntityIds", "pinnedBeltIds",
+  ], label);
+  const entityLimit = safeInteger(source.entityLimit, `${label} entity limit`, 1);
+  const beltLimit = safeInteger(source.beltLimit, `${label} belt limit`, 1);
+  if (entityLimit > 4_096 || beltLimit > 8_192) throw protocolError(`${label} limits`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    baseFields: normalizeProjectionBaseFields(source.baseFields, label),
+    planetId: opaqueId(source.planetId, `${label} planet`),
+    bounds: normalizeBounds(source.bounds, `${label} bounds`),
+    entityCursor: safeInteger(source.entityCursor, `${label} entity cursor`),
+    entityLimit,
+    beltCursor: safeInteger(source.beltCursor, `${label} belt cursor`),
+    beltLimit,
+    pinnedEntityIds: opaqueIdArray(source.pinnedEntityIds, `${label} pinned entity IDs`, 32),
+    pinnedBeltIds: opaqueIdArray(source.pinnedBeltIds, `${label} pinned belt IDs`, 64),
+  };
+}
+
 function normalizeStatisticsProjectionContext(value, label) {
   const source = exactObject(value, ["minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId"], label);
   const minElapsedSeconds = finiteNumber(source.minElapsedSeconds, `${label} minimum elapsed seconds`);
@@ -281,7 +348,7 @@ function normalizeProjectionBase(value, allowedFields, label, budget) {
   return sanitizeProjectionValue(source, label, budget);
 }
 
-function normalizeProjectionRecords(value, allowedKeys, label, maximum, budget, requestedIds = null, quantityRecordKeys = null) {
+function normalizeProjectionRecords(value, allowedKeys, label, maximum, budget, requestedIds = null, quantityRecordKeys = null, idNormalizer = logicalId, quantityIdNormalizer = logicalId) {
   if (!Array.isArray(value) || value.length > maximum) throw protocolError(label);
   claimProjectionNode(budget, label);
   const seen = new Set();
@@ -291,20 +358,20 @@ function normalizeProjectionRecords(value, allowedKeys, label, maximum, budget, 
     if (keys.length > allowedKeys.size || keys.some((key) => typeof key !== "string" || !allowedKeys.has(key))) {
       throw protocolError(`${label}[${index}]`);
     }
-    const id = logicalId(source.id, `${label}[${index}].id`, 160);
+    const id = idNormalizer(source.id, `${label}[${index}].id`, 160);
     if (seen.has(id) || requestedIds && !requestedIds.has(id)) throw protocolError(`${label}[${index}].id`);
     seen.add(id);
     claimProjectionNode(budget, `${label}[${index}]`);
     return Object.fromEntries(keys.map((key) => [
       key,
       quantityRecordKeys?.has(key)
-        ? normalizeQuantityRecord(source[key], `${label}[${index}].${key}`, budget)
+        ? normalizeQuantityRecord(source[key], `${label}[${index}].${key}`, budget, quantityIdNormalizer)
         : sanitizeProjectionValue(source[key], `${label}[${index}].${key}`, budget, 1),
     ]));
   });
 }
 
-function normalizeQuantityRecord(value, label, budget) {
+function normalizeQuantityRecord(value, label, budget, idNormalizer = logicalId) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
   if (keys.length > 4_096) throw protocolError(label);
@@ -313,7 +380,7 @@ function normalizeQuantityRecord(value, label, budget) {
     // Item IDs are typed map keys, not diagnostic property names. A mod may
     // legitimately publish an item named "state" or "body"; its value must
     // still be a finite numeric quantity, so it cannot smuggle Host objects.
-    const itemId = logicalId(key, `${label} item`, 256);
+    const itemId = idNormalizer(key, `${label} item`, 256);
     claimProjectionNode(budget, `${label}.${itemId}`);
     return [itemId, finiteNumber(source[itemId], `${label}.${itemId}`)];
   }));
@@ -698,6 +765,193 @@ function normalizeCoreViewportProjection(value, context) {
   };
 }
 
+function equalBounds(left, right) {
+  return left.minX === right.minX && left.minY === right.minY &&
+    left.maxX === right.maxX && left.maxY === right.maxY;
+}
+
+function pointWithinBounds(x, y, bounds) {
+  return x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY;
+}
+
+function normalizeViewportTotals(value, label) {
+  const source = exactObject(value, ["entities", "belts"], label);
+  return {
+    entities: safeInteger(source.entities, `${label}.entities`),
+    belts: safeInteger(source.belts, `${label}.belts`),
+  };
+}
+
+function normalizeCoreViewportProjectionV2(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "planetId", "bounds", "base",
+    "entities", "belts", "pinnedEntityIds", "pinnedBeltIds", "nextEntityCursor",
+    "nextBeltCursor", "planetTotals", "viewportTotals", "worldBounds", "minimap",
+    "broadQueryFallback",
+  ], "native viewport v2 projection");
+  if (source.schemaVersion !== 2 || source.projectionType !== "viewport-v2") {
+    throw protocolError("native viewport v2 projection identity");
+  }
+  requireProjectionByteBudget(source, "native viewport v2 projection");
+  const projectionContext = normalizeViewportProjectionV2Context(
+    context,
+    "native viewport v2 projection context",
+  );
+  const revision = safeInteger(source.revision, "native viewport v2 revision");
+  if (revision !== projectionContext.expectedRevision) {
+    throw protocolError("native viewport v2 revision binding");
+  }
+  // Validating the session selector here is intentional even though the
+  // projection body does not echo it. The main-process MessagePort header is
+  // the session-bearing half of this same request binding.
+  if (!projectionContext.sessionId) throw protocolError("native viewport v2 session binding");
+  const planetId = opaqueId(source.planetId, "native viewport v2 planet");
+  const bounds = normalizeBounds(source.bounds, "native viewport v2 bounds");
+  if (planetId !== projectionContext.planetId || !equalBounds(bounds, projectionContext.bounds)) {
+    throw protocolError("native viewport v2 request binding");
+  }
+
+  const planetTotals = normalizeViewportTotals(source.planetTotals, "native viewport v2 planet totals");
+  const viewportTotals = normalizeViewportTotals(source.viewportTotals, "native viewport v2 viewport totals");
+  if (viewportTotals.entities > planetTotals.entities || viewportTotals.belts > planetTotals.belts ||
+      projectionContext.entityCursor > viewportTotals.entities ||
+      projectionContext.beltCursor > viewportTotals.belts) {
+    throw protocolError("native viewport v2 total binding");
+  }
+
+  const pinnedEntityIds = opaqueIdArray(
+    source.pinnedEntityIds,
+    "native viewport v2 pinned entity IDs",
+    projectionContext.pinnedEntityIds.length,
+  );
+  const pinnedBeltIds = opaqueIdArray(
+    source.pinnedBeltIds,
+    "native viewport v2 pinned belt IDs",
+    projectionContext.pinnedBeltIds.length,
+  );
+  const requestedPinnedEntityIds = new Set(projectionContext.pinnedEntityIds);
+  const requestedPinnedBeltIds = new Set(projectionContext.pinnedBeltIds);
+  if (pinnedEntityIds.some((id) => !requestedPinnedEntityIds.has(id)) ||
+      pinnedBeltIds.some((id) => !requestedPinnedBeltIds.has(id))) {
+    throw protocolError("native viewport v2 pinned request binding");
+  }
+
+  const budget = projectionBudget();
+  const entities = normalizeProjectionRecords(
+    source.entities,
+    ENTITY_PROJECTION_KEYS,
+    "native viewport v2 entities",
+    projectionContext.entityLimit + pinnedEntityIds.length,
+    budget,
+    null,
+    ENTITY_QUANTITY_RECORD_KEYS,
+    (entry, label) => opaqueId(entry, label),
+    (entry, label) => opaqueId(entry, label),
+  );
+  const belts = normalizeProjectionRecords(
+    source.belts,
+    BELT_PROJECTION_KEYS,
+    "native viewport v2 belts",
+    projectionContext.beltLimit + pinnedBeltIds.length,
+    budget,
+    null,
+    null,
+    (entry, label) => opaqueId(entry, label),
+  );
+  const entityIds = new Set(entities.map((entity) => entity.id));
+  const beltIds = new Set(belts.map((belt) => belt.id));
+  if (pinnedEntityIds.some((id) => !entityIds.has(id)) || pinnedBeltIds.some((id) => !beltIds.has(id))) {
+    throw protocolError("native viewport v2 pinned record binding");
+  }
+
+  const worldBounds = normalizeBounds(source.worldBounds, "native viewport v2 world bounds");
+  const pinnedEntitySet = new Set(pinnedEntityIds);
+  for (const [index, entity] of entities.entries()) {
+    if (entity.planetId !== planetId) throw protocolError(`native viewport v2 entities[${index}].planetId`);
+    const position = exactObject(entity.position, ["x", "y"], `native viewport v2 entities[${index}].position`);
+    const x = finiteNumber(position.x, `native viewport v2 entities[${index}].position.x`, -10_000_000);
+    const y = finiteNumber(position.y, `native viewport v2 entities[${index}].position.y`, -10_000_000);
+    if (!pointWithinBounds(x, y, worldBounds) ||
+        !pointWithinBounds(x, y, bounds) && !pinnedEntitySet.has(entity.id)) {
+      throw protocolError(`native viewport v2 entities[${index}].position`);
+    }
+    entity.position = { x, y };
+  }
+  for (const [index, belt] of belts.entries()) {
+    if (belt.planetId !== planetId) throw protocolError(`native viewport v2 belts[${index}].planetId`);
+  }
+
+  const expectedEntityPageSize = Math.min(
+    projectionContext.entityLimit,
+    viewportTotals.entities - projectionContext.entityCursor,
+  );
+  const expectedBeltPageSize = Math.min(
+    projectionContext.beltLimit,
+    viewportTotals.belts - projectionContext.beltCursor,
+  );
+  if (entities.length < expectedEntityPageSize ||
+      entities.length > expectedEntityPageSize + pinnedEntityIds.length ||
+      belts.length < expectedBeltPageSize ||
+      belts.length > expectedBeltPageSize + pinnedBeltIds.length ||
+      entities.length > planetTotals.entities || belts.length > planetTotals.belts) {
+    throw protocolError("native viewport v2 page cardinality");
+  }
+  const expectedNextEntityCursor = projectionContext.entityCursor + expectedEntityPageSize < viewportTotals.entities
+    ? projectionContext.entityCursor + expectedEntityPageSize
+    : null;
+  const expectedNextBeltCursor = projectionContext.beltCursor + expectedBeltPageSize < viewportTotals.belts
+    ? projectionContext.beltCursor + expectedBeltPageSize
+    : null;
+  const nextEntityCursor = source.nextEntityCursor === null
+    ? null
+    : safeInteger(source.nextEntityCursor, "native viewport v2 entity cursor");
+  const nextBeltCursor = source.nextBeltCursor === null
+    ? null
+    : safeInteger(source.nextBeltCursor, "native viewport v2 belt cursor");
+  if (nextEntityCursor !== expectedNextEntityCursor || nextBeltCursor !== expectedNextBeltCursor) {
+    throw protocolError("native viewport v2 cursor binding");
+  }
+
+  const minimapSource = exactObject(
+    source.minimap,
+    ["bounds", "entityCount", "beltCount", "occupiedCellCount", "cellSize"],
+    "native viewport v2 minimap",
+  );
+  const minimapBounds = normalizeBounds(minimapSource.bounds, "native viewport v2 minimap bounds");
+  const minimap = {
+    bounds: minimapBounds,
+    entityCount: safeInteger(minimapSource.entityCount, "native viewport v2 minimap entity count"),
+    beltCount: safeInteger(minimapSource.beltCount, "native viewport v2 minimap belt count"),
+    occupiedCellCount: safeInteger(minimapSource.occupiedCellCount, "native viewport v2 minimap occupied cell count"),
+    cellSize: finiteNumber(minimapSource.cellSize, "native viewport v2 minimap cell size", 1),
+  };
+  if (!equalBounds(minimap.bounds, worldBounds) || minimap.entityCount !== planetTotals.entities ||
+      minimap.beltCount !== planetTotals.belts || minimap.occupiedCellCount > minimap.entityCount ||
+      minimap.cellSize !== VIEWPORT_V2_SPATIAL_CELL_SIZE) {
+    throw protocolError("native viewport v2 minimap binding");
+  }
+
+  return {
+    schemaVersion: 2,
+    projectionType: "viewport-v2",
+    revision,
+    planetId,
+    bounds,
+    base: normalizeProjectionBase(source.base, projectionContext.baseFields, "native viewport v2 base", budget),
+    entities,
+    belts,
+    pinnedEntityIds,
+    pinnedBeltIds,
+    nextEntityCursor,
+    nextBeltCursor,
+    planetTotals,
+    viewportTotals,
+    worldBounds,
+    minimap,
+    broadQueryFallback: boolean(source.broadQueryFallback, "native viewport v2 broad query fallback"),
+  };
+}
+
 function normalizeCoreStatisticsProjection(value, context) {
   const source = exactObject(value, ["schemaVersion", "projectionType", "revision", "window", "filters", "samples", "nextCursor"], "native statistics projection");
   if (source.schemaVersion !== 1 || source.projectionType !== "statistics-v1") throw protocolError("native statistics projection identity");
@@ -844,6 +1098,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreSummary: normalizeCoreSummary,
   coreProjection: normalizeCoreProjection,
   coreViewportProjection: normalizeCoreViewportProjection,
+  coreViewportProjectionV2: normalizeCoreViewportProjectionV2,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

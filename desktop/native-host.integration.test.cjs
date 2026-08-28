@@ -382,6 +382,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v2"));
+  assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   const base = JSON.stringify({
@@ -542,6 +543,25 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.deepEqual(viewportProjectionV2.viewportTotals, { entities: 1, belts: 1 });
   assert.equal(viewportProjectionV2.minimap.entityCount, 1);
   assert.equal(viewportProjectionV2.minimap.beltCount, 1);
+  const factoryReadModel = await client.request({
+    operation: "coreFactoryReadModelProjection",
+    sessionId: opened.sessionId,
+    selectedEntityIds: ["vein", "missing"],
+    selectedBeltIds: ["belt"],
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreFactoryReadModelProjection", factoryReadModel, {
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    selectedEntityIds: ["vein", "missing"],
+    selectedBeltIds: ["belt"],
+  }));
+  assert.equal(factoryReadModel.projectionType, "factory-read-model-v1");
+  assert.equal(factoryReadModel.revision, 2);
+  assert.equal(factoryReadModel.shell.source, "native-core");
+  assert.equal(factoryReadModel.shell.entityCount, 1);
+  assert.deepEqual(factoryReadModel.selection.entityRows.rows.map((entity) => entity.entityId), ["vein"]);
+  assert.deepEqual(factoryReadModel.selection.beltRows.rows.map((belt) => belt.beltId), ["belt"]);
+  assert.equal(factoryReadModel.construction.queue.totalCount, 0);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

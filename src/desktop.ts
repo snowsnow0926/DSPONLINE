@@ -1,4 +1,5 @@
 import type { BeltConnection, FactoryEntity, ProductionHistorySample } from "./game/types";
+import type { FactoryReadModelBundle } from "./game/factoryReadModels";
 
 export type DesktopUpdateState = "development" | "idle" | "checking" | "available" | "up-to-date" | "downloading" | "downloaded" | "error";
 
@@ -45,6 +46,7 @@ export interface DesktopBridge {
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
   getNativeCoreViewportProjection: (request: DesktopNativeCoreViewportProjectionRequest) => Promise<DesktopNativeCoreViewportProjectionResult>;
   getNativeCoreViewportProjectionV2: (request: DesktopNativeCoreViewportProjectionV2Request) => Promise<DesktopNativeCoreViewportProjectionV2Result>;
+  getNativeCoreFactoryReadModel: (request: DesktopNativeCoreFactoryReadModelRequest) => Promise<DesktopNativeCoreFactoryReadModelResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
@@ -620,6 +622,18 @@ export interface DesktopNativeCoreViewportProjectionV2Result {
   broadQueryFallback: boolean;
 }
 
+export interface DesktopNativeCoreFactoryReadModelRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  selectedEntityIds?: string[];
+  selectedBeltIds?: string[];
+}
+
+export interface DesktopNativeCoreFactoryReadModelResult extends FactoryReadModelBundle {
+  schemaVersion: 1;
+  projectionType: "factory-read-model-v1";
+  revision: number;
+}
+
 export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
   minElapsedSeconds: number;
   maxElapsedSeconds: number;
@@ -652,6 +666,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "factory-read-model-v1";
+      payload: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     };
@@ -661,7 +680,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "statistics-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1";
   payloadLength: number;
   sha256: string;
 }

@@ -33,7 +33,7 @@ export interface ItemQuantityReadModel {
 
 export interface FactoryShellReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
-  readonly source: "web-game-state";
+  readonly source: "web-game-state" | "native-core";
   readonly stateVersion: number;
   readonly mode: "normal" | "speedrun";
   readonly activePlanetId: string;

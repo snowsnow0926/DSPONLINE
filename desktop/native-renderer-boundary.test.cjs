@@ -161,6 +161,139 @@ function viewportV2Projection(overrides = {}) {
   };
 }
 
+function factoryReadModelContext(overrides = {}) {
+  return {
+    sessionId: "session-factory-read-model",
+    expectedRevision: 7,
+    selectedEntityIds: ["MOD-建筑", "missing"],
+    selectedBeltIds: ["MOD-线路"],
+    ...overrides,
+  };
+}
+
+function factoryReadModelProjection(overrides = {}) {
+  const rows = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-read-model-v1",
+    revision: 7,
+    shell: {
+      schema: "factory-read-model-v1",
+      source: "native-core",
+      stateVersion: 47,
+      mode: "normal",
+      activePlanetId: "MOD-星球",
+      paused: false,
+      elapsedSeconds: 123,
+      simulationSpeed: 4,
+      entityCount: 2,
+      beltCount: 1,
+      activePlanetEntityCount: 2,
+      activePlanetBeltCount: 1,
+      constructionQueueCount: 1,
+    },
+    planetNavigation: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      planets: rows([{
+        planetId: "MOD-星球",
+        systemId: "MOD-恒星系",
+        displayName: "测试家园 Ω",
+        code: "MOD-星球",
+        active: true,
+        discovered: true,
+        colonized: true,
+        role: "industry",
+        entityCount: 2,
+        beltCount: 1,
+        constructionQueueCount: 1,
+      }]),
+    },
+    selection: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      requestedEntityCount: 2,
+      requestedBeltCount: 1,
+      entityRows: rows([{
+        entityId: "MOD-建筑",
+        planetId: "MOD-星球",
+        kind: "storage",
+        position: { x: -5, y: 6 },
+        interactionLocked: false,
+        buildingId: "MOD-仓库",
+        resourceId: null,
+        recipeId: null,
+        storedItemId: "MOD-物品/Ω",
+        fuelItemId: null,
+        machineCount: 1,
+        minerCount: 0,
+        progress: 0,
+        utilization: 0.5,
+        productionRate: 1,
+        powerFactor: null,
+        inputItems: rows([{ itemId: "MOD-物品/Ω", amount: 4 }]),
+        outputItems: rows([]),
+      }]),
+      beltRows: rows([{
+        beltId: "MOD-线路",
+        planetId: "MOD-星球",
+        sourceEntityId: "MOD-建筑",
+        targetEntityId: "sink",
+        itemId: "MOD-物品/Ω",
+        lanes: 1,
+        tier: 1,
+        sorterTier: 1,
+        stackSize: null,
+        priority: 1,
+        progress: 0,
+        lastFlow: 2,
+        totalTransferred: null,
+        congestion: null,
+      }]),
+    },
+    construction: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      queue: rows([{
+        queueId: "queue-1",
+        blueprintId: "bp-1",
+        blueprintVersionId: null,
+        blueprintRevision: null,
+        blueprintName: "测试蓝图",
+        planetId: "MOD-星球",
+        queuedAt: 2,
+        status: "pending-materials",
+        rotation: 0,
+        mirror: "none",
+        placedEntityCount: 1,
+        reservedConstruction: rows([{ constructionId: "MOD-仓库", amount: 2 }]),
+        reservedFleet: rows([{ itemId: "MOD-物品/Ω", amount: 3 }]),
+      }]),
+      automation: {
+        enabled: true,
+        quantumSourceEnabled: true,
+        totalCrafted: 7,
+        lastCraftedId: "MOD-仓库",
+        targets: rows([{ targetId: "MOD-仓库", amount: 10 }]),
+        jobs: rows([{
+          entityId: "MOD-建筑",
+          constructionId: "MOD-仓库",
+          stepIndex: 1,
+          stepCount: 2,
+          elapsedSeconds: 0.5,
+          inventory: rows([{ itemId: "MOD-物品/Ω", amount: 4 }]),
+        }]),
+        destroyedByproducts: rows([{ itemId: "MOD-副产物", amount: 1 }]),
+      },
+    },
+    ...overrides,
+  };
+}
+
 function statisticsContext(overrides = {}) {
   return {
     minElapsedSeconds: 0,
@@ -652,6 +785,93 @@ test("viewport v2 binds independent pages and preserves bounded opaque selection
   }, viewportV2Context({ baseFields: ["paused", "payload"] }));
 });
 
+test("factory read model is strictly bounded and revision-bound before renderer delivery", () => {
+  const projection = factoryReadModelProjection();
+  const context = factoryReadModelContext();
+  const normalized = normalizeRendererNativeResult("coreFactoryReadModelProjection", projection, context);
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.selection.entityRows.rows[0], projection.selection.entityRows.rows[0]);
+  assert.equal(normalized.shell.source, "native-core");
+  assert.equal(normalized.selection.entityRows.rows[0].inputItems.rows[0].itemId, "MOD-物品/Ω");
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreFactoryReadModelProjection", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, factoryReadModelContext({ sessionId: "bad session" }));
+  rejects(projection, factoryReadModelContext({ expectedRevision: 8 }));
+  rejects(projection, factoryReadModelContext({ selectedEntityIds: new Array(65).fill("entity") }));
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, shell: { ...projection.shell, source: "web-game-state" } });
+  rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{ ...projection.selection.entityRows.rows[0], entityId: "not-requested" }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{
+          ...projection.selection.entityRows.rows[0],
+          inputItems: {
+            rows: [
+              { itemId: "MOD-物品/Ω", amount: 1 },
+              { itemId: "MOD-物品/Ω", amount: 2 },
+            ],
+            totalCount: 2,
+            truncated: false,
+          },
+        }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    selection: { ...projection.selection, requestedEntityCount: 1 },
+  });
+  rejects({
+    ...projection,
+    construction: {
+      ...projection.construction,
+      queue: { ...projection.construction.queue, truncated: true },
+    },
+  });
+  rejects({ ...projection, shell: { ...projection.shell, constructionQueueCount: 2 } });
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{
+          ...projection.selection.entityRows.rows[0],
+          inputItems: { rows: [{ itemId: "MOD-物品/Ω", amount: { body: SECRET_BODY } }], totalCount: 1, truncated: false },
+        }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    construction: {
+      ...projection.construction,
+      queue: {
+        ...projection.construction.queue,
+        rows: [{ ...projection.construction.queue.rows[0], blueprintName: "x".repeat(1_048_576) }],
+      },
+    },
+  });
+});
+
 test("Electron main uses the dedicated native renderer boundary", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
@@ -663,12 +883,14 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.doesNotMatch(source, /desktop:native-core-projection-transfer[\s\S]*?\.catch\(\(error\) => postTransferError\(port, error\)\)/);
   assert.match(source, /function nativeViewportProjectionResultContext[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?bounds:\s*request\?\.bounds[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltLimit:/);
   assert.match(source, /function nativeViewportProjectionV2ResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltCursor:[\s\S]*?beltLimit:[\s\S]*?pinnedEntityIds:[\s\S]*?pinnedBeltIds:/);
+  assert.match(source, /function nativeFactoryReadModelResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?selectedEntityIds:[\s\S]*?selectedBeltIds:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection"[\s\S]*?resultContext:\s*nativeViewportProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection-v2"[\s\S]*?runRendererNativeOperation\("coreViewportProjectionV2"[\s\S]*?resultContext:\s*nativeViewportProjectionV2ResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-factory-read-model"[\s\S]*?runRendererNativeOperation\("coreFactoryReadModelProjection"[\s\S]*?resultContext:\s*nativeFactoryReadModelResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
-  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
+  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
   assert.match(source, /desktop:native-core-status[\s\S]*?runRendererNativeOperation\("coreSummary"/);
   assert.match(preload, /function invokeNative[\s\S]*?createRendererNativeRejection\(error, options\)/);
   assert.doesNotMatch(preload, /ipcRenderer\.invoke\("desktop:(?:native|set-native)/);
@@ -677,6 +899,6 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 25);
+  assert.equal(mainChannels.length, 26);
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

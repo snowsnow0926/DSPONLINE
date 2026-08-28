@@ -78,6 +78,19 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   assert.equal(viewportV2Transfer.header.schemaVersion, 1);
   assert.equal(viewportV2Transfer.header.projectionType, "viewport-v2");
   assert.equal(JSON.parse(viewportV2Transfer.payload).schemaVersion, 2);
+  const factoryReadModelTransfer = encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 9,
+    projectionType: "factory-read-model-v1",
+    result: {
+      schemaVersion: 1,
+      projectionType: "factory-read-model-v1",
+      revision: 13,
+      shell: {},
+    },
+  });
+  assert.equal(factoryReadModelTransfer.header.projectionType, "factory-read-model-v1");
+  assert.equal(JSON.parse(factoryReadModelTransfer.payload).schemaVersion, 1);
   assert.throws(() => encodeNativeProjectionTransfer({
     sessionId: "core-1",
     sequence: 9,
@@ -317,12 +330,29 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     beltLimit: 64,
     pinnedEntityIds: ["bad\0id"],
   }), /viewport v2 projection request is invalid/);
+  await registry.factoryReadModelProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    selectedEntityIds: ["MOD-建筑"],
+    selectedBeltIds: ["MOD-线路"],
+  });
+  assert.throws(() => registry.factoryReadModelProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    selectedEntityIds: new Array(65).fill("entity"),
+  }), /factory read-model projection request is invalid/);
+  assert.throws(() => registry.factoryReadModelProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    selectedBeltIds: ["bad\0id"],
+  }), /factory read-model projection request is invalid/);
   assert.throws(() => registry.checkpoint(7, { sessionId: "core-1", savedAtMs: -1 }), /timestamp/);
   await registry.checkpoint(7, { sessionId: "core-1", savedAtMs: 2 });
   await registry.close(7, "core-1");
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), [
-    "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2", "coreCheckpoint", "coreClose",
+    "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2",
+    "coreFactoryReadModelProjection", "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
     operation: "coreViewportProjectionV2",
@@ -339,6 +369,12 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     beltLimit: 128,
     pinnedEntityIds: ["MOD-建筑"],
     pinnedBeltIds: ["MOD-线路"],
+  });
+  assert.deepEqual(calls[4], {
+    operation: "coreFactoryReadModelProjection",
+    sessionId: "core-1",
+    selectedEntityIds: ["MOD-建筑"],
+    selectedBeltIds: ["MOD-线路"],
   });
 });
 

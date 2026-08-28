@@ -322,6 +322,24 @@ function normalizeViewportProjectionV2Context(value, label) {
   };
 }
 
+function normalizeFactoryReadModelContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "selectedEntityIds", "selectedBeltIds"],
+    label,
+  );
+  const selectorIds = (entry, entryLabel) => {
+    if (!Array.isArray(entry) || entry.length > 64) throw protocolError(entryLabel);
+    return entry.map((id, index) => opaqueId(id, `${entryLabel}[${index}]`));
+  };
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    selectedEntityIds: selectorIds(source.selectedEntityIds, `${label} selected entity IDs`),
+    selectedBeltIds: selectorIds(source.selectedBeltIds, `${label} selected belt IDs`),
+  };
+}
+
 function normalizeStatisticsProjectionContext(value, label) {
   const source = exactObject(value, ["minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId"], label);
   const minElapsedSeconds = finiteNumber(source.minElapsedSeconds, `${label} minimum elapsed seconds`);
@@ -952,6 +970,353 @@ function normalizeCoreViewportProjectionV2(value, context) {
   };
 }
 
+function boundedReadModelText(value, label, maximumBytes = 4_096, minimumBytes = 0) {
+  if (typeof value !== "string" || value.includes("\0")) throw protocolError(label);
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes < minimumBytes || bytes > maximumBytes) throw protocolError(label);
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw protocolError(label);
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw protocolError(label);
+    }
+  }
+  return value;
+}
+
+function nullableReadModelId(value, label) {
+  return value === null ? null : opaqueId(value, label);
+}
+
+function nullableReadModelNumber(value, label) {
+  return value === null ? null : finiteNumber(value, label);
+}
+
+function normalizeReadModelRows(value, label, maximumRows, normalizeRow) {
+  const source = exactObject(value, ["rows", "totalCount", "truncated"], label);
+  if (!Array.isArray(source.rows) || source.rows.length > maximumRows) throw protocolError(`${label}.rows`);
+  const rows = source.rows.map((row, index) => normalizeRow(row, `${label}.rows[${index}]`));
+  const totalCount = safeInteger(source.totalCount, `${label}.totalCount`);
+  const truncated = boolean(source.truncated, `${label}.truncated`);
+  if (totalCount < rows.length || truncated !== (totalCount > rows.length)) {
+    throw protocolError(`${label} cardinality`);
+  }
+  return { rows, totalCount, truncated };
+}
+
+function normalizeReadModelQuantityRows(value, label, maximumRows, idKey) {
+  const result = normalizeReadModelRows(value, label, maximumRows, (row, rowLabel) => {
+    const source = exactObject(row, [idKey, "amount"], rowLabel);
+    return {
+      [idKey]: opaqueId(source[idKey], `${rowLabel}.${idKey}`),
+      amount: finiteNumber(source.amount, `${rowLabel}.amount`),
+    };
+  });
+  const ids = new Set();
+  for (const row of result.rows) {
+    if (ids.has(row[idKey])) throw protocolError(`${label} duplicate ID`);
+    ids.add(row[idKey]);
+  }
+  return result;
+}
+
+function normalizeReadModelPosition(value, label) {
+  const source = exactObject(value, ["x", "y"], label);
+  const x = finiteNumber(source.x, `${label}.x`, -10_000_000);
+  const y = finiteNumber(source.y, `${label}.y`, -10_000_000);
+  if (Math.abs(x) > 10_000_000 || Math.abs(y) > 10_000_000) throw protocolError(label);
+  return { x, y };
+}
+
+function normalizeFactoryShellReadModel(value) {
+  const source = exactObject(value, [
+    "schema", "source", "stateVersion", "mode", "activePlanetId", "paused",
+    "elapsedSeconds", "simulationSpeed", "entityCount", "beltCount",
+    "activePlanetEntityCount", "activePlanetBeltCount", "constructionQueueCount",
+  ], "native factory shell");
+  if (source.schema !== "factory-read-model-v1" || source.source !== "native-core") {
+    throw protocolError("native factory shell identity");
+  }
+  const result = {
+    schema: "factory-read-model-v1",
+    source: "native-core",
+    stateVersion: safeInteger(source.stateVersion, "native factory shell state version", 1),
+    mode: oneOf(source.mode, ["normal", "speedrun"], "native factory shell mode"),
+    activePlanetId: opaqueId(source.activePlanetId, "native factory shell active planet"),
+    paused: boolean(source.paused, "native factory shell paused flag"),
+    elapsedSeconds: finiteNumber(source.elapsedSeconds, "native factory shell elapsed seconds"),
+    simulationSpeed: finiteNumber(source.simulationSpeed, "native factory shell simulation speed", 1),
+    entityCount: safeInteger(source.entityCount, "native factory shell entity count"),
+    beltCount: safeInteger(source.beltCount, "native factory shell belt count"),
+    activePlanetEntityCount: safeInteger(source.activePlanetEntityCount, "native factory shell active entity count"),
+    activePlanetBeltCount: safeInteger(source.activePlanetBeltCount, "native factory shell active belt count"),
+    constructionQueueCount: safeInteger(source.constructionQueueCount, "native factory shell construction queue count"),
+  };
+  if (result.activePlanetEntityCount > result.entityCount || result.activePlanetBeltCount > result.beltCount) {
+    throw protocolError("native factory shell active counts");
+  }
+  return result;
+}
+
+function normalizeFactoryPlanetNavigation(value, activePlanetId) {
+  const source = exactObject(value, ["schema", "activePlanetId", "planets"], "native factory planet navigation");
+  if (source.schema !== "factory-read-model-v1" ||
+      opaqueId(source.activePlanetId, "native factory navigation active planet") !== activePlanetId) {
+    throw protocolError("native factory planet navigation identity");
+  }
+  const planets = normalizeReadModelRows(source.planets, "native factory planets", 64, (row, label) => {
+    const entry = exactObject(row, [
+      "planetId", "systemId", "displayName", "code", "active", "discovered", "colonized",
+      "role", "entityCount", "beltCount", "constructionQueueCount",
+    ], label);
+    const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+    const active = boolean(entry.active, `${label}.active`);
+    if (active !== (planetId === activePlanetId)) throw protocolError(`${label}.active binding`);
+    return {
+      planetId,
+      systemId: nullableReadModelId(entry.systemId, `${label}.systemId`),
+      displayName: boundedReadModelText(entry.displayName, `${label}.displayName`, 4_096),
+      code: boundedReadModelText(entry.code, `${label}.code`, 4_096, 1),
+      active,
+      discovered: boolean(entry.discovered, `${label}.discovered`),
+      colonized: boolean(entry.colonized, `${label}.colonized`),
+      role: entry.role === null ? null : boundedReadModelText(entry.role, `${label}.role`, 512),
+      entityCount: safeInteger(entry.entityCount, `${label}.entityCount`),
+      beltCount: safeInteger(entry.beltCount, `${label}.beltCount`),
+      constructionQueueCount: safeInteger(entry.constructionQueueCount, `${label}.constructionQueueCount`),
+    };
+  });
+  const planetIds = new Set();
+  for (const row of planets.rows) {
+    if (planetIds.has(row.planetId)) throw protocolError("native factory planets duplicate ID");
+    planetIds.add(row.planetId);
+  }
+  return { schema: "factory-read-model-v1", activePlanetId, planets };
+}
+
+function normalizeFactorySelectedEntity(value, label) {
+  const source = exactObject(value, [
+    "entityId", "planetId", "kind", "position", "interactionLocked", "buildingId",
+    "resourceId", "recipeId", "storedItemId", "fuelItemId", "machineCount", "minerCount",
+    "progress", "utilization", "productionRate", "powerFactor", "inputItems", "outputItems",
+  ], label);
+  return {
+    entityId: opaqueId(source.entityId, `${label}.entityId`),
+    planetId: opaqueId(source.planetId, `${label}.planetId`),
+    kind: opaqueId(source.kind, `${label}.kind`),
+    position: normalizeReadModelPosition(source.position, `${label}.position`),
+    interactionLocked: boolean(source.interactionLocked, `${label}.interactionLocked`),
+    buildingId: nullableReadModelId(source.buildingId, `${label}.buildingId`),
+    resourceId: nullableReadModelId(source.resourceId, `${label}.resourceId`),
+    recipeId: nullableReadModelId(source.recipeId, `${label}.recipeId`),
+    storedItemId: nullableReadModelId(source.storedItemId, `${label}.storedItemId`),
+    fuelItemId: nullableReadModelId(source.fuelItemId, `${label}.fuelItemId`),
+    machineCount: finiteNumber(source.machineCount, `${label}.machineCount`),
+    minerCount: finiteNumber(source.minerCount, `${label}.minerCount`),
+    progress: finiteNumber(source.progress, `${label}.progress`),
+    utilization: finiteNumber(source.utilization, `${label}.utilization`),
+    productionRate: finiteNumber(source.productionRate, `${label}.productionRate`),
+    powerFactor: nullableReadModelNumber(source.powerFactor, `${label}.powerFactor`),
+    inputItems: normalizeReadModelQuantityRows(source.inputItems, `${label}.inputItems`, 32, "itemId"),
+    outputItems: normalizeReadModelQuantityRows(source.outputItems, `${label}.outputItems`, 32, "itemId"),
+  };
+}
+
+function normalizeFactorySelectedBelt(value, label) {
+  const source = exactObject(value, [
+    "beltId", "planetId", "sourceEntityId", "targetEntityId", "itemId", "lanes", "tier",
+    "sorterTier", "stackSize", "priority", "progress", "lastFlow", "totalTransferred", "congestion",
+  ], label);
+  return {
+    beltId: opaqueId(source.beltId, `${label}.beltId`),
+    planetId: opaqueId(source.planetId, `${label}.planetId`),
+    sourceEntityId: opaqueId(source.sourceEntityId, `${label}.sourceEntityId`),
+    targetEntityId: opaqueId(source.targetEntityId, `${label}.targetEntityId`),
+    itemId: opaqueId(source.itemId, `${label}.itemId`),
+    lanes: finiteNumber(source.lanes, `${label}.lanes`),
+    tier: finiteNumber(source.tier, `${label}.tier`),
+    sorterTier: finiteNumber(source.sorterTier, `${label}.sorterTier`),
+    stackSize: nullableReadModelNumber(source.stackSize, `${label}.stackSize`),
+    priority: finiteNumber(source.priority, `${label}.priority`),
+    progress: finiteNumber(source.progress, `${label}.progress`),
+    lastFlow: finiteNumber(source.lastFlow, `${label}.lastFlow`),
+    totalTransferred: nullableReadModelNumber(source.totalTransferred, `${label}.totalTransferred`),
+    congestion: nullableReadModelNumber(source.congestion, `${label}.congestion`),
+  };
+}
+
+function requireFactorySelectionOrder(rows, idKey, requestedIds, label) {
+  const order = [];
+  const seenRequested = new Set();
+  for (const id of requestedIds) {
+    if (!seenRequested.has(id)) order.push(id);
+    seenRequested.add(id);
+  }
+  const rank = new Map(order.map((id, index) => [id, index]));
+  const seenRows = new Set();
+  let previous = -1;
+  for (const row of rows) {
+    const id = row[idKey];
+    const index = rank.get(id);
+    if (index === undefined || index <= previous || seenRows.has(id)) throw protocolError(label);
+    previous = index;
+    seenRows.add(id);
+  }
+}
+
+function normalizeFactorySelection(value, activePlanetId, context) {
+  const source = exactObject(value, [
+    "schema", "activePlanetId", "requestedEntityCount", "requestedBeltCount", "entityRows", "beltRows",
+  ], "native factory selection");
+  if (source.schema !== "factory-read-model-v1" ||
+      opaqueId(source.activePlanetId, "native factory selection active planet") !== activePlanetId ||
+      safeInteger(source.requestedEntityCount, "native factory requested entity count") !== context.selectedEntityIds.length ||
+      safeInteger(source.requestedBeltCount, "native factory requested belt count") !== context.selectedBeltIds.length) {
+    throw protocolError("native factory selection request binding");
+  }
+  const entityRows = normalizeReadModelRows(source.entityRows, "native factory selected entities", 64, normalizeFactorySelectedEntity);
+  const beltRows = normalizeReadModelRows(source.beltRows, "native factory selected belts", 64, normalizeFactorySelectedBelt);
+  if (entityRows.totalCount !== entityRows.rows.length || beltRows.totalCount !== beltRows.rows.length) {
+    throw protocolError("native factory selection cardinality");
+  }
+  requireFactorySelectionOrder(entityRows.rows, "entityId", context.selectedEntityIds, "native factory entity selection order");
+  requireFactorySelectionOrder(beltRows.rows, "beltId", context.selectedBeltIds, "native factory belt selection order");
+  return {
+    schema: "factory-read-model-v1",
+    activePlanetId,
+    requestedEntityCount: context.selectedEntityIds.length,
+    requestedBeltCount: context.selectedBeltIds.length,
+    entityRows,
+    beltRows,
+  };
+}
+
+function normalizeFactoryConstruction(value, activePlanetId) {
+  const source = exactObject(value, ["schema", "activePlanetId", "queue", "automation"], "native factory construction");
+  if (source.schema !== "factory-read-model-v1" ||
+      opaqueId(source.activePlanetId, "native factory construction active planet") !== activePlanetId) {
+    throw protocolError("native factory construction identity");
+  }
+  const queue = normalizeReadModelRows(source.queue, "native factory construction queue", 64, (row, label) => {
+    const entry = exactObject(row, [
+      "queueId", "blueprintId", "blueprintVersionId", "blueprintRevision", "blueprintName",
+      "planetId", "queuedAt", "status", "rotation", "mirror", "placedEntityCount",
+      "reservedConstruction", "reservedFleet",
+    ], label);
+    return {
+      queueId: opaqueId(entry.queueId, `${label}.queueId`),
+      blueprintId: opaqueId(entry.blueprintId, `${label}.blueprintId`),
+      blueprintVersionId: nullableReadModelId(entry.blueprintVersionId, `${label}.blueprintVersionId`),
+      blueprintRevision: nullableReadModelNumber(entry.blueprintRevision, `${label}.blueprintRevision`),
+      blueprintName: boundedReadModelText(entry.blueprintName, `${label}.blueprintName`, 4_096),
+      planetId: opaqueId(entry.planetId, `${label}.planetId`),
+      queuedAt: finiteNumber(entry.queuedAt, `${label}.queuedAt`),
+      status: oneOf(entry.status, ["pending-materials", "waiting-fleet"], `${label}.status`),
+      rotation: finiteNumber(entry.rotation, `${label}.rotation`),
+      mirror: boundedReadModelText(entry.mirror, `${label}.mirror`, 128, 1),
+      placedEntityCount: safeInteger(entry.placedEntityCount, `${label}.placedEntityCount`),
+      reservedConstruction: normalizeReadModelQuantityRows(
+        entry.reservedConstruction,
+        `${label}.reservedConstruction`,
+        32,
+        "constructionId",
+      ),
+      reservedFleet: normalizeReadModelQuantityRows(entry.reservedFleet, `${label}.reservedFleet`, 32, "itemId"),
+    };
+  });
+  const queueIds = new Set();
+  for (const row of queue.rows) {
+    if (queueIds.has(row.queueId)) throw protocolError("native factory construction queue duplicate ID");
+    queueIds.add(row.queueId);
+  }
+  const automationSource = exactObject(source.automation, [
+    "enabled", "quantumSourceEnabled", "totalCrafted", "lastCraftedId", "targets", "jobs", "destroyedByproducts",
+  ], "native factory construction automation");
+  const targets = normalizeReadModelQuantityRows(automationSource.targets, "native factory construction targets", 128, "targetId");
+  const jobs = normalizeReadModelRows(automationSource.jobs, "native factory construction jobs", 64, (row, label) => {
+    const entry = exactObject(row, [
+      "entityId", "constructionId", "stepIndex", "stepCount", "elapsedSeconds", "inventory",
+    ], label);
+    return {
+      entityId: opaqueId(entry.entityId, `${label}.entityId`),
+      constructionId: opaqueId(entry.constructionId, `${label}.constructionId`),
+      stepIndex: finiteNumber(entry.stepIndex, `${label}.stepIndex`),
+      stepCount: safeInteger(entry.stepCount, `${label}.stepCount`),
+      elapsedSeconds: finiteNumber(entry.elapsedSeconds, `${label}.elapsedSeconds`),
+      inventory: normalizeReadModelQuantityRows(entry.inventory, `${label}.inventory`, 32, "itemId"),
+    };
+  });
+  const jobEntityIds = new Set();
+  for (const row of jobs.rows) {
+    if (jobEntityIds.has(row.entityId)) throw protocolError("native factory construction jobs duplicate entity");
+    jobEntityIds.add(row.entityId);
+  }
+  const destroyedByproducts = normalizeReadModelQuantityRows(
+    automationSource.destroyedByproducts,
+    "native factory destroyed byproducts",
+    32,
+    "itemId",
+  );
+  return {
+    schema: "factory-read-model-v1",
+    activePlanetId,
+    queue,
+    automation: {
+      enabled: boolean(automationSource.enabled, "native factory automation enabled"),
+      quantumSourceEnabled: boolean(automationSource.quantumSourceEnabled, "native factory automation quantum source"),
+      totalCrafted: finiteNumber(automationSource.totalCrafted, "native factory automation total crafted"),
+      lastCraftedId: nullableReadModelId(automationSource.lastCraftedId, "native factory automation last crafted ID"),
+      targets,
+      jobs,
+      destroyedByproducts,
+    },
+  };
+}
+
+function normalizeCoreFactoryReadModelProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "shell", "planetNavigation", "selection", "construction",
+  ], "native factory read-model projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "factory-read-model-v1") {
+    throw protocolError("native factory read-model identity");
+  }
+  requireProjectionByteBudget(source, "native factory read-model projection");
+  const projectionContext = normalizeFactoryReadModelContext(context, "native factory read-model context");
+  const revision = safeInteger(source.revision, "native factory read-model revision");
+  if (revision !== projectionContext.expectedRevision || !projectionContext.sessionId) {
+    throw protocolError("native factory read-model revision binding");
+  }
+  const shell = normalizeFactoryShellReadModel(source.shell);
+  const planetNavigation = normalizeFactoryPlanetNavigation(source.planetNavigation, shell.activePlanetId);
+  const selection = normalizeFactorySelection(source.selection, shell.activePlanetId, projectionContext);
+  const construction = normalizeFactoryConstruction(source.construction, shell.activePlanetId);
+  if (construction.queue.totalCount !== shell.constructionQueueCount) {
+    throw protocolError("native factory construction queue binding");
+  }
+  for (const row of planetNavigation.planets.rows) {
+    if (row.entityCount > shell.entityCount || row.beltCount > shell.beltCount ||
+        row.constructionQueueCount > shell.constructionQueueCount) {
+      throw protocolError("native factory planet count binding");
+    }
+    if (row.active && (row.entityCount !== shell.activePlanetEntityCount ||
+        row.beltCount !== shell.activePlanetBeltCount)) {
+      throw protocolError("native factory active planet count binding");
+    }
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-read-model-v1",
+    revision,
+    shell,
+    planetNavigation,
+    selection,
+    construction,
+  };
+}
+
 function normalizeCoreStatisticsProjection(value, context) {
   const source = exactObject(value, ["schemaVersion", "projectionType", "revision", "window", "filters", "samples", "nextCursor"], "native statistics projection");
   if (source.schemaVersion !== 1 || source.projectionType !== "statistics-v1") throw protocolError("native statistics projection identity");
@@ -1099,6 +1464,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreProjection: normalizeCoreProjection,
   coreViewportProjection: normalizeCoreViewportProjection,
   coreViewportProjectionV2: normalizeCoreViewportProjectionV2,
+  coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

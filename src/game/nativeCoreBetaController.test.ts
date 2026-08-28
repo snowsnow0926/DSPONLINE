@@ -88,6 +88,8 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   alwaysFail = false;
   closed = false;
   projectionCalls = 0;
+  factoryReadModelCalls = 0;
+  factoryReadModelRevisionOffset = 0;
   viewportProjectionV2Calls = 0;
   viewportProjectionV2RevisionOffset = 0;
   statisticsProjectionCalls = 0;
@@ -162,6 +164,70 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
         cellSize: 512,
       },
       broadQueryFallback: false,
+    };
+  }
+
+  async factoryReadModel(request: {
+    expectedRevision: number;
+    selectedEntityIds?: string[];
+    selectedBeltIds?: string[];
+  }): Promise<any> {
+    this.factoryReadModelCalls += 1;
+    const emptyRows = { rows: [], totalCount: 0, truncated: false };
+    return {
+      schemaVersion: 1 as const,
+      projectionType: "factory-read-model-v1" as const,
+      revision: this.current.revision + this.factoryReadModelRevisionOffset,
+      shell: {
+        schema: "factory-read-model-v1" as const,
+        source: "native-core" as const,
+        stateVersion: 47,
+        mode: "normal" as const,
+        activePlanetId: "home",
+        paused: false,
+        elapsedSeconds: 1,
+        simulationSpeed: 1,
+        entityCount: 1,
+        beltCount: 0,
+        activePlanetEntityCount: 1,
+        activePlanetBeltCount: 0,
+        constructionQueueCount: 0,
+      },
+      planetNavigation: {
+        schema: "factory-read-model-v1" as const,
+        activePlanetId: "home",
+        planets: {
+          rows: [{
+            planetId: "home", systemId: "helios", displayName: "家园", code: "home",
+            active: true, discovered: true, colonized: true, role: null,
+            entityCount: 1, beltCount: 0, constructionQueueCount: 0,
+          }],
+          totalCount: 1,
+          truncated: false,
+        },
+      },
+      selection: {
+        schema: "factory-read-model-v1" as const,
+        activePlanetId: "home",
+        requestedEntityCount: request.selectedEntityIds?.length ?? 0,
+        requestedBeltCount: request.selectedBeltIds?.length ?? 0,
+        entityRows: emptyRows,
+        beltRows: emptyRows,
+      },
+      construction: {
+        schema: "factory-read-model-v1" as const,
+        activePlanetId: "home",
+        queue: emptyRows,
+        automation: {
+          enabled: false,
+          quantumSourceEnabled: false,
+          totalCrafted: 0,
+          lastCraftedId: null,
+          targets: emptyRows,
+          jobs: emptyRows,
+          destroyedByproducts: emptyRows,
+        },
+      },
     };
   }
 
@@ -294,6 +360,35 @@ async function readyController(session: FakeNativeSession) {
 }
 
 describe("Windows native core invitation-Beta controller", () => {
+  it("serves factory read models only from a verified same-revision JavaScript shadow", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    const request = {
+      selectedEntityIds: ["selected-entity"],
+      selectedBeltIds: ["selected-belt"],
+    };
+    await expect(controller.readVerifiedFactoryReadModel(request, 1)).resolves.toMatchObject({
+      projectionType: "factory-read-model-v1",
+      revision: 1,
+      selection: { requestedEntityCount: 1, requestedBeltCount: 1 },
+    });
+    expect(session.factoryReadModelCalls).toBe(1);
+
+    session.factoryReadModelRevisionOffset = 1;
+    await expect(controller.readVerifiedFactoryReadModel(request, 1)).resolves.toBeNull();
+    expect(session.factoryReadModelCalls).toBe(2);
+
+    await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "factory-read-model-unverified",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    await expect(controller.readVerifiedFactoryReadModel(request, 2)).resolves.toBeNull();
+    expect(session.factoryReadModelCalls).toBe(2);
+  });
+
   it("serves viewport v2 only from a verified same-revision JavaScript shadow", async () => {
     const session = new FakeNativeSession();
     const controller = await openController(session);

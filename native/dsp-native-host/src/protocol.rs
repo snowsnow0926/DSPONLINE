@@ -147,6 +147,13 @@ pub enum ControlRequest {
         #[serde(default)]
         pinned_belt_ids: Vec<String>,
     },
+    CoreFactoryReadModelProjection {
+        session_id: String,
+        #[serde(default)]
+        selected_entity_ids: Vec<String>,
+        #[serde(default)]
+        selected_belt_ids: Vec<String>,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,
@@ -294,6 +301,46 @@ mod tests {
         });
         let error = serde_json::from_value::<ControlRequest>(top_level_proof).unwrap_err();
         assert!(error.to_string().contains("unknown field `proof`"));
+    }
+
+    #[test]
+    fn factory_read_model_protocol_preserves_bounded_opaque_selectors() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreFactoryReadModelProjection",
+            "sessionId": "core-1",
+            "selectedEntityIds": ["MOD-建筑/Ω"],
+            "selectedBeltIds": ["MOD-线路/β"]
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreFactoryReadModelProjection {
+                session_id,
+                selected_entity_ids,
+                selected_belt_ids,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(selected_entity_ids, ["MOD-建筑/Ω"]);
+                assert_eq!(selected_belt_ids, ["MOD-线路/β"]);
+            }
+            _ => panic!("factory read-model operation decoded as the wrong variant"),
+        }
+
+        let defaults = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreFactoryReadModelProjection",
+            "sessionId": "core-2"
+        }))
+        .unwrap();
+        match defaults {
+            ControlRequest::CoreFactoryReadModelProjection {
+                selected_entity_ids,
+                selected_belt_ids,
+                ..
+            } => {
+                assert!(selected_entity_ids.is_empty());
+                assert!(selected_belt_ids.is_empty());
+            }
+            _ => panic!("factory read-model defaults decoded as the wrong variant"),
+        }
     }
 }
 

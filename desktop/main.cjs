@@ -467,6 +467,15 @@ function nativeViewportProjectionV2ResultContext(request) {
   };
 }
 
+function nativeFactoryReadModelResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    selectedEntityIds: request?.selectedEntityIds ?? [],
+    selectedBeltIds: request?.selectedBeltIds ?? [],
+  };
+}
+
 function nativeStatisticsProjectionResultContext(request) {
   return {
     minElapsedSeconds: request?.minElapsedSeconds,
@@ -948,6 +957,17 @@ ipcMain.handle("desktop:native-core-viewport-projection-v2", async (event, reque
   });
 });
 
+ipcMain.handle("desktop:native-core-factory-read-model", async (event, request) => {
+  return runRendererNativeOperation("coreFactoryReadModelProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生工厂只读模型请求失败，请重试",
+    resultContext: nativeFactoryReadModelResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await nativeCoreSessions.factoryReadModelProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
   return runRendererNativeOperation("coreStatisticsProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -967,7 +987,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "statistics-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -977,19 +997,25 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       ? await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest)
       : request.projectionType === "viewport-v2"
         ? await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest)
-        : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+        : request.projectionType === "factory-read-model-v1"
+          ? await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest)
+          : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
     const result = normalizeRendererNativeResult(
       request.projectionType === "viewport-v1"
         ? "coreViewportProjection"
         : request.projectionType === "viewport-v2"
           ? "coreViewportProjectionV2"
-          : "coreStatisticsProjection",
+          : request.projectionType === "factory-read-model-v1"
+            ? "coreFactoryReadModelProjection"
+            : "coreStatisticsProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
         : request.projectionType === "viewport-v2"
           ? nativeViewportProjectionV2ResultContext(normalizedRequest)
-          : nativeStatisticsProjectionResultContext(request.payload),
+          : request.projectionType === "factory-read-model-v1"
+            ? nativeFactoryReadModelResultContext(normalizedRequest)
+            : nativeStatisticsProjectionResultContext(request.payload),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

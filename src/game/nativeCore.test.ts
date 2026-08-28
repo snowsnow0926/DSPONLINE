@@ -203,6 +203,22 @@ describe("native core transferable projections", () => {
     })).rejects.toThrow(/正文身份无效/);
   });
 
+  it("verifies and decodes a factory read-model block over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "factory-read-model-v1",
+      revision: 14,
+      shell: { schema: "factory-read-model-v1", source: "native-core" },
+      planetNavigation: {},
+      selection: {},
+      construction: {},
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "factory-read-model-v1",
+    })).resolves.toEqual(value);
+  });
+
   it("rejects a corrupted payload before installing it", async () => {
     const transfer = await transferFor({
       schemaVersion: 1,

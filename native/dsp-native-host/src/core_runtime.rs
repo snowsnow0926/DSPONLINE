@@ -873,6 +873,16 @@ impl CoreRegistry {
         )
     }
 
+    pub fn factory_read_model_projection(
+        &self,
+        session_id: &str,
+        selected_entity_ids: &[String],
+        selected_belt_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .factory_read_model_projection(selected_entity_ids, selected_belt_ids)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

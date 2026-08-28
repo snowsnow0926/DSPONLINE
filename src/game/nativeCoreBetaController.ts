@@ -1,5 +1,7 @@
 import type {
   DesktopNativeCoreCommitOperationResult,
+  DesktopNativeCoreFactoryReadModelRequest,
+  DesktopNativeCoreFactoryReadModelResult,
   DesktopNativeCoreProjectionResult,
   DesktopNativeCoreStatisticsProjectionRequest,
   DesktopNativeCoreStatisticsProjectionResult,
@@ -508,6 +510,39 @@ export class WindowsNativeCoreBetaController {
     this.authorityState = handleNativeCoreExit(this.authorityState, reason);
     await this.closeSession();
     return this.snapshot();
+  }
+
+  /**
+   * Returns the bounded shell/selection/construction model only while the
+   * native shadow remains proven to be the exact renderer revision. Both the
+   * main-process boundary and this controller perform the revision check.
+   */
+  async readVerifiedFactoryReadModel(
+    request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreFactoryReadModelResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.factoryReadModel({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
   }
 
   /**

@@ -74,6 +74,7 @@ fn handle_request(
                     "native-core-projection-v1",
                     "native-core-viewport-projection-v1",
                     "native-core-viewport-projection-v2",
+                    "native-core-factory-read-model-v1",
                     "native-core-statistics-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
@@ -253,6 +254,15 @@ fn handle_request(
             belt_limit,
             &pinned_entity_ids,
             &pinned_belt_ids,
+        )?,
+        ControlRequest::CoreFactoryReadModelProjection {
+            session_id,
+            selected_entity_ids,
+            selected_belt_ids,
+        } => cores.factory_read_model_projection(
+            &session_id,
+            &selected_entity_ids,
+            &selected_belt_ids,
         )?,
         ControlRequest::CoreStatisticsProjection {
             session_id,

@@ -1,6 +1,6 @@
-# 1.2.4 Release Agent 交接草案
+# 1.2.4 Release Agent 交接与发布收口
 
-> 当前结论：**Development complete / Release No-Go**。功能实现与本地软件门禁已完成到开发收口阶段，但工作树尚未提交为 clean runtime SHA，也没有不可变发布制品或正式签名。本文件不能作为连接生产或原子切换授权。
+> 当前结论：**Release complete**。原开发草案的 No-Go 条件已由 clean runtime `3154f8cf4479b874362a2cf01510706fee60d16e`、不可变制品、正式 Android 签名、双节点新鲜备份与独立 preflight、原子切换和公网验收全部收口。正式证据以 [1.2.4 发布记录](./releases/1.2.4.md) 为准；本文件后续开发阶段内容保留为历史交接背景。
 
 ## 开发工作区
 
@@ -32,7 +32,9 @@
 
 这些结果来自当前 dirty 开发工作树，Release Agent 必须在最终 clean runtime SHA 上重新建立候选证据，不能直接复用为发布清单。
 
-## Release Agent 必须重新完成的门禁
+## Release Agent 已完成的门禁（原交接要求）
+
+以下八项均已由最终 runtime SHA 和正式发布证据收口；详细计数、制品哈希、备份与节点状态见正式发布记录。
 
 1. 提交并确认 clean runtime SHA；文档提交不得冒充 runtime SHA。
 2. 在独立 clean checkout 重跑 release gate，核对 1.2.4 版本和云合同的根/API 副本一致。

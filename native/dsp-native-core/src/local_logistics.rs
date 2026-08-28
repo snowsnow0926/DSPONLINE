@@ -1088,11 +1088,11 @@ pub(crate) fn transfer_buffers(
     base: &Map<String, Value>,
     entities: &mut [Value],
     directory: &mut LocalPeerDirectory,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<usize>> {
     let (station_indices, _dense_fallback) = directory.buffer_scan_indices();
     let updates = transfer_buffers_for_indices(state, base, entities, directory, &station_indices)?;
     directory.replace_scanned_buffer_activity(&updates);
-    Ok(())
+    Ok(station_indices)
 }
 
 /// Installs exact wake evidence produced by inventory-moving subsystems. The
@@ -1542,6 +1542,11 @@ pub(crate) fn dispatch(
     dispatch_with_ledger(state, base, entities, powers, directory, route_ledger)
 }
 
+struct LocalRouteAdvanceOutcome {
+    activity_updates: Vec<(usize, bool)>,
+    changed_station_indices: Vec<usize>,
+}
+
 fn advance_routes_for_indices(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -1549,10 +1554,11 @@ fn advance_routes_for_indices(
     seconds: f64,
     powers: &HashMap<usize, f64>,
     route_scan_indices: &[usize],
-) -> anyhow::Result<Vec<(usize, bool)>> {
+) -> anyhow::Result<LocalRouteAdvanceOutcome> {
     let indexes = &state.entity_index;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     let mut activity_updates = Vec::with_capacity(route_scan_indices.len());
+    let mut changed_station_indices = Vec::new();
     for &demand_index in route_scan_indices {
         let demand_id = entities[demand_index]
             .as_object()
@@ -1659,6 +1665,7 @@ fn advance_routes_for_indices(
                 set_number(station, "stationTrips", (trips + vehicles).floor())?;
                 set_number(station, "stationLastTransfer", delivered_cargo)?;
             }
+            changed_station_indices.extend([demand_index, supply_index, owner_index]);
             completed_cargo += delivered_cargo;
             if retain_route {
                 remaining.push(route_value);
@@ -1687,7 +1694,12 @@ fn advance_routes_for_indices(
         set_number(demand, "stationProgress", max_progress)?;
         activity_updates.push((demand_index, has_local_route));
     }
-    Ok(activity_updates)
+    changed_station_indices.sort_unstable();
+    changed_station_indices.dedup();
+    Ok(LocalRouteAdvanceOutcome {
+        activity_updates,
+        changed_station_indices,
+    })
 }
 
 pub(crate) fn advance_routes(
@@ -1697,22 +1709,22 @@ pub(crate) fn advance_routes(
     seconds: f64,
     powers: &HashMap<usize, f64>,
     directory: &mut LocalPeerDirectory,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<usize>> {
     if !directory.has_local_routes() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let (route_scan_indices, _dense_fallback) = directory.route_scan_indices();
-    let activity_updates =
+    let outcome =
         advance_routes_for_indices(state, base, entities, seconds, powers, &route_scan_indices)?;
     // A quantum-supply demand can retain completed local cargo in its station
     // input buffer. Derive that wake only from the successfully mutated
     // demand rows; ordinary route completions add outputs and remain dormant.
     let buffer_updates = plan_buffer_activity(entities, directory, &route_scan_indices)?;
-    directory.replace_scanned_local_route_activity(&activity_updates);
+    directory.replace_scanned_local_route_activity(&outcome.activity_updates);
     for (station_index, active) in buffer_updates {
         directory.update_buffer_station(station_index, active);
     }
-    Ok(())
+    Ok(outcome.changed_station_indices)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2718,7 +2730,7 @@ mod tests {
         };
         if force_full_scan {
             let full_indices = directory.station_indices.to_vec();
-            let updates = advance_routes_for_indices(
+            let outcome = advance_routes_for_indices(
                 state,
                 base.as_object_mut().unwrap(),
                 &mut entities,
@@ -2727,7 +2739,7 @@ mod tests {
                 &full_indices,
             )
             .unwrap();
-            directory.replace_scanned_local_route_activity(&updates);
+            directory.replace_scanned_local_route_activity(&outcome.activity_updates);
         } else {
             advance_routes(
                 state,

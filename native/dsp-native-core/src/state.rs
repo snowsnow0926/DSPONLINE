@@ -2355,6 +2355,11 @@ pub struct CoreState {
     /// route graph. It is installed only after a successful revision commit.
     prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
+    /// Immutable traditional interstellar peer/reverse-wake graph. It is
+    /// shared across committed revisions and rebuilt only when record
+    /// topology, station mode, research, or exploration membership changes.
+    prepared_interstellar_peer_directory:
+        Option<Arc<crate::interstellar_logistics::InterstellarPeerDirectory>>,
     /// Runtime-only deterministic wake set for in-flight interstellar routes.
     /// It is installed only after a successful candidate revision commits.
     prepared_interstellar_route_activity:
@@ -3006,6 +3011,7 @@ impl CoreState {
             prepared_belt_routes: None,
             prepared_belt_activity: None,
             prepared_local_peer_directory: None,
+            prepared_interstellar_peer_directory: None,
             prepared_interstellar_route_activity: None,
             save_dirty,
             checkpoint_chunks,
@@ -3032,6 +3038,13 @@ impl CoreState {
                     &parsed_entities,
                     &state.factory_topology.station_indices,
                 )?));
+            state.prepared_interstellar_peer_directory = Some(Arc::new(
+                crate::interstellar_logistics::InterstellarPeerDirectory::build(
+                    &state,
+                    &state.base,
+                    &parsed_entities,
+                ),
+            ));
             state.prepared_interstellar_route_activity = Some(Arc::new(
                 crate::interstellar_logistics::prepare_route_activity(&parsed_entities),
             ));
@@ -3372,6 +3385,12 @@ impl CoreState {
         self.factory_static_admission_reason = None;
         self.prepared_belt_routes = None;
         self.prepared_belt_activity = None;
+        // Non-pause top-level commands can change research, exploration,
+        // routing settings, or tray-backed warper availability. Re-admit the
+        // complete interstellar reverse graph and demand wake queue rather
+        // than attempting to infer an unsafe partial invalidation here.
+        self.prepared_interstellar_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
     }
 
     pub(crate) fn prepared_belt_routes(&self) -> Option<Arc<crate::belts::PreparedRoutes>> {
@@ -3413,6 +3432,19 @@ impl CoreState {
         &self,
     ) -> Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>> {
         self.prepared_interstellar_route_activity.clone()
+    }
+
+    pub(crate) fn prepared_interstellar_peer_directory(
+        &self,
+    ) -> Option<Arc<crate::interstellar_logistics::InterstellarPeerDirectory>> {
+        self.prepared_interstellar_peer_directory.clone()
+    }
+
+    pub(crate) fn install_prepared_interstellar_peer_directory(
+        &mut self,
+        directory: Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
+    ) {
+        self.prepared_interstellar_peer_directory = Some(directory);
     }
 
     pub(crate) fn install_prepared_interstellar_route_activity(
@@ -3684,6 +3716,7 @@ impl CoreState {
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
+        self.prepared_interstellar_peer_directory = None;
         self.prepared_interstellar_route_activity = None;
         Ok(())
     }
@@ -5073,6 +5106,11 @@ impl CoreState {
             .unwrap_or(0)
             + self
                 .prepared_local_peer_directory
+                .as_ref()
+                .map(|directory| directory.estimated_bytes())
+                .unwrap_or(0)
+            + self
+                .prepared_interstellar_peer_directory
                 .as_ref()
                 .map(|directory| directory.estimated_bytes())
                 .unwrap_or(0)

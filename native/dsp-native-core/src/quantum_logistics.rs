@@ -121,6 +121,7 @@ struct TransitionPatchProbe {
 
 #[derive(Debug, Default)]
 struct TransitionParallelDiagnostics {
+    topology_changed: bool,
     #[cfg(test)]
     entity_probe_workers: HashSet<usize>,
     #[cfg(test)]
@@ -1657,7 +1658,7 @@ fn settle_transitions_with_runtime(
     #[cfg(test)]
     let mut diagnostics = TransitionParallelDiagnostics::default();
     #[cfg(not(test))]
-    let diagnostics = TransitionParallelDiagnostics::default();
+    let mut diagnostics = TransitionParallelDiagnostics::default();
     #[cfg(test)]
     {
         diagnostics.entity_probe_count = entity_probes.len();
@@ -1698,6 +1699,7 @@ fn settle_transitions_with_runtime(
         }
         patches.push(probe.patch);
     }
+    diagnostics.topology_changed = !patches.is_empty();
 
     // No source field is written until every parallel probe and every commit
     // target has been validated. This turns malformed transition data into a
@@ -1751,9 +1753,9 @@ fn settle_transitions_with_runtime(
 pub(crate) fn settle_transitions(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     settle_transitions_with_runtime(crate::deterministic_runtime::runtime(), base, entities)
-        .map(|_| ())
+        .map(|diagnostics| diagnostics.topology_changed)
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -2533,14 +2535,18 @@ mod tests {
             } else {
                 assert!(!diagnostics.entity_probe_workers.is_empty());
                 assert!(!diagnostics.transition_probe_workers.is_empty());
-                assert!(diagnostics
-                    .entity_probe_workers
-                    .iter()
-                    .all(|index| *index < worker_limit));
-                assert!(diagnostics
-                    .transition_probe_workers
-                    .iter()
-                    .all(|index| *index < worker_limit));
+                assert!(
+                    diagnostics
+                        .entity_probe_workers
+                        .iter()
+                        .all(|index| *index < worker_limit)
+                );
+                assert!(
+                    diagnostics
+                        .transition_probe_workers
+                        .iter()
+                        .all(|index| *index < worker_limit)
+                );
             }
         }
         assert_eq!(

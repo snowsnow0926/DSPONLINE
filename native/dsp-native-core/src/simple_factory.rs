@@ -3400,6 +3400,9 @@ fn simulate_step(
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    interstellar_peer_directory: &mut std::sync::Arc<
+        crate::interstellar_logistics::InterstellarPeerDirectory,
+    >,
     interstellar_route_activity: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarRouteActivity,
     >,
@@ -3450,6 +3453,14 @@ fn simulate_step(
     crate::global_progress::advance_exploration(state, base, seconds)?;
     crate::global_progress::advance_handcraft(state, base, seconds)?;
     crate::dyson::advance_environment(base, seconds)?;
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        base,
+        entities,
+        false,
+        interstellar_peer_directory,
+        interstellar_route_activity,
+    );
     profile_mark!("time-warp-and-dyson-environment");
     crate::local_logistics::reset_runtime_for_indices(
         entities,
@@ -3467,7 +3478,13 @@ fn simulate_step(
     // Only candidate-local wake vectors are mutable. Arc::make_mut preserves
     // the source revision's runtime cache if any later simulation stage fails.
     let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
-    crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
+    let buffer_changed_station_indices =
+        crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &buffer_changed_station_indices,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     profile_mark!("local-logistics-buffers");
     crate::quantum_logistics::flush_supply_buffers(base, entities)?;
     profile_mark!("quantum-supply-buffers");
@@ -3490,6 +3507,11 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &belt_changed_entity_indices,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     profile_mark!("belt-input-transfer");
     let belt_reservation = crate::belts::reserve(state, base, entities, belt_runtime, belt_routes)?;
     profile_mark!("belt-reservation");
@@ -3500,6 +3522,10 @@ fn simulate_step(
         seconds,
         &belt_reservation.output_credits,
     )?;
+    crate::interstellar_logistics::wake_orbital_supply_demands(
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     drain_material_delivery_hubs(
         state,
         base,
@@ -3561,8 +3587,6 @@ fn simulate_step(
         local_step_runtime,
         interstellar_route_activity.as_ref(),
     );
-    let interstellar_peer_directory =
-        crate::interstellar_logistics::InterstellarPeerDirectory::build(state, base, entities);
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -3582,7 +3606,7 @@ fn simulate_step(
         state,
         base,
         entities,
-        &interstellar_peer_directory,
+        interstellar_peer_directory,
         &step_route_ledger,
     )?);
     profile_mark!("interstellar-ready-stations");
@@ -4427,6 +4451,11 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &belt_changed_entity_indices,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     drain_material_delivery_hubs(
         state,
         base,
@@ -4460,7 +4489,27 @@ fn simulate_step(
             ))
         })
         .collect::<HashMap<_, _>>();
-    crate::interstellar_logistics::refill_station_warpers(base, entities)?;
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        base,
+        entities,
+        false,
+        interstellar_peer_directory,
+        interstellar_route_activity,
+    );
+    crate::interstellar_logistics::refresh_dispatch_power_wakes(
+        &state.factory_topology.station_indices,
+        &station_powers,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    let warper_changed_station_indices =
+        crate::interstellar_logistics::refill_station_warpers(base, entities)?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &warper_changed_station_indices,
+        interstellar_peer_directory,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -4484,7 +4533,7 @@ fn simulate_step(
         entities,
         &station_powers,
         interstellar_step_runtime,
-        &interstellar_peer_directory,
+        interstellar_peer_directory,
         &mut step_route_ledger,
     )?;
     if profile_enabled {
@@ -4501,7 +4550,7 @@ fn simulate_step(
     }
     drop(step_route_ledger);
     profile_mark!("interstellar-dispatch");
-    crate::local_logistics::advance_routes(
+    let local_route_changed_station_indices = crate::local_logistics::advance_routes(
         state,
         base,
         entities,
@@ -4510,15 +4559,31 @@ fn simulate_step(
         local_step_runtime,
     )?;
     profile_mark!("local-route-advance");
-    crate::interstellar_logistics::advance_routes(
+    let remote_route_changed_station_indices = crate::interstellar_logistics::advance_routes(
         state,
         entities,
         seconds,
         &station_powers,
         interstellar_step_runtime,
     )?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &local_route_changed_station_indices,
+        interstellar_peer_directory,
+        interstellar_step_runtime,
+    );
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &remote_route_changed_station_indices,
+        interstellar_peer_directory,
+        interstellar_step_runtime,
+    );
     profile_mark!("interstellar-route-advance");
-    crate::interstellar_logistics::refill_station_warpers(base, entities)?;
+    let post_route_warper_changed_station_indices =
+        crate::interstellar_logistics::refill_station_warpers(base, entities)?;
+    crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+        &post_route_warper_changed_station_indices,
+        interstellar_peer_directory,
+        interstellar_step_runtime,
+    );
     // Route completion can remove the final active demand, so congestion must
     // use a fresh post-advance snapshot rather than the readiness ledger.
     let congestion_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
@@ -4545,7 +4610,7 @@ fn simulate_step(
         state,
         base,
         entities,
-        &interstellar_peer_directory,
+        interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
     drop(congestion_route_ledger);
@@ -4657,7 +4722,8 @@ fn simulate_step(
         for boundary in first_quantum_boundary..=last_quantum_boundary {
             station_mode_topology_changed |=
                 crate::system_space_station::settle_mode_transitions(entities)?;
-            crate::quantum_logistics::settle_transitions(base, entities)?;
+            station_mode_topology_changed |=
+                crate::quantum_logistics::settle_transitions(base, entities)?;
             crate::system_space_station::settle_construction(state, base, entities)?;
             crate::system_space_station::settle_hubs(
                 state,
@@ -4674,9 +4740,9 @@ fn simulate_step(
                 &indexed_quantum_endpoint_indices,
             )?;
         }
-        // Elevator-mode transitions are the only boundary event that changes
-        // local peer membership. Stable five-second settlements retain the
-        // cross-revision wake cache; an actual transition rebuilds once.
+        // Elevator and quantum attachment transitions can change traditional
+        // peer membership. Stable five-second settlements retain the
+        // cross-revision wake caches; an actual transition rebuilds once.
         crate::local_logistics::refresh_step_directory_after_topology_change(
             entities,
             &state.factory_topology.station_indices,
@@ -4686,6 +4752,14 @@ fn simulate_step(
         crate::interstellar_logistics::refresh_route_activity_after_topology_change(
             entities,
             station_mode_topology_changed,
+            interstellar_route_activity,
+        );
+        crate::interstellar_logistics::refresh_peer_directory(
+            state,
+            base,
+            entities,
+            station_mode_topology_changed,
+            interstellar_peer_directory,
             interstellar_route_activity,
         );
     }
@@ -4721,6 +4795,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    pub interstellar_peer_directory:
+        std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
         std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
 }
@@ -4773,6 +4849,7 @@ pub(crate) fn prepare_advance(
             );
         }
     }
+    let mut base = state.base_value().clone();
     profile_mark!("parse-records");
     let belt_routes = if let Some(routes) = state.prepared_belt_routes() {
         routes
@@ -4795,13 +4872,35 @@ pub(crate) fn prepare_advance(
                 &entities,
             ))
         };
+    let mut interstellar_peer_directory =
+        if let Some(directory) = state.prepared_interstellar_peer_directory() {
+            directory
+        } else {
+            let directory = std::sync::Arc::new(
+                crate::interstellar_logistics::InterstellarPeerDirectory::build(
+                    state, &base, &entities,
+                ),
+            );
+            crate::interstellar_logistics::reset_dispatch_wakes(
+                &directory,
+                std::sync::Arc::make_mut(&mut interstellar_route_activity),
+            );
+            directory
+        };
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        &base,
+        &entities,
+        false,
+        &mut interstellar_peer_directory,
+        &mut interstellar_route_activity,
+    );
     let mut belt_runtime = crate::belts::BeltRuntime::from_state(
         state,
         &entities,
         &belt_routes,
         state.prepared_belt_activity(),
     )?;
-    let mut base = state.base_value().clone();
     if let (Some(active_planet), Some(tray)) = (
         base.get("activePlanetId")
             .and_then(Value::as_str)
@@ -4891,6 +4990,7 @@ pub(crate) fn prepare_advance(
             &mut belt_runtime,
             &belt_routes,
             &mut local_peer_directory,
+            &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
         )
@@ -4978,6 +5078,7 @@ pub(crate) fn prepare_advance(
         belt_routes,
         belt_activity,
         local_peer_directory,
+        interstellar_peer_directory,
         interstellar_route_activity,
     })
 }

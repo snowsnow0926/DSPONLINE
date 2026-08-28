@@ -314,8 +314,32 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
     algorithmVersion: "native-pure-idle-conservative-v4",
     exactCalibrationSeconds: 30,
     approximatedSeconds: 3_570,
+    beltScheduler: {
+      routeCount: 155_746,
+      groupCount: 78_025,
+      activeQueueEnabled: true,
+      initializationGroupChecks: 0,
+      selectionGroupChecks: 12_345,
+      carriedActiveGroups: 4_115,
+      transferPasses: 2,
+      reservationPasses: 1,
+      fullScanPasses: 0,
+      transferRouteChecks: 16_000,
+      reservationRouteChecks: 8_000,
+      reservationAllowanceEntries: 7_900,
+      reservationCreditEntries: 4_000,
+      stableRoutesSkipped: 443_238,
+      wakeCount: 20,
+      sleepCount: 12,
+      changedBeltRecords: 1_024,
+      writeBackPatchRecords: 1_024,
+      writeBackWorkers: 1,
+    },
   });
   assert.equal(advanced.reason, "native-domain-unavailable");
+  assert.equal(advanced.beltScheduler.initializationGroupChecks, 0);
+  assert.equal(advanced.beltScheduler.selectionGroupChecks, 12_345);
+  assert.equal(advanced.beltScheduler.carriedActiveGroups, 4_115);
   assert.doesNotMatch(JSON.stringify(advanced), /Player|private-save|token/);
 
   const macroAdvanced = normalizeRendererNativeResult("coreAdvance", {

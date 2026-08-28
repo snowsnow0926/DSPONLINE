@@ -660,11 +660,16 @@ export interface DesktopNativeBeltSchedulerDiagnostics {
   routeCount: number;
   groupCount: number;
   activeQueueEnabled: boolean;
+  initializationGroupChecks: number;
+  selectionGroupChecks: number;
+  carriedActiveGroups: number;
   transferPasses: number;
   reservationPasses: number;
   fullScanPasses: number;
   transferRouteChecks: number;
   reservationRouteChecks: number;
+  reservationAllowanceEntries: number;
+  reservationCreditEntries: number;
   stableRoutesSkipped: number;
   wakeCount: number;
   sleepCount: number;

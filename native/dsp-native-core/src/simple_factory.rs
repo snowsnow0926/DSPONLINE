@@ -4435,6 +4435,7 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_flow: crate::belts::BeltFlowAggregate,
     pub belt_scheduler: crate::belts::BeltSchedulerDiagnostics,
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
+    pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
 }
 
@@ -4500,7 +4501,12 @@ pub(crate) fn prepare_advance(
             &state.factory_topology.station_indices,
         )?)
     };
-    let mut belt_runtime = crate::belts::BeltRuntime::from_state(state, &entities, &belt_routes)?;
+    let mut belt_runtime = crate::belts::BeltRuntime::from_state(
+        state,
+        &entities,
+        &belt_routes,
+        state.prepared_belt_activity(),
+    )?;
     let mut base = state.base_value().clone();
     if let (Some(active_planet), Some(tray)) = (
         base.get("activePlanetId")
@@ -4646,6 +4652,7 @@ pub(crate) fn prepare_advance(
         crate::speedrun::advance_clock(state, &mut base, remaining_wall)?;
     }
     profile_mark!("simulate-steps");
+    let belt_activity = belt_runtime.activity_snapshot(&belt_routes);
     let (belt_commit, belt_flow, belt_scheduler) = belt_runtime.into_patches(state)?;
     profile_mark!("belt-runtime-write-back");
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
@@ -4672,6 +4679,7 @@ pub(crate) fn prepare_advance(
         belt_flow,
         belt_scheduler,
         belt_routes,
+        belt_activity,
         local_peer_directory,
     })
 }

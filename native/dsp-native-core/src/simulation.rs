@@ -341,6 +341,7 @@ impl CoreState {
             let mut prepared =
                 crate::simple_factory::prepare_advance(self, simulation_seconds, wall_seconds)?;
             let belt_routes = prepared.belt_routes.clone();
+            let belt_activity = prepared.belt_activity.clone();
             let local_peer_directory = prepared.local_peer_directory.clone();
             profile_mark!("simulate");
             self.record_production_history_with_records(
@@ -366,6 +367,7 @@ impl CoreState {
                 request.include_diagnostics,
             )?;
             self.install_prepared_belt_routes(belt_routes);
+            self.install_prepared_belt_activity(belt_activity);
             self.install_prepared_local_peer_directory(local_peer_directory);
             profile_mark!("commit-state");
             if request.include_diagnostics {

@@ -742,7 +742,7 @@ function normalizeCoreCommand(value) {
 }
 
 function normalizeBeltScheduler(value) {
-  const keys = ["routeCount", "groupCount", "activeQueueEnabled", "transferPasses", "reservationPasses", "fullScanPasses", "transferRouteChecks", "reservationRouteChecks", "stableRoutesSkipped", "wakeCount", "sleepCount", "changedBeltRecords", "writeBackPatchRecords", "writeBackWorkers"];
+  const keys = ["routeCount", "groupCount", "activeQueueEnabled", "initializationGroupChecks", "selectionGroupChecks", "carriedActiveGroups", "transferPasses", "reservationPasses", "fullScanPasses", "transferRouteChecks", "reservationRouteChecks", "reservationAllowanceEntries", "reservationCreditEntries", "stableRoutesSkipped", "wakeCount", "sleepCount", "changedBeltRecords", "writeBackPatchRecords", "writeBackWorkers"];
   const source = exactObject(value, keys, "native belt scheduler diagnostics");
   return Object.fromEntries(keys.map((key) => [key, key === "activeQueueEnabled" ? boolean(source[key], `native belt scheduler.${key}`) : safeInteger(source[key], `native belt scheduler.${key}`)]));
 }

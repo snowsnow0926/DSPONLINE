@@ -1651,6 +1651,9 @@ pub struct CoreState {
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
     prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
+    /// Runtime-only deterministic wake set paired with the exact prepared
+    /// route graph. It is installed only after a successful revision commit.
+    prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
     /// Persistence dirtiness is deliberately independent from the simulation
     /// wake queues. A successful checkpoint clears only this structure; belt
@@ -2292,6 +2295,7 @@ impl CoreState {
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
+            prepared_belt_activity: None,
             prepared_local_peer_directory: None,
             save_dirty,
             checkpoint_chunks,
@@ -2649,6 +2653,7 @@ impl CoreState {
         self.factory_static_admission_checked = false;
         self.factory_static_admission_reason = None;
         self.prepared_belt_routes = None;
+        self.prepared_belt_activity = None;
     }
 
     pub(crate) fn prepared_belt_routes(&self) -> Option<Arc<crate::belts::PreparedRoutes>> {
@@ -2660,6 +2665,17 @@ impl CoreState {
         routes: Arc<crate::belts::PreparedRoutes>,
     ) {
         self.prepared_belt_routes = Some(routes);
+    }
+
+    pub(crate) fn prepared_belt_activity(&self) -> Option<Arc<crate::belts::BeltActivitySnapshot>> {
+        self.prepared_belt_activity.clone()
+    }
+
+    pub(crate) fn install_prepared_belt_activity(
+        &mut self,
+        activity: Arc<crate::belts::BeltActivitySnapshot>,
+    ) {
+        self.prepared_belt_activity = Some(activity);
     }
 
     pub(crate) fn prepared_local_peer_directory(

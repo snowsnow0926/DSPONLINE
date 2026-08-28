@@ -2715,6 +2715,27 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.summary.canonicalSha256, `time-warp-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
+
+    const opened = await open(checkpoint);
+    const first = await client.request({
+      operation: "coreAdvance", sessionId: opened.sessionId,
+      request: { baseRevision: checkpoint.revision, simulationSeconds: 1, wallSeconds: 1 },
+    });
+    const second = await client.request({
+      operation: "coreAdvance", sessionId: opened.sessionId,
+      request: { baseRevision: checkpoint.revision + 1, simulationSeconds: 1, wallSeconds: 1 },
+    });
+    const expectedSegmented = advanceSimulationBudget(advanceSimulationBudget(initial, 1, 1), 1, 1);
+    expect(first.beltScheduler.initializationGroupChecks).toBe(first.beltScheduler.groupCount);
+    expect(first.beltScheduler.carriedActiveGroups).toBe(0);
+    expect(second.beltScheduler.initializationGroupChecks).toBe(0);
+    expect(second.beltScheduler.carriedActiveGroups).toBeGreaterThan(0);
+    expect(second.beltScheduler.selectionGroupChecks).toBeLessThan(
+      second.beltScheduler.groupCount *
+        (second.beltScheduler.transferPasses + second.beltScheduler.reservationPasses),
+    );
+    expect(second.summary.canonicalSha256, "carried active queue exact hash").toBe(canonicalSha256(expectedSegmented));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 90_000);
 
   it("wakes a large initially dormant belt cohort without changing exact settlement", async () => {
@@ -2743,6 +2764,17 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       expect(advanced.beltScheduler.transferRouteChecks + advanced.beltScheduler.reservationRouteChecks)
         .toBeLessThan(advanced.beltScheduler.routeCount *
           (advanced.beltScheduler.transferPasses + advanced.beltScheduler.reservationPasses));
+      expect(advanced.beltScheduler.reservationAllowanceEntries)
+        .toBeLessThan(advanced.beltScheduler.routeCount);
+      expect(advanced.beltScheduler.reservationCreditEntries)
+        .toBeLessThan(advanced.beltScheduler.groupCount);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map((entity) => entity.id),
+        beltIds: [],
+        baseFields: [],
+      });
+      expect(projection.entities, `dormant-wake-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
       expect(advanced.summary.canonicalFields, `dormant-wake-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `dormant-wake-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });

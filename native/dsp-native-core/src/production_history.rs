@@ -932,8 +932,11 @@ impl CoreState {
         let mut campaign_factory_metrics = crate::campaign::factory_metrics_needed(base)
             .then(crate::campaign::CampaignFactoryMetrics::default);
         let rate_indices = &self.factory_topology.production_history_rate_indices;
-        let rate_index_dense =
-            rate_indices.len().saturating_mul(4) >= entities.len().saturating_mul(3);
+        let rate_index_dense = self
+            .factory_topology
+            .production_history_rate_full_scan_required
+            || (!rate_indices.is_empty()
+                && rate_indices.len().saturating_mul(4) >= entities.len().saturating_mul(3));
         let rate_index_invalid = rate_indices
             .last()
             .is_some_and(|index| *index >= entities.len());
@@ -1815,11 +1818,13 @@ mod tests {
         }
 
         let mut indexed_state = state.clone();
-        std::sync::Arc::make_mut(&mut indexed_state.factory_topology)
-            .production_history_rate_indices = (1..65).collect();
+        let indexed_topology = std::sync::Arc::make_mut(&mut indexed_state.factory_topology);
+        indexed_topology.production_history_rate_indices = (1..65).collect();
+        indexed_topology.production_history_rate_full_scan_required = false;
         let mut full_scan_state = state;
-        std::sync::Arc::make_mut(&mut full_scan_state.factory_topology)
-            .production_history_rate_indices = (1..entities.len()).collect();
+        let full_scan_topology = std::sync::Arc::make_mut(&mut full_scan_state.factory_topology);
+        full_scan_topology.production_history_rate_indices = (1..entities.len()).collect();
+        full_scan_topology.production_history_rate_full_scan_required = false;
 
         let mut indexed = base.clone();
         let indexed_started = Instant::now();

@@ -2269,6 +2269,11 @@ pub(crate) struct FactoryTopology {
     /// only these rows; ten-second inventory snapshots and pending campaign
     /// probes deliberately retain their complete entity scan.
     pub production_history_rate_indices: Vec<usize>,
+    /// Dense rate producers deliberately use persisted entity order directly.
+    /// Keeping a near-complete duplicate row index would spend session memory
+    /// without reducing work, so topology compilation releases that vector
+    /// and records the stable full-scan decision here instead.
+    pub production_history_rate_full_scan_required: bool,
     pub non_station_indices: Vec<usize>,
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
@@ -3742,6 +3747,16 @@ impl CoreState {
             .map(|indices| PlanetViewportIndex::build(indices, &self.entities))
             .collect();
         factory_topology.entity_belt_adjacency = EntityBeltAdjacency::from_rows(entity_belt_rows);
+        if !factory_topology.production_history_rate_indices.is_empty()
+            && factory_topology
+                .production_history_rate_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.production_history_rate_indices = Vec::new();
+            factory_topology.production_history_rate_full_scan_required = true;
+        }
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save
         // does not retain several MiB of unreachable topology capacity.
@@ -6431,6 +6446,46 @@ mod tests {
             state.memory_estimate().topology_index_bytes
                 >= state.factory_topology.estimated_bytes(),
             "public memory diagnostics must include the history rate index"
+        );
+    }
+
+    #[test]
+    fn dense_production_history_rate_index_releases_duplicate_session_memory() {
+        let entities = (0..16)
+            .map(|index| {
+                json!({
+                    "id": format!("machine-{index}"),
+                    "kind": "machine",
+                    "planetId": "home",
+                    "buildingId": "mining_machine",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 1,
+                    "inputs": {},
+                    "outputs": {},
+                    "productionRate": index,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        assert!(
+            state
+                .factory_topology
+                .production_history_rate_full_scan_required
+        );
+        assert!(
+            state
+                .factory_topology
+                .production_history_rate_indices
+                .is_empty(),
+            "a dense persisted-order scan must not retain a duplicate row index"
         );
     }
 

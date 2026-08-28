@@ -1,9 +1,13 @@
 import type {
   FactoryConstructionHeadlineReadModel,
+  FactoryInspectorSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
+  ItemQuantityReadModel,
   PlanetNavigationReadModel,
   PlanetNavigationRowReadModel,
+  SelectedBeltReadModel,
+  SelectedEntityReadModel,
 } from "./factoryReadModels";
 import { FACTORY_READ_MODEL_LIMITS } from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
@@ -45,6 +49,14 @@ export interface FactorySelectionToolbarNativeBinding {
   /** Raw toolbar selections used by the legacy Web/PWA presentation. */
   readonly selectedEntityIds: readonly string[];
   readonly selectedBeltIds: readonly string[];
+}
+
+export interface FactoryInspectorNativeBinding {
+  /** Exact ordered, de-duplicated IDs carried by the atomic native request. */
+  readonly requestedEntityIds: readonly string[];
+  readonly requestedBeltIds: readonly string[];
+  /** True when either original request exceeded its native row cap. */
+  readonly requestTruncated: boolean;
 }
 
 function hasUniqueIds(ids: readonly string[]): boolean {
@@ -122,6 +134,101 @@ export function selectFactorySelectionToolbarReadModel(
     source: "native-core",
     revision: expectedRevision,
   });
+}
+
+function sameItemRows(
+  web: SelectedEntityReadModel["inputItems"],
+  native: SelectedEntityReadModel["inputItems"],
+): boolean {
+  if (web.truncated || native.truncated ||
+    web.totalCount !== web.rows.length || native.totalCount !== native.rows.length ||
+    web.rows.length !== native.rows.length) {
+    return false;
+  }
+  return native.rows.every((row: ItemQuantityReadModel, index) => {
+    const webRow = web.rows[index];
+    return webRow?.itemId === row.itemId && webRow.amount === row.amount;
+  });
+}
+
+function sameSelectedEntityRow(web: SelectedEntityReadModel, native: SelectedEntityReadModel): boolean {
+  return native.entityId === web.entityId && native.planetId === web.planetId &&
+    native.kind === web.kind && native.position.x === web.position.x && native.position.y === web.position.y &&
+    native.interactionLocked === web.interactionLocked && native.buildingId === web.buildingId &&
+    native.resourceId === web.resourceId && native.recipeId === web.recipeId &&
+    native.storedItemId === web.storedItemId && native.fuelItemId === web.fuelItemId &&
+    native.machineCount === web.machineCount && native.minerCount === web.minerCount &&
+    native.progress === web.progress && native.utilization === web.utilization &&
+    native.productionRate === web.productionRate && native.powerFactor === web.powerFactor &&
+    sameItemRows(web.inputItems, native.inputItems) && sameItemRows(web.outputItems, native.outputItems);
+}
+
+function sameSelectedBeltRow(web: SelectedBeltReadModel, native: SelectedBeltReadModel): boolean {
+  return native.beltId === web.beltId && native.planetId === web.planetId &&
+    native.sourceEntityId === web.sourceEntityId && native.targetEntityId === web.targetEntityId &&
+    native.itemId === web.itemId && native.lanes === web.lanes && native.tier === web.tier &&
+    native.sorterTier === web.sorterTier && native.stackSize === web.stackSize &&
+    native.priority === web.priority && native.progress === web.progress &&
+    native.lastFlow === web.lastFlow && native.totalTransferred === web.totalTransferred &&
+    native.congestion === web.congestion;
+}
+
+/**
+ * Selects only the compact inspector's live display fields from a complete
+ * atomic native selection. GameState remains the source for every action,
+ * eligibility check and specialized inspector control.
+ */
+export function selectFactoryInspectorSummaryReadModel(
+  web: FactoryInspectorSummaryReadModel,
+  native: NativeFactoryThinViewSnapshot,
+  expectedRevision: number,
+  binding: FactoryInspectorNativeBinding,
+): FactoryInspectorSummaryReadModel {
+  if (binding.requestTruncated ||
+    binding.requestedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+    binding.requestedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows ||
+    !hasUniqueIds(binding.requestedEntityIds) || !hasUniqueIds(binding.requestedBeltIds) ||
+    Boolean(web.entity) === Boolean(web.belt) ||
+    web.entity?.planetId !== undefined && web.entity.planetId !== web.activePlanetId ||
+    web.belt?.planetId !== undefined && web.belt.planetId !== web.activePlanetId) {
+    return web;
+  }
+
+  const frame = native.status === "ready" && native.requestedRevision === expectedRevision
+    ? native.frame
+    : null;
+  const factory = frame?.factory;
+  const selection = factory?.selection;
+  if (!frame || frame.revision !== expectedRevision || frame.planetId !== web.activePlanetId ||
+    !factory || factory.revision !== expectedRevision || factory.shell.source !== "native-core" ||
+    factory.shell.activePlanetId !== web.activePlanetId || selection?.schema !== web.schema ||
+    selection.activePlanetId !== web.activePlanetId || selection.entityRows.truncated ||
+    selection.beltRows.truncated ||
+    selection.requestedEntityCount !== binding.requestedEntityIds.length ||
+    selection.requestedBeltCount !== binding.requestedBeltIds.length ||
+    selection.entityRows.totalCount !== selection.entityRows.rows.length ||
+    selection.beltRows.totalCount !== selection.beltRows.rows.length ||
+    !hasExactOrderedIds(selection.entityRows.rows, binding.requestedEntityIds, (row) => row.entityId) ||
+    !hasExactOrderedIds(selection.beltRows.rows, binding.requestedBeltIds, (row) => row.beltId)) {
+    return web;
+  }
+
+  if (web.entity) {
+    const entity = selection.entityRows.rows.find((row) => row.entityId === web.entity?.entityId);
+    if (!entity || !binding.requestedEntityIds.includes(web.entity.entityId) ||
+      !sameSelectedEntityRow(web.entity, entity)) {
+      return web;
+    }
+    return Object.freeze({ ...web, source: "native-core", revision: expectedRevision, entity });
+  }
+
+  const webBelt = web.belt!;
+  const belt = selection.beltRows.rows.find((row) => row.beltId === webBelt.beltId);
+  if (!belt || !binding.requestedBeltIds.includes(webBelt.beltId) ||
+    !sameSelectedBeltRow(webBelt, belt)) {
+    return web;
+  }
+  return Object.freeze({ ...web, source: "native-core", revision: expectedRevision, belt });
 }
 
 /**

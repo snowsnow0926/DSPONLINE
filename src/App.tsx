@@ -386,6 +386,7 @@ import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import { FACTORY_READ_MODEL_LIMITS } from "./game/factoryReadModels";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryInspectorSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
   selectFactorySelectionToolbarReadModel,
@@ -393,6 +394,7 @@ import {
 import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryInspectorSummaryReadModel,
   createWebFactoryRunStatusReadModel,
   createWebFactorySelectionToolbarReadModel,
 } from "./game/webFactoryReadModelAdapter";
@@ -11629,6 +11631,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ? canvasGame.belts.find((belt) => belt.id === selectedBeltId && belt.planetId === canvasGame.activePlanetId) ?? null
     : null,
   [canvasGame.activePlanetId, canvasGame.belts, selectedBeltId]);
+  const webFactoryInspectorSummaryReadModel = useMemo(
+    () => createWebFactoryInspectorSummaryReadModel(game, selectedEntity, selectedBelt),
+    [game.activePlanetId, selectedBelt, selectedEntity],
+  );
+  const factoryInspectorSummaryReadModel = useMemo(
+    () => selectFactoryInspectorSummaryReadModel(
+      webFactoryInspectorSummaryReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+      {
+        requestedEntityIds: factoryThinViewSelectedEntityIds,
+        requestedBeltIds: factoryThinViewSelectedBeltIds,
+        requestTruncated:
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+      },
+    ),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      webFactoryInspectorSummaryReadModel,
+    ],
+  );
   const selectedBelts = useMemo(() => {
     if (selectedBeltIds.length === 0) return [];
     const selectedIds = new Set(selectedBeltIds);
@@ -12554,6 +12583,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           selectedEntity,
           selectedBelt,
           selectedCount: factorySelectionToolbarReadModel.selectedCount,
+          inspectorReadModel: factoryInspectorSummaryReadModel,
         }}
         factoryActions={{
           onPlacement: (buildingId) => {

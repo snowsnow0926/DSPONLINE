@@ -89,4 +89,25 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/eligibleCount=\{blueprintEligibleIds\.length\}/);
     expect(app).toMatch(/onLock=\{\(\) => \{[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked/);
   });
+
+  it("feeds compact mobile inspector live fields without moving command authority", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const sheets = readFileSync(resolve("src/components/mobile/MobileSheets.tsx"), "utf8");
+    const panels = readFileSync(resolve("src/components/mobile/MobileFactoryPanels.tsx"), "utf8");
+
+    expect(app).toMatch(/createWebFactoryInspectorSummaryReadModel\(game, selectedEntity, selectedBelt\)/);
+    expect(app).toMatch(/selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/inspectorReadModel:\s*factoryInspectorSummaryReadModel/);
+    expect(sheets).toMatch(/readModel=\{factory\.inspectorReadModel\}/);
+    expect(panels).toMatch(/data-factory-read-model-source=\{displaySource\}/);
+    expect(panels).toMatch(/displayEntity\.inputItems\.rows/);
+    expect(panels).toMatch(/displayBelt\?\.lastFlow/);
+
+    // The read model supplies display-only fields. Mutations and eligibility
+    // still use the full GameState entity/belt and the original callbacks.
+    expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);
+    expect(panels).toMatch(/onUpgradeEntity\(entity\.id\)/);
+    expect(panels).toMatch(/getBeltLaneAdjustmentCheck\(game, belt\.id/);
+    expect(panels).toMatch(/onBeltLaneCountChange/);
+  });
 });

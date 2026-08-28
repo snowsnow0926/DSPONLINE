@@ -15,6 +15,7 @@ import type {
 } from "./types";
 import {
   createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryInspectorSummaryReadModel,
   createWebFactoryReadModels,
   createWebFactoryRunStatusReadModel,
   createWebFactorySelectionToolbarReadModel,
@@ -135,6 +136,41 @@ describe("Web/PWA factory read-model adapter", () => {
       canLock: true,
       canUnlock: true,
     });
+  });
+
+  it("projects only the already-selected compact inspector record", () => {
+    const state = createInitialState();
+    const entity = {
+      ...makeEntity(state.entities[0], "entity-inspected"),
+      progress: 0.25,
+      utilization: 0.75,
+      productionRate: 42,
+      inputs: { iron_ore: 12 },
+      outputs: { iron_ingot: 3 },
+    };
+    const belt = { ...makeBelt("belt-inspected", entity.id, entity.id), lastFlow: 7 };
+
+    const entityModel = createWebFactoryInspectorSummaryReadModel(state, entity, belt);
+    expect(entityModel).toMatchObject({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      activePlanetId: "home",
+      entity: {
+        entityId: "entity-inspected",
+        progress: 0.25,
+        utilization: 0.75,
+        productionRate: 42,
+      },
+      belt: null,
+    });
+    expect(entityModel.entity?.inputItems.rows).toEqual([{ itemId: "iron_ore", amount: 12 }]);
+
+    const beltModel = createWebFactoryInspectorSummaryReadModel(state, null, belt);
+    expect(beltModel.entity).toBeNull();
+    expect(beltModel.belt).toMatchObject({ beltId: "belt-inspected", lastFlow: 7 });
+    expect(entityModel).not.toHaveProperty("entities");
+    expect(beltModel).not.toHaveProperty("belts");
   });
 
   it("returns detached bounded projections without full GameState, entity, or belt objects", () => {

@@ -10,6 +10,7 @@ import {
   type ConstructionSummaryReadModel,
   type ConstructionTargetReadModel,
   type FactoryConstructionHeadlineReadModel,
+  type FactoryInspectorSummaryReadModel,
   type FactoryReadModelBundle,
   type FactoryReadModelRequest,
   type FactoryRunStatusReadModel,
@@ -266,6 +267,35 @@ function selectedBeltRow(belt: GameState["belts"][number]): SelectedBeltReadMode
     lastFlow: belt.lastFlow,
     totalTransferred: belt.totalTransferred ?? null,
     congestion: belt.congestion ?? null,
+  };
+}
+
+/**
+ * Web/PWA fallback for the compact inspector's live display fields.
+ *
+ * The caller already owns the selected records, so this adapter performs no
+ * factory-wide lookup. Entity display takes precedence over a belt exactly as
+ * the existing mobile inspector does. Interactive controls continue receiving
+ * the original GameState records separately.
+ */
+export function createWebFactoryInspectorSummaryReadModel(
+  state: GameState,
+  selectedEntity: GameState["entities"][number] | null,
+  selectedBelt: GameState["belts"][number] | null,
+): FactoryInspectorSummaryReadModel {
+  const entity = selectedEntity?.planetId === state.activePlanetId
+    ? selectedEntityRow(selectedEntity)
+    : null;
+  const belt = !entity && selectedBelt?.planetId === state.activePlanetId
+    ? selectedBeltRow(selectedBelt)
+    : null;
+  return {
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: state.activePlanetId,
+    entity,
+    belt,
   };
 }
 

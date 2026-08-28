@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
 import type {
   FactoryConstructionHeadlineReadModel,
+  FactoryInspectorSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
   PlanetNavigationReadModel,
@@ -12,6 +13,7 @@ import type {
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryInspectorSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
   selectFactorySelectionToolbarReadModel,
@@ -141,6 +143,12 @@ const selectionBinding = {
   requestTruncated: false,
   selectedEntityIds: ["entity-open", "entity-locked"],
   selectedBeltIds: ["belt-selected"],
+} as const;
+
+const inspectorBinding = {
+  requestedEntityIds: selectionBinding.requestedEntityIds,
+  requestedBeltIds: selectionBinding.requestedBeltIds,
+  requestTruncated: false,
 } as const;
 
 function factory(revision: number, paused = false): DesktopNativeCoreFactoryReadModelResult {
@@ -455,6 +463,91 @@ describe("native factory thin-view selection toolbar bridge", () => {
       21,
       { ...selectionBinding, requestTruncated: true },
     )).toBe(selectionToolbarWeb);
+  });
+});
+
+describe("native factory thin-view compact inspector bridge", () => {
+  const entityWeb: FactoryInspectorSummaryReadModel = {
+    schema: "factory-read-model-v1",
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: "home",
+    entity: selectedEntity("entity-open", false),
+    belt: null,
+  };
+  const beltWeb: FactoryInspectorSummaryReadModel = {
+    schema: "factory-read-model-v1",
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: "home",
+    entity: null,
+    belt: selectedBelt("belt-inspected"),
+  };
+
+  it("uses only a complete exact-revision row for entity and belt display fields", () => {
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, selectionSnapshot(), 21, inspectorBinding)).toEqual({
+      ...entityWeb,
+      source: "native-core",
+      revision: 21,
+    });
+    expect(selectFactoryInspectorSummaryReadModel(beltWeb, selectionSnapshot(), 21, inspectorBinding)).toEqual({
+      ...beltWeb,
+      source: "native-core",
+      revision: 21,
+    });
+  });
+
+  it("fails closed for stale, truncated, missing, reordered, or semantically different rows", () => {
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, selectionSnapshot(20), 21, inspectorBinding)).toBe(entityWeb);
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, selectionSnapshot(), 21, {
+      ...inspectorBinding,
+      requestTruncated: true,
+    })).toBe(entityWeb);
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, selectionSnapshot(), 21, {
+      ...inspectorBinding,
+      requestedEntityIds: ["entity-locked", "entity-open"],
+    })).toBe(entityWeb);
+
+    const current = selectionSnapshot();
+    const drifted: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              ...current.frame!.factory.selection.entityRows,
+              rows: current.frame!.factory.selection.entityRows.rows.map((row) => row.entityId === "entity-open"
+                ? { ...row, productionRate: 1 }
+                : row),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, drifted, 21, inspectorBinding)).toBe(entityWeb);
+
+    const nestedTruncation: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              ...current.frame!.factory.selection.entityRows,
+              rows: current.frame!.factory.selection.entityRows.rows.map((row) => row.entityId === "entity-open"
+                ? { ...row, inputItems: { rows: [], totalCount: 1, truncated: true } }
+                : row),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryInspectorSummaryReadModel(entityWeb, nestedTruncation, 21, inspectorBinding)).toBe(entityWeb);
   });
 });
 

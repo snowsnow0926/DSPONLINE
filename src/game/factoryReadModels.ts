@@ -68,6 +68,19 @@ export interface FactorySelectionToolbarReadModel {
   readonly canUnlock: boolean;
 }
 
+/**
+ * Bounded live fields rendered by the compact mobile entity/belt inspector.
+ * Command eligibility and mutations deliberately remain outside this model.
+ */
+export interface FactoryInspectorSummaryReadModel {
+  readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly activePlanetId: string;
+  readonly entity: SelectedEntityReadModel | null;
+  readonly belt: SelectedBeltReadModel | null;
+}
+
 /** Bounded headline used by the visible blueprint construction workspace. */
 export interface FactoryConstructionHeadlineReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;

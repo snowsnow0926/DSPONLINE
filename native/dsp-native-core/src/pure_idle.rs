@@ -9,7 +9,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-v3";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-dag-v4";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DEFAULT_QUANTUM_ITEM_CAPACITY: i128 = 10_000_000_000;
@@ -69,8 +69,10 @@ struct OrdinaryFlowCertificate {
     /// Inferred internal recipe consumption per simulated second. GameState
     /// v47 has no persisted totalConsumed map; this remains runtime proof.
     consumed_units_per_second: MaterialTotals,
-    /// Present only when the certificate closes one ordinary recipe domain.
-    recipe_id: Option<String>,
+    /// Active ordinary recipes in first-seen entity order. An empty vector is
+    /// the legacy source-only proof; non-empty means the complete acyclic
+    /// recipe domain was closed without reordering any persisted entity.
+    recipe_ids: Vec<String>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -1859,11 +1861,12 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
     None
 }
 
-fn active_ordinary_recipe_id(state: &CoreState) -> Result<Option<String>, String> {
+fn active_ordinary_recipe_ids(state: &CoreState) -> Result<Vec<String>, String> {
     if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
         return Err(format!("ordinary recipe tail is excluded while {reason}"));
     }
-    let mut recipe_ids = BTreeSet::new();
+    let mut recipe_ids = Vec::new();
+    let mut seen_recipe_ids = HashSet::new();
     for entity_index in 0..state.entity_index.len() {
         let entity = state
             .parse_entity(entity_index)
@@ -1871,10 +1874,34 @@ fn active_ordinary_recipe_id(state: &CoreState) -> Result<Option<String>, String
         if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
             continue;
         }
+        let entity_output_ids = entity
+            .get("outputs")
+            .and_then(Value::as_object)
+            .map(|outputs| outputs.keys().cloned().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         let Some(recipe_id) = entity.get("recipeId").and_then(Value::as_str) else {
+            if !entity_output_ids.is_empty() {
+                return Err(format!(
+                    "active entity {} is an alternate unmodelled producer for {}",
+                    entity
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>"),
+                    entity_output_ids.into_iter().collect::<Vec<_>>().join(",")
+                ));
+            }
             continue;
         };
         if recipe_id.is_empty() {
+            if !entity_output_ids.is_empty() {
+                return Err(format!(
+                    "active entity {} has an empty recipe ID but declares produced materials",
+                    entity
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>")
+                ));
+            }
             continue;
         }
         let recipe = state
@@ -1911,15 +1938,31 @@ fn active_ordinary_recipe_id(state: &CoreState) -> Result<Option<String>, String
                 "active recipe {recipe_id} uses proliferator without a closed bonus ledger"
             ));
         }
-        recipe_ids.insert(recipe_id.to_owned());
+        let recipe_input_ids = recipe
+            .inputs
+            .iter()
+            .map(|input| input.item_id.clone())
+            .collect::<BTreeSet<_>>();
+        let recipe_output_ids = recipe
+            .outputs
+            .iter()
+            .map(|output| output.item_id.clone())
+            .collect::<BTreeSet<_>>();
+        let entity_input_ids = entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .map(|inputs| inputs.keys().cloned().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        if entity_input_ids != recipe_input_ids || entity_output_ids != recipe_output_ids {
+            return Err(format!(
+                "active recipe {recipe_id} entity slots do not exactly match its catalog material ledger"
+            ));
+        }
+        if seen_recipe_ids.insert(recipe_id.to_owned()) {
+            recipe_ids.push(recipe_id.to_owned());
+        }
     }
-    match recipe_ids.len() {
-        0 => Ok(None),
-        1 => Ok(recipe_ids.into_iter().next()),
-        count => Err(format!(
-            "ordinary recipe tail currently proves one recipe at a time, observed {count}"
-        )),
-    }
+    Ok(recipe_ids)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2050,138 +2093,231 @@ fn build_closed_recipe_certificate(
     sources: &BTreeSet<String>,
     flow: &OrdinaryWindowFlow,
 ) -> Result<OrdinaryFlowCertificate, String> {
-    let recipe_id = active_ordinary_recipe_id(state)?
-        .ok_or_else(|| "no active ordinary recipe is available".to_owned())?;
-    let recipe = state
-        .catalog
-        .recipes
-        .get(&recipe_id)
-        .ok_or_else(|| format!("active recipe {recipe_id} disappeared"))?;
-    let mut inputs = MaterialTotals::new();
-    let mut outputs = MaterialTotals::new();
-    for input in &recipe.inputs {
-        add_catalog_flow_amount(
-            &mut inputs,
-            &input.item_id,
-            input.amount,
-            &format!("recipes.{recipe_id}.inputs.{}", input.item_id),
-        )?;
+    let recipe_ids = active_ordinary_recipe_ids(state)?;
+    if recipe_ids.is_empty() {
+        return Err("no active ordinary recipe is available".to_owned());
     }
-    for output in &recipe.outputs {
-        add_catalog_flow_amount(
-            &mut outputs,
-            &output.item_id,
-            output.amount,
-            &format!("recipes.{recipe_id}.outputs.{}", output.item_id),
-        )?;
-    }
-    if inputs.keys().any(|item_id| outputs.contains_key(item_id)) {
-        return Err(format!(
-            "active recipe {recipe_id} has an input/output feedback item"
-        ));
-    }
-    for item_id in inputs.keys() {
-        if !sources.contains(item_id) {
+
+    // Recipe IDs are retained in first-seen entity order. The topological
+    // traversal below proves acyclicity only; it never rewrites entity order or
+    // uses map iteration order as a scheduling input.
+    let mut recipe_inputs = Vec::with_capacity(recipe_ids.len());
+    let mut recipe_outputs = Vec::with_capacity(recipe_ids.len());
+    let mut output_producer = BTreeMap::<String, usize>::new();
+    for (recipe_index, recipe_id) in recipe_ids.iter().enumerate() {
+        let recipe = state
+            .catalog
+            .recipes
+            .get(recipe_id)
+            .ok_or_else(|| format!("active recipe {recipe_id} disappeared"))?;
+        let mut inputs = MaterialTotals::new();
+        let mut outputs = MaterialTotals::new();
+        for input in &recipe.inputs {
+            add_catalog_flow_amount(
+                &mut inputs,
+                &input.item_id,
+                input.amount,
+                &format!("recipes.{recipe_id}.inputs.{}", input.item_id),
+            )?;
+        }
+        for output in &recipe.outputs {
+            add_catalog_flow_amount(
+                &mut outputs,
+                &output.item_id,
+                output.amount,
+                &format!("recipes.{recipe_id}.outputs.{}", output.item_id),
+            )?;
+        }
+        if inputs.keys().any(|item_id| outputs.contains_key(item_id)) {
             return Err(format!(
-                "recipe {recipe_id} input {item_id} is not an exclusive infinite-vein source"
+                "active recipe {recipe_id} has an input/output feedback item"
             ));
         }
-    }
-    for item_id in outputs.keys() {
-        if sources.contains(item_id) {
-            return Err(format!(
-                "recipe {recipe_id} output {item_id} overlaps an infinite-vein source"
-            ));
+        for item_id in outputs.keys() {
+            if sources.contains(item_id) {
+                return Err(format!(
+                    "recipe {recipe_id} output {item_id} overlaps an infinite-vein source"
+                ));
+            }
+            if let Some(previous_index) = output_producer.insert(item_id.clone(), recipe_index) {
+                return Err(format!(
+                    "item {item_id} has alternate active producers {} and {recipe_id}",
+                    recipe_ids[previous_index]
+                ));
+            }
         }
+        recipe_inputs.push(inputs);
+        recipe_outputs.push(outputs);
+    }
+
+    // Every non-source input must have exactly one active upstream producer.
+    // Edges are de-duplicated per recipe pair so a multi-item dependency does
+    // not inflate the consumer's indegree.
+    let mut outgoing = vec![BTreeSet::<usize>::new(); recipe_ids.len()];
+    let mut indegree = vec![0_usize; recipe_ids.len()];
+    for (consumer_index, inputs) in recipe_inputs.iter().enumerate() {
+        for item_id in inputs.keys() {
+            let Some(&producer_index) = output_producer.get(item_id) else {
+                if sources.contains(item_id) {
+                    continue;
+                }
+                return Err(format!(
+                    "recipe {} input {item_id} has no certified infinite source or active producer",
+                    recipe_ids[consumer_index]
+                ));
+            };
+            if outgoing[producer_index].insert(consumer_index) {
+                indegree[consumer_index] = indegree[consumer_index]
+                    .checked_add(1)
+                    .ok_or_else(|| "ordinary recipe DAG indegree overflowed".to_owned())?;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+        .collect::<BTreeSet<_>>();
+    let mut topological_order = Vec::with_capacity(recipe_ids.len());
+    while let Some(index) = ready.iter().next().copied() {
+        ready.remove(&index);
+        topological_order.push(index);
+        for &consumer_index in &outgoing[index] {
+            indegree[consumer_index] = indegree[consumer_index]
+                .checked_sub(1)
+                .ok_or_else(|| "ordinary recipe DAG indegree regressed".to_owned())?;
+            if indegree[consumer_index] == 0 {
+                ready.insert(consumer_index);
+            }
+        }
+    }
+    if topological_order.len() != recipe_ids.len() {
+        return Err("active ordinary recipes contain a material dependency cycle".to_owned());
     }
 
     let allowed_production = sources
         .iter()
-        .chain(outputs.keys())
+        .chain(output_producer.keys())
         .cloned()
+        .collect::<BTreeSet<_>>();
+    let allowed_consumption = recipe_inputs
+        .iter()
+        .flat_map(|inputs| inputs.keys().cloned())
         .collect::<BTreeSet<_>>();
     for item_id in flow.produced_per_second.keys() {
         if !allowed_production.contains(item_id) {
             return Err(format!(
-                "unmodelled item {item_id} was produced beside recipe {recipe_id}"
+                "unmodelled item {item_id} was produced beside the ordinary recipe DAG"
             ));
         }
     }
     for item_id in flow.consumed_per_second.keys() {
-        if !inputs.contains_key(item_id) {
+        if !allowed_consumption.contains(item_id) {
             return Err(format!(
-                "unmodelled item {item_id} was consumed beside recipe {recipe_id}"
+                "unmodelled item {item_id} was consumed beside the ordinary recipe DAG"
             ));
         }
     }
 
-    let mut batches_per_second = None;
-    for (item_id, output_amount) in &outputs {
-        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
-        if produced <= 0 || produced % output_amount != 0 {
-            return Err(format!(
-                "recipe {recipe_id} output {item_id} does not prove whole stable batches"
-            ));
-        }
-        let batches = produced / output_amount;
-        match batches_per_second {
-            None => batches_per_second = Some(batches),
-            Some(expected) if expected == batches => {}
-            Some(expected) => {
+    // Gross output fixes an integer batch rate for every active recipe. This
+    // avoids deriving downstream flow from inventory deltas alone.
+    let mut batches_per_second = vec![0_i128; recipe_ids.len()];
+    for &recipe_index in &topological_order {
+        let recipe_id = &recipe_ids[recipe_index];
+        let mut recipe_batches = None;
+        for (item_id, output_amount) in &recipe_outputs[recipe_index] {
+            let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
+            if produced <= 0 || produced % output_amount != 0 {
                 return Err(format!(
-                    "recipe {recipe_id} output batch rates disagree ({expected} versus {batches})"
+                    "recipe {recipe_id} output {item_id} does not prove whole stable batches"
                 ));
             }
+            let batches = produced / output_amount;
+            match recipe_batches {
+                None => recipe_batches = Some(batches),
+                Some(expected) if expected == batches => {}
+                Some(expected) => {
+                    return Err(format!(
+                        "recipe {recipe_id} output batch rates disagree ({expected} versus {batches})"
+                    ));
+                }
+            }
         }
-        if flow.consumed_per_second.get(item_id).copied().unwrap_or(0) != 0
-            || flow.net_owned_per_second.get(item_id).copied().unwrap_or(0) != produced
-        {
+        let recipe_batches = recipe_batches.unwrap_or(0);
+        if recipe_batches <= 0 {
+            return Err(format!("recipe {recipe_id} produced no stable batches"));
+        }
+        batches_per_second[recipe_index] = recipe_batches;
+    }
+
+    // Sum every consumer before comparing against the inferred aggregate.
+    // This is the shared-intermediate fan-out receipt: an intermediate can be
+    // consumed by several recipes, but each unit is charged exactly once.
+    let mut expected_consumption = MaterialTotals::new();
+    for (recipe_index, inputs) in recipe_inputs.iter().enumerate() {
+        for (item_id, input_amount) in inputs {
+            let consumed = input_amount
+                .checked_mul(batches_per_second[recipe_index])
+                .ok_or_else(|| {
+                    format!(
+                        "recipe {} input {item_id} rate overflowed",
+                        recipe_ids[recipe_index]
+                    )
+                })?;
+            let current = expected_consumption.get(item_id).copied().unwrap_or(0);
+            expected_consumption.insert(
+                item_id.clone(),
+                current
+                    .checked_add(consumed)
+                    .ok_or_else(|| format!("{item_id} aggregate consumption overflowed"))?,
+            );
+        }
+    }
+
+    let ledger_items = material_ids([
+        &flow.produced_per_second,
+        &flow.consumed_per_second,
+        &flow.net_owned_per_second,
+        &expected_consumption,
+    ]);
+    let mut has_terminal_product = false;
+    for item_id in ledger_items {
+        if !allowed_production.contains(&item_id) && !allowed_consumption.contains(&item_id) {
             return Err(format!(
-                "recipe {recipe_id} output {item_id} is not a terminal-free net product"
+                "unmodelled item {item_id} changed ownership beside the ordinary recipe DAG"
             ));
         }
-    }
-    let batches_per_second = batches_per_second.unwrap_or(0);
-    if batches_per_second <= 0 {
-        return Err(format!("recipe {recipe_id} produced no stable batches"));
-    }
-    for (item_id, input_amount) in &inputs {
-        let expected_consumed = input_amount
-            .checked_mul(batches_per_second)
-            .ok_or_else(|| format!("recipe {recipe_id} input {item_id} rate overflowed"))?;
-        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
-        let consumed = flow.consumed_per_second.get(item_id).copied().unwrap_or(0);
-        let net_owned = flow.net_owned_per_second.get(item_id).copied().unwrap_or(0);
-        if consumed != expected_consumed {
+        let produced = flow.produced_per_second.get(&item_id).copied().unwrap_or(0);
+        let consumed = flow.consumed_per_second.get(&item_id).copied().unwrap_or(0);
+        let expected = expected_consumption.get(&item_id).copied().unwrap_or(0);
+        let net_owned = flow
+            .net_owned_per_second
+            .get(&item_id)
+            .copied()
+            .unwrap_or(0);
+        if consumed != expected {
             return Err(format!(
-                "recipe {recipe_id} input {item_id} consumed {consumed}/s instead of {expected_consumed}/s"
+                "ordinary recipe DAG item {item_id} consumed {consumed}/s instead of {expected}/s"
             ));
         }
         if produced < consumed || produced - consumed != net_owned {
             return Err(format!(
-                "recipe {recipe_id} input {item_id} is not funded by same-window source production"
+                "ordinary recipe DAG item {item_id} is not funded by same-window certified production"
             ));
+        }
+        if output_producer.contains_key(&item_id) && expected == 0 && net_owned > 0 {
+            has_terminal_product = true;
         }
     }
-    for item_id in sources {
-        if inputs.contains_key(item_id) {
-            continue;
-        }
-        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
-        if flow.consumed_per_second.get(item_id).copied().unwrap_or(0) != 0
-            || flow.net_owned_per_second.get(item_id).copied().unwrap_or(0) != produced
-        {
-            return Err(format!(
-                "exclusive source {item_id} does not close outside recipe {recipe_id}"
-            ));
-        }
+    if !has_terminal_product {
+        return Err("ordinary recipe DAG has no stable net-positive final product".to_owned());
     }
 
     Ok(OrdinaryFlowCertificate {
         units_per_second: flow.net_owned_per_second.clone(),
         produced_units_per_second: flow.produced_per_second.clone(),
         consumed_units_per_second: flow.consumed_per_second.clone(),
-        recipe_id: Some(recipe_id),
+        recipe_ids,
     })
 }
 
@@ -2238,6 +2374,13 @@ fn build_ordinary_flow_certificate(
         return Ok(certificate);
     }
     let recipe_rejection = recipe_rejection.unwrap_err();
+
+    // Source-only is a strict subset, not a recovery path for a malformed or
+    // unclosed active recipe domain. Otherwise a blocked/cyclic factory could
+    // still receive extrapolated mining while its material consumers freeze.
+    if !active_ordinary_recipe_ids(state)?.is_empty() {
+        return Err(recipe_rejection);
+    }
 
     let mut rates = MaterialTotals::new();
     let mut first_rejection = None;
@@ -2309,7 +2452,7 @@ fn build_ordinary_flow_certificate(
         units_per_second: rates.clone(),
         produced_units_per_second: rates,
         consumed_units_per_second: MaterialTotals::new(),
-        recipe_id: None,
+        recipe_ids: Vec::new(),
     })
 }
 
@@ -2515,7 +2658,7 @@ fn apply_ordinary_flow_certificate(
     elapsed_before: f64,
     elapsed_after: f64,
 ) -> Result<OrdinaryFlowApplication, String> {
-    if certificate.recipe_id.is_none() {
+    if certificate.recipe_ids.is_empty() {
         return apply_source_only_flow_certificate(
             state,
             certificate,
@@ -2653,7 +2796,7 @@ fn apply_ordinary_flow_certificate(
     let mut produced_updates = Vec::with_capacity(certificate.produced_units_per_second.len());
     let mut application = OrdinaryFlowApplication {
         certified_items: certified_ids.len(),
-        recipe_certified: certificate.recipe_id.is_some(),
+        recipe_certified: !certificate.recipe_ids.is_empty(),
         capacity_limited: accepted_seconds < scheduled_seconds,
         ..OrdinaryFlowApplication::default()
     };
@@ -2764,11 +2907,12 @@ fn prove_internal_exact_settlement_candidate(
 /// audited grants/consumption and Dyson terminal deltas before any candidate
 /// commits. Macro-v10 additionally admits a narrow three-window certificate
 /// for exclusive infinite-vein source flow backed only by non-fuel power. A
-/// stricter slice may also close one ordinary recipe whose complete input rate
-/// is funded by those sources. Its tail writes only non-negative net ownership
-/// into bounded quantum inventory while crediting gross `totalProduced` from
-/// the runtime produced/consumed ledger. Finite resources, stored/fuel energy,
-/// research, construction and every terminal subsystem remain frozen.
+/// stricter slice may also close an acyclic ordinary-recipe DAG whose root
+/// inputs are funded by those sources and whose shared intermediates balance
+/// exactly. Its tail writes only non-negative net ownership into bounded
+/// quantum inventory while crediting gross `totalProduced` from the runtime
+/// produced/consumed ledger. Finite resources, stored/fuel energy, research,
+/// construction and every terminal subsystem remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -2777,7 +2921,7 @@ pub(crate) fn advance(
 }
 
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
-/// calibration boundary and can settle only the source or single-recipe
+/// calibration boundary and can settle only the source or closed recipe-DAG
 /// ordinary flow authorized by `OrdinaryFlowCertificate`; all other tail
 /// domains freeze.
 pub(crate) fn advance_macro_v10(
@@ -2986,7 +3130,7 @@ fn advance_bounded(
                 };
                 tail_reason = Some(if ordinary_application.deposited_units > 0 {
                     let scope = if ordinary_application.recipe_certified {
-                        "single-recipe closed ordinary"
+                        "acyclic closed ordinary recipe"
                     } else {
                         "source-only ordinary"
                     };
@@ -3120,7 +3264,7 @@ mod tests {
                     simulation_order: 0,
                     orbital_yields: HashMap::new(),
                 }],
-                items: ["iron_ore", "iron_ingot"]
+                items: ["iron_ore", "iron_ingot", "iron_gear", "magnet"]
                     .into_iter()
                     .map(|id| ItemDefinition {
                         id: id.into(),
@@ -3206,23 +3350,59 @@ mod tests {
                         accepts: None,
                     },
                 ],
-                recipes: vec![RecipeDefinition {
-                    id: "iron_ingot".into(),
-                    name: "iron_ingot".into(),
-                    building_id: "arc_smelter".into(),
-                    duration: 1.0,
-                    required_tech_id: None,
-                    recursive_priority: 0.0,
-                    recursive_manufacturing: false,
-                    inputs: vec![ItemAmount {
-                        item_id: "iron_ore".into(),
-                        amount: 1.0,
-                    }],
-                    outputs: vec![ItemAmount {
-                        item_id: "iron_ingot".into(),
-                        amount: 1.0,
-                    }],
-                }],
+                recipes: vec![
+                    RecipeDefinition {
+                        id: "iron_ingot".into(),
+                        name: "iron_ingot".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "iron_ingot".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "iron_gear".into(),
+                        name: "iron_gear".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ingot".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "iron_gear".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "magnet".into(),
+                        name: "magnet".into(),
+                        building_id: "arc_smelter".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ingot".into(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "magnet".into(),
+                            amount: 1.0,
+                        }],
+                    },
+                ],
                 constructions: vec![
                     ConstructionDefinition {
                         id: "test_building".into(),
@@ -3750,6 +3930,133 @@ mod tests {
                 "lastFlow": 0,
                 "totalTransferred": 0
             })],
+        )
+    }
+
+    fn productive_closed_recipe_dag_macro_fixture(multiplier: f64) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["campaign"]["rewardedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        base["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000",
+            "iron_ingot": "10000000000",
+            "iron_gear": "10000000000",
+            "magnet": "10000000000"
+        });
+        fixture_state_from_parts(
+            base,
+            vec![
+                json!({
+                    "id": "wind",
+                    "kind": "power",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "wind_turbine",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "controller",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "time_warp_device",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 1,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "vein",
+                    "kind": "vein",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "resourceId": "iron_ore",
+                    "extractorBuildingId": "mining_machine",
+                    "minerCount": 4,
+                    "inputs": {},
+                    "outputs": { "iron_ore": 0 },
+                    "resourceCapacity": 1000000,
+                    "resourceRemaining": 1000000,
+                    "resourceDepletionRemainder": 0,
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                // Consumers deliberately precede their producer. The proof
+                // must retain this persisted order while using a separate
+                // stable topological traversal for certification.
+                json!({
+                    "id": "magnet-smelter",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "magnet",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "iron_ingot": 1000 },
+                    "outputs": { "magnet": 0 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "ingot-smelter",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 2,
+                    "minerCount": 0,
+                    "inputs": { "iron_ore": 1000 },
+                    "outputs": { "iron_ingot": 0 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "gear-smelter",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_gear",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "iron_ingot": 1000 },
+                    "outputs": { "iron_gear": 0 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+            ],
         )
     }
 
@@ -4558,7 +4865,7 @@ mod tests {
                 long_result
                     .reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("single-recipe closed ordinary")),
+                    .is_some_and(|reason| reason.contains("acyclic closed ordinary recipe")),
                 "reason={:?}",
                 long_result.reason
             );
@@ -4631,6 +4938,463 @@ mod tests {
                 "multiplier={multiplier}"
             );
         }
+    }
+
+    #[test]
+    fn macro_v10_certifies_acyclic_recipe_dag_with_shared_intermediate() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_closed_recipe_dag_macro_fixture(multiplier);
+            let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / multiplier);
+            let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+            let certificate = build_ordinary_flow_certificate(&initial, &snapshots).unwrap();
+            assert_eq!(
+                certificate.recipe_ids,
+                ["magnet", "iron_ingot", "iron_gear"],
+                "the certificate must retain first-seen entity order"
+            );
+            assert_eq!(
+                certificate.produced_units_per_second,
+                BTreeMap::from([
+                    ("iron_gear".to_owned(), 1),
+                    ("iron_ingot".to_owned(), 2),
+                    ("iron_ore".to_owned(), 4),
+                    ("magnet".to_owned(), 1),
+                ])
+            );
+            assert_eq!(
+                certificate.consumed_units_per_second,
+                BTreeMap::from([("iron_ingot".to_owned(), 2), ("iron_ore".to_owned(), 2),])
+            );
+            assert_eq!(
+                certificate.units_per_second,
+                BTreeMap::from([
+                    ("iron_gear".to_owned(), 1),
+                    ("iron_ore".to_owned(), 2),
+                    ("magnet".to_owned(), 1),
+                ])
+            );
+
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+
+            let mut long = initial.clone();
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 600.0, 600.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert!(
+                long_result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("acyclic closed ordinary recipe")),
+                "reason={:?}",
+                long_result.reason
+            );
+            let long_state = long.materialize().unwrap();
+            let tail_seconds = 570_i128;
+            for (item_id, rate) in [
+                ("iron_ore", 4_i128),
+                ("iron_ingot", 2),
+                ("iron_gear", 1),
+                ("magnet", 1),
+            ] {
+                let delta = proof_counter(
+                    long_state["totalProduced"].get(item_id),
+                    &format!("long.totalProduced.{item_id}"),
+                )
+                .unwrap()
+                    - proof_counter(
+                        prefix_state["totalProduced"].get(item_id),
+                        &format!("prefix.totalProduced.{item_id}"),
+                    )
+                    .unwrap();
+                assert_eq!(delta, rate * tail_seconds, "item={item_id}");
+            }
+            for (item_id, rate) in [("iron_ore", 2_i128), ("iron_gear", 1), ("magnet", 1)] {
+                assert_eq!(
+                    proof_counter(
+                        long_state["quantumLogisticsNetwork"]["inventory"].get(item_id),
+                        &format!("long.quantum.{item_id}"),
+                    )
+                    .unwrap(),
+                    rate * tail_seconds,
+                    "item={item_id}"
+                );
+            }
+            assert!(
+                long_state["quantumLogisticsNetwork"]["inventory"]
+                    .get("iron_ingot")
+                    .is_none(),
+                "zero-net shared intermediates must not be deposited"
+            );
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            assert_eq!(long_state["belts"], prefix_state["belts"]);
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_recipe_dag_capacity_horizon_scales_the_complete_ledger() {
+        let mut initial = productive_closed_recipe_dag_macro_fixture(15.0);
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000",
+            "iron_ingot": "10000",
+            "iron_gear": "10000",
+            "magnet": "10000"
+        });
+        initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"] = json!({
+            "iron_ore": "9000",
+            "iron_gear": "9997",
+            "magnet": "9000"
+        });
+
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let prefix_state = prefix.materialize().unwrap();
+
+        let mut long = initial.clone();
+        let long_revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capacity horizon")),
+            "reason={:?}",
+            result.reason
+        );
+        let long_state = long.materialize().unwrap();
+        assert_eq!(
+            long_state["quantumLogisticsNetwork"]["inventory"]["iron_gear"],
+            json!("10000")
+        );
+        assert_eq!(
+            long_state["quantumLogisticsNetwork"]["inventory"]["iron_ore"],
+            json!("9006")
+        );
+        assert_eq!(
+            long_state["quantumLogisticsNetwork"]["inventory"]["magnet"],
+            json!("9003")
+        );
+        for (item_id, expected_delta) in [
+            ("iron_ore", 12_i128),
+            ("iron_ingot", 6),
+            ("iron_gear", 3),
+            ("magnet", 3),
+        ] {
+            let delta = proof_counter(
+                long_state["totalProduced"].get(item_id),
+                &format!("long.totalProduced.{item_id}"),
+            )
+            .unwrap()
+                - proof_counter(
+                    prefix_state["totalProduced"].get(item_id),
+                    &format!("prefix.totalProduced.{item_id}"),
+                )
+                .unwrap();
+            assert_eq!(delta, expected_delta, "item={item_id}");
+        }
+
+        let mut segmented = initial;
+        for seconds in [30.0, 190.0, 190.0, 190.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn closed_recipe_dag_rejects_cycles_alternate_producers_and_spray_without_mutation() {
+        let state = productive_closed_recipe_dag_macro_fixture(15.0);
+        let request = pure_idle_macro_request(state.revision, 600.0, 40.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+        let flows = snapshots
+            .windows(2)
+            .map(|window| capture_ordinary_window_flow(&window[0], &window[1]).unwrap())
+            .collect::<Vec<_>>();
+        assert!(flows.iter().skip(1).all(|flow| flow == &flows[0]));
+        let mut cycle = state.clone();
+        std::sync::Arc::make_mut(&mut cycle.catalog)
+            .recipes
+            .get_mut("iron_ingot")
+            .unwrap()
+            .inputs = vec![ItemAmount {
+            item_id: "magnet".to_owned(),
+            amount: 1.0,
+        }];
+        let mut ingot_entity = cycle.parse_entity(4).unwrap();
+        ingot_entity["inputs"] = json!({ "magnet": 1000 });
+        cycle.replace_entity_raw(4, serde_json::to_string(&ingot_entity).unwrap().into());
+        cycle.rebuild_indexes().unwrap();
+        let cycle_hash = cycle.summary().unwrap().canonical_sha256;
+        let cycle_sources = exclusive_infinite_vein_sources(&cycle).unwrap();
+        let rejection =
+            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0]).unwrap_err();
+        assert!(rejection.contains("dependency cycle"), "{rejection}");
+        assert_eq!(cycle.summary().unwrap().canonical_sha256, cycle_hash);
+
+        let mut alternate = state.clone();
+        std::sync::Arc::make_mut(&mut alternate.catalog)
+            .recipes
+            .get_mut("magnet")
+            .unwrap()
+            .outputs = vec![ItemAmount {
+            item_id: "iron_gear".to_owned(),
+            amount: 1.0,
+        }];
+        let mut magnet_entity = alternate.parse_entity(3).unwrap();
+        magnet_entity["outputs"] = json!({ "iron_gear": 0 });
+        alternate.replace_entity_raw(3, serde_json::to_string(&magnet_entity).unwrap().into());
+        alternate.rebuild_indexes().unwrap();
+        let alternate_hash = alternate.summary().unwrap().canonical_sha256;
+        let alternate_sources = exclusive_infinite_vein_sources(&alternate).unwrap();
+        let rejection =
+            build_closed_recipe_certificate(&alternate, &alternate_sources, &flows[0]).unwrap_err();
+        assert!(
+            rejection.contains("alternate active producers"),
+            "{rejection}"
+        );
+        assert_eq!(
+            alternate.summary().unwrap().canonical_sha256,
+            alternate_hash
+        );
+
+        let mut hidden_producer = state.clone();
+        let mut controller = hidden_producer.parse_entity(1).unwrap();
+        controller["outputs"] = json!({ "iron_gear": 0 });
+        hidden_producer.replace_entity_raw(1, serde_json::to_string(&controller).unwrap().into());
+        hidden_producer.rebuild_indexes().unwrap();
+        let hidden_hash = hidden_producer.summary().unwrap().canonical_sha256;
+        let hidden_sources = exclusive_infinite_vein_sources(&hidden_producer).unwrap();
+        let rejection =
+            build_closed_recipe_certificate(&hidden_producer, &hidden_sources, &flows[0])
+                .unwrap_err();
+        assert!(
+            rejection.contains("alternate unmodelled producer"),
+            "{rejection}"
+        );
+        assert_eq!(
+            hidden_producer.summary().unwrap().canonical_sha256,
+            hidden_hash
+        );
+
+        let mut sprayed = state;
+        let mut entity = sprayed.parse_entity(3).unwrap();
+        entity["sprayCoaterInstalled"] = json!(true);
+        sprayed.replace_entity_raw(3, serde_json::to_string(&entity).unwrap().into());
+        sprayed.rebuild_indexes().unwrap();
+        let sprayed_sources = exclusive_infinite_vein_sources(&sprayed).unwrap();
+        let rejection =
+            build_closed_recipe_certificate(&sprayed, &sprayed_sources, &flows[0]).unwrap_err();
+        assert!(rejection.contains("proliferator"), "{rejection}");
+    }
+
+    #[test]
+    fn macro_v10_recipe_cycle_never_falls_back_to_source_only_mining() {
+        let mut initial = productive_closed_recipe_dag_macro_fixture(15.0);
+        std::sync::Arc::make_mut(&mut initial.catalog)
+            .recipes
+            .get_mut("iron_ingot")
+            .unwrap()
+            .inputs = vec![ItemAmount {
+            item_id: "magnet".to_owned(),
+            amount: 1.0,
+        }];
+        let mut ingot = initial.parse_entity(4).unwrap();
+        ingot["machineCount"] = json!(1);
+        ingot["inputs"] = json!({ "magnet": 1000 });
+        initial.replace_entity_raw(4, serde_json::to_string(&ingot).unwrap().into());
+        let mut gear = initial.parse_entity(5).unwrap();
+        gear["machineCount"] = json!(0);
+        initial.replace_entity_raw(5, serde_json::to_string(&gear).unwrap().into());
+        initial.rebuild_indexes().unwrap();
+
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        let result = advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_state = prefix.materialize().unwrap();
+
+        let mut long = initial;
+        let long_revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("dependency cycle")),
+            "reason={:?}",
+            result.reason
+        );
+        let long_state = long.materialize().unwrap();
+        assert_eq!(long_state["totalProduced"], prefix_state["totalProduced"]);
+        assert_eq!(long_state["entities"], prefix_state["entities"]);
+        assert!(
+            long_state["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .unwrap()
+                .is_empty(),
+            "the infinite source must freeze with the rejected cyclic domain"
+        );
+    }
+
+    #[test]
+    fn macro_v10_recipe_dag_does_not_replay_prefilled_only_inputs() {
+        let mut initial = productive_closed_recipe_dag_macro_fixture(15.0);
+        let mut vein = initial.parse_entity(2).unwrap();
+        vein["minerCount"] = json!(0);
+        initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+        initial.rebuild_indexes().unwrap();
+
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        let result = advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_state = prefix.materialize().unwrap();
+        assert!(
+            proof_counter(
+                prefix_state["totalProduced"].get("iron_gear"),
+                "prefix.totalProduced.iron_gear",
+            )
+            .unwrap()
+                > 0
+        );
+
+        let mut long = initial;
+        let long_revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no exclusive active infinite-vein source")),
+            "reason={:?}",
+            result.reason
+        );
+        let long_state = long.materialize().unwrap();
+        assert_eq!(long_state["totalProduced"], prefix_state["totalProduced"]);
+        assert_eq!(long_state["entities"], prefix_state["entities"]);
+        assert!(
+            long_state["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn macro_v10_recipe_dag_ledger_failure_is_atomic() {
+        let mut state = productive_closed_recipe_dag_macro_fixture(15.0);
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .expect("closed recipe DAG certificate");
+        assert_eq!(
+            certificate.recipe_ids,
+            ["magnet", "iron_ingot", "iron_gear"]
+        );
+        certificate
+            .consumed_units_per_second
+            .insert("iron_ingot".to_owned(), 1);
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("closed-flow identity is invalid")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
+    }
+
+    #[test]
+    fn macro_v10_recipe_dag_has_a_fixed_cross_thread_hash() {
+        let mut state = productive_closed_recipe_dag_macro_fixture(15.0);
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            state.summary().unwrap().canonical_sha256,
+            "568a15dba5cb059a34a2d6e40263b1a2ab134ebe9d011fc96446e82982d7bc9b"
+        );
     }
 
     #[test]
@@ -4732,7 +5496,7 @@ mod tests {
             .as_mut()
             .and_then(|runtime| runtime.certificate.as_mut())
             .expect("closed recipe certificate");
-        assert_eq!(certificate.recipe_id.as_deref(), Some("iron_ingot"));
+        assert_eq!(certificate.recipe_ids, ["iron_ingot"]);
         certificate
             .consumed_units_per_second
             .insert("iron_ore".to_owned(), 0);
@@ -4777,13 +5541,14 @@ mod tests {
         let request = pure_idle_macro_request(state.revision, 60.0, 4.0);
         let snapshots = exact_three_window_probe(&state, &request).unwrap();
         let certificate = build_ordinary_flow_certificate(&state, &snapshots).unwrap();
-        assert_eq!(certificate.recipe_id.as_deref(), Some("iron_ingot"));
+        assert_eq!(certificate.recipe_ids, ["iron_ingot"]);
 
         let assert_domain_rejected = |label: &str, excluded: CoreState| {
             let rejection = build_ordinary_flow_certificate(&excluded, &snapshots).unwrap_err();
             assert!(
                 rejection.contains("not a source-only closed flow")
-                    || rejection.contains("did not produce"),
+                    || rejection.contains("did not produce")
+                    || rejection.contains("ordinary recipe tail is excluded while"),
                 "domain={label} rejection={rejection}"
             );
         };
@@ -5019,7 +5784,7 @@ mod tests {
                 units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
                 produced_units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
                 consumed_units_per_second: MaterialTotals::new(),
-                recipe_id: None,
+                recipe_ids: Vec::new(),
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

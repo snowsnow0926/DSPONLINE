@@ -1,6 +1,6 @@
 # 原生应用构建与更新
 
-> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。clean 源提交 `460742f86483` 生成的 Build ID `1.2.3+460742f86483` 目录包只属于冻结 E18 工作树，是当前 E18 + e503 整合的历史基础，不是整合态制品。整合候选在形成 clean commit、重新执行完整门禁并重打包前没有可交付的新 Build ID、清单或哈希，禁止沿用该 E18 包冒充当前结果。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；标准目录与 fallback 仍只能有一个被清单选中。
+> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。E18 + e503 整合运行时已冻结为 clean 提交 `f6923747c69b0be590a2b2e4c0681f1c41ecee75`，标准目录包 Build ID 为 `1.2.3+f6923747c69b`；75 个文件、413,286,323 B，可测 ZIP 为 157,799,939 B、SHA-256 `f3c3729b93a290cab861fc9caf8e0816080bd32f695a5d66dda26bc2d873b593`。此前 `460742f86483` 的 E18 clean 包只是历史性能基础，不能冒充整合态制品。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；标准目录与 fallback 仍只能有一个被清单选中。
 
 > 冻结 E18 包及后续整合态沿用同一套可与稳定版并存的 1.2.3 **性能开发版**身份：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
 

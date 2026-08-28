@@ -1079,36 +1079,62 @@ impl BeltWorkspace {
     }
 }
 
-fn advance_belt_clocks(
+#[inline]
+fn advance_belt_clock_row(
+    route: &Route,
+    progress: &mut f64,
+    congestion: &mut f64,
+    last_flow: &mut f64,
+    seconds: f64,
+    belt_limit: f64,
+    flow_decay: f64,
+    congestion_decay: f64,
+) {
+    *last_flow = rounded(*last_flow * flow_decay, 3);
+    *congestion = rounded(*congestion * congestion_decay, 3);
+    let current = (*progress).max(0.0);
+    *progress = rounded(
+        if current > belt_limit {
+            current
+        } else {
+            (current + route.capacity * seconds).min(belt_limit)
+        },
+        4,
+    );
+}
+
+fn advance_belt_clocks_with_runtime(
     runtime: &mut BeltRuntime,
     prepared_routes: &PreparedRoutes,
     selection: &ActiveSelection,
     seconds: f64,
     belt_limit: f64,
+    executor: &DeterministicRuntime,
 ) -> anyhow::Result<()> {
     if seconds <= 0.0 || runtime.progress.is_empty() {
         return Ok(());
     }
     let flow_decay = 0.8_f64.powf(seconds);
     let congestion_decay = 0.85_f64.powf(seconds);
-    let mut advance_route = |belt_index: usize| {
-        let route = &prepared_routes.routes[belt_index];
-        let index = belt_index;
-        runtime.last_flow[index] = rounded(runtime.last_flow[index] * flow_decay, 3);
-        runtime.congestion[index] = rounded(runtime.congestion[index] * congestion_decay, 3);
-        let current = runtime.progress[index].max(0.0);
-        let progress = if current > belt_limit {
-            current
-        } else {
-            (current + route.capacity * seconds).min(belt_limit)
-        };
-        runtime.progress[index] = rounded(progress, 4);
-    };
     match selection {
         ActiveSelection::All | ActiveSelection::Dense { .. } => {
-            for belt_index in 0..prepared_routes.routes.len() {
-                advance_route(belt_index);
-            }
+            executor.indexed_for_each_mut3(
+                &mut runtime.progress,
+                &mut runtime.congestion,
+                &mut runtime.last_flow,
+                |belt_index, progress, congestion, last_flow| {
+                    advance_belt_clock_row(
+                        &prepared_routes.routes[belt_index],
+                        progress,
+                        congestion,
+                        last_flow,
+                        seconds,
+                        belt_limit,
+                        flow_decay,
+                        congestion_decay,
+                    );
+                },
+            )?;
         }
         ActiveSelection::Mask {
             selected_group_indices,
@@ -1120,7 +1146,160 @@ fn advance_belt_clocks(
                     .iter()
                     .copied()
                 {
-                    advance_route(expand_compact_index(route_index));
+                    let belt_index = expand_compact_index(route_index);
+                    advance_belt_clock_row(
+                        &prepared_routes.routes[belt_index],
+                        &mut runtime.progress[belt_index],
+                        &mut runtime.congestion[belt_index],
+                        &mut runtime.last_flow[belt_index],
+                        seconds,
+                        belt_limit,
+                        flow_decay,
+                        congestion_decay,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn advance_belt_clocks(
+    runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    seconds: f64,
+    belt_limit: f64,
+) -> anyhow::Result<()> {
+    advance_belt_clocks_with_runtime(
+        runtime,
+        prepared_routes,
+        selection,
+        seconds,
+        belt_limit,
+        deterministic_runtime(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn apply_belt_post_action_row(
+    route: &Route,
+    action: BeltPostAction,
+    progress: &mut f64,
+    total_transferred: &mut f64,
+    congestion: &mut f64,
+    last_flow: &mut f64,
+    total_dirty: &mut bool,
+    seconds: f64,
+    defer_source_depletion_reset: bool,
+    flow_window_seconds: f64,
+) {
+    match action {
+        BeltPostAction::None => {}
+        BeltPostAction::ResetProgress => *progress = 0.0,
+        BeltPostAction::Flow {
+            available,
+            free,
+            moved,
+        } => {
+            *progress = if !defer_source_depletion_reset && available <= 0.0 || free <= 0.0 {
+                0.0
+            } else {
+                rounded((*progress - moved).max(0.0), 4)
+            };
+            if moved > 0.0 {
+                if flow_window_seconds > 0.0 {
+                    let prior = if seconds > 0.0 { 0.0 } else { *last_flow };
+                    *last_flow =
+                        rounded(route.capacity.min(prior + moved / flow_window_seconds), 3);
+                }
+                *total_transferred = (*total_transferred + moved).floor();
+                *total_dirty = true;
+            }
+            let load = if route.capacity > EPSILON {
+                *last_flow / route.capacity
+            } else {
+                0.0
+            };
+            *congestion = rounded(
+                1.0_f64.min(load.max(if available > 0.0 && free <= 0.0 {
+                    1.0
+                } else {
+                    0.0
+                })),
+                3,
+            );
+        }
+    }
+}
+
+fn apply_belt_post_actions_with_runtime(
+    runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    seconds: f64,
+    defer_source_depletion_reset: bool,
+    flow_window_seconds: f64,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<()> {
+    let BeltRuntime {
+        progress,
+        total_transferred,
+        congestion,
+        last_flow,
+        total_dirty,
+        workspace,
+        ..
+    } = runtime;
+    let actions = &workspace.post_actions;
+    match selection {
+        ActiveSelection::All | ActiveSelection::Dense { .. } => {
+            executor.indexed_for_each_mut5(
+                progress,
+                total_transferred,
+                congestion,
+                last_flow,
+                total_dirty,
+                |belt_index, progress, total_transferred, congestion, last_flow, total_dirty| {
+                    apply_belt_post_action_row(
+                        &prepared_routes.routes[belt_index],
+                        actions[belt_index],
+                        progress,
+                        total_transferred,
+                        congestion,
+                        last_flow,
+                        total_dirty,
+                        seconds,
+                        defer_source_depletion_reset,
+                        flow_window_seconds,
+                    );
+                },
+            )?;
+        }
+        ActiveSelection::Mask {
+            selected_group_indices,
+            ..
+        } => {
+            for group_index in selected_group_indices.iter().copied() {
+                for route_index in prepared_routes.groups[expand_compact_index(group_index)]
+                    .route_indices
+                    .iter()
+                    .copied()
+                {
+                    let belt_index = expand_compact_index(route_index);
+                    apply_belt_post_action_row(
+                        &prepared_routes.routes[belt_index],
+                        actions[belt_index],
+                        &mut progress[belt_index],
+                        &mut total_transferred[belt_index],
+                        &mut congestion[belt_index],
+                        &mut last_flow[belt_index],
+                        &mut total_dirty[belt_index],
+                        seconds,
+                        defer_source_depletion_reset,
+                        flow_window_seconds,
+                    );
                 }
             }
         }
@@ -1136,80 +1315,15 @@ fn apply_belt_post_actions(
     defer_source_depletion_reset: bool,
     flow_window_seconds: f64,
 ) -> anyhow::Result<()> {
-    let BeltRuntime {
-        progress,
-        total_transferred,
-        congestion,
-        last_flow,
-        total_dirty,
-        workspace,
-        ..
-    } = runtime;
-    let actions = &workspace.post_actions;
-    let mut apply_route = |belt_index: usize| {
-        let route = &prepared_routes.routes[belt_index];
-        let index = belt_index;
-        match actions[index] {
-            BeltPostAction::None => {}
-            BeltPostAction::ResetProgress => progress[index] = 0.0,
-            BeltPostAction::Flow {
-                available,
-                free,
-                moved,
-            } => {
-                progress[index] =
-                    if !defer_source_depletion_reset && available <= 0.0 || free <= 0.0 {
-                        0.0
-                    } else {
-                        rounded((progress[index] - moved).max(0.0), 4)
-                    };
-                if moved > 0.0 {
-                    if flow_window_seconds > 0.0 {
-                        let prior = if seconds > 0.0 { 0.0 } else { last_flow[index] };
-                        last_flow[index] =
-                            rounded(route.capacity.min(prior + moved / flow_window_seconds), 3);
-                    }
-                    total_transferred[index] = (total_transferred[index] + moved).floor();
-                    total_dirty[index] = true;
-                }
-                let load = if route.capacity > EPSILON {
-                    last_flow[index] / route.capacity
-                } else {
-                    0.0
-                };
-                congestion[index] = rounded(
-                    1.0_f64.min(load.max(if available > 0.0 && free <= 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    })),
-                    3,
-                );
-            }
-        }
-    };
-    match selection {
-        ActiveSelection::All | ActiveSelection::Dense { .. } => {
-            for belt_index in 0..prepared_routes.routes.len() {
-                apply_route(belt_index);
-            }
-        }
-        ActiveSelection::Mask {
-            selected_group_indices,
-            ..
-        } => {
-            for group_index in selected_group_indices.iter().copied() {
-                for route_index in prepared_routes.groups[expand_compact_index(group_index)]
-                    .route_indices
-                    .iter()
-                    .copied()
-                {
-                    apply_route(expand_compact_index(route_index));
-                }
-            }
-        }
-    }
-    Ok(())
+    apply_belt_post_actions_with_runtime(
+        runtime,
+        prepared_routes,
+        selection,
+        seconds,
+        defer_source_depletion_reset,
+        flow_window_seconds,
+        deterministic_runtime(),
+    )
 }
 
 fn select_active_groups(
@@ -3067,6 +3181,160 @@ mod tests {
         *state ^= *state >> 7;
         *state ^= *state << 17;
         *state
+    }
+
+    fn kernel_prepared_routes(route_count: usize) -> PreparedRoutes {
+        let routes = (0..route_count)
+            .map(|index| Route {
+                capacity: (index % 13 + 1) as f64 * 1.125,
+                source_index: 0,
+                target_index: 0,
+                source_group: 0,
+                target_slot: 0,
+                belt_sort_rank: compact_index(index, "kernel belt rank").unwrap(),
+                target_port_index: None,
+                priority: 1,
+            })
+            .collect::<Vec<_>>();
+        PreparedRoutes {
+            total_capacity: routes.iter().map(|route| route.capacity).sum(),
+            routes,
+            groups: Vec::new(),
+            target_slot_count: 0,
+            group_by_key: Arc::new(HashMap::new()),
+        }
+    }
+
+    fn kernel_runtime(route_count: usize) -> BeltRuntime {
+        BeltRuntime {
+            source: None,
+            progress: (0..route_count)
+                .map(|index| index as f64 * 0.03125 - 2.0)
+                .collect(),
+            total_transferred: (0..route_count)
+                .map(|index| (index % 97) as f64 * 3.0)
+                .collect(),
+            congestion: (0..route_count)
+                .map(|index| (index % 101) as f64 / 100.0)
+                .collect(),
+            last_flow: (0..route_count)
+                .map(|index| (index % 67) as f64 * 0.125)
+                .collect(),
+            total_dirty: vec![false; route_count],
+            belt_capacity: 0.0,
+            active_groups: Vec::new(),
+            active_group_indices: Vec::new(),
+            active_queue_enabled: false,
+            diagnostics: BeltSchedulerDiagnostics::default(),
+            workspace: BeltWorkspace::new(route_count, 0, 0),
+        }
+    }
+
+    fn runtime_kernel_signature(
+        runtime: &BeltRuntime,
+    ) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, Vec<bool>) {
+        (
+            runtime
+                .progress
+                .iter()
+                .map(|value| value.to_bits())
+                .collect(),
+            runtime
+                .total_transferred
+                .iter()
+                .map(|value| value.to_bits())
+                .collect(),
+            runtime
+                .congestion
+                .iter()
+                .map(|value| value.to_bits())
+                .collect(),
+            runtime
+                .last_flow
+                .iter()
+                .map(|value| value.to_bits())
+                .collect(),
+            runtime.total_dirty.clone(),
+        )
+    }
+
+    #[test]
+    fn dense_belt_clock_kernel_matches_serial_bitwise_at_one_two_four_and_eight_workers() {
+        let route_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let prepared = kernel_prepared_routes(route_count);
+        let run = |workers| {
+            let mut runtime = kernel_runtime(route_count);
+            advance_belt_clocks_with_runtime(
+                &mut runtime,
+                &prepared,
+                &ActiveSelection::All,
+                1.375,
+                9_007_199_254_740_991.0,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap();
+            runtime_kernel_signature(&runtime)
+        };
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(run(workers), expected, "worker limit {workers}");
+        }
+    }
+
+    #[test]
+    fn dense_belt_post_action_kernel_matches_serial_bitwise_at_one_two_four_and_eight_workers() {
+        let route_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let prepared = kernel_prepared_routes(route_count);
+        for (seconds, defer_reset, flow_window) in [
+            (0.0, false, 0.0),
+            (0.0, true, 1.0),
+            (1.0, false, 1.0),
+            (5.0, true, 5.0),
+        ] {
+            let run = |workers| {
+                let mut runtime = kernel_runtime(route_count);
+                for (index, action) in runtime.workspace.post_actions.iter_mut().enumerate() {
+                    *action = match index % 5 {
+                        0 => BeltPostAction::None,
+                        1 => BeltPostAction::ResetProgress,
+                        2 => BeltPostAction::Flow {
+                            available: 0.0,
+                            free: 7.0,
+                            moved: 0.0,
+                        },
+                        3 => BeltPostAction::Flow {
+                            available: 11.0,
+                            free: 0.0,
+                            moved: 0.0,
+                        },
+                        _ => BeltPostAction::Flow {
+                            available: 19.0,
+                            free: 23.0,
+                            moved: (index % 7 + 1) as f64,
+                        },
+                    };
+                }
+                apply_belt_post_actions_with_runtime(
+                    &mut runtime,
+                    &prepared,
+                    &ActiveSelection::All,
+                    seconds,
+                    defer_reset,
+                    flow_window,
+                    &DeterministicRuntime::for_test(workers),
+                )
+                .unwrap();
+                runtime_kernel_signature(&runtime)
+            };
+            let expected = run(1);
+            for workers in [2, 4, 8] {
+                assert_eq!(
+                    run(workers),
+                    expected,
+                    "workers={workers}, seconds={seconds}, defer={defer_reset}, window={flow_window}"
+                );
+            }
+        }
     }
 
     fn legacy_set_output(

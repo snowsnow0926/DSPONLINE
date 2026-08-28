@@ -70,7 +70,7 @@ function emitVersionMetadata(): Plugin {
       this.emitFile({
         type: "asset",
         fileName: "version.json",
-        source: `${JSON.stringify({ version: appVersion, buildId, generatedAt: versionGeneratedAt })}\n`,
+        source: `${JSON.stringify({ version: appVersion, buildId, platform: appPlatform, generatedAt: versionGeneratedAt })}\n`,
       });
     },
   };

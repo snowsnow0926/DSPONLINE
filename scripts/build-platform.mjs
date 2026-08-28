@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { verifyBuiltPlatform } from "./verify-built-platform.mjs";
 
 const platform = process.argv[2];
 if (platform !== "desktop" && platform !== "android") throw new Error("Usage: node scripts/build-platform.mjs <desktop|android>");
@@ -36,4 +37,16 @@ child.on("error", (error) => {
   console.error(error);
   process.exitCode = 1;
 });
-child.on("exit", (code) => { process.exitCode = code ?? 1; });
+child.on("exit", async (code) => {
+  if (code !== 0) {
+    process.exitCode = code ?? 1;
+    return;
+  }
+  try {
+    await verifyBuiltPlatform(platform);
+    process.stdout.write(`built-platform-ok\t${platform}\n`);
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
+});

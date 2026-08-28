@@ -1776,6 +1776,10 @@ pub(crate) struct FactoryTopology {
     pub entity_grid_indices: Vec<usize>,
     pub entities_by_planet: Vec<Vec<usize>>,
     pub belts_by_planet: Vec<Vec<usize>>,
+    /// Sum of machine/miner stacks per planet for bounded UI projections.
+    /// Counts are rebuilt with the immutable topology columns, so reading the
+    /// planet navigator never scans every entity on a simulation revision.
+    pub device_counts_by_planet: Vec<f64>,
     planet_viewport_indexes: Vec<PlanetViewportIndex>,
     entity_belt_adjacency: EntityBeltAdjacency,
     pub has_galactic_material_exporter: bool,
@@ -1808,6 +1812,7 @@ impl FactoryTopology {
         }
         self.entities_by_planet.shrink_to_fit();
         self.belts_by_planet.shrink_to_fit();
+        self.device_counts_by_planet.shrink_to_fit();
         self.planet_viewport_indexes.shrink_to_fit();
     }
 
@@ -1835,6 +1840,7 @@ impl FactoryTopology {
             .map(Vec::capacity)
             .sum::<usize>();
         ((index_capacity + planet_index_capacity) * size_of::<usize>()) as u64
+            + (self.device_counts_by_planet.capacity() * size_of::<f64>()) as u64
             + (self.planet_viewport_indexes.capacity() * size_of::<PlanetViewportIndex>()) as u64
             + self
                 .planet_viewport_indexes
@@ -2938,6 +2944,7 @@ impl CoreState {
         let mut factory_topology = FactoryTopology {
             entities_by_planet: vec![Vec::new(); self.catalog.planets.len()],
             belts_by_planet: vec![Vec::new(); self.catalog.planets.len()],
+            device_counts_by_planet: vec![0.0; self.catalog.planets.len()],
             ..FactoryTopology::default()
         };
         let mut entity_dynamics = EntityDynamicColumns::with_capacity(entity_values.len());
@@ -3057,6 +3064,13 @@ impl CoreState {
             factory_topology.entity_planet_indices.push(entity_planet);
             if let Some(indices) = factory_topology.entities_by_planet.get_mut(entity_planet) {
                 indices.push(index);
+            }
+            if let Some(device_count) = factory_topology
+                .device_counts_by_planet
+                .get_mut(entity_planet)
+            {
+                *device_count +=
+                    self.entities.machine_counts[index] + self.entities.miner_counts[index];
             }
             factory_topology.entity_grid_indices.push(
                 match object_string(object, "powerGridId").unwrap_or("grid-a") {

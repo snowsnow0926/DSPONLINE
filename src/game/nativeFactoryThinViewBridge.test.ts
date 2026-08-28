@@ -4,10 +4,12 @@ import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
 import type {
   FactoryConstructionHeadlineReadModel,
   FactoryRunStatusReadModel,
+  PlanetNavigationReadModel,
 } from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
 } from "./nativeFactoryThinViewBridge";
 
@@ -26,6 +28,30 @@ const constructionWeb: FactoryConstructionHeadlineReadModel = {
   activePlanetId: "home",
   activePlanetDisplayName: "澄海 I",
   constructionQueueCount: 0,
+};
+
+const navigationWeb: PlanetNavigationReadModel = {
+  schema: "factory-read-model-v1",
+  activePlanetId: "home",
+  planets: {
+    rows: [{
+      planetId: "home",
+      systemId: "helios",
+      displayName: "澄海 I",
+      code: "H-I",
+      active: true,
+      discovered: true,
+      colonized: true,
+      role: null,
+      entityCount: 0,
+      deviceCount: 0,
+      beltCount: 0,
+      constructionQueueCount: 0,
+      powerFactor: 1,
+    }],
+    totalCount: 1,
+    truncated: false,
+  },
 };
 
 function factory(revision: number, paused = false): DesktopNativeCoreFactoryReadModelResult {
@@ -63,8 +89,10 @@ function factory(revision: number, paused = false): DesktopNativeCoreFactoryRead
           colonized: true,
           role: null,
           entityCount: 0,
+          deviceCount: 0,
           beltCount: 0,
           constructionQueueCount: 0,
+          powerFactor: 1,
         }],
         totalCount: 1,
         truncated: false,
@@ -224,5 +252,39 @@ describe("native factory thin-view construction headline bridge", () => {
       },
     };
     expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, inactivePlanet, 9)).toBe(constructionWeb);
+  });
+});
+
+describe("native factory thin-view planet navigation bridge", () => {
+  it("uses the exact native dynamic rows while retaining the bounded catalog code", () => {
+    const selected = selectFactoryPlanetNavigationReadModel(navigationWeb, snapshot(12), 12);
+    expect(selected).not.toBe(navigationWeb);
+    expect(selected.planets.rows[0]).toEqual(navigationWeb.planets.rows[0]);
+    expect(selected.planets.rows[0].code).toBe("H-I");
+  });
+
+  it("fails closed for stale, incomplete, or semantically different rows", () => {
+    expect(selectFactoryPlanetNavigationReadModel(navigationWeb, snapshot(11), 12)).toBe(navigationWeb);
+    const current = snapshot(12);
+    const wrongPower: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          planetNavigation: {
+            ...current.frame!.factory.planetNavigation,
+            planets: {
+              ...current.frame!.factory.planetNavigation.planets,
+              rows: current.frame!.factory.planetNavigation.planets.rows.map((row) => ({
+                ...row,
+                powerFactor: 0.5,
+              })),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryPlanetNavigationReadModel(navigationWeb, wrongPower, 12)).toBe(navigationWeb);
   });
 });

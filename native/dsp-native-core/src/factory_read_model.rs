@@ -353,8 +353,16 @@ impl CoreState {
                     "colonized": colonized_planets.contains(planet.id.as_str()),
                     "role": optional_string(roles.and_then(|value| value.get(&planet.id))),
                     "entityCount": self.factory_topology.entities_by_planet[index].len(),
+                    "deviceCount": self.factory_topology.device_counts_by_planet[index],
                     "beltCount": self.factory_topology.belts_by_planet[index].len(),
                     "constructionQueueCount": queue_for_planet,
+                    "powerFactor": base
+                        .get("planetMetrics")
+                        .and_then(Value::as_object)
+                        .and_then(|value| value.get(&planet.id))
+                        .and_then(Value::as_object)
+                        .map(|value| finite_number(value.get("powerFactor")))
+                        .unwrap_or(1.0),
                 })
             })
             .collect::<Vec<_>>();
@@ -507,6 +515,10 @@ mod tests {
                 "planetMetadata": { "home": { "customName": "测试家园" } },
                 "planetRoles": { "home": "industry" }
             },
+            "planetMetrics": {
+                "home": { "powerFactor": 0.75 },
+                "mod_planet": { "powerFactor": 1 }
+            },
             "constructionQueue": [{
                 "id": "queue-1",
                 "blueprintId": "bp-1",
@@ -626,6 +638,14 @@ mod tests {
         assert_eq!(
             projection["planetNavigation"]["planets"]["rows"][0]["displayName"],
             "测试家园"
+        );
+        assert_eq!(
+            projection["planetNavigation"]["planets"]["rows"][0]["deviceCount"],
+            2.0
+        );
+        assert_eq!(
+            projection["planetNavigation"]["planets"]["rows"][0]["powerFactor"],
+            0.75
         );
         assert_eq!(projection["selection"]["requestedEntityCount"], 2);
         assert_eq!(projection["selection"]["entityRows"]["totalCount"], 1);

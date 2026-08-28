@@ -199,7 +199,7 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
           rows: [{
             planetId: "home", systemId: "helios", displayName: "家园", code: "home",
             active: true, discovered: true, colonized: true, role: null,
-            entityCount: 1, beltCount: 0, constructionQueueCount: 0,
+            entityCount: 1, deviceCount: 1, beltCount: 0, constructionQueueCount: 0, powerFactor: 1,
           }],
           totalCount: 1,
           truncated: false,

@@ -1070,7 +1070,7 @@ function normalizeFactoryPlanetNavigation(value, activePlanetId) {
   const planets = normalizeReadModelRows(source.planets, "native factory planets", 64, (row, label) => {
     const entry = exactObject(row, [
       "planetId", "systemId", "displayName", "code", "active", "discovered", "colonized",
-      "role", "entityCount", "beltCount", "constructionQueueCount",
+      "role", "entityCount", "deviceCount", "beltCount", "constructionQueueCount", "powerFactor",
     ], label);
     const planetId = opaqueId(entry.planetId, `${label}.planetId`);
     const active = boolean(entry.active, `${label}.active`);
@@ -1085,8 +1085,10 @@ function normalizeFactoryPlanetNavigation(value, activePlanetId) {
       colonized: boolean(entry.colonized, `${label}.colonized`),
       role: entry.role === null ? null : boundedReadModelText(entry.role, `${label}.role`, 512),
       entityCount: safeInteger(entry.entityCount, `${label}.entityCount`),
+      deviceCount: finiteNumber(entry.deviceCount, `${label}.deviceCount`, 0),
       beltCount: safeInteger(entry.beltCount, `${label}.beltCount`),
       constructionQueueCount: safeInteger(entry.constructionQueueCount, `${label}.constructionQueueCount`),
+      powerFactor: finiteNumber(entry.powerFactor, `${label}.powerFactor`, 0),
     };
   });
   const planetIds = new Set();

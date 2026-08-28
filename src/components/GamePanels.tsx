@@ -71,6 +71,7 @@ import { CAMPAIGN_TASKS, getCampaignSnapshot, getCampaignTaskDeficits } from "..
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS, PLANET_LIST, RECIPES, getBeltConstructionId, getBeltTier, getBuilding, getBuildingUpgradeTarget, getConstructionCatalogIds, getConstructionDefinition, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getNextBeltTier, getPlanet, getProliferator, getRecipe, getRecipesForBuilding, getTechnology, isConstructionDeployable, isConstructionInCategory, isConveyorBeltId } from "../game/content";
  import { MATERIAL_DELIVERY_SLOT_COUNT, MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, MAX_MANUAL_CRAFT_BATCHES, MAX_PLANET_TRAY_ITEM_LIMIT, MIN_PLANET_TRAY_ITEM_LIMIT, PORTABLE_FLEET_ITEM_IDS, POWER_GRID_IDS, POWER_GRID_LABELS, canPlaceBuildingOnPlanet, canQueueHandcraftRecipe, canSetBeltStackSize, canUpgradeBelt, canUpgradeEntity, findInterstellarPeer, findPlanetaryPeer, getBeltCapacity, getBeltLaneAdjustmentCheck, getBeltNetworkIds, getConstructionAutomationStatus, getConstructionCraftDeficits, getConstructionQuickCraftPlan, getDysonEngineeringSnapshot, getDysonShellCapacity, getEjectorOrbitTargetStatus, getEntityExtraProductBonus, getEntityOperatingStatus, getEntityOutputCapacity, getEntityPowerFactor, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getInterstellarCargoCapacity, getInterstellarTripSeconds, getMaterialDeliveryItems, getMaterialDeliverySlots, getMaxConstructionQuickCraftBatches, getMaxRecursiveHandcraftBatches, getMiningSpeedMultiplier, getOrbitalCollectorQuantumStatus, getPlanetaryCargoCapacity, getPlanetaryTripSeconds, getPlanetMetrics, getPlanetTrayItemLimit, getPowerGridMetrics, getProliferatorSprayCost, getQuantumAttachmentStatus, getRayReceiverCapacityKw, getRecursiveHandcraftPlan, getResourceReserveSnapshot, getSprayCoaterInstallCheck, getSprayCoaterRemovalRefund, getStationActiveRoutes, getStationBusyVehicleCount, getStationDroneCapacity, getStationFleetDiagnostic, getStationMinimumCargo, getStationSlotCapacity, getStationSlots, getStationVesselCapacity, getStationWarperAutoRefillTarget, getStationWarperCapacity, getStationWarperRefillSnapshot, getTimeWarpRequiredPowerKw, isEntityInPowerCoverage, isHandcraftableRecipe, isPlanetColonized, isPortableFleetItem, isProliferatorEligible, isTechnologyCompleted, stationRouteRequiresWarp } from "../game/engine";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYields, specializationApplies } from "../game/galaxy";
+import type { PlanetNavigationReadModel } from "../game/factoryReadModels";
 import { analyzeBeltNetwork } from "../game/network";
 import { ACTIVITY_MATERIAL_IDS } from "../game/activity";
 import { getOrbitalCargoPortItems } from "../game/stationCargoTerminal";
@@ -375,32 +376,30 @@ export function ResourceRail({ game, onOpenCampaign, onOpenDysonPlanner, onPickT
   );
 }
 
-export function PlanetNavigator({ game, onPlanetChange }: { game: GameState; onPlanetChange: (planetId: PlanetId) => boolean }) {
+export function PlanetNavigator({ model, onPlanetChange }: { model: PlanetNavigationReadModel; onPlanetChange: (planetId: PlanetId) => boolean }) {
   const [collapsed, setCollapsed] = useState(false);
-  const activeSystemId = getPlanet(game.activePlanetId).systemId;
-  const visiblePlanets = useMemo(() => PLANET_LIST.filter((planet) => planet.systemId === activeSystemId &&
-    game.exploration.unlockedSystemIds.includes(planet.systemId)), [activeSystemId, game.exploration.unlockedSystemIds]);
-  const deviceCounts = useMemo(() => {
-    const counts = new Map<PlanetId, number>();
-    if (collapsed) return counts;
-    for (const entity of game.entities) {
-      counts.set(entity.planetId, (counts.get(entity.planetId) ?? 0) + entity.machineCount + entity.minerCount);
-    }
-    return counts;
-  }, [collapsed, game.entities]);
+  const visiblePlanets = useMemo(() => {
+    const rows = new Map(model.planets.rows.map((row) => [row.planetId, row] as const));
+    const activeSystemId = rows.get(model.activePlanetId)?.systemId;
+    if (!activeSystemId) return [];
+    return PLANET_LIST
+      .filter((planet) => planet.systemId === activeSystemId)
+      .flatMap((planet) => {
+        const row = rows.get(planet.id);
+        return row?.discovered ? [{ planet, row }] : [];
+      });
+  }, [model]);
   return (
     <nav className={`planet-navigator nodrag nopan${collapsed ? " planet-navigator--collapsed" : ""}`} aria-label="行星切换">
-      {!collapsed ? visiblePlanets.map((planet) => {
-        const active = game.activePlanetId === planet.id;
-        const unlocked = isPlanetColonized(game, planet.id);
-        const metrics = getPlanetMetrics(game, planet.id);
-        const deviceCount = deviceCounts.get(planet.id) ?? 0;
+      {!collapsed ? visiblePlanets.map(({ planet, row }) => {
+        const active = row.active;
+        const unlocked = row.colonized;
         return (
-          <button type="button" className={`${active ? "active" : ""}${unlocked ? "" : " locked"}`} aria-pressed={active} key={planet.id} disabled={!unlocked} onClick={() => onPlanetChange(planet.id)} title={unlocked ? `切换到${getPlanetDisplayName(game, planet.id)}` : "完成星际物流系统科技后开放"}>
+          <button type="button" className={`${active ? "active" : ""}${unlocked ? "" : " locked"}`} aria-pressed={active} key={planet.id} disabled={!unlocked} onClick={() => onPlanetChange(planet.id)} title={unlocked ? `切换到${row.displayName}` : "完成星际物流系统科技后开放"}>
             <i style={{ color: unlocked ? planet.color : undefined }}>{unlocked ? <Orbit size={15} /> : <LockKeyhole size={15} />}</i>
-            <span><strong>{getPlanetDisplayName(game, planet.id)}</strong><small>{unlocked ? `${planet.code} · ${planet.environment}` : "星图锁定 · 需要星际物流系统"}</small></span>
-            <em>{deviceCount}</em>
-            <b className={metrics.powerFactor < 0.999 ? "warning" : ""}>{Math.round(metrics.powerFactor * 100)}%</b>
+            <span><strong>{row.displayName}</strong><small>{unlocked ? `${row.code} · ${planet.environment}` : "星图锁定 · 需要星际物流系统"}</small></span>
+            <em>{row.deviceCount}</em>
+            <b className={row.powerFactor < 0.999 ? "warning" : ""}>{Math.round(row.powerFactor * 100)}%</b>
           </button>
         );
       }) : null}

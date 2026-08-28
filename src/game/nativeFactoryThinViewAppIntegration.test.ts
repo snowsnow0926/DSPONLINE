@@ -37,4 +37,22 @@ describe("factory thin-view App consumption", () => {
     expect(headline).not.toMatch(/GameState/);
     expect(headline).not.toMatch(/\.\/game\/types|\.\.\/game\/types/);
   });
+
+  it("feeds the visible planet navigator from the bounded atomic navigation model", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
+    const navigator = panels.slice(
+      panels.indexOf("export function PlanetNavigator"),
+      panels.indexOf("type InspectorTab"),
+    );
+
+    expect(app).toMatch(/createPlanetNavigationReadModel\(game\)/);
+    expect(app).toMatch(/selectFactoryPlanetNavigationReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/<StablePlanetNavigator model=\{factoryPlanetNavigationReadModel\}/);
+    expect(app).not.toMatch(/<StablePlanetNavigator game=\{/);
+    expect(navigator).toMatch(/PlanetNavigationReadModel/);
+    expect(navigator).toMatch(/row\.deviceCount/);
+    expect(navigator).toMatch(/row\.powerFactor/);
+    expect(navigator).not.toMatch(/GameState|game\./);
+  });
 });

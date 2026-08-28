@@ -385,9 +385,11 @@ import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
 } from "./game/nativeFactoryThinViewBridge";
 import {
+  createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryRunStatusReadModel,
 } from "./game/webFactoryReadModelAdapter";
@@ -1909,6 +1911,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewExpectedRevision,
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
+  );
+  const webFactoryPlanetNavigationReadModel = useMemo(
+    () => createPlanetNavigationReadModel(game),
+    [game],
+  );
+  const factoryPlanetNavigationReadModel = useMemo(
+    () => selectFactoryPlanetNavigationReadModel(
+      webFactoryPlanetNavigationReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+    ),
+    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
   );
   useEffect(() => {
     if (!windowsNativeCoreAvailable || !windowsNativeCoreBetaEnabled ||
@@ -12947,8 +12961,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               <i><Satellite size={18} /></i>
               <span><strong>空间站</strong><small>{game.orbitalStation.contractBoard.accepted.some((contract) => contract.status === "claimable") ? "合同奖励待领取" : orbitalStationStatusLabel(game.orbitalStation.status)}</small></span>
             </button>
-            <StablePlanetNavigator game={panelGame} onPlanetChange={onPlanetChange} />
-          </div> : <StablePlanetNavigator game={panelGame} onPlanetChange={onPlanetChange} />}
+            <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />
+          </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
           <CanvasSelectionTools
             selectionMode={selectionMode}

@@ -64,18 +64,26 @@ function incrementCount(counts: Map<string, number>, key: string): void {
 
 interface PlanetCounts {
   readonly entityCounts: ReadonlyMap<string, number>;
+  readonly deviceCounts: ReadonlyMap<string, number>;
   readonly beltCounts: ReadonlyMap<string, number>;
   readonly queueCounts: ReadonlyMap<string, number>;
 }
 
 function collectPlanetCounts(state: GameState): PlanetCounts {
   const entityCounts = new Map<string, number>();
+  const deviceCounts = new Map<string, number>();
   const beltCounts = new Map<string, number>();
   const queueCounts = new Map<string, number>();
-  for (const entity of state.entities) incrementCount(entityCounts, entity.planetId);
+  for (const entity of state.entities) {
+    incrementCount(entityCounts, entity.planetId);
+    deviceCounts.set(
+      entity.planetId,
+      (deviceCounts.get(entity.planetId) ?? 0) + entity.machineCount + entity.minerCount,
+    );
+  }
   for (const belt of state.belts) incrementCount(beltCounts, belt.planetId);
   for (const entry of state.constructionQueue) incrementCount(queueCounts, entry.planetId);
-  return { entityCounts, beltCounts, queueCounts };
+  return { entityCounts, deviceCounts, beltCounts, queueCounts };
 }
 
 export function createFactoryShellReadModel(state: GameState, counts = collectPlanetCounts(state)): FactoryShellReadModel {
@@ -167,8 +175,10 @@ export function createPlanetNavigationReadModel(state: GameState, counts = colle
         colonized: colonizedPlanets.has(planetId),
         role: roles[planetId] ?? null,
         entityCount: counts.entityCounts.get(planetId) ?? 0,
+        deviceCount: counts.deviceCounts.get(planetId) ?? 0,
         beltCount: counts.beltCounts.get(planetId) ?? 0,
         constructionQueueCount: counts.queueCounts.get(planetId) ?? 0,
+        powerFactor: state.planetMetrics[planetId as PlanetId]?.powerFactor ?? 1,
       };
     });
   return {

@@ -76,8 +76,10 @@ export interface PlanetNavigationRowReadModel {
   readonly colonized: boolean;
   readonly role: string | null;
   readonly entityCount: number;
+  readonly deviceCount: number;
   readonly beltCount: number;
   readonly constructionQueueCount: number;
+  readonly powerFactor: number;
 }
 
 export interface PlanetNavigationReadModel {

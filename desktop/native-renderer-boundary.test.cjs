@@ -209,8 +209,10 @@ function factoryReadModelProjection(overrides = {}) {
         colonized: true,
         role: "industry",
         entityCount: 2,
+        deviceCount: 7,
         beltCount: 1,
         constructionQueueCount: 1,
+        powerFactor: 0.75,
       }]),
     },
     selection: {

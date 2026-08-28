@@ -357,6 +357,14 @@ function factoryReadModelProjection(overrides = {}) {
       paused: false,
       elapsedSeconds: 123,
       simulationSpeed: 4,
+      timeWarp: {
+        controllerEntityId: "MOD-时间扭曲/Ω",
+        enabled: true,
+        requestedMultiplier: 15,
+        effectiveMultiplier: 12,
+        requiredPowerKw: 1e13,
+        allocatedPowerKw: 1e13,
+      },
       entityCount: 2,
       beltCount: 1,
       activePlanetEntityCount: 2,
@@ -962,6 +970,7 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   assert.notEqual(normalized, projection);
   assert.notEqual(normalized.selection.entityRows.rows[0], projection.selection.entityRows.rows[0]);
   assert.equal(normalized.shell.source, "native-core");
+  assert.deepEqual(normalized.shell.timeWarp, projection.shell.timeWarp);
   assert.equal(normalized.selection.entityRows.rows[0].inputItems.rows[0].itemId, "MOD-物品/Ω");
 
   const rejects = (value, requestContext = context) => assert.throws(
@@ -973,6 +982,8 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   rejects(projection, factoryReadModelContext({ selectedEntityIds: new Array(65).fill("entity") }));
   rejects({ ...projection, revision: 8 });
   rejects({ ...projection, shell: { ...projection.shell, source: "web-game-state" } });
+  rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, effectiveMultiplier: 4.5 } } });
+  rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, allocatedPowerKw: 1e14 } } });
   rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
   rejects({
     ...projection,

@@ -274,6 +274,14 @@ impl CoreState {
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
         let settings = base.get("settings").and_then(Value::as_object);
+        let time_warp = base.get("timeWarp").and_then(Value::as_object);
+        let controller_entity_id = time_warp
+            .and_then(|value| value.get("controllerEntityId"))
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .map_or(Value::Null, |id| Value::from(id.to_owned()));
+        let simulation_speed =
+            finite_number(settings.and_then(|value| value.get("simulationSpeed"))).max(1.0);
         let mode = base.get("mode").and_then(Value::as_str).unwrap_or("normal");
         if !matches!(mode, "normal" | "speedrun") {
             bail!("native factory read-model mode is invalid");
@@ -286,7 +294,26 @@ impl CoreState {
             "activePlanetId": active_planet_id,
             "paused": base.get("paused").and_then(Value::as_bool).unwrap_or(false),
             "elapsedSeconds": finite_number(base.get("elapsedSeconds")),
-            "simulationSpeed": finite_number(settings.and_then(|value| value.get("simulationSpeed"))).max(1.0),
+            "simulationSpeed": simulation_speed,
+            "timeWarp": {
+                "controllerEntityId": controller_entity_id,
+                "enabled": time_warp
+                    .and_then(|value| value.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "requestedMultiplier": finite_number(
+                    time_warp.and_then(|value| value.get("requestedMultiplier")),
+                ).max(simulation_speed),
+                "effectiveMultiplier": finite_number(
+                    time_warp.and_then(|value| value.get("effectiveMultiplier")),
+                ).max(simulation_speed),
+                "requiredPowerKw": finite_number(
+                    time_warp.and_then(|value| value.get("requiredPowerKw")),
+                ).max(0.0),
+                "allocatedPowerKw": finite_number(
+                    time_warp.and_then(|value| value.get("allocatedPowerKw")),
+                ).max(0.0),
+            },
             "entityCount": self.entities.ids.len(),
             "beltCount": self.belts.ids.len(),
             "activePlanetEntityCount": self.factory_topology.entities_by_planet[active_planet_index].len(),
@@ -507,6 +534,14 @@ mod tests {
             "elapsedSeconds": 123,
             "paused": false,
             "settings": { "simulationSpeed": 4 },
+            "timeWarp": {
+                "controllerEntityId": "MOD-时间扭曲/Ω",
+                "enabled": true,
+                "requestedMultiplier": 15,
+                "effectiveMultiplier": 12,
+                "requiredPowerKw": 10000000000000.0,
+                "allocatedPowerKw": 10000000000000.0
+            },
             "exploration": {
                 "unlockedSystemIds": ["helios"],
                 "colonizedPlanetIds": ["home"]
@@ -635,6 +670,11 @@ mod tests {
         assert_eq!(projection["shell"]["source"], "native-core");
         assert_eq!(projection["shell"]["entityCount"], 2);
         assert_eq!(projection["shell"]["beltCount"], 1);
+        assert_eq!(projection["shell"]["timeWarp"]["effectiveMultiplier"], 12.0);
+        assert_eq!(
+            projection["shell"]["timeWarp"]["controllerEntityId"],
+            "MOD-时间扭曲/Ω"
+        );
         assert_eq!(
             projection["planetNavigation"]["planets"]["rows"][0]["displayName"],
             "测试家园"

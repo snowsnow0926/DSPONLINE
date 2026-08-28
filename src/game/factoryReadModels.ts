@@ -40,11 +40,25 @@ export interface FactoryShellReadModel {
   readonly paused: boolean;
   readonly elapsedSeconds: number;
   readonly simulationSpeed: number;
+  /**
+   * Small authoritative control snapshot. Optional only for rollback shells;
+   * current Web and native v1 producers always provide it.
+   */
+  readonly timeWarp?: FactoryTimeWarpReadModel;
   readonly entityCount: number;
   readonly beltCount: number;
   readonly activePlanetEntityCount: number;
   readonly activePlanetBeltCount: number;
   readonly constructionQueueCount: number;
+}
+
+export interface FactoryTimeWarpReadModel {
+  readonly controllerEntityId: string | null;
+  readonly enabled: boolean;
+  readonly requestedMultiplier: number;
+  readonly effectiveMultiplier: number;
+  readonly requiredPowerKw: number;
+  readonly allocatedPowerKw: number;
 }
 
 /** Smallest visible factory status contract; it never owns a GameState. */

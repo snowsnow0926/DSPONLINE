@@ -270,6 +270,15 @@ describe("Web/PWA factory read-model adapter", () => {
     });
 
     expect(model.shell.schema).toBe(FACTORY_READ_MODEL_SCHEMA);
+    expect(model.shell.timeWarp).toEqual({
+      controllerEntityId: state.timeWarp.controllerEntityId,
+      enabled: state.timeWarp.enabled,
+      requestedMultiplier: state.timeWarp.requestedMultiplier,
+      effectiveMultiplier: state.timeWarp.effectiveMultiplier,
+      requiredPowerKw: state.timeWarp.requiredPowerKw,
+      allocatedPowerKw: state.timeWarp.allocatedPowerKw,
+    });
+    expect(model.shell.timeWarp).not.toBe(state.timeWarp);
     expect(model).not.toHaveProperty("entities");
     expect(model).not.toHaveProperty("belts");
     expect(model.selection.entityRows.rows[0]).not.toHaveProperty("stationRoutes");

@@ -1234,12 +1234,26 @@ function normalizeReadModelPosition(value, label) {
 function normalizeFactoryShellReadModel(value) {
   const source = exactObject(value, [
     "schema", "source", "stateVersion", "mode", "activePlanetId", "paused",
-    "elapsedSeconds", "simulationSpeed", "entityCount", "beltCount",
+    "elapsedSeconds", "simulationSpeed", "timeWarp", "entityCount", "beltCount",
     "activePlanetEntityCount", "activePlanetBeltCount", "constructionQueueCount",
   ], "native factory shell");
   if (source.schema !== "factory-read-model-v1" || source.source !== "native-core") {
     throw protocolError("native factory shell identity");
   }
+  const timeWarpSource = exactObject(source.timeWarp, [
+    "controllerEntityId", "enabled", "requestedMultiplier", "effectiveMultiplier",
+    "requiredPowerKw", "allocatedPowerKw",
+  ], "native factory shell time warp");
+  const requiredPowerKw = finiteNumber(
+    timeWarpSource.requiredPowerKw,
+    "native factory shell time-warp required power",
+    0,
+  );
+  const allocatedPowerKw = finiteNumber(
+    timeWarpSource.allocatedPowerKw,
+    "native factory shell time-warp allocated power",
+    0,
+  );
   const result = {
     schema: "factory-read-model-v1",
     source: "native-core",
@@ -1249,6 +1263,25 @@ function normalizeFactoryShellReadModel(value) {
     paused: boolean(source.paused, "native factory shell paused flag"),
     elapsedSeconds: finiteNumber(source.elapsedSeconds, "native factory shell elapsed seconds"),
     simulationSpeed: finiteNumber(source.simulationSpeed, "native factory shell simulation speed", 1),
+    timeWarp: {
+      controllerEntityId: nullableReadModelId(
+        timeWarpSource.controllerEntityId,
+        "native factory shell time-warp controller",
+      ),
+      enabled: boolean(timeWarpSource.enabled, "native factory shell time-warp enabled flag"),
+      requestedMultiplier: safeInteger(
+        timeWarpSource.requestedMultiplier,
+        "native factory shell requested time-warp multiplier",
+        1,
+      ),
+      effectiveMultiplier: safeInteger(
+        timeWarpSource.effectiveMultiplier,
+        "native factory shell effective time-warp multiplier",
+        1,
+      ),
+      requiredPowerKw,
+      allocatedPowerKw,
+    },
     entityCount: safeInteger(source.entityCount, "native factory shell entity count"),
     beltCount: safeInteger(source.beltCount, "native factory shell belt count"),
     activePlanetEntityCount: safeInteger(source.activePlanetEntityCount, "native factory shell active entity count"),
@@ -1257,6 +1290,11 @@ function normalizeFactoryShellReadModel(value) {
   };
   if (result.activePlanetEntityCount > result.entityCount || result.activePlanetBeltCount > result.beltCount) {
     throw protocolError("native factory shell active counts");
+  }
+  if (result.timeWarp.effectiveMultiplier < result.simulationSpeed ||
+      result.timeWarp.requestedMultiplier < result.simulationSpeed ||
+      result.timeWarp.allocatedPowerKw > result.timeWarp.requiredPowerKw) {
+    throw protocolError("native factory shell time-warp bounds");
   }
   return result;
 }

@@ -24,6 +24,7 @@ mod orbital_station;
 pub mod production_history;
 mod pure_idle;
 mod quantum_logistics;
+mod recipe_workspace;
 pub mod replay;
 mod simple_factory;
 pub mod simulation;

@@ -23,7 +23,7 @@ import {
   type OnSelectionChangeParams,
   type SnapGrid,
 } from "@xyflow/react";
-import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import {
   ConstructionDock,
@@ -42,6 +42,7 @@ import { CanvasInteractionOverlay, type CanvasClickConnectionPreview, type Canva
 import { GAME_DIALOG_CLOSED_EVENT, useGameDialog } from "./components/GameDialogProvider";
 import type { StarMapBatchActionResult } from "./components/StarMapWorkspace";
 import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
+import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
@@ -381,6 +382,9 @@ import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type Persist
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
+import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
+import { selectFactoryRunStatusReadModel } from "./game/nativeFactoryThinViewBridge";
+import { createWebFactoryRunStatusReadModel } from "./game/webFactoryReadModelAdapter";
 import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
 import { readWindowsNativeCoreBetaEnabled, writeWindowsNativeCoreBetaEnabled } from "./game/nativeCoreBetaSettings";
 import type {
@@ -1857,6 +1861,88 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // distinguish a real unmount from that ordinary dependency turnover.
   const lifecycleSaveEffectGenerationRef = useRef(0);
   const simulationStateRevisionRef = useRef(durableSimulationRuntimeEnabled ? loaded.runtimeRecovery?.stateRevision ?? 0 : 0);
+  const nativeFactoryThinViewStoreRef = useRef<NativeFactoryThinViewStore | null>(null);
+  if (nativeFactoryThinViewStoreRef.current === null) {
+    nativeFactoryThinViewStoreRef.current = new NativeFactoryThinViewStore();
+  }
+  const nativeFactoryThinViewStore = nativeFactoryThinViewStoreRef.current;
+  const nativeFactoryThinViewSnapshot = useSyncExternalStore(
+    nativeFactoryThinViewStore.subscribe,
+    nativeFactoryThinViewStore.getSnapshot,
+    nativeFactoryThinViewStore.getSnapshot,
+  );
+  const factoryThinViewExpectedRevision = simulationStateRevisionRef.current;
+  const factoryThinViewSelectedEntityIds = useMemo(
+    () => [...new Set(selectedEntityIds)].slice(0, 64),
+    [selectedEntityIds],
+  );
+  const factoryThinViewSelectedBeltIds = useMemo(
+    () => [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)].slice(0, 64),
+    [selectedBeltId, selectedBeltIds],
+  );
+  const webFactoryRunStatusReadModel = useMemo(
+    () => createWebFactoryRunStatusReadModel(game),
+    [game.activePlanetId, game.paused],
+  );
+  const factoryRunStatusReadModel = useMemo(
+    () => selectFactoryRunStatusReadModel(
+      webFactoryRunStatusReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+    ),
+    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryRunStatusReadModel],
+  );
+  useEffect(() => {
+    if (!windowsNativeCoreAvailable || !windowsNativeCoreBetaEnabled ||
+      !["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    const rectangle = canvasVisibleRectangleRef.current;
+    const coordinates = [rectangle.left, rectangle.top, rectangle.right, rectangle.bottom];
+    if (coordinates.some((value) => !Number.isFinite(value) || Math.abs(value) > 10_000_000)) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    const controller = windowsNativeCoreBetaControllerRef.current;
+    if (!controller) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    void nativeFactoryThinViewStore.refresh(controller, {
+      expectedRevision: factoryThinViewExpectedRevision,
+      factory: {
+        selectedEntityIds: factoryThinViewSelectedEntityIds,
+        selectedBeltIds: factoryThinViewSelectedBeltIds,
+      },
+      viewport: {
+        baseFields: [],
+        planetId: game.activePlanetId,
+        bounds: {
+          minX: Math.min(rectangle.left, rectangle.right),
+          minY: Math.min(rectangle.top, rectangle.bottom),
+          maxX: Math.max(rectangle.left, rectangle.right),
+          maxY: Math.max(rectangle.top, rectangle.bottom),
+        },
+        entityCursor: 0,
+        entityLimit: 256,
+        beltCursor: 0,
+        beltLimit: 512,
+        pinnedEntityIds: factoryThinViewSelectedEntityIds.slice(0, 32),
+        pinnedBeltIds: factoryThinViewSelectedBeltIds,
+      },
+    }).catch(() => undefined);
+  }, [
+    canvasRenderSnapshot.runtimeRevision,
+    factoryThinViewExpectedRevision,
+    factoryThinViewSelectedBeltIds,
+    factoryThinViewSelectedEntityIds,
+    game.activePlanetId,
+    nativeFactoryThinViewStore,
+    windowsNativeCoreAvailable,
+    windowsNativeCoreBetaEnabled,
+    windowsNativeCoreBetaStatus,
+  ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
   simulationProjectionScopeRef.current = fullRealtimeSimulation || dysonPlannerOpen ? "full-top-level" : "default";
@@ -13033,7 +13119,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             </div>
           ) : null}
           <div className="canvas-status">
-            <span className={game.paused ? "paused" : "running"}>{game.paused ? "模拟暂停" : "实时运行"}</span>
+            <FactoryRunStatus model={factoryRunStatusReadModel} />
             <strong>{getPlanetDisplayName(game, game.activePlanetId)} · {getPlanet(game.activePlanetId).code}工厂区</strong>
           </div>
           <RecipeFocusPanel

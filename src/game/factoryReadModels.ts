@@ -47,6 +47,15 @@ export interface FactoryShellReadModel {
   readonly constructionQueueCount: number;
 }
 
+/** Smallest visible factory status contract; it never owns a GameState. */
+export interface FactoryRunStatusReadModel {
+  readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly activePlanetId: string;
+  readonly paused: boolean;
+}
+
 export interface PlanetNavigationRowReadModel {
   readonly planetId: string;
   readonly systemId: string | null;

@@ -11,6 +11,7 @@ import {
   type ConstructionTargetReadModel,
   type FactoryReadModelBundle,
   type FactoryReadModelRequest,
+  type FactoryRunStatusReadModel,
   type FactorySelectionReadModel,
   type FactoryShellReadModel,
   type ItemQuantityReadModel,
@@ -91,6 +92,21 @@ export function createFactoryShellReadModel(state: GameState, counts = collectPl
     activePlanetEntityCount: counts.entityCounts.get(state.activePlanetId) ?? 0,
     activePlanetBeltCount: counts.beltCounts.get(state.activePlanetId) ?? 0,
     constructionQueueCount: state.constructionQueue.length,
+  };
+}
+
+/**
+ * Constant-time Web/PWA adapter for the visible run-state chip. Keeping this
+ * separate from the complete bundle avoids scanning every entity and belt on
+ * each running-frame publication while preserving the same read-model schema.
+ */
+export function createWebFactoryRunStatusReadModel(state: GameState): FactoryRunStatusReadModel {
+  return {
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: state.activePlanetId,
+    paused: state.paused,
   };
 }
 

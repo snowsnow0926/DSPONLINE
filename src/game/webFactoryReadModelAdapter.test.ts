@@ -13,7 +13,10 @@ import type {
   ItemId,
   RecipeId,
 } from "./types";
-import { createWebFactoryReadModels } from "./webFactoryReadModelAdapter";
+import {
+  createWebFactoryReadModels,
+  createWebFactoryRunStatusReadModel,
+} from "./webFactoryReadModelAdapter";
 
 const asItemId = (id: string) => id as ItemId;
 const asBuildingId = (id: string) => id as BuildingId;
@@ -59,6 +62,24 @@ function makeBelt(id: string, source: string, target: string): BeltConnection {
 }
 
 describe("Web/PWA factory read-model adapter", () => {
+  it("projects the visible run status without retaining GameState", () => {
+    const state = createInitialState();
+    state.activePlanetId = "ashen";
+    state.paused = true;
+
+    const model = createWebFactoryRunStatusReadModel(state);
+
+    expect(model).toEqual({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      activePlanetId: "ashen",
+      paused: true,
+    });
+    expect(model).not.toHaveProperty("entities");
+    expect(model).not.toHaveProperty("belts");
+  });
+
   it("returns detached bounded projections without full GameState, entity, or belt objects", () => {
     const state = createInitialState();
     const source = makeEntity(state.entities[0], "selected-source");

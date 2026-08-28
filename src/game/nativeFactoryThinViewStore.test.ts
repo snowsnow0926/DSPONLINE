@@ -153,6 +153,21 @@ describe("NativeFactoryThinViewStore", () => {
     expect(store.getSnapshot().frame?.revision).toBe(11);
   });
 
+  it("supersedes an older selection request even when both target the same revision", async () => {
+    let resolveOldFactory!: (value: DesktopNativeCoreFactoryReadModelResult) => void;
+    const oldSource: NativeFactoryThinViewSource = {
+      readVerifiedFactoryReadModel: () => new Promise((resolve) => { resolveOldFactory = resolve; }),
+      readVerifiedViewportProjectionV2: vi.fn().mockResolvedValue(viewportProjection(12, "planet-a")),
+    };
+    const store = new NativeFactoryThinViewStore();
+    const oldRefresh = store.refresh(oldSource, request(12, "planet-a"));
+    await store.refresh(source(factoryProjection(12, "planet-b"), viewportProjection(12, "planet-b")), request(12, "planet-b"));
+    resolveOldFactory(factoryProjection(12, "planet-a"));
+
+    await expect(oldRefresh).resolves.toEqual({ status: "superseded" });
+    expect(store.getSnapshot().frame).toMatchObject({ revision: 12, planetId: "planet-b" });
+  });
+
   it("clears the complete frame and invalidates in-flight reads", async () => {
     let resolveFactory!: (value: DesktopNativeCoreFactoryReadModelResult) => void;
     const pendingSource: NativeFactoryThinViewSource = {

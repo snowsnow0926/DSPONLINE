@@ -9,6 +9,7 @@ import {
   type ConstructionReservationReadModel,
   type ConstructionSummaryReadModel,
   type ConstructionTargetReadModel,
+  type FactoryConstructionHeadlineReadModel,
   type FactoryReadModelBundle,
   type FactoryReadModelRequest,
   type FactoryRunStatusReadModel,
@@ -107,6 +108,22 @@ export function createWebFactoryRunStatusReadModel(state: GameState): FactoryRun
     revision: null,
     activePlanetId: state.activePlanetId,
     paused: state.paused,
+  };
+}
+
+/** Constant-time Web/PWA projection for the blueprint construction headline. */
+export function createWebFactoryConstructionHeadlineReadModel(
+  state: GameState,
+): FactoryConstructionHeadlineReadModel {
+  const planetId = state.activePlanetId;
+  const definition = (PLANETS as Readonly<Record<string, PlanetDefinition | undefined>>)[planetId];
+  return {
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: planetId,
+    activePlanetDisplayName: definition?.name || planetId,
+    constructionQueueCount: state.constructionQueue.length,
   };
 }
 

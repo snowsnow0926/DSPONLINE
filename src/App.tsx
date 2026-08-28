@@ -383,8 +383,14 @@ import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure 
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
-import { selectFactoryRunStatusReadModel } from "./game/nativeFactoryThinViewBridge";
-import { createWebFactoryRunStatusReadModel } from "./game/webFactoryReadModelAdapter";
+import {
+  selectFactoryConstructionHeadlineReadModel,
+  selectFactoryRunStatusReadModel,
+} from "./game/nativeFactoryThinViewBridge";
+import {
+  createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryRunStatusReadModel,
+} from "./game/webFactoryReadModelAdapter";
 import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
 import { readWindowsNativeCoreBetaEnabled, writeWindowsNativeCoreBetaEnabled } from "./game/nativeCoreBetaSettings";
 import type {
@@ -1891,6 +1897,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewExpectedRevision,
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryRunStatusReadModel],
+  );
+  const webFactoryConstructionHeadlineReadModel = useMemo(
+    () => createWebFactoryConstructionHeadlineReadModel(game),
+    [game.activePlanetId, game.constructionQueue.length],
+  );
+  const factoryConstructionHeadlineReadModel = useMemo(
+    () => selectFactoryConstructionHeadlineReadModel(
+      webFactoryConstructionHeadlineReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+    ),
+    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
   );
   useEffect(() => {
     if (!windowsNativeCoreAvailable || !windowsNativeCoreBetaEnabled ||
@@ -13389,6 +13407,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}
+        factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
         mobile={nextMobileShell}
         mobileSubview={mobileWorkspaceSubview}
         onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}

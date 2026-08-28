@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
-import type { FactoryRunStatusReadModel } from "./factoryReadModels";
+import type {
+  FactoryConstructionHeadlineReadModel,
+  FactoryRunStatusReadModel,
+} from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
-import { selectFactoryRunStatusReadModel } from "./nativeFactoryThinViewBridge";
+import {
+  selectFactoryConstructionHeadlineReadModel,
+  selectFactoryRunStatusReadModel,
+} from "./nativeFactoryThinViewBridge";
 
 const web: FactoryRunStatusReadModel = {
   schema: "factory-read-model-v1",
@@ -11,6 +17,15 @@ const web: FactoryRunStatusReadModel = {
   revision: null,
   activePlanetId: "home",
   paused: false,
+};
+
+const constructionWeb: FactoryConstructionHeadlineReadModel = {
+  schema: "factory-read-model-v1",
+  source: "web-game-state",
+  revision: null,
+  activePlanetId: "home",
+  activePlanetDisplayName: "澄海 I",
+  constructionQueueCount: 0,
 };
 
 function factory(revision: number, paused = false): DesktopNativeCoreFactoryReadModelResult {
@@ -34,7 +49,27 @@ function factory(revision: number, paused = false): DesktopNativeCoreFactoryRead
       activePlanetBeltCount: 0,
       constructionQueueCount: 0,
     },
-    planetNavigation: { schema: "factory-read-model-v1", activePlanetId: "home", planets: emptyRows },
+    planetNavigation: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "home",
+      planets: {
+        rows: [{
+          planetId: "home",
+          systemId: "helios",
+          displayName: "澄海 I",
+          code: "home",
+          active: true,
+          discovered: true,
+          colonized: true,
+          role: null,
+          entityCount: 0,
+          beltCount: 0,
+          constructionQueueCount: 0,
+        }],
+        totalCount: 1,
+        truncated: false,
+      },
+    },
     selection: {
       schema: "factory-read-model-v1",
       activePlanetId: "home",
@@ -130,5 +165,64 @@ describe("native factory thin-view run-status bridge", () => {
       },
     };
     expect(selectFactoryRunStatusReadModel(web, wrongPlanet, 7)).toBe(web);
+  });
+});
+
+describe("native factory thin-view construction headline bridge", () => {
+  it("uses the native atomic frame only at the exact revision", () => {
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, snapshot(9), 9)).toEqual({
+      ...constructionWeb,
+      source: "native-core",
+      revision: 9,
+    });
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, snapshot(8), 9)).toBe(constructionWeb);
+  });
+
+  it("keeps Web output while native data is loading or unavailable", () => {
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, snapshot(9, "loading"), 9)).toBe(constructionWeb);
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, snapshot(9, "unavailable"), 9)).toBe(constructionWeb);
+  });
+
+  it("keeps Web output for planet or same-revision semantic mismatches", () => {
+    const current = snapshot(9);
+    const wrongPlanet: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: { ...current.frame!, planetId: "other" },
+    };
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, wrongPlanet, 9)).toBe(constructionWeb);
+
+    const wrongQueueCount: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          shell: { ...current.frame!.factory.shell, constructionQueueCount: 1 },
+          construction: {
+            ...current.frame!.factory.construction,
+            queue: { rows: [], totalCount: 1, truncated: true },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, wrongQueueCount, 9)).toBe(constructionWeb);
+
+    const inactivePlanet: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          planetNavigation: {
+            ...current.frame!.factory.planetNavigation,
+            planets: {
+              ...current.frame!.factory.planetNavigation.planets,
+              rows: current.frame!.factory.planetNavigation.planets.rows.map((row) => ({ ...row, active: false })),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, inactivePlanet, 9)).toBe(constructionWeb);
   });
 });

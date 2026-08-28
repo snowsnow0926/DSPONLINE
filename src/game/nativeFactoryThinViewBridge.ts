@@ -1,4 +1,7 @@
-import type { FactoryRunStatusReadModel } from "./factoryReadModels";
+import type {
+  FactoryConstructionHeadlineReadModel,
+  FactoryRunStatusReadModel,
+} from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 
 /**
@@ -26,5 +29,40 @@ export function selectFactoryRunStatusReadModel(
     revision: expectedRevision,
     activePlanetId: shell.activePlanetId,
     paused: shell.paused,
+  });
+}
+
+/**
+ * Selects the blueprint construction headline from the exact atomic native
+ * frame only when every visible value agrees with the Web authority view.
+ */
+export function selectFactoryConstructionHeadlineReadModel(
+  web: FactoryConstructionHeadlineReadModel,
+  native: NativeFactoryThinViewSnapshot,
+  expectedRevision: number,
+): FactoryConstructionHeadlineReadModel {
+  const frame = native.status === "ready" && native.requestedRevision === expectedRevision
+    ? native.frame
+    : null;
+  const factory = frame?.factory;
+  const shell = factory?.shell;
+  const navigation = factory?.planetNavigation;
+  const construction = factory?.construction;
+  const activePlanet = navigation?.planets.rows.find((row) => row.planetId === web.activePlanetId);
+  if (!frame || frame.revision !== expectedRevision || frame.planetId !== web.activePlanetId ||
+    !factory || factory.revision !== expectedRevision || !shell || shell.source !== "native-core" ||
+    shell.activePlanetId !== web.activePlanetId || navigation?.activePlanetId !== web.activePlanetId ||
+    construction?.activePlanetId !== web.activePlanetId || !activePlanet?.active ||
+    shell.constructionQueueCount !== web.constructionQueueCount ||
+    construction.queue.totalCount !== web.constructionQueueCount) {
+    return web;
+  }
+  return Object.freeze({
+    schema: web.schema,
+    source: "native-core",
+    revision: expectedRevision,
+    activePlanetId: web.activePlanetId,
+    activePlanetDisplayName: web.activePlanetDisplayName,
+    constructionQueueCount: shell.constructionQueueCount,
   });
 }

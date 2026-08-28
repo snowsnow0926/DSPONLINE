@@ -20,4 +20,21 @@ describe("factory thin-view App consumption", () => {
     expect(component).not.toMatch(/GameState/);
     expect(component).not.toMatch(/\.\/game\/types|\.\.\/game\/types/);
   });
+
+  it("feeds the real blueprint construction headline from the atomic bounded frame", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const workspace = readFileSync(resolve("src/components/BlueprintWorkspace.tsx"), "utf8");
+    const headline = readFileSync(resolve("src/components/BlueprintFactoryHeadline.tsx"), "utf8");
+
+    expect(app).toMatch(/createWebFactoryConstructionHeadlineReadModel\(game\)/);
+    expect(app).toMatch(/selectFactoryConstructionHeadlineReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/<BlueprintWorkspace[\s\S]*?factoryHeadlineReadModel=\{factoryConstructionHeadlineReadModel\}/);
+    expect(workspace).toMatch(/<BlueprintFactoryHeadline model=\{factoryHeadlineReadModel\} \/>/);
+    expect(workspace).toMatch(/const pendingCount = factoryHeadlineReadModel\.constructionQueueCount/);
+    expect(workspace).not.toMatch(/<span>施工队列 <strong>\{game\.constructionQueue\.length\}/);
+
+    expect(headline).toMatch(/FactoryConstructionHeadlineReadModel/);
+    expect(headline).not.toMatch(/GameState/);
+    expect(headline).not.toMatch(/\.\/game\/types|\.\.\/game\/types/);
+  });
 });

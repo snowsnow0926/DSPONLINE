@@ -56,6 +56,16 @@ export interface FactoryRunStatusReadModel {
   readonly paused: boolean;
 }
 
+/** Bounded headline used by the visible blueprint construction workspace. */
+export interface FactoryConstructionHeadlineReadModel {
+  readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly activePlanetId: string;
+  readonly activePlanetDisplayName: string;
+  readonly constructionQueueCount: number;
+}
+
 export interface PlanetNavigationRowReadModel {
   readonly planetId: string;
   readonly systemId: string | null;

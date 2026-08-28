@@ -1,9 +1,11 @@
 import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Download, FlipHorizontal2, Focus, Layers3, ListChecks, Lock, MousePointer2, PackageCheck, PackageOpen, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Redo2, RotateCw, Route, Trash2, Truck, Undo2, Unlock, Upload, WandSparkles, X } from "lucide-react";
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
+import type { FactoryConstructionHeadlineReadModel } from "../game/factoryReadModels";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { BlueprintFactoryHeadline } from "./BlueprintFactoryHeadline";
 import { useGameDialog } from "./GameDialogProvider";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { StableTextArea, StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
@@ -444,9 +446,10 @@ function formatSimulationTime(seconds: number): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
+export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
   open: boolean;
   game: GameState;
+  factoryHeadlineReadModel: FactoryConstructionHeadlineReadModel;
   onClose: () => void;
   onDeploy: (blueprintId: string) => void;
   onRemove: (blueprintId: string) => void;
@@ -498,12 +501,12 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
   if (!open) return null;
   const detailBlueprintId = mobile && mobileSubview?.startsWith("blueprint:") ? mobileSubview.slice(10) : null;
   const visibleBlueprints = detailBlueprintId ? game.blueprints.filter((blueprint) => blueprint.id === detailBlueprintId) : game.blueprints;
-  const pendingCount = game.constructionQueue.length;
+  const pendingCount = factoryHeadlineReadModel.constructionQueueCount;
   return (
     <WorkspaceFrame className={`blueprint-workspace${mobile ? ` mobile-workspace mobile-blueprints${detailBlueprintId ? " mobile-workspace--detail" : ""}` : ""}`} ariaLabel="蓝图与待建施工" onRequestClose={onClose}>
       <header className="blueprint-header">
         <div className="blueprint-title"><i><Layers3 size={20} /></i><div><span>生产网络模板</span><strong>{activeTab === "library" ? "蓝图库" : "待建与补足"}</strong></div></div>
-        <div className="blueprint-headline"><span>模板 <strong>{game.blueprints.length}</strong></span><span>施工队列 <strong>{game.constructionQueue.length}</strong></span><span>部署行星 <strong>{getPlanet(game.activePlanetId).name}</strong></span></div>
+        <div className="blueprint-headline"><span>模板 <strong>{game.blueprints.length}</strong></span><BlueprintFactoryHeadline model={factoryHeadlineReadModel} /></div>
         <div className="blueprint-header-actions">{activeTab === "library" ? <>
           <div className="blueprint-view-mode" role="group" aria-label="蓝图卡片显示模式">
             <button className={viewMode === "compact" ? "active" : ""} type="button" aria-pressed={viewMode === "compact"} onClick={() => setBlueprintViewMode("compact")} title="只显示部署所需摘要">精简</button>

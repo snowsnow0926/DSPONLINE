@@ -14,6 +14,7 @@ import type {
   RecipeId,
 } from "./types";
 import {
+  createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryReadModels,
   createWebFactoryRunStatusReadModel,
 } from "./webFactoryReadModelAdapter";
@@ -62,6 +63,31 @@ function makeBelt(id: string, source: string, target: string): BeltConnection {
 }
 
 describe("Web/PWA factory read-model adapter", () => {
+  it("projects the blueprint construction headline in constant-time fields", () => {
+    const state = createInitialState();
+    state.activePlanetId = "ashen";
+    state.galaxy.planetMetadata.ashen = { customName: "玩家自定义名", note: "", tags: [] };
+    state.constructionQueue = [{
+      id: "queue-1",
+      blueprintId: "blueprint-1",
+      blueprintName: "Test",
+      planetId: "ashen",
+      position: { x: 0, y: 0 },
+      rotation: 0,
+      mirror: "none",
+      queuedAt: 1,
+    }];
+
+    expect(createWebFactoryConstructionHeadlineReadModel(state)).toEqual({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      activePlanetId: "ashen",
+      activePlanetDisplayName: "烬原 II",
+      constructionQueueCount: 1,
+    });
+  });
+
   it("projects the visible run status without retaining GameState", () => {
     const state = createInitialState();
     state.activePlanetId = "ashen";

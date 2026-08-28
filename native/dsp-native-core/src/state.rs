@@ -3285,9 +3285,12 @@ impl CoreState {
         let checksum;
         {
             let mut write = |text: &str| -> anyhow::Result<()> {
+                let next_byte_length = byte_length
+                    .checked_add(u64::try_from(text.len())?)
+                    .ok_or_else(|| anyhow!("native v47 export byte length overflowed"))?;
                 writer.write_all(text.as_bytes())?;
                 envelope_sha.update(text.as_bytes());
-                byte_length = byte_length.saturating_add(text.len() as u64);
+                byte_length = next_byte_length;
                 Ok(())
             };
             let prefix = format!(

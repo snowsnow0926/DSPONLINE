@@ -1484,9 +1484,21 @@ impl CoreRegistry {
         }
         let state = self.session(session_id)?;
         let mode = state.identity.mode.clone();
-        let result = store.publish_export(export_id, |writer| {
+        // The first pass writes only to a sink so SaveStore can prove the exact
+        // disk budget before it creates the export temporary file. The second
+        // pass is bounded to that length and must reproduce the same digest.
+        let preflight = state.write_v47_envelope(saved_at_ms, std::io::sink())?;
+        let result = store.publish_export(export_id, preflight.byte_length, |writer| {
             state.write_v47_envelope(saved_at_ms, writer)
         })?;
+        if result.revision != preflight.revision
+            || result.saved_at_ms != preflight.saved_at_ms
+            || result.byte_length != preflight.byte_length
+            || result.envelope_sha256 != preflight.envelope_sha256
+            || result.state_checksum != preflight.state_checksum
+        {
+            bail!("native v47 export changed between disk preflight and publication");
+        }
         Ok(CoreExportResult {
             export_id: export_id.to_owned(),
             mode,
@@ -1567,9 +1579,32 @@ fn validate_session_id(value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disk_budget::{DiskSpaceProbe, DiskSpaceQuery, MINIMUM_FREE_SPACE_RESERVE_BYTES};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct MutableDiskSpaceProbe(AtomicU64);
+
+    impl MutableDiskSpaceProbe {
+        fn available() -> Self {
+            Self(AtomicU64::new(u64::MAX))
+        }
+
+        fn set(&self, available_bytes: u64) {
+            self.0.store(available_bytes, Ordering::SeqCst);
+        }
+    }
+
+    impl DiskSpaceProbe for MutableDiskSpaceProbe {
+        fn query_available_bytes(&self, _directory: &Path) -> anyhow::Result<DiskSpaceQuery> {
+            Ok(DiskSpaceQuery::Available(self.0.load(Ordering::SeqCst)))
+        }
+    }
 
     fn import_catalog() -> Value {
         json!({
@@ -1738,6 +1773,119 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.root_hash, before.root_hash);
         assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn low_space_v47_export_keeps_the_source_session_and_checkpoint_bitwise_stable() {
+        let root = tempdir().unwrap();
+        let probe = Arc::new(MutableDiskSpaceProbe::available());
+        let mut store = SaveStore::open_with_disk_space_probe(root.path(), probe.clone()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let summary_before =
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap();
+        let checkpoint_before = store.recover("normal-main").unwrap().unwrap();
+
+        probe.set(MINIMUM_FREE_SPACE_RESERVE_BYTES);
+        let error = registry
+            .export_v47(
+                &store,
+                &imported.session_id,
+                "blocked-low-space-export",
+                1234,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        let summary_after =
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap();
+        assert_eq!(summary_after, summary_before);
+        let checkpoint_after = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(checkpoint_after.generation, checkpoint_before.generation);
+        assert_eq!(checkpoint_after.revision, checkpoint_before.revision);
+        assert_eq!(checkpoint_after.root_hash, checkpoint_before.root_hash);
+        assert!(
+            !root
+                .path()
+                .join("exports/blocked-low-space-export.part")
+                .exists()
+        );
+        assert!(
+            !root
+                .path()
+                .join("exports/blocked-low-space-export.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn low_space_checkpoint_aborts_the_visit_and_remains_retryable() {
+        let root = tempdir().unwrap();
+        let probe = Arc::new(MutableDiskSpaceProbe::available());
+        let mut store = SaveStore::open_with_disk_space_probe(root.path(), probe.clone()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let summary_before =
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap();
+        let checkpoint_before = store.recover("normal-main").unwrap().unwrap();
+
+        probe.set(MINIMUM_FREE_SPACE_RESERVE_BYTES);
+        let error = registry
+            .checkpoint(&mut store, &imported.session_id, 1_234)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(crate::disk_budget::LOW_SPACE_ERROR),
+            "{error:#}"
+        );
+        assert!(
+            !registry
+                .uncertain_checkpoint_transactions
+                .contains_key(&imported.session_id)
+        );
+        assert_eq!(
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap(),
+            summary_before
+        );
+        let checkpoint_after_failure = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(
+            checkpoint_after_failure.generation,
+            checkpoint_before.generation
+        );
+        assert_eq!(
+            checkpoint_after_failure.root_hash,
+            checkpoint_before.root_hash
+        );
+
+        probe.set(u64::MAX);
+        let retry = registry
+            .checkpoint(&mut store, &imported.session_id, 1_235)
+            .unwrap();
+        assert!(retry.checkpoint.generation > checkpoint_before.generation);
+        assert_eq!(
+            store.recover("normal-main").unwrap().unwrap().generation,
+            retry.checkpoint.generation
+        );
     }
 
     #[test]

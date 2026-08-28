@@ -1,14 +1,12 @@
 use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json, to_value};
 use sha2::{Digest, Sha256};
 
-use crate::save_store::{PublishedCheckpointIdentity, SaveStore, atomic_replace, sync_directory};
+use crate::save_store::{PublishedCheckpointIdentity, SaveStore, sync_directory};
 
 pub const EXACT_REALTIME_LEASE_CAPABILITY: &str = "native-core-exact-realtime-lease-v2";
 pub const EXACT_REALTIME_WRITER_FENCE_CAPABILITY: &str =
@@ -28,8 +26,6 @@ const MAX_LEASE_BYTES: u64 = 32 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const EXACT_TICK_SECONDS: u64 = 1;
 const EXACT_TICK_MILLISECONDS: u64 = 1_000;
-
-static NEXT_LEASE_TEMPORARY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -854,7 +850,7 @@ impl SaveStore {
         if fault == LeaseWriteFault::BeforePublish {
             bail!("injected native exact realtime lease pre-publish fault")
         }
-        atomic_replace(&path, &bytes, &next_lease_temporary_name())?;
+        self.atomic_replace_budgeted(&path, &bytes)?;
         sync_directory(&directory)?;
         if fault == LeaseWriteFault::AfterPublish {
             bail!("injected native exact realtime lease lost ACK")
@@ -1229,15 +1225,6 @@ fn exact_realtime_lease_path(root: &Path) -> PathBuf {
         .join(LEASE_FILE_NAME)
 }
 
-fn next_lease_temporary_name() -> String {
-    let id = NEXT_LEASE_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("lease-{}-{now:032x}-{id:016x}", std::process::id())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LeaseWriteFault {
     None,
@@ -1255,10 +1242,32 @@ enum LeaseClearFault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disk_budget::{DiskSpaceProbe, DiskSpaceQuery, MINIMUM_FREE_SPACE_RESERVE_BYTES};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 
     const RUN_ID: &str = "authority-run-1";
     const FINGERPRINT: &str = "builtin:test";
+
+    #[derive(Debug)]
+    struct MutableDiskSpaceProbe(AtomicU64);
+
+    impl MutableDiskSpaceProbe {
+        fn available() -> Self {
+            Self(AtomicU64::new(u64::MAX))
+        }
+
+        fn set(&self, available_bytes: u64) {
+            self.0.store(available_bytes, Ordering::SeqCst);
+        }
+    }
+
+    impl DiskSpaceProbe for MutableDiskSpaceProbe {
+        fn query_available_bytes(&self, _directory: &Path) -> anyhow::Result<DiskSpaceQuery> {
+            Ok(DiskSpaceQuery::Available(self.0.load(Ordering::SeqCst)))
+        }
+    }
 
     fn sha(value: &str) -> String {
         hex::encode(Sha256::digest(value.as_bytes()))
@@ -1378,6 +1387,28 @@ mod tests {
             result.err().expect("generic mutation must be fenced")
         );
         assert!(message.contains("exact realtime lease"), "{message}");
+    }
+
+    #[test]
+    fn low_space_lease_replacement_preserves_the_previous_durable_lease() {
+        let root = tempdir().unwrap();
+        let probe = Arc::new(MutableDiskSpaceProbe::available());
+        let mut store = SaveStore::open_with_disk_space_probe(root.path(), probe.clone()).unwrap();
+        let prepared = prepare(&mut store);
+        let path = exact_realtime_lease_path(store.root());
+        let bytes_before = fs::read(&path).unwrap();
+
+        probe.set(MINIMUM_FREE_SPACE_RESERVE_BYTES);
+        let error = store
+            .activate_exact_realtime_lease(RUN_ID, FINGERPRINT)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes_before);
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), prepared);
     }
 
     #[test]

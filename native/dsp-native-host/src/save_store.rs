@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -10,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
 
+use crate::disk_budget::{
+    DiskBudgetOutcome, DiskBudgetStatus, DiskSpaceProbe, SystemDiskSpaceProbe, require_write_budget,
+};
 use crate::exact_realtime_lease::ExactRealtimeLease;
 
 const MAX_SLOT_BYTES: usize = 64;
@@ -98,7 +102,20 @@ impl<R: Read> Read for Sha256CountingReader<R> {
         let bytes = self.inner.read(buffer)?;
         if bytes > 0 {
             self.digest.update(&buffer[..bytes]);
-            self.bytes_read = self.bytes_read.saturating_add(bytes as u64);
+            self.bytes_read = self
+                .bytes_read
+                .checked_add(u64::try_from(bytes).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native byte counter length overflowed",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native byte counter overflowed",
+                    )
+                })?;
         }
         Ok(bytes)
     }
@@ -124,8 +141,20 @@ impl Sha256CountingWriter {
 
 impl Write for Sha256CountingWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(buffer.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native byte counter length overflowed",
+            )
+        })?;
+        let next = self.bytes_written.checked_add(bytes).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native byte counter overflowed",
+            )
+        })?;
         self.digest.update(buffer);
-        self.bytes_written = self.bytes_written.saturating_add(buffer.len() as u64);
+        self.bytes_written = next;
         Ok(buffer.len())
     }
 
@@ -378,6 +407,8 @@ pub struct SaveStore {
     transactions: HashMap<String, SaveTransaction>,
     verified_manifests: RefCell<HashMap<String, SaveManifest>>,
     uncertain_publications: HashMap<String, UncertainPublication>,
+    disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    last_disk_budget_status: Cell<DiskBudgetStatus>,
     #[cfg(test)]
     transient_reconciliation_failures: HashSet<String>,
 }
@@ -406,8 +437,64 @@ impl Drop for TemporaryPathGuard {
     }
 }
 
+struct ExactLengthWriter<'a> {
+    inner: &'a mut File,
+    remaining: u64,
+}
+
+impl ExactLengthWriter<'_> {
+    fn finish(self) -> anyhow::Result<()> {
+        if self.remaining != 0 {
+            bail!("native compatibility export wrote fewer bytes than preflighted");
+        }
+        Ok(())
+    }
+}
+
+impl Write for ExactLengthWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let requested = u64::try_from(buffer.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native compatibility export buffer length overflowed",
+            )
+        })?;
+        if requested > self.remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "native compatibility export exceeded its preflighted byte length",
+            ));
+        }
+        let written = self.inner.write(buffer)?;
+        self.remaining = self
+            .remaining
+            .checked_sub(written as u64)
+            .expect("bounded export write cannot exceed remaining bytes");
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl SaveStore {
     pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_with_probe(root, Arc::new(SystemDiskSpaceProbe))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_disk_space_probe(
+        root: impl AsRef<Path>,
+        disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_probe(root, disk_space_probe)
+    }
+
+    fn open_with_probe(
+        root: impl AsRef<Path>,
+        disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    ) -> anyhow::Result<Self> {
         let root = root.as_ref();
         ensure_save_root(root)?;
         let root_identity = require_direct_directory(root, "native save root")?;
@@ -444,6 +531,8 @@ impl SaveStore {
             transactions: HashMap::new(),
             verified_manifests: RefCell::new(HashMap::new()),
             uncertain_publications: HashMap::new(),
+            disk_space_probe,
+            last_disk_budget_status: Cell::new(DiskBudgetStatus::NotChecked),
             #[cfg(test)]
             transient_reconciliation_failures: HashSet::new(),
         })
@@ -451,6 +540,52 @@ impl SaveStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn require_disk_budget_in_directory(
+        &self,
+        directory: &Path,
+        write_bytes: u64,
+    ) -> anyhow::Result<()> {
+        match require_write_budget(self.disk_space_probe.as_ref(), directory, write_bytes) {
+            Ok(DiskBudgetOutcome::Verified { .. }) => {
+                self.last_disk_budget_status.set(DiskBudgetStatus::Verified);
+                Ok(())
+            }
+            Ok(DiskBudgetOutcome::Unsupported { .. }) => {
+                self.last_disk_budget_status
+                    .set(DiskBudgetStatus::Unsupported);
+                Ok(())
+            }
+            Err(error) => {
+                self.last_disk_budget_status.set(DiskBudgetStatus::Failed);
+                Err(error)
+            }
+        }
+    }
+
+    fn require_disk_budget_for_path(&self, path: &Path, write_bytes: u64) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("native disk budget target has no parent"))?;
+        self.require_disk_budget_in_directory(parent, write_bytes)
+    }
+
+    fn atomic_write_new_budgeted(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        if !reject_existing_path_redirect(path, "immutable native target")? {
+            self.require_disk_budget_for_path(path, u64::try_from(bytes.len())?)?;
+        }
+        atomic_write_new(path, bytes, &self.next_temporary_name()?)
+    }
+
+    pub(crate) fn atomic_replace_budgeted(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        self.require_disk_budget_for_path(path, u64::try_from(bytes.len())?)?;
+        atomic_replace(path, bytes, &self.next_temporary_name()?)
+    }
+
+    #[cfg(test)]
+    fn last_disk_budget_status(&self) -> DiskBudgetStatus {
+        self.last_disk_budget_status.get()
     }
 
     /// Best-effort callers must ignore every error from this method. The
@@ -495,7 +630,7 @@ impl SaveStore {
             bail!("native statistics sidecar exceeds its byte budget");
         }
         let path = self.statistics_sidecar_path(slot)?;
-        atomic_replace(&path, &bytes, &self.next_temporary_name()?)?;
+        self.atomic_replace_budgeted(&path, &bytes)?;
         sync_directory(&self.slot_dir(slot)?)?;
         Ok(())
     }
@@ -574,7 +709,8 @@ impl SaveStore {
     pub fn publish_export<T>(
         &self,
         export_id: &str,
-        write: impl FnOnce(&mut File) -> anyhow::Result<T>,
+        expected_bytes: u64,
+        write: impl FnOnce(&mut dyn Write) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         validate_export_id(export_id)?;
         let export_root = self.fixed_directory(&self.root.join("exports"), "native export root")?;
@@ -586,23 +722,28 @@ impl SaveStore {
             bail!("native export identity already exists");
         }
         self.fixed_directory(&export_root, "native export root")?;
+        self.require_disk_budget_in_directory(&export_root, expected_bytes)?;
+        let mut temporary_guard = TemporaryPathGuard::new(temporary.clone());
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        let result = match write(&mut file) {
-            Ok(result) => result,
-            Err(error) => {
-                drop(file);
-                let _ = fs::remove_file(&temporary);
-                return Err(error.context("stream native compatibility export"));
-            }
+        temporary_guard.arm();
+        let result = {
+            let mut writer = ExactLengthWriter {
+                inner: &mut file,
+                remaining: expected_bytes,
+            };
+            let result = write(&mut writer).context("stream native compatibility export")?;
+            writer.finish()?;
+            result
         };
         file.sync_all()?;
         drop(file);
         self.fixed_directory(&export_root, "native export root")?;
         fs::rename(&temporary, &final_path)?;
         sync_directory(&export_root)?;
+        drop(temporary_guard);
         Ok(result)
     }
 
@@ -879,6 +1020,13 @@ impl SaveStore {
         let generations_root = generation_dir
             .parent()
             .ok_or_else(|| anyhow!("native generation has no parent"))?;
+        // Check against the already-trusted parent before creating the new
+        // generation directory. A rejected manifest must not leave an empty
+        // generation behind and consume a generation number.
+        self.require_disk_budget_in_directory(
+            generations_root,
+            u64::try_from(manifest_bytes.len())?,
+        )?;
         ensure_direct_directory(
             &generation_dir,
             generations_root,
@@ -913,6 +1061,10 @@ impl SaveStore {
                 } else {
                     "superblock-b.json"
                 });
+        self.require_disk_budget_for_path(
+            &superblock_target,
+            u64::try_from(superblock_bytes.len())?,
+        )?;
         atomic_replace(
             &superblock_target,
             &superblock_bytes,
@@ -1348,12 +1500,13 @@ impl SaveStore {
         let frame = encode_wal_frame(&encoded)?;
         ensure_wal_append_budget(scan.identity.bytes, scan.entries.len(), frame.len())?;
         let wal_bytes = if wal_path.exists() {
+            self.require_disk_budget_for_path(&wal_path, u64::try_from(frame.len())?)?;
             let mut file = OpenOptions::new().append(true).open(&wal_path)?;
             file.write_all(&frame)?;
             file.sync_all()?;
             file.metadata()?.len()
         } else {
-            atomic_write_new(&wal_path, &frame, &self.next_temporary_name()?)?;
+            self.atomic_write_new_budgeted(&wal_path, &frame)?;
             frame.len() as u64
         };
         Ok(WalAppendResult {
@@ -1515,7 +1668,7 @@ impl SaveStore {
             });
         }
         let path = self.wal_path(slot)?;
-        atomic_replace(&path, &[], &self.next_temporary_name()?)?;
+        self.atomic_replace_budgeted(&path, &[])?;
         Ok(WalMaintenanceResult {
             pending: false,
             bytes: 0,
@@ -1892,7 +2045,7 @@ impl SaveStore {
             return self.verify_reused_chunk(&path, hash, bytes.len() as u64);
         }
         let compressed = zstd::stream::encode_all(bytes, 3)?;
-        atomic_write_new(&path, &compressed, &self.next_temporary_name()?)?;
+        self.atomic_write_new_budgeted(&path, &compressed)?;
         Ok(ChunkMetadata {
             hash,
             compressed_hash: sha256_hex(&compressed),
@@ -2737,7 +2890,56 @@ pub(crate) fn sync_directory(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disk_budget::DiskSpaceQuery;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    #[derive(Clone, Debug)]
+    enum ProbeReply {
+        Available(u64),
+        Unsupported,
+        Failure,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedDiskSpaceProbe {
+        replies: Mutex<VecDeque<ProbeReply>>,
+        fallback: Mutex<ProbeReply>,
+    }
+
+    impl ScriptedDiskSpaceProbe {
+        fn available() -> Self {
+            Self {
+                replies: Mutex::new(VecDeque::new()),
+                fallback: Mutex::new(ProbeReply::Available(u64::MAX)),
+            }
+        }
+
+        fn replace_replies(&self, replies: impl IntoIterator<Item = ProbeReply>) {
+            *self.replies.lock().unwrap() = replies.into_iter().collect();
+        }
+
+        fn set_fallback(&self, reply: ProbeReply) {
+            *self.fallback.lock().unwrap() = reply;
+        }
+    }
+
+    impl DiskSpaceProbe for ScriptedDiskSpaceProbe {
+        fn query_available_bytes(&self, _directory: &Path) -> anyhow::Result<DiskSpaceQuery> {
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.lock().unwrap().clone());
+            match reply {
+                ProbeReply::Available(bytes) => Ok(DiskSpaceQuery::Available(bytes)),
+                ProbeReply::Unsupported => Ok(DiskSpaceQuery::Unsupported),
+                ProbeReply::Failure => bail!("injected disk space query failure"),
+            }
+        }
+    }
 
     fn begin(store: &mut SaveStore, revision: u64) -> String {
         store
@@ -2812,6 +3014,258 @@ mod tests {
             .put(&transaction, "base", Some("{\"version\":47}"))
             .unwrap();
         store.commit(&transaction).unwrap()
+    }
+
+    fn open_with_scripted_disk_probe(root: &Path) -> (SaveStore, Arc<ScriptedDiskSpaceProbe>) {
+        let probe = Arc::new(ScriptedDiskSpaceProbe::available());
+        let store = SaveStore::open_with_disk_space_probe(root, probe.clone()).unwrap();
+        (store, probe)
+    }
+
+    fn assert_same_checkpoint(left: &SaveRecoveryResult, right: &SaveRecoveryResult) {
+        assert_eq!(left.slot, right.slot);
+        assert_eq!(left.generation, right.generation);
+        assert_eq!(left.revision, right.revision);
+        assert_eq!(left.root_hash, right.root_hash);
+        assert_eq!(left.record_keys, right.record_keys);
+    }
+
+    #[test]
+    fn low_space_chunk_and_wal_writes_leave_transaction_and_checkpoint_unchanged() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+
+        let transaction_id = begin(&mut store, 2);
+        let transaction_before = store.transactions[&transaction_id].records.clone();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let value = "a different immutable chunk";
+        let error = store
+            .put(&transaction_id, "changed", Some(value))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
+        assert_eq!(
+            store.transactions[&transaction_id].records,
+            transaction_before
+        );
+        assert!(
+            !store
+                .chunk_path("normal-main", &sha256_hex(value.as_bytes()))
+                .unwrap()
+                .exists()
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(store.abort(&transaction_id));
+
+        let wal_path = store.wal_path("normal-main").unwrap();
+        let error = store
+            .append_wal(
+                "normal-main",
+                baseline.revision,
+                baseline.revision + 1,
+                "low-space-wal",
+                serde_json::json!({"paused": true}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert!(!wal_path.exists());
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        store
+            .append_wal(
+                "normal-main",
+                baseline.revision,
+                baseline.revision + 1,
+                "durable-wal-frame",
+                serde_json::json!({"paused": true}),
+            )
+            .unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store
+            .append_wal(
+                "normal-main",
+                baseline.revision + 1,
+                baseline.revision + 2,
+                "blocked-second-wal-frame",
+                serde_json::json!({"paused": false}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        let active = store.read_wal("normal-main", baseline.revision).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].command_id, "durable-wal-frame");
+    }
+
+    #[test]
+    fn low_space_manifest_or_superblock_never_replaces_the_old_checkpoint() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+        let transaction_id = begin(&mut store, 2);
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store.commit(&transaction_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(!store.transactions.contains_key(&transaction_id));
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let retry = begin(&mut store, 2);
+        store
+            .put(&retry, "retry", Some("after-freeing-space"))
+            .unwrap();
+        let committed = store.commit(&retry).unwrap();
+        assert!(committed.generation > baseline.generation);
+
+        let second_root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(second_root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+        let transaction_id = begin(&mut store, 2);
+        probe.replace_replies([
+            ProbeReply::Available(u64::MAX),
+            ProbeReply::Available(crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES),
+        ]);
+        let error = store.commit(&transaction_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(!store.transactions.contains_key(&transaction_id));
+        let next_generation = store.generation_dir("normal-main", 2).unwrap();
+        assert!(next_generation.join("manifest.json").exists());
+        let superblock = store
+            .slot_dir("normal-main")
+            .unwrap()
+            .join("superblock-a.json");
+        assert!(!superblock.exists());
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let retry = begin(&mut store, 2);
+        store
+            .put(&retry, "retry", Some("after-freeing-space"))
+            .unwrap();
+        let committed = store.commit(&retry).unwrap();
+        assert!(committed.generation > baseline.generation);
+    }
+
+    #[test]
+    fn sidecar_and_export_low_space_fail_before_replacing_or_creating_files() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        let checkpoint = seed_statistics_checkpoint(&mut store, 1);
+        store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples": [1]}),
+            )
+            .unwrap();
+        let sidecar = store.statistics_sidecar_path("normal-main").unwrap();
+        let sidecar_before = fs::read(&sidecar).unwrap();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples": [2]}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(fs::read(&sidecar).unwrap(), sidecar_before);
+
+        let invoked = Cell::new(false);
+        let error = store
+            .publish_export("low-space-export", 7, |writer| {
+                invoked.set(true);
+                writer.write_all(b"blocked")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert!(!invoked.get());
+        let export_root = root.path().join("exports");
+        assert!(!export_root.join("low-space-export.part").exists());
+        assert!(!export_root.join("low-space-export.json").exists());
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let error = store
+            .publish_export("short-export", 8, |writer| {
+                writer.write_all(b"short")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("wrote fewer bytes"));
+        assert!(!export_root.join("short-export.part").exists());
+        assert!(!export_root.join("short-export.json").exists());
+    }
+
+    #[test]
+    fn unsupported_probe_is_reported_but_query_failure_and_u64_overflow_fail_closed() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        probe.set_fallback(ProbeReply::Unsupported);
+        seed_statistics_checkpoint(&mut store, 1);
+        assert_eq!(
+            store.last_disk_budget_status(),
+            DiskBudgetStatus::Unsupported
+        );
+        assert!(store.recover("normal-main").unwrap().is_some());
+
+        probe.set_fallback(ProbeReply::Failure);
+        let error = store
+            .require_disk_budget_in_directory(store.root(), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("query native disk free space"));
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let error = store
+            .require_disk_budget_in_directory(store.root(), u64::MAX)
+            .unwrap_err();
+        assert!(error.to_string().contains("byte calculation overflowed"));
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
     }
 
     #[test]
@@ -4010,7 +4464,7 @@ mod tests {
         create_directory_redirect(&exports, export_outside.path());
         let invoked = Cell::new(false);
         let error = export_store
-            .publish_export("must-not-escape", |file| {
+            .publish_export("must-not-escape", 7, |file| {
                 invoked.set(true);
                 file.write_all(b"escaped")?;
                 Ok(())

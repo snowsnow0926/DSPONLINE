@@ -376,6 +376,36 @@ function normalizeTechnologyProjectionContext(value, label) {
   };
 }
 
+function normalizeRecipeWorkspaceProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemIds",
+    "selectedItemId", "location",
+  ], label);
+  const itemIds = opaqueIdArray(source.itemIds, `${label} item IDs`, 256);
+  const location = source.location === null ? null : (() => {
+    const entry = exactObject(source.location, ["planetId", "cursor", "limit"], `${label} location`);
+    const limit = safeInteger(entry.limit, `${label} location limit`, 1);
+    if (limit > 4_096) throw protocolError(`${label} location limit`);
+    return {
+      planetId: opaqueId(entry.planetId, `${label} location planet`),
+      cursor: safeInteger(entry.cursor, `${label} location cursor`),
+      limit,
+    };
+  })();
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    itemIds,
+    selectedItemId: opaqueId(source.selectedItemId, `${label} selected item`),
+    location,
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -1507,6 +1537,317 @@ function normalizeCoreTechnologyProjection(value, context) {
   };
 }
 
+function normalizeCoreRecipeWorkspaceProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "truncated",
+    "limits", "counts", "request", "live", "itemStocks", "selectedItem", "locationPage",
+  ], "native recipe workspace projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "recipe-workspace-v1") {
+    throw protocolError("native recipe workspace projection identity");
+  }
+  requireProjectionByteBudget(source, "native recipe workspace projection");
+  const projectionContext = normalizeRecipeWorkspaceProjectionContext(
+    context,
+    "native recipe workspace projection context",
+  );
+  const revision = safeInteger(source.revision, "native recipe workspace revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native recipe workspace registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native recipe workspace identity binding");
+  }
+
+  const limitsSource = exactObject(source.limits, [
+    "itemRows", "completedTechRows", "planetRows", "profileItemRows", "colonyCostRows",
+    "locationRows",
+  ], "native recipe workspace limits");
+  const limits = Object.fromEntries(Object.entries(limitsSource).map(([key, value]) => [
+    key,
+    safeInteger(value, `native recipe workspace limits.${key}`, 1),
+  ]));
+  if (limits.itemRows !== 256 || limits.completedTechRows !== 512 || limits.planetRows !== 64 ||
+      limits.profileItemRows !== 256 || limits.colonyCostRows !== 32 || limits.locationRows !== 4_096) {
+    throw protocolError("native recipe workspace limits binding");
+  }
+  const countsSource = exactObject(source.counts, [
+    "catalogItems", "completedTechIds", "planetProfiles",
+  ], "native recipe workspace counts");
+  const counts = {
+    catalogItems: safeInteger(countsSource.catalogItems, "native recipe workspace catalog count", 1),
+    completedTechIds: safeInteger(countsSource.completedTechIds, "native recipe workspace completed-tech count"),
+    planetProfiles: safeInteger(countsSource.planetProfiles, "native recipe workspace planet count", 1),
+  };
+
+  const requestSource = exactObject(source.request, [
+    "itemIds", "selectedItemId", "location",
+  ], "native recipe workspace echoed request");
+  const requestItemIds = opaqueIdArray(
+    requestSource.itemIds,
+    "native recipe workspace echoed item IDs",
+    limits.itemRows,
+  );
+  const selectedItemId = opaqueId(
+    requestSource.selectedItemId,
+    "native recipe workspace echoed selected item",
+  );
+  const requestLocation = requestSource.location === null ? null : (() => {
+    const entry = exactObject(
+      requestSource.location,
+      ["planetId", "cursor", "limit"],
+      "native recipe workspace echoed location",
+    );
+    return {
+      planetId: opaqueId(entry.planetId, "native recipe workspace echoed location planet"),
+      cursor: safeInteger(entry.cursor, "native recipe workspace echoed location cursor"),
+      limit: safeInteger(entry.limit, "native recipe workspace echoed location limit", 1),
+    };
+  })();
+  if (requestItemIds.length !== projectionContext.itemIds.length ||
+      requestItemIds.some((itemId, index) => itemId !== projectionContext.itemIds[index]) ||
+      selectedItemId !== projectionContext.selectedItemId ||
+      JSON.stringify(requestLocation) !== JSON.stringify(projectionContext.location)) {
+    throw protocolError("native recipe workspace selector binding");
+  }
+
+  const liveSource = exactObject(source.live, [
+    "activePlanetId", "recipeFocus", "completedTechIds", "beltCount", "metrics",
+    "planetProfiles", "dyson",
+  ], "native recipe workspace live model");
+  const activePlanetId = opaqueId(liveSource.activePlanetId, "native recipe workspace active planet");
+  const recipeFocusSource = exactObject(
+    liveSource.recipeFocus,
+    ["itemId", "mode"],
+    "native recipe workspace focus",
+  );
+  const recipeFocus = {
+    itemId: recipeFocusSource.itemId === null
+      ? null
+      : opaqueId(recipeFocusSource.itemId, "native recipe workspace focus item"),
+    mode: oneOf(recipeFocusSource.mode, ["two-level", "full"], "native recipe workspace focus mode"),
+  };
+  const completedTechIds = opaqueIdArray(
+    liveSource.completedTechIds,
+    "native recipe workspace completed technology IDs",
+    limits.completedTechRows,
+  );
+  const metricsSource = exactObject(
+    liveSource.metrics,
+    ["generationKw", "demandKw", "powerFactor"],
+    "native recipe workspace metrics",
+  );
+  const metrics = {
+    generationKw: finiteNumber(metricsSource.generationKw, "native recipe workspace generation"),
+    demandKw: finiteNumber(metricsSource.demandKw, "native recipe workspace demand"),
+    powerFactor: finiteNumber(metricsSource.powerFactor, "native recipe workspace power factor"),
+  };
+
+  const normalizeCountedRows = (value, label, maximum, normalizeRow) => {
+    const entry = exactObject(value, ["rows", "totalCount", "truncated"], label);
+    if (!Array.isArray(entry.rows) || entry.rows.length > maximum) throw protocolError(`${label} rows`);
+    const rows = entry.rows.map((row, index) => normalizeRow(row, `${label}.rows[${index}]`));
+    const totalCount = safeInteger(entry.totalCount, `${label} total count`);
+    const truncated = boolean(entry.truncated, `${label} truncated`);
+    if (totalCount < rows.length || truncated !== (totalCount > rows.length)) {
+      throw protocolError(`${label} cardinality`);
+    }
+    return { rows, totalCount, truncated };
+  };
+  if (!Array.isArray(liveSource.planetProfiles) || liveSource.planetProfiles.length > limits.planetRows) {
+    throw protocolError("native recipe workspace planet profiles");
+  }
+  const planetIds = new Set();
+  let nestedTruncated = false;
+  const planetProfiles = liveSource.planetProfiles.map((row, index) => {
+    const label = `native recipe workspace planet profiles[${index}]`;
+    const entry = exactObject(row, [
+      "planetId", "climateName", "starTypeName", "oceanType", "windMultiplier",
+      "solarPowerMultiplier", "geothermalMultiplier", "miningMultiplier", "reserveScale",
+      "tidalLocked", "resourceIds", "orbitalYields", "colonyCost",
+    ], label);
+    const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+    if (planetIds.has(planetId)) throw protocolError(`${label}.planetId`);
+    planetIds.add(planetId);
+    const resourceIds = normalizeCountedRows(
+      entry.resourceIds,
+      `${label}.resourceIds`,
+      limits.profileItemRows,
+      (itemId, itemLabel) => opaqueId(itemId, itemLabel),
+    );
+    const orbitalItemIds = new Set();
+    const orbitalYields = normalizeCountedRows(
+      entry.orbitalYields,
+      `${label}.orbitalYields`,
+      limits.profileItemRows,
+      (value, rowLabel) => {
+        const amount = exactObject(value, ["itemId", "rate"], rowLabel);
+        const itemId = opaqueId(amount.itemId, `${rowLabel}.itemId`);
+        if (orbitalItemIds.has(itemId)) throw protocolError(`${rowLabel}.itemId`);
+        orbitalItemIds.add(itemId);
+        return { itemId, rate: finiteNumber(amount.rate, `${rowLabel}.rate`) };
+      },
+    );
+    const costItemIds = new Set();
+    const colonyCost = normalizeCountedRows(
+      entry.colonyCost,
+      `${label}.colonyCost`,
+      limits.colonyCostRows,
+      (value, rowLabel) => {
+        const amount = exactObject(value, ["itemId", "amount"], rowLabel);
+        const itemId = opaqueId(amount.itemId, `${rowLabel}.itemId`);
+        if (costItemIds.has(itemId)) throw protocolError(`${rowLabel}.itemId`);
+        costItemIds.add(itemId);
+        return { itemId, amount: finiteNumber(amount.amount, `${rowLabel}.amount`) };
+      },
+    );
+    nestedTruncated ||= resourceIds.truncated || orbitalYields.truncated || colonyCost.truncated;
+    return {
+      planetId,
+      climateName: boundedReadModelText(entry.climateName, `${label}.climateName`, 512, 1),
+      starTypeName: boundedReadModelText(entry.starTypeName, `${label}.starTypeName`, 512, 1),
+      oceanType: boundedReadModelText(entry.oceanType, `${label}.oceanType`, 512, 1),
+      windMultiplier: finiteNumber(entry.windMultiplier, `${label}.windMultiplier`),
+      solarPowerMultiplier: finiteNumber(entry.solarPowerMultiplier, `${label}.solarPowerMultiplier`),
+      geothermalMultiplier: finiteNumber(entry.geothermalMultiplier, `${label}.geothermalMultiplier`),
+      miningMultiplier: finiteNumber(entry.miningMultiplier, `${label}.miningMultiplier`),
+      reserveScale: finiteNumber(entry.reserveScale, `${label}.reserveScale`),
+      tidalLocked: boolean(entry.tidalLocked, `${label}.tidalLocked`),
+      resourceIds,
+      orbitalYields,
+      colonyCost,
+    };
+  });
+  if (!planetIds.has(activePlanetId)) throw protocolError("native recipe workspace active planet binding");
+
+  const dysonSource = exactObject(liveSource.dyson, [
+    "systemId", "orbitCount", "orbitSails", "completedStructurePoints", "projectedGenerationKw",
+    "sailLaunchesPerMinute", "rocketLaunchesPerMinute", "receiverLoadKw",
+    "criticalPhotonPerMinute", "shellSails", "shellCapacity",
+  ], "native recipe workspace Dyson summary");
+  const dyson = {
+    systemId: opaqueId(dysonSource.systemId, "native recipe workspace Dyson system"),
+    orbitCount: safeInteger(dysonSource.orbitCount, "native recipe workspace Dyson orbit count"),
+    orbitSails: finiteNumber(dysonSource.orbitSails, "native recipe workspace Dyson orbit sails"),
+    completedStructurePoints: finiteNumber(dysonSource.completedStructurePoints, "native recipe workspace Dyson structure"),
+    projectedGenerationKw: finiteNumber(dysonSource.projectedGenerationKw, "native recipe workspace Dyson generation"),
+    sailLaunchesPerMinute: finiteNumber(dysonSource.sailLaunchesPerMinute, "native recipe workspace sail launches"),
+    rocketLaunchesPerMinute: finiteNumber(dysonSource.rocketLaunchesPerMinute, "native recipe workspace rocket launches"),
+    receiverLoadKw: finiteNumber(dysonSource.receiverLoadKw, "native recipe workspace receiver load"),
+    criticalPhotonPerMinute: finiteNumber(dysonSource.criticalPhotonPerMinute, "native recipe workspace critical photons"),
+    shellSails: finiteNumber(dysonSource.shellSails, "native recipe workspace shell sails"),
+    shellCapacity: finiteNumber(dysonSource.shellCapacity, "native recipe workspace shell capacity"),
+  };
+
+  if (!Array.isArray(source.itemStocks) || source.itemStocks.length !== requestItemIds.length) {
+    throw protocolError("native recipe workspace stock rows");
+  }
+  const itemStocks = source.itemStocks.map((row, index) => {
+    const entry = exactObject(row, ["itemId", "amount"], `native recipe workspace stock rows[${index}]`);
+    const itemId = opaqueId(entry.itemId, `native recipe workspace stock rows[${index}].itemId`);
+    if (itemId !== requestItemIds[index]) throw protocolError("native recipe workspace stock order binding");
+    return { itemId, amount: finiteNumber(entry.amount, `native recipe workspace stock rows[${index}].amount`) };
+  });
+  const selectedSource = exactObject(
+    source.selectedItem,
+    ["itemId", "stock", "productionLocations"],
+    "native recipe workspace selected item",
+  );
+  const selectedOutputItemId = opaqueId(selectedSource.itemId, "native recipe workspace selected output item");
+  if (selectedOutputItemId !== selectedItemId || !Array.isArray(selectedSource.productionLocations) ||
+      selectedSource.productionLocations.length > limits.planetRows) {
+    throw protocolError("native recipe workspace selected item binding");
+  }
+  const productionPlanetIds = new Set();
+  const productionLocations = selectedSource.productionLocations.map((row, index) => {
+    const label = `native recipe workspace production locations[${index}]`;
+    const entry = exactObject(row, ["planetId", "producerCount"], label);
+    const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+    if (productionPlanetIds.has(planetId) || !planetIds.has(planetId)) throw protocolError(`${label}.planetId`);
+    productionPlanetIds.add(planetId);
+    return { planetId, producerCount: safeInteger(entry.producerCount, `${label}.producerCount`, 1) };
+  });
+  const selectedItem = {
+    itemId: selectedOutputItemId,
+    stock: finiteNumber(selectedSource.stock, "native recipe workspace selected stock"),
+    productionLocations,
+  };
+  const selectedStockRow = itemStocks.find((row) => row.itemId === selectedItemId);
+  if (selectedStockRow && selectedStockRow.amount !== selectedItem.stock) {
+    throw protocolError("native recipe workspace selected stock binding");
+  }
+
+  let locationPage = null;
+  if (source.locationPage !== null) {
+    const entry = exactObject(source.locationPage, [
+      "planetId", "cursor", "totalCount", "entities", "nextCursor",
+    ], "native recipe workspace location page");
+    if (!projectionContext.location) throw protocolError("native recipe workspace unsolicited location page");
+    if (!Array.isArray(entry.entities) || entry.entities.length > projectionContext.location.limit) {
+      throw protocolError("native recipe workspace location entities");
+    }
+    const entityIds = new Set();
+    const entities = entry.entities.map((row, index) => {
+      const label = `native recipe workspace location entities[${index}]`;
+      const entity = exactObject(row, ["id", "x", "y"], label);
+      const id = opaqueId(entity.id, `${label}.id`);
+      if (entityIds.has(id)) throw protocolError(`${label}.id`);
+      entityIds.add(id);
+      return {
+        id,
+        x: finiteNumber(entity.x, `${label}.x`, -Number.MAX_VALUE),
+        y: finiteNumber(entity.y, `${label}.y`, -Number.MAX_VALUE),
+      };
+    });
+    const cursor = safeInteger(entry.cursor, "native recipe workspace location cursor");
+    const totalCount = safeInteger(entry.totalCount, "native recipe workspace location total count");
+    const nextCursor = entry.nextCursor === null
+      ? null
+      : safeInteger(entry.nextCursor, "native recipe workspace location next cursor");
+    const expectedNextCursor = cursor + entities.length < totalCount ? cursor + entities.length : null;
+    const planetId = opaqueId(entry.planetId, "native recipe workspace location planet");
+    if (planetId !== projectionContext.location.planetId || cursor !== projectionContext.location.cursor ||
+        totalCount < cursor + entities.length || nextCursor !== expectedNextCursor) {
+      throw protocolError("native recipe workspace location binding");
+    }
+    locationPage = { planetId, cursor, totalCount, entities, nextCursor };
+  } else if (projectionContext.location) {
+    throw protocolError("native recipe workspace missing location page");
+  }
+
+  const truncated = boolean(source.truncated, "native recipe workspace truncated flag");
+  const computedTruncated = nestedTruncated || counts.completedTechIds > completedTechIds.length ||
+    counts.planetProfiles > planetProfiles.length;
+  if (counts.catalogItems < requestItemIds.length || counts.completedTechIds < completedTechIds.length ||
+      counts.planetProfiles < planetProfiles.length || truncated !== computedTruncated) {
+    throw protocolError("native recipe workspace cardinality binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "recipe-workspace-v1",
+    revision,
+    registryFingerprint,
+    truncated,
+    limits,
+    counts,
+    request: { itemIds: requestItemIds, selectedItemId, location: requestLocation },
+    live: {
+      activePlanetId,
+      recipeFocus,
+      completedTechIds,
+      beltCount: safeInteger(liveSource.beltCount, "native recipe workspace belt count"),
+      metrics,
+      planetProfiles,
+      dyson,
+    },
+    itemStocks,
+    selectedItem,
+    locationPage,
+  };
+}
+
 function normalizeCoreCommand(value) {
   const source = exactObject(value, ["previousRevision", "revision", "changedEntityIds", "changedBeltIds", "topologyDirty"], "native core command result");
   const previousRevision = safeInteger(source.previousRevision, "native command previous revision");
@@ -1693,6 +2034,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
+  coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,
   coreCommit: normalizeCoreCommit,

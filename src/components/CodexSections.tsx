@@ -35,9 +35,9 @@ import {
   getTechnology,
   isConveyorBeltId,
 } from "../game/content";
-import { getBeltCapacity, getDysonEngineeringSnapshot, isTechnologyCompleted } from "../game/engine";
-import { getPlanetIndustrialProfile, getPlanetSolarPowerMultiplier, getStarSystemProfile } from "../game/galaxy";
+import { getBeltCapacity } from "../game/engine";
 import { getRecipeRates } from "../game/recipeGraph";
+import type { RecipeWorkspaceReadModel } from "../game/recipeWorkspaceReadModel";
 import { formatPowerKw } from "../game/units";
 import { PowerValue } from "./PowerValue";
 import type {
@@ -47,7 +47,6 @@ import type {
   BuildingId,
   CargoStackSize,
   ConveyorBeltId,
-  GameState,
   ItemId,
   PlanetId,
   RecipeDefinition,
@@ -88,6 +87,10 @@ const OCEAN_LABELS = {
 
 const DYSON_BUILDING_IDS: BuildingId[] = ["em_rail_ejector", "ray_receiver", "vertical_launching_silo"];
 
+function technologyCompleted(readModel: RecipeWorkspaceReadModel, techId: TechId): boolean {
+  return readModel.completedTechIds.includes(techId);
+}
+
 function ItemButton({ itemId, suffix, onSelect }: { itemId: ItemId; suffix?: string; onSelect: (itemId: ItemId) => void }) {
   return <button className="codex-item-button" type="button" onClick={() => onSelect(itemId)}><ItemGlyph itemId={itemId} /><span>{getItem(itemId).name}</span>{suffix ? <strong>{suffix}</strong> : null}</button>;
 }
@@ -119,8 +122,8 @@ function RecipeRateRow({ recipe, building, onSelectItem }: { recipe: RecipeDefin
   </article>;
 }
 
-function BuildingDetail({ game, buildingId, onSelectItem, onSelectTechnology }: {
-  game: GameState;
+function BuildingDetail({ readModel, buildingId, onSelectItem, onSelectTechnology }: {
+  readModel: RecipeWorkspaceReadModel;
   buildingId: BuildingId;
   onSelectItem: (itemId: ItemId) => void;
   onSelectTechnology: (techId: TechId) => void;
@@ -129,7 +132,7 @@ function BuildingDetail({ game, buildingId, onSelectItem, onSelectTechnology }: 
   const construction = getConstructionDefinition(buildingId);
   const recipes = getRecipesForBuilding(buildingId);
   return <article className="codex-detail codex-building-detail">
-    <header className="codex-detail-heading"><i><Factory size={22} /></i><span><small>{BUILDING_KIND_LABELS[building.kind]}{building.tier ? ` · Mk.${building.tier}` : ""}</small><strong>{building.name}</strong><p>{building.description}</p></span><b>{construction?.requiredTechId ? isTechnologyCompleted(game, construction.requiredTechId) ? "已解锁" : "未解锁" : "默认可用"}</b></header>
+    <header className="codex-detail-heading"><i><Factory size={22} /></i><span><small>{BUILDING_KIND_LABELS[building.kind]}{building.tier ? ` · Mk.${building.tier}` : ""}</small><strong>{building.name}</strong><p>{building.description}</p></span><b>{construction?.requiredTechId ? technologyCompleted(readModel, construction.requiredTechId) ? "已解锁" : "未解锁" : "默认可用"}</b></header>
     <dl className="codex-metrics">
       <div><dt>基础速度</dt><dd>{building.speed.toFixed(2)}×</dd></div>
       <div><dt>输入缓存</dt><dd>{building.inputCapacity.toLocaleString("zh-CN")}</dd></div>
@@ -143,8 +146,8 @@ function BuildingDetail({ game, buildingId, onSelectItem, onSelectTechnology }: 
   </article>;
 }
 
-function BuildingSection({ game, selectedId, detailOnly, onSelect, onSelectItem, onSelectTechnology }: {
-  game: GameState;
+function BuildingSection({ readModel, selectedId, detailOnly, onSelect, onSelectItem, onSelectTechnology }: {
+  readModel: RecipeWorkspaceReadModel;
   selectedId: BuildingId;
   detailOnly: boolean;
   onSelect: (buildingId: BuildingId) => void;
@@ -153,10 +156,10 @@ function BuildingSection({ game, selectedId, detailOnly, onSelect, onSelectItem,
 }) {
   const [query, setQuery] = useState("");
   const buildings = Object.values(BUILDINGS);
-  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <BuildingIndex buildings={buildings} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={onSelect} /> : null}<BuildingDetail game={game} buildingId={selectedId} onSelectItem={onSelectItem} onSelectTechnology={onSelectTechnology} /></div>;
+  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <BuildingIndex buildings={buildings} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={onSelect} /> : null}<BuildingDetail readModel={readModel} buildingId={selectedId} onSelectItem={onSelectItem} onSelectTechnology={onSelectTechnology} /></div>;
 }
 
-function LogisticsSection({ game, onSelectBuilding, onSelectItem }: { game: GameState; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
+function LogisticsSection({ readModel, onSelectBuilding, onSelectItem }: { readModel: RecipeWorkspaceReadModel; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
   const beltDefinitions = CONSTRUCTION.filter((definition) => isConveyorBeltId(definition.buildingId));
   const logisticsBuildings = Object.values(BUILDINGS).filter((building) => building.kind === "storage" || building.kind === "splitter" || building.kind === "station");
   const capacity = (tier: BeltTier, stackSize: CargoStackSize) => getBeltCapacity({ tier, lanes: 1, stackSize } as BeltConnection);
@@ -166,43 +169,42 @@ function LogisticsSection({ game, onSelectBuilding, onSelectItem }: { game: Game
       return <article key={definition.buildingId}><header><span><strong>{definition.name}</strong><small>{definition.requiredTechId ? getTechnology(definition.requiredTechId)?.name : "基础物流"}</small></span><b>{capacity(tier, 1)} 件/秒</b></header><dl><div><dt>1 层</dt><dd>{capacity(tier, 1)}/s</dd></div><div><dt>2 层</dt><dd>{capacity(tier, 2)}/s</dd></div><div><dt>4 层</dt><dd>{capacity(tier, 4)}/s</dd></div></dl><div className="codex-link-grid">{definition.costs.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />)}</div></article>;
     })}</div></section>
     <section className="codex-section-block"><header><GitFork size={17} /><strong>物流设施</strong><small>{logisticsBuildings.length} 类</small></header><div className="codex-card-grid">{logisticsBuildings.map((building) => <button type="button" key={building.id} onClick={() => onSelectBuilding(building.id)}><Factory size={18} /><span><strong>{building.name}</strong><small>{building.description}</small></span></button>)}</div></section>
-    <small className="codex-live-note">当前已铺设 {game.belts.length.toLocaleString("zh-CN")} 条线路；堆叠吞吐会按每条线路的实际层数计算。</small>
+    <small className="codex-live-note">当前已铺设 {readModel.beltCount.toLocaleString("zh-CN")} 条线路；堆叠吞吐会按每条线路的实际层数计算。</small>
   </div>;
 }
 
-function EnergySection({ game, onSelectBuilding, onSelectItem }: { game: GameState; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
+function EnergySection({ readModel, onSelectBuilding, onSelectItem }: { readModel: RecipeWorkspaceReadModel; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
   const powerBuildings = Object.values(BUILDINGS).filter((building) => building.kind === "power");
   const fuels = Object.entries(FUEL_ENERGY_MJ) as Array<[ItemId, number]>;
-  return <div className="codex-overview"><section className="codex-live-summary"><div><Zap size={18} /><span>当前发电<strong><PowerValue valueKw={game.metrics.generationKw} /></strong></span></div><div><Gauge size={18} /><span>当前需求<strong><PowerValue valueKw={game.metrics.demandKw} /></strong></span></div><div><BatteryCharging size={18} /><span>供电比例<strong>{Math.round(game.metrics.powerFactor * 100)}%</strong></span></div></section><section className="codex-section-block"><header><Zap size={17} /><strong>电力设施</strong><small>{powerBuildings.length} 类</small></header><div className="codex-card-grid">{powerBuildings.map((building) => <button type="button" key={building.id} onClick={() => onSelectBuilding(building.id)}><Zap size={18} /><span><strong>{building.name}</strong><small>{building.powerGenerationKw ? `额定 ${formatPowerKw(building.powerGenerationKw)}` : building.energyCapacityMj ? `储能 ${building.energyCapacityMj.toLocaleString("zh-CN")} MJ` : building.description}</small></span></button>)}</div></section><section className="codex-section-block"><header><Atom size={17} /><strong>燃料热值</strong><small>引擎实际 MJ/件</small></header><div className="codex-fuel-grid">{fuels.map(([itemId, energy]) => <ItemButton key={itemId} itemId={itemId} suffix={`${energy.toLocaleString("zh-CN")} MJ`} onSelect={onSelectItem} />)}</div></section></div>;
+  return <div className="codex-overview"><section className="codex-live-summary"><div><Zap size={18} /><span>当前发电<strong><PowerValue valueKw={readModel.metrics.generationKw} /></strong></span></div><div><Gauge size={18} /><span>当前需求<strong><PowerValue valueKw={readModel.metrics.demandKw} /></strong></span></div><div><BatteryCharging size={18} /><span>供电比例<strong>{Math.round(readModel.metrics.powerFactor * 100)}%</strong></span></div></section><section className="codex-section-block"><header><Zap size={17} /><strong>电力设施</strong><small>{powerBuildings.length} 类</small></header><div className="codex-card-grid">{powerBuildings.map((building) => <button type="button" key={building.id} onClick={() => onSelectBuilding(building.id)}><Zap size={18} /><span><strong>{building.name}</strong><small>{building.powerGenerationKw ? `额定 ${formatPowerKw(building.powerGenerationKw)}` : building.energyCapacityMj ? `储能 ${building.energyCapacityMj.toLocaleString("zh-CN")} MJ` : building.description}</small></span></button>)}</div></section><section className="codex-section-block"><header><Atom size={17} /><strong>燃料热值</strong><small>引擎实际 MJ/件</small></header><div className="codex-fuel-grid">{fuels.map(([itemId, energy]) => <ItemButton key={itemId} itemId={itemId} suffix={`${energy.toLocaleString("zh-CN")} MJ`} onSelect={onSelectItem} />)}</div></section></div>;
 }
 
-function PlanetSection({ game, selectedId, detailOnly, onSelect, onSelectItem }: { game: GameState; selectedId: PlanetId; detailOnly: boolean; onSelect: (planetId: PlanetId) => void; onSelectItem: (itemId: ItemId) => void }) {
+function PlanetSection({ readModel, selectedId, detailOnly, onSelect, onSelectItem }: { readModel: RecipeWorkspaceReadModel; selectedId: PlanetId; detailOnly: boolean; onSelect: (planetId: PlanetId) => void; onSelectItem: (itemId: ItemId) => void }) {
   const planet = getPlanet(selectedId);
-  const profile = getPlanetIndustrialProfile(game, selectedId);
+  const profile = readModel.planetProfiles[selectedId];
   const system = getStarSystem(planet.systemId);
-  const star = getStarSystemProfile(game, planet.systemId);
-  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <aside className="codex-index"><small>{PLANET_LIST.length} 颗确定性行星</small><div>{PLANET_LIST.map((candidate) => { const candidateProfile = getPlanetIndustrialProfile(game, candidate.id); return <button className={candidate.id === selectedId ? "active" : ""} type="button" key={candidate.id} onClick={() => onSelect(candidate.id)}><i style={{ color: candidate.color }}><Orbit size={17} /></i><span><strong>{candidate.name}</strong><small>{candidateProfile.climateName} · {getStarSystem(candidate.systemId).name}</small></span></button>; })}</div></aside> : null}<article className="codex-detail"><header className="codex-detail-heading"><i style={{ color: planet.color }}><Orbit size={22} /></i><span><small>{system.name} · {star.starTypeName}</small><strong>{planet.name}</strong><p>{planet.environment}</p></span><b>{profile.tidalLocked ? "潮汐锁定" : planet.kind === "gas-giant" ? "气态巨星" : "类地行星"}</b></header><dl className="codex-metrics"><div><dt>海洋</dt><dd>{OCEAN_LABELS[profile.oceanType]}</dd></div><div><dt>矿储倍率</dt><dd>{Math.round(profile.reserveScale * 100)}%</dd></div><div><dt>采矿倍率</dt><dd>{Math.round(profile.miningMultiplier * 100)}%</dd></div><div><dt>风力倍率</dt><dd>{Math.round(profile.windMultiplier * 100)}%</dd></div><div><dt>太阳能倍率</dt><dd>{Math.round(getPlanetSolarPowerMultiplier(game, selectedId) * 100)}%</dd></div><div><dt>地热倍率</dt><dd>{Math.round(profile.geothermalMultiplier * 100)}%</dd></div></dl><section className="codex-section-block"><header><MapPin size={16} /><strong>资源目录</strong></header><div className="codex-link-grid">{profile.resourceIds.map((itemId) => <ItemButton key={itemId} itemId={itemId} onSelect={onSelectItem} />)}{Object.keys(profile.orbitalYields).map((itemId) => <ItemButton key={itemId} itemId={itemId as ItemId} suffix={`${profile.orbitalYields[itemId as ItemId]?.toFixed(2)}/s`} onSelect={onSelectItem} />)}</div></section><section className="codex-section-block"><header><Box size={16} /><strong>殖民成本</strong></header><div className="codex-link-grid">{profile.colonyCost.length ? profile.colonyCost.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />) : <span>无额外殖民成本</span>}</div></section></article></div>;
+  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <aside className="codex-index"><small>{PLANET_LIST.length} 颗确定性行星</small><div>{PLANET_LIST.map((candidate) => { const candidateProfile = readModel.planetProfiles[candidate.id]; return <button className={candidate.id === selectedId ? "active" : ""} type="button" key={candidate.id} onClick={() => onSelect(candidate.id)}><i style={{ color: candidate.color }}><Orbit size={17} /></i><span><strong>{candidate.name}</strong><small>{candidateProfile.climateName} · {getStarSystem(candidate.systemId).name}</small></span></button>; })}</div></aside> : null}<article className="codex-detail"><header className="codex-detail-heading"><i style={{ color: planet.color }}><Orbit size={22} /></i><span><small>{system.name} · {profile.starTypeName}</small><strong>{planet.name}</strong><p>{planet.environment}</p></span><b>{profile.tidalLocked ? "潮汐锁定" : planet.kind === "gas-giant" ? "气态巨星" : "类地行星"}</b></header><dl className="codex-metrics"><div><dt>海洋</dt><dd>{OCEAN_LABELS[profile.oceanType]}</dd></div><div><dt>矿储倍率</dt><dd>{Math.round(profile.reserveScale * 100)}%</dd></div><div><dt>采矿倍率</dt><dd>{Math.round(profile.miningMultiplier * 100)}%</dd></div><div><dt>风力倍率</dt><dd>{Math.round(profile.windMultiplier * 100)}%</dd></div><div><dt>太阳能倍率</dt><dd>{Math.round(profile.solarPowerMultiplier * 100)}%</dd></div><div><dt>地热倍率</dt><dd>{Math.round(profile.geothermalMultiplier * 100)}%</dd></div></dl><section className="codex-section-block"><header><MapPin size={16} /><strong>资源目录</strong></header><div className="codex-link-grid">{profile.resourceIds.map((itemId) => <ItemButton key={itemId} itemId={itemId} onSelect={onSelectItem} />)}{Object.keys(profile.orbitalYields).map((itemId) => <ItemButton key={itemId} itemId={itemId as ItemId} suffix={`${profile.orbitalYields[itemId as ItemId]?.toFixed(2)}/s`} onSelect={onSelectItem} />)}</div></section><section className="codex-section-block"><header><Box size={16} /><strong>殖民成本</strong></header><div className="codex-link-grid">{profile.colonyCost.length ? profile.colonyCost.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />) : <span>无额外殖民成本</span>}</div></section></article></div>;
 }
 
-function DysonSection({ game, onSelectBuilding, onSelectItem }: { game: GameState; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
-  const systemId = getPlanet(game.activePlanetId).systemId;
-  const snapshot = getDysonEngineeringSnapshot(game, systemId);
+function DysonSection({ readModel, onSelectBuilding, onSelectItem }: { readModel: RecipeWorkspaceReadModel; onSelectBuilding: (buildingId: BuildingId) => void; onSelectItem: (itemId: ItemId) => void }) {
+  const snapshot = readModel.dyson;
+  const systemId = snapshot.systemId;
   const buildings = DYSON_BUILDING_IDS.map(getBuilding);
   return <div className="codex-overview"><section className="codex-live-summary"><div><Sparkles size={18} /><span>在轨太阳帆<strong>{snapshot.orbitSails.toLocaleString("zh-CN")}</strong></span></div><div><Factory size={18} /><span>永久结构<strong>{snapshot.completedStructurePoints.toLocaleString("zh-CN")}</strong></span></div><div><Zap size={18} /><span>预计发电<strong><PowerValue valueKw={snapshot.projectedGenerationKw} /></strong></span></div></section><section className="codex-section-block"><header><Sparkles size={17} /><strong>本系戴森参数</strong><small>{getStarSystem(systemId).name}</small></header><dl className="codex-metrics"><div><dt>轨道数量</dt><dd>{snapshot.orbitCount}</dd></div><div><dt>太阳帆发射</dt><dd>{snapshot.sailLaunchesPerMinute.toFixed(1)}/min</dd></div><div><dt>火箭发射</dt><dd>{snapshot.rocketLaunchesPerMinute.toFixed(1)}/min</dd></div><div><dt>射线接收</dt><dd><PowerValue valueKw={snapshot.receiverLoadKw} /></dd></div><div><dt>临界光子</dt><dd>{snapshot.criticalPhotonPerMinute.toFixed(1)}/min</dd></div><div><dt>壳面太阳帆</dt><dd>{snapshot.shellSails.toLocaleString("zh-CN")}/{snapshot.shellCapacity.toLocaleString("zh-CN")}</dd></div></dl></section><section className="codex-section-block"><header><Factory size={17} /><strong>工程设施</strong></header><div className="codex-card-grid">{buildings.map((building) => <button type="button" key={building.id} onClick={() => onSelectBuilding(building.id)}><Factory size={18} /><span><strong>{building.name}</strong><small>{building.description}</small></span></button>)}</div></section><section className="codex-section-block"><header><Box size={17} /><strong>工程物资</strong></header><div className="codex-link-grid">{(["solar_sail", "small_carrier_rocket", "critical_photon", "antimatter"] as ItemId[]).map((itemId) => <ItemButton key={itemId} itemId={itemId} onSelect={onSelectItem} />)}</div></section></div>;
 }
 
-function ResearchSection({ game, selectedId, detailOnly, onSelect, onSelectItem }: { game: GameState; selectedId: TechId; detailOnly: boolean; onSelect: (techId: TechId) => void; onSelectItem: (itemId: ItemId) => void }) {
+function ResearchSection({ readModel, selectedId, detailOnly, onSelect, onSelectItem }: { readModel: RecipeWorkspaceReadModel; selectedId: TechId; detailOnly: boolean; onSelect: (techId: TechId) => void; onSelectItem: (itemId: ItemId) => void }) {
   const [query, setQuery] = useState("");
   const technologies = useMemo(() => Object.values(TECHNOLOGIES).sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name, "zh-CN")), []);
   const term = query.trim().toLocaleLowerCase("zh-CN");
   const visible = technologies.filter((technology) => !term || `${technology.name} ${technology.summary} ${technology.unlocks.join(" ")}`.toLocaleLowerCase("zh-CN").includes(term));
   const technology = getTechnology(selectedId)!;
-  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <aside className="codex-index"><CatalogSearch draftId="codex-technology-search" value={query} onChange={setQuery} placeholder="搜索科技或解锁内容" /><small>{visible.length} 项科技</small><div>{visible.map((candidate) => <button className={candidate.id === selectedId ? "active" : ""} type="button" key={candidate.id} onClick={() => onSelect(candidate.id)}><i>{isTechnologyCompleted(game, candidate.id) ? <Check size={17} /> : <FlaskConical size={17} />}</i><span><strong>{candidate.name}</strong><small>层级 {candidate.tier} · {candidate.costs.reduce((sum, cost) => sum + cost.amount, 0).toLocaleString("zh-CN")} 矩阵</small></span></button>)}</div></aside> : null}<article className="codex-detail"><header className="codex-detail-heading"><i><FlaskConical size={22} /></i><span><small>科技层级 {technology.tier}</small><strong>{technology.name}</strong><p>{technology.summary}</p></span><b>{isTechnologyCompleted(game, technology.id) ? "已完成" : "未完成"}</b></header><section className="codex-section-block"><header><Atom size={16} /><strong>研究成本</strong></header><div className="codex-link-grid">{technology.costs.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />)}</div></section><section className="codex-section-block"><header><LockKeyhole size={16} /><strong>前置科技</strong></header><div className="codex-card-grid">{technology.prerequisites.length ? technology.prerequisites.map((techId) => <button type="button" key={techId} onClick={() => onSelect(techId)}><FlaskConical size={17} /><span><strong>{getTechnology(techId)?.name}</strong><small>{isTechnologyCompleted(game, techId) ? "已完成" : "尚未完成"}</small></span></button>) : <span>无前置科技</span>}</div></section><section className="codex-section-block"><header><BookOpen size={16} /><strong>主要解锁</strong></header><ul className="codex-unlock-list">{technology.unlocks.map((unlock) => <li key={unlock}>{unlock}</li>)}</ul></section></article></div>;
+  return <div className={`codex-master-detail${detailOnly ? " codex-master-detail--detail" : ""}`}>{!detailOnly ? <aside className="codex-index"><CatalogSearch draftId="codex-technology-search" value={query} onChange={setQuery} placeholder="搜索科技或解锁内容" /><small>{visible.length} 项科技</small><div>{visible.map((candidate) => <button className={candidate.id === selectedId ? "active" : ""} type="button" key={candidate.id} onClick={() => onSelect(candidate.id)}><i>{technologyCompleted(readModel, candidate.id) ? <Check size={17} /> : <FlaskConical size={17} />}</i><span><strong>{candidate.name}</strong><small>层级 {candidate.tier} · {candidate.costs.reduce((sum, cost) => sum + cost.amount, 0).toLocaleString("zh-CN")} 矩阵</small></span></button>)}</div></aside> : null}<article className="codex-detail"><header className="codex-detail-heading"><i><FlaskConical size={22} /></i><span><small>科技层级 {technology.tier}</small><strong>{technology.name}</strong><p>{technology.summary}</p></span><b>{technologyCompleted(readModel, technology.id) ? "已完成" : "未完成"}</b></header><section className="codex-section-block"><header><Atom size={16} /><strong>研究成本</strong></header><div className="codex-link-grid">{technology.costs.map((cost) => <ItemButton key={cost.itemId} itemId={cost.itemId} suffix={`×${cost.amount}`} onSelect={onSelectItem} />)}</div></section><section className="codex-section-block"><header><LockKeyhole size={16} /><strong>前置科技</strong></header><div className="codex-card-grid">{technology.prerequisites.length ? technology.prerequisites.map((techId) => <button type="button" key={techId} onClick={() => onSelect(techId)}><FlaskConical size={17} /><span><strong>{getTechnology(techId)?.name}</strong><small>{technologyCompleted(readModel, techId) ? "已完成" : "尚未完成"}</small></span></button>) : <span>无前置科技</span>}</div></section><section className="codex-section-block"><header><BookOpen size={16} /><strong>主要解锁</strong></header><ul className="codex-unlock-list">{technology.unlocks.map((unlock) => <li key={unlock}>{unlock}</li>)}</ul></section></article></div>;
 }
 
-export function CodexSections({ section, game, selectedBuildingId, selectedTechId, selectedPlanetId, detailOnly, onSelectBuilding, onSelectTechnology, onSelectPlanet, onSelectItem }: {
+export function CodexSections({ section, readModel, selectedBuildingId, selectedTechId, selectedPlanetId, detailOnly, onSelectBuilding, onSelectTechnology, onSelectPlanet, onSelectItem }: {
   section: Exclude<CodexSection, "items">;
-  game: GameState;
+  readModel: RecipeWorkspaceReadModel;
   selectedBuildingId: BuildingId;
   selectedTechId: TechId;
   selectedPlanetId: PlanetId;
@@ -212,10 +214,10 @@ export function CodexSections({ section, game, selectedBuildingId, selectedTechI
   onSelectPlanet: (planetId: PlanetId) => void;
   onSelectItem: (itemId: ItemId) => void;
 }) {
-  if (section === "buildings") return <BuildingSection game={game} selectedId={selectedBuildingId} detailOnly={detailOnly} onSelect={onSelectBuilding} onSelectItem={onSelectItem} onSelectTechnology={onSelectTechnology} />;
-  if (section === "logistics") return <LogisticsSection game={game} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
-  if (section === "energy") return <EnergySection game={game} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
-  if (section === "planets") return <PlanetSection game={game} selectedId={selectedPlanetId} detailOnly={detailOnly} onSelect={onSelectPlanet} onSelectItem={onSelectItem} />;
-  if (section === "dyson") return <DysonSection game={game} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
-  return <ResearchSection game={game} selectedId={selectedTechId} detailOnly={detailOnly} onSelect={onSelectTechnology} onSelectItem={onSelectItem} />;
+  if (section === "buildings") return <BuildingSection readModel={readModel} selectedId={selectedBuildingId} detailOnly={detailOnly} onSelect={onSelectBuilding} onSelectItem={onSelectItem} onSelectTechnology={onSelectTechnology} />;
+  if (section === "logistics") return <LogisticsSection readModel={readModel} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
+  if (section === "energy") return <EnergySection readModel={readModel} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
+  if (section === "planets") return <PlanetSection readModel={readModel} selectedId={selectedPlanetId} detailOnly={detailOnly} onSelect={onSelectPlanet} onSelectItem={onSelectItem} />;
+  if (section === "dyson") return <DysonSection readModel={readModel} onSelectBuilding={onSelectBuilding} onSelectItem={onSelectItem} />;
+  return <ResearchSection readModel={readModel} selectedId={selectedTechId} detailOnly={detailOnly} onSelect={onSelectTechnology} onSelectItem={onSelectItem} />;
 }

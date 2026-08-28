@@ -392,6 +392,17 @@ import {
   selectNativeTechnologyWorkspaceReadModel,
 } from "./game/technologyWorkspaceReadModel";
 import {
+  NativeRecipeWorkspaceStore,
+  createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
+} from "./game/nativeRecipeWorkspaceStore";
+import {
+  RECIPE_WORKSPACE_PROJECTION_LIMITS,
+  createWebRecipeWorkspaceReadModel,
+  recipeWorkspaceSelectorsEqual,
+  selectNativeRecipeWorkspaceReadModel,
+  type RecipeWorkspaceSelector,
+} from "./game/recipeWorkspaceReadModel";
+import {
   collectCanvasDragMembers,
   collectCanvasSelectionBeltIds,
   selectFactoryCanvasRows,
@@ -1470,6 +1481,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [authorityWorkspaceSync, setAuthorityWorkspaceSync] = useState<"statistics" | "dyson" | null>(null);
   const [statisticsFocusTab, setStatisticsFocusTab] = useState<StatisticsTab | null>(null);
   const [recipesOpen, setRecipesOpen] = useState(false);
+  const [recipeWorkspaceSelector, setRecipeWorkspaceSelector] = useState<RecipeWorkspaceSelector>(() => ({
+    itemIds: Object.keys(ITEMS).slice(0, RECIPE_WORKSPACE_PROJECTION_LIMITS.itemRows) as ItemId[],
+    selectedItemId: loaded.state.recipeFocus.itemId ?? "iron_ore",
+  }));
   const [starMapOpen, setStarMapOpen] = useState(false);
   const [systemSpaceStationOpen, setSystemSpaceStationOpen] = useState(false);
   const [systemSpaceStationId, setSystemSpaceStationId] = useState<StarSystemId | null>(null);
@@ -1996,6 +2011,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const technologyWorkspaceReadModel = nativePlayerAuthorityBoundFrame
     ? nativeTechnologyWorkspaceReadModel
     : webTechnologyWorkspaceReadModel;
+  const updateRecipeWorkspaceSelector = useCallback((selector: RecipeWorkspaceSelector) => {
+    setRecipeWorkspaceSelector((current) => recipeWorkspaceSelectorsEqual(current, selector)
+      ? current
+      : { itemIds: [...selector.itemIds], selectedItemId: selector.selectedItemId });
+  }, []);
+  const nativeRecipeWorkspaceStoreRef = useRef<NativeRecipeWorkspaceStore | null>(null);
+  if (nativeRecipeWorkspaceStoreRef.current === null) {
+    nativeRecipeWorkspaceStoreRef.current = new NativeRecipeWorkspaceStore();
+  }
+  const nativeRecipeWorkspaceStore = nativeRecipeWorkspaceStoreRef.current;
+  const nativeRecipeWorkspaceSnapshot = useSyncExternalStore(
+    nativeRecipeWorkspaceStore.subscribe,
+    nativeRecipeWorkspaceStore.getSnapshot,
+    nativeRecipeWorkspaceStore.getSnapshot,
+  );
+  const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeRecipeWorkspaceReadModel = useMemo(
+    () => selectNativeRecipeWorkspaceReadModel(nativeRecipeWorkspaceSnapshot.frame, {
+      enabled: Boolean(nativePlayerAuthorityBoundFrame),
+      sessionId: nativePlayerAuthorityBoundFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+      selector: recipeWorkspaceSelector,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativePlayerAuthorityBoundFrame,
+      nativeRecipeWorkspaceSnapshot.frame,
+      recipeWorkspaceRegistryFingerprint,
+      recipeWorkspaceSelector,
+    ],
+  );
+  const webRecipeWorkspaceReadModel = useMemo(
+    () => recipesOpen && !nativePlayerAuthorityBoundFrame
+      ? createWebRecipeWorkspaceReadModel(game, recipeWorkspaceSelector, recipeWorkspaceRegistryFingerprint)
+      : null,
+    [
+      game,
+      nativePlayerAuthorityBoundFrame,
+      recipeWorkspaceRegistryFingerprint,
+      recipeWorkspaceSelector,
+      recipesOpen,
+    ],
+  );
+  const recipeWorkspaceReadModel = nativePlayerAuthorityBoundFrame
+    ? nativeRecipeWorkspaceReadModel
+    : webRecipeWorkspaceReadModel;
   const nativeFactoryThinViewMode = nativePlayerAuthorityActiveFrame
     ? "native-authoritative"
     : nativePlayerAuthorityBoundFrame
@@ -2349,6 +2411,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityBoundFrame,
     nativeTechnologyWorkspaceStore,
     technologyOpen,
+  ]);
+  useEffect(() => {
+    if (!recipesOpen || !nativePlayerAuthorityBoundFrame) {
+      nativeRecipeWorkspaceStore.clear();
+      return;
+    }
+    if (!nativePlayerAuthorityActiveFrame) return;
+    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
+    if (!sessionId) {
+      nativeRecipeWorkspaceStore.clear();
+      return;
+    }
+    const source = createNativePlayerAuthorityRecipeWorkspaceProjectionSource(desktopBridge, sessionId);
+    if (!source) {
+      nativeRecipeWorkspaceStore.clear();
+      return;
+    }
+    void nativeRecipeWorkspaceStore.refresh(
+      source,
+      sessionId,
+      factoryThinViewExpectedRevision,
+      recipeWorkspaceRegistryFingerprint,
+      recipeWorkspaceSelector,
+    ).catch(() => undefined);
+  }, [
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    nativeRecipeWorkspaceStore,
+    recipeWorkspaceRegistryFingerprint,
+    recipeWorkspaceSelector,
+    recipesOpen,
   ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
@@ -8632,6 +8727,94 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`已定位${getPlanetDisplayName(gameRef.current, planetId)}的${ITEMS[itemId].name}产线 · ${location.producerEntityIds.length} 个生产节点`);
   }, [closeAllWorkspaces, focusEntityIds, mobileNavigation.goFactory, nextMobileShell, onPlanetChange]);
 
+  const locateRecipeWorkspaceProduction = useCallback(async (itemId: ItemId, planetId: PlanetId) => {
+    if (!nativePlayerAuthorityBoundFrame) {
+      locateProductionLine(itemId, planetId);
+      return;
+    }
+    const authority = nativePlayerAuthorityActiveFrame;
+    const authorityRevision = authority?.revision;
+    const nativeReadModel = recipeWorkspaceReadModel?.source === "native-core" ? recipeWorkspaceReadModel : null;
+    if (!authority?.sessionId || typeof authorityRevision !== "number" || !nativeReadModel ||
+        typeof desktopBridge?.getNativePlayerAuthorityState !== "function" ||
+        typeof desktopBridge.getNativeCoreRecipeWorkspaceProjection !== "function") {
+      setNotice("原生资料库正在等待稳定版本，请稍后再定位");
+      return;
+    }
+    if (nativeReadModel.activePlanetId !== planetId) {
+      if (onPlanetChange(planetId)) {
+        setNotice(`已切换到${getPlanet(planetId).name}；等待原生版本更新后请再次点击定位`);
+      }
+      return;
+    }
+    try {
+      const projection = await desktopBridge.getNativeCoreRecipeWorkspaceProjection({
+        sessionId: authority.sessionId,
+        expectedRevision: authorityRevision,
+        expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+        itemIds: [],
+        selectedItemId: itemId,
+        location: {
+          planetId,
+          cursor: 0,
+          limit: RECIPE_WORKSPACE_PROJECTION_LIMITS.locationRows,
+        },
+      });
+      const page = projection.locationPage;
+      const clock = await desktopBridge.getNativePlayerAuthorityState();
+      if (projection.truncated || projection.revision !== authorityRevision ||
+          projection.registryFingerprint !== recipeWorkspaceRegistryFingerprint || !page ||
+          page.planetId !== planetId || page.cursor !== 0 || page.nextCursor !== null ||
+          page.totalCount !== page.entities.length || clock.phase !== "active" || clock.inFlight ||
+          clock.sessionId !== authority.sessionId || clock.revision !== authorityRevision) {
+        setNotice("原生资料库版本已变化或生产设备过多，本次定位已安全取消");
+        return;
+      }
+      if (page.entities.length === 0) {
+        setNotice(`${ITEMS[itemId].name}在${getPlanet(planetId).name}没有可定位的生产设备`);
+        return;
+      }
+      const entityIds = page.entities.map((entity) => entity.id);
+      const center = page.entities.reduce((total, entity) => ({
+        x: total.x + entity.x + 128,
+        y: total.y + entity.y + 90,
+      }), { x: 0, y: 0 });
+      closeAllWorkspaces();
+      setCommandPaletteOpen(false);
+      setMobilePanel(null);
+      setHighlightedTaskId(null);
+      setFocusedBeltNetworkId(null);
+      setProductionLineFocus({
+        planetId,
+        producerEntityIds: entityIds,
+        relatedEntityIds: entityIds,
+        relatedBeltIds: [],
+        itemId,
+        activeIndex: 0,
+      });
+      if (nextMobileShell) mobileNavigation.goFactory();
+      setCenter(center.x / page.entities.length, center.y / page.entities.length, {
+        zoom: page.entities.length === 1 ? 1.05 : page.entities.length <= 3 ? 0.85 : 0.65,
+        duration: gameRef.current.settings.reducedMotion ? 0 : 260,
+      });
+      setNotice(`已定位${getPlanet(planetId).name}的${ITEMS[itemId].name}生产设备 · ${page.entities.length} 个（原生资料库不扩展上游线路）`);
+    } catch {
+      setNotice("原生生产设备定位失败，未使用旧版网页存档数据兜底");
+    }
+  }, [
+    closeAllWorkspaces,
+    desktopBridge,
+    locateProductionLine,
+    mobileNavigation.goFactory,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    nextMobileShell,
+    onPlanetChange,
+    recipeWorkspaceReadModel,
+    recipeWorkspaceRegistryFingerprint,
+    setCenter,
+  ]);
+
   const itemReferenceActions = useMemo(() => ({
     getLocateAvailability: (itemId: ItemId) => {
       const locations = getProductionLineLocations(gameRef.current, itemId);
@@ -14133,7 +14316,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onOpenCanvasBookmark={openCanvasBookmark}
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
-        {recipesOpen ? <RecipeWorkspace open game={game} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateProductionLine} /> : null}
+        {recipesOpen ? <RecipeWorkspace open readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
         {campaignOpen ? (
           <CampaignWorkspace
             open

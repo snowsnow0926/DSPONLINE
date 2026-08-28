@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BUILDINGS, ITEMS, PLANET_LIST, RECIPES, TECHNOLOGIES, getBuilding, getCompatibleRecipeBuildings, getItem, getPlanet, getTechnology } from "../game/content";
-import { isTechnologyCompleted } from "../game/engine";
 import {
   getConsumingRecipes,
   getProducingRecipes,
@@ -25,8 +24,13 @@ import {
 } from "../game/recipeGraph";
 import { getRecipeRates } from "../game/recipeGraph";
 import { validateContentCatalog } from "../game/content";
-import { getProductionLineLocations } from "../game/productionLocator";
-import type { BuildingId, GameState, ItemId, PlanetId, RecipeDefinition, TechId } from "../game/types";
+import {
+  RECIPE_WORKSPACE_PROJECTION_LIMITS,
+  recipeWorkspaceSelectorsEqual,
+  type RecipeWorkspaceReadModel,
+  type RecipeWorkspaceSelector,
+} from "../game/recipeWorkspaceReadModel";
+import type { BuildingId, ItemId, PlanetId, RecipeDefinition, TechId } from "../game/types";
 import { CODEX_SECTION_LABELS, CodexSections, type CodexSection } from "./CodexSections";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { QuantityValue } from "./QuantityValue";
@@ -34,15 +38,6 @@ import { StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
 type ItemFilter = "all" | "raw" | "solid" | "fluid" | "matrix";
-
-function networkItemStock(game: GameState, itemId: ItemId): number {
-  const nodeStock = game.entities.reduce((sum, entity) =>
-    sum + (entity.inputs[itemId] ?? 0) + (entity.outputs[itemId] ?? 0), 0);
-  const trayStock = PLANET_LIST.reduce((sum, planet) => sum + (planet.id === game.activePlanetId
-    ? game.tray[itemId] ?? 0
-    : game.planetTrays[planet.id][itemId] ?? 0), 0);
-  return Math.floor(nodeStock + trayStock + (game.cargo?.itemId === itemId ? game.cargo.amount : 0));
-}
 
 function ItemMark({ itemId }: { itemId: ItemId }) {
   return (
@@ -68,9 +63,9 @@ function ItemLink({ itemId, amount, ratePerMinute, onSelect }: {
   );
 }
 
-function RecipeFlowCard({ recipe, game, onSelect, onSelectBuilding, onSelectTechnology }: {
+function RecipeFlowCard({ recipe, readModel, onSelect, onSelectBuilding, onSelectTechnology }: {
   recipe: RecipeDefinition;
-  game: GameState;
+  readModel: RecipeWorkspaceReadModel;
   onSelect: (itemId: ItemId) => void;
   onSelectBuilding?: (buildingId: BuildingId) => void;
   onSelectTechnology?: (techId: TechId) => void;
@@ -80,7 +75,7 @@ function RecipeFlowCard({ recipe, game, onSelect, onSelectBuilding, onSelectTech
   const equipmentLabel = compatibleBuildings.length > 1
     ? `${building.name} +${compatibleBuildings.length - 1} 高阶`
     : building.name;
-  const unlocked = !recipe.requiredTechId || isTechnologyCompleted(game, recipe.requiredTechId);
+  const unlocked = !recipe.requiredTechId || readModel.completedTechIds.includes(recipe.requiredTechId);
   const virtualResult = getVirtualRecipeResult(recipe);
   const rates = getRecipeRates(recipe, building.speed);
   return (
@@ -117,9 +112,10 @@ function RecipeFlowCard({ recipe, game, onSelect, onSelectBuilding, onSelectTech
   );
 }
 
-export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onLocateProductionLine, mobile = false, mobileSubview, onMobileOpenDetail, onMobileReplaceDetail }: {
+export function RecipeWorkspace({ open, readModel, onReadRequest, onClose, focusItemId, onFocus, onLocateProductionLine, mobile = false, mobileSubview, onMobileOpenDetail, onMobileReplaceDetail }: {
   open: boolean;
-  game: GameState;
+  readModel: RecipeWorkspaceReadModel | null;
+  onReadRequest: (selector: RecipeWorkspaceSelector) => void;
   onClose: () => void;
   focusItemId?: ItemId | null;
   onFocus: (itemId: ItemId | null) => void;
@@ -132,15 +128,23 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ItemFilter>("all");
   const [section, setSection] = useState<CodexSection>("items");
-  const [selectedItemId, setSelectedItemId] = useState<ItemId>(focusItemId ?? game.recipeFocus.itemId ?? "iron_ore");
+  const [selectedItemId, setSelectedItemId] = useState<ItemId>(focusItemId ?? "iron_ore");
   const [selectedBuildingId, setSelectedBuildingId] = useState<BuildingId>("assembling_machine_mk1");
   const [selectedTechId, setSelectedTechId] = useState<TechId>("electromagnetic_matrix");
-  const [selectedPlanetId, setSelectedPlanetId] = useState<PlanetId>(game.activePlanetId);
+  const [selectedPlanetId, setSelectedPlanetId] = useState<PlanetId>(PLANET_LIST[0].id);
+  const [itemPage, setItemPage] = useState(0);
   const mobileScrollRef = useRef<HTMLElement | null>(null);
   const mobileScrollPositionRef = useRef(0);
   const previousMobileSubviewRef = useRef<string | null>(null);
   const autoFocusedMobileSubviewRef = useRef<string | null>(null);
-  const itemList = Object.values(ITEMS);
+  const initializedFromReadModelRef = useRef(false);
+  const itemList = useMemo(() => Object.values(ITEMS), [readModel?.registryFingerprint]);
+  useEffect(() => {
+    if (!readModel || initializedFromReadModelRef.current) return;
+    initializedFromReadModelRef.current = true;
+    if (!focusItemId && readModel.recipeFocus.itemId) setSelectedItemId(readModel.recipeFocus.itemId);
+    setSelectedPlanetId(readModel.activePlanetId);
+  }, [focusItemId, readModel]);
   useEffect(() => {
     if (!focusItemId) return;
     setSection("items");
@@ -194,8 +198,38 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
     if (filter === "matrix") return item.kind === "matrix";
     return true;
   }), [filter, itemList, query]);
+  const itemPageCount = Math.max(1, Math.ceil(visibleItems.length / RECIPE_WORKSPACE_PROJECTION_LIMITS.itemRows));
+  const pageItems = useMemo(() => visibleItems.slice(
+    itemPage * RECIPE_WORKSPACE_PROJECTION_LIMITS.itemRows,
+    (itemPage + 1) * RECIPE_WORKSPACE_PROJECTION_LIMITS.itemRows,
+  ), [itemPage, visibleItems]);
+  useEffect(() => setItemPage(0), [filter, query]);
+  useEffect(() => {
+    if (itemPage < itemPageCount) return;
+    setItemPage(itemPageCount - 1);
+  }, [itemPage, itemPageCount]);
+  const requestedSelector = useMemo<RecipeWorkspaceSelector>(() => ({
+    itemIds: pageItems.map((item) => item.id),
+    selectedItemId,
+  }), [pageItems, selectedItemId]);
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => onReadRequest(requestedSelector), 120);
+    return () => window.clearTimeout(timer);
+  }, [onReadRequest, open, requestedSelector]);
 
   if (!open) return null;
+  if (!readModel || !recipeWorkspaceSelectorsEqual(readModel.selector, requestedSelector)) {
+    return (
+      <WorkspaceFrame className="recipe-workspace" ariaLabel="生产资料库" onRequestClose={onClose}>
+        <header className="recipe-header">
+          <div className="recipe-title"><i><BookOpen size={20} /></i><div><span>星系生产资料库</span><strong>正在读取同一版本的数据…</strong></div></div>
+          <button className="recipe-close" type="button" onClick={onClose} title="关闭生产资料库" aria-label="关闭生产资料库"><X size={18} /></button>
+        </header>
+        <div className="recipe-section-empty">资料库正在等待当前模拟版本的有界只读投影，不会显示旧版本数据。</div>
+      </WorkspaceFrame>
+    );
+  }
   const item = getItem(selectedItemId);
   const sources = getResourceSources(selectedItemId);
   const producingRecipes = getProducingRecipes(selectedItemId);
@@ -203,9 +237,9 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
   const researchUses = getResearchUses(selectedItemId);
   const upstreamItems = [...new Set(producingRecipes.flatMap((recipe) => recipe.inputs.map((input) => input.itemId)))];
   const downstreamItems = [...new Set(consumingRecipes.flatMap((recipe) => recipe.outputs.map((output) => output.itemId)))];
-  const stock = networkItemStock(game, selectedItemId);
-  const productionLocations = getProductionLineLocations(game, selectedItemId);
-  const currentProductionLocation = productionLocations.find((location) => location.planetId === game.activePlanetId);
+  const stock = readModel.selectedItem.stock;
+  const productionLocations = readModel.selectedItem.productionLocations;
+  const currentProductionLocation = productionLocations.find((location) => location.planetId === readModel.activePlanetId);
   const catalogAudit = validateContentCatalog();
 
   const mobileDetail = Boolean(mobile && mobileSubview);
@@ -255,19 +289,23 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
             </button>
           ))}
         </div>
-        <span className="recipe-result-count">{visibleItems.length} 项</span>
+        {itemPageCount > 1 ? <div className="recipe-filters" aria-label="资料库物品分页">
+          <button type="button" disabled={itemPage === 0} onClick={() => setItemPage((page) => Math.max(0, page - 1))}>上一页</button>
+          <button type="button" disabled={itemPage + 1 >= itemPageCount} onClick={() => setItemPage((page) => Math.min(itemPageCount - 1, page + 1))}>下一页</button>
+        </div> : null}
+        <span className="recipe-result-count">{visibleItems.length} 项 · {itemPage + 1}/{itemPageCount} 页</span>
       </div> : null}
 
       {section === "items" ? <div className="recipe-layout">
         {!mobileDetail ? <aside className="recipe-index" aria-label="物品索引">
-          {visibleItems.length === 0 ? <div className="recipe-index-empty">没有符合条件的物品</div> : visibleItems.map((candidate) => {
+          {pageItems.length === 0 ? <div className="recipe-index-empty">没有符合条件的物品</div> : pageItems.map((candidate) => {
             const producerCount = getProducingRecipes(candidate.id).length;
             const natural = getResourceSources(candidate.id).length > 0;
             return (
               <button className={selectedItemId === candidate.id ? "active" : ""} type="button" key={candidate.id} onClick={() => selectItem(candidate.id)}>
                 <ItemGlyph itemId={candidate.id} className="item-mark" />
                 <span><strong>{candidate.name}</strong><small>{natural ? "天然资源" : producerCount > 0 ? `${producerCount} 种生产方式` : "特殊来源"}</small></span>
-                <em><QuantityValue value={networkItemStock(game, candidate.id)} interactive={false} /></em>
+                <em><QuantityValue value={readModel.itemStocks[candidate.id] ?? 0} interactive={false} /></em>
               </button>
             );
           })}
@@ -278,8 +316,8 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
             <ItemMark itemId={selectedItemId} />
             <div><span>{item.kind === "matrix" ? "科研矩阵" : item.kind === "fluid" ? "流体物品" : sources.length > 0 ? "天然资源" : "工业物品"}</span><strong>{item.name}</strong><p>{item.description}</p></div>
             <div className="recipe-item-actions">
-              <button type="button" className={game.recipeFocus.itemId === selectedItemId ? "active" : ""} onClick={() => onFocus(game.recipeFocus.itemId === selectedItemId ? null : selectedItemId)} title={game.recipeFocus.itemId === selectedItemId ? "取消主界面聚焦" : "固定生产链到主界面"}><Pin size={14} /><span>{game.recipeFocus.itemId === selectedItemId ? "已固定" : "固定到主界面"}</span></button>
-              {currentProductionLocation ? <button type="button" onClick={() => onLocateProductionLine(selectedItemId, game.activePlanetId)} title={`定位当前行星 ${currentProductionLocation.producerEntityIds.length} 条产线`}><LocateFixed size={14} /><span>定位产线 · {currentProductionLocation.producerEntityIds.length}</span></button> : null}
+              <button type="button" className={readModel.recipeFocus.itemId === selectedItemId ? "active" : ""} onClick={() => onFocus(readModel.recipeFocus.itemId === selectedItemId ? null : selectedItemId)} title={readModel.recipeFocus.itemId === selectedItemId ? "取消主界面聚焦" : "固定生产链到主界面"}><Pin size={14} /><span>{readModel.recipeFocus.itemId === selectedItemId ? "已固定" : "固定到主界面"}</span></button>
+              {currentProductionLocation ? <button type="button" onClick={() => onLocateProductionLine(selectedItemId, readModel.activePlanetId)} title={`定位当前行星 ${currentProductionLocation.producerCount} 个${readModel.source === "native-core" ? "生产设备" : "生产节点及上游产线"}`}><LocateFixed size={14} /><span>定位{readModel.source === "native-core" ? "生产设备" : "产线"} · {currentProductionLocation.producerCount}</span></button> : null}
             </div>
             <dl>
               <div><dt>网络库存</dt><dd><QuantityValue value={stock} /></dd></div>
@@ -290,7 +328,7 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
 
           {!currentProductionLocation && productionLocations.length > 0 ? <section className="recipe-production-locations" aria-label="其他行星生产位置">
             <header><LocateFixed size={15} /><span>当前行星没有生产该物品的设备</span><strong>其他行星 {productionLocations.length}</strong></header>
-            <div>{productionLocations.map((location) => <button type="button" key={location.planetId} onClick={() => onLocateProductionLine(selectedItemId, location.planetId)}><MapPin size={14} /><span>{getPlanet(location.planetId).name}</span><strong>{location.producerEntityIds.length} 条产线</strong></button>)}</div>
+            <div>{productionLocations.map((location) => <button type="button" key={location.planetId} onClick={() => onLocateProductionLine(selectedItemId, location.planetId)}><MapPin size={14} /><span>{getPlanet(location.planetId).name}</span><strong>{location.producerCount} 个生产设备</strong></button>)}</div>
           </section> : productionLocations.length === 0 ? <p className="recipe-production-empty">当前存档尚未部署该物品的生产设备。</p> : null}
 
           <section className="recipe-relations">
@@ -313,7 +351,7 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
                   <footer><span>{source.manual ? "可手动采集或自动开采" : "必须部署采集设备"}</span><span className="recipe-unlock recipe-unlock--ready"><Check size={11} />资源来源</span></footer>
                 </article>
               ))}
-              {producingRecipes.map((recipe) => <RecipeFlowCard recipe={recipe} game={game} onSelect={selectItem} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} key={recipe.id} />)}
+              {producingRecipes.map((recipe) => <RecipeFlowCard recipe={recipe} readModel={readModel} onSelect={selectItem} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} key={recipe.id} />)}
               {sources.length === 0 && producingRecipes.length === 0 ? <div className="recipe-section-empty">暂无已登记的生产方式</div> : null}
             </div>
           </section>
@@ -321,7 +359,7 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
           <section className="recipe-section">
             <header><ArrowRight size={16} /><span>作为原料</span><strong>{consumingRecipes.length}</strong></header>
             <div className="recipe-method-grid">
-              {consumingRecipes.map((recipe) => <RecipeFlowCard recipe={recipe} game={game} onSelect={selectItem} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} key={recipe.id} />)}
+              {consumingRecipes.map((recipe) => <RecipeFlowCard recipe={recipe} readModel={readModel} onSelect={selectItem} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} key={recipe.id} />)}
               {consumingRecipes.length === 0 ? <div className="recipe-section-empty">当前没有后续生产配方</div> : null}
             </div>
           </section>
@@ -330,12 +368,12 @@ export function RecipeWorkspace({ open, game, onClose, focusItemId, onFocus, onL
             <section className="recipe-section recipe-research-uses">
               <header><FlaskConical size={16} /><span>科研用途</span><strong>{researchUses.length}</strong></header>
               <div>{researchUses.map((technology) => (
-                <button type="button" key={technology.id} onClick={() => selectTechnology(technology.id)}><i>{isTechnologyCompleted(game, technology.id) ? <Check size={12} /> : <FlaskConical size={12} />}</i><strong>{technology.name}</strong><small>消耗 <QuantityValue value={technology.costs.find((cost) => cost.itemId === selectedItemId)?.amount ?? 0} interactive={false} /></small></button>
+                <button type="button" key={technology.id} onClick={() => selectTechnology(technology.id)}><i>{readModel.completedTechIds.includes(technology.id) ? <Check size={12} /> : <FlaskConical size={12} />}</i><strong>{technology.name}</strong><small>消耗 <QuantityValue value={technology.costs.find((cost) => cost.itemId === selectedItemId)?.amount ?? 0} interactive={false} /></small></button>
               ))}</div>
             </section>
           ) : null}
         </div> : null}
-      </div> : <CodexSections section={section} game={game} selectedBuildingId={selectedBuildingId} selectedTechId={selectedTechId} selectedPlanetId={selectedPlanetId} detailOnly={mobileDetail} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} onSelectPlanet={selectPlanet} onSelectItem={selectItem} />}
+      </div> : <CodexSections section={section} readModel={readModel} selectedBuildingId={selectedBuildingId} selectedTechId={selectedTechId} selectedPlanetId={selectedPlanetId} detailOnly={mobileDetail} onSelectBuilding={selectBuilding} onSelectTechnology={selectTechnology} onSelectPlanet={selectPlanet} onSelectItem={selectItem} />}
     </WorkspaceFrame>
   );
 }

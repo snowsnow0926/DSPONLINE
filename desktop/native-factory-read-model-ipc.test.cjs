@@ -19,7 +19,7 @@ test("factory read model is exposed through direct and bounded transfer IPC", ()
   assert.match(main, /request\.projectionType === "factory-read-model-v1"[\s\S]*?"coreFactoryReadModelProjection"[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)/);
 
   assert.match(preload, /getNativeCoreFactoryReadModel:\s*\(request\)\s*=>\s*invokeNative\("desktop:native-core-factory-read-model"[\s\S]*?request\)/);
-  assert.match(preload, /\["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1"\]\.includes\(request\.projectionType\)/);
+  assert.match(preload, /\["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1"\]\.includes\(request\.projectionType\)/);
 });
 
 test("factory read model TypeScript contract is revision-bound and included in transfer types", () => {

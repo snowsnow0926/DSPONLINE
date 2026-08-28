@@ -593,6 +593,17 @@ function nativeTechnologyProjectionResultContext(request) {
   };
 }
 
+function nativeRecipeWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    itemIds: request?.itemIds ?? [],
+    selectedItemId: request?.selectedItemId,
+    location: request?.location ?? null,
+  };
+}
+
 async function waitForResponseAck(record, expectedBytes) {
   if (record.cancelled) throw Object.assign(new Error("云存档上传已取消"), { name: "AbortError", code: "ABORTED" });
   await new Promise((resolve, reject) => {
@@ -1114,6 +1125,20 @@ ipcMain.handle("desktop:native-core-technology-projection", async (event, reques
   });
 });
 
+ipcMain.handle("desktop:native-core-recipe-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreRecipeWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生生产资料库投影请求失败，请重试",
+    resultContext: nativeRecipeWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "recipe-workspace-v1", request);
+    }
+    return await nativeCoreSessions.recipeWorkspaceProjection(ownerId, request);
+  });
+});
+
 ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   const port = event.ports?.[0];
   if (!port) return;
@@ -1122,7 +1147,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1143,6 +1168,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "statistics-v1") {
       rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "recipe-workspace-v1") {
+      rawResult = await nativeCoreSessions.recipeWorkspaceProjection(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -1155,7 +1182,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
             ? "coreFactoryReadModelProjection"
             : request.projectionType === "statistics-v1"
               ? "coreStatisticsProjection"
-              : "coreTechnologyProjection",
+              : request.projectionType === "recipe-workspace-v1"
+                ? "coreRecipeWorkspaceProjection"
+                : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
@@ -1165,7 +1194,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
             ? nativeFactoryReadModelResultContext(normalizedRequest)
             : request.projectionType === "statistics-v1"
               ? nativeStatisticsProjectionResultContext(request.payload)
-              : nativeTechnologyProjectionResultContext(normalizedRequest),
+              : request.projectionType === "recipe-workspace-v1"
+                ? nativeRecipeWorkspaceProjectionResultContext(normalizedRequest)
+                : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

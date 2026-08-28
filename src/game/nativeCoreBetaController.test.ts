@@ -281,6 +281,10 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     };
   }
 
+  async recipeWorkspaceProjection(_request: Parameters<WindowsNativeCoreShadow["recipeWorkspaceProjection"]>[0]): Promise<never> {
+    throw new Error("recipe workspace projection is not exercised by this controller fixture");
+  }
+
   async applyCommand(_command: SimulationCommandPatch) {
     return { revision: this.current.revision, topologyDirty: false };
   }

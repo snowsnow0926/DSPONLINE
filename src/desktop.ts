@@ -92,6 +92,8 @@ export interface DesktopBridge {
   getNativeCoreFactoryReadModel: (request: DesktopNativeCoreFactoryReadModelRequest) => Promise<DesktopNativeCoreFactoryReadModelResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
+  /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
+  getNativeCoreRecipeWorkspaceProjection?: (request: DesktopNativeCoreRecipeWorkspaceProjectionRequest) => Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
@@ -752,6 +754,98 @@ export interface DesktopNativeCoreTechnologyProjectionResult {
   matrixStock: Record<DesktopTechnologyMatrixItemId, number>;
 }
 
+export interface DesktopNativeCoreRecipeWorkspaceLocationRequest {
+  planetId: string;
+  cursor: number;
+  limit: number;
+}
+
+export interface DesktopNativeCoreRecipeWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  itemIds: string[];
+  selectedItemId: string;
+  location: DesktopNativeCoreRecipeWorkspaceLocationRequest | null;
+}
+
+export interface DesktopNativeCoreRecipeWorkspaceCountedRows<T> {
+  rows: T[];
+  totalCount: number;
+  truncated: boolean;
+}
+
+export interface DesktopNativeCoreRecipeWorkspacePlanetProfile {
+  planetId: string;
+  climateName: string;
+  starTypeName: string;
+  oceanType: string;
+  windMultiplier: number;
+  solarPowerMultiplier: number;
+  geothermalMultiplier: number;
+  miningMultiplier: number;
+  reserveScale: number;
+  tidalLocked: boolean;
+  resourceIds: DesktopNativeCoreRecipeWorkspaceCountedRows<string>;
+  orbitalYields: DesktopNativeCoreRecipeWorkspaceCountedRows<{ itemId: string; rate: number }>;
+  colonyCost: DesktopNativeCoreRecipeWorkspaceCountedRows<{ itemId: string; amount: number }>;
+}
+
+export interface DesktopNativeCoreRecipeWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "recipe-workspace-v1";
+  revision: number;
+  registryFingerprint: string;
+  truncated: boolean;
+  limits: {
+    itemRows: 256;
+    completedTechRows: 512;
+    planetRows: 64;
+    profileItemRows: 256;
+    colonyCostRows: 32;
+    locationRows: 4096;
+  };
+  counts: { catalogItems: number; completedTechIds: number; planetProfiles: number };
+  request: {
+    itemIds: string[];
+    selectedItemId: string;
+    location: DesktopNativeCoreRecipeWorkspaceLocationRequest | null;
+  };
+  live: {
+    activePlanetId: string;
+    recipeFocus: { itemId: string | null; mode: "two-level" | "full" };
+    completedTechIds: string[];
+    beltCount: number;
+    metrics: { generationKw: number; demandKw: number; powerFactor: number };
+    planetProfiles: DesktopNativeCoreRecipeWorkspacePlanetProfile[];
+    dyson: {
+      systemId: string;
+      orbitCount: number;
+      orbitSails: number;
+      completedStructurePoints: number;
+      projectedGenerationKw: number;
+      sailLaunchesPerMinute: number;
+      rocketLaunchesPerMinute: number;
+      receiverLoadKw: number;
+      criticalPhotonPerMinute: number;
+      shellSails: number;
+      shellCapacity: number;
+    };
+  };
+  itemStocks: Array<{ itemId: string; amount: number }>;
+  selectedItem: {
+    itemId: string;
+    stock: number;
+    productionLocations: Array<{ planetId: string; producerCount: number }>;
+  };
+  locationPage: null | {
+    planetId: string;
+    cursor: number;
+    totalCount: number;
+    entities: Array<{ id: string; x: number; y: number }>;
+    nextCursor: number | null;
+  };
+}
+
 export type DesktopNativeCoreProjectionTransferRequest =
   | {
       sessionId: string;
@@ -777,6 +871,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "technology-v1";
       payload: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "recipe-workspace-v1";
+      payload: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -784,7 +883,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

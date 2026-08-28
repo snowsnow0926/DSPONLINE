@@ -350,13 +350,37 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     expectedRevision: 2,
     selectedBeltIds: ["bad\0id"],
   }), /factory read-model projection request is invalid/);
+  await registry.recipeWorkspaceProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: ["iron_ore"],
+    selectedItemId: "iron_ore",
+    location: { planetId: "home", cursor: 0, limit: 32 },
+  });
+  assert.throws(() => registry.recipeWorkspaceProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: ["iron_ore", "iron_ore"],
+    selectedItemId: "iron_ore",
+    location: null,
+  }), /recipe workspace projection request is invalid/);
+  assert.throws(() => registry.recipeWorkspaceProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: [],
+    selectedItemId: "iron_ore",
+    location: { planetId: "home", cursor: 0, limit: 4_097 },
+  }), /recipe workspace projection request is invalid/);
   assert.throws(() => registry.checkpoint(7, { sessionId: "core-1", savedAtMs: -1 }), /timestamp/);
   await registry.checkpoint(7, { sessionId: "core-1", savedAtMs: 2 });
   await registry.close(7, "core-1");
   assert.throws(() => registry.status(7, "core-1"), /not owned/);
   assert.deepEqual(calls.map((call) => call.operation), [
     "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2",
-    "coreFactoryReadModelProjection", "coreCheckpoint", "coreClose",
+    "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection", "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
     operation: "coreViewportProjectionV2",
@@ -379,6 +403,16 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     sessionId: "core-1",
     selectedEntityIds: ["MOD-建筑"],
     selectedBeltIds: ["MOD-线路"],
+  });
+  assert.deepEqual(calls[5], {
+    operation: "coreRecipeWorkspaceProjection",
+    sessionId: "core-1",
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: ["iron_ore"],
+    selectedItemId: "iron_ore",
+    locationPlanetId: "home",
+    locationCursor: 0,
+    locationLimit: 32,
   });
 });
 

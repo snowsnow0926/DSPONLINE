@@ -55,7 +55,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (projectionType === "viewport-v2" ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -969,6 +969,42 @@ class NativeCoreSessionRegistry {
     return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreTechnologyProjection",
       sessionId: request.sessionId,
+    });
+  }
+
+  recipeWorkspaceProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const itemIds = request?.itemIds ?? [];
+    const location = request?.location ?? null;
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemIds",
+      "selectedItemId", "location",
+    ]);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !Array.isArray(itemIds) || itemIds.length > 256 || new Set(itemIds).size !== itemIds.length ||
+      itemIds.some((itemId) => !validOpaqueId(itemId)) || !validOpaqueId(request.selectedItemId) ||
+      location !== null && location !== undefined && (
+        !location || typeof location !== "object" || Array.isArray(location) ||
+        Reflect.ownKeys(location).some((key) => !["planetId", "cursor", "limit"].includes(key)) ||
+        !validOpaqueId(location.planetId) || !Number.isSafeInteger(location.cursor) || location.cursor < 0 ||
+        !Number.isSafeInteger(location.limit) || location.limit < 1 || location.limit > 4096
+      )) {
+      throw new TypeError("native recipe workspace projection request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreRecipeWorkspaceProjection",
+      sessionId: request.sessionId,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      itemIds,
+      selectedItemId: request.selectedItemId,
+      ...(location ? {
+        locationPlanetId: location.planetId,
+        locationCursor: location.cursor,
+        locationLimit: location.limit,
+      } : {}),
     });
   }
 

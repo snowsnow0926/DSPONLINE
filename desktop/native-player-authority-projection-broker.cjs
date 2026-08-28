@@ -3,7 +3,7 @@
 /*
  * Main-process-only read broker for a future Rust player-authority session.
  *
- * The broker deliberately exposes only the three bounded thin-UI projections.
+ * The broker deliberately exposes only bounded thin-UI projections.
  * It cannot open, activate, advance, mutate, checkpoint, or close a session.
  * Existing renderer-owned shadow sessions bypass this module in main.cjs.
  */
@@ -15,6 +15,7 @@ const PROJECTION_METHODS = Object.freeze({
   "factory-read-model-v1": "factoryReadModelProjection",
   "statistics-v1": "statisticsProjection",
   "technology-v1": "technologyProjection",
+  "recipe-workspace-v1": "recipeWorkspaceProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

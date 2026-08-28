@@ -1439,6 +1439,175 @@ fn validate_station_slot_configuration_command(
     Ok(())
 }
 
+fn validate_interstellar_station_configuration_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.is_empty()
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority interstellar station command shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let index = *state
+        .entity_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority interstellar station is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority interstellar station is invalid"))?;
+    if object.get("kind").and_then(Value::as_str) != Some("station")
+        || object.get("buildingId").and_then(Value::as_str)
+            != Some("interstellar_logistics_station")
+        || state
+            .catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .is_none_or(|building| building.kind != "station")
+    {
+        bail!("native player-authority interstellar station target is invalid")
+    }
+    if let Some(locked) = object.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority interstellar station is locked or malformed")
+    }
+
+    let fields = record
+        .changes
+        .iter()
+        .map(|change| {
+            let [PathSegment::Key(field)] = change.path.as_slice() else {
+                bail!("native player-authority interstellar station path is invalid")
+            };
+            if change.operation != "set" || change.value.is_none() {
+                bail!("native player-authority interstellar station patch is malformed")
+            }
+            Ok(field.as_str())
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut unique_fields = HashSet::new();
+    if fields.iter().any(|field| !unique_fields.insert(*field)) {
+        bail!("native player-authority interstellar station field is repeated")
+    }
+
+    let hub_command = fields
+        .iter()
+        .all(|field| matches!(*field, "stationHubEnabled" | "stationHubPriority"));
+    if hub_command {
+        for change in &record.changes {
+            let PathSegment::Key(field) = &change.path[0] else {
+                unreachable!("single-key path was proved above")
+            };
+            let target = change.value.as_ref().expect("set value was proved above");
+            match field.as_str() {
+                "stationHubEnabled" => {
+                    let target = target.as_bool().ok_or_else(|| {
+                        anyhow!("native player-authority station hub enabled target is invalid")
+                    })?;
+                    let current = match object.get(field) {
+                        Some(value) => value.as_bool().ok_or_else(|| {
+                            anyhow!("native player-authority current station hub enabled state is invalid")
+                        })?,
+                        None => false,
+                    };
+                    if current == target {
+                        bail!("native player-authority station hub enabled target is unchanged")
+                    }
+                }
+                "stationHubPriority" => {
+                    let target = target
+                        .as_u64()
+                        .filter(|priority| *priority <= 2)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "native player-authority station hub priority target is invalid"
+                            )
+                        })?;
+                    let current = match object.get(field) {
+                        Some(value) => value
+                            .as_u64()
+                            .filter(|priority| *priority <= 2)
+                            .ok_or_else(|| {
+                                anyhow!("native player-authority current station hub priority is invalid")
+                            })?,
+                        None => 1,
+                    };
+                    if current == target {
+                        bail!("native player-authority station hub priority target is unchanged")
+                    }
+                }
+                _ => unreachable!("hub command fields were proved above"),
+            }
+        }
+        return Ok(());
+    }
+
+    if record.changes.len() != 1 {
+        bail!("native player-authority station warp command mixes intents")
+    }
+    let change = &record.changes[0];
+    let PathSegment::Key(field) = &change.path[0] else {
+        unreachable!("single-key path was proved above")
+    };
+    let target = change.value.as_ref().expect("set value was proved above");
+    match field.as_str() {
+        "stationWarpEnabled" | "stationWarperAutoRefill" => {
+            let target = target.as_bool().ok_or_else(|| {
+                anyhow!("native player-authority station warp toggle target is invalid")
+            })?;
+            if target && !technology_is_completed(state, "space_warp") {
+                bail!("native player-authority station warp technology is locked")
+            }
+            let default = field == "stationWarpEnabled";
+            let current = match object.get(field) {
+                Some(value) => value.as_bool().ok_or_else(|| {
+                    anyhow!("native player-authority current station warp toggle is invalid")
+                })?,
+                None => default,
+            };
+            if current == target {
+                bail!("native player-authority station warp toggle is unchanged")
+            }
+        }
+        "stationWarperTarget" => {
+            let machine_count = safe_json_integer(object.get("machineCount"), "station stack")?;
+            let capacity = machine_count
+                .checked_mul(50)
+                .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station warper capacity overflows")
+                })?;
+            if capacity == 0 {
+                bail!("native player-authority station warper capacity is empty")
+            }
+            let target = target
+                .as_u64()
+                .filter(|target| (1..=capacity).contains(target))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority station warper target is invalid")
+                })?;
+            let current = match object.get(field) {
+                Some(value) => safe_json_integer(Some(value), "current station warper target")?
+                    .clamp(1, capacity),
+                None => 50_u64.clamp(1, capacity),
+            };
+            if current == target {
+                bail!("native player-authority station warper target is unchanged")
+            }
+        }
+        _ => bail!("native player-authority interstellar station field is not typed"),
+    }
+    Ok(())
+}
+
 struct ValidatedTimeWarpState<'a> {
     value: &'a Map<String, Value>,
     controller_entity_id: Option<&'a str>,
@@ -2477,6 +2646,24 @@ impl CoreState {
         }) {
             return validate_station_slot_configuration_command(self, command);
         }
+        if command.changed_entities.iter().any(|record| {
+            record.changes.iter().any(|change| {
+                matches!(
+                    change.path.first(),
+                    Some(PathSegment::Key(field))
+                        if matches!(
+                            field.as_str(),
+                            "stationHubEnabled"
+                                | "stationHubPriority"
+                                | "stationWarpEnabled"
+                                | "stationWarperAutoRefill"
+                                | "stationWarperTarget"
+                        )
+                )
+            })
+        }) {
+            return validate_interstellar_station_configuration_command(self, command);
+        }
         if !command.changed_entities.is_empty()
             && command.changed_entities.iter().all(|record| {
                 record.changes.iter().all(|change| {
@@ -3396,6 +3583,11 @@ mod tests {
                     "stationProgress": 0,
                     "stationPeerId": null,
                     "stationRoutes": [],
+                    "stationWarpEnabled": true,
+                    "stationWarperAutoRefill": false,
+                    "stationWarperTarget": 50,
+                    "stationHubEnabled": false,
+                    "stationHubPriority": 1,
                     "modPayload": { "owner": "pack:test", "revision": 31 + offset }
                 }),
             },
@@ -4331,6 +4523,143 @@ mod tests {
             .apply_player_authority_command(&malformed_probe)
             .unwrap_err();
         assert!(format!("{error:#}").contains("stock limit pair"));
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_interstellar_hub_and_warper_configuration() {
+        let mut state = player_station_configuration_state();
+        let mut hub = entity_leaf_command(
+            state.revision,
+            "station-ils",
+            "stationHubEnabled",
+            Value::from(true),
+        );
+        hub.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationHubPriority".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(2)),
+        });
+        state.apply_player_authority_command(&hub).unwrap();
+        state
+            .apply_player_authority_command(&entity_leaf_command(
+                state.revision,
+                "station-ils",
+                "stationWarpEnabled",
+                Value::from(false),
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&entity_leaf_command(
+                state.revision,
+                "station-ils",
+                "stationWarperTarget",
+                Value::from(25),
+            ))
+            .unwrap();
+
+        let unlock_warp = top_level_leaf_command(
+            state.revision,
+            &["research", "completedTechIds"],
+            serde_json::json!(["space_warp"]),
+        );
+        state.apply_command(&unlock_warp).unwrap();
+        state
+            .apply_player_authority_command(&entity_leaf_command(
+                state.revision,
+                "station-ils",
+                "stationWarperAutoRefill",
+                Value::from(true),
+            ))
+            .unwrap();
+
+        let station_index = *state.entity_index.get("station-ils").unwrap();
+        let station = state.parse_entity(station_index).unwrap();
+        assert_eq!(station["stationHubEnabled"], true);
+        assert_eq!(station["stationHubPriority"], 2);
+        assert_eq!(station["stationWarpEnabled"], false);
+        assert_eq!(station["stationWarperAutoRefill"], true);
+        assert_eq!(station["stationWarperTarget"], 25);
+        assert_eq!(
+            station["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 31 })
+        );
+        assert_eq!(state.revision, 15);
+    }
+
+    #[test]
+    fn player_authority_interstellar_configuration_fails_closed_without_mutation() {
+        let mut delete_hub =
+            entity_leaf_command(10, "station-ils", "stationHubEnabled", Value::from(true));
+        delete_hub.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete_hub.changed_entities[0].changes[0].value = None;
+        let mut mixed_intents =
+            entity_leaf_command(10, "station-ils", "stationHubEnabled", Value::from(true));
+        mixed_intents.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationWarpEnabled".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(false)),
+        });
+        let mut mixed_top_level =
+            entity_leaf_command(10, "station-ils", "stationWarpEnabled", Value::from(false));
+        mixed_top_level.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let commands = [
+            entity_leaf_command(10, "missing", "stationHubEnabled", Value::from(true)),
+            entity_leaf_command(10, "station-pls", "stationHubEnabled", Value::from(true)),
+            entity_leaf_command(
+                10,
+                "station-locked",
+                "stationWarpEnabled",
+                Value::from(false),
+            ),
+            entity_leaf_command(10, "station-ils", "stationHubEnabled", Value::from(false)),
+            entity_leaf_command(10, "station-ils", "stationHubPriority", Value::from(3)),
+            entity_leaf_command(10, "station-ils", "stationWarpEnabled", Value::from(true)),
+            entity_leaf_command(
+                10,
+                "station-ils",
+                "stationWarperAutoRefill",
+                Value::from(true),
+            ),
+            entity_leaf_command(10, "station-ils", "stationWarperTarget", Value::from(0)),
+            entity_leaf_command(10, "station-ils", "stationWarperTarget", Value::from(51)),
+            entity_leaf_command(10, "station-ils", "stationWarperTarget", Value::from(50)),
+            entity_leaf_command(10, "station-ils", "stationWarperTarget", Value::from(12.5)),
+            delete_hub,
+            mixed_intents,
+            mixed_top_level,
+        ];
+        for command in commands {
+            let mut state = player_station_configuration_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 10);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = player_station_configuration_state();
+        malformed
+            .apply_command(&entity_leaf_command(
+                malformed.revision,
+                "station-ils",
+                "stationHubPriority",
+                Value::from("highest"),
+            ))
+            .unwrap();
+        let before = malformed.canonical_sha256().unwrap();
+        let error = malformed
+            .apply_player_authority_command(&entity_leaf_command(
+                malformed.revision,
+                "station-ils",
+                "stationHubPriority",
+                Value::from(2),
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("current station hub priority"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 

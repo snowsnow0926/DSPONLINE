@@ -44,6 +44,7 @@ export interface DesktopBridge {
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
   getNativeCoreViewportProjection: (request: DesktopNativeCoreViewportProjectionRequest) => Promise<DesktopNativeCoreViewportProjectionResult>;
+  getNativeCoreViewportProjectionV2: (request: DesktopNativeCoreViewportProjectionV2Request) => Promise<DesktopNativeCoreViewportProjectionV2Result>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
@@ -580,6 +581,45 @@ export interface DesktopNativeCoreViewportProjectionResult {
   truncatedBelts: boolean;
 }
 
+export interface DesktopNativeCoreViewportProjectionV2Request extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  baseFields?: string[];
+  planetId: string;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  entityCursor?: number;
+  entityLimit: number;
+  beltCursor?: number;
+  beltLimit: number;
+  pinnedEntityIds?: string[];
+  pinnedBeltIds?: string[];
+}
+
+export interface DesktopNativeCoreViewportProjectionV2Result {
+  schemaVersion: 2;
+  projectionType: "viewport-v2";
+  revision: number;
+  planetId: string;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  base: Record<string, unknown>;
+  entities: DesktopNativeCoreEntityProjection[];
+  belts: DesktopNativeCoreBeltProjection[];
+  pinnedEntityIds: string[];
+  pinnedBeltIds: string[];
+  nextEntityCursor: number | null;
+  nextBeltCursor: number | null;
+  planetTotals: { entities: number; belts: number };
+  viewportTotals: { entities: number; belts: number };
+  worldBounds: { minX: number; minY: number; maxX: number; maxY: number };
+  minimap: {
+    bounds: { minX: number; minY: number; maxX: number; maxY: number };
+    entityCount: number;
+    beltCount: number;
+    occupiedCellCount: number;
+    cellSize: number;
+  };
+  broadQueryFallback: boolean;
+}
+
 export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
   minElapsedSeconds: number;
   maxElapsedSeconds: number;
@@ -607,6 +647,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "viewport-v2";
+      payload: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     };
@@ -616,7 +661,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "statistics-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "statistics-v1";
   payloadLength: number;
   sha256: string;
 }

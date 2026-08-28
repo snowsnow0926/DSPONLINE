@@ -21,7 +21,7 @@ function localNativeError(options) {
 function requestNativeCoreProjectionTransfer(request) {
   return new Promise((resolve, reject) => {
     if (!request || typeof request !== "object" || typeof request.sessionId !== "string" ||
-      !["viewport-v1", "statistics-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "statistics-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object") {
       reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求无效" }));
       return;
@@ -112,6 +112,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreStatus: (request) => invokeNative("desktop:native-core-status", { fallbackCode: "NATIVE_CORE_STATUS_FAILED", message: "原生影子核心状态读取失败，请重试" }, request),
   getNativeCoreProjection: (request) => invokeNative("desktop:native-core-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求失败，请重试" }, request),
   getNativeCoreViewportProjection: (request) => invokeNative("desktop:native-core-viewport-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生视口投影请求失败，请重试" }, request),
+  getNativeCoreViewportProjectionV2: (request) => invokeNative("desktop:native-core-viewport-projection-v2", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生视口 v2 投影请求失败，请重试" }, request),
   getNativeCoreStatisticsProjection: (request) => invokeNative("desktop:native-core-statistics-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生统计投影请求失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),

@@ -59,6 +59,35 @@ struct PlanetProfile {
     ocean_type: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlanetMetricProbe {
+    production_rate: f64,
+    reserve_primary: f64,
+    reserve_secondary: f64,
+    planet_index: u32,
+    reserve_kind: PlanetReserveKind,
+}
+
+impl Default for PlanetMetricProbe {
+    fn default() -> Self {
+        Self {
+            production_rate: 0.0,
+            reserve_primary: 0.0,
+            reserve_secondary: 0.0,
+            planet_index: u32::MAX,
+            reserve_kind: PlanetReserveKind::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PlanetReserveKind {
+    #[default]
+    None,
+    StoredEnergy,
+    Fuel,
+}
+
 #[derive(Debug, Clone, Default)]
 struct Consumer {
     entity_index: usize,
@@ -444,6 +473,106 @@ fn stored_energy(entity: &Map<String, Value>, building: &BuildingDefinition) -> 
     finite_number(entity.get("storedEnergyMj"))
         .max(0.0)
         .min(energy_capacity(entity, building))
+}
+
+fn collect_ordered_planet_metric_probes_with_runtime<T, R, F>(
+    runtime: &DeterministicRuntime,
+    values: &[T],
+    probe: F,
+) -> anyhow::Result<Vec<R>>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(usize, &T) -> anyhow::Result<R> + Send + Sync,
+{
+    runtime.indexed_try_map(values, probe)
+}
+
+fn probe_planet_metric(
+    state: &CoreState,
+    entity_index: usize,
+    entity: &Value,
+) -> anyhow::Result<PlanetMetricProbe> {
+    let Some(entity) = entity.as_object() else {
+        return Ok(PlanetMetricProbe::default());
+    };
+    let planet_index = state.factory_topology.entity_planet_indices[entity_index];
+    if planet_index == usize::MAX {
+        return Ok(PlanetMetricProbe::default());
+    }
+    let planet_index = u32::try_from(planet_index)
+        .map_err(|_| anyhow!("native power reserve planet index overflowed"))?;
+    let mut probe = PlanetMetricProbe {
+        production_rate: finite_number(entity.get("productionRate")),
+        planet_index,
+        ..PlanetMetricProbe::default()
+    };
+    let Some(building_id) = string_at(entity, "buildingId") else {
+        return Ok(probe);
+    };
+    let building = state
+        .catalog
+        .buildings
+        .get(building_id)
+        .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
+    if matches!(building_id, "accumulator" | "energy_exchanger") {
+        probe.reserve_kind = PlanetReserveKind::StoredEnergy;
+        probe.reserve_primary = stored_energy(entity, building);
+        probe.reserve_secondary = energy_capacity(entity, building);
+    } else if is_fuel_generator(building_id) {
+        probe.reserve_kind = PlanetReserveKind::Fuel;
+        probe.reserve_primary =
+            fuel_energy_available(state, entity, building) * building.fuel_efficiency;
+        probe.reserve_secondary =
+            building.power_generation_kw * finite_number(entity.get("machineCount"));
+    }
+    Ok(probe)
+}
+
+type PlanetPowerReserves = (f64, f64, f64, f64);
+
+fn collect_planet_metrics_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+    planet_count: usize,
+) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
+    let probes = collect_ordered_planet_metric_probes_with_runtime(
+        runtime,
+        entities,
+        |entity_index, entity| probe_planet_metric(state, entity_index, entity),
+    )?;
+    let mut total_items_before_global = vec![0.0; planet_count];
+    let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_count];
+    // Worker scheduling must never decide an IEEE-754 accumulation order.
+    // `indexed_try_map` returns the original entity order, and only this
+    // serial replay touches the per-planet totals.
+    for probe in probes {
+        if probe.planet_index == u32::MAX {
+            continue;
+        }
+        let planet = usize::try_from(probe.planet_index)
+            .map_err(|_| anyhow!("native power reserve planet index overflowed"))?;
+        let total_items = total_items_before_global
+            .get_mut(planet)
+            .ok_or_else(|| anyhow!("native power reserve planet topology is unknown"))?;
+        *total_items += probe.production_rate;
+        let reserves = power_reserves_by_planet
+            .get_mut(planet)
+            .expect("validated native power reserve planet disappeared");
+        match probe.reserve_kind {
+            PlanetReserveKind::None => {}
+            PlanetReserveKind::StoredEnergy => {
+                reserves.0 += probe.reserve_primary;
+                reserves.1 += probe.reserve_secondary;
+            }
+            PlanetReserveKind::Fuel => {
+                reserves.2 += probe.reserve_primary;
+                reserves.3 += probe.reserve_secondary;
+            }
+        }
+    }
+    Ok((total_items_before_global, power_reserves_by_planet))
 }
 
 fn item_output_free(
@@ -4405,36 +4534,17 @@ fn simulate_step(
         }
     }
 
-    // Preserve the per-planet entity accumulation order while avoiding one
-    // complete entity scan per planet for production and reserve metrics.
-    let mut total_items_before_global = vec![0.0; planet_ids.len()];
-    let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_ids.len()];
-    for (entity_index, entity) in entities.iter().enumerate() {
-        let Some(entity) = entity.as_object() else {
-            continue;
-        };
-        let planet = state.factory_topology.entity_planet_indices[entity_index];
-        if planet == usize::MAX {
-            continue;
-        }
-        total_items_before_global[planet] += finite_number(entity.get("productionRate"));
-        let Some(building_id) = string_at(entity, "buildingId") else {
-            continue;
-        };
-        let building = state
-            .catalog
-            .buildings
-            .get(building_id)
-            .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
-        let reserves = &mut power_reserves_by_planet[planet];
-        if matches!(building_id, "accumulator" | "energy_exchanger") {
-            reserves.0 += stored_energy(entity, building);
-            reserves.1 += energy_capacity(entity, building);
-        } else if is_fuel_generator(building_id) {
-            reserves.2 += fuel_energy_available(state, entity, building) * building.fuel_efficiency;
-            reserves.3 += building.power_generation_kw * finite_number(entity.get("machineCount"));
-        }
-    }
+    // Every entity can be inspected independently, but the f64 additions are
+    // observable. Probe on the shared deterministic pool and replay the
+    // ordered scalar results exactly as the former serial scan did.
+    let (total_items_before_global, power_reserves_by_planet) =
+        collect_planet_metrics_with_runtime(
+            deterministic_runtime(),
+            state,
+            entities,
+            planet_ids.len(),
+        )?;
+    profile_mark!("planet-metrics-probe");
 
     let quantum_flow = if crossed_quantum_boundary {
         crate::quantum_logistics::settle_downloads(
@@ -5666,6 +5776,87 @@ mod tests {
         (entities, produced, outcome_order)
     }
 
+    fn planet_metric_fixture(count: usize) -> (CoreState, Vec<Value>) {
+        let seed = local_machine_matrix(count);
+        let mut state = fixture_state(&seed);
+        let catalog = std::sync::Arc::make_mut(&mut state.catalog);
+        let mut accumulator = fixture_building("accumulator");
+        accumulator.kind = "power".to_owned();
+        accumulator.energy_capacity_mj = 100.0;
+        catalog
+            .buildings
+            .insert(accumulator.id.clone(), accumulator);
+        let mut thermal = fixture_building("thermal_power_plant");
+        thermal.kind = "power".to_owned();
+        thermal.power_generation_kw = 12.0;
+        thermal.fuel_item_ids = vec!["iron_ore".to_owned()];
+        thermal.fuel_efficiency = 0.5;
+        catalog.buildings.insert(thermal.id.clone(), thermal);
+
+        let mut entities = seed;
+        for (index, entity) in entities.iter_mut().enumerate() {
+            entity["productionRate"] = Value::from(match index % 6 {
+                0 => 10_000_000_000_000_000.0,
+                1 | 2 => 1.0,
+                3 => -10_000_000_000_000_000.0,
+                4 => 0.25,
+                _ => 0.5,
+            });
+            if index.is_multiple_of(17) {
+                entity["buildingId"] = Value::from("accumulator");
+                entity["machineCount"] = Value::from(2);
+                entity["storedEnergyMj"] = Value::from(73.0);
+            } else if index.is_multiple_of(23) {
+                entity["buildingId"] = Value::from("thermal_power_plant");
+                entity["machineCount"] = Value::from(3);
+                entity["fuelItemId"] = Value::from("iron_ore");
+                entity["fuelRemainingMj"] = Value::from(41.5);
+            }
+        }
+        // Keep both legacy skip paths in the deterministic matrix.
+        entities[5] = Value::Null;
+        entities[11].as_object_mut().unwrap().remove("buildingId");
+        (state, entities)
+    }
+
+    fn serial_planet_metrics_oracle(
+        state: &CoreState,
+        entities: &[Value],
+        planet_count: usize,
+    ) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
+        let mut total_items_before_global = vec![0.0; planet_count];
+        let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_count];
+        for (entity_index, entity) in entities.iter().enumerate() {
+            let Some(entity) = entity.as_object() else {
+                continue;
+            };
+            let planet = state.factory_topology.entity_planet_indices[entity_index];
+            if planet == usize::MAX {
+                continue;
+            }
+            total_items_before_global[planet] += finite_number(entity.get("productionRate"));
+            let Some(building_id) = string_at(entity, "buildingId") else {
+                continue;
+            };
+            let building = state
+                .catalog
+                .buildings
+                .get(building_id)
+                .ok_or_else(|| anyhow!("native power reserve building is missing"))?;
+            let reserves = &mut power_reserves_by_planet[planet];
+            if matches!(building_id, "accumulator" | "energy_exchanger") {
+                reserves.0 += stored_energy(entity, building);
+                reserves.1 += energy_capacity(entity, building);
+            } else if is_fuel_generator(building_id) {
+                reserves.2 +=
+                    fuel_energy_available(state, entity, building) * building.fuel_efficiency;
+                reserves.3 +=
+                    building.power_generation_kw * finite_number(entity.get("machineCount"));
+            }
+        }
+        Ok((total_items_before_global, power_reserves_by_planet))
+    }
+
     #[test]
     fn machine_item_number_overwrites_existing_keys_and_preserves_number_fallbacks() {
         let mut values = json!({
@@ -5846,6 +6037,179 @@ mod tests {
                 .enumerate()
                 .all(|(index, &(value, workers))| value == index && workers == 4)
         );
+    }
+
+    #[test]
+    fn planet_metric_probe_is_compact_and_worker_threshold_is_explicit() {
+        assert!(
+            std::mem::size_of::<PlanetMetricProbe>() <= 32,
+            "one full-factory probe row must remain a compact scalar result"
+        );
+        let runtime = DeterministicRuntime::for_test(8);
+        let small = [7_usize, 3, 11, 5];
+        let observed =
+            collect_ordered_planet_metric_probes_with_runtime(&runtime, &small, |_, value| {
+                Ok((*value, rayon::current_thread_index()))
+            })
+            .unwrap();
+        assert_eq!(observed, vec![(7, None), (3, None), (11, None), (5, None)]);
+
+        let large = (0..PARALLEL_MIN_ITEMS + 257).collect::<Vec<_>>();
+        let observed = collect_ordered_planet_metric_probes_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &large,
+            |index, value| {
+                if index % 127 == 0 {
+                    std::thread::yield_now();
+                }
+                Ok((*value, rayon::current_num_threads()))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            observed.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+            large
+        );
+        assert!(observed.iter().all(|(_, workers)| *workers == 4));
+    }
+
+    #[test]
+    fn planet_metrics_are_bit_exact_for_one_two_four_and_eight_workers() {
+        let (state, entities) = planet_metric_fixture(PARALLEL_MIN_ITEMS + 73);
+        let bits = |result: &(Vec<f64>, Vec<PlanetPowerReserves>)| {
+            (
+                result
+                    .0
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                result
+                    .1
+                    .iter()
+                    .map(|values| {
+                        [
+                            values.0.to_bits(),
+                            values.1.to_bits(),
+                            values.2.to_bits(),
+                            values.3.to_bits(),
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let baseline = serial_planet_metrics_oracle(&state, &entities, 1).unwrap();
+        let baseline_bits = bits(&baseline);
+        assert!(baseline.1[0].0 > 0.0);
+        assert!(baseline.1[0].1 > baseline.1[0].0);
+        assert!(baseline.1[0].2 > 0.0);
+        assert!(baseline.1[0].3 > 0.0);
+        for worker_count in [1, 2, 4, 8] {
+            let observed = collect_planet_metrics_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                &entities,
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                bits(&observed),
+                baseline_bits,
+                "planet metric fold diverged for {worker_count} workers"
+            );
+        }
+
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            let (profile_state, profile_entities) = planet_metric_fixture(80_000);
+            let runtime = DeterministicRuntime::for_test(8);
+            let mut serial_ms = Vec::new();
+            let mut parallel_ms = Vec::new();
+            for round in 0_usize..9 {
+                let measure_serial = || {
+                    let started = std::time::Instant::now();
+                    let result = serial_planet_metrics_oracle(
+                        &profile_state,
+                        std::hint::black_box(&profile_entities),
+                        1,
+                    )
+                    .unwrap();
+                    (started.elapsed().as_secs_f64() * 1_000.0, result)
+                };
+                let measure_parallel = || {
+                    let started = std::time::Instant::now();
+                    let result = collect_planet_metrics_with_runtime(
+                        &runtime,
+                        &profile_state,
+                        std::hint::black_box(&profile_entities),
+                        1,
+                    )
+                    .unwrap();
+                    (started.elapsed().as_secs_f64() * 1_000.0, result)
+                };
+                let ((serial_elapsed, serial), (parallel_elapsed, parallel)) =
+                    if round.is_multiple_of(2) {
+                        (measure_serial(), measure_parallel())
+                    } else {
+                        let parallel = measure_parallel();
+                        let serial = measure_serial();
+                        (serial, parallel)
+                    };
+                serial_ms.push(serial_elapsed);
+                parallel_ms.push(parallel_elapsed);
+                assert_eq!(bits(&parallel), bits(&serial), "profile round {round}");
+            }
+            serial_ms.sort_by(f64::total_cmp);
+            parallel_ms.sort_by(f64::total_cmp);
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tplanet-metric-ab\tentities=80000\trounds=9\tserial-median-ms={:.3}\tparallel-8-median-ms={:.3}",
+                serial_ms[serial_ms.len() / 2],
+                parallel_ms[parallel_ms.len() / 2]
+            );
+        }
+    }
+
+    #[test]
+    fn planet_metric_failure_uses_lowest_entity_and_keeps_sources_atomic() {
+        let (state, mut entities) = planet_metric_fixture(PARALLEL_MIN_ITEMS + 31);
+        let later_failure = PARALLEL_MIN_ITEMS + 13;
+        entities[7]["buildingId"] = Value::from("mod:missing-power/first");
+        entities[later_failure]["buildingId"] = Value::from("mod:missing-power/later");
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let state_hash = state.canonical_sha256().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let error = collect_planet_metrics_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                &entities,
+                1,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "native power reserve building is missing"
+            );
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), entity_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        }
+
+        let values = (0..PARALLEL_MIN_ITEMS + 31).collect::<Vec<_>>();
+        let visited_later_failure = AtomicBool::new(false);
+        let error = collect_ordered_planet_metric_probes_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &values,
+            |index, _| {
+                if index == later_failure {
+                    visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                    return Err(anyhow!("later-{index}"));
+                }
+                if index == 7 {
+                    return Err(anyhow!("first-{index}"));
+                }
+                Ok(index)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "first-7");
+        assert!(visited_later_failure.load(AtomicOrdering::SeqCst));
     }
 
     #[test]

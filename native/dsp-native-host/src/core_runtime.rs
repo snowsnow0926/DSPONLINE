@@ -2969,6 +2969,8 @@ mod tests {
     #[derive(Debug)]
     struct MutableDiskSpaceProbe(AtomicU64);
 
+    const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
     impl MutableDiskSpaceProbe {
         fn available() -> Self {
             Self(AtomicU64::new(u64::MAX))
@@ -3038,6 +3040,12 @@ mod tests {
             "proliferators": [],
             "technologies": [],
         })
+    }
+
+    fn player_authority_catalog() -> Value {
+        let mut catalog = import_catalog();
+        catalog["registryFingerprint"] = Value::from(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        catalog
     }
 
     fn utf16_fnv(text: &str) -> String {
@@ -3339,8 +3347,8 @@ mod tests {
                 &mut store,
                 Cursor::new(bytes.clone()),
                 bytes.len() as u64,
-                "builtin:test",
-                import_catalog(),
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
             )
             .unwrap();
         let checkpoint = ExactRealtimeCheckpoint {
@@ -3371,7 +3379,7 @@ mod tests {
                 "player-authority-run",
                 &checkpoint,
                 &summary.registry_fingerprint,
-                import_catalog(),
+                player_authority_catalog(),
             )
             .unwrap();
         store
@@ -3408,8 +3416,8 @@ mod tests {
                 &mut store,
                 Cursor::new(bytes.clone()),
                 bytes.len() as u64,
-                "builtin:test",
-                import_catalog(),
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
             )
             .unwrap();
         let checkpoint = ExactRealtimeCheckpoint {
@@ -3440,7 +3448,7 @@ mod tests {
                 "player-authority-run",
                 &checkpoint,
                 &summary.registry_fingerprint,
-                import_catalog(),
+                player_authority_catalog(),
             )
             .unwrap();
         store
@@ -3586,6 +3594,42 @@ mod tests {
                         "productionRate": 0
                     }
                 }],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn ordinary_building_stack_increase_command(
+        base_revision: u64,
+        command_id: &str,
+        target: u64,
+        construction: u64,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["construction", "arc_smelter"],
+                    "operation": "set",
+                    "value": construction
+                }],
+                "changedEntities": [{
+                    "id": "entity_9",
+                    "changes": [{
+                        "path": ["machineCount"],
+                        "operation": "set",
+                        "value": target
+                    }]
+                }],
+                "addedEntities": [],
                 "removedEntityIds": [],
                 "changedBelts": [],
                 "addedBelts": [],
@@ -4227,13 +4271,168 @@ mod tests {
                 &mut reload_store,
                 Cursor::new(exported.clone()),
                 exported.len() as u64,
-                "builtin:test",
-                import_catalog(),
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
             )
             .unwrap();
         let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
         assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
         assert_eq!(reloaded_summary.entity_count, 2);
+    }
+
+    #[test]
+    fn typed_building_stack_increase_recovers_retries_exports_and_reloads_exactly() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let placed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_building_placement_command(
+                    entry_checkpoint.revision,
+                    "stack-prerequisite-placement",
+                ),
+            )
+            .unwrap();
+        let placed_hash = placed.summary.canonical_sha256.clone();
+        let placed_checkpoint =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let request = || {
+            ordinary_building_stack_increase_command(
+                placed.revision,
+                "ordinary-building-stack-increase",
+                2,
+                0,
+            )
+        };
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            placed_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            placed_checkpoint
+        );
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_some()
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("typed stack increase must recover from its durable stage");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("ordinary-building-stack-increase")
+        );
+        assert_eq!(recovered.revision, placed.revision + 1);
+        assert_eq!(recovered.changed_entity_ids, ["entity_9"]);
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, recovered.revision);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "ordinary-building-stack-increase-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let exported = std::fs::read(
+            root.path()
+                .join("exports/ordinary-building-stack-increase-recovered.json"),
+        )
+        .unwrap();
+        let envelope: Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(envelope["state"]["construction"]["arc_smelter"], 0);
+        assert_eq!(envelope["state"]["entities"][1]["id"], "entity_9");
+        assert_eq!(envelope["state"]["entities"][1]["machineCount"], 2);
+
+        let reload_root = tempdir().unwrap();
+        let mut reload_store = SaveStore::open(reload_root.path()).unwrap();
+        let mut reload_registry = CoreRegistry::default();
+        let reloaded = reload_registry
+            .import_v47(
+                &mut reload_store,
+                Cursor::new(exported.clone()),
+                exported.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
+        assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
+        assert_eq!(reloaded_summary.entity_count, 2);
+    }
+
+    #[test]
+    fn forged_building_stack_debit_fails_before_stage_and_preserves_checkpoint() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let placed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_building_placement_command(
+                    entry_checkpoint.revision,
+                    "forged-stack-prerequisite-placement",
+                ),
+            )
+            .unwrap();
+        let summary_before = serde_json::to_value(registry.status(&session_id).unwrap()).unwrap();
+        let checkpoint_before =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let error = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_building_stack_increase_command(
+                    placed.revision,
+                    "forged-building-stack-increase",
+                    2,
+                    1,
+                ),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stack inventory adjustment is invalid"),
+            "{error:#}"
+        );
+        assert_eq!(
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            summary_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            checkpoint_before
+        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
     }
 
     #[test]
@@ -4396,7 +4595,7 @@ mod tests {
                     &published.root_hash,
                     published.revision,
                     &published.registry_fingerprint,
-                    import_catalog(),
+                    player_authority_catalog(),
                 )
                 .unwrap();
             let recovered = reopened
@@ -4975,7 +5174,7 @@ mod tests {
                 &recovered.root_hash,
                 recovered.revision,
                 &recovered.registry_fingerprint,
-                import_catalog(),
+                player_authority_catalog(),
             )
             .unwrap();
         assert_eq!(reopened.session_id, session_id);

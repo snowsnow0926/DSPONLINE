@@ -8,6 +8,41 @@ use crate::state::CoreState;
 const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
+/// FNV-1a fingerprint produced by `createContentPackRegistry()` with no packs.
+/// The current CORE catalog omits the optional MOD `stackLimit`, so positive
+/// stack changes are only provable when no content pack can have overridden a
+/// core building's limit.  Non-empty registries remain fail-closed until that
+/// bound is carried by a future, explicitly versioned catalog protocol.
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
+const BUILTIN_ORDINARY_STACK_BUILDINGS: &[&str] = &[
+    "accumulator",
+    "arc_smelter",
+    "artificial_star",
+    "assembling_machine_mk1",
+    "assembling_machine_mk2",
+    "assembling_machine_mk3",
+    "chemical_plant",
+    "em_rail_ejector",
+    "energy_exchanger",
+    "fractionator",
+    "geothermal_power_station",
+    "matrix_lab",
+    "mini_fusion_power_plant",
+    "miniature_particle_collider",
+    "oil_refinery",
+    "plane_smelter",
+    "quantum_chemical_plant",
+    "ray_receiver",
+    "solar_panel",
+    "splitter_4way",
+    "spray_coater",
+    "storage_mk1",
+    "storage_tank",
+    "thermal_power_plant",
+    "vertical_launching_silo",
+    "wind_turbine",
+];
 
 const UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS: &[&str] = &[
     "galactic_material_exporter",
@@ -710,7 +745,7 @@ fn queue_or_blueprint_pruning_would_change(state: &CoreState, entity_id: &str) -
         })
 }
 
-fn validate_ordinary_building_stack_decrease(
+fn validate_ordinary_building_stack_change(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
@@ -723,7 +758,7 @@ fn validate_ordinary_building_stack_decrease(
         || !command.added_belts.is_empty()
         || !command.removed_belt_ids.is_empty()
     {
-        bail!("native player-authority building stack decrease shape is invalid")
+        bail!("native player-authority building stack change shape is invalid")
     }
     let record = &command.changed_entities[0];
     let (_, building_id, current) = ordinary_removal_entity(state, &record.id)?;
@@ -731,19 +766,38 @@ fn validate_ordinary_building_stack_decrease(
         .as_u64()
         .filter(|value| *value <= MAX_PLAYER_BUILDING_STACK)
         .ok_or_else(|| anyhow!("native player-authority building stack target is invalid"))?;
-    if target == 0 || target >= current {
-        bail!("native player-authority building stack command is not a decrease")
+    if target == 0 || target == current {
+        bail!("native player-authority building stack command is unchanged")
     }
     let construction = state
         .base_value()
         .get("construction")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
-    let previous = normalized_construction_inventory(construction.get(&building_id))?;
-    let expected = previous
-        .checked_add(current - target)
-        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-        .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?;
+    let previous = if target > current {
+        // Content packs may override a core building's optional stackLimit,
+        // while the existing CORE protocol deliberately omits that field.
+        // Prove the built-in, unbounded definition instead of guessing that a
+        // catalog-shaped MOD entry has the same player semantics.
+        if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || !BUILTIN_ORDINARY_STACK_BUILDINGS.contains(&building_id.as_str())
+        {
+            bail!("native player-authority building stack limit is not provable")
+        }
+        safe_json_integer(construction.get(&building_id), "construction inventory")?
+    } else {
+        normalized_construction_inventory(construction.get(&building_id))?
+    };
+    let expected = if target > current {
+        previous.checked_sub(target - current).ok_or_else(|| {
+            anyhow!("native player-authority building construction stock is insufficient")
+        })?
+    } else {
+        previous
+            .checked_add(current - target)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?
+    };
     if require_exact_set_patch(
         &command.top_level_changes,
         &["construction", building_id.as_str()],
@@ -751,7 +805,7 @@ fn validate_ordinary_building_stack_decrease(
     .as_u64()
         != Some(expected)
     {
-        bail!("native player-authority building stack refund is invalid")
+        bail!("native player-authority building stack inventory adjustment is invalid")
     }
     Ok(())
 }
@@ -1110,7 +1164,7 @@ impl CoreState {
                 .iter()
                 .any(|change| path_matches(&change.path, &["machineCount"]))
         }) {
-            return validate_ordinary_building_stack_decrease(self, command);
+            return validate_ordinary_building_stack_change(self, command);
         }
         if command.changed_entities.iter().any(|record| {
             record
@@ -1501,10 +1555,10 @@ mod tests {
         );
     }
 
-    fn player_command_catalog() -> RuntimeCatalog {
+    fn player_command_catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
         let snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
             "protocolVersion": crate::CORE_PROTOCOL_VERSION,
-            "registryFingerprint": "player-command-test",
+            "registryFingerprint": registry_fingerprint,
             "planets": [
                 { "id": "home", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 },
                 { "id": "ashen", "systemId": "sigma", "kind": "terrestrial", "orbitIndex": 1 },
@@ -1550,7 +1604,7 @@ mod tests {
             "belts": [{ "tier": 1, "speed": 6 }]
         }))
         .unwrap();
-        RuntimeCatalog::validate(snapshot, "player-command-test").unwrap()
+        RuntimeCatalog::validate(snapshot, registry_fingerprint).unwrap()
     }
 
     fn player_command_entity(
@@ -1584,7 +1638,7 @@ mod tests {
         entity.to_string()
     }
 
-    fn player_command_state() -> CoreState {
+    fn player_command_state_for_registry(registry_fingerprint: &str) -> CoreState {
         let base = serde_json::json!({
             "version": 47,
             "mode": "normal",
@@ -1616,7 +1670,7 @@ mod tests {
                 revision: 9,
                 state_version: 47,
                 mode: "normal".to_owned(),
-                registry_fingerprint: "player-command-test".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
             base,
@@ -1626,9 +1680,13 @@ mod tests {
                 player_command_entity("ejector-b", "em_rail_ejector", 5.0, Some("orbit-home-old")),
             ],
             Vec::new(),
-            player_command_catalog(),
+            player_command_catalog_for_registry(registry_fingerprint),
         )
         .unwrap()
+    }
+
+    fn player_command_state() -> CoreState {
+        player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
     }
 
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
@@ -1687,6 +1745,31 @@ mod tests {
         command
     }
 
+    fn ordinary_stack_change_command(
+        revision: u64,
+        target: u64,
+        construction: u64,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("construction".to_owned()),
+                PathSegment::Key("arc_smelter".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(construction)),
+        }];
+        command.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("machineCount".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(target)),
+            }],
+        }];
+        command
+    }
+
     #[test]
     fn player_authority_places_one_canonical_catalog_building_atomically() {
         let mut state = player_command_state();
@@ -1704,6 +1787,49 @@ mod tests {
         let retry_error = state.apply_player_authority_command(&command).unwrap_err();
         assert!(format!("{retry_error:#}").contains("base revision is not current"));
         assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_increases_builtin_building_stack_with_exact_debit() {
+        let mut state = player_command_state();
+        let command = ordinary_stack_change_command(state.revision, 5, 2);
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert_eq!(applied.changed_entity_ids, ["smelter-a"]);
+        assert!(applied.changed_belt_ids.is_empty());
+        assert!(applied.topology_dirty);
+        assert_eq!(state.parse_entity(0).unwrap()["machineCount"], 5);
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 2);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_stack_increase_fails_closed_on_inventory_limit_or_mod_catalog() {
+        let commands = [
+            ordinary_stack_change_command(9, 5, 3),
+            ordinary_stack_change_command(9, 8, 0),
+            ordinary_stack_change_command(9, MAX_PLAYER_BUILDING_STACK + 1, 0),
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut modded = player_command_state_for_registry("modded-player-command-test");
+        let before = modded.canonical_sha256().unwrap();
+        let command = ordinary_stack_change_command(modded.revision, 5, 2);
+        let error = modded.apply_player_authority_command(&command).unwrap_err();
+        assert!(format!("{error:#}").contains("stack limit is not provable"));
+        assert_eq!(modded.revision, 9);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
     }
 
     #[test]

@@ -25,6 +25,8 @@ const WARPER_REFILL_DENSE_NUMERATOR: usize = 3;
 const WARPER_REFILL_DENSE_DENOMINATOR: usize = 4;
 const STATION_POWER_DENSE_NUMERATOR: usize = 3;
 const STATION_POWER_DENSE_DENOMINATOR: usize = 4;
+const INTERSTELLAR_CONGESTION_DENSE_NUMERATOR: usize = 3;
+const INTERSTELLAR_CONGESTION_DENSE_DENOMINATOR: usize = 4;
 const ORBITAL_COLLECTOR_DENSE_NUMERATOR: usize = 3;
 const ORBITAL_COLLECTOR_DENSE_DENOMINATOR: usize = 4;
 
@@ -75,6 +77,7 @@ trait InterstellarLedgerView: Sync {
     fn local_busy(&self, station_index: usize) -> f64;
     fn in_flight(&self, station_index: usize, item_id: &str) -> f64;
     fn is_active_remote_station(&self, station_index: usize) -> bool;
+    #[cfg(test)]
     fn active_progress(&self, station_index: usize) -> f64;
 }
 
@@ -116,6 +119,7 @@ impl InterstellarLedgerView for Ledger {
         self.active_remote_stations.contains(&station_index)
     }
 
+    #[cfg(test)]
     fn active_progress(&self, station_index: usize) -> f64 {
         self.active_progress
             .get(&station_index)
@@ -186,6 +190,7 @@ impl InterstellarLedgerView for StationRouteLedger {
         StationRouteLedger::is_active_remote_station(self, station_index)
     }
 
+    #[cfg(test)]
     fn active_progress(&self, station_index: usize) -> f64 {
         StationRouteLedger::active_progress(self, station_index)
     }
@@ -225,6 +230,7 @@ impl InterstellarDispatchLedger for StationRouteLedger {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct LocalSupplyDirectory {
     by_planet_item: HashMap<String, HashMap<String, Vec<usize>>>,
@@ -982,6 +988,14 @@ impl InterstellarPeerDirectory {
             self.demand_by_item.get(item_id)
         };
         values.map(Vec::as_slice).unwrap_or_default()
+    }
+
+    pub(crate) fn congestion_demand_station_indices(&self) -> &[usize] {
+        &self.demand_station_indices
+    }
+
+    pub(crate) fn congestion_requires_full_scan(&self) -> bool {
+        self.fallback_full_scan
     }
 }
 
@@ -3667,6 +3681,7 @@ pub(crate) fn advance_routes(
     )
 }
 
+#[cfg(test)]
 fn build_local_supply_directory(
     entities: &[Value],
     station_indices: &[usize],
@@ -3720,6 +3735,7 @@ fn build_local_supply_directory(
     directory
 }
 
+#[cfg(test)]
 fn local_peer_exists(
     directory: &LocalSupplyDirectory,
     entities: &[Value],
@@ -3755,6 +3771,7 @@ struct CongestionUpdate {
     active_progress: f64,
 }
 
+#[cfg(test)]
 fn plan_congestion_updates_with<F, L>(
     runtime: &DeterministicRuntime,
     entities: &[Value],
@@ -3842,42 +3859,147 @@ fn apply_congestion_updates(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InterstellarCongestionScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+}
+
+fn select_congestion_station_indices(
+    all_station_indices: &[usize],
+    local_directory: &crate::local_logistics::LocalPeerDirectory,
+    peer_directory: &InterstellarPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> (Vec<usize>, InterstellarCongestionScan) {
+    let mut selected = local_directory.local_waiting_station_indices().to_vec();
+    selected.extend_from_slice(peer_directory.congestion_demand_station_indices());
+    selected.extend_from_slice(local_directory.interstellar_congestion_reset_station_indices());
+    selected.extend(route_ledger.active_station_indices());
+    selected.sort_unstable();
+    selected.dedup();
+    selected.retain(|index| all_station_indices.binary_search(index).is_ok());
+    let directory_fallback = peer_directory.congestion_requires_full_scan();
+    let dense_fallback = !directory_fallback
+        && !selected.is_empty()
+        && selected
+            .len()
+            .saturating_mul(INTERSTELLAR_CONGESTION_DENSE_DENOMINATOR)
+            >= all_station_indices
+                .len()
+                .saturating_mul(INTERSTELLAR_CONGESTION_DENSE_NUMERATOR);
+    if directory_fallback || dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(all_station_indices);
+    }
+    let scan = InterstellarCongestionScan {
+        selected_station_rows: selected.len(),
+        total_station_rows: all_station_indices.len(),
+        dense_fallback,
+        directory_fallback,
+    };
+    (selected, scan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_indexed_congestion_updates(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    station_indices: &[usize],
+    ledger: &StationRouteLedger,
+    local_directory: &crate::local_logistics::LocalPeerDirectory,
+    peer_directory: &InterstellarPeerDirectory,
+) -> anyhow::Result<Vec<Option<CongestionUpdate>>> {
+    runtime.indexed_try_map(
+        station_indices,
+        |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !is_legacy_interstellar_station(station) || traditional_remote_disabled(station) {
+                return Ok(None);
+            }
+            let station_slots = slots(station)?;
+            let mut waiting = 0.0;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                if slot.item_id.is_none() {
+                    continue;
+                }
+                let remote_waiting = slot.remote_mode == "demand"
+                    && !peer_matches_indexed(
+                        state,
+                        base,
+                        entities,
+                        station_index,
+                        slot_index,
+                        peer_directory,
+                    )?
+                    .0
+                    .is_empty();
+                if remote_waiting
+                    || local_directory.has_local_peer_match(station_index, slot_index)?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
+                + vessel_capacity(station);
+            let busy = ledger.local_busy(station_index) + ledger.remote_busy(station_index);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            Ok(Some(CongestionUpdate {
+                station_index,
+                congestion: rounded(congestion, 3),
+                active_progress: ledger.active_progress(station_index),
+            }))
+        },
+    )
+}
+
 pub(crate) fn update_congestion(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
+    local_directory: &mut crate::local_logistics::LocalPeerDirectory,
     peer_directory: &InterstellarPeerDirectory,
     route_ledger: &StationRouteLedger,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<InterstellarCongestionScan> {
     let station_indices = &state.factory_topology.station_indices;
-    if !station_indices.iter().copied().any(|index| {
-        entities[index].as_object().is_some_and(|station| {
-            is_legacy_interstellar_station(station) && !traditional_remote_disabled(station)
-        })
-    }) {
-        return Ok(());
-    }
-    let local_supply_directory = build_local_supply_directory(entities, station_indices);
-    let updates = plan_congestion_updates_with(
-        deterministic_runtime(),
-        entities,
+    let (selected_indices, scan) = select_congestion_station_indices(
         station_indices,
+        local_directory,
+        peer_directory,
         route_ledger,
-        &local_supply_directory,
-        |station_index, slot_index, _| {
-            Ok(!peer_matches_indexed(
-                state,
-                base,
-                entities,
-                station_index,
-                slot_index,
-                peer_directory,
-            )?
-            .0
-            .is_empty())
-        },
+    );
+    let updates = plan_indexed_congestion_updates(
+        deterministic_runtime(),
+        state,
+        base,
+        entities,
+        &selected_indices,
+        route_ledger,
+        local_directory,
+        peer_directory,
     )?;
-    apply_congestion_updates(entities, updates)
+    apply_congestion_updates(entities, updates)?;
+    let mut next_reset = route_ledger.active_station_indices();
+    next_reset.retain(|index| station_indices.binary_search(index).is_ok());
+    local_directory.replace_interstellar_congestion_reset_station_indices(next_reset);
+    Ok(scan)
 }
 
 #[cfg(test)]
@@ -7148,7 +7270,7 @@ mod tests {
         let base = base.as_object().unwrap();
         let directory = InterstellarPeerDirectory::build(&state, base, &entities);
         let activity = prepare_route_activity(&entities);
-        let local_directory = crate::local_logistics::prepare_step_directory(
+        let mut local_directory = crate::local_logistics::prepare_step_directory(
             &entities,
             &state.factory_topology.station_indices,
         )
@@ -7207,7 +7329,137 @@ mod tests {
         .unwrap();
         let mut expected = entities.clone();
         apply_congestion_updates(&mut expected, full_updates).unwrap();
-        update_congestion(&state, base, &mut entities, &directory, &ledger).unwrap();
+        update_congestion(
+            &state,
+            base,
+            &mut entities,
+            &mut local_directory,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn sparse_congestion_matches_full_oracle_and_clears_completed_routes_once() {
+        let count = 256;
+        let mut entities = route_activity_matrix(240 + 16, &[(113, false, vec![])], 0.25, 120.0);
+        for (index, entity) in entities.iter_mut().enumerate() {
+            entity["planetId"] = Value::from(if index == 0 {
+                "source_planet"
+            } else {
+                "demand_planet"
+            });
+            entity["stationSlots"][0]["itemId"] = if matches!(index, 0 | 7) {
+                Value::from("iron_ore")
+            } else {
+                Value::Null
+            };
+            entity["stationSlots"][0]["remoteMode"] = Value::from(if index == 0 {
+                "supply"
+            } else if index == 7 {
+                "demand"
+            } else {
+                "storage"
+            });
+        }
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        assert!(!directory.congestion_requires_full_scan());
+        assert_eq!(directory.congestion_demand_station_indices(), [7]);
+        let mut local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        local_directory.replace_interstellar_congestion_reset_station_indices(Vec::new());
+
+        let apply_full_oracle = |source: &[Value], ledger: &StationRouteLedger| {
+            let local_supply =
+                build_local_supply_directory(source, &state.factory_topology.station_indices);
+            let updates = plan_congestion_updates_with(
+                &DeterministicRuntime::for_test(4),
+                source,
+                &state.factory_topology.station_indices,
+                ledger,
+                &local_supply,
+                |station_index, slot_index, _| {
+                    Ok(
+                        !peer_matches_full_scan(&state, base, source, station_index, slot_index)?
+                            .is_empty(),
+                    )
+                },
+            )?;
+            let mut expected = source.to_vec();
+            apply_congestion_updates(&mut expected, updates)?;
+            Ok::<_, anyhow::Error>(expected)
+        };
+
+        let activity = prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let expected = apply_full_oracle(&entities, &ledger).unwrap();
+        let scan = update_congestion(
+            &state,
+            base,
+            &mut entities,
+            &mut local_directory,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, 3);
+        assert_eq!(scan.total_station_rows, count);
+        assert!(!scan.dense_fallback);
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(
+            local_directory.interstellar_congestion_reset_station_indices(),
+            [0, 113]
+        );
+
+        entities[113]["stationRoutes"] = Value::Array(Vec::new());
+        let activity = prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let expected = apply_full_oracle(&entities, &ledger).unwrap();
+        let scan = update_congestion(
+            &state,
+            base,
+            &mut entities,
+            &mut local_directory,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, 3);
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert!(
+            local_directory
+                .interstellar_congestion_reset_station_indices()
+                .is_empty()
+        );
+
+        let expected = apply_full_oracle(&entities, &ledger).unwrap();
+        let scan = update_congestion(
+            &state,
+            base,
+            &mut entities,
+            &mut local_directory,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, 1);
         assert_eq!(
             serde_json::to_vec(&entities).unwrap(),
             serde_json::to_vec(&expected).unwrap()

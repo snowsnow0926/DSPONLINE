@@ -4825,20 +4825,38 @@ fn simulate_step(
             scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
         );
     }
-    crate::local_logistics::update_congestion(
+    let local_congestion_scan = crate::local_logistics::update_congestion(
         state,
         entities,
         local_step_runtime,
         &congestion_route_ledger,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tlocal-congestion-active\t{}/{}\tdense={}",
+            local_congestion_scan.selected_station_rows,
+            local_congestion_scan.total_station_rows,
+            local_congestion_scan.dense_fallback,
+        );
+    }
     profile_mark!("local-congestion");
-    crate::interstellar_logistics::update_congestion(
+    let interstellar_congestion_scan = crate::interstellar_logistics::update_congestion(
         state,
         base,
         entities,
+        local_step_runtime,
         interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tinterstellar-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+            interstellar_congestion_scan.selected_station_rows,
+            interstellar_congestion_scan.total_station_rows,
+            interstellar_congestion_scan.dense_fallback,
+            interstellar_congestion_scan.directory_fallback,
+        );
+    }
     let mut next_runtime_reset_station_indices = congestion_route_ledger.active_station_indices();
     next_runtime_reset_station_indices.extend_from_slice(&local_route_changed_station_indices);
     next_runtime_reset_station_indices.extend_from_slice(&remote_route_changed_station_indices);

@@ -489,4 +489,14 @@ impl StationRouteLedger {
         indices.sort_unstable();
         indices
     }
+
+    pub(crate) fn active_local_station_indices(&self) -> Vec<usize> {
+        let mut indices = self
+            .active_local_stations
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices
+    }
 }

@@ -62,6 +62,7 @@ trait LocalLedgerView: Sync {
     fn local_busy(&self, station_index: usize) -> f64;
     fn in_flight(&self, station_index: usize, item_id: &str) -> f64;
     fn is_active_local_station(&self, station_index: usize) -> bool;
+    #[cfg(test)]
     fn active_local_progress(&self, station_index: usize) -> f64;
 }
 
@@ -95,6 +96,7 @@ impl LocalLedgerView for Ledger {
         self.active_local_stations.contains(&station_index)
     }
 
+    #[cfg(test)]
     fn active_local_progress(&self, station_index: usize) -> f64 {
         self.active_local_progress
             .get(&station_index)
@@ -148,6 +150,7 @@ impl LocalLedgerView for StationRouteLedger {
         StationRouteLedger::is_active_local_station(self, station_index)
     }
 
+    #[cfg(test)]
     fn active_local_progress(&self, station_index: usize) -> f64 {
         StationRouteLedger::active_local_progress(self, station_index)
     }
@@ -361,19 +364,27 @@ pub(crate) struct LocalPeerDirectory {
     by_planet_item: Arc<HashMap<usize, HashMap<String, LocalPeers>>>,
     station_slots: Arc<HashMap<usize, Vec<Slot>>>,
     station_planets: Arc<HashMap<usize, usize>>,
+    local_waiting_station_indices: Arc<[usize]>,
     local_route_demand_indices: Vec<usize>,
     buffer_active_station_indices: Vec<usize>,
     buffer_activity_initialized: bool,
     runtime_reset_station_indices: Vec<usize>,
+    local_congestion_reset_station_indices: Vec<usize>,
+    interstellar_congestion_reset_station_indices: Vec<usize>,
 }
 
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
             + self.runtime_station_indices.len() * std::mem::size_of::<usize>()
+            + self.local_waiting_station_indices.len() * std::mem::size_of::<usize>()
             + (self.local_route_demand_indices.capacity()
                 + self.buffer_active_station_indices.capacity()
-                + self.runtime_reset_station_indices.capacity())
+                + self.runtime_reset_station_indices.capacity()
+                + self.local_congestion_reset_station_indices.capacity()
+                + self
+                    .interstellar_congestion_reset_station_indices
+                    .capacity())
                 * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
@@ -437,6 +448,54 @@ impl LocalPeerDirectory {
                 .all(|index| { self.runtime_station_indices.binary_search(index).is_ok() })
         );
         self.runtime_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn local_waiting_station_indices(&self) -> &[usize] {
+        &self.local_waiting_station_indices
+    }
+
+    pub(crate) fn has_local_peer_match(
+        &self,
+        station_index: usize,
+        slot_index: usize,
+    ) -> anyhow::Result<bool> {
+        has_peer_match(self, station_index, slot_index)
+    }
+
+    pub(crate) fn local_congestion_reset_station_indices(&self) -> &[usize] {
+        &self.local_congestion_reset_station_indices
+    }
+
+    pub(crate) fn replace_local_congestion_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| self.station_indices.binary_search(index).is_ok())
+        );
+        self.local_congestion_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn interstellar_congestion_reset_station_indices(&self) -> &[usize] {
+        &self.interstellar_congestion_reset_station_indices
+    }
+
+    pub(crate) fn replace_interstellar_congestion_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| self.runtime_station_indices.binary_search(index).is_ok())
+        );
+        self.interstellar_congestion_reset_station_indices = station_indices;
     }
 
     fn route_scan_indices(&self) -> (Vec<usize>, bool) {
@@ -638,6 +697,22 @@ fn build_peer_directory(
         peers.supply.shrink_to_fit();
         peers.demand.shrink_to_fit();
     }
+    let mut local_waiting_station_indices = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .flat_map(|peers| {
+            peers.demand.iter().filter_map(|(demand_index, _)| {
+                peers
+                    .supply
+                    .iter()
+                    .any(|(supply_index, _)| supply_index != demand_index)
+                    .then_some(*demand_index)
+            })
+        })
+        .collect::<Vec<_>>();
+    local_waiting_station_indices.sort_unstable();
+    local_waiting_station_indices.dedup();
+    local_waiting_station_indices.shrink_to_fit();
     for items in by_planet_item.values_mut() {
         items.shrink_to_fit();
     }
@@ -658,6 +733,7 @@ fn build_peer_directory(
         by_planet_item: Arc::new(by_planet_item),
         station_slots: Arc::new(station_slots),
         station_planets: Arc::new(station_planets),
+        local_waiting_station_indices: Arc::from(local_waiting_station_indices),
         local_route_demand_indices,
         buffer_active_station_indices: Vec::new(),
         buffer_activity_initialized: false,
@@ -666,6 +742,8 @@ fn build_peer_directory(
         // display once; successful native steps replace this with the exact
         // active set for the following second.
         runtime_reset_station_indices: runtime_station_indices.to_vec(),
+        local_congestion_reset_station_indices: station_indices.to_vec(),
+        interstellar_congestion_reset_station_indices: runtime_station_indices.to_vec(),
     })
 }
 
@@ -1763,6 +1841,39 @@ struct CongestionUpdate {
     active_progress: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalCongestionScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+}
+
+fn select_congestion_station_indices(
+    directory: &LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> (Vec<usize>, LocalCongestionScan) {
+    let mut selected = directory.local_waiting_station_indices().to_vec();
+    selected.extend_from_slice(directory.local_congestion_reset_station_indices());
+    selected.extend(route_ledger.active_local_station_indices());
+    selected.sort_unstable();
+    selected.dedup();
+    selected.retain(|index| directory.station_indices.binary_search(index).is_ok());
+    let total_station_rows = directory.station_indices.len();
+    let dense_fallback = !selected.is_empty()
+        && selected.len().saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+            >= total_station_rows.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+    if dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(&directory.station_indices);
+    }
+    let scan = LocalCongestionScan {
+        selected_station_rows: selected.len(),
+        total_station_rows,
+        dense_fallback,
+    };
+    (selected, scan)
+}
+
 fn plan_idle_congestion_updates(
     runtime: &DeterministicRuntime,
     entities: &[Value],
@@ -1783,6 +1894,7 @@ fn plan_idle_congestion_updates(
     })
 }
 
+#[cfg(test)]
 fn plan_congestion_updates<L: LocalLedgerView + ?Sized>(
     runtime: &DeterministicRuntime,
     entities: &[Value],
@@ -1859,16 +1971,67 @@ fn apply_congestion_updates(
 pub(crate) fn update_congestion(
     _state: &CoreState,
     entities: &mut [Value],
-    directory: &LocalPeerDirectory,
+    directory: &mut LocalPeerDirectory,
     route_ledger: &StationRouteLedger,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<LocalCongestionScan> {
     let runtime = deterministic_runtime();
+    let (station_indices, scan) = select_congestion_station_indices(directory, route_ledger);
     let updates = if !directory_has_local_pair(directory) && !directory.has_local_routes() {
-        plan_idle_congestion_updates(runtime, entities, directory.station_indices.as_ref())
+        plan_idle_congestion_updates(runtime, entities, &station_indices)
     } else {
-        plan_congestion_updates(runtime, entities, directory, route_ledger)?
+        runtime.indexed_try_map(
+            &station_indices,
+            |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+                let station_index = *station_index;
+                let station = entities[station_index].as_object().expect("station object");
+                if !matches!(
+                    string_at(station, "buildingId"),
+                    Some("planetary_logistics_station" | "interstellar_logistics_station")
+                ) {
+                    return Ok(None);
+                }
+                let station_slots = directory
+                    .station_slots
+                    .get(&station_index)
+                    .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+                let mut waiting = 0.0;
+                for (slot_index, slot) in station_slots.iter().enumerate() {
+                    if slot.item_id.is_some()
+                        && slot.local_mode == LocalMode::Demand
+                        && has_peer_match(directory, station_index, slot_index)?
+                    {
+                        waiting += 1.0;
+                    }
+                }
+                let installed = drone_capacity(station);
+                let busy = route_ledger.local_busy(station_index);
+                let fleet_load = if installed > 0.0 {
+                    busy / installed
+                } else if waiting > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let congestion = fleet_load
+                    .max(if waiting > 0.0 && busy == 0.0 {
+                        0.35
+                    } else {
+                        0.0
+                    })
+                    .clamp(0.0, 1.0);
+                Ok(Some(CongestionUpdate {
+                    station_index,
+                    congestion: rounded(congestion, 3),
+                    active_progress: route_ledger.active_local_progress(station_index),
+                }))
+            },
+        )?
     };
-    apply_congestion_updates(entities, updates)
+    apply_congestion_updates(entities, updates)?;
+    let mut next_reset = route_ledger.active_local_station_indices();
+    next_reset.retain(|index| directory.station_indices.binary_search(index).is_ok());
+    directory.replace_local_congestion_reset_station_indices(next_reset);
+    Ok(scan)
 }
 
 #[cfg(test)]
@@ -2167,6 +2330,70 @@ mod tests {
             serde_json::to_vec(&sparse).unwrap(),
             serde_json::to_vec(&full).unwrap(),
         );
+    }
+
+    #[test]
+    fn sparse_congestion_scans_waiting_and_route_activity_then_clears_once() {
+        let count = 256;
+        let mut entities = (0..count)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        entities[113]["stationRoutes"] =
+            Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        directory.replace_local_congestion_reset_station_indices(Vec::new());
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+
+        let full_updates = plan_congestion_updates(
+            &DeterministicRuntime::for_test(4),
+            &entities,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        let mut expected = entities.clone();
+        apply_congestion_updates(&mut expected, full_updates).unwrap();
+        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(scan.selected_station_rows, 3);
+        assert_eq!(scan.total_station_rows, count);
+        assert!(!scan.dense_fallback);
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(directory.local_congestion_reset_station_indices(), [0, 113]);
+
+        // A completed route leaves its former endpoints in the reset set for
+        // exactly one more step; after their progress is cleared, only the
+        // statically waiting demand remains observable work.
+        entities[113]["stationRoutes"] = Value::Array(Vec::new());
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(scan.selected_station_rows, 3);
+        assert!(
+            directory
+                .local_congestion_reset_station_indices()
+                .is_empty()
+        );
+        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(scan.selected_station_rows, 1);
+        assert_eq!(entities[0]["stationProgress"], Value::from(0.0));
+        assert_eq!(entities[113]["stationProgress"], Value::from(0.0));
     }
 
     fn local_route(

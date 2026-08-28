@@ -21,6 +21,7 @@ import {
   createWebFactoryReadModels,
   createWebFactoryRunStatusReadModel,
   createWebFactorySelectionToolbarReadModel,
+  createWebFactoryViewportReadModel,
 } from "./webFactoryReadModelAdapter";
 
 const asItemId = (id: string) => id as ItemId;
@@ -441,5 +442,36 @@ describe("Web/PWA factory read-model adapter", () => {
       totalCount: FACTORY_READ_MODEL_LIMITS.constructionJobRows + 7,
       truncated: true,
     });
+  });
+
+  it("matches viewport-v2 visible, pinned, cross-boundary, and world-bound semantics", () => {
+    const state = createInitialState();
+    const base = state.entities[0];
+    state.entities = [
+      { ...makeEntity(base, "entity-a"), position: { x: 0, y: 0 } },
+      { ...makeEntity(base, "entity-b"), position: { x: 10, y: 10 } },
+      { ...makeEntity(base, "entity-c"), position: { x: 100, y: 100 } },
+    ];
+    state.belts = [
+      makeBelt("belt-inside", "entity-a", "entity-b"),
+      makeBelt("belt-cross-boundary", "entity-b", "entity-c"),
+      makeBelt("belt-pinned", "entity-c", "entity-c"),
+    ];
+
+    const model = createWebFactoryViewportReadModel(state, {
+      planetId: "home",
+      bounds: { minX: -1, minY: -1, maxX: 20, maxY: 20 },
+      pinnedEntityIds: ["missing-entity"],
+      pinnedBeltIds: ["belt-pinned", "missing-belt"],
+    });
+
+    expect(model.viewportTotals).toEqual({ entities: 2, belts: 2 });
+    expect(model.entities.map((row) => row.id)).toEqual(["entity-a", "entity-b"]);
+    expect(model.belts.map((row) => row.id)).toEqual([
+      "belt-inside", "belt-cross-boundary", "belt-pinned",
+    ]);
+    expect(model.pinnedEntityIds).toEqual([]);
+    expect(model.pinnedBeltIds).toEqual(["belt-pinned"]);
+    expect(model.worldBounds).toEqual({ minX: 0, minY: 0, maxX: 100, maxY: 100 });
   });
 });

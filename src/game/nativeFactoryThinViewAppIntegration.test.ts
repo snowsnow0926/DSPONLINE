@@ -189,4 +189,29 @@ describe("factory thin-view App consumption", () => {
     expect(panels).toMatch(/onRecipeChange\(machines\.map\(\(entity\) => entity\.id\)/);
     expect(panels).toMatch(/onInstallSprayCoater\(sprayEligible\.map\(\(entity\) => entity\.id\)/);
   });
+
+  it("feeds the minimap only from a proven complete viewport while keeping canvas commands on GameState", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const store = readFileSync(resolve("src/game/nativeFactoryThinViewStore.ts"), "utf8");
+    const minimap = readFileSync(resolve("src/components/CanvasMiniMap.tsx"), "utf8");
+
+    expect(store).toMatch(/readCompleteViewportProjection/);
+    expect(store).toMatch(/let completed = false/);
+    expect(store).toMatch(/if \(!completed \|\| !first/);
+    expect(app).toMatch(/createWebFactoryViewportReadModel\(game/);
+    expect(app).toMatch(/selectFactoryViewportReadModel\([\s\S]*?nativeFactoryThinViewSnapshot[\s\S]*?factoryThinViewExpectedRevision/);
+    expect(app).toMatch(/projectionEnabled:\s*nativeFactoryThinViewActive/);
+    expect(app).toMatch(/factoryViewportProvesWholePlanet\(factoryViewportReadModel\)/);
+    expect(app).toMatch(/<CanvasMiniMap[\s\S]*?nodes=\{factoryMiniMapEntities\}[\s\S]*?worldBounds=\{/);
+    expect(minimap).toMatch(/data-projection-source=\{projectionSource/);
+    expect(minimap).toMatch(/projectCanvasMiniMap\(nodes, currentViewport, canvasWidth, canvasHeight, worldBounds\)/);
+
+    // The native viewport is display-only. ReactFlow, belt hit-testing and all
+    // topology mutations still consume the original Web-derived models.
+    expect(app).toMatch(/<ReactFlow\s+[\s\S]*?nodes=\{renderedFlowNodes\}[\s\S]*?edges=\{renderedFlowEdges\}/);
+    expect(app).toMatch(/<CanvasBeltLayer[\s\S]*?belts=\{canvasTopology\.belts\}/);
+    expect(app).toMatch(/onNodesChange=\{handleNodesChange\}/);
+    expect(app).toMatch(/onConnect=\{onConnect\}/);
+    expect(app).toMatch(/onNodeDragStop=\{handleFactoryNodeDragStop\}/);
+  });
 });

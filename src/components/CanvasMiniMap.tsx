@@ -2,8 +2,15 @@ import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef }
 import type { CanvasEntityTopology } from "../game/canvasTopology";
 import type { CanvasViewport } from "../game/types";
 
+type CanvasMiniMapNode = Pick<CanvasEntityTopology, "id" | "kind" | "x" | "y">;
+
 interface CanvasMiniMapProps {
-  nodes: readonly CanvasEntityTopology[];
+  nodes: readonly CanvasMiniMapNode[];
+  worldBounds?: Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>;
+  projectionSource?: "web-game-state" | "native-core";
+  projectionRevision?: number | null;
+  planetEntityCount?: number;
+  planetBeltCount?: number;
   viewport: CanvasViewport;
   canvasWidth: number;
   canvasHeight: number;
@@ -32,7 +39,7 @@ const MINIMAP_GESTURE_FRAME_MS = 80;
 const NODE_WIDTH = 256;
 const NODE_HEIGHT = 180;
 
-function nodeColor(kind: CanvasEntityTopology["kind"]): string {
+function nodeColor(kind: CanvasMiniMapNode["kind"]): string {
   if (kind === "vein") return "#79a27f";
   if (kind === "power") return "#e1b452";
   if (kind === "station") return "#d8794d";
@@ -42,10 +49,11 @@ function nodeColor(kind: CanvasEntityTopology["kind"]): string {
 }
 
 export function projectCanvasMiniMap(
-  nodes: readonly CanvasEntityTopology[],
+  nodes: readonly CanvasMiniMapNode[],
   viewport: CanvasViewport,
   canvasWidth: number,
   canvasHeight: number,
+  worldBounds?: Readonly<{ minX: number; minY: number; maxX: number; maxY: number }>,
 ): MiniMapProjection {
   const visibleLeft = -viewport.x / Math.max(0.01, viewport.zoom);
   const visibleTop = -viewport.y / Math.max(0.01, viewport.zoom);
@@ -55,11 +63,18 @@ export function projectCanvasMiniMap(
   let minY = visibleTop;
   let maxX = visibleRight;
   let maxY = visibleBottom;
-  for (const node of nodes) {
-    minX = Math.min(minX, node.x);
-    minY = Math.min(minY, node.y);
-    maxX = Math.max(maxX, node.x + NODE_WIDTH);
-    maxY = Math.max(maxY, node.y + NODE_HEIGHT);
+  if (worldBounds) {
+    minX = Math.min(minX, worldBounds.minX);
+    minY = Math.min(minY, worldBounds.minY);
+    maxX = Math.max(maxX, worldBounds.maxX + NODE_WIDTH);
+    maxY = Math.max(maxY, worldBounds.maxY + NODE_HEIGHT);
+  } else {
+    for (const node of nodes) {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + NODE_WIDTH);
+      maxY = Math.max(maxY, node.y + NODE_HEIGHT);
+    }
   }
   const worldWidth = Math.max(1, maxX - minX);
   const worldHeight = Math.max(1, maxY - minY);
@@ -77,12 +92,26 @@ export function projectCanvasMiniMap(
 }
 
 /** Extreme-mode minimap that redraws only from the low-frequency topology snapshot. */
-export const CanvasMiniMap = memo(forwardRef<CanvasMiniMapHandle, CanvasMiniMapProps>(function CanvasMiniMap({ nodes, viewport, canvasWidth, canvasHeight, lightTheme, onCenter, onZoom, onUnavailable }, ref) {
+export const CanvasMiniMap = memo(forwardRef<CanvasMiniMapHandle, CanvasMiniMapProps>(function CanvasMiniMap({
+  nodes,
+  worldBounds,
+  projectionSource,
+  projectionRevision,
+  planetEntityCount,
+  planetBeltCount,
+  viewport,
+  canvasWidth,
+  canvasHeight,
+  lightTheme,
+  onCenter,
+  onZoom,
+  onUnavailable,
+}, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const draggingRef = useRef(false);
   const drawCountRef = useRef(0);
   const viewportRef = useRef(viewport);
-  const projectionRef = useRef(projectCanvasMiniMap(nodes, viewport, canvasWidth, canvasHeight));
+  const projectionRef = useRef(projectCanvasMiniMap(nodes, viewport, canvasWidth, canvasHeight, worldBounds));
   const drawFrameRef = useRef<number | null>(null);
   const drawTimerRef = useRef<number | null>(null);
   const lastDrawAtRef = useRef(0);
@@ -93,7 +122,7 @@ export const CanvasMiniMap = memo(forwardRef<CanvasMiniMapHandle, CanvasMiniMapP
     const canvas = canvasRef.current;
     if (!canvas) return;
     const currentViewport = viewportRef.current;
-    const projection = projectCanvasMiniMap(nodes, currentViewport, canvasWidth, canvasHeight);
+    const projection = projectCanvasMiniMap(nodes, currentViewport, canvasWidth, canvasHeight, worldBounds);
     projectionRef.current = projection;
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     canvas.width = Math.ceil(MINIMAP_WIDTH * dpr);
@@ -128,7 +157,7 @@ export const CanvasMiniMap = memo(forwardRef<CanvasMiniMapHandle, CanvasMiniMapP
     const maskHeight = canvasHeight / zoom * projection.scale;
     context.fillRect(maskX, maskY, maskWidth, maskHeight);
     context.strokeRect(maskX, maskY, maskWidth, maskHeight);
-  }, [canvasHeight, canvasWidth, lightTheme, nodes, onUnavailable]);
+  }, [canvasHeight, canvasWidth, lightTheme, nodes, onUnavailable, worldBounds]);
 
   const scheduleDraw = useCallback(() => {
     if (drawFrameRef.current != null || drawTimerRef.current != null) return;
@@ -190,7 +219,14 @@ export const CanvasMiniMap = memo(forwardRef<CanvasMiniMapHandle, CanvasMiniMapP
     );
   };
 
-  return <div className="react-flow__panel bottom right react-flow__minimap canvas-minimap-snapshot nodrag nopan" data-snapshot-nodes={nodes.length}>
+  return <div
+    className="react-flow__panel bottom right react-flow__minimap canvas-minimap-snapshot nodrag nopan"
+    data-snapshot-nodes={nodes.length}
+    data-projection-source={projectionSource ?? "web-game-state"}
+    data-projection-revision={projectionRevision ?? ""}
+    data-planet-entity-count={planetEntityCount ?? nodes.length}
+    data-planet-belt-count={planetBeltCount ?? ""}
+  >
     <canvas
       ref={canvasRef}
       width={MINIMAP_WIDTH}

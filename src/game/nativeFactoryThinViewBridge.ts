@@ -10,6 +10,10 @@ import type {
   FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
+  FactoryViewportBeltReadModel,
+  FactoryViewportBoundsReadModel,
+  FactoryViewportEntityReadModel,
+  FactoryViewportReadModel,
   ItemQuantityReadModel,
   PlanetNavigationReadModel,
   PlanetNavigationRowReadModel,
@@ -64,6 +68,14 @@ export interface FactoryInspectorNativeBinding {
   readonly requestedBeltIds: readonly string[];
   /** True when either original request exceeded its native row cap. */
   readonly requestTruncated: boolean;
+}
+
+export interface FactoryViewportNativeBinding {
+  readonly bounds: FactoryViewportBoundsReadModel;
+  readonly requestedPinnedEntityIds: readonly string[];
+  readonly requestedPinnedBeltIds: readonly string[];
+  readonly requestTruncated: boolean;
+  readonly projectionEnabled: boolean;
 }
 
 function hasUniqueIds(ids: readonly string[]): boolean {
@@ -441,6 +453,188 @@ export function selectFactoryConstructionWorkspaceReadModel(
     source: "native-core",
     revision: expectedRevision,
   });
+}
+
+function sameViewportBounds(
+  left: FactoryViewportBoundsReadModel,
+  right: FactoryViewportBoundsReadModel,
+): boolean {
+  return left.minX === right.minX && left.minY === right.minY &&
+    left.maxX === right.maxX && left.maxY === right.maxY;
+}
+
+function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && hasUniqueIds(left) && hasUniqueIds(right) &&
+    left.every((id) => right.includes(id));
+}
+
+function nativeViewportEntity(
+  row: NativeFactoryThinViewSnapshot["frame"] extends infer _Frame
+    ? NonNullable<NativeFactoryThinViewSnapshot["frame"]>["viewport"]["entities"][number]
+    : never,
+): FactoryViewportEntityReadModel | null {
+  if (!row.kind || !["vein", "machine", "power", "storage", "splitter", "station"].includes(row.kind) ||
+    !row.position || !Number.isFinite(row.position.x) || !Number.isFinite(row.position.y)) return null;
+  return {
+    id: row.id,
+    kind: row.kind as FactoryViewportEntityReadModel["kind"],
+    buildingId: row.buildingId ?? null,
+    x: row.position.x,
+    y: row.position.y,
+  };
+}
+
+function nativeViewportBelt(
+  row: NonNullable<NativeFactoryThinViewSnapshot["frame"]>["viewport"]["belts"][number],
+): FactoryViewportBeltReadModel | null {
+  if (!row.planetId || !row.source || !row.target || !row.itemId ||
+    typeof row.lanes !== "number" || !Number.isSafeInteger(row.lanes) ||
+    typeof row.tier !== "number" || !Number.isSafeInteger(row.tier) ||
+    typeof row.priority !== "number" || !Number.isSafeInteger(row.priority)) return null;
+  const targetPortIndex = row.targetPortIndex ?? null;
+  const routeMode = row.routeMode ?? "auto";
+  const routeOffsetY = row.routeOffsetY ?? 0;
+  const stackSize = row.stackSize ?? 1;
+  if (targetPortIndex !== null && !Number.isSafeInteger(targetPortIndex) ||
+    !["bezier", "auto", "upper", "lower", "manual"].includes(routeMode) ||
+    !Number.isFinite(routeOffsetY) || !Number.isSafeInteger(stackSize)) return null;
+  return {
+    id: row.id,
+    planetId: row.planetId,
+    source: row.source,
+    target: row.target,
+    itemId: row.itemId,
+    lanes: row.lanes,
+    tier: row.tier,
+    stackSize,
+    priority: row.priority,
+    targetPortIndex,
+    routeMode: routeMode as FactoryViewportBeltReadModel["routeMode"],
+    routeOffsetY,
+  };
+}
+
+function sameViewportEntity(
+  web: FactoryViewportEntityReadModel,
+  native: FactoryViewportEntityReadModel,
+): boolean {
+  return native.id === web.id && native.kind === web.kind && native.buildingId === web.buildingId &&
+    native.x === web.x && native.y === web.y;
+}
+
+function sameViewportBelt(
+  web: FactoryViewportBeltReadModel,
+  native: FactoryViewportBeltReadModel,
+): boolean {
+  return native.id === web.id && native.planetId === web.planetId && native.source === web.source &&
+    native.target === web.target && native.itemId === web.itemId && native.lanes === web.lanes &&
+    native.tier === web.tier && native.stackSize === web.stackSize && native.priority === web.priority &&
+    native.targetPortIndex === web.targetPortIndex && native.routeMode === web.routeMode &&
+    native.routeOffsetY === web.routeOffsetY;
+}
+
+/**
+ * Selects a fully paged viewport-v2 topology only after proving the exact
+ * revision, planet, bounds, pins, aggregate counts and every rendered topology
+ * field against the current Web model. This model is display-only and grants
+ * no selection, dragging, connection or mutation authority.
+ */
+export function selectFactoryViewportReadModel(
+  web: FactoryViewportReadModel,
+  native: NativeFactoryThinViewSnapshot,
+  expectedRevision: number,
+  binding: FactoryViewportNativeBinding,
+): FactoryViewportReadModel {
+  if (web.source !== "web-game-state" || web.revision !== null || !binding.projectionEnabled || binding.requestTruncated ||
+    !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 ||
+    binding.requestedPinnedEntityIds.length > 32 || binding.requestedPinnedBeltIds.length > 64 ||
+    !sameIdSet(web.pinnedEntityIds, binding.requestedPinnedEntityIds) ||
+    !sameIdSet(web.pinnedBeltIds, binding.requestedPinnedBeltIds) ||
+    !sameViewportBounds(web.bounds, binding.bounds)) return web;
+  const frame = native.status === "ready" && native.requestedRevision === expectedRevision
+    ? native.frame
+    : null;
+  const model = frame?.viewport;
+  const shell = frame?.factory.shell;
+  if (!frame || frame.revision !== expectedRevision || frame.planetId !== web.planetId ||
+    !model || model.schemaVersion !== 2 || model.projectionType !== "viewport-v2" ||
+    model.revision !== expectedRevision || model.planetId !== web.planetId ||
+    model.nextEntityCursor !== null || model.nextBeltCursor !== null ||
+    !shell || shell.source !== "native-core" || shell.activePlanetId !== web.planetId ||
+    !sameViewportBounds(model.bounds, binding.bounds) ||
+    !sameIdSet(model.pinnedEntityIds, binding.requestedPinnedEntityIds) ||
+    !sameIdSet(model.pinnedBeltIds, binding.requestedPinnedBeltIds) ||
+    model.planetTotals.entities !== web.planetTotals.entities ||
+    model.planetTotals.belts !== web.planetTotals.belts ||
+    model.viewportTotals.entities !== web.viewportTotals.entities ||
+    model.viewportTotals.belts !== web.viewportTotals.belts ||
+    model.minimap.entityCount !== web.planetTotals.entities ||
+    model.minimap.beltCount !== web.planetTotals.belts ||
+    model.broadQueryFallback !== web.broadQueryFallback ||
+    !sameViewportBounds(model.worldBounds, web.worldBounds) ||
+    !sameViewportBounds(model.minimap.bounds, web.worldBounds) ||
+    model.entities.length !== web.entities.length || model.belts.length !== web.belts.length) return web;
+
+  const nativeEntities = new Map<string, FactoryViewportEntityReadModel>();
+  for (const row of model.entities) {
+    const normalized = nativeViewportEntity(row);
+    if (!normalized || row.planetId !== web.planetId || nativeEntities.has(normalized.id)) return web;
+    nativeEntities.set(normalized.id, normalized);
+  }
+  const nativeBelts = new Map<string, FactoryViewportBeltReadModel>();
+  for (const row of model.belts) {
+    const normalized = nativeViewportBelt(row);
+    if (!normalized || nativeBelts.has(normalized.id)) return web;
+    nativeBelts.set(normalized.id, normalized);
+  }
+  const entities = web.entities.map((row) => nativeEntities.get(row.id));
+  const belts = web.belts.map((row) => nativeBelts.get(row.id));
+  if (entities.some((row, index) => !row || !sameViewportEntity(web.entities[index], row)) ||
+    belts.some((row, index) => !row || !sameViewportBelt(web.belts[index], row))) return web;
+
+  return Object.freeze({
+    schema: web.schema,
+    source: "native-core",
+    revision: expectedRevision,
+    planetId: model.planetId,
+    bounds: model.bounds,
+    pinnedEntityIds: model.pinnedEntityIds,
+    pinnedBeltIds: model.pinnedBeltIds,
+    planetTotals: model.planetTotals,
+    viewportTotals: model.viewportTotals,
+    worldBounds: model.worldBounds,
+    entities: entities as FactoryViewportEntityReadModel[],
+    belts: belts as FactoryViewportBeltReadModel[],
+    broadQueryFallback: model.broadQueryFallback,
+  });
+}
+
+/**
+ * A viewport may replace the minimap's full-planet entity source only when the
+ * aggregate itself proves that no entity or belt was omitted. Merely reaching
+ * a null cursor is insufficient: pinned rows and independent cursors can make
+ * a syntactically complete page set semantically partial.
+ */
+export function factoryViewportProvesWholePlanet(
+  model: FactoryViewportReadModel,
+): boolean {
+  if (model.source !== "native-core" || model.revision === null ||
+    model.viewportTotals.entities !== model.planetTotals.entities ||
+    model.viewportTotals.belts !== model.planetTotals.belts ||
+    model.entities.length !== model.planetTotals.entities ||
+    model.belts.length !== model.planetTotals.belts) return false;
+  const entityIds = new Set<string>();
+  for (const entity of model.entities) {
+    if (entityIds.has(entity.id) || entity.x < model.bounds.minX || entity.x > model.bounds.maxX ||
+      entity.y < model.bounds.minY || entity.y > model.bounds.maxY) return false;
+    entityIds.add(entity.id);
+  }
+  const beltIds = new Set<string>();
+  for (const belt of model.belts) {
+    if (beltIds.has(belt.id) || !entityIds.has(belt.source) || !entityIds.has(belt.target)) return false;
+    beltIds.add(belt.id);
+  }
+  return true;
 }
 
 function samePlanetRow(

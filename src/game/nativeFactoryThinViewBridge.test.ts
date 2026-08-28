@@ -8,12 +8,14 @@ import type {
   FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
   FactorySelectionToolbarReadModel,
+  FactoryViewportReadModel,
   PlanetNavigationReadModel,
   SelectedBeltReadModel,
   SelectedEntityReadModel,
 } from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 import {
+  factoryViewportProvesWholePlanet,
   selectFactoryConstructionHeadlineReadModel,
   selectFactoryConstructionWorkspaceReadModel,
   selectFactoryInspectorSummaryReadModel,
@@ -21,6 +23,7 @@ import {
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
   selectFactorySelectionToolbarReadModel,
+  selectFactoryViewportReadModel,
 } from "./nativeFactoryThinViewBridge";
 
 const web: FactoryRunStatusReadModel = {
@@ -986,5 +989,161 @@ describe("native factory thin-view planet navigation bridge", () => {
       },
     };
     expect(selectFactoryPlanetNavigationReadModel(navigationWeb, wrongPower, 12)).toBe(navigationWeb);
+  });
+});
+
+const viewportBounds = { minX: 0, minY: 0, maxX: 10, maxY: 10 } as const;
+const viewportWeb: FactoryViewportReadModel = {
+  schema: "factory-viewport-read-model-v1",
+  source: "web-game-state",
+  revision: null,
+  planetId: "home",
+  bounds: viewportBounds,
+  pinnedEntityIds: [],
+  pinnedBeltIds: [],
+  planetTotals: { entities: 2, belts: 1 },
+  viewportTotals: { entities: 2, belts: 1 },
+  worldBounds: { minX: 1, minY: 1, maxX: 2, maxY: 2 },
+  entities: [
+    { id: "entity-a", kind: "vein", buildingId: null, x: 1, y: 1 },
+    { id: "entity-b", kind: "machine", buildingId: "smelter_mk1", x: 2, y: 2 },
+  ],
+  belts: [{
+    id: "belt-a",
+    planetId: "home",
+    source: "entity-a",
+    target: "entity-b",
+    itemId: "iron_ore",
+    lanes: 1,
+    tier: 1,
+    stackSize: 1,
+    priority: 0,
+    targetPortIndex: null,
+    routeMode: "auto",
+    routeOffsetY: 0,
+  }],
+  broadQueryFallback: false,
+};
+
+function viewportSnapshot(revision = 41): NativeFactoryThinViewSnapshot {
+  const current = snapshot(revision);
+  return {
+    ...current,
+    frame: {
+      ...current.frame!,
+      viewport: {
+        ...current.frame!.viewport,
+        revision,
+        bounds: viewportBounds,
+        entities: [
+          { id: "entity-a", kind: "vein", planetId: "home" as never, position: { x: 1, y: 1 } },
+          { id: "entity-b", kind: "machine", planetId: "home" as never, buildingId: "smelter_mk1" as never, position: { x: 2, y: 2 } },
+        ],
+        belts: [{
+          id: "belt-a",
+          planetId: "home" as never,
+          source: "entity-a",
+          target: "entity-b",
+          itemId: "iron_ore" as never,
+          lanes: 1,
+          tier: 1,
+          stackSize: 1,
+          priority: 0,
+          routeMode: "auto",
+          routeOffsetY: 0,
+        }],
+        planetTotals: { entities: 2, belts: 1 },
+        viewportTotals: { entities: 2, belts: 1 },
+        worldBounds: viewportWeb.worldBounds,
+        minimap: {
+          ...current.frame!.viewport.minimap,
+          bounds: viewportWeb.worldBounds,
+          entityCount: 2,
+          beltCount: 1,
+        },
+      },
+    },
+  };
+}
+
+const viewportBinding = {
+  bounds: viewportBounds,
+  requestedPinnedEntityIds: [],
+  requestedPinnedBeltIds: [],
+  requestTruncated: false,
+  projectionEnabled: true,
+} as const;
+
+describe("native factory viewport-v2 bridge", () => {
+  it("selects exact complete topology and proves a full-planet minimap", () => {
+    const selected = selectFactoryViewportReadModel(viewportWeb, viewportSnapshot(), 41, viewportBinding);
+
+    expect(selected.source).toBe("native-core");
+    expect(selected.revision).toBe(41);
+    expect(selected.entities).toEqual(viewportWeb.entities);
+    expect(selected.belts).toEqual(viewportWeb.belts);
+    expect(factoryViewportProvesWholePlanet(selected)).toBe(true);
+  });
+
+  it("fails closed for stale, truncated, unclosed, wrong-bounds, or drifted rows", () => {
+    expect(selectFactoryViewportReadModel(viewportWeb, viewportSnapshot(40), 41, viewportBinding)).toBe(viewportWeb);
+    expect(selectFactoryViewportReadModel(viewportWeb, viewportSnapshot(), 41, {
+      ...viewportBinding,
+      requestTruncated: true,
+    })).toBe(viewportWeb);
+    expect(selectFactoryViewportReadModel(viewportWeb, viewportSnapshot(), 41, {
+      ...viewportBinding,
+      projectionEnabled: false,
+    })).toBe(viewportWeb);
+
+    const unclosed = viewportSnapshot();
+    unclosed.frame!.viewport.nextBeltCursor = 1;
+    expect(selectFactoryViewportReadModel(viewportWeb, unclosed, 41, viewportBinding)).toBe(viewportWeb);
+
+    const wrongBounds = viewportSnapshot();
+    wrongBounds.frame!.viewport.bounds = { ...viewportBounds, maxX: 11 };
+    expect(selectFactoryViewportReadModel(viewportWeb, wrongBounds, 41, viewportBinding)).toBe(viewportWeb);
+
+    const wrongPlanet = viewportSnapshot();
+    wrongPlanet.frame!.viewport.planetId = "other";
+    expect(selectFactoryViewportReadModel(viewportWeb, wrongPlanet, 41, viewportBinding)).toBe(viewportWeb);
+    expect(selectFactoryViewportReadModel(viewportWeb, viewportSnapshot(), 41, {
+      ...viewportBinding,
+      requestedPinnedEntityIds: ["entity-a"],
+    })).toBe(viewportWeb);
+
+    const drifted = viewportSnapshot();
+    drifted.frame!.viewport.entities = drifted.frame!.viewport.entities.map((row) =>
+      row.id === "entity-b" ? { ...row, position: { x: 3, y: 2 } } : row);
+    expect(selectFactoryViewportReadModel(viewportWeb, drifted, 41, viewportBinding)).toBe(viewportWeb);
+  });
+
+  it("does not claim a partial or cross-boundary projection is a whole planet", () => {
+    const partial: FactoryViewportReadModel = {
+      ...viewportWeb,
+      source: "native-core",
+      revision: 41,
+      viewportTotals: { entities: 1, belts: 1 },
+      entities: [viewportWeb.entities[0]],
+    };
+    expect(factoryViewportProvesWholePlanet(partial)).toBe(false);
+
+    const pinnedPartial: FactoryViewportReadModel = {
+      ...viewportWeb,
+      source: "native-core",
+      revision: 41,
+      pinnedEntityIds: ["entity-b"],
+      viewportTotals: { entities: 1, belts: 1 },
+    };
+    expect(factoryViewportProvesWholePlanet(pinnedPartial)).toBe(false);
+
+    const missingEndpoint: FactoryViewportReadModel = {
+      ...viewportWeb,
+      source: "native-core",
+      revision: 41,
+      entities: [viewportWeb.entities[0], { ...viewportWeb.entities[1], id: "entity-c" }],
+    };
+    expect(factoryViewportProvesWholePlanet(missingEndpoint)).toBe(false);
+    expect(factoryViewportProvesWholePlanet(viewportWeb)).toBe(false);
   });
 });

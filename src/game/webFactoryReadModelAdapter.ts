@@ -19,6 +19,9 @@ import {
   type FactorySelectionToolbarReadModel,
   type FactorySelectionReadModel,
   type FactoryShellReadModel,
+  type FactoryViewportBeltReadModel,
+  type FactoryViewportReadModel,
+  type FactoryViewportReadModelRequest,
   type ItemQuantityReadModel,
   type PlanetNavigationReadModel,
   type PlanetNavigationRowReadModel,
@@ -471,6 +474,94 @@ export function createWebFactoryConstructionWorkspaceReadModel(
     ...createConstructionSummaryReadModel(state),
     source: "web-game-state",
     revision: null,
+  };
+}
+
+function viewportPointInside(
+  position: Readonly<{ x: number; y: number }>,
+  bounds: FactoryViewportReadModelRequest["bounds"],
+): boolean {
+  return position.x >= bounds.minX && position.x <= bounds.maxX &&
+    position.y >= bounds.minY && position.y <= bounds.maxY;
+}
+
+function viewportWorldBounds(
+  entities: readonly GameState["entities"][number][],
+): FactoryViewportReadModel["worldBounds"] {
+  if (entities.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  let minX = entities[0].position.x;
+  let minY = entities[0].position.y;
+  let maxX = minX;
+  let maxY = minY;
+  for (let index = 1; index < entities.length; index += 1) {
+    const position = entities[index].position;
+    minX = Math.min(minX, position.x);
+    minY = Math.min(minY, position.y);
+    maxX = Math.max(maxX, position.x);
+    maxY = Math.max(maxY, position.y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function viewportBeltRow(belt: GameState["belts"][number]): FactoryViewportBeltReadModel {
+  return {
+    id: belt.id,
+    planetId: belt.planetId,
+    source: belt.source,
+    target: belt.target,
+    itemId: belt.itemId,
+    lanes: belt.lanes,
+    tier: belt.tier,
+    stackSize: belt.stackSize ?? 1,
+    priority: belt.priority,
+    targetPortIndex: belt.targetPortIndex ?? null,
+    routeMode: belt.routeMode ?? "auto",
+    routeOffsetY: belt.routeOffsetY ?? 0,
+  };
+}
+
+/** Complete Web fallback and same-revision semantic oracle for viewport-v2. */
+export function createWebFactoryViewportReadModel(
+  state: GameState,
+  request: FactoryViewportReadModelRequest,
+): FactoryViewportReadModel {
+  const planetEntities = state.entities.filter((entity) => entity.planetId === request.planetId);
+  const planetBelts = state.belts.filter((belt) => belt.planetId === request.planetId);
+  const entityById = new Map(planetEntities.map((entity) => [entity.id, entity] as const));
+  const beltById = new Map(planetBelts.map((belt) => [belt.id, belt] as const));
+  const visibleEntityIds = new Set(planetEntities
+    .filter((entity) => viewportPointInside(entity.position, request.bounds))
+    .map((entity) => entity.id));
+  const pinnedEntityIds = request.pinnedEntityIds.filter((id) => entityById.has(id));
+  const pinnedBeltIds = request.pinnedBeltIds.filter((id) => beltById.has(id));
+  const beltSourceEntityIds = new Set([...visibleEntityIds, ...pinnedEntityIds]);
+  const ordinaryBelts = planetBelts.filter((belt) =>
+    beltSourceEntityIds.has(belt.source) || beltSourceEntityIds.has(belt.target));
+  const ordinaryBeltIds = new Set(ordinaryBelts.map((belt) => belt.id));
+  return {
+    schema: "factory-viewport-read-model-v1",
+    source: "web-game-state",
+    revision: null,
+    planetId: request.planetId,
+    bounds: { ...request.bounds },
+    pinnedEntityIds,
+    pinnedBeltIds,
+    planetTotals: { entities: planetEntities.length, belts: planetBelts.length },
+    viewportTotals: { entities: visibleEntityIds.size, belts: ordinaryBelts.length },
+    worldBounds: viewportWorldBounds(planetEntities),
+    entities: planetEntities
+      .filter((entity) => visibleEntityIds.has(entity.id) || pinnedEntityIds.includes(entity.id))
+      .map((entity) => ({
+        id: entity.id,
+        kind: entity.kind,
+        buildingId: entity.buildingId ?? null,
+        x: entity.position.x,
+        y: entity.position.y,
+      })),
+    belts: planetBelts
+      .filter((belt) => ordinaryBeltIds.has(belt.id) || pinnedBeltIds.includes(belt.id))
+      .map(viewportBeltRow),
+    broadQueryFallback: false,
   };
 }
 

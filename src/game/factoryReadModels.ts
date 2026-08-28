@@ -236,6 +236,64 @@ export interface FactoryConstructionWorkspaceReadModel extends ConstructionSumma
   readonly revision: number | null;
 }
 
+export interface FactoryViewportBoundsReadModel {
+  readonly minX: number;
+  readonly minY: number;
+  readonly maxX: number;
+  readonly maxY: number;
+}
+
+export interface FactoryViewportEntityReadModel {
+  readonly id: string;
+  readonly kind: "vein" | "machine" | "power" | "storage" | "splitter" | "station";
+  readonly buildingId: string | null;
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface FactoryViewportBeltReadModel {
+  readonly id: string;
+  readonly planetId: string;
+  readonly source: string;
+  readonly target: string;
+  readonly itemId: string;
+  readonly lanes: number;
+  readonly tier: number;
+  readonly stackSize: number;
+  readonly priority: number;
+  readonly targetPortIndex: number | null;
+  readonly routeMode: "bezier" | "auto" | "upper" | "lower" | "manual";
+  readonly routeOffsetY: number;
+}
+
+/**
+ * Renderer-only, fully paged viewport topology. It is never a command model:
+ * selection, dragging, connection and mutation eligibility remain GameState
+ * responsibilities even when these read-only rows come from native-core.
+ */
+export interface FactoryViewportReadModel {
+  readonly schema: "factory-viewport-read-model-v1";
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly planetId: string;
+  readonly bounds: FactoryViewportBoundsReadModel;
+  readonly pinnedEntityIds: readonly string[];
+  readonly pinnedBeltIds: readonly string[];
+  readonly planetTotals: Readonly<{ entities: number; belts: number }>;
+  readonly viewportTotals: Readonly<{ entities: number; belts: number }>;
+  readonly worldBounds: FactoryViewportBoundsReadModel;
+  readonly entities: readonly FactoryViewportEntityReadModel[];
+  readonly belts: readonly FactoryViewportBeltReadModel[];
+  readonly broadQueryFallback: boolean;
+}
+
+export interface FactoryViewportReadModelRequest {
+  readonly planetId: string;
+  readonly bounds: FactoryViewportBoundsReadModel;
+  readonly pinnedEntityIds: readonly string[];
+  readonly pinnedBeltIds: readonly string[];
+}
+
 export interface FactoryReadModelBundle {
   readonly shell: FactoryShellReadModel;
   readonly planetNavigation: PlanetNavigationReadModel;

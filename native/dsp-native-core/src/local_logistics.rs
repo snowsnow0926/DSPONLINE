@@ -778,6 +778,107 @@ pub(crate) fn transfer_buffers(
     Ok(())
 }
 
+fn plan_ready_station_indices_with<F>(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    ledger: &Ledger,
+    cargo_capacity: f64,
+    station_capacity: F,
+) -> anyhow::Result<Vec<Option<usize>>>
+where
+    F: Fn(usize, &Map<String, Value>, &Slot) -> anyhow::Result<f64> + Send + Sync,
+{
+    runtime.indexed_try_map(
+        &directory.station_indices,
+        |_, station_index| -> anyhow::Result<Option<usize>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                return Ok(None);
+            }
+            if ledger.active_local_stations.contains(&station_index) {
+                return Ok(Some(station_index));
+            }
+            let station_slots = directory
+                .station_slots
+                .get(&station_index)
+                .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Storage {
+                    continue;
+                }
+                for (peer_index, peer_slot_index) in
+                    peer_matches(directory, station_index, slot_index)?
+                {
+                    let peer_slots = directory
+                        .station_slots
+                        .get(&peer_index)
+                        .ok_or_else(|| anyhow!("native local peer slots are missing"))?;
+                    let (demand_index, demand_slot, supply_index, supply_slot) =
+                        if slot.local_mode == LocalMode::Demand {
+                            (
+                                station_index,
+                                slot,
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                            )
+                        } else {
+                            (
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                                station_index,
+                                slot,
+                            )
+                        };
+                    let demand = entities[demand_index].as_object().expect("station object");
+                    let supply = entities[supply_index].as_object().expect("station object");
+                    let available = (item_amount(supply, "outputs", item_id)
+                        - supply_slot.min_stock)
+                        .max(0.0)
+                        .floor();
+                    let free = (station_capacity(demand_index, demand, demand_slot)?
+                        - item_amount(demand, "outputs", item_id)
+                        - ledger_item_amount(&ledger.in_flight, demand_index, item_id))
+                    .max(0.0)
+                    .floor();
+                    for (owner_index, owner_slot) in
+                        [(demand_index, demand_slot), (supply_index, supply_slot)]
+                    {
+                        let owner = entities[owner_index].as_object().expect("station object");
+                        let has_vehicle = installed_drones(owner)
+                            - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
+                            > 0.0;
+                        let minimum = minimum_cargo(cargo_capacity, owner_slot);
+                        if has_vehicle && available >= minimum && free >= minimum {
+                            return Ok(Some(station_index));
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        },
+    )
+}
+
+fn replay_ready_station_indices(planned: Vec<Option<usize>>) -> HashSet<usize> {
+    let mut ready = HashSet::with_capacity(planned.len());
+    // Replay in original topology order even though the public result is a
+    // set. The caller later sorts this set before power probes; retaining the
+    // historical insertion order also keeps this boundary ready for a future
+    // ordered representation without making it worker-schedule dependent.
+    for station_index in planned.into_iter().flatten() {
+        ready.insert(station_index);
+    }
+    ready
+}
+
 pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -791,80 +892,15 @@ pub(crate) fn ready_station_indices(
     }
     let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
     let buffer_limit = normalized_buffer_limit(base);
-    let cargo_capacity = cargo_capacity(base);
-    let mut ready = HashSet::new();
-    for &station_index in &directory.station_indices {
-        let station = entities[station_index].as_object().expect("station object");
-        if !matches!(
-            string_at(station, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) {
-            continue;
-        }
-        if ledger.active_local_stations.contains(&station_index) {
-            ready.insert(station_index);
-            continue;
-        }
-        let station_slots = directory
-            .station_slots
-            .get(&station_index)
-            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
-        'slots: for (slot_index, slot) in station_slots.iter().enumerate() {
-            let Some(item_id) = slot.item_id.as_deref() else {
-                continue;
-            };
-            if slot.local_mode == LocalMode::Storage {
-                continue;
-            }
-            for (peer_index, peer_slot_index) in peer_matches(directory, station_index, slot_index)?
-            {
-                let peer_slots = directory
-                    .station_slots
-                    .get(&peer_index)
-                    .ok_or_else(|| anyhow!("native local peer slots are missing"))?;
-                let (demand_index, demand_slot, supply_index, supply_slot) =
-                    if slot.local_mode == LocalMode::Demand {
-                        (
-                            station_index,
-                            slot,
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                        )
-                    } else {
-                        (
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                            station_index,
-                            slot,
-                        )
-                    };
-                let demand = entities[demand_index].as_object().expect("station object");
-                let supply = entities[supply_index].as_object().expect("station object");
-                let available = (item_amount(supply, "outputs", item_id) - supply_slot.min_stock)
-                    .max(0.0)
-                    .floor();
-                let free = (station_capacity(state, demand, demand_slot, buffer_limit)?
-                    - item_amount(demand, "outputs", item_id)
-                    - ledger_item_amount(&ledger.in_flight, demand_index, item_id))
-                .max(0.0)
-                .floor();
-                for (owner_index, owner_slot) in
-                    [(demand_index, demand_slot), (supply_index, supply_slot)]
-                {
-                    let owner = entities[owner_index].as_object().expect("station object");
-                    let has_vehicle = installed_drones(owner)
-                        - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
-                        > 0.0;
-                    let minimum = minimum_cargo(cargo_capacity, owner_slot);
-                    if has_vehicle && available >= minimum && free >= minimum {
-                        ready.insert(station_index);
-                        break 'slots;
-                    }
-                }
-            }
-        }
-    }
-    Ok(ready)
+    let planned = plan_ready_station_indices_with(
+        deterministic_runtime(),
+        entities,
+        directory,
+        &ledger,
+        cargo_capacity(base),
+        |_, demand, demand_slot| station_capacity(state, demand, demand_slot, buffer_limit),
+    )?;
+    Ok(replay_ready_station_indices(planned))
 }
 
 fn add_max_field(
@@ -1422,6 +1458,7 @@ pub(crate) fn update_congestion(
 mod tests {
     use super::*;
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     fn json_key_pointer(record: &Map<String, Value>, key: &str) -> usize {
         record
@@ -1688,5 +1725,106 @@ mod tests {
             assert_eq!(error.to_string(), "native local station slots are missing");
             assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
         }
+    }
+
+    fn run_ready_station_plan(worker_count: usize) -> (Vec<Option<usize>>, Vec<usize>) {
+        let (entities, directory, mut ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 43);
+        ledger.active_local_stations.insert(7);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            &directory,
+            &ledger,
+            25.0,
+            |demand_index, _, _| Ok(if demand_index % 2 == 0 { 100.0 } else { 10.0 }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source,
+            "ready probes must not mutate routes, inventories, or MOD fields"
+        );
+        let mut ready = replay_ready_station_indices(planned.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        (planned, ready)
+    }
+
+    #[test]
+    fn ready_station_parallel_probe_is_exact_for_1_2_4_8_workers() {
+        let expected = run_ready_station_plan(1);
+        for worker_count in [2, 4, 8] {
+            assert_eq!(run_ready_station_plan(worker_count), expected);
+        }
+
+        let (planned, ready) = expected;
+        assert_eq!(planned[0], Some(0));
+        assert_eq!(planned[1], None);
+        assert_eq!(planned[2], Some(2));
+        assert_eq!(planned[7], Some(7));
+        assert!(ready.contains(&0));
+        assert!(ready.contains(&2));
+        assert!(ready.contains(&7));
+        assert!(!ready.contains(&1));
+        assert!(!ready.contains(&9));
+    }
+
+    #[test]
+    fn ready_station_parallel_failure_uses_lowest_index_and_keeps_source_atomic() {
+        let (entities, directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 23);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let later_failure = PARALLEL_MIN_ITEMS + 11;
+
+        for worker_count in [1, 2, 4, 8] {
+            let visited_later_failure = AtomicBool::new(false);
+            let error = plan_ready_station_indices_with(
+                &DeterministicRuntime::for_test(worker_count),
+                &entities,
+                &directory,
+                &ledger,
+                25.0,
+                |demand_index, _, _| {
+                    if demand_index == later_failure {
+                        visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                        bail!("later local ready probe failure");
+                    }
+                    if demand_index == 7 {
+                        bail!("first local ready probe failure");
+                    }
+                    Ok(100.0)
+                },
+            )
+            .expect_err("any failed readiness probe must reject the whole batch");
+            assert_eq!(error.to_string(), "first local ready probe failure");
+            assert!(
+                visited_later_failure.load(AtomicOrdering::SeqCst),
+                "all probes must finish before the lowest input error is selected"
+            );
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn small_ready_station_batches_stay_serial() {
+        let (entities, directory, ledger) = local_congestion_matrix(31);
+        let saw_rayon_worker = AtomicBool::new(false);
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(8),
+            &entities,
+            &directory,
+            &ledger,
+            25.0,
+            |_, _, _| {
+                if rayon::current_thread_index().is_some() {
+                    saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(100.0)
+            },
+        )
+        .unwrap();
+        assert_eq!(planned.len(), directory.station_indices.len());
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
     }
 }

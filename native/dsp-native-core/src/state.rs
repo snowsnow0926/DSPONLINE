@@ -89,6 +89,87 @@ impl<T: fmt::Debug> fmt::Debug for SyncCell<T> {
     }
 }
 
+/// One-shot decoded entity graph for the next sequential factory revision.
+///
+/// Raw JSON records remain authoritative. A successful simulation installs
+/// the exact Values it just encoded; the next transaction moves that graph
+/// out instead of reparsing every entity. Shared transactional clones compete
+/// for the same one-shot value, so at most one full decoded graph is retained.
+/// Invalidating any entity record clears the cache for every clone. Losing the
+/// cache after a failed candidate is only a performance loss: the next caller
+/// rebuilds it from the unchanged raw records.
+#[derive(Default)]
+struct EntityRuntimeCache(Mutex<Option<Vec<Value>>>);
+
+impl EntityRuntimeCache {
+    fn with_values(values: Vec<Value>) -> Self {
+        Self(Mutex::new(Some(values)))
+    }
+
+    fn take(&self, expected_rows: usize) -> Option<Vec<Value>> {
+        let mut cached = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if cached
+            .as_ref()
+            .is_some_and(|values| values.len() == expected_rows)
+        {
+            cached.take()
+        } else {
+            // A mismatched runtime cache is never a source of gameplay truth.
+            // Discard it and let the caller decode the authoritative rows.
+            cached.take();
+            None
+        }
+    }
+
+    fn clear(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+
+    fn estimated_bytes(&self, raw_entity_bytes: u64) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|values| {
+                // JSON text bytes are a conservative lower-bound proxy for
+                // strings/map allocations; add the outer Value allocation.
+                raw_entity_bytes.saturating_add((values.capacity() * size_of::<Value>()) as u64)
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn resident_rows(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for EntityRuntimeCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntityRuntimeCache")
+            .field(
+                "resident_rows",
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .map(Vec::len)
+                    .unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
 /// Clone-on-write ownership for immutable factory indexes and scalar columns.
 /// Ordinary simulation revisions share these tables in O(1); topology edits
 /// keep the existing mutation syntax and clone a table only on first write.
@@ -2255,6 +2336,8 @@ pub struct CoreState {
     base: Map<String, Value>,
     entity_raw: SharedArc<Vec<RawRecord>>,
     belt_raw: SharedArc<Vec<RawRecord>>,
+    /// Process-local one-shot cache; never persisted or hashed.
+    parsed_entity_runtime: Arc<EntityRuntimeCache>,
     pub(crate) entity_index: SharedArc<ExactRowIdIndex>,
     pub(crate) belt_index: SharedArc<ExactRowIdIndex>,
     pub(crate) symbols: SharedArc<Symbols>,
@@ -2903,6 +2986,7 @@ impl CoreState {
             base,
             entity_raw: entity_raw.into(),
             belt_raw: belt_raw.into(),
+            parsed_entity_runtime: Arc::new(EntityRuntimeCache::default()),
             entity_index: ExactRowIdIndex::default().into(),
             belt_index: ExactRowIdIndex::default().into(),
             symbols: Symbols::default().into(),
@@ -2949,6 +3033,10 @@ impl CoreState {
         let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
         let summary = state.summary_from_digest(canonical);
         state.summary_cache.replace(Some((state.revision, summary)));
+        if !sync_record_drop_enabled() {
+            state.parsed_entity_runtime =
+                Arc::new(EntityRuntimeCache::with_values(parsed_entities));
+        }
         Ok(state)
     }
 
@@ -3315,7 +3403,11 @@ impl CoreState {
 
     pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
         let entities = self.parse_entities_parallel()?;
-        self.rebuild_indexes_from_parsed_entities(&entities)
+        self.rebuild_indexes_from_parsed_entities(&entities)?;
+        if !sync_record_drop_enabled() {
+            self.install_parsed_entity_runtime(entities);
+        }
+        Ok(())
     }
 
     fn rebuild_indexes_from_parsed_entities(
@@ -3620,6 +3712,35 @@ impl CoreState {
         parse_records_parallel(&self.entity_raw, "native core entity")
     }
 
+    pub(crate) fn take_entities_for_simulation(&self) -> anyhow::Result<Vec<Value>> {
+        if let Some(values) = self.parsed_entity_runtime.take(self.entity_raw.len()) {
+            if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tstate-entity-runtime-cache\treused\trows={}",
+                    values.len()
+                );
+            }
+            return Ok(values);
+        }
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tstate-entity-runtime-cache\tdecoded\trows={}",
+                self.entity_raw.len()
+            );
+        }
+        self.parse_entities_parallel()
+    }
+
+    fn install_parsed_entity_runtime(&mut self, values: Vec<Value>) {
+        debug_assert_eq!(values.len(), self.entity_raw.len());
+        self.parsed_entity_runtime = Arc::new(EntityRuntimeCache::with_values(values));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parsed_entity_runtime_rows_for_test(&self) -> usize {
+        self.parsed_entity_runtime.resident_rows()
+    }
+
     /// Read-only scalar access over the authoritative raw row. The former dense
     /// resident mirror exceeded the real-save memory gate and had no production
     /// consumer; one-row lazy decoding preserves missing/null/MOD/-0 semantics
@@ -3786,6 +3907,7 @@ impl CoreState {
     }
 
     pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
+        self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
         self.entity_raw[index] = value;
@@ -3799,6 +3921,7 @@ impl CoreState {
     }
 
     pub(crate) fn entity_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
+        self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();
         self.save_dirty.mark_entity_topology();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
@@ -3921,9 +4044,17 @@ impl CoreState {
         } else {
             None
         };
+        let retired_entities = if sync_record_drop_enabled() {
+            Some(entities)
+        } else {
+            candidate.install_parsed_entity_runtime(entities);
+            None
+        };
         *self = candidate;
         self.refresh_production_history_tiers();
-        retire_record_values(entities, Vec::new());
+        if let Some(entities) = retired_entities {
+            retire_record_values(entities, Vec::new());
+        }
         profile_last!("install");
         Ok(summary)
     }
@@ -4884,12 +5015,17 @@ impl CoreState {
     }
 
     pub fn memory_estimate(&self) -> RuntimeMemoryEstimate {
-        let raw_record_bytes = self
+        let raw_entity_bytes = self
             .entity_raw
             .iter()
-            .chain(self.belt_raw.iter())
             .map(|value| value.len() as u64)
-            .sum();
+            .sum::<u64>();
+        let raw_belt_bytes = self
+            .belt_raw
+            .iter()
+            .map(|value| value.len() as u64)
+            .sum::<u64>();
+        let raw_record_bytes = raw_entity_bytes.saturating_add(raw_belt_bytes);
         // Raw records remain authoritative. E1 values are decoded one row at
         // a time, and full writeback encoding keeps no per-row proof or target
         // mirror. Inventory cardinality is diagnostic rather than allocating
@@ -4924,6 +5060,8 @@ impl CoreState {
             .as_ref()
             .map(|activity| activity.estimated_bytes())
             .unwrap_or(0);
+        let parsed_entity_runtime_bytes =
+            self.parsed_entity_runtime.estimated_bytes(raw_entity_bytes);
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + numeric_columns
@@ -4932,6 +5070,7 @@ impl CoreState {
             + index_overhead
             + topology_index_bytes
             + belt_activity_runtime_bytes
+            + parsed_entity_runtime_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
@@ -7532,6 +7671,9 @@ mod tests {
             .commit_simulated_state(state.base_value().clone(), entities, belt_commit, 8, true)
             .unwrap();
 
+        if !sync_record_drop_enabled() {
+            assert_eq!(state.parsed_entity_runtime_rows_for_test(), 1);
+        }
         assert!(!Arc::ptr_eq(&state.entity_dynamics.0, &original_columns));
         assert_eq!(
             state
@@ -7613,6 +7755,35 @@ mod tests {
                 changed_rows: 0,
             }
         );
+    }
+
+    #[test]
+    fn parsed_entity_runtime_is_one_shot_counted_and_invalidated_by_raw_changes() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let values = state.parse_entities_parallel().unwrap();
+        let expected = values.clone();
+        let moved_pointer = values.as_ptr();
+        state.install_parsed_entity_runtime(values);
+        let memory_with_cache = state.memory_estimate().estimated_runtime_bytes;
+
+        let moved = state.take_entities_for_simulation().unwrap();
+        assert_eq!(moved.as_ptr(), moved_pointer);
+        assert_eq!(moved, expected);
+        assert_eq!(state.parsed_entity_runtime_rows_for_test(), 0);
+        assert!(state.memory_estimate().estimated_runtime_bytes < memory_with_cache);
+
+        state.install_parsed_entity_runtime(moved);
+        let mut transactional_clone = state.clone();
+        let original_raw = state.entity_raw[0].clone();
+        transactional_clone.replace_entity_raw(0, original_raw.clone());
+        assert_eq!(state.parsed_entity_runtime_rows_for_test(), 0);
+        assert_eq!(transactional_clone.parsed_entity_runtime_rows_for_test(), 0);
+        assert!(Arc::ptr_eq(&state.entity_raw[0], &original_raw));
     }
 
     #[test]

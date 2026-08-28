@@ -4627,7 +4627,7 @@ pub(crate) fn prepare_advance(
             }
         };
     }
-    let mut entities = state.parse_entities_parallel()?;
+    let mut entities = state.take_entities_for_simulation()?;
     // JS copyState() materializes both sparse runtime maps before either a
     // simulation step or a wall-clock-only speedrun advance. Mirror that
     // shape here so a zero-simulation budget remains canonically exact.

@@ -16,6 +16,11 @@ const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
   "native-core-exact-realtime-writer-fence-v1";
 const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
 const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-tick-v1";
+const NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY = "native-core-player-authority-command-v1";
+const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
+  "native-core-player-authority-startup-recovery-v1";
+const MAIN_PLAYER_AUTHORITY_OWNER_ID = "main-player-authority";
+const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
@@ -560,6 +565,19 @@ function normalizeNativeCoreCommand(value) {
   return value;
 }
 
+function normalizeDurablePlayerAuthorityCommand(value) {
+  exactObjectKeys(value, [
+    "protocolVersion", "baseRevision", "topLevelChanges", "changedEntities", "addedEntities",
+    "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
+  ], "native player-authority command patch");
+  normalizeNativeCoreCommand(value);
+  const encoded = JSON.stringify(value);
+  if (Buffer.byteLength(encoded, "utf8") > MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES) {
+    throw new RangeError("native player-authority command exceeds its durable payload limit");
+  }
+  return JSON.parse(encoded);
+}
+
 function normalizeNativeCoreCommitOperation(value) {
   if (!value || typeof value !== "object" || !validLogicalId(value.commandId, 128) ||
     !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0 ||
@@ -605,6 +623,58 @@ function normalizePlayerAuthorityCheckpoint(value, label) {
   };
 }
 
+function normalizePlayerAuthorityStartupRecovery(value) {
+  exactObjectKeys(value, [
+    "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
+    "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
+    "settledDeadlineMs", "nextDeadlineMs", "summary",
+  ], "native player-authority startup recovery receipt");
+  const checkpoint = normalizePlayerAuthorityCheckpoint(
+    value.checkpoint,
+    "native player-authority startup checkpoint",
+  );
+  const summary = value.summary;
+  if (value.schemaVersion !== 1 ||
+    value.kind !== NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY ||
+    value.ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID ||
+    !validLogicalId(value.sessionId, 128) || !validLogicalId(value.runId, 128) ||
+    !validLogicalId(value.registryFingerprint, 256) ||
+    !Number.isSafeInteger(value.revision) || value.revision < 0 ||
+    checkpoint.revision !== value.revision ||
+    !Number.isSafeInteger(value.acknowledgedSequence) || value.acknowledgedSequence < 0 ||
+    !Number.isSafeInteger(value.nextSequence) ||
+    value.nextSequence !== value.acknowledgedSequence + 1 ||
+    !Number.isSafeInteger(value.settledDeadlineMs) || value.settledDeadlineMs < 0 ||
+    !Number.isSafeInteger(value.nextDeadlineMs) ||
+    value.nextDeadlineMs !== value.settledDeadlineMs + 1_000 ||
+    !summary || typeof summary !== "object" || Array.isArray(summary) ||
+    summary.revision !== value.revision || summary.stateVersion !== 47 ||
+    summary.mode !== "normal" || summary.paused !== false ||
+    summary.registryFingerprint !== value.registryFingerprint ||
+    !validSha256(summary.canonicalSha256) || !validSha256(summary.domainSha256) ||
+    summary.coverage?.authorityEligible !== true) {
+    throw new NativeHostError(
+      "native host returned an invalid player-authority startup recovery receipt",
+      "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+    );
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: value.kind,
+    ownerId: value.ownerId,
+    sessionId: value.sessionId,
+    runId: value.runId,
+    registryFingerprint: value.registryFingerprint,
+    revision: value.revision,
+    checkpoint: Object.freeze(checkpoint),
+    acknowledgedSequence: value.acknowledgedSequence,
+    nextSequence: value.nextSequence,
+    settledDeadlineMs: value.settledDeadlineMs,
+    nextDeadlineMs: value.nextDeadlineMs,
+    summary: Object.freeze(JSON.parse(JSON.stringify(summary))),
+  });
+}
+
 class NativeExactRealtimeLeaseRegistry {
   constructor(client) {
     this.client = client;
@@ -628,6 +698,39 @@ class NativeCoreSessionRegistry {
   constructor(client) {
     this.client = client;
     this.sessions = new Map();
+    this.playerAuthorityStartupRecovery = null;
+    const startupRecovery = client.hello?.playerAuthorityStartupRecovery;
+    if (startupRecovery !== undefined) {
+      if (!client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY)) {
+        throw new NativeHostError(
+          "native host supplied player-authority recovery without its capability",
+          "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+        );
+      }
+      const receipt = normalizePlayerAuthorityStartupRecovery(startupRecovery);
+      this.sessions.set(receipt.sessionId, {
+        ownerId: MAIN_PLAYER_AUTHORITY_OWNER_ID,
+        slot: "normal-main",
+        ownerEpoch: 1,
+        state: "owned",
+        inFlight: 0,
+      });
+      this.playerAuthorityStartupRecovery = receipt;
+    }
+  }
+
+  takePlayerAuthorityStartupRecovery(ownerId) {
+    const receipt = this.playerAuthorityStartupRecovery;
+    if (receipt === null) return null;
+    this.assertOwner(ownerId, receipt.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
+      throw new NativeHostError(
+        "player-authority startup recovery belongs to the main owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    this.playerAuthorityStartupRecovery = null;
+    return receipt;
   }
 
   async open(ownerId, request) {
@@ -953,6 +1056,64 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  commitPlayerAuthorityCommand(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
+      throw new NativeHostError(
+        "durable player-authority commands require the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide durable player-authority commands",
+        "NATIVE_CORE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "commandId", "baseRevision", "command",
+    ], "native player-authority command request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.commandId, 128) ||
+      !Number.isSafeInteger(request.baseRevision) || request.baseRevision < 0) {
+      throw new TypeError("native player-authority command request is invalid");
+    }
+    const command = normalizeDurablePlayerAuthorityCommand(request.command);
+    if (command.baseRevision !== request.baseRevision) {
+      throw new TypeError("native player-authority command revision is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityCommand",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        command,
+      },
+    }, 300_000);
+  }
+
+  recoverPlayerAuthorityCommand(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
+      throw new NativeHostError(
+        "player-authority recovery requires the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide durable player-authority commands",
+        "NATIVE_CORE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, ["sessionId"], "native player-authority command recovery request");
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreRecoverPlayerAuthorityCommand",
+      sessionId: request.sessionId,
+    }, 300_000);
+  }
+
   checkpoint(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
@@ -1182,6 +1343,8 @@ module.exports = {
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NativeHostClient,

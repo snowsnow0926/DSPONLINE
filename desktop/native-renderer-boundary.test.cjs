@@ -30,6 +30,54 @@ function performancePolicy() {
   };
 }
 
+test("host startup recovery receipt remains main-only at the renderer boundary", () => {
+  const normalized = normalizeRendererNativeResult("hostHello", {
+    protocolVersion: 1,
+    nativeFormatVersion: 1,
+    hostVersion: "1.2.3",
+    capabilities: ["native-core-player-authority-startup-recovery-v1"],
+    playerAuthorityStartupRecovery: { sessionId: "main-only" },
+  });
+  assert.deepEqual(normalized, {
+    protocolVersion: 1,
+    nativeFormatVersion: 1,
+    hostVersion: "1.2.3",
+    capabilities: ["native-core-player-authority-startup-recovery-v1"],
+  });
+  assert.equal(Object.hasOwn(normalized, "playerAuthorityStartupRecovery"), false);
+});
+
+test("player-authority clock state is exact, bounded and contains no writer identity", () => {
+  const state = {
+    schemaVersion: 1,
+    phase: "active",
+    sessionId: "core-restarted-1",
+    runId: "player-run-1",
+    revision: 11,
+    acknowledgedSequence: 4,
+    nextSequence: 5,
+    nextDeadlineMs: 11_000,
+    inFlight: false,
+    currentOperation: null,
+    queuedCommands: 0,
+    lastErrorCode: null,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  for (const invalid of [
+    { ...state, ownerId: "main-player-authority" },
+    { ...state, checkpoint: { generation: 8, rootHash: SHA_A, revision: 11 } },
+    { ...state, nextSequence: 6 },
+    { ...state, sessionId: null },
+    { ...state, queuedCommands: 65 },
+    { ...state, lastErrorCode: "private-path" },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i,
+    );
+  }
+});
+
 function coreSummary(revision = 2) {
   return {
     revision,
@@ -894,6 +942,9 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
   assert.match(source, /desktop:native-core-status[\s\S]*?runRendererNativeOperation\("coreSummary"/);
+  assert.match(source, /desktop:native-player-authority-state"[\s\S]*?runRendererNativeOperation\("playerAuthorityState"/);
+  assert.match(source, /onTransition:\s*publishNativePlayerAuthorityState/);
+  assert.match(source, /webContents\.send\("desktop:native-player-authority-state-changed", state\)/);
   assert.match(preload, /function invokeNative[\s\S]*?createRendererNativeRejection\(error, options\)/);
   assert.doesNotMatch(preload, /ipcRenderer\.invoke\("desktop:(?:native|set-native)/);
 
@@ -901,6 +952,6 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 26);
+  assert.equal(mainChannels.length, 27);
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

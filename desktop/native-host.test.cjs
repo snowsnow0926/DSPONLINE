@@ -6,7 +6,9 @@ const test = require("node:test");
 const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
@@ -619,6 +621,170 @@ test("player authority tick is main-owned, sequence-keyed, and rejects caller st
     assert.equal(error.code, "NATIVE_CORE_PLAYER_AUTHORITY_TICK_UNAVAILABLE");
     return true;
   });
+});
+
+test("player authority commands are capability-gated, main-owned, and exact-revision only", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreRecoverPlayerAuthorityCommand") return { duplicate: true };
+      return { commandId: request.request.commandId, revision: request.request.baseRevision + 1 };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-1", {
+    ownerId: "main-player-authority", slot: "normal-main", ownerEpoch: 2, state: "owned", inFlight: 0,
+  });
+  const command = {
+    protocolVersion: 1,
+    baseRevision: 7,
+    topLevelChanges: [{ path: ["playerCommandProbe"], operation: "set", value: 1 }],
+    changedEntities: [],
+    addedEntities: [],
+    removedEntityIds: [],
+    changedBelts: [],
+    addedBelts: [],
+    removedBeltIds: [],
+  };
+  await registry.commitPlayerAuthorityCommand("main-player-authority", {
+    sessionId: "core-1",
+    runId: "player-run-1",
+    commandId: "player-command-1",
+    baseRevision: 7,
+    command,
+  });
+  assert.deepEqual(calls, [{
+    operation: "coreCommitPlayerAuthorityCommand",
+    sessionId: "core-1",
+    request: {
+      runId: "player-run-1",
+      commandId: "player-command-1",
+      baseRevision: 7,
+      command,
+    },
+  }]);
+  assert.throws(() => registry.commitPlayerAuthorityCommand(7, {
+    sessionId: "core-1", runId: "player-run-1", commandId: "player-command-1",
+    baseRevision: 7, command,
+  }), (error) => error.code === "NATIVE_CORE_SESSION_INVALID");
+  assert.throws(() => registry.commitPlayerAuthorityCommand("main-player-authority", {
+    sessionId: "core-1", runId: "player-run-1", commandId: "player-command-2",
+    baseRevision: 8, command,
+  }), /command revision is invalid/);
+  assert.throws(() => registry.commitPlayerAuthorityCommand("main-player-authority", {
+    sessionId: "core-1", runId: "player-run-1", commandId: "player-command-extra",
+    baseRevision: 7, command: { ...command, rendererProof: true },
+  }), /command patch is invalid/);
+  await registry.recoverPlayerAuthorityCommand("main-player-authority", { sessionId: "core-1" });
+  assert.deepEqual(calls.at(-1), {
+    operation: "coreRecoverPlayerAuthorityCommand",
+    sessionId: "core-1",
+  });
+
+  const rendererOwned = new NativeCoreSessionRegistry(client);
+  rendererOwned.sessions.set("core-renderer", {
+    ownerId: "renderer-7", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  assert.throws(() => rendererOwned.commitPlayerAuthorityCommand("renderer-7", {
+    sessionId: "core-renderer", runId: "player-run-1", commandId: "renderer-command",
+    baseRevision: 7, command,
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED");
+  assert.throws(() => rendererOwned.recoverPlayerAuthorityCommand("renderer-7", {
+    sessionId: "core-renderer",
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED");
+
+  const oldRegistry = new NativeCoreSessionRegistry({
+    hello: { capabilities: [] },
+    request() { throw new Error("must not call host"); },
+  });
+  oldRegistry.sessions.set("core-1", {
+    ownerId: "main-player-authority", slot: "normal-main", ownerEpoch: 2, state: "owned", inFlight: 0,
+  });
+  assert.throws(() => oldRegistry.commitPlayerAuthorityCommand("main-player-authority", {
+    sessionId: "core-1", runId: "player-run-1", commandId: "player-command-1",
+    baseRevision: 7, command,
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE");
+});
+
+test("startup recovery receipt is strictly adopted once as a main-owned Rust session", () => {
+  const receipt = {
+    schemaVersion: 1,
+    kind: NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
+    ownerId: "main-player-authority",
+    sessionId: "core-restarted-1",
+    runId: "player-run-1",
+    registryFingerprint: "builtin:test",
+    revision: 11,
+    checkpoint: { generation: 8, rootHash: "a".repeat(64), revision: 11 },
+    acknowledgedSequence: 4,
+    nextSequence: 5,
+    settledDeadlineMs: 10_000,
+    nextDeadlineMs: 11_000,
+    summary: {
+      revision: 11,
+      stateVersion: 47,
+      mode: "normal",
+      paused: false,
+      registryFingerprint: "builtin:test",
+      canonicalSha256: "b".repeat(64),
+      domainSha256: "c".repeat(64),
+      coverage: { authorityEligible: true },
+    },
+  };
+  const registry = new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: receipt,
+    },
+    request() { throw new Error("startup adoption must not call the Host"); },
+  });
+  const owned = registry.inspectSession("main-player-authority", "core-restarted-1");
+  assert.equal(owned.slot, "normal-main");
+  assert.equal(owned.ownerEpoch, 1);
+  assert.equal(owned.inFlight, 0);
+  assert.throws(
+    () => registry.inspectSession("renderer-7", "core-restarted-1"),
+    (error) => error.code === "NATIVE_CORE_SESSION_INVALID",
+  );
+  assert.throws(
+    () => registry.commitPlayerAuthorityTick("renderer-7", {
+      sessionId: "core-restarted-1",
+      runId: "player-run-1",
+      sequence: 5,
+    }),
+    (error) => error.code === "NATIVE_CORE_SESSION_INVALID",
+  );
+  receipt.summary.revision = 999;
+  const adopted = registry.takePlayerAuthorityStartupRecovery("main-player-authority");
+  assert.equal(adopted.summary.revision, 11);
+  assert.equal(registry.takePlayerAuthorityStartupRecovery("main-player-authority"), null);
+
+  const initialReceipt = {
+    ...receipt,
+    sessionId: "core-restarted-initial",
+    revision: 0,
+    checkpoint: { ...receipt.checkpoint, revision: 0 },
+    acknowledgedSequence: 0,
+    nextSequence: 1,
+    summary: { ...receipt.summary, revision: 0 },
+  };
+  const initialRegistry = new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: initialReceipt,
+    },
+    request() { throw new Error("initial startup adoption must not call the Host"); },
+  });
+  assert.equal(
+    initialRegistry.takePlayerAuthorityStartupRecovery("main-player-authority").nextSequence,
+    1,
+  );
+
+  assert.throws(() => new NativeCoreSessionRegistry({
+    hello: { capabilities: [], playerAuthorityStartupRecovery: receipt },
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
 });
 
 test("v47 import closes an unowned host session when its receipt is malformed", async () => {

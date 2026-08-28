@@ -45,6 +45,10 @@ const {
   NativePlayerAuthorityProjectionBroker,
 } = require("./native-player-authority-projection-broker.cjs");
 const {
+  NativePlayerAuthorityStateBroker,
+  normalizeNativePlayerAuthorityState,
+} = require("./native-player-authority-state-broker.cjs");
+const {
   inspectNativeExactRealtimeStartup,
   inspectNativeExactRealtimeStartupWithoutHost,
   resolveFixedNativeSaveRootPath,
@@ -140,6 +144,7 @@ let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
+let nativePlayerAuthorityStateBroker = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -261,6 +266,40 @@ function requireTrustedNativeSender(event) {
   return event.sender.id;
 }
 
+function validatedNativePlayerAuthorityState(rendererOwnerId) {
+  if (!nativePlayerAuthorityStateBroker || !nativeCoreSessions) {
+    throw new Error("Windows 原生玩家权威时钟不可用");
+  }
+  const state = nativePlayerAuthorityStateBroker.read(rendererOwnerId);
+  if (state.sessionId !== null) {
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", state.sessionId);
+    if (owned.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
+        owned.state !== "owned") {
+      throw new Error("Windows 原生玩家权威会话不一致");
+    }
+  }
+  return normalizeRendererNativeResult("playerAuthorityState", state);
+}
+
+function publishNativePlayerAuthorityState(snapshot) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try {
+    const state = normalizeRendererNativeResult(
+      "playerAuthorityState",
+      normalizeNativePlayerAuthorityState(snapshot),
+    );
+    if (state.sessionId !== null) {
+      const owned = nativeCoreSessions?.inspectSession("main-player-authority", state.sessionId);
+      if (owned?.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
+          owned.state !== "owned") return;
+    }
+    mainWindow.webContents.send("desktop:native-player-authority-state-changed", state);
+  } catch {
+    // A malformed or stale authority snapshot is never delivered. The pull
+    // endpoint remains available for the renderer to recover a later exact state.
+  }
+}
+
 function validNativeLogicalId(value, maximumLength = 128) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
@@ -315,7 +354,19 @@ async function initializeNativeHost() {
     nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
       registry: nativeCoreSessions,
       ownerId: playerAuthorityOwnerId,
+      onTransition: publishNativePlayerAuthorityState,
     });
+    nativePlayerAuthorityStateBroker = new NativePlayerAuthorityStateBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
+    const playerAuthorityStartupRecovery =
+      nativeCoreSessions.takePlayerAuthorityStartupRecovery(playerAuthorityOwnerId);
+    if (playerAuthorityStartupRecovery) {
+      nativePlayerAuthorityRuntime.resumeFromStartupRecovery(playerAuthorityStartupRecovery);
+    }
     nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
       runtime: nativePlayerAuthorityRuntime,
       isTrustedRendererOwner: (ownerId) => Boolean(
@@ -330,12 +381,23 @@ async function initializeNativeHost() {
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
     });
-    nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
+    const inspectedExactRealtimeStartup = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
         leaseRegistry: new NativeExactRealtimeLeaseRegistry(nativeHostClient),
       }),
       environment: process.env,
     });
+    nativeExactRealtimeStartupStatus = playerAuthorityStartupRecovery
+      ? {
+        ...inspectedExactRealtimeStartup,
+        state: "player-authority-recovered",
+        leaseState: "valid",
+        leasePhase: "active",
+        code: null,
+        normalWindowAllowed: true,
+        message: "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
+      }
+      : inspectedExactRealtimeStartup;
     nativeHostState = {
       available: true,
       state: "ready",
@@ -375,6 +437,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityRuntime = null;
     nativePlayerAuthorityCommandBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
+    nativePlayerAuthorityStateBroker = null;
   }
   return nativeHostState;
 }
@@ -764,6 +827,12 @@ ipcMain.handle("desktop:native-status", async (event) => runRendererNativeOperat
   if (!trustedSender(event)) throw new Error("invalid native status sender");
   return nativeHostState;
 }));
+
+ipcMain.handle("desktop:native-player-authority-state", async (event) =>
+  runRendererNativeOperation("playerAuthorityState", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED",
+    message: "无法读取 Windows 原生玩家权威时钟",
+  }, async () => validatedNativePlayerAuthorityState(requireTrustedNativeSender(event))));
 
 ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
   if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");

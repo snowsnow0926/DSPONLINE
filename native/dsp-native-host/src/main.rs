@@ -7,7 +7,9 @@ use dsp_native_core::{
     V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE, V47ImportJavascriptCompatibilityRequired,
 };
 use dsp_native_host::core_runtime::{
-    CoreRegistry, PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_TICK_CAPABILITY,
+    CorePlayerAuthorityStartupRecoveryReceipt, CoreRegistry, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+    PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
+    PLAYER_AUTHORITY_TICK_CAPABILITY,
 };
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
@@ -52,6 +54,7 @@ fn parse_serve_root() -> anyhow::Result<PathBuf> {
 fn handle_request(
     store: &mut SaveStore,
     cores: &mut CoreRegistry,
+    player_authority_startup_recovery: &mut Option<CorePlayerAuthorityStartupRecoveryReceipt>,
     request: ControlRequest,
 ) -> anyhow::Result<HostAction> {
     let value = match request {
@@ -86,7 +89,10 @@ fn handle_request(
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                     PLAYER_AUTHORITY_GATE_CAPABILITY,
                     PLAYER_AUTHORITY_TICK_CAPABILITY,
+                    PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+                    PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
                 ],
+                player_authority_startup_recovery: player_authority_startup_recovery.take(),
             })?
         }
         ControlRequest::SaveBegin {
@@ -309,6 +315,12 @@ fn handle_request(
         ControlRequest::CoreCommitPlayerAuthorityTick(control) => to_value(
             cores.commit_player_authority_tick(store, &control.session_id, control.request)?,
         )?,
+        ControlRequest::CoreCommitPlayerAuthorityCommand(control) => to_value(
+            cores.commit_player_authority_command(store, &control.session_id, control.request)?,
+        )?,
+        ControlRequest::CoreRecoverPlayerAuthorityCommand(control) => {
+            to_value(cores.recover_player_authority_pending_command(store, &control.session_id)?)?
+        }
         ControlRequest::CoreCheckpoint {
             session_id,
             saved_at_ms,
@@ -375,6 +387,9 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
 fn serve(root: PathBuf) -> anyhow::Result<()> {
     let mut store = SaveStore::open(root).context("open native save store")?;
     let mut cores = CoreRegistry::default();
+    let mut player_authority_startup_recovery = cores
+        .recover_player_authority_pending_command_on_startup(&mut store)
+        .context("recover staged native player-authority command at host startup")?;
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -386,7 +401,12 @@ fn serve(root: PathBuf) -> anyhow::Result<()> {
         let request = serde_json::from_slice::<ControlRequest>(&frame.payload)
             .context("decode native host request");
         let (payload, shutdown) = match request {
-            Ok(request) => response_bytes(handle_request(&mut store, &mut cores, request))?,
+            Ok(request) => response_bytes(handle_request(
+                &mut store,
+                &mut cores,
+                &mut player_authority_startup_recovery,
+                request,
+            ))?,
             Err(error) => response_bytes(Err(error))?,
         };
         write_frame(

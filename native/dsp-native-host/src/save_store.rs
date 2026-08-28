@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use crate::disk_budget::{
     DiskBudgetOutcome, DiskBudgetStatus, DiskSpaceProbe, SystemDiskSpaceProbe, require_write_budget,
 };
-use crate::exact_realtime_lease::{ExactRealtimeLease, ExactRealtimeLeasePurpose};
+use crate::exact_realtime_lease::{
+    ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePhase,
+    ExactRealtimeLeasePurpose, player_authority_command_request_sha256,
+};
 
 const MAX_SLOT_BYTES: usize = 64;
 const MAX_KEY_BYTES: usize = 512;
@@ -26,6 +29,11 @@ const MAX_WAL_ENTRIES: usize = 4_096;
 const MAX_STATISTICS_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
 const STATISTICS_SIDECAR_FORMAT_VERSION: u16 = 1;
 const STATISTICS_SIDECAR_FILE: &str = "statistics-history-v1.json";
+const PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION: u16 = 1;
+const PLAYER_AUTHORITY_CATALOG_KIND: &str = "native-core-player-authority-recovery-catalog-v1";
+const PLAYER_AUTHORITY_CATALOG_FILE: &str = "player-authority-catalog-v1.json";
+const MAX_PLAYER_AUTHORITY_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const WAL_FRAME_HEADER_BYTES: u64 = 8;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
 const SAVE_SLOTS: [&str; 2] = ["normal-main", "speedrun-main"];
@@ -60,6 +68,69 @@ pub(crate) fn json_values_bitwise_equal(left: &Value, right: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+/// Stable structural digest for authority request identity. Unlike the public
+/// GameState canonical hash, this keeps JSON numeric categories and IEEE-754
+/// signed zero distinct so an idempotency key cannot be reused with subtly
+/// different command bytes.
+pub(crate) fn json_value_bitwise_sha256(value: &Value) -> String {
+    fn update_length(hasher: &mut Sha256, length: usize) {
+        hasher.update(u64::try_from(length).unwrap_or(u64::MAX).to_le_bytes());
+    }
+
+    fn update(hasher: &mut Sha256, value: &Value) {
+        match value {
+            Value::Null => hasher.update([0]),
+            Value::Bool(false) => hasher.update([1]),
+            Value::Bool(true) => hasher.update([2]),
+            Value::Number(number) if number.is_f64() => {
+                hasher.update([3]);
+                hasher.update(
+                    number
+                        .as_f64()
+                        .expect("floating JSON number")
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+            Value::Number(number) if number.as_u64().is_some() => {
+                hasher.update([4]);
+                hasher.update(number.as_u64().unwrap().to_le_bytes());
+            }
+            Value::Number(number) => {
+                hasher.update([5]);
+                hasher.update(number.as_i64().expect("signed JSON number").to_le_bytes());
+            }
+            Value::String(text) => {
+                hasher.update([6]);
+                update_length(hasher, text.len());
+                hasher.update(text.as_bytes());
+            }
+            Value::Array(values) => {
+                hasher.update([7]);
+                update_length(hasher, values.len());
+                for value in values {
+                    update(hasher, value);
+                }
+            }
+            Value::Object(object) => {
+                hasher.update([8]);
+                update_length(hasher, object.len());
+                let mut keys = object.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                for key in keys {
+                    update_length(hasher, key.len());
+                    hasher.update(key.as_bytes());
+                    update(hasher, &object[key]);
+                }
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    update(&mut hasher, value);
+    hex::encode(hasher.finalize())
 }
 
 fn json_numbers_bitwise_equal(left: &Number, right: &Number) -> bool {
@@ -290,6 +361,31 @@ struct StatisticsSidecarPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StatisticsSidecarEnvelope {
     payload: StatisticsSidecarPayload,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCatalogPayload {
+    schema_version: u16,
+    kind: String,
+    slot: String,
+    mode: String,
+    state_version: u16,
+    run_id: String,
+    registry_fingerprint: String,
+    catalog_byte_length: u64,
+    catalog_sha256: String,
+    /// Exact, strictly normalized UTF-8 JSON bytes. Keeping the payload as a
+    /// string avoids the several-fold expansion of a JSON byte array while
+    /// retaining a byte length and digest that are checked before parsing.
+    catalog_payload_utf8: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCatalogEnvelope {
+    payload: PlayerAuthorityCatalogPayload,
     checksum: String,
 }
 
@@ -658,6 +754,192 @@ impl SaveStore {
         self.atomic_replace_budgeted(&path, &bytes)?;
         sync_directory(&self.slot_dir(slot)?)?;
         Ok(())
+    }
+
+    /// Persists the immutable catalog required to reopen a fenced native core
+    /// after process restart. It is private recovery metadata, not part of the
+    /// GameState, cloud envelope, lease schema, or public save manifest.
+    pub(crate) fn write_player_authority_recovery_catalog(
+        &self,
+        run_id: &str,
+        checkpoint: &ExactRealtimeCheckpoint,
+        registry_fingerprint: &str,
+        catalog: Value,
+    ) -> anyhow::Result<()> {
+        validate_authority_run_id(run_id)?;
+        validate_fingerprint(registry_fingerprint)?;
+        if let Some(lease) = self.read_exact_realtime_lease()?
+            && (lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+                || lease.phase != ExactRealtimeLeasePhase::Prepared
+                || lease.run_id != run_id
+                || lease.slot != "normal-main"
+                || lease.mode != "normal"
+                || lease.registry_fingerprint != registry_fingerprint
+                || lease.checkpoint != *checkpoint
+                || lease.acknowledged.checkpoint != *checkpoint
+                || lease.pending_tick.is_some()
+                || lease.pending_command.is_some())
+        {
+            bail!("native player-authority recovery catalog lease identity conflicts")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main player-authority checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != registry_fingerprint
+            || published.generation != checkpoint.generation
+            || published.root_hash != checkpoint.root_hash
+            || published.revision != checkpoint.revision
+        {
+            bail!("native player-authority recovery catalog checkpoint is stale")
+        }
+        if catalog.get("registryFingerprint").and_then(Value::as_str) != Some(registry_fingerprint)
+        {
+            bail!("native player-authority recovery catalog fingerprint conflicts")
+        }
+        let catalog_bytes = serde_json::to_vec(&catalog)?;
+        if catalog_bytes.is_empty()
+            || catalog_bytes.len() > MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES
+        {
+            bail!("native player-authority recovery catalog payload exceeds its byte budget")
+        }
+        let catalog_payload_utf8 = String::from_utf8(catalog_bytes.clone())
+            .context("encode native player-authority recovery catalog as UTF-8")?;
+        let payload = PlayerAuthorityCatalogPayload {
+            schema_version: PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION,
+            kind: PLAYER_AUTHORITY_CATALOG_KIND.to_owned(),
+            slot: published.slot,
+            mode: published.mode,
+            state_version: published.state_version,
+            run_id: run_id.to_owned(),
+            registry_fingerprint: registry_fingerprint.to_owned(),
+            catalog_byte_length: u64::try_from(catalog_bytes.len())?,
+            catalog_sha256: sha256_hex(&catalog_bytes),
+            catalog_payload_utf8,
+        };
+        let envelope = PlayerAuthorityCatalogEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_CATALOG_BYTES {
+            bail!("native player-authority recovery catalog exceeds its byte budget")
+        }
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_CATALOG_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            validate_save_regular_file_type(
+                metadata.file_type(),
+                "native player-authority catalog",
+            )?;
+        }
+        self.atomic_replace_budgeted(&path, &bytes)?;
+        sync_directory(&directory)?;
+        if fs::read(&path)? != bytes {
+            bail!("native player-authority recovery catalog readback differs")
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_player_authority_recovery_catalog(
+        &self,
+        lease: &ExactRealtimeLease,
+        published: &PublishedCheckpointIdentity,
+    ) -> anyhow::Result<Value> {
+        let resumable_phase = lease.phase == ExactRealtimeLeasePhase::Prepared
+            || lease.phase == ExactRealtimeLeasePhase::Active
+                && (lease.pending_command.is_some() || lease.startup_resume_enabled);
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.pending_tick.is_some()
+            || !resumable_phase
+        {
+            bail!("native player-authority recovery catalog lease purpose is invalid")
+        }
+        let published_is_acknowledged = published.generation
+            == lease.acknowledged.checkpoint.generation
+            && published.root_hash == lease.acknowledged.checkpoint.root_hash
+            && published.revision == lease.acknowledged.checkpoint.revision;
+        let published_is_pending_command = lease.pending_command.as_ref().is_some_and(|pending| {
+            lease.phase == ExactRealtimeLeasePhase::Active
+                && published.revision == pending.expected_revision
+        });
+        if lease.slot != "normal-main"
+            || lease.mode != "normal"
+            || published.slot != lease.slot
+            || published.mode != lease.mode
+            || published.state_version != 47
+            || published.registry_fingerprint != lease.registry_fingerprint
+            || !(published_is_acknowledged || published_is_pending_command)
+        {
+            bail!("native player-authority recovery lease/checkpoint publication conflicts")
+        }
+        validate_authority_run_id(&lease.run_id)?;
+        validate_fingerprint(&lease.registry_fingerprint)?;
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_CATALOG_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(metadata.file_type(), "native player-authority catalog")?;
+        if metadata.len() == 0 || metadata.len() > MAX_PLAYER_AUTHORITY_CATALOG_BYTES {
+            bail!("native player-authority recovery catalog size is invalid")
+        }
+        let file = File::open(&path)?;
+        validate_save_regular_file_type(
+            file.metadata()?.file_type(),
+            "native player-authority catalog",
+        )?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+        file.take(MAX_PLAYER_AUTHORITY_CATALOG_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let after = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(after.file_type(), "native player-authority catalog")?;
+        if bytes.len() as u64 != metadata.len()
+            || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_CATALOG_BYTES
+            || after.len() != metadata.len()
+        {
+            bail!("native player-authority recovery catalog changed while reading")
+        }
+        let envelope = serde_json::from_slice::<PlayerAuthorityCatalogEnvelope>(&bytes)?;
+        if envelope.payload.schema_version != PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION
+            || envelope.payload.kind != PLAYER_AUTHORITY_CATALOG_KIND
+            || envelope.payload.slot != lease.slot
+            || envelope.payload.mode != lease.mode
+            || envelope.payload.state_version != published.state_version
+            || envelope.payload.run_id != lease.run_id
+            || envelope.payload.registry_fingerprint != lease.registry_fingerprint
+            || envelope.checksum != sha256_hex(&serde_json::to_vec(&envelope.payload)?)
+        {
+            bail!("native player-authority recovery catalog integrity is invalid")
+        }
+        let catalog_bytes = envelope.payload.catalog_payload_utf8.as_bytes();
+        if catalog_bytes.is_empty()
+            || catalog_bytes.len() > MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES
+            || envelope.payload.catalog_byte_length != u64::try_from(catalog_bytes.len())?
+            || envelope.payload.catalog_sha256 != sha256_hex(catalog_bytes)
+        {
+            bail!("native player-authority recovery catalog payload integrity is invalid")
+        }
+        let catalog = serde_json::from_slice::<Value>(catalog_bytes)?;
+        if serde_json::to_vec(&catalog)? != catalog_bytes
+            || catalog.get("registryFingerprint").and_then(Value::as_str)
+                != Some(lease.registry_fingerprint.as_str())
+        {
+            bail!("native player-authority recovery catalog payload is not normalized")
+        }
+        Ok(catalog)
+    }
+
+    fn player_authority_recovery_directory(&self) -> anyhow::Result<PathBuf> {
+        let authority = self.root.join("authority");
+        ensure_direct_directory(&authority, &self.root, "native authority directory")?;
+        let normal = authority.join("normal-main");
+        ensure_direct_directory(
+            &normal,
+            &authority,
+            "native normal-main authority directory",
+        )?;
+        Ok(normal)
     }
 
     /// Reads a disposable cache fail-open. Corruption, stale identity,
@@ -1508,6 +1790,46 @@ impl SaveStore {
             revision,
             command_id,
         )?;
+        if let Some(pending) = expected_lease.pending_command.as_ref() {
+            let object = payload
+                .as_object()
+                .ok_or_else(|| anyhow!("native player-authority command WAL is not an object"))?;
+            let registry_fingerprint = object
+                .get("registry")
+                .and_then(Value::as_object)
+                .and_then(|registry| registry.get("fingerprint"))
+                .and_then(Value::as_str);
+            let simulation_seconds = object.get("simulationSeconds").and_then(Value::as_f64);
+            let wall_seconds = object.get("wallSeconds").and_then(Value::as_f64);
+            let command = object
+                .get("command")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| anyhow!("native player-authority command WAL patch is missing"))?;
+            if object.get("kind").and_then(Value::as_str) != Some("stable-operation-v1")
+                || object.get("baseStateRevision").and_then(Value::as_u64)
+                    != Some(pending.base_revision)
+                || object.get("resultStateRevision").and_then(Value::as_u64)
+                    != Some(pending.expected_revision)
+                || simulation_seconds.map(f64::to_bits) != Some(0.0_f64.to_bits())
+                || wall_seconds.map(f64::to_bits) != Some(0.0_f64.to_bits())
+                || object.get("advanceMode").and_then(Value::as_str) != Some("exact")
+                || registry_fingerprint != Some(expected_lease.registry_fingerprint.as_str())
+                || !json_values_bitwise_equal(command, &pending.command)
+            {
+                bail!(
+                    "native player-authority command WAL payload is not the staged zero-time event"
+                )
+            }
+            if player_authority_command_request_sha256(
+                &expected_lease.run_id,
+                &pending.command_id,
+                pending.base_revision,
+                command,
+            )? != pending.request_sha256
+            {
+                bail!("native player-authority command WAL request digest conflicts")
+            }
+        }
         self.append_wal_internal(slot, base_revision, revision, command_id, payload, true)
     }
 
@@ -2582,6 +2904,18 @@ fn validate_fingerprint(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_authority_run_id(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        bail!("native player-authority recovery run ID is invalid")
+    }
+    Ok(())
+}
+
 fn validate_command_id(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 128
@@ -2597,6 +2931,13 @@ fn validate_command_id(value: &str) -> anyhow::Result<()> {
 fn validate_hex_identity(value: &str, label: &str) -> anyhow::Result<()> {
     if value.len() < 8 || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{label} is invalid")
+    }
+    Ok(())
+}
+
+fn validate_save_regular_file_type(file_type: fs::FileType, label: &str) -> anyhow::Result<()> {
+    if file_type.is_symlink() || !file_type.is_file() {
+        bail!("{label} path is not a direct regular file")
     }
     Ok(())
 }
@@ -4055,6 +4396,18 @@ mod tests {
 
     #[test]
     fn authority_wal_signed_zero_retry_conflicts_without_mutating_durable_data() {
+        assert_eq!(
+            json_value_bitwise_sha256(&serde_json::json!({"a": 1, "b": 2})),
+            json_value_bitwise_sha256(&serde_json::json!({"b": 2, "a": 1}))
+        );
+        assert_ne!(
+            json_value_bitwise_sha256(&serde_json::json!(-0.0)),
+            json_value_bitwise_sha256(&serde_json::json!(0.0))
+        );
+        assert_ne!(
+            json_value_bitwise_sha256(&serde_json::json!(0)),
+            json_value_bitwise_sha256(&serde_json::json!(0.0))
+        );
         assert!(!json_values_bitwise_equal(
             &serde_json::json!(0),
             &serde_json::json!(0.0)

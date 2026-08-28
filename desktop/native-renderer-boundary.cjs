@@ -72,6 +72,7 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_HOST_EXITED", "NATIVE_HOST_START_FAILED", "NATIVE_HOST_TIMEOUT",
   "NATIVE_HOST_UNAVAILABLE", "NATIVE_HOST_WRITE_FAILED", "NATIVE_OPERATION_FAILED",
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_STATE_FAILED",
   "NATIVE_PROTOCOL_INVALID", "NATIVE_SAVE_ABORT_FAILED", "NATIVE_SAVE_BEGIN_FAILED",
   "NATIVE_SAVE_COMMIT_FAILED", "NATIVE_SAVE_COMPACT_FAILED", "NATIVE_SAVE_READ_FAILED",
   "NATIVE_SAVE_RECOVER_FAILED", "NATIVE_SAVE_WRITE_FAILED", "NATIVE_STATUS_FAILED",
@@ -515,7 +516,15 @@ function normalizePerformancePolicy(value) {
 }
 
 function normalizeHostHello(value) {
-  const source = exactObject(value, ["protocolVersion", "nativeFormatVersion", "hostVersion", "capabilities"], "native Host hello");
+  // The optional startup-recovery receipt is consumed only by the main
+  // process NativeCoreSessionRegistry and is deliberately omitted from the
+  // renderer-safe projection returned here.
+  const source = objectWithKeys(
+    value,
+    ["protocolVersion", "nativeFormatVersion", "hostVersion", "capabilities"],
+    ["playerAuthorityStartupRecovery"],
+    "native Host hello",
+  );
   if (!Array.isArray(source.capabilities) || source.capabilities.length > 128) throw protocolError("native Host capabilities");
   return {
     protocolVersion: safeInteger(source.protocolVersion, "native Host protocol", 1),
@@ -1448,6 +1457,74 @@ function normalizeCoreClose(value) {
   return { closed: boolean(source.closed, "native core closed flag") };
 }
 
+function normalizePlayerAuthorityState(value) {
+  const source = exactObject(value, [
+    "schemaVersion", "phase", "sessionId", "runId", "revision", "acknowledgedSequence",
+    "nextSequence", "nextDeadlineMs", "inFlight", "currentOperation", "queuedCommands",
+    "lastErrorCode",
+  ], "native player-authority state");
+  if (source.schemaVersion !== 1) throw protocolError("native player-authority state schema");
+  const phase = oneOf(source.phase, [
+    "idle", "activating", "recovering", "active", "uncertain", "faulted", "shutdown",
+  ], "native player-authority phase");
+  const nullableLogicalId = (entry, label) => entry === null ? null : logicalId(entry, label, 128);
+  const nullableInteger = (entry, label, minimum) => entry === null
+    ? null
+    : safeInteger(entry, label, minimum);
+  const sessionId = nullableLogicalId(source.sessionId, "native player-authority session ID");
+  const runId = nullableLogicalId(source.runId, "native player-authority run ID");
+  const revision = nullableInteger(source.revision, "native player-authority revision", 0);
+  const acknowledgedSequence = nullableInteger(
+    source.acknowledgedSequence,
+    "native player-authority acknowledged sequence",
+    0,
+  );
+  const nextSequence = nullableInteger(
+    source.nextSequence,
+    "native player-authority next sequence",
+    1,
+  );
+  const nextDeadlineMs = nullableInteger(
+    source.nextDeadlineMs,
+    "native player-authority next deadline",
+    0,
+  );
+  const currentOperation = oneOf(source.currentOperation, [
+    null, "activation", "recovery", "tick", "command",
+  ], "native player-authority operation");
+  const queuedCommands = safeInteger(
+    source.queuedCommands,
+    "native player-authority queued commands",
+  );
+  if (queuedCommands > 64) throw protocolError("native player-authority queued commands");
+  const lastErrorCode = source.lastErrorCode === null
+    ? null
+    : requireNativeErrorCode(source.lastErrorCode, "native player-authority error code");
+  const identity = [sessionId, runId, revision, acknowledgedSequence, nextSequence, nextDeadlineMs];
+  const completeIdentity = identity.every((entry) => entry !== null);
+  const emptyIdentity = identity.every((entry) => entry === null);
+  if ((!completeIdentity && !emptyIdentity) ||
+      completeIdentity && acknowledgedSequence + 1 !== nextSequence ||
+      phase === "active" && (!completeIdentity || lastErrorCode !== null) ||
+      ["idle", "activating", "recovering"].includes(phase) && !emptyIdentity) {
+    throw protocolError("native player-authority state identity");
+  }
+  return {
+    schemaVersion: 1,
+    phase,
+    sessionId,
+    runId,
+    revision,
+    acknowledgedSequence,
+    nextSequence,
+    nextDeadlineMs,
+    inFlight: boolean(source.inFlight, "native player-authority in-flight flag"),
+    currentOperation,
+    queuedCommands,
+    lastErrorCode,
+  };
+}
+
 const RESULT_NORMALIZERS = Object.freeze({
   hostHello: normalizeHostHello,
   nativeStatus: normalizeNativeStatus,
@@ -1475,6 +1552,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreExport: normalizeCoreExport,
   coreCompare: normalizeCoreCompare,
   coreClose: normalizeCoreClose,
+  playerAuthorityState: normalizePlayerAuthorityState,
 });
 
 function normalizeRendererNativeResult(kind, value, context) {

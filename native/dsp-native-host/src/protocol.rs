@@ -6,7 +6,8 @@ use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
-    CoreCommitOperationRequest, CoreCommitPlayerAuthorityTickRequest,
+    CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
+    CoreCommitPlayerAuthorityTickRequest, CorePlayerAuthorityStartupRecoveryReceipt,
     CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
@@ -37,6 +38,19 @@ pub struct CoreActivatePlayerAuthorityControlRequest {
 pub struct CoreCommitPlayerAuthorityTickControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthorityTickRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityCommandControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreRecoverPlayerAuthorityCommandControlRequest {
+    pub session_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,6 +207,8 @@ pub enum ControlRequest {
     CorePreparePlayerAuthority(CorePreparePlayerAuthorityControlRequest),
     CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
     CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
+    CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
+    CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),
     CoreCheckpoint {
         session_id: String,
         saved_at_ms: u64,
@@ -373,6 +389,81 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_command_protocol_requires_exact_identity_and_patch() {
+        let command = json!({
+            "protocolVersion": 1,
+            "baseRevision": 7,
+            "topLevelChanges": [{
+                "path": ["playerCommandProbe"],
+                "operation": "set",
+                "value": 1
+            }],
+            "changedEntities": [],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        });
+        let value = json!({
+            "operation": "coreCommitPlayerAuthorityCommand",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "commandId": "player-command-1",
+                "baseRevision": 7,
+                "command": command
+            }
+        });
+        match serde_json::from_value::<ControlRequest>(value.clone()).unwrap() {
+            ControlRequest::CoreCommitPlayerAuthorityCommand(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.command_id, "player-command-1");
+                assert_eq!(control.request.base_revision, 7);
+                assert_eq!(control.request.command.base_revision, 7);
+            }
+            _ => panic!("player-authority command decoded as the wrong operation"),
+        }
+        for forbidden in ["proof", "checkpoint", "sequence", "simulationSeconds"] {
+            let mut invalid = value.clone();
+            invalid["request"][forbidden] = json!(0);
+            let error = serde_json::from_value::<ControlRequest>(invalid).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{forbidden}: {error}"
+            );
+        }
+        let mut nested_extra = value.clone();
+        nested_extra["request"]["command"]["rendererProof"] = json!(true);
+        assert!(
+            serde_json::from_value::<ControlRequest>(nested_extra)
+                .unwrap_err()
+                .to_string()
+                .contains("strictly normalized")
+        );
+
+        let recovered = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreRecoverPlayerAuthorityCommand",
+            "sessionId": "core-1"
+        }))
+        .unwrap();
+        assert!(matches!(
+            recovered,
+            ControlRequest::CoreRecoverPlayerAuthorityCommand(_)
+        ));
+        assert!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreRecoverPlayerAuthorityCommand",
+                "sessionId": "core-1",
+                "command": command
+            }))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field")
+        );
+    }
+
+    #[test]
     fn factory_read_model_protocol_preserves_bounded_opaque_selectors() {
         let request = serde_json::from_value::<ControlRequest>(json!({
             "operation": "coreFactoryReadModelProjection",
@@ -420,4 +511,6 @@ pub struct HelloResponse {
     pub native_format_version: u16,
     pub host_version: &'static str,
     pub capabilities: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_authority_startup_recovery: Option<CorePlayerAuthorityStartupRecoveryReceipt>,
 }

@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value};
 
-use crate::catalog::ItemAmount;
+use crate::catalog::{ItemAmount, RuntimeCatalog};
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -137,10 +138,12 @@ fn parse_step(value: &Value) -> anyhow::Result<Step> {
     }
 }
 
-fn requirements(state: &CoreState, step: &Step) -> anyhow::Result<Vec<ItemAmount>> {
+fn requirements_from_catalog(
+    catalog: &RuntimeCatalog,
+    step: &Step,
+) -> anyhow::Result<Vec<ItemAmount>> {
     match step {
-        Step::Building { construction_id } => state
-            .catalog
+        Step::Building { construction_id } => catalog
             .constructions
             .get(construction_id)
             .map(|definition| definition.costs.clone())
@@ -150,8 +153,7 @@ fn requirements(state: &CoreState, step: &Step) -> anyhow::Result<Vec<ItemAmount
             batches,
             output_item_id,
             ..
-        } => state
-            .catalog
+        } => catalog
             .recipes
             .get(recipe_id)
             .filter(|recipe| {
@@ -176,6 +178,10 @@ fn requirements(state: &CoreState, step: &Step) -> anyhow::Result<Vec<ItemAmount
             amount: *amount,
         }]),
     }
+}
+
+fn requirements(state: &CoreState, step: &Step) -> anyhow::Result<Vec<ItemAmount>> {
+    requirements_from_catalog(state.catalog.as_ref(), step)
 }
 
 fn step_duration(state: &CoreState, base: &Map<String, Value>, step: &Step) -> anyhow::Result<f64> {
@@ -2003,6 +2009,117 @@ pub(crate) fn run_centers(
     Ok(())
 }
 
+fn plan_construction_center_probes<R, F>(
+    runtime: &DeterministicRuntime,
+    centers: &[&Map<String, Value>],
+    probe: F,
+) -> anyhow::Result<Vec<R>>
+where
+    R: Send,
+    F: Fn(usize, &Map<String, Value>) -> anyhow::Result<R> + Send + Sync,
+{
+    runtime.indexed_try_map(centers, |index, center| probe(index, center))
+}
+
+fn probe_quantum_demands(
+    catalog: &RuntimeCatalog,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    center: &Map<String, Value>,
+) -> anyhow::Result<Vec<QuantumDemand>> {
+    if center
+        .get("powerFactor")
+        .and_then(Value::as_f64)
+        .is_some_and(|factor| factor <= EPSILON)
+    {
+        return Ok(Vec::new());
+    }
+    let entity_id = string_at(center, "id").unwrap_or_default();
+    let planet_id = string_at(center, "planetId").unwrap_or_default();
+    let Some(job) = jobs.get(entity_id).and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+    let Some(step) = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.get(step_index))
+    else {
+        return Ok(Vec::new());
+    };
+    let step = parse_step(step)?;
+    let job_inventory = job
+        .get("inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
+    let mut missing = BTreeMap::<String, f64>::new();
+    for requirement in requirements_from_catalog(catalog, &step)? {
+        if matches!(
+            requirement.item_id.as_str(),
+            "logistics_drone" | "logistics_vessel"
+        ) {
+            continue;
+        }
+        let required = floor_amount(requirement.amount);
+        let available = inventory_amount(job_inventory, &requirement.item_id)
+            + inventory_amount(planet_tray, &requirement.item_id)
+            + inventory_amount(quantum, &requirement.item_id);
+        let amount = (required - available).max(0.0);
+        if amount > 0.0 {
+            *missing.entry(requirement.item_id).or_default() += amount;
+        }
+    }
+    Ok(missing
+        .into_iter()
+        .filter_map(|(item_id, amount)| {
+            let amount = floor_amount(amount) as u64;
+            (amount > 0).then(|| QuantumDemand {
+                key: format!("construction-direct:{entity_id}:{item_id}"),
+                entity_id: entity_id.to_owned(),
+                item_id,
+                amount,
+            })
+        })
+        .collect())
+}
+
+fn collect_quantum_demands_with_runtime(
+    runtime: &DeterministicRuntime,
+    catalog: &RuntimeCatalog,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    entities: &[Value],
+) -> anyhow::Result<Vec<QuantumDemand>> {
+    let mut centers = entities
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
+        .collect::<Vec<_>>();
+    centers.sort_by(|left, right| {
+        string_at(left, "id")
+            .unwrap_or_default()
+            .cmp(string_at(right, "id").unwrap_or_default())
+    });
+    // A center probe only reads its saved job and the immutable inventory
+    // snapshot. The later quantum-logistics replay still allocates the shared
+    // stock in this exact ID order, so worker scheduling cannot change which
+    // center wins a scarce item.
+    let planned = plan_construction_center_probes(runtime, &centers, |_, center| {
+        probe_quantum_demands(catalog, base, automation, jobs, center)
+    })?;
+    let demand_count = planned.iter().map(Vec::len).sum();
+    let mut result = Vec::with_capacity(demand_count);
+    for demands in planned {
+        result.extend(demands);
+    }
+    Ok(result)
+}
+
 pub(crate) fn quantum_demands(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -2021,76 +2138,14 @@ pub(crate) fn quantum_demands(
         .get("jobs")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
-    let mut centers = entities
-        .iter()
-        .filter_map(Value::as_object)
-        .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
-        .collect::<Vec<_>>();
-    centers.sort_by(|left, right| {
-        string_at(left, "id")
-            .unwrap_or_default()
-            .cmp(string_at(right, "id").unwrap_or_default())
-    });
-    let mut result = Vec::new();
-    for center in centers {
-        if center
-            .get("powerFactor")
-            .and_then(Value::as_f64)
-            .is_some_and(|factor| factor <= EPSILON)
-        {
-            continue;
-        }
-        let entity_id = string_at(center, "id").unwrap_or_default();
-        let planet_id = string_at(center, "planetId").unwrap_or_default();
-        let Some(job) = jobs.get(entity_id).and_then(Value::as_object) else {
-            continue;
-        };
-        let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
-        let Some(step) = job
-            .get("steps")
-            .and_then(Value::as_array)
-            .and_then(|steps| steps.get(step_index))
-        else {
-            continue;
-        };
-        let step = parse_step(step)?;
-        let job_inventory = job
-            .get("inventory")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-        let empty = Map::new();
-        let tray = tray(base, planet_id).unwrap_or(&empty);
-        let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
-        let mut missing = BTreeMap::<String, f64>::new();
-        for requirement in requirements(state, &step)? {
-            if matches!(
-                requirement.item_id.as_str(),
-                "logistics_drone" | "logistics_vessel"
-            ) {
-                continue;
-            }
-            let required = floor_amount(requirement.amount);
-            let available = inventory_amount(job_inventory, &requirement.item_id)
-                + inventory_amount(tray, &requirement.item_id)
-                + inventory_amount(quantum, &requirement.item_id);
-            let amount = (required - available).max(0.0);
-            if amount > 0.0 {
-                *missing.entry(requirement.item_id).or_default() += amount;
-            }
-        }
-        for (item_id, amount) in missing {
-            let amount = floor_amount(amount) as u64;
-            if amount > 0 {
-                result.push(QuantumDemand {
-                    key: format!("construction-direct:{entity_id}:{item_id}"),
-                    entity_id: entity_id.to_owned(),
-                    item_id,
-                    amount,
-                });
-            }
-        }
-    }
-    Ok(result)
+    collect_quantum_demands_with_runtime(
+        deterministic_runtime(),
+        state.catalog.as_ref(),
+        base,
+        automation,
+        jobs,
+        entities,
+    )
 }
 
 pub(crate) fn apply_quantum_delivery(
@@ -2266,6 +2321,9 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{
+        CatalogSnapshot, ConstructionDefinition, ItemDefinition, PlanetDefinition,
+    };
     use crate::construction_planner::TargetKind;
     use serde_json::json;
 
@@ -2304,6 +2362,268 @@ mod tests {
             touched_tray_items,
             cycle_state_items: Vec::new(),
             cycle_start_inventory: BTreeMap::new(),
+        }
+    }
+
+    fn quantum_probe_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                registry_fingerprint: "construction-parallel".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "planet-a".to_owned(),
+                    name: "planet-a".to_owned(),
+                    system_id: "system-a".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: std::collections::HashMap::new(),
+                }],
+                items: ["copper", "iron"]
+                    .into_iter()
+                    .map(|id| ItemDefinition {
+                        id: id.to_owned(),
+                        name: id.to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    })
+                    .collect(),
+                buildings: Vec::new(),
+                recipes: Vec::new(),
+                constructions: vec![ConstructionDefinition {
+                    id: "widget".to_owned(),
+                    output_amount: 1.0,
+                    automation_order: 0,
+                    required_tech_id: None,
+                    costs: vec![
+                        ItemAmount {
+                            item_id: "iron".to_owned(),
+                            amount: 7.0,
+                        },
+                        ItemAmount {
+                            item_id: "copper".to_owned(),
+                            amount: 3.0,
+                        },
+                    ],
+                }],
+                belts: Vec::new(),
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "construction-parallel",
+        )
+        .expect("construction probe catalog")
+    }
+
+    fn quantum_probe_fixture(
+        center_count: usize,
+    ) -> (
+        RuntimeCatalog,
+        Map<String, Value>,
+        Map<String, Value>,
+        Vec<Value>,
+    ) {
+        let catalog = quantum_probe_catalog();
+        let base = object(json!({
+            "activePlanetId": "planet-a",
+            "tray": { "copper": 0, "iron": 1 },
+            "planetTrays": {},
+        }));
+        let mut jobs = Map::new();
+        let mut buffers = Map::new();
+        let mut entities = Vec::with_capacity(center_count);
+        for index in (0..center_count).rev() {
+            let entity_id = format!("center-{index:05}");
+            entities.push(json!({
+                "id": entity_id,
+                "buildingId": "construction_center",
+                "planetId": "planet-a",
+                "powerFactor": if index % 19 == 0 { 0.0 } else { 1.0 },
+            }));
+            jobs.insert(
+                entity_id.clone(),
+                json!({
+                    "constructionId": "widget",
+                    "stepIndex": 0,
+                    "elapsedSeconds": 0,
+                    "inventory": { "iron": index % 3 },
+                    "steps": [{ "kind": "building", "constructionId": "widget" }],
+                }),
+            );
+            if index % 7 == 0 {
+                buffers.insert(entity_id, json!({ "iron": 1 }));
+            }
+        }
+        let automation = object(json!({
+            "enabled": true,
+            "quantumSourceEnabled": true,
+            "jobs": jobs,
+            "quantumMaterialBuffer": buffers,
+        }));
+        (catalog, base, automation, entities)
+    }
+
+    fn demand_projection(demands: &[QuantumDemand]) -> Vec<(String, String, String, u64)> {
+        demands
+            .iter()
+            .map(|demand| {
+                (
+                    demand.key.clone(),
+                    demand.entity_id.clone(),
+                    demand.item_id.clone(),
+                    demand.amount,
+                )
+            })
+            .collect()
+    }
+
+    fn demand_bytes(demands: &[QuantumDemand]) -> Vec<u8> {
+        serde_json::to_vec(
+            &demands
+                .iter()
+                .map(|demand| {
+                    json!({
+                        "key": demand.key,
+                        "entityId": demand.entity_id,
+                        "itemId": demand.item_id,
+                        "amount": demand.amount,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize construction demands")
+    }
+
+    #[test]
+    fn construction_center_probe_keeps_small_work_serial_and_enters_bounded_pool_when_large() {
+        let (_, _, _, small_entities) = quantum_probe_fixture(32);
+        let small_centers = small_entities
+            .iter()
+            .filter_map(Value::as_object)
+            .collect::<Vec<_>>();
+        let small_runtime = DeterministicRuntime::for_test(8);
+        let small_threads = plan_construction_center_probes(
+            &small_runtime,
+            &small_centers,
+            |index, _| -> anyhow::Result<_> {
+                let thread = std::thread::current();
+                Ok((index, thread.name().unwrap_or("unnamed").to_owned()))
+            },
+        )
+        .expect("small construction probe");
+        assert!(
+            small_threads
+                .iter()
+                .all(|(_, name)| !name.starts_with("dsp-native-core-"))
+        );
+
+        let (_, _, _, large_entities) =
+            quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
+        let large_centers = large_entities
+            .iter()
+            .filter_map(Value::as_object)
+            .collect::<Vec<_>>();
+        for worker_limit in [2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            let observations = plan_construction_center_probes(
+                &runtime,
+                &large_centers,
+                |index, _| -> anyhow::Result<_> {
+                    let thread = std::thread::current();
+                    Ok((
+                        index,
+                        rayon::current_num_threads(),
+                        thread.name().unwrap_or("unnamed").to_owned(),
+                    ))
+                },
+            )
+            .expect("parallel construction probe");
+            assert_eq!(
+                observations
+                    .iter()
+                    .map(|(index, _, _)| *index)
+                    .collect::<Vec<_>>(),
+                (0..large_centers.len()).collect::<Vec<_>>()
+            );
+            assert!(observations.iter().all(|(_, workers, name)| {
+                *workers == worker_limit && name.starts_with("dsp-native-core-")
+            }));
+        }
+    }
+
+    #[test]
+    fn quantum_demand_probe_is_byte_identical_for_1_2_4_8_workers() {
+        let (catalog, base, automation, entities) =
+            quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
+        let jobs = automation["jobs"].as_object().expect("construction jobs");
+        let expected = collect_quantum_demands_with_runtime(
+            &DeterministicRuntime::for_test(1),
+            &catalog,
+            &base,
+            &automation,
+            jobs,
+            &entities,
+        )
+        .expect("serial construction demand probe");
+        let expected_projection = demand_projection(&expected);
+        let expected_bytes = demand_bytes(&expected);
+        assert!(!expected.is_empty());
+        assert!(
+            expected
+                .windows(2)
+                .all(|pair| pair[0].entity_id <= pair[1].entity_id)
+        );
+
+        for worker_limit in [1, 2, 4, 8] {
+            let actual = collect_quantum_demands_with_runtime(
+                &DeterministicRuntime::for_test(worker_limit),
+                &catalog,
+                &base,
+                &automation,
+                jobs,
+                &entities,
+            )
+            .expect("construction demand worker matrix");
+            assert_eq!(demand_projection(&actual), expected_projection);
+            assert_eq!(demand_bytes(&actual), expected_bytes);
+        }
+    }
+
+    #[test]
+    fn quantum_demand_parallel_failure_uses_lowest_center_and_keeps_sources_atomic() {
+        let (catalog, base, mut automation, entities) =
+            quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
+        let jobs = automation["jobs"]
+            .as_object_mut()
+            .expect("construction jobs");
+        jobs["center-01024"]["steps"] = json!([{ "kind": "invalid-low" }]);
+        jobs["center-03000"]
+            .as_object_mut()
+            .expect("higher malformed job")
+            .remove("inventory");
+        let source_bytes = serde_json::to_vec(&(&base, &automation, &entities))
+            .expect("serialize construction source");
+        let jobs = automation["jobs"].as_object().expect("construction jobs");
+
+        for worker_limit in [1, 2, 4, 8] {
+            let error = collect_quantum_demands_with_runtime(
+                &DeterministicRuntime::for_test(worker_limit),
+                &catalog,
+                &base,
+                &automation,
+                jobs,
+                &entities,
+            )
+            .expect_err("malformed construction probe must fail");
+            assert_eq!(
+                error.to_string(),
+                "native construction step kind is invalid"
+            );
+            assert_eq!(
+                serde_json::to_vec(&(&base, &automation, &entities))
+                    .expect("serialize construction source after failure"),
+                source_bytes
+            );
         }
     }
 

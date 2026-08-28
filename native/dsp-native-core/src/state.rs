@@ -5380,6 +5380,8 @@ mod tests {
                 + state.factory_topology.entity_grid_indices.len()
                 + state.factory_topology.entities_by_planet[0].len()) as u64
                 * size_of::<usize>() as u64
+                + (state.factory_topology.device_counts_by_planet.capacity()
+                    * size_of::<f64>()) as u64
                 + (state.factory_topology.planet_viewport_indexes.capacity()
                     * size_of::<PlanetViewportIndex>()) as u64
                 + state.factory_topology.planet_viewport_indexes[0].estimated_bytes()

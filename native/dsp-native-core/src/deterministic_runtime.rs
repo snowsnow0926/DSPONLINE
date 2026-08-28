@@ -211,6 +211,7 @@ impl DeterministicRuntime {
     /// Updates three equally sized structure-of-arrays slices in index order.
     /// Every length is validated before the first mutable element is exposed,
     /// so a malformed caller cannot leave a partially updated state behind.
+    #[allow(dead_code)]
     pub(crate) fn indexed_for_each_mut3<A, B, C, F>(
         &self,
         first: &mut [A],
@@ -263,6 +264,7 @@ impl DeterministicRuntime {
     /// Updates five equally sized structure-of-arrays slices in index order.
     /// Like the three-slice variant, validation is atomic with respect to
     /// mutation: a length error is returned before the callback can run.
+    #[allow(dead_code)]
     pub(crate) fn indexed_for_each_mut5<A, B, C, D, E, F>(
         &self,
         first: &mut [A],
@@ -321,6 +323,188 @@ impl DeterministicRuntime {
                     .for_each(|(index, ((((first, second), third), fourth), fifth))| {
                         update(index, first, second, third, fourth, fifth);
                     });
+            });
+        Ok(())
+    }
+
+    /// Dense fallback for fixed-size paged SoA columns. All page counts and
+    /// page lengths are checked before any callback can mutate a row. Pages
+    /// remain independently owned, so Rayon can process them without first
+    /// rebuilding factory-sized contiguous vectors.
+    pub(crate) fn indexed_for_each_mut3_pages<A, B, C, F>(
+        &self,
+        page_rows: usize,
+        first: &mut [&mut [A]],
+        second: &mut [&mut [B]],
+        third: &mut [&mut [C]],
+        update: F,
+    ) -> Result<()>
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        F: Fn(usize, &mut A, &mut B, &mut C) + Send + Sync,
+    {
+        anyhow::ensure!(page_rows != 0, "indexed paged update has zero page size");
+        anyhow::ensure!(
+            second.len() == first.len() && third.len() == first.len(),
+            "indexed_for_each_mut3_pages page-count mismatch"
+        );
+        let mut item_count = 0_usize;
+        for page_index in 0..first.len() {
+            let page_len = first[page_index].len();
+            anyhow::ensure!(
+                second[page_index].len() == page_len && third[page_index].len() == page_len,
+                "indexed_for_each_mut3_pages page-length mismatch at page {page_index}"
+            );
+            anyhow::ensure!(
+                page_len != 0
+                    && page_len <= page_rows
+                    && (page_index + 1 == first.len() || page_len == page_rows),
+                "indexed_for_each_mut3_pages malformed page at page {page_index}"
+            );
+            item_count = item_count.saturating_add(page_len);
+        }
+
+        let apply_page = |page_index: usize, first: &mut [A], second: &mut [B], third: &mut [C]| {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .enumerate()
+                .for_each(|(offset, ((first, second), third))| {
+                    update(page_index * page_rows + offset, first, second, third);
+                });
+        };
+        if self.worker_count_for_items(item_count) == 1 {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .enumerate()
+                .for_each(|(page_index, ((first, second), third))| {
+                    apply_page(page_index, first, second, third);
+                });
+            return Ok(());
+        }
+        self.pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                first
+                    .par_iter_mut()
+                    .zip(second.par_iter_mut())
+                    .zip(third.par_iter_mut())
+                    .enumerate()
+                    .for_each(|(page_index, ((first, second), third))| {
+                        apply_page(page_index, first, second, third);
+                    });
+            });
+        Ok(())
+    }
+
+    /// Five-column counterpart used by the dense belt post-action fold.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn indexed_for_each_mut5_pages<A, B, C, D, E, F>(
+        &self,
+        page_rows: usize,
+        first: &mut [&mut [A]],
+        second: &mut [&mut [B]],
+        third: &mut [&mut [C]],
+        fourth: &mut [&mut [D]],
+        fifth: &mut [&mut [E]],
+        update: F,
+    ) -> Result<()>
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        D: Send,
+        E: Send,
+        F: Fn(usize, &mut A, &mut B, &mut C, &mut D, &mut E) + Send + Sync,
+    {
+        anyhow::ensure!(page_rows != 0, "indexed paged update has zero page size");
+        anyhow::ensure!(
+            second.len() == first.len()
+                && third.len() == first.len()
+                && fourth.len() == first.len()
+                && fifth.len() == first.len(),
+            "indexed_for_each_mut5_pages page-count mismatch"
+        );
+        let mut item_count = 0_usize;
+        for page_index in 0..first.len() {
+            let page_len = first[page_index].len();
+            anyhow::ensure!(
+                second[page_index].len() == page_len
+                    && third[page_index].len() == page_len
+                    && fourth[page_index].len() == page_len
+                    && fifth[page_index].len() == page_len,
+                "indexed_for_each_mut5_pages page-length mismatch at page {page_index}"
+            );
+            anyhow::ensure!(
+                page_len != 0
+                    && page_len <= page_rows
+                    && (page_index + 1 == first.len() || page_len == page_rows),
+                "indexed_for_each_mut5_pages malformed page at page {page_index}"
+            );
+            item_count = item_count.saturating_add(page_len);
+        }
+
+        let apply_page = |page_index: usize,
+                          first: &mut [A],
+                          second: &mut [B],
+                          third: &mut [C],
+                          fourth: &mut [D],
+                          fifth: &mut [E]| {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .zip(fourth.iter_mut())
+                .zip(fifth.iter_mut())
+                .enumerate()
+                .for_each(|(offset, ((((first, second), third), fourth), fifth))| {
+                    update(
+                        page_index * page_rows + offset,
+                        first,
+                        second,
+                        third,
+                        fourth,
+                        fifth,
+                    );
+                });
+        };
+        if self.worker_count_for_items(item_count) == 1 {
+            first
+                .iter_mut()
+                .zip(second.iter_mut())
+                .zip(third.iter_mut())
+                .zip(fourth.iter_mut())
+                .zip(fifth.iter_mut())
+                .enumerate()
+                .for_each(
+                    |(page_index, ((((first, second), third), fourth), fifth))| {
+                        apply_page(page_index, first, second, third, fourth, fifth);
+                    },
+                );
+            return Ok(());
+        }
+        self.pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                first
+                    .par_iter_mut()
+                    .zip(second.par_iter_mut())
+                    .zip(third.par_iter_mut())
+                    .zip(fourth.par_iter_mut())
+                    .zip(fifth.par_iter_mut())
+                    .enumerate()
+                    .for_each(
+                        |(page_index, ((((first, second), third), fourth), fifth))| {
+                            apply_page(page_index, first, second, third, fourth, fifth);
+                        },
+                    );
             });
         Ok(())
     }
@@ -686,9 +870,9 @@ mod tests {
         (first, second, visits)
     }
 
-    fn run_indexed_for_each_mut5(
-        worker_limit: usize,
-    ) -> (Vec<u64>, Vec<u64>, Vec<u32>, Vec<i64>, Vec<u8>) {
+    type Mut5Signature = (Vec<u64>, Vec<u64>, Vec<u32>, Vec<i64>, Vec<u8>);
+
+    fn run_indexed_for_each_mut5(worker_limit: usize) -> Mut5Signature {
         let runtime = DeterministicRuntime::for_test(worker_limit);
         let item_count = PARALLEL_MIN_ITEMS + 257;
         let mut first = (0..item_count)
@@ -717,9 +901,7 @@ mod tests {
                     let original_b = *b;
                     let original_c = *c;
                     let original_d = *d;
-                    *a = original_a.rotate_left((original_c % 64) as u32)
-                        ^ original_b
-                        ^ index as u64;
+                    *a = original_a.rotate_left(original_c % 64) ^ original_b ^ index as u64;
                     *b = original_b
                         .wrapping_mul(0x94d0_49bb_1331_11eb)
                         .wrapping_add(original_d as u64);

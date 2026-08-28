@@ -10,7 +10,10 @@ use serde_json::value::RawValue;
 use serde_json::{Deserializer, Map, Number, Value};
 
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
-use crate::state::{BeltCommitSource, BeltDynamicColumns, CoreState, ExactRowIds, RawRecord};
+use crate::state::{
+    BELT_DYNAMIC_PAGE_ROWS, BeltCommitSource, BeltDynamicColumns, BeltPagedColumn, CoreState,
+    ExactRowIds, RawRecord,
+};
 
 const EPSILON: f64 = 0.0001;
 
@@ -241,6 +244,15 @@ pub struct BeltSchedulerDiagnostics {
     pub(crate) write_back_flow_checks: usize,
     #[serde(skip)]
     pub(crate) write_back_evidence_checks: usize,
+    /// Page-granular copy/validation evidence. These internal counters make it
+    /// possible to enforce that a sparse revision scales with dirty pages,
+    /// without widening the renderer protocol.
+    #[serde(skip)]
+    pub(crate) dynamic_cow_pages: usize,
+    #[serde(skip)]
+    pub(crate) mask_cow_pages: usize,
+    #[serde(skip)]
+    pub(crate) dirty_validation_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,11 +539,11 @@ impl ActiveSelection {
 #[derive(Debug)]
 pub(crate) struct BeltRuntime {
     source: Option<BeltCommitSource>,
-    progress: Vec<f64>,
-    total_transferred: Vec<f64>,
-    congestion: Vec<f64>,
-    last_flow: Vec<f64>,
-    total_dirty: Vec<bool>,
+    progress: BeltPagedColumn<f64>,
+    total_transferred: BeltPagedColumn<f64>,
+    congestion: BeltPagedColumn<f64>,
+    last_flow: BeltPagedColumn<f64>,
+    total_dirty: BeltPagedColumn<bool>,
     touched_routes: TouchedRoutes,
     belt_capacity: f64,
     // Runtime-only source/item wake state. A group may sleep only when its
@@ -552,11 +564,11 @@ impl BeltRuntime {
     fn empty(belt_count: usize, prepared_routes: &PreparedRoutes) -> Self {
         Self {
             source: None,
-            progress: Vec::with_capacity(belt_count),
-            total_transferred: Vec::with_capacity(belt_count),
-            congestion: Vec::with_capacity(belt_count),
-            last_flow: Vec::with_capacity(belt_count),
-            total_dirty: vec![false; belt_count],
+            progress: BeltPagedColumn::default(),
+            total_transferred: BeltPagedColumn::default(),
+            congestion: BeltPagedColumn::default(),
+            last_flow: BeltPagedColumn::default(),
+            total_dirty: BeltPagedColumn::with_len_default(belt_count),
             touched_routes: TouchedRoutes::default(),
             belt_capacity: prepared_routes.total_capacity,
             active_groups: vec![false; prepared_routes.groups.len()],
@@ -656,29 +668,26 @@ impl BeltRuntime {
         let belt_count = state.validate_belt_runtime_topology()?;
         let mut runtime = Self::empty(belt_count, prepared_routes);
         runtime.source = Some(state.belt_commit_source());
-        // These four flat copies replace one serde_json parse and object-map
-        // lookup for every belt at the start of every exact advance.
-        runtime.progress.clone_from(&state.belt_dynamics.progress);
-        runtime
-            .total_transferred
-            .clone_from(&state.belt_dynamics.total_transferred);
-        runtime
-            .congestion
-            .clone_from(&state.belt_dynamics.congestion);
-        runtime.last_flow.clone_from(&state.belt_dynamics.last_flow);
+        // Each clone copies only the fixed 64-entry top directory. Pages stay
+        // shared with the source revision until an active route writes them.
+        runtime.progress = state.belt_dynamics.progress.clone();
+        runtime.total_transferred = state.belt_dynamics.total_transferred.clone();
+        runtime.congestion = state.belt_dynamics.congestion.clone();
+        runtime.last_flow = state.belt_dynamics.last_flow.clone();
+        runtime.progress.clear_dirty();
+        runtime.total_transferred.clear_dirty();
+        runtime.congestion.clear_dirty();
+        runtime.last_flow.clear_dirty();
         // The historical write-back canonicalizes absent/non-numeric
         // progress, lastFlow and congestion fields even if no transfer occurs.
         // Seed those rows into the same complete mutation evidence so sparse
         // write-back preserves byte/value semantics without rediscovering
         // them in a second full scan at commit time. totalTransferred remains
         // absent until an actual transfer marks it dirty.
-        let required_mask = (1 << BeltDynamicColumns::PROGRESS)
-            | (1 << BeltDynamicColumns::LAST_FLOW)
-            | (1 << BeltDynamicColumns::CONGESTION);
-        for (index, &mask) in state.belt_dynamics.number_mask.iter().enumerate() {
-            if mask & required_mask != required_mask {
-                runtime.touched_routes.record_index(index)?;
-            }
+        for &index in state.belt_dynamics.missing_required_rows() {
+            runtime
+                .touched_routes
+                .record_index(expand_compact_index(index))?;
         }
         runtime.finish_activity(state, entities, prepared_routes, carried)
     }
@@ -731,12 +740,17 @@ impl BeltRuntime {
     ) -> anyhow::Result<Self> {
         let belt_count = state.validate_belt_runtime_topology()?;
         dynamics.validate(belt_count)?;
-        let total_dirty = dynamics
+        let mut total_dirty = BeltPagedColumn::with_len_default(belt_count);
+        for (index, (next, previous)) in dynamics
             .total_transferred
             .iter()
             .zip(&state.belt_dynamics.total_transferred)
-            .map(|(next, previous)| next.to_bits() != previous.to_bits())
-            .collect::<Vec<_>>();
+            .enumerate()
+        {
+            if next.to_bits() != previous.to_bits() {
+                total_dirty[index] = true;
+            }
+        }
         let mut runtime = Self {
             source: Some(state.belt_commit_source()),
             progress: dynamics.progress,
@@ -763,6 +777,11 @@ impl BeltRuntime {
     #[cfg(test)]
     pub(crate) fn clear_total_dirty_for_test(&mut self, index: usize) {
         self.total_dirty[index] = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_touched_for_test(&mut self, index: usize) -> anyhow::Result<()> {
+        self.touched_routes.record_index(index)
     }
 
     #[cfg(test)]
@@ -910,6 +929,7 @@ impl BeltRuntime {
 
         let mut changed_count = 0_usize;
         let mut number_mask = state.belt_dynamics.number_mask.clone();
+        number_mask.clear_dirty();
         let mut sparse_patches = None;
         let mut all_changed_indices = None;
         match touched {
@@ -1024,14 +1044,17 @@ impl BeltRuntime {
                 plan.worker_count
             );
         }
-        let dynamics = BeltDynamicColumns {
-            progress: self.progress,
-            total_transferred: self.total_transferred,
-            congestion: self.congestion,
-            last_flow: self.last_flow,
+        let mut dynamics = BeltDynamicColumns::from_runtime_columns(
+            self.progress,
+            self.total_transferred,
+            self.congestion,
+            self.last_flow,
             number_mask,
-        };
-        dynamics.validate(belt_count)?;
+        );
+        self.diagnostics.dynamic_cow_pages = dynamics.dynamic_dirty_page_count();
+        self.diagnostics.mask_cow_pages = dynamics.number_mask.dirty_page_count();
+        self.diagnostics.dirty_validation_rows = dynamics.validate_dirty(belt_count)?;
+        dynamics.clear_dirty();
         let dynamics = (changed_count != 0).then_some(dynamics);
         let source = self
             .source
@@ -1322,6 +1345,7 @@ impl BeltWorkspace {
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn advance_belt_clock_row(
     route: &Route,
     progress: &mut f64,
@@ -1366,10 +1390,14 @@ fn advance_belt_clocks_with_runtime(
     let congestion_decay = 0.85_f64.powf(seconds);
     match selection {
         ActiveSelection::All | ActiveSelection::Dense { .. } => {
-            executor.indexed_for_each_mut3(
-                &mut runtime.progress,
-                &mut runtime.congestion,
-                &mut runtime.last_flow,
+            let mut progress_pages = runtime.progress.materialized_pages_mut();
+            let mut congestion_pages = runtime.congestion.materialized_pages_mut();
+            let mut last_flow_pages = runtime.last_flow.materialized_pages_mut();
+            executor.indexed_for_each_mut3_pages(
+                BELT_DYNAMIC_PAGE_ROWS,
+                &mut progress_pages,
+                &mut congestion_pages,
+                &mut last_flow_pages,
                 |belt_index, progress, congestion, last_flow| {
                     advance_belt_clock_row(
                         &prepared_routes.routes[belt_index],
@@ -1509,12 +1537,18 @@ fn apply_belt_post_actions_with_runtime(
     let actions = &workspace.post_actions;
     match selection {
         ActiveSelection::All | ActiveSelection::Dense { .. } => {
-            executor.indexed_for_each_mut5(
-                progress,
-                total_transferred,
-                congestion,
-                last_flow,
-                total_dirty,
+            let mut progress_pages = progress.materialized_pages_mut();
+            let mut total_transferred_pages = total_transferred.materialized_pages_mut();
+            let mut congestion_pages = congestion.materialized_pages_mut();
+            let mut last_flow_pages = last_flow.materialized_pages_mut();
+            let mut total_dirty_pages = total_dirty.materialized_pages_mut();
+            executor.indexed_for_each_mut5_pages(
+                BELT_DYNAMIC_PAGE_ROWS,
+                &mut progress_pages,
+                &mut total_transferred_pages,
+                &mut congestion_pages,
+                &mut last_flow_pages,
+                &mut total_dirty_pages,
                 |belt_index, progress, total_transferred, congestion, last_flow, total_dirty| {
                     apply_belt_post_action_row(
                         &prepared_routes.routes[belt_index],
@@ -3474,7 +3508,7 @@ mod tests {
             last_flow: (0..route_count)
                 .map(|index| (index % 67) as f64 * 0.125)
                 .collect(),
-            total_dirty: vec![false; route_count],
+            total_dirty: BeltPagedColumn::with_len_default(route_count),
             touched_routes: TouchedRoutes::default(),
             belt_capacity: 0.0,
             active_groups: Vec::new(),
@@ -3539,16 +3573,16 @@ mod tests {
         assert!(sealed.unseal().is_err());
     }
 
-    fn runtime_kernel_signature(
-        runtime: &BeltRuntime,
-    ) -> (
+    type BeltKernelSignature = (
         Vec<u64>,
         Vec<u64>,
         Vec<u64>,
         Vec<u64>,
         Vec<bool>,
         Option<Vec<u32>>,
-    ) {
+    );
+
+    fn runtime_kernel_signature(runtime: &BeltRuntime) -> BeltKernelSignature {
         (
             runtime
                 .progress
@@ -3570,7 +3604,7 @@ mod tests {
                 .iter()
                 .map(|value| value.to_bits())
                 .collect(),
-            runtime.total_dirty.clone(),
+            runtime.total_dirty.iter().copied().collect(),
             runtime.touched_routes.signature(),
         )
     }
@@ -4134,7 +4168,9 @@ mod tests {
             json!({"totalTransferred":7,"congestion":0,"lastFlow":0}),
             json!({"progress":0,"congestion":0,"lastFlow":0}),
         ] {
-            persisted.push_from_object(record.as_object().unwrap());
+            persisted
+                .push_from_object(record.as_object().unwrap())
+                .unwrap();
         }
         runtime.progress.clone_from(&persisted.progress);
         runtime

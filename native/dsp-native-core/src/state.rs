@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
-use std::ops::{Deref, DerefMut, Index};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -1390,6 +1390,280 @@ impl BeltColumns {
     }
 }
 
+pub(crate) const BELT_DYNAMIC_PAGE_ROWS: usize = 1_024;
+const BELT_DYNAMIC_GROUP_PAGES: usize = 64;
+const BELT_DYNAMIC_GROUPS: usize = 64;
+const BELT_DYNAMIC_MAX_ROWS: usize =
+    BELT_DYNAMIC_PAGE_ROWS * BELT_DYNAMIC_GROUP_PAGES * BELT_DYNAMIC_GROUPS;
+const BELT_DYNAMIC_PAGE_BITMAP_WORDS: usize =
+    BELT_DYNAMIC_GROUP_PAGES * BELT_DYNAMIC_GROUPS / u64::BITS as usize;
+
+#[derive(Debug, Clone)]
+struct BeltPagedGroup<T: Copy> {
+    pages: [Option<Arc<[T; BELT_DYNAMIC_PAGE_ROWS]>>; BELT_DYNAMIC_GROUP_PAGES],
+}
+
+impl<T: Copy> Default for BeltPagedGroup<T> {
+    fn default() -> Self {
+        Self {
+            pages: std::array::from_fn(|_| None),
+        }
+    }
+}
+
+/// Fixed-depth, page-granular clone-on-write storage for mutable belt signals.
+///
+/// The maximum v47 belt count fits in 64 top-level groups, each containing 64
+/// independently shared 1,024-row pages. Cloning a column therefore copies a
+/// fixed 64 Arc directory entries rather than `len` values. A sparse write
+/// clones at most one 64-entry group directory and one bounded page per newly
+/// touched page. Missing pages read as the column default, which lets runtime-
+/// only boolean evidence start at logical length B without allocating B bits.
+#[derive(Debug, Clone)]
+pub(crate) struct BeltPagedColumn<T: Copy> {
+    len: usize,
+    default_value: T,
+    groups: [Option<Arc<BeltPagedGroup<T>>>; BELT_DYNAMIC_GROUPS],
+    dirty_pages: [u64; BELT_DYNAMIC_PAGE_BITMAP_WORDS],
+    allocated_pages: usize,
+}
+
+impl<T: Copy + Default> Default for BeltPagedColumn<T> {
+    fn default() -> Self {
+        Self::with_len_default(0)
+    }
+}
+
+impl<T: Copy + Default> BeltPagedColumn<T> {
+    pub(crate) fn with_len_default(len: usize) -> Self {
+        assert!(
+            len <= BELT_DYNAMIC_MAX_ROWS,
+            "native belt paged column exceeds its fixed address space"
+        );
+        Self {
+            len,
+            default_value: T::default(),
+            groups: std::array::from_fn(|_| None),
+            dirty_pages: [0; BELT_DYNAMIC_PAGE_BITMAP_WORDS],
+            allocated_pages: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub(crate) fn push(&mut self, value: T) -> anyhow::Result<()> {
+        if self.len == BELT_DYNAMIC_MAX_ROWS {
+            bail!("native belt paged column exceeds its fixed address space");
+        }
+        let index = self.len;
+        self.len += 1;
+        self[index] = value;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        let index = self.len.checked_sub(1)?;
+        let value = self[index];
+        self.len = index;
+        Some(value)
+    }
+
+    #[inline]
+    fn page_coordinates(index: usize) -> (usize, usize, usize, usize) {
+        let page_index = index / BELT_DYNAMIC_PAGE_ROWS;
+        (
+            page_index,
+            page_index / BELT_DYNAMIC_GROUP_PAGES,
+            page_index % BELT_DYNAMIC_GROUP_PAGES,
+            index % BELT_DYNAMIC_PAGE_ROWS,
+        )
+    }
+
+    #[inline]
+    fn page(&self, page_index: usize) -> Option<&Arc<[T; BELT_DYNAMIC_PAGE_ROWS]>> {
+        let group_index = page_index / BELT_DYNAMIC_GROUP_PAGES;
+        let group_page = page_index % BELT_DYNAMIC_GROUP_PAGES;
+        self.groups[group_index]
+            .as_ref()
+            .and_then(|group| group.pages[group_page].as_ref())
+    }
+
+    fn page_mut(&mut self, page_index: usize) -> &mut [T; BELT_DYNAMIC_PAGE_ROWS] {
+        let group_index = page_index / BELT_DYNAMIC_GROUP_PAGES;
+        let group_page = page_index % BELT_DYNAMIC_GROUP_PAGES;
+        let group =
+            self.groups[group_index].get_or_insert_with(|| Arc::new(BeltPagedGroup::default()));
+        let group = Arc::make_mut(group);
+        let page = group.pages[group_page].get_or_insert_with(|| {
+            self.allocated_pages += 1;
+            Arc::new([self.default_value; BELT_DYNAMIC_PAGE_ROWS])
+        });
+        Arc::make_mut(page)
+    }
+
+    #[inline]
+    fn mark_page_dirty(&mut self, page_index: usize) {
+        self.dirty_pages[page_index / u64::BITS as usize] |=
+            1_u64 << (page_index % u64::BITS as usize);
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty_pages.fill(0);
+    }
+
+    pub(crate) fn dirty_page_count(&self) -> usize {
+        self.dirty_pages
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    fn dirty_page_words(&self) -> &[u64; BELT_DYNAMIC_PAGE_BITMAP_WORDS] {
+        &self.dirty_pages
+    }
+
+    pub(crate) fn iter(&self) -> BeltPagedIter<'_, T> {
+        BeltPagedIter {
+            column: self,
+            index: 0,
+        }
+    }
+
+    /// Materializes and uniquely owns every logical page. Callers use this
+    /// only after the active selector deliberately chose the dense fallback.
+    /// Sparse revisions must never call it.
+    pub(crate) fn materialized_pages_mut(&mut self) -> Vec<&mut [T]> {
+        let page_count = self.len.div_ceil(BELT_DYNAMIC_PAGE_ROWS);
+        for page_index in 0..page_count {
+            self.mark_page_dirty(page_index);
+        }
+        let mut remaining = self.len;
+        let mut pages = Vec::with_capacity(page_count);
+        for group_slot in &mut self.groups {
+            if remaining == 0 {
+                break;
+            }
+            let group = group_slot.get_or_insert_with(|| Arc::new(BeltPagedGroup::default()));
+            let group = Arc::make_mut(group);
+            for page_slot in &mut group.pages {
+                if remaining == 0 {
+                    break;
+                }
+                let page = page_slot.get_or_insert_with(|| {
+                    self.allocated_pages += 1;
+                    Arc::new([self.default_value; BELT_DYNAMIC_PAGE_ROWS])
+                });
+                let used = remaining.min(BELT_DYNAMIC_PAGE_ROWS);
+                pages.push(&mut Arc::make_mut(page)[..used]);
+                remaining -= used;
+            }
+        }
+        debug_assert_eq!(remaining, 0);
+        pages
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        let group_count = self.groups.iter().filter(|group| group.is_some()).count();
+        (group_count * size_of::<BeltPagedGroup<T>>()
+            + self.allocated_pages * size_of::<[T; BELT_DYNAMIC_PAGE_ROWS]>()) as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn changed_page_count_from(&self, source: &Self) -> usize {
+        let page_count = self.len.max(source.len).div_ceil(BELT_DYNAMIC_PAGE_ROWS);
+        (0..page_count)
+            .filter(
+                |&page_index| match (self.page(page_index), source.page(page_index)) {
+                    (Some(left), Some(right)) => !Arc::ptr_eq(left, right),
+                    (None, None) => false,
+                    _ => true,
+                },
+            )
+            .count()
+    }
+}
+
+impl<T: Copy + Default> Index<usize> for BeltPagedColumn<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(
+            index < self.len,
+            "native belt paged column index out of bounds"
+        );
+        let (page_index, _, _, offset) = Self::page_coordinates(index);
+        self.page(page_index)
+            .map_or(&self.default_value, |page| &page[offset])
+    }
+}
+
+impl<T: Copy + Default> IndexMut<usize> for BeltPagedColumn<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(
+            index < self.len,
+            "native belt paged column index out of bounds"
+        );
+        let (page_index, _, _, offset) = Self::page_coordinates(index);
+        self.mark_page_dirty(page_index);
+        &mut self.page_mut(page_index)[offset]
+    }
+}
+
+pub(crate) struct BeltPagedIter<'a, T: Copy + Default> {
+    column: &'a BeltPagedColumn<T>,
+    index: usize,
+}
+
+impl<'a, T: Copy + Default> Iterator for BeltPagedIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.column.len {
+            return None;
+        }
+        let index = self.index;
+        self.index += 1;
+        Some(&self.column[index])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.column.len - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: Copy + Default> ExactSizeIterator for BeltPagedIter<'_, T> {}
+
+impl<'a, T: Copy + Default> IntoIterator for &'a BeltPagedColumn<T> {
+    type Item = &'a T;
+    type IntoIter = BeltPagedIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T: Copy + Default> FromIterator<T> for BeltPagedColumn<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
+        let mut column = Self::default();
+        for value in values {
+            column
+                .push(value)
+                .expect("native belt paged iterator exceeds fixed address space");
+        }
+        column
+    }
+}
+
 /// Compact authoritative mirror of the four mutable belt signals. The raw JSON
 /// records remain the persistence/canonical source of truth; these columns are
 /// rebuilt from raw records on load/topology commands and replaced only with a
@@ -1398,11 +1672,12 @@ impl BeltColumns {
 /// IEEE bits (including negative zero).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BeltDynamicColumns {
-    pub progress: Vec<f64>,
-    pub total_transferred: Vec<f64>,
-    pub congestion: Vec<f64>,
-    pub last_flow: Vec<f64>,
-    pub number_mask: Vec<u8>,
+    pub progress: BeltPagedColumn<f64>,
+    pub total_transferred: BeltPagedColumn<f64>,
+    pub congestion: BeltPagedColumn<f64>,
+    pub last_flow: BeltPagedColumn<f64>,
+    pub number_mask: BeltPagedColumn<u8>,
+    missing_required_rows: Vec<u32>,
 }
 
 impl BeltDynamicColumns {
@@ -1413,12 +1688,33 @@ impl BeltDynamicColumns {
     const VALID_MASK: u8 = (1 << 4) - 1;
 
     fn with_capacity(rows: usize) -> Self {
+        assert!(rows <= MAX_BELT_COUNT);
         Self {
-            progress: Vec::with_capacity(rows),
-            total_transferred: Vec::with_capacity(rows),
-            congestion: Vec::with_capacity(rows),
-            last_flow: Vec::with_capacity(rows),
-            number_mask: Vec::with_capacity(rows),
+            progress: BeltPagedColumn::default(),
+            total_transferred: BeltPagedColumn::default(),
+            congestion: BeltPagedColumn::default(),
+            last_flow: BeltPagedColumn::default(),
+            number_mask: BeltPagedColumn::default(),
+            missing_required_rows: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_runtime_columns(
+        progress: BeltPagedColumn<f64>,
+        total_transferred: BeltPagedColumn<f64>,
+        congestion: BeltPagedColumn<f64>,
+        last_flow: BeltPagedColumn<f64>,
+        number_mask: BeltPagedColumn<u8>,
+    ) -> Self {
+        Self {
+            progress,
+            total_transferred,
+            congestion,
+            last_flow,
+            number_mask,
+            // Every historically missing progress/congestion/lastFlow row is
+            // included in the runtime evidence and canonicalized on commit.
+            missing_required_rows: Vec::new(),
         }
     }
 
@@ -1437,11 +1733,12 @@ impl BeltDynamicColumns {
         ]
     }
 
-    pub(crate) fn push_from_object(&mut self, object: &Map<String, Value>) {
-        self.push_signals(Self::signals_from_object(object));
+    pub(crate) fn push_from_object(&mut self, object: &Map<String, Value>) -> anyhow::Result<()> {
+        self.push_signals(Self::signals_from_object(object))
     }
 
-    fn push_signals(&mut self, signals: [Option<f64>; 4]) {
+    fn push_signals(&mut self, signals: [Option<f64>; 4]) -> anyhow::Result<()> {
+        let index = self.progress.len();
         let mut mask = 0_u8;
         let mut read = |slot: usize| {
             signals[slot].map_or(0.0, |value| {
@@ -1449,11 +1746,16 @@ impl BeltDynamicColumns {
                 value
             })
         };
-        self.progress.push(read(Self::PROGRESS));
-        self.total_transferred.push(read(Self::TOTAL_TRANSFERRED));
-        self.congestion.push(read(Self::CONGESTION));
-        self.last_flow.push(read(Self::LAST_FLOW));
-        self.number_mask.push(mask);
+        self.progress.push(read(Self::PROGRESS))?;
+        self.total_transferred.push(read(Self::TOTAL_TRANSFERRED))?;
+        self.congestion.push(read(Self::CONGESTION))?;
+        self.last_flow.push(read(Self::LAST_FLOW))?;
+        self.number_mask.push(mask)?;
+        if mask & Self::required_runtime_mask() != Self::required_runtime_mask() {
+            self.missing_required_rows
+                .push(u32::try_from(index).context("compact missing belt dynamic index")?);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1461,7 +1763,16 @@ impl BeltDynamicColumns {
         self.progress.len()
     }
 
-    pub(crate) fn validate(&self, expected: usize) -> anyhow::Result<()> {
+    #[inline]
+    fn required_runtime_mask() -> u8 {
+        (1 << Self::PROGRESS) | (1 << Self::LAST_FLOW) | (1 << Self::CONGESTION)
+    }
+
+    pub(crate) fn missing_required_rows(&self) -> &[u32] {
+        &self.missing_required_rows
+    }
+
+    pub(crate) fn validate_shape(&self, expected: usize) -> anyhow::Result<()> {
         if self.progress.len() != expected
             || self.total_transferred.len() != expected
             || self.congestion.len() != expected
@@ -1470,32 +1781,110 @@ impl BeltDynamicColumns {
         {
             bail!("native belt dynamic column topology changed");
         }
-        for index in 0..expected {
-            if self.number_mask[index] & !Self::VALID_MASK != 0
-                || !self.progress[index].is_finite()
-                || !self.total_transferred[index].is_finite()
-                || !self.congestion[index].is_finite()
-                || !self.last_flow[index].is_finite()
-            {
-                bail!("native belt dynamic column is invalid");
-            }
-            for (slot, value) in [
-                self.progress[index],
-                self.total_transferred[index],
-                self.congestion[index],
-                self.last_flow[index],
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if self.number_mask[index] & (1 << slot) == 0
-                    && value.to_bits() != 0.0_f64.to_bits()
-                {
-                    bail!("native belt absent dynamic column is nonzero");
-                }
+        if self
+            .missing_required_rows
+            .iter()
+            .any(|&index| index as usize >= expected)
+            || self
+                .missing_required_rows
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            bail!("native belt missing-signal index is invalid");
+        }
+        Ok(())
+    }
+
+    fn validate_row(&self, index: usize) -> anyhow::Result<()> {
+        if self.number_mask[index] & !Self::VALID_MASK != 0
+            || !self.progress[index].is_finite()
+            || !self.total_transferred[index].is_finite()
+            || !self.congestion[index].is_finite()
+            || !self.last_flow[index].is_finite()
+        {
+            bail!("native belt dynamic column is invalid");
+        }
+        for (slot, value) in [
+            self.progress[index],
+            self.total_transferred[index],
+            self.congestion[index],
+            self.last_flow[index],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.number_mask[index] & (1 << slot) == 0 && value.to_bits() != 0.0_f64.to_bits() {
+                bail!("native belt absent dynamic column is nonzero");
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn validate(&self, expected: usize) -> anyhow::Result<()> {
+        self.validate_shape(expected)?;
+        let mut missing_position = 0_usize;
+        for index in 0..expected {
+            self.validate_row(index)?;
+            if self.number_mask[index] & Self::required_runtime_mask()
+                != Self::required_runtime_mask()
+            {
+                if self.missing_required_rows.get(missing_position).copied() != Some(index as u32) {
+                    bail!("native belt missing-signal index is inconsistent");
+                }
+                missing_position += 1;
+            }
+        }
+        if missing_position != self.missing_required_rows.len() {
+            bail!("native belt missing-signal index is inconsistent");
+        }
+        Ok(())
+    }
+
+    /// Validates only pages made writable since this state was forked. The
+    /// fixed 4,096-bit union scan is independent of B; value work is bounded
+    /// by the number of pages touched by the active frontier.
+    pub(crate) fn validate_dirty(&self, expected: usize) -> anyhow::Result<usize> {
+        self.validate_shape(expected)?;
+        let columns = [
+            self.progress.dirty_page_words(),
+            self.total_transferred.dirty_page_words(),
+            self.congestion.dirty_page_words(),
+            self.last_flow.dirty_page_words(),
+            self.number_mask.dirty_page_words(),
+        ];
+        let mut checked = 0_usize;
+        for word_index in 0..BELT_DYNAMIC_PAGE_BITMAP_WORDS {
+            let mut word = columns
+                .iter()
+                .fold(0_u64, |union, column| union | column[word_index]);
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let page_index = word_index * u64::BITS as usize + bit;
+                let start = page_index * BELT_DYNAMIC_PAGE_ROWS;
+                let end = (start + BELT_DYNAMIC_PAGE_ROWS).min(expected);
+                for index in start..end {
+                    self.validate_row(index)?;
+                }
+                checked += end.saturating_sub(start);
+                word &= word - 1;
+            }
+        }
+        Ok(checked)
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.progress.clear_dirty();
+        self.total_transferred.clear_dirty();
+        self.congestion.clear_dirty();
+        self.last_flow.clear_dirty();
+        self.number_mask.clear_dirty();
+    }
+
+    pub(crate) fn dynamic_dirty_page_count(&self) -> usize {
+        self.progress.dirty_page_count()
+            + self.total_transferred.dirty_page_count()
+            + self.congestion.dirty_page_count()
+            + self.last_flow.dirty_page_count()
     }
 
     #[inline]
@@ -1530,12 +1919,12 @@ impl BeltDynamicColumns {
     }
 
     fn estimated_bytes(&self) -> u64 {
-        ((self.progress.capacity()
-            + self.total_transferred.capacity()
-            + self.congestion.capacity()
-            + self.last_flow.capacity())
-            * size_of::<f64>()
-            + self.number_mask.capacity() * size_of::<u8>()) as u64
+        self.progress.estimated_bytes()
+            + self.total_transferred.estimated_bytes()
+            + self.congestion.estimated_bytes()
+            + self.last_flow.estimated_bytes()
+            + self.number_mask.estimated_bytes()
+            + (self.missing_required_rows.capacity() * size_of::<u32>()) as u64
     }
 }
 
@@ -3137,7 +3526,7 @@ impl CoreState {
                     .unwrap_or(1)
                     .min(2) as u8,
             );
-            self.belt_dynamics.push_from_object(object);
+            self.belt_dynamics.push_from_object(object)?;
             if let Some(planet) = object_string(object, "planetId")
                 .and_then(|id| planet_indices.get(id).copied())
                 .and_then(|planet| factory_topology.belts_by_planet.get_mut(planet))
@@ -3156,6 +3545,7 @@ impl CoreState {
         entity_dynamics.validate(entity_values.len())?;
         self.entity_dynamics = entity_dynamics.into();
         self.belt_dynamics.validate(self.belt_raw.len())?;
+        self.belt_dynamics.clear_dirty();
         factory_topology.planet_viewport_indexes = factory_topology
             .entities_by_planet
             .iter()
@@ -3200,7 +3590,10 @@ impl CoreState {
         {
             bail!("native belt runtime topology changed");
         }
-        self.belt_dynamics.validate(rows)?;
+        // Full value validation is paid when records enter the resident state.
+        // Per-revision runtimes only need this fixed-depth shape proof; every
+        // subsequently writable page is value-validated before publication.
+        self.belt_dynamics.validate_shape(rows)?;
         Ok(rows)
     }
 
@@ -5385,8 +5778,8 @@ mod tests {
                 + state.factory_topology.entity_grid_indices.len()
                 + state.factory_topology.entities_by_planet[0].len()) as u64
                 * size_of::<usize>() as u64
-                + (state.factory_topology.device_counts_by_planet.capacity()
-                    * size_of::<f64>()) as u64
+                + (state.factory_topology.device_counts_by_planet.capacity() * size_of::<f64>())
+                    as u64
                 + (state.factory_topology.planet_viewport_indexes.capacity()
                     * size_of::<PlanetViewportIndex>()) as u64
                 + state.factory_topology.planet_viewport_indexes[0].estimated_bytes()
@@ -7563,6 +7956,112 @@ mod tests {
     }
 
     #[test]
+    fn sparse_belt_revision_clones_and_validates_only_bounded_pages_at_every_worker_limit() {
+        let belt_count = 4_097;
+        let belts = (0..belt_count)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":if index == 7 { -0.0 } else { 0.0 },
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":0,
+                    "modPayload":{"kept":index}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let source =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let source_hash = source.canonical_sha256().unwrap();
+        let source_raw = source.belt_raw[3_000].clone();
+        let mut expected = None::<(String, Vec<u8>)>;
+
+        for workers in [1, 2, 4, 8] {
+            let mut dynamics = source.belt_dynamics.0.as_ref().clone();
+            dynamics.progress[7] = 12.5;
+            dynamics.congestion[8] = 0.75;
+            dynamics.total_transferred[9] += 3.0;
+            dynamics.last_flow[9] = 3.0;
+
+            // All three changed rows reside in one 1,024-row page. No column
+            // may copy a factory-sized Vec, and untouched pages stay shared.
+            assert_eq!(
+                dynamics
+                    .progress
+                    .changed_page_count_from(&source.belt_dynamics.progress),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .congestion
+                    .changed_page_count_from(&source.belt_dynamics.congestion),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .total_transferred
+                    .changed_page_count_from(&source.belt_dynamics.total_transferred),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .last_flow
+                    .changed_page_count_from(&source.belt_dynamics.last_flow),
+                1
+            );
+
+            let runtime =
+                crate::belts::BeltRuntime::from_dynamics_for_test(&source, dynamics).unwrap();
+            let (batch, flow, diagnostics) = runtime
+                .into_patches_with_worker_count_for_test(
+                    &source,
+                    workers,
+                    crate::belts::BeltFlowRequirement::NotRequired,
+                )
+                .unwrap();
+            assert!(matches!(flow, crate::belts::PreparedBeltFlow::NotRequired));
+            assert_eq!(batch.patch_indices(), [7, 8, 9]);
+            assert_eq!(diagnostics.write_back_evidence_checks, 3);
+            assert_eq!(diagnostics.dynamic_cow_pages, 4);
+            assert_eq!(diagnostics.mask_cow_pages, 1);
+            assert_eq!(diagnostics.dirty_validation_rows, BELT_DYNAMIC_PAGE_ROWS);
+            assert!(diagnostics.dirty_validation_rows < belt_count);
+
+            let mut committed = source.clone();
+            committed
+                .commit_simulated_state(
+                    committed.base_value().clone(),
+                    committed.parse_entities_parallel().unwrap(),
+                    batch,
+                    8,
+                    true,
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&committed.belt_raw[3_000], &source_raw));
+            let hash = committed.canonical_sha256().unwrap();
+            let mut bytes = Vec::new();
+            committed.write_v47_envelope(123, &mut bytes).unwrap();
+            if let Some((expected_hash, expected_bytes)) = &expected {
+                assert_eq!(&hash, expected_hash, "worker limit {workers}");
+                assert_eq!(&bytes, expected_bytes, "worker limit {workers}");
+            } else {
+                expected = Some((hash, bytes));
+            }
+            assert_eq!(source.canonical_sha256().unwrap(), source_hash);
+            assert!(Arc::ptr_eq(&source.belt_raw[3_000], &source_raw));
+        }
+    }
+
+    #[test]
     fn dense_touched_writeback_is_bitwise_equal_at_one_two_four_and_eight_workers() {
         let belt_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
         let belts = (0..belt_count)
@@ -7797,6 +8296,8 @@ mod tests {
             fixture_catalog(),
         )
         .unwrap();
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_dirty = format!("{:?}", state.save_dirty);
         for column in [
             "progress",
             "totalTransferred",
@@ -7817,7 +8318,27 @@ mod tests {
                 )
                 .unwrap_err();
             assert!(error.to_string().contains("topology"), "column={column}");
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(format!("{:?}", state.save_dirty), source_dirty);
         }
+
+        let mut runtime = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        runtime
+            .record_touched_for_test(state.belt_raw.len())
+            .unwrap();
+        let error = runtime
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("outside"));
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(format!("{:?}", state.save_dirty), source_dirty);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-quantum-source-v2";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-v3";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DEFAULT_QUANTUM_ITEM_CAPACITY: i128 = 10_000_000_000;
@@ -61,7 +61,16 @@ struct SettlementProofSnapshot {
 /// without a persisted fractional remainder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct OrdinaryFlowCertificate {
+    /// Persisted ownership delta. Kept as the primary write vector so the
+    /// source-only v2 path remains a strict subset of the closed recipe path.
     units_per_second: MaterialTotals,
+    /// Gross cumulative production credited per simulated second.
+    produced_units_per_second: MaterialTotals,
+    /// Inferred internal recipe consumption per simulated second. GameState
+    /// v47 has no persisted totalConsumed map; this remains runtime proof.
+    consumed_units_per_second: MaterialTotals,
+    /// Present only when the certificate closes one ordinary recipe domain.
+    recipe_id: Option<String>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -1758,6 +1767,424 @@ fn exclusive_infinite_vein_sources(state: &CoreState) -> Result<BTreeSet<String>
     Ok(sources)
 }
 
+fn collection_has_entries(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| match value {
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        _ => false,
+    })
+}
+
+fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
+    let base = state.base_value();
+    let research = base.get("research").and_then(Value::as_object);
+    if research
+        .and_then(|research| research.get("selectedTechId"))
+        .is_some_and(|value| !value.is_null())
+        || collection_has_entries(research.and_then(|research| research.get("queuedTechIds")))
+    {
+        return Some("research is active".to_owned());
+    }
+
+    let endgame = base.get("endgame").and_then(Value::as_object);
+    if endgame
+        .and_then(|endgame| endgame.get("activeInfiniteResearchId"))
+        .is_some_and(|value| !value.is_null())
+        || endgame
+            .and_then(|endgame| endgame.get("autoResearch"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Some("infinite or automatic research is active".to_owned());
+    }
+
+    if collection_has_entries(base.get("handcraftQueue"))
+        || collection_has_entries(base.get("constructionQueue"))
+    {
+        return Some("handcraft or construction work is active".to_owned());
+    }
+    let construction = base
+        .get("constructionAutomation")
+        .and_then(Value::as_object);
+    if construction
+        .and_then(|construction| construction.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || collection_has_entries(construction.and_then(|construction| construction.get("jobs")))
+        || collection_has_entries(
+            construction.and_then(|construction| construction.get("quantumMaterialBuffer")),
+        )
+    {
+        return Some("construction automation is active".to_owned());
+    }
+
+    if endgame
+        .and_then(|endgame| endgame.get("autoDispatch"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || endgame
+            .and_then(|endgame| endgame.get("exportProjects"))
+            .and_then(Value::as_object)
+            .is_some_and(|projects| {
+                projects.values().any(|project| {
+                    project
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+            })
+    {
+        return Some("galactic export is active".to_owned());
+    }
+    if let Some(activity) = endgame
+        .and_then(|endgame| endgame.get("constructionActivity"))
+        .and_then(Value::as_object)
+        && (activity
+            .get("activityId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+            || collection_has_entries(activity.get("pendingBatches")))
+    {
+        return Some("galactic construction delivery is active".to_owned());
+    }
+    if collection_has_entries(
+        base.get("orbitalStation")
+            .and_then(Value::as_object)
+            .and_then(|station| station.get("contractBoard"))
+            .and_then(Value::as_object)
+            .and_then(|board| board.get("accepted")),
+    ) {
+        return Some("orbital station contract delivery is active".to_owned());
+    }
+    None
+}
+
+fn active_ordinary_recipe_id(state: &CoreState) -> Result<Option<String>, String> {
+    if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
+        return Err(format!("ordinary recipe tail is excluded while {reason}"));
+    }
+    let mut recipe_ids = BTreeSet::new();
+    for entity_index in 0..state.entity_index.len() {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("ordinary recipe entity decode failed: {error:#}"))?;
+        if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
+            continue;
+        }
+        let Some(recipe_id) = entity.get("recipeId").and_then(Value::as_str) else {
+            continue;
+        };
+        if recipe_id.is_empty() {
+            continue;
+        }
+        let recipe = state
+            .catalog
+            .recipes
+            .get(recipe_id)
+            .ok_or_else(|| format!("active recipe {recipe_id} is absent from the catalog"))?;
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if building_id != recipe.building_id {
+            return Err(format!(
+                "active recipe {recipe_id} is installed in incompatible building {building_id}"
+            ));
+        }
+        if recipe.inputs.is_empty() || recipe.outputs.is_empty() {
+            return Err(format!(
+                "active recipe {recipe_id} is a research or terminal recipe"
+            ));
+        }
+        if recipe.inputs.iter().chain(&recipe.outputs).any(|amount| {
+            matches!(
+                amount.item_id.as_str(),
+                TERMINAL_ROCKET_ITEM_ID | TERMINAL_SAIL_ITEM_ID
+            )
+        }) {
+            return Err(format!(
+                "active recipe {recipe_id} touches a Dyson terminal material"
+            ));
+        }
+        if entity.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true) {
+            return Err(format!(
+                "active recipe {recipe_id} uses proliferator without a closed bonus ledger"
+            ));
+        }
+        recipe_ids.insert(recipe_id.to_owned());
+    }
+    match recipe_ids.len() {
+        0 => Ok(None),
+        1 => Ok(recipe_ids.into_iter().next()),
+        count => Err(format!(
+            "ordinary recipe tail currently proves one recipe at a time, observed {count}"
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OrdinaryWindowFlow {
+    produced_per_second: MaterialTotals,
+    consumed_per_second: MaterialTotals,
+    net_owned_per_second: MaterialTotals,
+}
+
+fn capture_ordinary_window_flow(
+    before: &SettlementProofSnapshot,
+    after: &SettlementProofSnapshot,
+) -> Result<OrdinaryWindowFlow, String> {
+    if before.dyson != after.dyson {
+        return Err("Dyson rocket, sail or structure state changed during calibration".to_owned());
+    }
+    if before.construction_outputs != after.construction_outputs
+        || before.construction_fleet_wip != after.construction_fleet_wip
+        || before.portable_fleet != after.portable_fleet
+        || before.construction_crafted != after.construction_crafted
+    {
+        return Err("construction or portable-fleet state changed during calibration".to_owned());
+    }
+
+    let mut flow = OrdinaryWindowFlow::default();
+    for item_id in material_ids([
+        &before.owned,
+        &after.owned,
+        &before.produced,
+        &after.produced,
+        &before.consumed,
+        &after.consumed,
+        &before.granted,
+        &after.granted,
+    ]) {
+        let produced =
+            checked_material_delta(&before.produced, &after.produced, &item_id, "produced")?;
+        let net_owned = checked_material_delta(&before.owned, &after.owned, &item_id, "owned")?;
+        let terminal_consumed = checked_material_delta(
+            &before.consumed,
+            &after.consumed,
+            &item_id,
+            "terminalConsumed",
+        )?;
+        let granted = checked_material_delta(&before.granted, &after.granted, &item_id, "granted")?;
+        if produced < 0 || terminal_consumed < 0 || granted < 0 {
+            return Err(format!(
+                "{item_id} cumulative calibration counter regressed"
+            ));
+        }
+        if terminal_consumed != 0 {
+            return Err(format!(
+                "{item_id} had terminal export, destruction or delivery consumption"
+            ));
+        }
+        if granted != 0 {
+            return Err(format!(
+                "{item_id} received an audited reward during calibration"
+            ));
+        }
+        if net_owned < 0 {
+            return Err(format!(
+                "{item_id} depleted owned inventory by {} units in a calibration window",
+                -net_owned
+            ));
+        }
+        let ordinary_consumed = produced
+            .checked_sub(net_owned)
+            .ok_or_else(|| format!("{item_id} ordinary consumption overflowed"))?;
+        if ordinary_consumed < 0 {
+            return Err(format!(
+                "{item_id} owned growth {net_owned} exceeds production {produced}"
+            ));
+        }
+        let window_seconds = MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128;
+        for (label, value) in [
+            ("produced", produced),
+            ("consumed", ordinary_consumed),
+            ("owned", net_owned),
+        ] {
+            if value % window_seconds != 0 {
+                return Err(format!(
+                    "{item_id} {label} flow {value} is not an integer per simulated second"
+                ));
+            }
+        }
+        let produced = produced / window_seconds;
+        let ordinary_consumed = ordinary_consumed / window_seconds;
+        let net_owned = net_owned / window_seconds;
+        if produced > 0 {
+            flow.produced_per_second.insert(item_id.clone(), produced);
+        }
+        if ordinary_consumed > 0 {
+            flow.consumed_per_second
+                .insert(item_id.clone(), ordinary_consumed);
+        }
+        if net_owned > 0 {
+            flow.net_owned_per_second.insert(item_id, net_owned);
+        }
+    }
+    Ok(flow)
+}
+
+fn add_catalog_flow_amount(
+    totals: &mut MaterialTotals,
+    item_id: &str,
+    amount: f64,
+    label: &str,
+) -> Result<(), String> {
+    if !amount.is_finite()
+        || !(1.0..=MAX_SAFE_INTEGER).contains(&amount)
+        || amount.fract().abs() > f64::EPSILON
+    {
+        return Err(format!("{label} is not a positive safe integer"));
+    }
+    let current = totals.get(item_id).copied().unwrap_or(0);
+    totals.insert(
+        item_id.to_owned(),
+        current
+            .checked_add(amount as i128)
+            .ok_or_else(|| format!("{label} aggregate amount overflowed"))?,
+    );
+    Ok(())
+}
+
+fn build_closed_recipe_certificate(
+    state: &CoreState,
+    sources: &BTreeSet<String>,
+    flow: &OrdinaryWindowFlow,
+) -> Result<OrdinaryFlowCertificate, String> {
+    let recipe_id = active_ordinary_recipe_id(state)?
+        .ok_or_else(|| "no active ordinary recipe is available".to_owned())?;
+    let recipe = state
+        .catalog
+        .recipes
+        .get(&recipe_id)
+        .ok_or_else(|| format!("active recipe {recipe_id} disappeared"))?;
+    let mut inputs = MaterialTotals::new();
+    let mut outputs = MaterialTotals::new();
+    for input in &recipe.inputs {
+        add_catalog_flow_amount(
+            &mut inputs,
+            &input.item_id,
+            input.amount,
+            &format!("recipes.{recipe_id}.inputs.{}", input.item_id),
+        )?;
+    }
+    for output in &recipe.outputs {
+        add_catalog_flow_amount(
+            &mut outputs,
+            &output.item_id,
+            output.amount,
+            &format!("recipes.{recipe_id}.outputs.{}", output.item_id),
+        )?;
+    }
+    if inputs.keys().any(|item_id| outputs.contains_key(item_id)) {
+        return Err(format!(
+            "active recipe {recipe_id} has an input/output feedback item"
+        ));
+    }
+    for item_id in inputs.keys() {
+        if !sources.contains(item_id) {
+            return Err(format!(
+                "recipe {recipe_id} input {item_id} is not an exclusive infinite-vein source"
+            ));
+        }
+    }
+    for item_id in outputs.keys() {
+        if sources.contains(item_id) {
+            return Err(format!(
+                "recipe {recipe_id} output {item_id} overlaps an infinite-vein source"
+            ));
+        }
+    }
+
+    let allowed_production = sources
+        .iter()
+        .chain(outputs.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for item_id in flow.produced_per_second.keys() {
+        if !allowed_production.contains(item_id) {
+            return Err(format!(
+                "unmodelled item {item_id} was produced beside recipe {recipe_id}"
+            ));
+        }
+    }
+    for item_id in flow.consumed_per_second.keys() {
+        if !inputs.contains_key(item_id) {
+            return Err(format!(
+                "unmodelled item {item_id} was consumed beside recipe {recipe_id}"
+            ));
+        }
+    }
+
+    let mut batches_per_second = None;
+    for (item_id, output_amount) in &outputs {
+        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
+        if produced <= 0 || produced % output_amount != 0 {
+            return Err(format!(
+                "recipe {recipe_id} output {item_id} does not prove whole stable batches"
+            ));
+        }
+        let batches = produced / output_amount;
+        match batches_per_second {
+            None => batches_per_second = Some(batches),
+            Some(expected) if expected == batches => {}
+            Some(expected) => {
+                return Err(format!(
+                    "recipe {recipe_id} output batch rates disagree ({expected} versus {batches})"
+                ));
+            }
+        }
+        if flow.consumed_per_second.get(item_id).copied().unwrap_or(0) != 0
+            || flow.net_owned_per_second.get(item_id).copied().unwrap_or(0) != produced
+        {
+            return Err(format!(
+                "recipe {recipe_id} output {item_id} is not a terminal-free net product"
+            ));
+        }
+    }
+    let batches_per_second = batches_per_second.unwrap_or(0);
+    if batches_per_second <= 0 {
+        return Err(format!("recipe {recipe_id} produced no stable batches"));
+    }
+    for (item_id, input_amount) in &inputs {
+        let expected_consumed = input_amount
+            .checked_mul(batches_per_second)
+            .ok_or_else(|| format!("recipe {recipe_id} input {item_id} rate overflowed"))?;
+        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
+        let consumed = flow.consumed_per_second.get(item_id).copied().unwrap_or(0);
+        let net_owned = flow.net_owned_per_second.get(item_id).copied().unwrap_or(0);
+        if consumed != expected_consumed {
+            return Err(format!(
+                "recipe {recipe_id} input {item_id} consumed {consumed}/s instead of {expected_consumed}/s"
+            ));
+        }
+        if produced < consumed || produced - consumed != net_owned {
+            return Err(format!(
+                "recipe {recipe_id} input {item_id} is not funded by same-window source production"
+            ));
+        }
+    }
+    for item_id in sources {
+        if inputs.contains_key(item_id) {
+            continue;
+        }
+        let produced = flow.produced_per_second.get(item_id).copied().unwrap_or(0);
+        if flow.consumed_per_second.get(item_id).copied().unwrap_or(0) != 0
+            || flow.net_owned_per_second.get(item_id).copied().unwrap_or(0) != produced
+        {
+            return Err(format!(
+                "exclusive source {item_id} does not close outside recipe {recipe_id}"
+            ));
+        }
+    }
+
+    Ok(OrdinaryFlowCertificate {
+        units_per_second: flow.net_owned_per_second.clone(),
+        produced_units_per_second: flow.produced_per_second.clone(),
+        consumed_units_per_second: flow.consumed_per_second.clone(),
+        recipe_id: Some(recipe_id),
+    })
+}
+
 fn build_ordinary_flow_certificate(
     state: &CoreState,
     snapshots: &[SettlementProofSnapshot],
@@ -1793,6 +2220,25 @@ fn build_ordinary_flow_certificate(
     }
 
     let sources = exclusive_infinite_vein_sources(state)?;
+    let recipe_rejection = (|| {
+        let mut windows = Vec::with_capacity(3);
+        for window in snapshots.windows(2) {
+            windows.push(capture_ordinary_window_flow(&window[0], &window[1])?);
+        }
+        let flow = windows
+            .first()
+            .cloned()
+            .ok_or_else(|| "three-window calibration produced no flow snapshots".to_owned())?;
+        if windows.iter().skip(1).any(|window| window != &flow) {
+            return Err("ordinary production/consumption/ownership rates were unstable across the three calibration windows".to_owned());
+        }
+        build_closed_recipe_certificate(state, &sources, &flow)
+    })();
+    if let Ok(certificate) = recipe_rejection {
+        return Ok(certificate);
+    }
+    let recipe_rejection = recipe_rejection.unwrap_err();
+
     let mut rates = MaterialTotals::new();
     let mut first_rejection = None;
     for item_id in sources {
@@ -1857,12 +2303,13 @@ fn build_ordinary_flow_certificate(
         }
     }
     if rates.is_empty() {
-        return Err(first_rejection.unwrap_or_else(|| {
-            "no source-only material passed the three-window certificate".to_owned()
-        }));
+        return Err(first_rejection.unwrap_or(recipe_rejection));
     }
     Ok(OrdinaryFlowCertificate {
-        units_per_second: rates,
+        units_per_second: rates.clone(),
+        produced_units_per_second: rates,
+        consumed_units_per_second: MaterialTotals::new(),
+        recipe_id: None,
     })
 }
 
@@ -1931,21 +2378,28 @@ fn elapsed_micros(value: f64) -> Result<i128, String> {
 struct OrdinaryFlowApplication {
     certified_items: usize,
     deposited_units: i128,
+    produced_units: i128,
+    consumed_units: i128,
+    recipe_certified: bool,
     capacity_limited: bool,
 }
 
-fn apply_ordinary_flow_certificate(
+fn apply_source_only_flow_certificate(
     state: &mut CoreState,
     certificate: &OrdinaryFlowCertificate,
     elapsed_before: f64,
     elapsed_after: f64,
 ) -> Result<OrdinaryFlowApplication, String> {
+    if certificate.produced_units_per_second != certificate.units_per_second
+        || !certificate.consumed_units_per_second.is_empty()
+    {
+        return Err("source-only certificate has an invalid closed-flow identity".to_owned());
+    }
     let before_micros = elapsed_micros(elapsed_before)?;
     let after_micros = elapsed_micros(elapsed_after)?;
     if after_micros < before_micros {
-        return Err("elapsed clock regressed during ordinary-flow settlement".to_owned());
+        return Err("elapsed clock regressed during source-only settlement".to_owned());
     }
-
     let base = state.base_value();
     let quantum = base
         .get("quantumLogisticsNetwork")
@@ -2018,6 +2472,10 @@ fn apply_ordinary_flow_certificate(
             .deposited_units
             .checked_add(accepted)
             .ok_or_else(|| "ordinary-flow deposited-unit total overflowed".to_owned())?;
+        application.produced_units = application
+            .produced_units
+            .checked_add(accepted)
+            .ok_or_else(|| "ordinary-flow produced-unit total overflowed".to_owned())?;
         updates.push((
             item_id.clone(),
             current_inventory
@@ -2044,6 +2502,222 @@ fn apply_ordinary_flow_certificate(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "totalProduced disappeared before commit".to_owned())?;
     for (item_id, _, next_produced) in updates {
+        let next_produced = i64::try_from(next_produced)
+            .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
+        produced.insert(item_id, Value::Number(Number::from(next_produced)));
+    }
+    Ok(application)
+}
+
+fn apply_ordinary_flow_certificate(
+    state: &mut CoreState,
+    certificate: &OrdinaryFlowCertificate,
+    elapsed_before: f64,
+    elapsed_after: f64,
+) -> Result<OrdinaryFlowApplication, String> {
+    if certificate.recipe_id.is_none() {
+        return apply_source_only_flow_certificate(
+            state,
+            certificate,
+            elapsed_before,
+            elapsed_after,
+        );
+    }
+    let before_micros = elapsed_micros(elapsed_before)?;
+    let after_micros = elapsed_micros(elapsed_after)?;
+    if after_micros < before_micros {
+        return Err("elapsed clock regressed during ordinary-flow settlement".to_owned());
+    }
+    // Whole-second settlement keeps the three integer vectors exactly closed:
+    // produced - consumed == net owned. Absolute floor boundaries make a long
+    // call and any ordered segmentation choose the same number of seconds
+    // without a persisted fractional remainder.
+    let scheduled_seconds = after_micros
+        .checked_div(MICROS_PER_SECOND)
+        .and_then(|after| {
+            before_micros
+                .checked_div(MICROS_PER_SECOND)
+                .and_then(|before| after.checked_sub(before))
+        })
+        .ok_or_else(|| "ordinary-flow schedule overflowed".to_owned())?;
+
+    let certified_ids = material_ids([
+        &certificate.produced_units_per_second,
+        &certificate.consumed_units_per_second,
+        &certificate.units_per_second,
+    ]);
+    for item_id in &certified_ids {
+        let produced = certificate
+            .produced_units_per_second
+            .get(item_id)
+            .copied()
+            .unwrap_or(0);
+        let consumed = certificate
+            .consumed_units_per_second
+            .get(item_id)
+            .copied()
+            .unwrap_or(0);
+        let net_owned = certificate
+            .units_per_second
+            .get(item_id)
+            .copied()
+            .unwrap_or(0);
+        if produced < 0
+            || consumed < 0
+            || net_owned < 0
+            || produced > MAX_SAFE_INTEGER as i128
+            || consumed > MAX_SAFE_INTEGER as i128
+            || net_owned > MAX_SAFE_INTEGER as i128
+        {
+            return Err(format!("{item_id} source schedule overflowed"));
+        }
+        if produced
+            .checked_sub(consumed)
+            .filter(|delta| *delta == net_owned)
+            .is_none()
+        {
+            return Err(format!(
+                "{item_id} closed-flow identity is invalid ({produced} - {consumed} != {net_owned})"
+            ));
+        }
+    }
+
+    let base = state.base_value();
+    let quantum = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum logistics network is missing".to_owned())?;
+    if quantum.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err("quantum logistics network became disabled".to_owned());
+    }
+    let inventory = quantum
+        .get("inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum inventory is malformed".to_owned())?;
+    let capacities = quantum
+        .get("itemCapacities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum capacity ledger is malformed".to_owned())?;
+    let produced = base
+        .get("totalProduced")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "totalProduced is malformed".to_owned())?;
+
+    let mut accepted_seconds = scheduled_seconds;
+    let mut inventory_baselines = MaterialTotals::new();
+    for (item_id, rate) in &certificate.units_per_second {
+        if *rate <= 0 {
+            continue;
+        }
+        let current_inventory = proof_counter(
+            inventory.get(item_id),
+            &format!("quantumLogisticsNetwork.inventory.{item_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let capacity = match capacities.get(item_id) {
+            Some(value) => proof_counter(
+                Some(value),
+                &format!("quantumLogisticsNetwork.itemCapacities.{item_id}"),
+            )
+            .map_err(|error| error.to_string())?,
+            None => DEFAULT_QUANTUM_ITEM_CAPACITY,
+        };
+        if !(10_000..=DEFAULT_QUANTUM_ITEM_CAPACITY).contains(&capacity) {
+            return Err(format!(
+                "{item_id} quantum capacity is outside the supported range"
+            ));
+        }
+        let room = capacity.saturating_sub(current_inventory);
+        accepted_seconds = accepted_seconds.min(room / rate);
+        inventory_baselines.insert(item_id.clone(), current_inventory);
+    }
+    let mut produced_baselines = MaterialTotals::new();
+    for (item_id, rate) in &certificate.produced_units_per_second {
+        if *rate <= 0 {
+            continue;
+        }
+        let current = proof_counter(produced.get(item_id), &format!("totalProduced.{item_id}"))
+            .map_err(|error| error.to_string())?;
+        if current > MAX_SAFE_INTEGER as i128 {
+            return Err(format!(
+                "totalProduced.{item_id} exceeds the safe integer range"
+            ));
+        }
+        accepted_seconds =
+            accepted_seconds.min((MAX_SAFE_INTEGER as i128).saturating_sub(current) / rate);
+        produced_baselines.insert(item_id.clone(), current);
+    }
+    accepted_seconds = accepted_seconds.max(0);
+
+    let mut inventory_updates = Vec::with_capacity(certificate.units_per_second.len());
+    let mut produced_updates = Vec::with_capacity(certificate.produced_units_per_second.len());
+    let mut application = OrdinaryFlowApplication {
+        certified_items: certified_ids.len(),
+        recipe_certified: certificate.recipe_id.is_some(),
+        capacity_limited: accepted_seconds < scheduled_seconds,
+        ..OrdinaryFlowApplication::default()
+    };
+    for (item_id, rate) in &certificate.units_per_second {
+        let accepted = rate
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| format!("{item_id} source schedule overflowed"))?;
+        application.deposited_units = application
+            .deposited_units
+            .checked_add(accepted)
+            .ok_or_else(|| "ordinary-flow deposited-unit total overflowed".to_owned())?;
+        inventory_updates.push((
+            item_id.clone(),
+            inventory_baselines
+                .get(item_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(accepted)
+                .ok_or_else(|| format!("{item_id} quantum inventory overflowed"))?,
+        ));
+    }
+    for (item_id, rate) in &certificate.produced_units_per_second {
+        let credited = rate
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| format!("{item_id} production schedule overflowed"))?;
+        application.produced_units = application
+            .produced_units
+            .checked_add(credited)
+            .ok_or_else(|| "ordinary-flow produced-unit total overflowed".to_owned())?;
+        produced_updates.push((
+            item_id.clone(),
+            produced_baselines
+                .get(item_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(credited)
+                .ok_or_else(|| format!("totalProduced.{item_id} overflowed"))?,
+        ));
+    }
+    for (item_id, rate) in &certificate.consumed_units_per_second {
+        let consumed = rate
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| format!("{item_id} consumption schedule overflowed"))?;
+        application.consumed_units = application
+            .consumed_units
+            .checked_add(consumed)
+            .ok_or_else(|| "ordinary-flow consumed-unit total overflowed".to_owned())?;
+    }
+
+    let base = state.base_value_mut();
+    let inventory = base
+        .get_mut("quantumLogisticsNetwork")
+        .and_then(Value::as_object_mut)
+        .and_then(|network| network.get_mut("inventory"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "quantum inventory disappeared before commit".to_owned())?;
+    for (item_id, next_inventory) in &inventory_updates {
+        inventory.insert(item_id.clone(), Value::String(next_inventory.to_string()));
+    }
+    let produced = base
+        .get_mut("totalProduced")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "totalProduced disappeared before commit".to_owned())?;
+    for (item_id, next_produced) in produced_updates {
         let next_produced = i64::try_from(next_produced)
             .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
         produced.insert(item_id, Value::Number(Number::from(next_produced)));
@@ -2089,11 +2763,12 @@ fn prove_internal_exact_settlement_candidate(
 /// The compact settlement proof closes aggregate ownership, production,
 /// audited grants/consumption and Dyson terminal deltas before any candidate
 /// commits. Macro-v10 additionally admits a narrow three-window certificate
-/// for exclusive infinite-vein source flow backed only by non-fuel power. Its
-/// tail writes accepted source material into the bounded quantum inventory and
-/// increments only the matching cumulative production counter. Recipe flows,
-/// finite resources, stored/fuel energy, research, construction and every
-/// terminal subsystem remain frozen until they gain their own closed ledgers.
+/// for exclusive infinite-vein source flow backed only by non-fuel power. A
+/// stricter slice may also close one ordinary recipe whose complete input rate
+/// is funded by those sources. Its tail writes only non-negative net ownership
+/// into bounded quantum inventory while crediting gross `totalProduced` from
+/// the runtime produced/consumed ledger. Finite resources, stored/fuel energy,
+/// research, construction and every terminal subsystem remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -2102,8 +2777,9 @@ pub(crate) fn advance(
 }
 
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
-/// calibration boundary and can settle only the source-only ordinary flow
-/// authorized by `OrdinaryFlowCertificate`; all other tail domains freeze.
+/// calibration boundary and can settle only the source or single-recipe
+/// ordinary flow authorized by `OrdinaryFlowCertificate`; all other tail
+/// domains freeze.
 pub(crate) fn advance_macro_v10(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -2309,10 +2985,17 @@ fn advance_bounded(
                     }
                 };
                 tail_reason = Some(if ordinary_application.deposited_units > 0 {
+                    let scope = if ordinary_application.recipe_certified {
+                        "single-recipe closed ordinary"
+                    } else {
+                        "source-only ordinary"
+                    };
                     format!(
-                        "certified {} source-only ordinary item(s) deposited {} unit(s) into bounded quantum inventory; recipe, research, construction and terminal tails remained frozen{}",
+                        "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption; research, construction and terminal tails remained frozen{}",
                         ordinary_application.certified_items,
                         ordinary_application.deposited_units,
+                        ordinary_application.produced_units,
+                        ordinary_application.consumed_units,
                         if ordinary_application.capacity_limited {
                             " at the proven capacity horizon"
                         } else {
@@ -2320,7 +3003,7 @@ fn advance_bounded(
                         }
                     )
                 } else {
-                    "certified ordinary source flow reached its quantum/production capacity horizon; every material-bearing tail remained frozen".to_owned()
+                    "certified ordinary flow reached its closed quantum/production capacity horizon; every material-bearing tail remained frozen".to_owned()
                 });
             } else {
                 tail_reason = Some(format!(
@@ -2419,7 +3102,7 @@ mod tests {
     use crate::canonical::fnv1a_utf8;
     use crate::catalog::{
         BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
-        ItemDefinition, PlanetDefinition, RuntimeCatalog,
+        ItemDefinition, PlanetDefinition, RecipeDefinition, RuntimeCatalog,
     };
     use crate::state::CoreCheckpointIdentity;
 
@@ -2437,12 +3120,15 @@ mod tests {
                     simulation_order: 0,
                     orbital_yields: HashMap::new(),
                 }],
-                items: vec![ItemDefinition {
-                    id: "iron_ore".into(),
-                    name: "iron_ore".into(),
-                    kind: "solid".into(),
-                    fuel_energy_mj: 0.0,
-                }],
+                items: ["iron_ore", "iron_ingot"]
+                    .into_iter()
+                    .map(|id| ItemDefinition {
+                        id: id.into(),
+                        name: id.into(),
+                        kind: "solid".into(),
+                        fuel_energy_mj: 0.0,
+                    })
+                    .collect(),
                 buildings: vec![
                     BuildingDefinition {
                         id: "mining_machine".into(),
@@ -2504,8 +3190,39 @@ mod tests {
                         family: None,
                         accepts: None,
                     },
+                    BuildingDefinition {
+                        id: "arc_smelter".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 1_000_000.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: Some("smelter".into()),
+                        accepts: None,
+                    },
                 ],
-                recipes: Vec::new(),
+                recipes: vec![RecipeDefinition {
+                    id: "iron_ingot".into(),
+                    name: "iron_ingot".into(),
+                    building_id: "arc_smelter".into(),
+                    duration: 1.0,
+                    required_tech_id: None,
+                    recursive_priority: 0.0,
+                    recursive_manufacturing: false,
+                    inputs: vec![ItemAmount {
+                        item_id: "iron_ore".into(),
+                        amount: 1.0,
+                    }],
+                    outputs: vec![ItemAmount {
+                        item_id: "iron_ingot".into(),
+                        amount: 1.0,
+                    }],
+                }],
                 constructions: vec![
                     ConstructionDefinition {
                         id: "test_building".into(),
@@ -2790,15 +3507,20 @@ mod tests {
         Value::Object(base)
     }
 
-    fn fixture_state_from_parts(base: Value, entities: Vec<Value>) -> CoreState {
+    fn fixture_state_from_parts_with_belts(
+        base: Value,
+        entities: Vec<Value>,
+        belts: Vec<Value>,
+    ) -> CoreState {
         let base = serde_json::to_vec(&base).unwrap();
         let entity_count = entities.len();
         let entities = serde_json::to_vec(&entities).unwrap();
-        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let belt_count = belts.len();
+        let belts = serde_json::to_vec(&belts).unwrap();
         let chunks = [
             ("base", "base", &base, 0, 1),
             ("entities:00000000", "entities", &entities, 0, entity_count),
-            ("belts:00000000", "belts", &belts, 0, 0),
+            ("belts:00000000", "belts", &belts, 0, belt_count),
         ]
         .into_iter()
         .map(|(id, kind, bytes, offset, count)| {
@@ -2823,7 +3545,7 @@ mod tests {
             "chunkRootChecksum": "12345678",
             "totalBytes": base.len() + entities.len() + belts.len(),
             "entityCount": entity_count,
-            "beltCount": 0,
+            "beltCount": belt_count,
             "chunks": chunks
         }))
         .unwrap();
@@ -2860,6 +3582,10 @@ mod tests {
             fixture_catalog(),
         )
         .unwrap()
+    }
+
+    fn fixture_state_from_parts(base: Value, entities: Vec<Value>) -> CoreState {
+        fixture_state_from_parts_with_belts(base, entities, Vec::new())
     }
 
     fn productive_powered_fixture(multiplier: f64, resource_mode: &str) -> CoreState {
@@ -2924,6 +3650,107 @@ mod tests {
         state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
             json!({ "iron_ore": "10000000000" });
         state
+    }
+
+    fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["campaign"]["rewardedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        base["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        base["quantumLogisticsNetwork"]["itemCapacities"] =
+            json!({ "iron_ore": "10000000000", "iron_ingot": "10000000000" });
+        fixture_state_from_parts_with_belts(
+            base,
+            vec![
+                json!({
+                    "id": "wind",
+                    "kind": "power",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "wind_turbine",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "controller",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "time_warp_device",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 1,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "vein",
+                    "kind": "vein",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "resourceId": "iron_ore",
+                    "extractorBuildingId": "mining_machine",
+                    "minerCount": 2,
+                    "inputs": {},
+                    "outputs": { "iron_ore": 0 },
+                    "resourceCapacity": 1000000,
+                    "resourceRemaining": 1000000,
+                    "resourceDepletionRemainder": 0,
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "smelter",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "iron_ore": 20 },
+                    "outputs": { "iron_ingot": 0 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+            ],
+            vec![json!({
+                "id": "ore-feed",
+                "planetId": "home",
+                "source": "vein",
+                "target": "smelter",
+                "itemId": "iron_ore",
+                "lanes": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "lastFlow": 0,
+                "totalTransferred": 0
+            })],
+        )
     }
 
     fn construction_powered_fixture() -> CoreState {
@@ -3706,6 +4533,330 @@ mod tests {
     }
 
     #[test]
+    fn macro_v10_certifies_one_closed_recipe_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_closed_recipe_macro_fixture(multiplier);
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_state = prefix.materialize().unwrap();
+
+            let mut long = initial.clone();
+            let long_revision = long.revision;
+            let long_result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(long_revision, 60.0, 60.0 / multiplier),
+            )
+            .unwrap();
+            assert!(long_result.supported, "reason={:?}", long_result.reason);
+            assert!(
+                long_result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("single-recipe closed ordinary")),
+                "reason={:?}",
+                long_result.reason
+            );
+            let long_state = long.materialize().unwrap();
+            let iron_produced = proof_counter(
+                long_state["totalProduced"].get("iron_ore"),
+                "long.totalProduced.iron_ore",
+            )
+            .unwrap()
+                - proof_counter(
+                    prefix_state["totalProduced"].get("iron_ore"),
+                    "prefix.totalProduced.iron_ore",
+                )
+                .unwrap();
+            let ingot_produced = proof_counter(
+                long_state["totalProduced"].get("iron_ingot"),
+                "long.totalProduced.iron_ingot",
+            )
+            .unwrap()
+                - proof_counter(
+                    prefix_state["totalProduced"].get("iron_ingot"),
+                    "prefix.totalProduced.iron_ingot",
+                )
+                .unwrap();
+            let quantum_ore = proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ore"),
+                "long.quantum.iron_ore",
+            )
+            .unwrap();
+            let quantum_ingot = proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ingot"),
+                "long.quantum.iron_ingot",
+            )
+            .unwrap();
+            assert!(ingot_produced > 0, "multiplier={multiplier}");
+            assert!(iron_produced >= ingot_produced, "multiplier={multiplier}");
+            assert_eq!(quantum_ore, iron_produced - ingot_produced);
+            assert_eq!(quantum_ingot, ingot_produced);
+            assert_eq!(long_state["entities"], prefix_state["entities"]);
+            assert_eq!(long_state["belts"], prefix_state["belts"]);
+            for frozen in [
+                "research",
+                "construction",
+                "constructionAutomation",
+                "dysonSwarm",
+                "dysonSphere",
+                "dysonEngineering",
+                "dysonPlans",
+                "endgame",
+            ] {
+                assert_eq!(
+                    long_state[frozen], prefix_state[frozen],
+                    "multiplier={multiplier} field={frozen}"
+                );
+            }
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 30.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_closed_recipe_capacity_horizon_recomputes_the_whole_ledger() {
+        let mut initial = productive_closed_recipe_macro_fixture(15.0);
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
+            json!({ "iron_ore": "10000", "iron_ingot": "10000" });
+        initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"] =
+            json!({ "iron_ore": "9990", "iron_ingot": "9995" });
+
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let prefix_state = prefix.materialize().unwrap();
+
+        let mut long = initial.clone();
+        let long_revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capacity horizon")),
+            "reason={:?}",
+            result.reason
+        );
+        let long_state = long.materialize().unwrap();
+        let ore_produced = proof_counter(
+            long_state["totalProduced"].get("iron_ore"),
+            "long.totalProduced.iron_ore",
+        )
+        .unwrap()
+            - proof_counter(
+                prefix_state["totalProduced"].get("iron_ore"),
+                "prefix.totalProduced.iron_ore",
+            )
+            .unwrap();
+        let ingot_produced = proof_counter(
+            long_state["totalProduced"].get("iron_ingot"),
+            "long.totalProduced.iron_ingot",
+        )
+        .unwrap()
+            - proof_counter(
+                prefix_state["totalProduced"].get("iron_ingot"),
+                "prefix.totalProduced.iron_ingot",
+            )
+            .unwrap();
+        assert!(ingot_produced > 0);
+        assert_eq!(
+            proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ingot"),
+                "long.quantum.iron_ingot",
+            )
+            .unwrap(),
+            10_000
+        );
+        assert_eq!(
+            proof_counter(
+                long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ore"),
+                "long.quantum.iron_ore",
+            )
+            .unwrap()
+                - 9_990,
+            ore_produced - ingot_produced
+        );
+
+        let mut segmented = initial;
+        for seconds in [30.0, 190.0, 190.0, 190.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_closed_recipe_ledger_corruption_is_atomic() {
+        let mut state = productive_closed_recipe_macro_fixture(15.0);
+        let revision = state.revision;
+        advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .expect("closed recipe certificate");
+        assert_eq!(certificate.recipe_id.as_deref(), Some("iron_ingot"));
+        certificate
+            .consumed_units_per_second
+            .insert("iron_ore".to_owned(), 0);
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("closed-flow identity is invalid")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
+    }
+
+    #[test]
+    fn macro_v10_closed_recipe_has_a_fixed_cross_thread_hash() {
+        let mut state = productive_closed_recipe_macro_fixture(15.0);
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            state.summary().unwrap().canonical_sha256,
+            "9b46a6889b8636fee6555037219168c40041064091a20f50062c6b40aee789aa"
+        );
+    }
+
+    #[test]
+    fn closed_recipe_certificate_rejects_every_unclosed_tail_domain() {
+        let state = productive_closed_recipe_macro_fixture(15.0);
+        let request = pure_idle_macro_request(state.revision, 60.0, 4.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+        let certificate = build_ordinary_flow_certificate(&state, &snapshots).unwrap();
+        assert_eq!(certificate.recipe_id.as_deref(), Some("iron_ingot"));
+
+        let assert_domain_rejected = |label: &str, excluded: CoreState| {
+            let rejection = build_ordinary_flow_certificate(&excluded, &snapshots).unwrap_err();
+            assert!(
+                rejection.contains("not a source-only closed flow")
+                    || rejection.contains("did not produce"),
+                "domain={label} rejection={rejection}"
+            );
+        };
+        let mut research = state.clone();
+        research.base_value_mut()["research"]["selectedTechId"] = json!("active-tech");
+        assert_domain_rejected("research", research);
+        let mut construction = state.clone();
+        construction.base_value_mut()["constructionAutomation"]["enabled"] = json!(true);
+        assert_domain_rejected("construction", construction);
+        let mut export = state.clone();
+        export.base_value_mut()["endgame"]["autoDispatch"] = json!(true);
+        assert_domain_rejected("export", export);
+
+        let mut terminal = snapshots.clone();
+        terminal[1].dyson.rockets_launched += 1;
+        terminal[1].dyson.structure_points += 1;
+        terminal[1]
+            .dyson
+            .structure_by_system
+            .insert("helios".to_owned(), 1);
+        let rejection = build_ordinary_flow_certificate(&state, &terminal).unwrap_err();
+        assert!(
+            rejection.contains("Dyson rocket, sail or structure state changed")
+                || rejection.contains("small_carrier_rocket launch plus known consumption"),
+            "{rejection}"
+        );
+    }
+
+    #[test]
+    fn macro_v10_does_not_replay_a_prefilled_recipe_without_live_sources() {
+        let mut initial = productive_closed_recipe_macro_fixture(15.0);
+        let mut vein = initial.parse_entity(2).unwrap();
+        vein["minerCount"] = json!(0);
+        initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+        initial.rebuild_indexes().unwrap();
+
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let prefix_state = prefix.materialize().unwrap();
+        assert!(
+            proof_counter(
+                prefix_state["totalProduced"].get("iron_ingot"),
+                "prefix.totalProduced.iron_ingot",
+            )
+            .unwrap()
+                > 0
+        );
+
+        let mut long = initial;
+        let long_revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(long_revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let long_state = long.materialize().unwrap();
+        assert_eq!(long_state["totalProduced"], prefix_state["totalProduced"]);
+        assert_eq!(long_state["entities"], prefix_state["entities"]);
+        assert!(
+            long_state["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn macro_v10_rejects_finite_source_and_fuel_backed_power_certificates() {
         let mut finite = productive_quantum_macro_fixture(15.0, "finite");
         let finite_revision = finite.revision;
@@ -3866,6 +5017,9 @@ mod tests {
         state.pure_idle_macro_runtime.as_mut().unwrap().certificate =
             Some(OrdinaryFlowCertificate {
                 units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
+                produced_units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
+                consumed_units_per_second: MaterialTotals::new(),
+                recipe_id: None,
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

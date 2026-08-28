@@ -30,6 +30,11 @@ const MAX_PROJECTION_BASE_FIELDS: usize = 64;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_VIEWPORT_PROJECTION_ENTITIES: usize = 4_096;
 const MAX_VIEWPORT_PROJECTION_BELTS: usize = 8_192;
+const MAX_VIEWPORT_PINNED_ENTITIES: usize = 64;
+const MAX_VIEWPORT_PINNED_BELTS: usize = 128;
+const MAX_VIEWPORT_OPAQUE_ID_BYTES: usize = 1_024;
+const VIEWPORT_SPATIAL_CELL_SIZE: f64 = 512.0;
+const MAX_VIEWPORT_GRID_CELL_PROBES: u64 = 4_096;
 const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
 const NONE_SYMBOL: u32 = u32::MAX;
 const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
@@ -1551,6 +1556,206 @@ impl BeltCommitSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ViewportWorldBounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl ViewportWorldBounds {
+    fn include(&mut self, x: f64, y: f64, first: bool) {
+        debug_assert!(x.is_finite() && y.is_finite());
+        if first {
+            *self = Self {
+                min_x: x,
+                min_y: y,
+                max_x: x,
+                max_y: y,
+            };
+            return;
+        }
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn as_json(self) -> Value {
+        serde_json::json!({
+            "minX": self.min_x,
+            "minY": self.min_y,
+            "maxX": self.max_x,
+            "maxY": self.max_y,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ViewportCellKey {
+    x: i64,
+    y: i64,
+}
+
+fn viewport_cell_coordinate(value: f64) -> i64 {
+    let scaled = (value / VIEWPORT_SPATIAL_CELL_SIZE).floor();
+    if scaled <= i64::MIN as f64 {
+        i64::MIN
+    } else if scaled >= i64::MAX as f64 {
+        i64::MAX
+    } else {
+        scaled as i64
+    }
+}
+
+/// Immutable per-planet spatial index. Cell members are persisted entity row
+/// indexes, and every query re-sorts only the touched rows by that index. This
+/// keeps viewport order independent from grid-cell traversal order.
+#[derive(Debug, Clone, Default)]
+struct PlanetViewportIndex {
+    cell_keys: Vec<ViewportCellKey>,
+    cell_offsets: Vec<usize>,
+    entity_indices: Vec<usize>,
+    world_bounds: ViewportWorldBounds,
+}
+
+impl PlanetViewportIndex {
+    fn build(entity_indices: &[usize], entities: &EntityColumns) -> Self {
+        let mut cells = BTreeMap::<ViewportCellKey, Vec<usize>>::new();
+        let mut world_bounds = ViewportWorldBounds::default();
+        for (ordinal, &entity_index) in entity_indices.iter().enumerate() {
+            let x = entities.position_x[entity_index];
+            let y = entities.position_y[entity_index];
+            world_bounds.include(x, y, ordinal == 0);
+            cells
+                .entry(ViewportCellKey {
+                    x: viewport_cell_coordinate(x),
+                    y: viewport_cell_coordinate(y),
+                })
+                .or_default()
+                .push(entity_index);
+        }
+
+        let mut cell_keys = Vec::with_capacity(cells.len());
+        let mut cell_offsets = Vec::with_capacity(cells.len().saturating_add(1));
+        let mut flattened = Vec::with_capacity(entity_indices.len());
+        cell_offsets.push(0);
+        for (key, indices) in cells {
+            cell_keys.push(key);
+            flattened.extend(indices);
+            cell_offsets.push(flattened.len());
+        }
+        cell_keys.shrink_to_fit();
+        cell_offsets.shrink_to_fit();
+        flattened.shrink_to_fit();
+        Self {
+            cell_keys,
+            cell_offsets,
+            entity_indices: flattened,
+            world_bounds,
+        }
+    }
+
+    fn query(
+        &self,
+        planet_entities: &[usize],
+        entities: &EntityColumns,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> (Vec<usize>, bool) {
+        let min_cell_x = viewport_cell_coordinate(min_x);
+        let min_cell_y = viewport_cell_coordinate(min_y);
+        let max_cell_x = viewport_cell_coordinate(max_x);
+        let max_cell_y = viewport_cell_coordinate(max_y);
+        let span_x = i128::from(max_cell_x) - i128::from(min_cell_x) + 1;
+        let span_y = i128::from(max_cell_y) - i128::from(min_cell_y) + 1;
+        let cell_probes = span_x
+            .checked_mul(span_y)
+            .filter(|value| *value >= 0)
+            .and_then(|value| u64::try_from(value).ok());
+        let broad_fallback = cell_probes.is_none_or(|count| {
+            count > MAX_VIEWPORT_GRID_CELL_PROBES || count > self.cell_keys.len() as u64 * 16 + 64
+        });
+
+        let mut candidates = if broad_fallback {
+            planet_entities.to_vec()
+        } else {
+            let mut candidates = Vec::new();
+            for cell_x in min_cell_x..=max_cell_x {
+                for cell_y in min_cell_y..=max_cell_y {
+                    let key = ViewportCellKey {
+                        x: cell_x,
+                        y: cell_y,
+                    };
+                    if let Ok(index) = self.cell_keys.binary_search(&key) {
+                        candidates.extend_from_slice(
+                            &self.entity_indices
+                                [self.cell_offsets[index]..self.cell_offsets[index + 1]],
+                        );
+                    }
+                }
+            }
+            candidates.sort_unstable();
+            candidates
+        };
+        candidates.retain(|&index| {
+            let x = entities.position_x[index];
+            let y = entities.position_y[index];
+            x >= min_x && x <= max_x && y >= min_y && y <= max_y
+        });
+        (candidates, broad_fallback)
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        (self.cell_keys.capacity() * size_of::<ViewportCellKey>()
+            + self.cell_offsets.capacity() * size_of::<usize>()
+            + self.entity_indices.capacity() * size_of::<usize>()) as u64
+    }
+}
+
+/// Immutable CSR mapping from persisted entity rows to incident persisted
+/// belt rows. It is rebuilt only with topology and is never serialized.
+#[derive(Debug, Clone, Default)]
+struct EntityBeltAdjacency {
+    offsets: Vec<usize>,
+    belt_indices: Vec<usize>,
+}
+
+impl EntityBeltAdjacency {
+    fn from_rows(mut rows: Vec<Vec<usize>>) -> Self {
+        let edge_count = rows.iter().map(Vec::len).sum();
+        let mut offsets = Vec::with_capacity(rows.len().saturating_add(1));
+        let mut belt_indices = Vec::with_capacity(edge_count);
+        offsets.push(0);
+        for row in &mut rows {
+            row.sort_unstable();
+            row.dedup();
+            belt_indices.extend_from_slice(row);
+            offsets.push(belt_indices.len());
+        }
+        offsets.shrink_to_fit();
+        belt_indices.shrink_to_fit();
+        Self {
+            offsets,
+            belt_indices,
+        }
+    }
+
+    fn incident(&self, entity_index: usize) -> &[usize] {
+        self.offsets
+            .get(entity_index..=entity_index.saturating_add(1))
+            .filter(|range| range.len() == 2)
+            .map_or(&[], |range| &self.belt_indices[range[0]..range[1]])
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        ((self.offsets.capacity() + self.belt_indices.capacity()) * size_of::<usize>()) as u64
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FactoryTopology {
     pub station_indices: Vec<usize>,
@@ -1571,6 +1776,8 @@ pub(crate) struct FactoryTopology {
     pub entity_grid_indices: Vec<usize>,
     pub entities_by_planet: Vec<Vec<usize>>,
     pub belts_by_planet: Vec<Vec<usize>>,
+    planet_viewport_indexes: Vec<PlanetViewportIndex>,
+    entity_belt_adjacency: EntityBeltAdjacency,
     pub has_galactic_material_exporter: bool,
 }
 
@@ -1601,6 +1808,7 @@ impl FactoryTopology {
         }
         self.entities_by_planet.shrink_to_fit();
         self.belts_by_planet.shrink_to_fit();
+        self.planet_viewport_indexes.shrink_to_fit();
     }
 
     fn estimated_bytes(&self) -> u64 {
@@ -1627,6 +1835,13 @@ impl FactoryTopology {
             .map(Vec::capacity)
             .sum::<usize>();
         ((index_capacity + planet_index_capacity) * size_of::<usize>()) as u64
+            + (self.planet_viewport_indexes.capacity() * size_of::<PlanetViewportIndex>()) as u64
+            + self
+                .planet_viewport_indexes
+                .iter()
+                .map(PlanetViewportIndex::estimated_bytes)
+                .sum::<u64>()
+            + self.entity_belt_adjacency.estimated_bytes()
     }
 }
 
@@ -2855,6 +3070,7 @@ impl CoreState {
         let entity_index = ExactRowIdIndex::from_boxed(entity_ids, "entity")?;
         self.entities.ids = entity_index.ids();
         self.entity_index = entity_index.into();
+        let mut entity_belt_rows = vec![Vec::<usize>::new(); entity_values.len()];
 
         for index in 0..self.belt_raw.len() {
             let value = self.parse_belt(index)?;
@@ -2864,15 +3080,13 @@ impl CoreState {
             let id = object_string(object, "id")
                 .ok_or_else(|| anyhow!("native core belt ID is missing"))?;
             belt_ids.push(id.into());
+            let source_id = object_string(object, "source");
+            let target_id = object_string(object, "target");
             self.belts
                 .planets
                 .push(self.symbols.intern(object_string(object, "planetId")));
-            self.belts
-                .sources
-                .push(self.symbols.intern(object_string(object, "source")));
-            self.belts
-                .targets
-                .push(self.symbols.intern(object_string(object, "target")));
+            self.belts.sources.push(self.symbols.intern(source_id));
+            self.belts.targets.push(self.symbols.intern(target_id));
             self.belts
                 .items
                 .push(self.symbols.intern(object_string(object, "itemId")));
@@ -2911,6 +3125,11 @@ impl CoreState {
             {
                 planet.push(index);
             }
+            for endpoint_id in [source_id, target_id].into_iter().flatten() {
+                if let Some(&entity_index) = self.entity_index.get(endpoint_id) {
+                    entity_belt_rows[entity_index].push(index);
+                }
+            }
         }
         let belt_index = ExactRowIdIndex::from_boxed(belt_ids, "belt")?;
         self.belts.ids = belt_index.ids();
@@ -2918,6 +3137,12 @@ impl CoreState {
         entity_dynamics.validate(entity_values.len())?;
         self.entity_dynamics = entity_dynamics.into();
         self.belt_dynamics.validate(self.belt_raw.len())?;
+        factory_topology.planet_viewport_indexes = factory_topology
+            .entities_by_planet
+            .iter()
+            .map(|indices| PlanetViewportIndex::build(indices, &self.entities))
+            .collect();
+        factory_topology.entity_belt_adjacency = EntityBeltAdjacency::from_rows(entity_belt_rows);
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save
         // does not retain several MiB of unreachable topology capacity.
@@ -3569,6 +3794,219 @@ impl CoreState {
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native viewport projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
+    /// Second-generation viewport projection with independently pageable
+    /// entity and belt streams. Ordinary entities come from the immutable
+    /// per-planet spatial grid; ordinary belts come from the immutable
+    /// entity-to-belt CSR for every visible entity, never merely the current
+    /// entity page. Explicitly pinned IDs are merged after pagination so a
+    /// selected off-screen object remains available to the thin renderer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2(
+        &self,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
+            || entity_limit == 0
+            || entity_limit > MAX_VIEWPORT_PROJECTION_ENTITIES
+            || belt_limit == 0
+            || belt_limit > MAX_VIEWPORT_PROJECTION_BELTS
+            || pinned_entity_ids.len() > MAX_VIEWPORT_PINNED_ENTITIES
+            || pinned_belt_ids.len() > MAX_VIEWPORT_PINNED_BELTS
+            || entity_cursor > self.entity_raw.len()
+            || belt_cursor > self.belt_raw.len()
+            || [min_x, min_y, max_x, max_y]
+                .iter()
+                .any(|value| !value.is_finite())
+            || min_x > max_x
+            || min_y > max_y
+            || max_x - min_x > 10_000_000.0
+            || max_y - min_y > 10_000_000.0
+        {
+            bail!("native viewport v2 bounds or limits are invalid");
+        }
+        let valid_base_key = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+                })
+        };
+        // Entity, belt and planet IDs are opaque content-pack identifiers.
+        // Bound only their encoded size and NUL use; do not impose the core
+        // catalog's ASCII spelling on MOD-owned IDs.
+        let valid_opaque_id = |value: &str| {
+            !value.is_empty()
+                && value.len() <= MAX_VIEWPORT_OPAQUE_ID_BYTES
+                && !value.contains('\0')
+        };
+        if !valid_opaque_id(planet_id)
+            || base_fields.iter().any(|field| {
+                !valid_base_key(field) || matches!(field.as_str(), "entities" | "belts")
+            })
+            || pinned_entity_ids.iter().any(|id| !valid_opaque_id(id))
+            || pinned_belt_ids.iter().any(|id| !valid_opaque_id(id))
+        {
+            bail!("native viewport v2 selector is invalid");
+        }
+
+        let planet_index = self
+            .catalog
+            .planets
+            .iter()
+            .position(|planet| planet.id == planet_id)
+            .ok_or_else(|| anyhow!("native viewport v2 planet is missing"))?;
+        let planet_entities = self
+            .factory_topology
+            .entities_by_planet
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport v2 planet index is invalid"))?;
+        let planet_belts = self
+            .factory_topology
+            .belts_by_planet
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport v2 belt planet index is invalid"))?;
+        let spatial = self
+            .factory_topology
+            .planet_viewport_indexes
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport v2 spatial index is missing"))?;
+        let (visible_entity_indices, broad_query_fallback) =
+            spatial.query(planet_entities, &self.entities, min_x, min_y, max_x, max_y);
+        if entity_cursor > visible_entity_indices.len() {
+            bail!("native viewport v2 entity cursor is invalid");
+        }
+
+        let entity_page_end = entity_cursor
+            .saturating_add(entity_limit)
+            .min(visible_entity_indices.len());
+        let mut returned_entity_indices =
+            visible_entity_indices[entity_cursor..entity_page_end].to_vec();
+        let mut resolved_pinned_entity_indices = pinned_entity_ids
+            .iter()
+            .filter_map(|id| self.entity_index.get(id).copied())
+            .filter(|&index| self.factory_topology.entity_planet_indices[index] == planet_index)
+            .collect::<Vec<_>>();
+        resolved_pinned_entity_indices.sort_unstable();
+        resolved_pinned_entity_indices.dedup();
+        returned_entity_indices.extend_from_slice(&resolved_pinned_entity_indices);
+        returned_entity_indices.sort_unstable();
+        returned_entity_indices.dedup();
+
+        // The ordinary belt stream is derived from every visible node plus
+        // any selected off-screen node. It therefore remains identical while
+        // entity pages advance through the same viewport.
+        let mut belt_source_entities = visible_entity_indices.clone();
+        belt_source_entities.extend_from_slice(&resolved_pinned_entity_indices);
+        belt_source_entities.sort_unstable();
+        belt_source_entities.dedup();
+        let mut visible_belt_indices = Vec::new();
+        for entity_index in belt_source_entities {
+            visible_belt_indices.extend_from_slice(
+                self.factory_topology
+                    .entity_belt_adjacency
+                    .incident(entity_index),
+            );
+        }
+        visible_belt_indices.sort_unstable();
+        visible_belt_indices.dedup();
+        visible_belt_indices
+            .retain(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id));
+        if belt_cursor > visible_belt_indices.len() {
+            bail!("native viewport v2 belt cursor is invalid");
+        }
+
+        let belt_page_end = belt_cursor
+            .saturating_add(belt_limit)
+            .min(visible_belt_indices.len());
+        let mut returned_belt_indices = visible_belt_indices[belt_cursor..belt_page_end].to_vec();
+        let mut resolved_pinned_belt_indices = pinned_belt_ids
+            .iter()
+            .filter_map(|id| self.belt_index.get(id).copied())
+            .filter(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id))
+            .collect::<Vec<_>>();
+        resolved_pinned_belt_indices.sort_unstable();
+        resolved_pinned_belt_indices.dedup();
+        returned_belt_indices.extend_from_slice(&resolved_pinned_belt_indices);
+        returned_belt_indices.sort_unstable();
+        returned_belt_indices.dedup();
+
+        let mut base = Map::new();
+        for field in base_fields {
+            if let Some(value) = self.base.get(field) {
+                base.insert(field.clone(), value.clone());
+            }
+        }
+        let entities = returned_entity_indices
+            .iter()
+            .copied()
+            .map(|index| self.parse_entity(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let belts = returned_belt_indices
+            .iter()
+            .copied()
+            .map(|index| self.parse_belt(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let pinned_entity_ids = resolved_pinned_entity_indices
+            .iter()
+            .map(|&index| self.entities.ids[index].to_owned())
+            .collect::<Vec<_>>();
+        let pinned_belt_ids = resolved_pinned_belt_indices
+            .iter()
+            .map(|&index| self.belts.ids[index].to_owned())
+            .collect::<Vec<_>>();
+        let next_entity_cursor =
+            (entity_page_end < visible_entity_indices.len()).then_some(entity_page_end);
+        let next_belt_cursor =
+            (belt_page_end < visible_belt_indices.len()).then_some(belt_page_end);
+        let world_bounds = spatial.world_bounds.as_json();
+        let value = serde_json::json!({
+            "schemaVersion": 2,
+            "projectionType": "viewport-v2",
+            "revision": self.revision,
+            "planetId": planet_id,
+            "bounds": { "minX": min_x, "minY": min_y, "maxX": max_x, "maxY": max_y },
+            "base": base,
+            "entities": entities,
+            "belts": belts,
+            "pinnedEntityIds": pinned_entity_ids,
+            "pinnedBeltIds": pinned_belt_ids,
+            "nextEntityCursor": next_entity_cursor,
+            "nextBeltCursor": next_belt_cursor,
+            "planetTotals": {
+                "entities": planet_entities.len(),
+                "belts": planet_belts.len(),
+            },
+            "viewportTotals": {
+                "entities": visible_entity_indices.len(),
+                "belts": visible_belt_indices.len(),
+            },
+            "worldBounds": world_bounds,
+            "minimap": {
+                "bounds": spatial.world_bounds.as_json(),
+                "entityCount": planet_entities.len(),
+                "beltCount": planet_belts.len(),
+                "occupiedCellCount": spatial.cell_keys.len(),
+                "cellSize": VIEWPORT_SPATIAL_CELL_SIZE,
+            },
+            "broadQueryFallback": broad_query_fallback,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native viewport v2 projection exceeds the byte limit");
         }
         Ok(value)
     }
@@ -4928,6 +5366,344 @@ mod tests {
                 + state.factory_topology.entity_grid_indices.len()
                 + state.factory_topology.entities_by_planet[0].len()) as u64
                 * size_of::<usize>() as u64
+                + (state.factory_topology.planet_viewport_indexes.capacity()
+                    * size_of::<PlanetViewportIndex>()) as u64
+                + state.factory_topology.planet_viewport_indexes[0].estimated_bytes()
+                + state
+                    .factory_topology
+                    .entity_belt_adjacency
+                    .estimated_bytes()
+        );
+        assert_eq!(
+            state.memory_estimate().topology_index_bytes,
+            state.factory_topology.estimated_bytes()
+                + state
+                    .prepared_belt_routes
+                    .as_ref()
+                    .map(|routes| routes.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_local_peer_directory
+                    .as_ref()
+                    .map(|directory| directory.estimated_bytes())
+                    .unwrap_or(0)
+        );
+    }
+
+    #[test]
+    fn viewport_v2_paginates_dense_entities_and_belts_independently_in_persisted_order() {
+        let entities = (0..7)
+            .map(|index| {
+                json!({
+                    "id": format!("entity-{index}"),
+                    "kind": "vein",
+                    "planetId": "home",
+                    "resourceId": "iron_ore",
+                    "minerCount": 1,
+                    // Alternate grid cells so grid traversal order differs
+                    // from persisted row order.
+                    "position": {"x": if index % 2 == 0 { 900 + index } else { index }, "y": index},
+                    "inputs": {},
+                    "outputs": {"iron_ore": 1},
+                })
+            })
+            .collect::<Vec<_>>();
+        let belts = (0..6)
+            .map(|index| {
+                json!({
+                    "id": format!("belt-{index}"),
+                    "planetId": "home",
+                    "source": format!("entity-{index}"),
+                    "target": format!("entity-{}", index + 1),
+                    "itemId": "iron_ore",
+                    "lanes": 1,
+                    "tier": 1,
+                    "priority": 1,
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_raw_entities_and_belts(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+            &serde_json::to_string(&belts).unwrap(),
+            belts.len(),
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let project = |entity_cursor, belt_cursor| {
+            state
+                .viewport_projection_v2(
+                    &[],
+                    "home",
+                    -1.0,
+                    -1.0,
+                    1_000.0,
+                    100.0,
+                    entity_cursor,
+                    2,
+                    belt_cursor,
+                    2,
+                    &[],
+                    &[],
+                )
+                .unwrap()
+        };
+
+        let first = project(0, 0);
+        assert_eq!(first["schemaVersion"], 2);
+        assert_eq!(first["projectionType"], "viewport-v2");
+        assert_eq!(first["planetTotals"]["entities"], 7);
+        assert_eq!(first["planetTotals"]["belts"], 6);
+        assert_eq!(first["viewportTotals"]["entities"], 7);
+        assert_eq!(first["viewportTotals"]["belts"], 6);
+        assert_eq!(first["entities"][0]["id"], "entity-0");
+        assert_eq!(first["entities"][1]["id"], "entity-1");
+        assert_eq!(first["belts"][0]["id"], "belt-0");
+        assert_eq!(first["belts"][1]["id"], "belt-1");
+        assert_eq!(first["nextEntityCursor"], 2);
+        assert_eq!(first["nextBeltCursor"], 2);
+
+        let second_entity_page = project(2, 0);
+        assert_eq!(second_entity_page["entities"][0]["id"], "entity-2");
+        assert_eq!(second_entity_page["entities"][1]["id"], "entity-3");
+        assert_eq!(second_entity_page["belts"], first["belts"]);
+
+        let mut entity_ids = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = project(cursor, 0);
+            entity_ids.extend(
+                page["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entity| entity["id"].as_str().unwrap().to_owned()),
+            );
+            let Some(next) = page["nextEntityCursor"].as_u64() else {
+                break;
+            };
+            cursor = next as usize;
+        }
+        assert_eq!(
+            entity_ids,
+            (0..7)
+                .map(|index| format!("entity-{index}"))
+                .collect::<Vec<_>>()
+        );
+
+        let mut belt_ids = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = project(0, cursor);
+            belt_ids.extend(
+                page["belts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|belt| belt["id"].as_str().unwrap().to_owned()),
+            );
+            let Some(next) = page["nextBeltCursor"].as_u64() else {
+                break;
+            };
+            cursor = next as usize;
+        }
+        assert_eq!(
+            belt_ids,
+            (0..6)
+                .map(|index| format!("belt-{index}"))
+                .collect::<Vec<_>>()
+        );
+
+        for key in ["minX", "minY", "maxX", "maxY"] {
+            assert!(first["worldBounds"][key].as_f64().unwrap().is_finite());
+            assert!(
+                first["minimap"]["bounds"][key]
+                    .as_f64()
+                    .unwrap()
+                    .is_finite()
+            );
+        }
+        let broad = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -5_000_000.0,
+                -5_000_000.0,
+                5_000_000.0,
+                5_000_000.0,
+                0,
+                7,
+                0,
+                6,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(broad["broadQueryFallback"], true);
+        assert_eq!(broad["entities"].as_array().unwrap().len(), 7);
+        assert_eq!(broad["entities"][0]["id"], "entity-0");
+        assert_eq!(broad["entities"][6]["id"], "entity-6");
+    }
+
+    #[test]
+    fn viewport_v2_keeps_opaque_out_of_view_pins_and_incident_belts() {
+        let pinned_entity_id = "mod:节点/Ω [selected]";
+        let pinned_belt_id = "mod:线路/β #pinned";
+        let entities = json!([
+            {"id": pinned_entity_id, "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":2000,"y":2000}, "inputs":{}, "outputs":{"iron_ore":1}},
+            {"id":"visible", "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":0,"y":0}, "inputs":{}, "outputs":{"iron_ore":1}},
+            {"id":"far", "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":3000,"y":3000}, "inputs":{}, "outputs":{"iron_ore":1}}
+        ]);
+        let belts = json!([
+            {"id":pinned_belt_id,"planetId":"home","source":"far","target":"far","itemId":"iron_ore","lanes":1,"tier":1,"priority":1},
+            {"id":"incident-to-selection","planetId":"home","source":pinned_entity_id,"target":"far","itemId":"iron_ore","lanes":1,"tier":1,"priority":1}
+        ]);
+        let records = fixture_records_with_raw_entities_and_belts(
+            &entities.to_string(),
+            3,
+            &belts.to_string(),
+            2,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let projection = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &[pinned_entity_id.to_owned()],
+                &[pinned_belt_id.to_owned()],
+            )
+            .unwrap();
+
+        // Returned arrays are always persisted-row ordered, even when the
+        // pinned record precedes the ordinary visible page.
+        assert_eq!(projection["entities"][0]["id"], pinned_entity_id);
+        assert_eq!(projection["entities"][1]["id"], "visible");
+        assert_eq!(projection["belts"][0]["id"], pinned_belt_id);
+        assert_eq!(projection["belts"][1]["id"], "incident-to-selection");
+        assert_eq!(projection["pinnedEntityIds"], json!([pinned_entity_id]));
+        assert_eq!(projection["pinnedBeltIds"], json!([pinned_belt_id]));
+        assert_eq!(projection["viewportTotals"]["entities"], 1);
+        assert_eq!(projection["viewportTotals"]["belts"], 1);
+        assert_eq!(projection["worldBounds"]["minX"], 0.0);
+        assert_eq!(projection["worldBounds"]["maxX"], 3000.0);
+    }
+
+    #[test]
+    fn viewport_v2_rejects_invalid_bounds_cursors_limits_and_selectors() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let project = |min_x,
+                       max_x,
+                       entity_cursor,
+                       entity_limit,
+                       belt_cursor,
+                       belt_limit,
+                       pinned_entity_ids: &[String]| {
+            state.viewport_projection_v2(
+                &[],
+                "home",
+                min_x,
+                -1.0,
+                max_x,
+                1.0,
+                entity_cursor,
+                entity_limit,
+                belt_cursor,
+                belt_limit,
+                pinned_entity_ids,
+                &[],
+            )
+        };
+        assert!(project(f64::NAN, 1.0, 0, 1, 0, 1, &[]).is_err());
+        assert!(project(2.0, 1.0, 0, 1, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 0, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 1, 0, 0, &[]).is_err());
+        assert!(project(-1.0, 1.0, 2, 1, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 1, 2, 1, &[]).is_err());
+        assert!(
+            project(
+                -1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &vec!["opaque".to_owned(); MAX_VIEWPORT_PINNED_ENTITIES + 1],
+            )
+            .is_err()
+        );
+        assert!(
+            project(
+                -1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &["x".repeat(MAX_VIEWPORT_OPAQUE_ID_BYTES + 1)],
+            )
+            .is_err()
+        );
+        assert!(
+            state
+                .viewport_projection_v2(
+                    &[],
+                    "missing/mod-planet",
+                    -1.0,
+                    -1.0,
+                    1.0,
+                    1.0,
+                    0,
+                    1,
+                    0,
+                    1,
+                    &[],
+                    &[],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn viewport_v2_enforces_the_one_mib_serialized_boundary() {
+        let records = fixture_records_with_entity_json(
+            &json!([{
+                "id":"large",
+                "kind":"vein",
+                "planetId":"home",
+                "resourceId":"iron_ore",
+                "position":{"x":0,"y":0},
+                "inputs":{},
+                "outputs":{"iron_ore":1},
+                "opaqueModPayload":"x".repeat(MAX_PROJECTION_BYTES)
+            }])
+            .to_string(),
+            1,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let error = state
+            .viewport_projection_v2(&[], "home", -1.0, -1.0, 1.0, 1.0, 0, 1, 0, 1, &[], &[])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native viewport v2 projection exceeds the byte limit"
         );
     }
 

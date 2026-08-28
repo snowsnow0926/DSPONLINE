@@ -397,6 +397,7 @@ import {
   selectNativeAuthoritativeFactoryInteractionRows,
   selectNativeFactorySelectionRelatedEntityIds,
 } from "./game/nativeFactoryInteractionFrame";
+import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFactoryWorkspaceFrame";
 import { FACTORY_READ_MODEL_LIMITS, type FactoryViewportBoundsReadModel } from "./game/factoryReadModels";
 import {
   factoryViewportProvesWholePlanet,
@@ -2090,58 +2091,73 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       selectedEntityIds,
     ],
   );
+  const nativeAuthoritativeFactoryWorkspaceFrame = useMemo(
+    () => selectNativeAuthoritativeFactoryWorkspaceFrame(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: game.activePlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      game.activePlanetId,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
   const webFactoryRunStatusReadModel = useMemo(
-    () => createWebFactoryRunStatusReadModel(game),
-    [game.activePlanetId, game.paused],
+    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryRunStatusReadModel(game),
+    [game.activePlanetId, game.paused, nativeAuthoritativeFactoryWorkspaceFrame],
   );
   const factoryRunStatusReadModel = useMemo(
-    () => selectFactoryRunStatusReadModel(
-      webFactoryRunStatusReadModel,
+    () => nativeAuthoritativeFactoryWorkspaceFrame?.runStatus ?? selectFactoryRunStatusReadModel(
+      webFactoryRunStatusReadModel!,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
     ),
-    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryRunStatusReadModel],
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryRunStatusReadModel],
   );
   const webFactoryConstructionHeadlineReadModel = useMemo(
-    () => createWebFactoryConstructionHeadlineReadModel(game),
-    [game.activePlanetId, game.constructionQueue.length],
+    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryConstructionHeadlineReadModel(game),
+    [game.activePlanetId, game.constructionQueue.length, nativeAuthoritativeFactoryWorkspaceFrame],
   );
   const factoryConstructionHeadlineReadModel = useMemo(
-    () => selectFactoryConstructionHeadlineReadModel(
-      webFactoryConstructionHeadlineReadModel,
+    () => nativeAuthoritativeFactoryWorkspaceFrame?.constructionHeadline ?? selectFactoryConstructionHeadlineReadModel(
+      webFactoryConstructionHeadlineReadModel!,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
     ),
-    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
   );
   const webFactoryConstructionWorkspaceReadModel = useMemo(
-    () => createWebFactoryConstructionWorkspaceReadModel(game),
-    [game],
+    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryConstructionWorkspaceReadModel(game),
+    [game, nativeAuthoritativeFactoryWorkspaceFrame],
   );
   const factoryConstructionWorkspaceReadModel = useMemo(
-    () => selectFactoryConstructionWorkspaceReadModel(
-      webFactoryConstructionWorkspaceReadModel,
+    () => nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace ?? selectFactoryConstructionWorkspaceReadModel(
+      webFactoryConstructionWorkspaceReadModel!,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
     ),
-    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionWorkspaceReadModel],
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryConstructionWorkspaceReadModel],
   );
   const webFactoryPlanetNavigationReadModel = useMemo(
-    () => createPlanetNavigationReadModel(game),
-    [game],
+    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createPlanetNavigationReadModel(game),
+    [game, nativeAuthoritativeFactoryWorkspaceFrame],
   );
   const factoryPlanetNavigationReadModel = useMemo(
-    () => selectFactoryPlanetNavigationReadModel(
-      webFactoryPlanetNavigationReadModel,
+    () => nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation ?? selectFactoryPlanetNavigationReadModel(
+      webFactoryPlanetNavigationReadModel!,
       nativeFactoryThinViewSnapshot,
       factoryThinViewExpectedRevision,
     ),
-    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
   );
   const factoryActivePlanetNavigationRow = useMemo(
     () => factoryPlanetNavigationReadModel.planets.rows.find(
       (row) => row.planetId === factoryPlanetNavigationReadModel.activePlanetId,
-    ) ?? webFactoryPlanetNavigationReadModel.planets.rows.find(
+    ) ?? webFactoryPlanetNavigationReadModel?.planets.rows.find(
       (row) => row.planetId === webFactoryPlanetNavigationReadModel.activePlanetId,
     ),
     [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],

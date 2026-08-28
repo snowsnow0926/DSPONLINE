@@ -91,6 +91,19 @@ describe("factory thin-view App consumption", () => {
     expect(app).not.toMatch(/<strong>\{getPlanetDisplayName\(game, game\.activePlanetId\)/);
   });
 
+  it("does not rebuild non-canvas Web workspace models after native authority owns the exact revision", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+
+    expect(app).toMatch(/selectNativeAuthoritativeFactoryWorkspaceFrame\(nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryRunStatusReadModel\(game\)/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryConstructionHeadlineReadModel\(game\)/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryConstructionWorkspaceReadModel\(game\)/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createPlanetNavigationReadModel\(game\)/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.runStatus\s*\?\?/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.constructionWorkspace\s*\?\?/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.planetNavigation\s*\?\?/);
+  });
+
   it("feeds SelectionToolbar counts and lock state from the bounded atomic selection", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const workspace = readFileSync(resolve("src/components/BlueprintWorkspace.tsx"), "utf8");

@@ -10,6 +10,7 @@ import {
   type ConstructionSummaryReadModel,
   type ConstructionTargetReadModel,
   type FactoryConstructionHeadlineReadModel,
+  type FactoryConstructionWorkspaceReadModel,
   type FactoryInspectorSummaryReadModel,
   type FactoryMultiSelectionSummaryReadModel,
   type FactoryReadModelBundle,
@@ -455,6 +456,21 @@ export function createConstructionSummaryReadModel(state: GameState): Constructi
         FACTORY_READ_MODEL_LIMITS.itemRows,
       ),
     },
+  };
+}
+
+/**
+ * Full Web/PWA fallback for the construction-center and pending-blueprint
+ * read-only display. Commands and eligibility checks continue to use
+ * GameState directly in the owning workspaces.
+ */
+export function createWebFactoryConstructionWorkspaceReadModel(
+  state: GameState,
+): FactoryConstructionWorkspaceReadModel {
+  return {
+    ...createConstructionSummaryReadModel(state),
+    source: "web-game-state",
+    revision: null,
   };
 }
 

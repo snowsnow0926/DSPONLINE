@@ -386,6 +386,7 @@ import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import { FACTORY_READ_MODEL_LIMITS } from "./game/factoryReadModels";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryConstructionWorkspaceReadModel,
   selectFactoryInspectorSummaryReadModel,
   selectFactoryMultiSelectionSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
@@ -395,6 +396,7 @@ import {
 import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryConstructionWorkspaceReadModel,
   createWebFactoryInspectorSummaryReadModel,
   createWebFactoryMultiSelectionSummaryReadModel,
   createWebFactoryRunStatusReadModel,
@@ -1926,6 +1928,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewExpectedRevision,
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
+  );
+  const webFactoryConstructionWorkspaceReadModel = useMemo(
+    () => createWebFactoryConstructionWorkspaceReadModel(game),
+    [game],
+  );
+  const factoryConstructionWorkspaceReadModel = useMemo(
+    () => selectFactoryConstructionWorkspaceReadModel(
+      webFactoryConstructionWorkspaceReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+    ),
+    [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryConstructionWorkspaceReadModel],
   );
   const webFactoryPlanetNavigationReadModel = useMemo(
     () => createPlanetNavigationReadModel(game),
@@ -13547,6 +13561,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         open={blueprintsOpen}
         game={game}
         factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
+        constructionReadModel={factoryConstructionWorkspaceReadModel}
         mobile={nextMobileShell}
         mobileSubview={mobileWorkspaceSubview}
         onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -13582,6 +13597,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           <ConstructionCenterWorkspace
             open
             game={game}
+            constructionReadModel={factoryConstructionWorkspaceReadModel}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
             onEnabledChange={(enabled) => commitGame((current) => setConstructionAutomationEnabled(current, enabled))}
             onQuantumSourceChange={(enabled) => commitGame((current) => setConstructionAutomationQuantumSourceEnabled(current, enabled))}

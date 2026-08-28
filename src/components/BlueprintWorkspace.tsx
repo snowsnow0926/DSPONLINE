@@ -1,7 +1,7 @@
 import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Download, FlipHorizontal2, Focus, Layers3, ListChecks, Lock, MousePointer2, PackageCheck, PackageOpen, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Redo2, RotateCw, Route, Trash2, Truck, Undo2, Unlock, Upload, WandSparkles, X } from "lucide-react";
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
-import type { FactoryConstructionHeadlineReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
+import type { FactoryConstructionHeadlineReadModel, FactoryConstructionWorkspaceReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
@@ -450,10 +450,11 @@ function formatSimulationTime(seconds: number): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
+export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, constructionReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
   open: boolean;
   game: GameState;
   factoryHeadlineReadModel: FactoryConstructionHeadlineReadModel;
+  constructionReadModel: FactoryConstructionWorkspaceReadModel;
   onClose: () => void;
   onDeploy: (blueprintId: string) => void;
   onRemove: (blueprintId: string) => void;
@@ -505,7 +506,10 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClo
   if (!open) return null;
   const detailBlueprintId = mobile && mobileSubview?.startsWith("blueprint:") ? mobileSubview.slice(10) : null;
   const visibleBlueprints = detailBlueprintId ? game.blueprints.filter((blueprint) => blueprint.id === detailBlueprintId) : game.blueprints;
-  const pendingCount = factoryHeadlineReadModel.constructionQueueCount;
+  const pendingCount = constructionReadModel.queue.totalCount;
+  const nativeQueueRows = constructionReadModel.source === "native-core"
+    ? new Map(constructionReadModel.queue.rows.map((row) => [row.queueId, row] as const))
+    : null;
   return (
     <WorkspaceFrame className={`blueprint-workspace${mobile ? ` mobile-workspace mobile-blueprints${detailBlueprintId ? " mobile-workspace--detail" : ""}` : ""}`} ariaLabel="蓝图与待建施工" onRequestClose={onClose}>
       <header className="blueprint-header">
@@ -606,7 +610,12 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClo
         })}
       </div>
       </div>
-      </> : <section className="pending-construction-workspace" aria-label="待建与补足">
+      </> : <section
+        className="pending-construction-workspace"
+        aria-label="待建与补足"
+        data-factory-read-model-source={constructionReadModel.source}
+        data-factory-read-model-revision={constructionReadModel.revision ?? "web"}
+      >
         <header>
           <div><ListChecks size={17} /><span><strong>施工订单</strong><small>按创建顺序稳定分配施工托盘与随身载具</small></span></div>
           <button type="button" disabled={pendingCount === 0} onClick={onFundAllQueues}><PackageCheck size={14} />一键补足全部</button>
@@ -614,6 +623,7 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClo
         {pendingCount === 0 ? <div className="blueprint-empty"><PackageCheck size={28} /><strong>没有待处理施工订单</strong><span>缺料蓝图会保留在画布，并在这里显示补足与取消状态。</span></div> : <div className="pending-construction-list">
           {[...game.constructionQueue].sort((left, right) => left.queuedAt - right.queuedAt || left.id.localeCompare(right.id)).map((entry) => {
             const details = getConstructionQueueDetails(game, entry.id);
+            const displayEntry = nativeQueueRows?.get(entry.id);
             const constructionReady = details.status === "pending-materials" && details.requirements.every((item) => item.missing === 0);
             const constructionAvailable = details.status === "pending-materials" && details.requirements.some((item) => item.missing > 0 && item.available > 0);
             const fleetAvailable = details.fleet.some((item) => item.missing > 0 && item.available > 0);
@@ -628,23 +638,24 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClo
                 : fleetUnavailable ? "随身物流载具暂无可用库存；载具到位后可一键补足" : undefined);
             return <article className={`pending-construction-order pending-construction-order--${details.status}`} key={entry.id}>
               <header>
-                <div><i><Layers3 size={16} /></i><span><strong>{entry.blueprintName}</strong><small>{getPlanet(entry.planetId).name} · 坐标 {Math.round(entry.position.x)}, {Math.round(entry.position.y)}</small></span></div>
-                <em>{details.status === "waiting-fleet" ? "建筑完成 · 等待载具" : details.compatible ? "灰模待建" : "施工阻塞"}</em>
+                <div><i><Layers3 size={16} /></i><span><strong>{displayEntry?.blueprintName ?? entry.blueprintName}</strong><small>{getPlanet((displayEntry?.planetId ?? entry.planetId) as PlanetId).name} · 坐标 {Math.round(entry.position.x)}, {Math.round(entry.position.y)}</small></span></div>
+                <em>{(displayEntry?.status ?? details.status) === "waiting-fleet" ? "建筑完成 · 等待载具" : details.compatible ? "灰模待建" : "施工阻塞"}</em>
               </header>
               <dl className="pending-construction-meta">
-                <div><dt>放置时间</dt><dd>运行 {formatSimulationTime(entry.queuedAt)}</dd></div>
-                <div><dt>方向</dt><dd>{entry.rotation}°{entry.mirror === "horizontal" ? " · 水平镜像" : ""}</dd></div>
-                <div><dt>版本</dt><dd>r{entry.blueprintRevision ?? details.blueprint?.revision ?? 1}</dd></div>
+                <div><dt>放置时间</dt><dd>运行 {formatSimulationTime(displayEntry?.queuedAt ?? entry.queuedAt)}</dd></div>
+                <div><dt>方向</dt><dd>{displayEntry?.rotation ?? entry.rotation}°{(displayEntry?.mirror ?? entry.mirror) === "horizontal" ? " · 水平镜像" : ""}</dd></div>
+                <div><dt>版本</dt><dd>r{displayEntry?.blueprintRevision ?? entry.blueprintRevision ?? details.blueprint?.revision ?? 1}</dd></div>
               </dl>
               {fundingHint ? <p className="pending-construction-blocked">{fundingHint}</p> : null}
               {details.requirements.length > 0 ? <section className="pending-construction-materials">
                 <strong>建筑与线路</strong>
                 <div>{details.requirements.map((item) => {
-                  const exact = `${formatQuantityExact(item.reserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，托盘可用 ${formatQuantityExact(item.available)}`;
+                  const reserved = displayEntry?.reservedConstruction.rows.find((row) => row.constructionId === item.constructionId)?.amount ?? item.reserved;
+                  const exact = `${formatQuantityExact(reserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，托盘可用 ${formatQuantityExact(item.available)}`;
                   return <span className={item.missing === 0 ? "ready" : ""} key={item.constructionId} title={exact}>
                     {item.missing === 0 ? <Check size={12} /> : <PackageOpen size={12} />}
                     <b>{getConstructionDefinition(item.constructionId)?.name ?? item.constructionId}</b>
-                    <em>{formatQuantityCompact(item.reserved)}/{formatQuantityCompact(item.total)}</em>
+                    <em>{formatQuantityCompact(reserved)}/{formatQuantityCompact(item.total)}</em>
                     <small>剩 {formatQuantityCompact(item.missing)} · 可用 {formatQuantityCompact(item.available)}</small>
                   </span>;
                 })}</div>
@@ -652,11 +663,12 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, onClo
               {details.fleet.length > 0 ? <section className="pending-construction-materials pending-construction-fleet">
                 <strong>物流载具</strong>
                 <div>{details.fleet.map((item) => {
-                  const exact = `${formatQuantityExact(item.installedOrReserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，随身可用 ${formatQuantityExact(item.available)}`;
+                  const installedOrReserved = displayEntry?.reservedFleet.rows.find((row) => row.itemId === item.itemId)?.amount ?? item.installedOrReserved;
+                  const exact = `${formatQuantityExact(installedOrReserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，随身可用 ${formatQuantityExact(item.available)}`;
                   return <span className={item.missing === 0 ? "ready" : ""} key={item.itemId} title={exact}>
                     {item.missing === 0 ? <Check size={12} /> : <Truck size={12} />}
                     <b>{getItem(item.itemId).name}</b>
-                    <em>{formatQuantityCompact(item.installedOrReserved)}/{formatQuantityCompact(item.total)}</em>
+                    <em>{formatQuantityCompact(installedOrReserved)}/{formatQuantityCompact(item.total)}</em>
                     <small>剩 {formatQuantityCompact(item.missing)} · 可用 {formatQuantityCompact(item.available)}</small>
                   </span>;
                 })}</div>

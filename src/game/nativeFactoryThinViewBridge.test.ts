@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
 import type {
   FactoryConstructionHeadlineReadModel,
+  FactoryConstructionWorkspaceReadModel,
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
@@ -14,6 +15,7 @@ import type {
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 import {
   selectFactoryConstructionHeadlineReadModel,
+  selectFactoryConstructionWorkspaceReadModel,
   selectFactoryInspectorSummaryReadModel,
   selectFactoryMultiSelectionSummaryReadModel,
   selectFactoryPlanetNavigationReadModel,
@@ -36,6 +38,75 @@ const constructionWeb: FactoryConstructionHeadlineReadModel = {
   activePlanetId: "home",
   activePlanetDisplayName: "澄海 I",
   constructionQueueCount: 0,
+};
+
+const constructionWorkspaceWeb: FactoryConstructionWorkspaceReadModel = {
+  schema: "factory-read-model-v1",
+  source: "web-game-state",
+  revision: null,
+  activePlanetId: "home",
+  queue: {
+    rows: [{
+      queueId: "queue-1",
+      blueprintId: "blueprint-1",
+      blueprintVersionId: "blueprint-version-1",
+      blueprintRevision: 3,
+      blueprintName: "钢铁工厂",
+      planetId: "home",
+      queuedAt: 9,
+      status: "pending-materials",
+      rotation: 90,
+      mirror: "horizontal",
+      placedEntityCount: 2,
+      reservedConstruction: {
+        rows: [{ constructionId: "assembling_machine_mk1", amount: 4 }],
+        totalCount: 1,
+        truncated: false,
+      },
+      reservedFleet: {
+        rows: [{ itemId: "logistics_drone", amount: 5 }],
+        totalCount: 1,
+        truncated: false,
+      },
+    }],
+    totalCount: 1,
+    truncated: false,
+  },
+  automation: {
+    enabled: true,
+    quantumSourceEnabled: true,
+    totalCrafted: 123,
+    lastCraftedId: "assembling_machine_mk1",
+    targets: {
+      rows: [
+        { targetId: "assembling_machine_mk1", amount: 100 },
+        { targetId: "conveyor_belt_mk1", amount: 500 },
+      ],
+      totalCount: 2,
+      truncated: false,
+    },
+    jobs: {
+      rows: [{
+        entityId: "construction-center-1",
+        constructionId: "assembling_machine_mk1",
+        stepIndex: 1,
+        stepCount: 3,
+        elapsedSeconds: 0.5,
+        inventory: {
+          rows: [{ itemId: "iron_ingot", amount: 8 }],
+          totalCount: 1,
+          truncated: false,
+        },
+      }],
+      totalCount: 1,
+      truncated: false,
+    },
+    destroyedByproducts: {
+      rows: [{ itemId: "hydrogen", amount: 2 }],
+      totalCount: 1,
+      truncated: false,
+    },
+  },
 };
 
 const navigationWeb: PlanetNavigationReadModel = {
@@ -282,6 +353,29 @@ function snapshot(
   };
 }
 
+function constructionWorkspaceSnapshot(revision = 31): NativeFactoryThinViewSnapshot {
+  const current = snapshot(revision);
+  return {
+    ...current,
+    frame: {
+      ...current.frame!,
+      factory: {
+        ...current.frame!.factory,
+        shell: {
+          ...current.frame!.factory.shell,
+          constructionQueueCount: constructionWorkspaceWeb.queue.totalCount,
+        },
+        construction: {
+          schema: constructionWorkspaceWeb.schema,
+          activePlanetId: constructionWorkspaceWeb.activePlanetId,
+          queue: constructionWorkspaceWeb.queue,
+          automation: constructionWorkspaceWeb.automation,
+        },
+      },
+    },
+  };
+}
+
 describe("native factory thin-view run-status bridge", () => {
   it("uses the native shell only for the exact ready revision", () => {
     expect(selectFactoryRunStatusReadModel(web, snapshot(7), 7)).toEqual({
@@ -370,6 +464,161 @@ describe("native factory thin-view construction headline bridge", () => {
       },
     };
     expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, inactivePlanet, 9)).toBe(constructionWeb);
+  });
+});
+
+describe("native factory thin-view construction workspace bridge", () => {
+  it("selects the complete construction atom only at the exact revision", () => {
+    const selected = selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      constructionWorkspaceSnapshot(),
+      31,
+    );
+    expect(selected).toEqual({
+      ...constructionWorkspaceWeb,
+      source: "native-core",
+      revision: 31,
+    });
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      constructionWorkspaceSnapshot(30),
+      31,
+    )).toBe(constructionWorkspaceWeb);
+  });
+
+  it("fails closed for top-level, reservation, or job-inventory truncation", () => {
+    const current = constructionWorkspaceSnapshot();
+    const truncatedQueue: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          construction: {
+            ...current.frame!.factory.construction,
+            queue: { ...current.frame!.factory.construction.queue, truncated: true },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      truncatedQueue,
+      31,
+    )).toBe(constructionWorkspaceWeb);
+
+    const truncatedReservation: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          construction: {
+            ...current.frame!.factory.construction,
+            queue: {
+              ...current.frame!.factory.construction.queue,
+              rows: current.frame!.factory.construction.queue.rows.map((row) => ({
+                ...row,
+                reservedConstruction: { ...row.reservedConstruction, truncated: true },
+              })),
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      truncatedReservation,
+      31,
+    )).toBe(constructionWorkspaceWeb);
+
+    const truncatedJobInventory: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          construction: {
+            ...current.frame!.factory.construction,
+            automation: {
+              ...current.frame!.factory.construction.automation,
+              jobs: {
+                ...current.frame!.factory.construction.automation.jobs,
+                rows: current.frame!.factory.construction.automation.jobs.rows.map((job) => ({
+                  ...job,
+                  inventory: { ...job.inventory, truncated: true },
+                })),
+              },
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      truncatedJobInventory,
+      31,
+    )).toBe(constructionWorkspaceWeb);
+  });
+
+  it("fails closed for a same-revision field drift, reordering, or planet mismatch", () => {
+    const current = constructionWorkspaceSnapshot();
+    const driftedTotal: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          construction: {
+            ...current.frame!.factory.construction,
+            automation: {
+              ...current.frame!.factory.construction.automation,
+              totalCrafted: 124,
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      driftedTotal,
+      31,
+    )).toBe(constructionWorkspaceWeb);
+
+    const reorderedTargets: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          construction: {
+            ...current.frame!.factory.construction,
+            automation: {
+              ...current.frame!.factory.construction.automation,
+              targets: {
+                ...current.frame!.factory.construction.automation.targets,
+                rows: [...current.frame!.factory.construction.automation.targets.rows].reverse(),
+              },
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      reorderedTargets,
+      31,
+    )).toBe(constructionWorkspaceWeb);
+
+    const wrongPlanet: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: { ...current.frame!, planetId: "other" },
+    };
+    expect(selectFactoryConstructionWorkspaceReadModel(
+      constructionWorkspaceWeb,
+      wrongPlanet,
+      31,
+    )).toBe(constructionWorkspaceWeb);
   });
 });
 

@@ -1,5 +1,11 @@
 import type {
+  BoundedReadModelRows,
+  ConstructionJobReadModel,
+  ConstructionQueueRowReadModel,
+  ConstructionReservationReadModel,
+  ConstructionTargetReadModel,
   FactoryConstructionHeadlineReadModel,
+  FactoryConstructionWorkspaceReadModel,
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
   FactoryRunStatusReadModel,
@@ -331,6 +337,109 @@ export function selectFactoryConstructionHeadlineReadModel(
     activePlanetId: web.activePlanetId,
     activePlanetDisplayName: web.activePlanetDisplayName,
     constructionQueueCount: shell.constructionQueueCount,
+  });
+}
+
+function completeBoundedRows<Row>(rows: BoundedReadModelRows<Row>, limit: number): boolean {
+  return !rows.truncated && rows.totalCount === rows.rows.length && rows.rows.length <= limit;
+}
+
+function sameConstructionReservationRows(
+  web: BoundedReadModelRows<ConstructionReservationReadModel>,
+  native: BoundedReadModelRows<ConstructionReservationReadModel>,
+): boolean {
+  return completeBoundedRows(web, FACTORY_READ_MODEL_LIMITS.constructionReservationRows) &&
+    completeBoundedRows(native, FACTORY_READ_MODEL_LIMITS.constructionReservationRows) &&
+    web.rows.length === native.rows.length && native.rows.every((row, index) => {
+      const expected = web.rows[index];
+      return expected?.constructionId === row.constructionId && expected.amount === row.amount;
+    });
+}
+
+function sameConstructionQueueRows(
+  web: BoundedReadModelRows<ConstructionQueueRowReadModel>,
+  native: BoundedReadModelRows<ConstructionQueueRowReadModel>,
+): boolean {
+  return completeBoundedRows(web, FACTORY_READ_MODEL_LIMITS.constructionQueueRows) &&
+    completeBoundedRows(native, FACTORY_READ_MODEL_LIMITS.constructionQueueRows) &&
+    web.rows.length === native.rows.length && native.rows.every((row, index) => {
+      const expected = web.rows[index];
+      return expected?.queueId === row.queueId && expected.blueprintId === row.blueprintId &&
+        expected.blueprintVersionId === row.blueprintVersionId &&
+        expected.blueprintRevision === row.blueprintRevision &&
+        expected.blueprintName === row.blueprintName && expected.planetId === row.planetId &&
+        expected.queuedAt === row.queuedAt && expected.status === row.status &&
+        expected.rotation === row.rotation && expected.mirror === row.mirror &&
+        expected.placedEntityCount === row.placedEntityCount &&
+        sameConstructionReservationRows(expected.reservedConstruction, row.reservedConstruction) &&
+        sameItemRows(expected.reservedFleet, row.reservedFleet);
+    });
+}
+
+function sameConstructionTargetRows(
+  web: BoundedReadModelRows<ConstructionTargetReadModel>,
+  native: BoundedReadModelRows<ConstructionTargetReadModel>,
+): boolean {
+  return completeBoundedRows(web, FACTORY_READ_MODEL_LIMITS.constructionTargetRows) &&
+    completeBoundedRows(native, FACTORY_READ_MODEL_LIMITS.constructionTargetRows) &&
+    web.rows.length === native.rows.length && native.rows.every((row, index) => {
+      const expected = web.rows[index];
+      return expected?.targetId === row.targetId && expected.amount === row.amount;
+    });
+}
+
+function sameConstructionJobRows(
+  web: BoundedReadModelRows<ConstructionJobReadModel>,
+  native: BoundedReadModelRows<ConstructionJobReadModel>,
+): boolean {
+  return completeBoundedRows(web, FACTORY_READ_MODEL_LIMITS.constructionJobRows) &&
+    completeBoundedRows(native, FACTORY_READ_MODEL_LIMITS.constructionJobRows) &&
+    web.rows.length === native.rows.length && native.rows.every((row, index) => {
+      const expected = web.rows[index];
+      return expected?.entityId === row.entityId && expected.constructionId === row.constructionId &&
+        expected.stepIndex === row.stepIndex && expected.stepCount === row.stepCount &&
+        expected.elapsedSeconds === row.elapsedSeconds && sameItemRows(expected.inventory, row.inventory);
+    });
+}
+
+/**
+ * Selects the construction-center and pending-blueprint display projection only
+ * when the complete bounded native payload is semantically identical to the
+ * same GameState revision. Any stale frame, cap, nested truncation, missing row
+ * or field drift keeps the complete Web model, rather than mixing revisions.
+ */
+export function selectFactoryConstructionWorkspaceReadModel(
+  web: FactoryConstructionWorkspaceReadModel,
+  native: NativeFactoryThinViewSnapshot,
+  expectedRevision: number,
+): FactoryConstructionWorkspaceReadModel {
+  const frame = native.status === "ready" && native.requestedRevision === expectedRevision
+    ? native.frame
+    : null;
+  const factory = frame?.factory;
+  const shell = factory?.shell;
+  const model = factory?.construction;
+  if (web.source !== "web-game-state" || web.revision !== null ||
+    !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 ||
+    !frame || frame.revision !== expectedRevision || frame.planetId !== web.activePlanetId ||
+    !factory || factory.revision !== expectedRevision || !shell || shell.source !== "native-core" ||
+    shell.activePlanetId !== web.activePlanetId || model?.schema !== web.schema ||
+    model.activePlanetId !== web.activePlanetId || shell.constructionQueueCount !== web.queue.totalCount ||
+    shell.constructionQueueCount !== model.queue.totalCount ||
+    model.automation.enabled !== web.automation.enabled ||
+    model.automation.quantumSourceEnabled !== web.automation.quantumSourceEnabled ||
+    model.automation.totalCrafted !== web.automation.totalCrafted ||
+    model.automation.lastCraftedId !== web.automation.lastCraftedId ||
+    !sameConstructionQueueRows(web.queue, model.queue) ||
+    !sameConstructionTargetRows(web.automation.targets, model.automation.targets) ||
+    !sameConstructionJobRows(web.automation.jobs, model.automation.jobs) ||
+    !sameItemRows(web.automation.destroyedByproducts, model.automation.destroyedByproducts)) {
+    return web;
+  }
+  return Object.freeze({
+    ...model,
+    source: "native-core",
+    revision: expectedRevision,
   });
 }
 

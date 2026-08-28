@@ -226,6 +226,16 @@ export interface ConstructionSummaryReadModel {
   }>;
 }
 
+/**
+ * Renderer-only wrapper for construction workspaces. The native wire schema
+ * remains `ConstructionSummaryReadModel`; source/revision are attached only
+ * after the renderer proves a complete, same-revision semantic match.
+ */
+export interface FactoryConstructionWorkspaceReadModel extends ConstructionSummaryReadModel {
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+}
+
 export interface FactoryReadModelBundle {
   readonly shell: FactoryShellReadModel;
   readonly planetNavigation: PlanetNavigationReadModel;

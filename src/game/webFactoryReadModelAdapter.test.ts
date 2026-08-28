@@ -15,6 +15,7 @@ import type {
 } from "./types";
 import {
   createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryConstructionWorkspaceReadModel,
   createWebFactoryInspectorSummaryReadModel,
   createWebFactoryMultiSelectionSummaryReadModel,
   createWebFactoryReadModels,
@@ -89,6 +90,32 @@ describe("Web/PWA factory read-model adapter", () => {
       activePlanetDisplayName: "烬原 II",
       constructionQueueCount: 1,
     });
+  });
+
+  it("wraps the bounded construction atom as the complete Web fallback identity", () => {
+    const state = createInitialState();
+    state.constructionAutomation.totalCrafted = 12;
+    state.constructionAutomation.lastCraftedId = asConstructionId("assembling_machine_mk1");
+    state.constructionAutomation.targetStock.assembling_machine_mk1 = 100;
+
+    const model = createWebFactoryConstructionWorkspaceReadModel(state);
+
+    expect(model).toMatchObject({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      activePlanetId: "home",
+      automation: {
+        totalCrafted: 12,
+        lastCraftedId: "assembling_machine_mk1",
+      },
+    });
+    expect(model.automation.targets.rows).toContainEqual({
+      targetId: "assembling_machine_mk1",
+      amount: 100,
+    });
+    expect(model).not.toHaveProperty("entities");
+    expect(model).not.toHaveProperty("belts");
   });
 
   it("projects the visible run status without retaining GameState", () => {

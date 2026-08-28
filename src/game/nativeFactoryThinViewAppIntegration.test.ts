@@ -30,12 +30,37 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/selectFactoryConstructionHeadlineReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/<BlueprintWorkspace[\s\S]*?factoryHeadlineReadModel=\{factoryConstructionHeadlineReadModel\}/);
     expect(workspace).toMatch(/<BlueprintFactoryHeadline model=\{factoryHeadlineReadModel\} \/>/);
-    expect(workspace).toMatch(/const pendingCount = factoryHeadlineReadModel\.constructionQueueCount/);
+    expect(workspace).toMatch(/const pendingCount = constructionReadModel\.queue\.totalCount/);
     expect(workspace).not.toMatch(/<span>施工队列 <strong>\{game\.constructionQueue\.length\}/);
 
     expect(headline).toMatch(/FactoryConstructionHeadlineReadModel/);
     expect(headline).not.toMatch(/GameState/);
     expect(headline).not.toMatch(/\.\/game\/types|\.\.\/game\/types/);
+  });
+
+  it("feeds construction-center and pending-blueprint read-only summaries from one fail-closed atom", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const center = readFileSync(resolve("src/components/ConstructionCenterWorkspace.tsx"), "utf8");
+    const blueprints = readFileSync(resolve("src/components/BlueprintWorkspace.tsx"), "utf8");
+
+    expect(app).toMatch(/createWebFactoryConstructionWorkspaceReadModel\(game\)/);
+    expect(app).toMatch(/selectFactoryConstructionWorkspaceReadModel\([\s\S]*?nativeFactoryThinViewSnapshot[\s\S]*?factoryThinViewExpectedRevision/);
+    expect(app).toMatch(/<BlueprintWorkspace[\s\S]*?constructionReadModel=\{factoryConstructionWorkspaceReadModel\}/);
+    expect(app).toMatch(/<ConstructionCenterWorkspace[\s\S]*?constructionReadModel=\{factoryConstructionWorkspaceReadModel\}/);
+
+    expect(center).toMatch(/data-factory-read-model-source=\{constructionReadModel\.source\}/);
+    expect(center).toMatch(/constructionReadModel\.automation\.totalCrafted/);
+    expect(center).toMatch(/constructionReadModel\.automation\.jobs\.rows/);
+    expect(center).toMatch(/checked=\{game\.constructionAutomation\.enabled\}/);
+    expect(center).toMatch(/const target = Math\.floor\(game\.constructionAutomation\.targetStock\[definition\.id\]/);
+
+    expect(blueprints).toMatch(/const pendingCount = constructionReadModel\.queue\.totalCount/);
+    expect(blueprints).toMatch(/nativeQueueRows.*constructionReadModel\.source === "native-core"/s);
+    expect(blueprints).toMatch(/data-factory-read-model-source=\{constructionReadModel\.source\}/);
+    expect(blueprints).toMatch(/getConstructionQueueDetails\(game, entry\.id\)/);
+    expect(blueprints).toMatch(/disabled=\{!canFundConstruction\}/);
+    expect(blueprints).toMatch(/onFundQueue\(entry\.id, "construction"\)/);
+    expect(blueprints).toMatch(/onCancelQueue\(entry\.id\)/);
   });
 
   it("feeds the visible planet navigator from the bounded atomic navigation model", () => {

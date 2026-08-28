@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::PlanetDefinition;
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::{CoreState, ExactRowIdIndex, SharedArc};
 
 const EPSILON: f64 = 0.0001;
@@ -1944,6 +1945,107 @@ fn local_peer_exists(
         .is_some_and(|stations| stations.iter().any(|&peer| peer != station_index)))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CongestionUpdate {
+    station_index: usize,
+    congestion: f64,
+    active_progress: f64,
+}
+
+fn plan_congestion_updates_with<F>(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    station_indices: &[usize],
+    ledger: &Ledger,
+    local_supply_directory: &LocalSupplyDirectory,
+    remote_peer_waiting: F,
+) -> anyhow::Result<Vec<Option<CongestionUpdate>>>
+where
+    F: Fn(usize, usize, &Slot) -> anyhow::Result<bool> + Send + Sync,
+{
+    runtime.indexed_try_map(
+        station_indices,
+        |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !is_legacy_interstellar_station(station) {
+                return Ok(None);
+            }
+            if traditional_remote_disabled(station) {
+                return Ok(None);
+            }
+            let station_slots = slots(station)?;
+            let mut waiting = 0.0;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                if slot.item_id.is_none() {
+                    continue;
+                }
+                let remote_waiting = slot.remote_mode == "demand"
+                    && remote_peer_waiting(station_index, slot_index, slot)?;
+                if remote_waiting
+                    || local_peer_exists(
+                        local_supply_directory,
+                        entities,
+                        station_index,
+                        slot_index,
+                    )?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
+                + vessel_capacity(station);
+            let local_busy = ledger
+                .local_busy
+                .get(&station_index)
+                .copied()
+                .unwrap_or(0.0);
+            let busy = local_busy + ledger.busy.get(&station_index).copied().unwrap_or(0.0);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            let active_progress = ledger
+                .active_progress
+                .get(&station_index)
+                .copied()
+                .unwrap_or(0.0);
+            Ok(Some(CongestionUpdate {
+                station_index,
+                congestion: rounded(congestion, 3),
+                active_progress,
+            }))
+        },
+    )
+}
+
+fn apply_congestion_updates(
+    entities: &mut [Value],
+    updates: Vec<Option<CongestionUpdate>>,
+) -> anyhow::Result<()> {
+    // Keep replay serial and in topology order. Interstellar intentionally
+    // runs after local congestion and therefore remains the final writer for
+    // shared station fields without making JSON/MOD key order scheduler-bound.
+    for update in updates.into_iter().flatten() {
+        let target = entities[update.station_index]
+            .as_object_mut()
+            .expect("station object");
+        set_number(target, "stationCongestion", update.congestion)?;
+        set_number(target, "stationProgress", update.active_progress)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn update_congestion(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -1960,71 +2062,24 @@ pub(crate) fn update_congestion(
     let indexes = &state.entity_index;
     let ledger = build_ledger(entities, indexes);
     let local_supply_directory = build_local_supply_directory(entities, station_indices);
-    let mut updates = Vec::with_capacity(station_indices.len());
-    for station_index in station_indices.iter().copied() {
-        let station = entities[station_index].as_object().expect("station object");
-        if !is_legacy_interstellar_station(station) {
-            continue;
-        }
-        if traditional_remote_disabled(station) {
-            continue;
-        }
-        let station_slots = slots(station)?;
-        let mut waiting = 0.0;
-        for (slot_index, slot) in station_slots.iter().enumerate() {
-            if slot.item_id.is_none() {
-                continue;
-            }
-            let remote_waiting = slot.remote_mode == "demand"
-                && !peer_matches(state, base, entities, station_index, slot_index)?.is_empty();
-            if remote_waiting
-                || local_peer_exists(&local_supply_directory, entities, station_index, slot_index)?
-            {
-                waiting += 1.0;
-            }
-        }
-        let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
-            + vessel_capacity(station);
-        let local_busy = ledger
-            .local_busy
-            .get(&station_index)
-            .copied()
-            .unwrap_or(0.0);
-        let busy = local_busy + ledger.busy.get(&station_index).copied().unwrap_or(0.0);
-        let fleet_load = if installed > 0.0 {
-            busy / installed
-        } else if waiting > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
-        let congestion = fleet_load
-            .max(if waiting > 0.0 && busy == 0.0 {
-                0.35
-            } else {
-                0.0
-            })
-            .clamp(0.0, 1.0);
-        let active_progress = ledger
-            .active_progress
-            .get(&station_index)
-            .copied()
-            .unwrap_or(0.0);
-        updates.push((station_index, rounded(congestion, 3), active_progress));
-    }
-    for (station_index, congestion, active_progress) in updates {
-        let target = entities[station_index]
-            .as_object_mut()
-            .expect("station object");
-        set_number(target, "stationCongestion", congestion)?;
-        set_number(target, "stationProgress", active_progress)?;
-    }
-    Ok(())
+    let updates = plan_congestion_updates_with(
+        deterministic_runtime(),
+        entities,
+        station_indices,
+        &ledger,
+        &local_supply_directory,
+        |station_index, slot_index, _| {
+            Ok(!peer_matches(state, base, entities, station_index, slot_index)?.is_empty())
+        },
+    )?;
+    apply_congestion_updates(entities, updates)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     #[derive(Clone, Copy)]
     struct Lcg(u64);
@@ -2430,5 +2485,177 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn congestion_slot(item_id: Option<&str>, remote_mode: &str) -> Value {
+        json!({
+            "itemId": item_id,
+            "localMode": "storage",
+            "remoteMode": remote_mode,
+            "minimumLoad": 0.1,
+            "minStock": 0,
+            "maxStock": 1000,
+            "priority": 1,
+            "routePolicy": "direct",
+            "warperBudget": 1,
+            "mod:slot/opaque": { "keep": "Ω🚀" }
+        })
+    }
+
+    fn interstellar_congestion_matrix(
+        count: usize,
+    ) -> (Vec<Value>, Vec<usize>, Ledger, LocalSupplyDirectory) {
+        let entities = (0..count)
+            .map(|index| {
+                json!({
+                    "id": format!("mod:星际站/{index:05}/Ω"),
+                    "kind": "station",
+                    "buildingId": "interstellar_logistics_station",
+                    "planetId": format!("mod:行星/{:03}", index % 127),
+                    "stationTier": 1,
+                    "stationOperationMode": "legacy",
+                    "machineCount": 1,
+                    "stationSlots": [
+                        congestion_slot(Some("mod:星际物料/Ω🚀"), "demand"),
+                        congestion_slot(None, "storage"),
+                        congestion_slot(None, "storage"),
+                        congestion_slot(None, "storage"),
+                        congestion_slot(None, "storage")
+                    ],
+                    "stationRoutes": [],
+                    // These pre-existing local-pass values must be overwritten
+                    // by the later interstellar replay in exactly this order.
+                    "stationCongestion": 0.777,
+                    "stationProgress": 0.888,
+                    "mod:station/opaque": {
+                        "index": index,
+                        "signedZero": -0.0,
+                        "text": "保持原样"
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let station_indices = (0..count).collect::<Vec<_>>();
+        let mut ledger = Ledger::default();
+        for station_index in 0..count {
+            ledger
+                .busy
+                .insert(station_index, (station_index % 83) as f64);
+            ledger
+                .local_busy
+                .insert(station_index, f64::from((station_index % 3) as u32) / 4.0);
+            ledger
+                .active_progress
+                .insert(station_index, f64::from((station_index % 97) as u32) / 97.0);
+        }
+        let directory = build_local_supply_directory(&entities, &station_indices);
+        (entities, station_indices, ledger, directory)
+    }
+
+    fn run_interstellar_congestion_plan(worker_count: usize) -> Vec<Value> {
+        let (mut entities, station_indices, ledger, directory) =
+            interstellar_congestion_matrix(PARALLEL_MIN_ITEMS + 53);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let updates = plan_congestion_updates_with(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            &station_indices,
+            &ledger,
+            &directory,
+            |station_index, slot_index, slot| {
+                assert_eq!(slot_index, 0);
+                assert_eq!(slot.item_id.as_deref(), Some("mod:星际物料/Ω🚀"));
+                Ok(station_index % 89 == 0)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source,
+            "read-only probes must not mutate their source"
+        );
+        apply_congestion_updates(&mut entities, updates).unwrap();
+        entities
+    }
+
+    #[test]
+    fn interstellar_congestion_parallel_probe_is_bitwise_stable_for_1_2_4_8_workers() {
+        let expected = run_interstellar_congestion_plan(1);
+        let expected_bytes = serde_json::to_vec(&expected).unwrap();
+        for worker_count in [2, 4, 8] {
+            let actual = run_interstellar_congestion_plan(worker_count);
+            assert_eq!(serde_json::to_vec(&actual).unwrap(), expected_bytes);
+        }
+
+        let waiting = expected[0].as_object().unwrap();
+        let saturated = expected[82].as_object().unwrap();
+        assert_eq!(waiting["stationCongestion"], Value::from(0.35));
+        assert_eq!(waiting["stationProgress"], Value::from(0.0));
+        assert_eq!(saturated["stationCongestion"], Value::from(1.0));
+        assert_eq!(
+            saturated["mod:station/opaque"]["text"],
+            Value::from("保持原样")
+        );
+    }
+
+    #[test]
+    fn interstellar_congestion_parallel_failure_uses_lowest_index_and_is_atomic() {
+        let (entities, station_indices, ledger, directory) =
+            interstellar_congestion_matrix(PARALLEL_MIN_ITEMS + 19);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let later_failure = PARALLEL_MIN_ITEMS + 7;
+
+        for worker_count in [1, 2, 4, 8] {
+            let visited_later_failure = AtomicBool::new(false);
+            let error = plan_congestion_updates_with(
+                &DeterministicRuntime::for_test(worker_count),
+                &entities,
+                &station_indices,
+                &ledger,
+                &directory,
+                |station_index, _, _| {
+                    if station_index == later_failure {
+                        visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                        bail!("later interstellar congestion probe failure");
+                    }
+                    if station_index == 7 {
+                        bail!("first interstellar congestion probe failure");
+                    }
+                    Ok(false)
+                },
+            )
+            .expect_err("any failed probe must reject the whole update batch");
+            assert_eq!(
+                error.to_string(),
+                "first interstellar congestion probe failure"
+            );
+            assert!(
+                visited_later_failure.load(AtomicOrdering::SeqCst),
+                "all read-only probes must finish before ordered error selection"
+            );
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn small_interstellar_congestion_batches_stay_off_worker_pool() {
+        let (entities, station_indices, ledger, directory) = interstellar_congestion_matrix(31);
+        let saw_rayon_worker = AtomicBool::new(false);
+        let updates = plan_congestion_updates_with(
+            &DeterministicRuntime::for_test(8),
+            &entities,
+            &station_indices,
+            &ledger,
+            &directory,
+            |_, _, _| {
+                if rayon::current_thread_index().is_some() {
+                    saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(false)
+            },
+        )
+        .unwrap();
+        assert_eq!(updates.len(), station_indices.len());
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
     }
 }

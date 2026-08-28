@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::{CoreState, ExactRowIdIndex};
 
 const EPSILON: f64 = 0.0001;
@@ -1296,87 +1297,131 @@ pub(crate) fn advance_routes(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CongestionUpdate {
+    station_index: usize,
+    congestion: f64,
+    active_progress: f64,
+}
+
+fn plan_idle_congestion_updates(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    station_indices: &[usize],
+) -> Vec<Option<CongestionUpdate>> {
+    runtime.indexed_map(station_indices, |_, station_index| {
+        let station_index = *station_index;
+        let station = entities[station_index].as_object().expect("station object");
+        matches!(
+            string_at(station, "buildingId"),
+            Some("planetary_logistics_station" | "interstellar_logistics_station")
+        )
+        .then_some(CongestionUpdate {
+            station_index,
+            congestion: 0.0,
+            active_progress: 0.0,
+        })
+    })
+}
+
+fn plan_congestion_updates(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    ledger: &Ledger,
+) -> anyhow::Result<Vec<Option<CongestionUpdate>>> {
+    runtime.indexed_try_map(
+        &directory.station_indices,
+        |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                return Ok(None);
+            }
+            let station_slots = directory
+                .station_slots
+                .get(&station_index)
+                .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+            let mut waiting = 0.0;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                if slot.item_id.is_some()
+                    && slot.local_mode == LocalMode::Demand
+                    && has_peer_match(directory, station_index, slot_index)?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = drone_capacity(station);
+            let busy = ledger.busy.get(&station_index).copied().unwrap_or(0.0);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            let active_progress = ledger
+                .active_local_progress
+                .get(&station_index)
+                .copied()
+                .unwrap_or(0.0);
+            Ok(Some(CongestionUpdate {
+                station_index,
+                congestion: rounded(congestion, 3),
+                active_progress,
+            }))
+        },
+    )
+}
+
+fn apply_congestion_updates(
+    entities: &mut [Value],
+    updates: Vec<Option<CongestionUpdate>>,
+) -> anyhow::Result<()> {
+    // Replay in the original topology order. Apart from preserving the legacy
+    // local-before-remote overwrite contract, this keeps insertion order for
+    // absent JSON keys and every opaque MOD field byte-for-byte stable.
+    for update in updates.into_iter().flatten() {
+        let target = entities[update.station_index]
+            .as_object_mut()
+            .expect("station object");
+        set_number(target, "stationCongestion", update.congestion)?;
+        set_number(target, "stationProgress", update.active_progress)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn update_congestion(
     state: &CoreState,
     entities: &mut [Value],
     directory: &LocalPeerDirectory,
 ) -> anyhow::Result<()> {
-    if !directory_has_local_pair(directory)
+    let runtime = deterministic_runtime();
+    let updates = if !directory_has_local_pair(directory)
         && !has_local_route(entities, &directory.station_indices)
     {
-        for &station_index in &directory.station_indices {
-            let station = entities[station_index]
-                .as_object_mut()
-                .expect("station object");
-            if matches!(
-                string_at(station, "buildingId"),
-                Some("planetary_logistics_station" | "interstellar_logistics_station")
-            ) {
-                set_number(station, "stationCongestion", 0.0)?;
-                set_number(station, "stationProgress", 0.0)?;
-            }
-        }
-        return Ok(());
-    }
-    let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
-    let mut updates = Vec::with_capacity(directory.station_indices.len());
-    for &station_index in &directory.station_indices {
-        let station = entities[station_index].as_object().expect("station object");
-        if !matches!(
-            string_at(station, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) {
-            continue;
-        }
-        let station_slots = directory
-            .station_slots
-            .get(&station_index)
-            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
-        let mut waiting = 0.0;
-        for (slot_index, slot) in station_slots.iter().enumerate() {
-            if slot.item_id.is_some()
-                && slot.local_mode == LocalMode::Demand
-                && has_peer_match(directory, station_index, slot_index)?
-            {
-                waiting += 1.0;
-            }
-        }
-        let installed = drone_capacity(station);
-        let busy = ledger.busy.get(&station_index).copied().unwrap_or(0.0);
-        let fleet_load = if installed > 0.0 {
-            busy / installed
-        } else if waiting > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
-        let congestion = fleet_load
-            .max(if waiting > 0.0 && busy == 0.0 {
-                0.35
-            } else {
-                0.0
-            })
-            .clamp(0.0, 1.0);
-        let active_progress = ledger
-            .active_local_progress
-            .get(&station_index)
-            .copied()
-            .unwrap_or(0.0);
-        updates.push((station_index, rounded(congestion, 3), active_progress));
-    }
-    for (station_index, congestion, active_progress) in updates {
-        let target = entities[station_index]
-            .as_object_mut()
-            .expect("station object");
-        set_number(target, "stationCongestion", congestion)?;
-        set_number(target, "stationProgress", active_progress)?;
-    }
-    Ok(())
+        plan_idle_congestion_updates(runtime, entities, &directory.station_indices)
+    } else {
+        let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
+        plan_congestion_updates(runtime, entities, directory, &ledger)?
+    };
+    apply_congestion_updates(entities, updates)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
 
     fn json_key_pointer(record: &Map<String, Value>, key: &str) -> usize {
         record
@@ -1541,5 +1586,107 @@ mod tests {
         let rebuilt_boundary = prepare_step_directory(&entities, &station_indices).unwrap();
         assert!(peer_matches(&rebuilt_boundary, 1, 0).unwrap().is_empty());
         assert_eq!(rebuilt_boundary.station_indices, vec![1]);
+    }
+
+    fn local_congestion_matrix(count: usize) -> (Vec<Value>, LocalPeerDirectory, Ledger) {
+        let mut entities = (0..count)
+            .map(|index| {
+                let mut station = local_station(
+                    &format!("mod:本地站/{index:05}/Ω"),
+                    if index == 0 { "supply" } else { "demand" },
+                );
+                let record = station.as_object_mut().expect("local congestion station");
+                record.insert("stationDrones".to_owned(), Value::from(50));
+                record.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+                record.insert("stationCongestion".to_owned(), Value::from(-1));
+                record.insert("stationProgress".to_owned(), Value::from(-1));
+                record.insert(
+                    "mod:拥堵探针/原样保留".to_owned(),
+                    json!({ "index": index, "signedZero": -0.0, "opaque": "Ω🚀" }),
+                );
+                station
+            })
+            .collect::<Vec<_>>();
+        // A non-station row in the topology slice exercises the legacy skip
+        // without changing the relative replay order of station updates.
+        entities.push(json!({
+            "id": "mod:非物流实体/保持",
+            "kind": "machine",
+            "buildingId": "mod:machine",
+            "mod:payload": [3, 2, 1]
+        }));
+        let station_indices = (0..entities.len()).collect::<Vec<_>>();
+        let directory = prepare_step_directory(&entities, &station_indices).unwrap();
+        let mut ledger = Ledger::default();
+        for station_index in 0..count {
+            ledger
+                .busy
+                .insert(station_index, (station_index % 67) as f64);
+            ledger.active_local_progress.insert(
+                station_index,
+                f64::from((station_index % 101) as u32) / 101.0,
+            );
+        }
+        (entities, directory, ledger)
+    }
+
+    fn run_local_congestion_plan(worker_count: usize) -> Vec<Value> {
+        let (mut entities, directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 37);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let updates = plan_congestion_updates(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source,
+            "read-only probes must not mutate their source"
+        );
+        apply_congestion_updates(&mut entities, updates).unwrap();
+        entities
+    }
+
+    #[test]
+    fn local_congestion_parallel_probe_is_bitwise_stable_for_1_2_4_8_workers() {
+        let expected = run_local_congestion_plan(1);
+        let expected_bytes = serde_json::to_vec(&expected).unwrap();
+        for worker_count in [2, 4, 8] {
+            let actual = run_local_congestion_plan(worker_count);
+            assert_eq!(serde_json::to_vec(&actual).unwrap(), expected_bytes);
+        }
+
+        let first = expected[0].as_object().unwrap();
+        let waiting = expected[67].as_object().unwrap();
+        let saturated = expected[66].as_object().unwrap();
+        assert_eq!(first["stationCongestion"], Value::from(0.0));
+        assert_eq!(waiting["stationCongestion"], Value::from(0.35));
+        assert_eq!(saturated["stationCongestion"], Value::from(1.0));
+        assert_eq!(
+            waiting["mod:拥堵探针/原样保留"]["opaque"],
+            Value::from("Ω🚀")
+        );
+    }
+
+    #[test]
+    fn local_congestion_parallel_failure_keeps_source_atomic() {
+        let (entities, mut directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 11);
+        directory.station_slots.remove(&7);
+        directory.station_slots.remove(&(PARALLEL_MIN_ITEMS + 3));
+        let source = serde_json::to_vec(&entities).unwrap();
+
+        for worker_count in [1, 2, 4, 8] {
+            let error = plan_congestion_updates(
+                &DeterministicRuntime::for_test(worker_count),
+                &entities,
+                &directory,
+                &ledger,
+            )
+            .expect_err("missing station slots must reject the whole probe batch");
+            assert_eq!(error.to_string(), "native local station slots are missing");
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+        }
     }
 }

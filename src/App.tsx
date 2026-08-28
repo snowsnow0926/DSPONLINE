@@ -456,6 +456,10 @@ import {
   selectNativePlayerAuthorityMacroStatus,
 } from "./game/nativePlayerAuthorityClock";
 import {
+  createNativePlayerAuthorityCommandSource,
+  type NativePlayerAuthorityCommandSource,
+} from "./game/nativePlayerAuthorityCommandSource";
+import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
@@ -2000,8 +2004,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityClockSnapshot,
     nativeCoreProjectionSessionId,
   );
+  const nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBoundFrame !== null ||
+    nativePlayerAuthorityMacroStatus !== null;
+  const nativePlayerAuthorityOwnsRuntimeRef = useRef(false);
+  nativePlayerAuthorityOwnsRuntimeRef.current = nativePlayerAuthorityOwnsRuntime;
   const nativePlayerAuthorityMacroReadOnly = nativePlayerAuthorityMacroStatus !== null;
   nativePlayerAuthorityMacroReadOnlyRef.current = nativePlayerAuthorityMacroReadOnly;
+  const nativePlayerAuthorityCommandBindingRef = useRef<{
+    key: string;
+    source: NativePlayerAuthorityCommandSource;
+  } | null>(null);
+  const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  if (!nativePlayerAuthorityActiveFrame) {
+    nativePlayerAuthorityCommandBindingRef.current = null;
+  } else {
+    const commandFrameKey = JSON.stringify([
+      nativePlayerAuthorityActiveFrame.sessionId,
+      nativePlayerAuthorityActiveFrame.runId,
+      nativePlayerAuthorityActiveFrame.revision,
+      nativePlayerAuthorityActiveFrame.acknowledgedSequence,
+      nativePlayerAuthorityActiveFrame.nextSequence,
+      nativePlayerAuthorityActiveFrame.nextDeadlineMs,
+    ]);
+    if (nativePlayerAuthorityCommandBindingRef.current?.key !== commandFrameKey) {
+      const source = createNativePlayerAuthorityCommandSource(
+        desktopBridge,
+        nativePlayerAuthorityActiveFrame,
+      );
+      nativePlayerAuthorityCommandBindingRef.current = source
+        ? { key: commandFrameKey, source }
+        : null;
+    }
+  }
   const nativePlayerAuthorityMacroDisplay = useMemo(() => {
     const status = nativePlayerAuthorityMacroStatus;
     if (!status) return null;
@@ -5574,6 +5608,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [persistPrimarySave]);
 
   const togglePause = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威的暂停控制仍在闭合中；本次操作未应用，也没有修改旧 JavaScript 状态");
+      return;
+    }
     if (gameRef.current.paused && durableRecoveryLifecycleRef.current === "active" &&
       (!simulationWorkerRef.current || simulationWorkerDisabledRef.current)) {
       void recoverSimulationWorkerFromDurableRecovery(true);
@@ -5594,6 +5632,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
 
   const handleTimeWarpEnabledChange = useCallback((enabled: boolean) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice(enabled
+        ? "Windows 原生权威的纯挂机控制仍在闭合中；本次操作未应用"
+        : "Windows 原生权威的停止结算仍在闭合中；本次操作未应用");
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     if (enabled) {
       if (typeof Worker === "undefined" ||
@@ -6132,6 +6176,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const current = gameRef.current;
     const next = updater(current);
     if (next === current) return false;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      if (!binding || nativePlayerAuthorityCommandInFlightRef.current) {
+        setNotice("Windows 原生权威正在确认上一条命令或等待稳定 revision；本次操作未应用");
+        return false;
+      }
+      const command = createSimulationCommandPatch(current, next, binding.source.baseRevision);
+      if (!command) return false;
+      nativePlayerAuthorityCommandInFlightRef.current = true;
+      void binding.source.applyCommand(command).then(() => {
+        // Main owns the durable receipt and pushes the next clock revision.
+        // The renderer deliberately does not install `next` or predict the
+        // command result; bounded projections will refresh from that revision.
+        invalidateFactoryAlertProjection();
+      }).catch((error: unknown) => {
+        const code = error && typeof error === "object" && "code" in error &&
+          typeof error.code === "string" ? error.code : "";
+        setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
+          ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复，旧 JavaScript 状态未被安装"
+          : "原生玩家命令未通过权威校验；本次操作未应用");
+      }).finally(() => {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+      });
+      return true;
+    }
     const recorded = gameHistoryRef.current.record(current, next);
     if (!recorded) return false;
     factoryAlertsGenerationRef.current += 1;
@@ -6149,7 +6218,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       dispatchDurableUiCommandRef.current();
     }
     return true;
-  }, [publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   useEffect(() => {
     const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
@@ -6186,6 +6255,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => {
     if (gameRef.current.mode !== "normal") return;
     const synchronizeTaskDay = () => {
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // Rust advances the contract calendar from its authoritative clock.
+        // Recomputing it from the renderer's stale mirror would create an
+        // unversioned second writer and could replace a newer native board.
+        return;
+      }
       const current = gameRef.current;
       if (current.mode !== "normal") return;
       const orbitalStation = synchronizeStationContracts(current, Date.now());
@@ -6217,10 +6292,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           schedule();
           return;
         }
-        pendingPlanetViewportRef.current.delete(planetId);
         const current = gameRef.current;
         const previous = current.planetViewports[planetId];
-        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) return;
+        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) {
+          pendingPlanetViewportRef.current.delete(planetId);
+          return;
+        }
+        if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+          // Viewports are persisted GameState too. Submit the bounded leaf
+          // patch to the exact Rust revision and wait for its projection;
+          // never install the renderer's stale full-state wrapper locally.
+          if (!nativePlayerAuthorityCommandBindingRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+            schedule();
+            return;
+          }
+          const accepted = commitGame((authoritativeMirror) => ({
+            ...authoritativeMirror,
+            planetViewports: {
+              ...authoritativeMirror.planetViewports,
+              [planetId]: latest.viewport,
+            },
+          }));
+          if (!accepted) {
+            schedule();
+            return;
+          }
+          pendingPlanetViewportRef.current.delete(planetId);
+          return;
+        }
+        pendingPlanetViewportRef.current.delete(planetId);
         const next = { ...current, planetViewports: { ...current.planetViewports, [planetId]: latest.viewport } };
         viewportOnlyGameStateRef.current = next;
         // The imperative authority and lifecycle save must see the viewport
@@ -6237,13 +6337,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer });
     };
     schedule();
-  }, [publishRuntimeGame]);
+  }, [commitGame, publishRuntimeGame]);
   useEffect(() => () => {
     for (const pending of pendingPlanetViewportRef.current.values()) window.clearTimeout(pending.timer);
     pendingPlanetViewportRef.current.clear();
   }, []);
 
   const undoGame = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威的撤销命令仍在闭合中；本次操作未应用");
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     // Resolve the history transition synchronously against the imperative
     // game ref. React may defer a functional updater until after the timer
@@ -6262,6 +6366,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const redoGame = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威的重做命令仍在闭合中；本次操作未应用");
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     const current = gameRef.current;
     const next = gameHistoryRef.current.redo(current);
@@ -6281,6 +6389,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   useEffect(() => {
+    if (nativePlayerAuthorityOwnsRuntime) {
+      // Main/Rust is now the only mutable runtime. The legacy Worker must not
+      // be recreated or retain a second independently advancing factory.
+      simulationWorkerDisabledRef.current = true;
+      simulationSubmissionRef.current = null;
+      simulationPendingSecondsRef.current = 0;
+      simulationPendingWallSecondsRef.current = 0;
+      simulationRetrySecondsRef.current = 0;
+      simulationRetryWallSecondsRef.current = 0;
+      setTimeWarpPendingUi(0);
+      setSimulationWorkerActive(false);
+      setInitialSimulationWorkerReady(true);
+      return;
+    }
     if (typeof Worker === "undefined") {
       simulationWorkerDisabledRef.current = true;
       setInitialSimulationWorkerReady(true);
@@ -7465,7 +7587,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         simulationSubmissionRef.current = null;
       }
     };
-  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
+  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, nativePlayerAuthorityOwnsRuntime, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
 
   useEffect(() => {
     if (!loaded.state.timeWarp.enabled || loaded.state.speedrun?.enabled) {
@@ -7702,10 +7824,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const timer = window.setInterval(() => {
       const now = performance.now();
       const currentState = gameRef.current;
-      if (nativePlayerAuthorityMacroReadOnlyRef.current) {
-        // Rust owns the productive macro window. Do not accumulate wall debt,
-        // post a Worker projection/command, or fall through to the JavaScript
-        // simulation fallback while schema v2 is the current authority state.
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // Rust owns this runtime in exact and macro phases. Do not accumulate
+        // wall debt, post a Worker command/projection, or fall through to the
+        // JavaScript fallback after ownership has transferred.
         previous = now;
         return;
       }

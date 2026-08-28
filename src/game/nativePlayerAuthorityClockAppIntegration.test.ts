@@ -82,7 +82,7 @@ describe("main-owned authority clock App wiring", () => {
       app.indexOf("let previous = performance.now();"),
       app.indexOf("// Keep the autosave timer responsive"),
     );
-    const macroStop = simulationLoop.indexOf("if (nativePlayerAuthorityMacroReadOnlyRef.current)");
+    const macroStop = simulationLoop.indexOf("if (nativePlayerAuthorityOwnsRuntimeRef.current)");
     expect(macroStop).toBeGreaterThanOrEqual(0);
     expect(simulationLoop.indexOf("return;", macroStop)).toBeLessThan(
       simulationLoop.indexOf("simulationWorkerRef.current"),

@@ -152,6 +152,22 @@ function validateOwnerState(value, request) {
   return value.ownerEpoch;
 }
 
+function validatePreTransferStatus(value, request) {
+  if (!isRecord(value) || value.revision !== request.expectedRevision) {
+    throw handoffError(
+      "native session revision drifted after renderer/Worker quiescence",
+      "NATIVE_PLAYER_AUTHORITY_HANDOFF_REVISION_DRIFT",
+    );
+  }
+  if (value.stateVersion !== 47 || value.mode !== "normal" || value.paused !== false ||
+      !isRecord(value.coverage) || value.coverage.authorityEligible !== true) {
+    throw handoffError(
+      "native session does not have complete player-authority coverage",
+      "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE",
+    );
+  }
+}
+
 function validateTransferReceipt(value, request, mainOwnerId, previousOwnerEpoch) {
   if (!isRecord(value) || value.kind !== OWNER_TRANSFER_KIND || value.sessionId !== request.sessionId ||
       value.previousOwnerId !== request.rendererOwnerId || value.ownerId !== mainOwnerId ||
@@ -304,12 +320,10 @@ class NativePlayerAuthorityHandoffCoordinator {
       validateQuiescenceAck(ack, request);
 
       const status = await this.registry.status(request.rendererOwnerId, request.sessionId);
-      if (!isRecord(status) || status.revision !== request.expectedRevision) {
-        throw handoffError(
-          "native session revision drifted after renderer/Worker quiescence",
-          "NATIVE_PLAYER_AUTHORITY_HANDOFF_REVISION_DRIFT",
-        );
-      }
+      // Coverage is checked while the renderer still owns the session.  A
+      // disabled/incomplete native ruleset therefore cannot strand the public
+      // state under main ownership merely by reaching Runtime.activate().
+      validatePreTransferStatus(status, request);
       const previousOwnerEpoch = validateOwnerState(
         this.registry.inspectSession(request.rendererOwnerId, request.sessionId),
         request,

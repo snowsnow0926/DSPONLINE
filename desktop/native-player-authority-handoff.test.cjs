@@ -58,7 +58,18 @@ function quiescenceAck(request = handoffRequest(), overrides = {}) {
   };
 }
 
-function registryWithStatus(statusFactory = () => ({ revision: CHECKPOINT.revision })) {
+function completeStatus(overrides = {}) {
+  return {
+    revision: CHECKPOINT.revision,
+    stateVersion: 47,
+    mode: "normal",
+    paused: false,
+    coverage: { authorityEligible: true },
+    ...overrides,
+  };
+}
+
+function registryWithStatus(statusFactory = () => completeStatus()) {
   const calls = [];
   const client = {
     request(request) {
@@ -169,7 +180,7 @@ test("stale or incomplete quiescence ACKs block before status, transfer, or acti
 
 test("revision drift and owner closure block without transferring the renderer session", async (t) => {
   await t.test("revision drift", async () => {
-    const { registry } = registryWithStatus(() => ({ revision: 18 }));
+    const { registry } = registryWithStatus(() => completeStatus({ revision: 18 }));
     const coordinator = new NativePlayerAuthorityHandoffCoordinator({
       registry,
       runtime: { activate: async () => assert.fail("must not activate") },
@@ -186,7 +197,7 @@ test("revision drift and owner closure block without transferring the renderer s
   await t.test("owner closes while quiescing", async () => {
     const gate = deferred();
     const { registry } = registryWithStatus((request) =>
-      request.operation === "coreClose" ? { closed: true } : { revision: 17 });
+      request.operation === "coreClose" ? { closed: true } : completeStatus());
     const coordinator = new NativePlayerAuthorityHandoffCoordinator({
       registry,
       runtime: { activate: async () => assert.fail("must not activate") },
@@ -243,7 +254,7 @@ test("quiescence timeout is terminal, ignores a late ACK, and duplicate calls ca
 test("an already in-flight renderer operation prevents handoff until it settles", async () => {
   const rendererOperation = deferred();
   const { registry } = registryWithStatus((request) =>
-    request.operation === "coreAdvance" ? rendererOperation.promise : { revision: 17 });
+    request.operation === "coreAdvance" ? rendererOperation.promise : completeStatus());
   const pending = registry.advance(7, {
     sessionId: "core-1",
     baseRevision: 17,
@@ -283,11 +294,13 @@ test("post-transfer activation failure is faulted and never returns ownership to
   assert.equal(registry.inspectSession("main-player-authority", "core-1").ownerEpoch, 2);
 });
 
-test("handoff does not bypass the runtime authorityEligible=false coverage gate", async () => {
+test("handoff rejects incomplete authority coverage before transferring ownership", async () => {
   const client = {
     hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY] },
     request(request) {
-      if (request.operation === "coreStatus") return { revision: 17 };
+      if (request.operation === "coreStatus") {
+        return completeStatus({ coverage: { authorityEligible: false } });
+      }
       if (request.operation === "corePreparePlayerAuthority") {
         return {
           lease: {
@@ -331,12 +344,42 @@ test("handoff does not bypass the runtime authorityEligible=false coverage gate"
   });
   await assert.rejects(
     coordinator.handoff(handoffRequest()),
-    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED",
+    (error) => {
+      assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
+      assert.equal(error.cause.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE");
+      return true;
+    },
   );
-  assert.equal(runtime.snapshot().phase, "faulted");
-  assert.equal(runtime.snapshot().lastErrorCode, "NATIVE_PLAYER_AUTHORITY_COVERAGE_INCOMPLETE");
-  assert.equal(registry.inspectSession("main-player-authority", "core-1").ownerEpoch, 2);
-  assert.throws(() => registry.inspectSession(7, "core-1"), /not owned/);
+  assert.equal(runtime.snapshot().phase, "idle");
+  assert.equal(runtime.snapshot().lastErrorCode, null);
+  assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
+  assert.throws(() => registry.inspectSession("main-player-authority", "core-1"), /not owned/);
+});
+
+test("missing, paused, speedrun, and wrong-version summaries fail closed before transfer", async () => {
+  const invalidStatuses = [
+    { revision: CHECKPOINT.revision },
+    completeStatus({ stateVersion: 46 }),
+    completeStatus({ mode: "speedrun" }),
+    completeStatus({ paused: true }),
+    completeStatus({ coverage: null }),
+  ];
+  for (const status of invalidStatuses) {
+    const { registry } = registryWithStatus(() => status);
+    let activated = false;
+    const coordinator = new NativePlayerAuthorityHandoffCoordinator({
+      registry,
+      runtime: { activate: async () => { activated = true; } },
+      requestQuiescence: async () => quiescenceAck(),
+    });
+    await assert.rejects(coordinator.handoff(handoffRequest()), (error) => {
+      assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
+      assert.equal(error.cause.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE");
+      return true;
+    });
+    assert.equal(activated, false);
+    assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
+  }
 });
 
 test("unknown transfer outcome and malformed post-transfer receipt both fault closed under main ownership", async (t) => {

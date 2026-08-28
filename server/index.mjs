@@ -2436,6 +2436,18 @@ function cloudSaveUploadDescriptor(request) {
   const expandedLimit = directContentType
     ? EXPANDED_BODY_LIMIT_BYTES
     : cloudTransferContract.legacyJsonRequestLimitBytes;
+  if (direct && Number.isSafeInteger(direct.declaredOriginalBytes) && direct.declaredOriginalBytes > SAVE_PAYLOAD_LIMIT_BYTES) {
+    const error = new Error(`云存档体积过大，单个存档不能超过 ${SAVE_PAYLOAD_LIMIT_BYTES / 1024 / 1024} MB`);
+    error.statusCode = 413;
+    error.code = "SAVE_SIZE_TOO_LARGE";
+    error.originalBytes = direct.declaredOriginalBytes;
+    error.expandedBytes = direct.declaredOriginalBytes;
+    error.payloadLimitBytes = SAVE_PAYLOAD_LIMIT_BYTES;
+    error.expandedLimitBytes = expandedLimit;
+    error.compressedLimitBytes = inputLimit;
+    error.overBytes = direct.declaredOriginalBytes - SAVE_PAYLOAD_LIMIT_BYTES;
+    throw error;
+  }
   return {
     ...direct,
     direct: Boolean(direct),

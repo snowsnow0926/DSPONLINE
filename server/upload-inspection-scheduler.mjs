@@ -116,7 +116,7 @@ export class UploadInspectionScheduler {
     concurrency = 2,
     queueLimit = 16,
     workerThresholdBytes = 1024 * 1024,
-    maximumConcurrentExpandedBytes = 96 * 1024 * 1024,
+    maximumConcurrentExpandedBytes = 320 * 1024 * 1024,
   } = {}) {
     if (typeof inspectInline !== "function") throw new TypeError("inspectInline is required");
     this.inspectInline = inspectInline;
@@ -125,7 +125,7 @@ export class UploadInspectionScheduler {
     this.workerThresholdBytes = Math.max(64 * 1024, Math.floor(workerThresholdBytes) || 1024 * 1024);
     this.maximumConcurrentExpandedBytes = Math.max(
       1024 * 1024,
-      Math.floor(maximumConcurrentExpandedBytes) || 96 * 1024 * 1024,
+      Math.floor(maximumConcurrentExpandedBytes) || 320 * 1024 * 1024,
     );
     this.active = 0;
     this.activeExpandedBytes = 0;

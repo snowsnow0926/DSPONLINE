@@ -241,6 +241,29 @@ test("scheduler bounds concurrent expanded bytes independently from request coun
   scheduler.close();
 });
 
+test("gzip inspection rejects expanded bodies at the descriptor cap without a huge fixture", async () => {
+  const scheduler = new UploadInspectionScheduler({
+    inspectInline: inspectDecodedCloudSaveUpload,
+    workerThresholdBytes: 64 * 1024,
+  });
+  const expandedLimit = 128 * 1024;
+  const compressed = gzipSync(Buffer.alloc(expandedLimit + 1, 0x78));
+  await assert.rejects(
+    scheduler.inspect(compressed, {
+      ...directDescriptor("x"),
+      encoding: "gzip",
+      declaredOriginalBytes: null,
+      expandedLimit,
+      payloadLimit: expandedLimit,
+    }),
+    (error) => error.code === "REQUEST_EXPANDED_BODY_TOO_LARGE"
+      && error.statusCode === 413
+      && error.expandedLimitBytes === expandedLimit
+      && error.expandedBytesAtLeast === true,
+  );
+  scheduler.close();
+});
+
 test("large direct raw and gzip uploads use workers and preserve payload, checksum, revision, mode, and slot", async (t) => {
   const running = await startServer({ uploadInspectionWorkerThresholdBytes: 64 * 1024 });
   t.after(() => running.close());

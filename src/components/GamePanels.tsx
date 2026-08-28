@@ -1131,7 +1131,7 @@ function EntityInspector({
               ? "速通工厂不能使用产率复制挂机"
               : replicationUnlocked
               ? replicationReadiness.ok
-                ? `可用：直接读取最近 ${Math.floor(replicationReadiness.contract.windowSeconds)} 个模拟秒统计，不执行额外校准`
+                ? `可用：读取最近 ${Math.floor(replicationReadiness.contract.windowSeconds)} 个模拟秒，只复制白矩阵、火箭、太阳帆和科研`
                 : `${replicationReadiness.reason}；点击时会先读取权威统计`
               : `无限科技总等级 ${replicationResearchTotal}/${PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL}（需大于 200）`}
           </small>
@@ -1139,7 +1139,7 @@ function EntityInspector({
       {onOpenTutorial && status.tone !== "running" ? <button className="inspector-tutorial-link" type="button" onClick={() => onOpenTutorial("time-warp")}><BookOpen size={14} />查看时间扭曲教程</button> : null}
       </>}
       <PowerNetworkControl game={game} entity={entity} onGridChange={onPowerGridChange} onPowerPriorityChange={onPowerPriorityChange} onGenerationPriorityChange={onGenerationPriorityChange} />
-      <p className="inspector-description">时间扭曲只有纯挂机模式。守恒模式保留原有安全校准；产率复制模式由玩家主动选择，直接复制最近 60 秒（不足时 30 秒）的正向材料、科研、火箭与壳面帆统计，不消耗原料并把材料送入量子共享库存。两种模式都沿用当前供电倍率；离线收益与活动时钟始终使用真实时间。</p>
+      <p className="inspector-description">时间扭曲只有纯挂机模式。守恒模式保留原有安全校准；产率复制模式由玩家主动选择，只复制最近 60 秒（不足时 30 秒）的白矩阵、小型运载火箭、太阳帆、科研与对应戴森终局事件，不再复制矿物和中间材料。终局材料送入量子共享库存且不消耗原料。两种模式都沿用当前供电倍率；离线收益与活动时钟始终使用真实时间。</p>
       <EntityManagementActions game={game} entity={entity} onSetTarget={onSetTarget} onRemove={onRemove} />
     </div>;
   }

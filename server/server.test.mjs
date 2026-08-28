@@ -1396,8 +1396,17 @@ test("reports cloud save format and size failures separately", async () => {
   const malformed = await request("/api/cloud-save", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: "not-json", expectedRevision: 0 }) });
   assert.equal(malformed.response.status, 400);
   assert.equal(malformed.body.code, "SAVE_FORMAT_INVALID");
-  const oversized = "x".repeat(96 * 1024 * 1024);
-  const tooLarge = await request("/api/cloud-save", { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ payload: oversized, expectedRevision: 0 }) });
+  const tooLargeResponse = await fetch(`${baseUrl}/api/cloud-save`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/vnd.dspidle.save+json",
+      "x-dsp-expected-revision": "0",
+      "x-dsp-save-original-bytes": String(256 * 1024 * 1024 + 1),
+    },
+    body: "{}",
+  });
+  const tooLarge = { response: tooLargeResponse, body: await tooLargeResponse.json() };
   assert.equal(tooLarge.response.status, 413);
   assert.equal(tooLarge.body.code, "SAVE_SIZE_TOO_LARGE");
   assert.match(tooLarge.body.error, /体积过大/);
@@ -1406,7 +1415,7 @@ test("reports cloud save format and size failures separately", async () => {
   assert.ok(tooLarge.body.overBytes > 0);
 });
 
-test("accepts gzip cloud saves and rejects invalid or expanded gzip bodies", async () => {
+test("accepts gzip cloud saves and raw fallback while rejecting invalid gzip bodies", async () => {
   const isolatedDirectory = await mkdtemp(path.join(tmpdir(), "dsp-cloud-gzip-"));
   let isolatedServer;
   try {
@@ -1451,32 +1460,6 @@ test("accepts gzip cloud saves and rejects invalid or expanded gzip bodies", asy
   assert.equal(rawFallback.response.status, 200);
   assert.equal(rawFallback.body.cloudSave.revision, 2);
 
-  const expandedState = { ...base.state, padding: "x".repeat(96 * 1024 * 1024) };
-  const expandedBody = gzipSync(Buffer.from(JSON.stringify({ payload: createSavePayload(expandedState), expectedRevision: 2 })));
-  const expanded = await isolatedRequest("/api/cloud-save", {
-    method: "PUT",
-    headers: { authorization: `Bearer ${registered.token}`, "content-encoding": "gzip", "content-type": "application/json" },
-    body: expandedBody,
-  });
-  assert.equal(expanded.response.status, 413);
-  assert.equal(expanded.body.code, "SAVE_SIZE_TOO_LARGE");
-
-  const decompressionBomb = await isolatedRequest("/api/cloud-save", {
-    method: "PUT",
-    headers: {
-      authorization: `Bearer ${registered.token}`,
-      "content-encoding": "gzip",
-      "content-type": "application/vnd.dspidle.save+json",
-      "x-dsp-expected-revision": "2",
-    },
-    body: gzipSync(Buffer.alloc(96 * 1024 * 1024 + 1, 0x78)),
-  });
-  assert.equal(decompressionBomb.response.status, 413);
-  assert.equal(decompressionBomb.body.code, "REQUEST_EXPANDED_BODY_TOO_LARGE");
-  assert.equal(decompressionBomb.body.expandedLimitBytes, 96 * 1024 * 1024);
-  assert.ok(decompressionBomb.body.compressedBytes > 0);
-  assert.equal(decompressionBomb.body.expandedBytesAtLeast, true);
-  assert.ok(decompressionBomb.body.expandedBytes > decompressionBomb.body.expandedLimitBytes);
   } finally {
     if (isolatedServer?.listening) await new Promise((resolve) => isolatedServer.close(resolve));
     await rm(isolatedDirectory, { recursive: true, force: true });

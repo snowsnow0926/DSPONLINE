@@ -8,48 +8,55 @@ import type { AppLocale } from "./locale";
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const english = locale === "en";
   return {
-    id: "2026-08-28-v1.2.3",
+    id: "2026-08-28-v1.2.4",
     date: english ? "August 28, 2026" : "2026年8月28日",
-    version: "1.2.3",
-    title: english ? "Endgame Automation, Idle Modes, and Windows Performance" : "终局自动化、挂机模式与 Windows 性能更新",
+    version: "1.2.4",
+    title: english ? "Large Saves, Tab Takeover, and Content Pack Compatibility" : "大存档、标签页接管与内容包兼容更新",
     summary: english
-      ? "Version 1.2.3 improves recursive construction, offline/time-warp settlement, and the Windows native hot paths. Eligible normal saves can opt into rate-replication idle mode, while the original conservation mode remains available. The mobile full inspector is visible in both light and dark themes. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible."
-      : "1.2.3 优化递归建筑制造、离线/时间扭曲结算与 Windows 原生热路径；符合条件的普通存档可主动选择产率复制挂机，原守恒模式继续保留。手机完整检查器在浅色和深色主题下均可正常显示。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+      ? "Version 1.2.4 raises the cloud revision hard limit to 256 MiB, adds explicit current-tab takeover for embedded browsers, and lets content-pack buildings reuse recipes by family. Rate-replication idle copies endgame outputs only, while memory/backlog auto-pause is now off by default per device. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible."
+      : "1.2.4 将云端单修订硬上限提高到 256 MiB，为内置浏览器提供明确的当前标签页强制接管，并让内容包建筑按配方族复用通用配方。产率复制挂机只复制终局成果；内存与积压自动暂停改为设备默认关闭。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
     items: [
       {
-        id: "construction-offline-timewarp",
-        title: english ? "Construction and offline settlement stay productive" : "建筑制造与离线结算持续产出",
+        id: "v124-cloud-256m",
+        title: english ? "Compressed saves above 96 MiB can upload" : "96 MiB 以上大存档可压缩上传",
         description: english
-          ? "Construction reserves inputs atomically and resumes unfinished dependency chains. Multi-system rocket ledgers and rolling time-warp certificates keep proven endgame production moving without losing a committed checkpoint."
-          : "建筑制造会原子预留输入并续接未完成依赖链；逐恒星系火箭账本与滚动时间扭曲证书让已证明的终局产线持续运行，同时保留已提交检查点。",
+          ? "Web, Windows, Android, the API, and Nginx share a 256 MiB per-revision hard limit and a bounded ten-minute transfer timeout. The 96 MiB guaranteed boundary, 30 MiB raw compatibility fallback, and account quotas remain in place."
+          : "Web、Windows、Android、API 与 Nginx 共用 256 MiB 单修订硬上限和有界 10 分钟传输超时；96 MiB 保证线、30 MiB 明文兼容兜底及账号总配额仍保留。",
       },
       {
-        id: "pure-idle-rate-replication",
-        title: english ? "Eligible saves can choose rate-replication idle mode" : "符合条件的存档可选择产率复制挂机",
+        id: "v124-tab-takeover",
+        title: english ? "The current tab can explicitly take authority" : "当前标签页可明确强制接管",
         description: english
-          ? "Normal saves whose five infinite-tech effective levels total more than 200 may copy positive 60/30-s production statistics at the locked power multiplier. It is explicitly optional and does not replace conservation idle mode."
-          : "普通存档五项无限科技有效等级合计大于 200 后，可按锁定供电倍率复制最近 60/30 模拟秒的正向产率；该模式由玩家主动选择，不替代原守恒挂机。",
+          ? "Settings and the read-only banner can advance the fencing token after confirmation, save and read back this tab's current state, and make the former tab read-only. The former primary remains a backup and its uncommitted pure-idle tail is not awarded."
+          : "设置和只读提示均可在确认后推进防覆盖令牌，以本页当前状态保存并回读；旧标签页立即只读，旧主存档仍作备份，旧页未提交的纯挂机尾段不结算。",
       },
       {
-        id: "windows-native-stable-integration",
-        title: english ? "Windows native hot paths retain the stable app identity" : "Windows 原生热路径接回正式版身份",
+        id: "v124-content-family",
+        title: english ? "Dark Fog buildings can reuse generic recipes" : "黑雾建筑可复用通用配方",
         description: english
-          ? "Dirty-page saves, bounded projections, streaming v47 import/export, and deterministic native-core support ship under the existing stable app and user-data identity. JavaScript remains player-visible authority where native coverage is not eligible."
-          : "脏页存档、有界投影、v47 流式导入导出与确定性原生核心能力使用既有正式应用及用户数据身份发布；原生覆盖不合格的领域仍由 JavaScript 作为玩家可见权威。",
+          ? "Content packs may declare a smelter, assembler, or chemical recipe family. Negentropy smelters and re-composing assemblers can use matching generic recipes without duplicating the core catalog."
+          : "内容包可声明 smelter、assembler 或 chemical 配方族；负熵熔炉和重组式制造台无需复制整套基础配方即可使用对应通用配方。",
       },
       {
-        id: "mobile-light-full-inspector",
-        title: english ? "The mobile full inspector works in light theme" : "手机浅色主题完整检查器不再空白",
+        id: "v124-endgame-replication",
+        title: english ? "Rate replication awards endgame outputs only" : "产率复制只发放终局成果",
         description: english
-          ? "The empty sheet bridge no longer paints an opaque white surface over the real advanced inspector, while dark-theme layering and touch behavior remain unchanged."
-          : "空白桥接抽屉不再用白色背景遮住真正的高级检查器；深色主题层级和触控行为保持不变。",
+          ? "The material allowlist contains only universe matrices, small carrier rockets, and solar sails. Research and per-system Dyson events remain separate while ordinary inventory no longer expands."
+          : "材料白名单仅含白矩阵、小型运载火箭和太阳帆；科研与逐恒星系戴森事件继续独立复制，普通库存不再膨胀。",
       },
       {
-        id: "v123-compatibility-boundary",
-        title: english ? "Save, cloud, and rollback formats remain compatible" : "存档、云端与回滚格式保持兼容",
+        id: "v124-memory-guard-default-off",
+        title: english ? "Memory and backlog auto-pause defaults off" : "内存与积压自动暂停默认关闭",
         description: english
-          ? "No GameState, envelope, cloud schema, or SQLite layout migration is introduced. Production-history windows remain runtime-only and do not enlarge saved files."
-          : "本版不升级 GameState、envelope、cloud schema 或 SQLite layout；生产历史窗口仍只存在运行态，不会增大持久存档。",
+          ? "New devices and browsers without a saved preference keep running instead of auto-pausing on heap or simulation backlog pressure. An explicit existing device choice is preserved, while Worker, checkpoint, and allocation-failure safeguards remain."
+          : "新设备或没有保存过该偏好的浏览器默认继续运行，不因堆水位或模拟积压自动暂停；曾明确开启或关闭的设备选择继续保留，Worker、检查点和分配失败保护不变。",
+      },
+      {
+        id: "v124-compatibility-boundary",
+        title: english ? "Save and server data formats do not change" : "存档与服务器数据格式不升级",
+        description: english
+          ? "This release changes bounded transfer, tab write authority, runtime content catalogs, and an optional idle algorithm only; it does not migrate player state, the cloud schema, or the SQLite layout."
+          : "本版仅调整有界传输、标签页写入权、运行时内容目录与可选挂机算法；不迁移玩家状态、云 schema 或 SQLite layout。",
       },
     ],
   } as const;

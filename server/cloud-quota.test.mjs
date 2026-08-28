@@ -93,8 +93,8 @@ test("normalizes unsafe configuration while preserving explicit test limits", ()
   assert.equal(safe.historyRevisions, 20);
 });
 
-test("keeps the public single-revision quota aligned with the 96 MiB transfer boundary", () => {
+test("keeps the public single-revision quota aligned with the 256 MiB transfer boundary", () => {
   const normalized = normalizeCloudQuotaPolicy();
-  assert.equal(normalized.revisionBytes, 96 * 1024 * 1024 - 1024);
+  assert.equal(normalized.revisionBytes, 256 * 1024 * 1024);
   assert.ok(normalized.slotBytes >= normalized.revisionBytes);
 });

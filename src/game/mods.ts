@@ -36,6 +36,8 @@ export interface ModBuildingDefinition {
   inputCapacity?: number;
   outputCapacity?: number;
   accepts?: BuildingDefinition["accepts"];
+  /** Generic recipe family. Buildings in the same family share recipes. */
+  family?: BuildingDefinition["family"];
   powerDemandKw?: number;
   powerGenerationKw?: number;
   description?: string;
@@ -249,6 +251,10 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     if (accepts !== undefined && !["solid", "fluid", "any"].includes(accepts)) {
       issues.push({ severity: "error", code: "building-accepts", path: `$.buildings[${index}].accepts`, message: "建筑物品类型限制无效" });
     }
+    const family = entry.family;
+    if (family !== undefined && family !== "smelter" && family !== "assembler" && family !== "chemical") {
+      issues.push({ severity: "error", code: "building-family", path: `$.buildings[${index}].family`, message: "通用配方族只能是 smelter、assembler 或 chemical" });
+    }
     const numericKeys = ["speed", "inputCapacity", "outputCapacity", "powerDemandKw", "powerGenerationKw", "outputAmount"] as const;
     for (const key of numericKeys) if (entry[key] !== undefined && (typeof entry[key] !== "number" || !Number.isFinite(entry[key]) || entry[key] < 0 || entry[key] > 1_000_000)) {
       issues.push({ severity: "error", code: "building-number", path: `$.buildings[${index}].${key}`, message: "建筑数值必须是有限的非负数" });
@@ -262,6 +268,7 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
       ...(kind ? { kind } : {}),
       ...numericKeys.reduce((result, key) => typeof entry[key] === "number" && Number.isFinite(entry[key]) ? { ...result, [key]: entry[key] } : result, {} as Record<string, number>),
       ...(accepts === "solid" || accepts === "fluid" || accepts === "any" ? { accepts } : {}),
+      ...(family === "smelter" || family === "assembler" || family === "chemical" ? { family } : {}),
       ...(typeof entry.description === "string" ? { description: entry.description.trim().slice(0, 240) } : {}),
       ...(typeof entry.requiredTechId === "string" ? { requiredTechId: entry.requiredTechId } : {}),
       ...(Array.isArray(entry.costs) ? { costs: entry.costs } : {}),

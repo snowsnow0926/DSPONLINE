@@ -8,7 +8,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.3");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.4");
     }
   });
 }
@@ -2107,7 +2107,7 @@ test("operations settings and local save slots persist across reload", async ({ 
   await page.screenshot({ path: "artifacts/qa/operations-settings-390.png", fullPage: true });
 });
 
-test("memory auto-pause policy exposes safe defaults and explicit no-rollback mode", async ({ page }) => {
+test("memory auto-pause defaults off and preserves an explicit device opt-in", async ({ page }) => {
   await openOperationsStageGame(page, "/?storageMigration=production");
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
@@ -2115,15 +2115,16 @@ test("memory auto-pause policy exposes safe defaults and explicit no-rollback mo
   await operations.locator(".settings-category-overview").getByRole("button", { name: "终局性能" }).click();
   const guard = operations.locator(".settings-memory-guard");
   await expect(guard).toBeVisible();
-  await expect(guard).toContainText("浏览器堆上限 90%");
+  await expect(guard).toContainText("已关闭内存与模拟积压自动暂停");
+  await expect(guard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).locator("input")).not.toBeChecked();
   await expect(guard.getByRole("radio", { name: "自动 90%" })).toHaveAttribute("aria-checked", "true");
   await guard.getByRole("radio", { name: "2 GiB" }).click();
   await guard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).click();
   await expect.poll(() => page.evaluate(() => ({
     enabled: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause.v1"),
     threshold: window.localStorage.getItem("dsp-idle-network.ui.memory-auto-pause-threshold-mib.v1"),
-  }))).toEqual({ enabled: "false", threshold: "2048" });
-  await expect(guard).toContainText("已关闭内存与模拟积压自动暂停");
+  }))).toEqual({ enabled: "true", threshold: "2048" });
+  await expect(guard).toContainText("仅本机 · 2 GiB");
   await operations.getByLabel("关闭运营中心").click();
   await page.reload();
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
@@ -2132,7 +2133,7 @@ test("memory auto-pause policy exposes safe defaults and explicit no-rollback mo
   await reloadedOperations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
   await selectSettingsCategory(reloadedOperations, "终局性能", "performance");
   const reloadedGuard = reloadedOperations.locator(".settings-memory-guard");
-  await expect(reloadedGuard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).locator("input")).not.toBeChecked();
+  await expect(reloadedGuard.locator(".setting-row").filter({ hasText: "内存或模拟积压超限时自动暂停" }).locator("input")).toBeChecked();
   await expect(reloadedGuard.getByRole("radio", { name: "2 GiB" })).toHaveAttribute("aria-checked", "true");
 });
 

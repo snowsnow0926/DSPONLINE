@@ -322,6 +322,7 @@ import {
   clearPureIdleBackground,
   clearPureIdleRecovery,
   createPureIdleRecovery,
+  finalizePureIdleRecoveryForLocalTakeover,
   getPureIdleForceConservativeReason,
   getPureIdleBackgroundPlan,
   getPureIdleOwnerToken,
@@ -375,7 +376,8 @@ import {
 } from "./game/simulationRuntimeRecoveryPersistenceClient";
 import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationRuntimeStartupRecovery";
 import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
-import { clearLocalSaveRawPayloadCache, commitLocalSaveInternalRecords, getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus } from "./game/localSaveStore";
+import { clearLocalSaveRawPayloadCache, commitLocalSaveInternalRecords, getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus, subscribeLocalSaveWriterStatus, takeOverLocalSaveWriter } from "./game/localSaveStore";
+import { registerCurrentTabTakeoverHandler } from "./game/localSaveTakeover";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
 import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type PersistChunkedSaveResult } from "./game/chunkedSaveJournal";
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
@@ -1944,6 +1946,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const pureIdleBackgroundRecoveryRef = useRef(false);
   const pureIdleContinueAvailableRef = useRef(false);
   const pureIdleHeartbeatAtRef = useRef(0);
+  useEffect(() => subscribeLocalSaveWriterStatus((status) => {
+    if (status.role !== "secondary") return;
+    // A deliberate takeover advances the local-save fencing token before this
+    // notification arrives. Stop every local authority loop immediately; any
+    // late save/stage is also rejected by the durable CAS token.
+    simulationWorkerRef.current?.terminate();
+    simulationWorkerRef.current = null;
+    simulationWorkerDisabledRef.current = true;
+    setSimulationWorkerActive(false);
+    pureIdleMacroClientRef.current?.close();
+    pureIdleMacroClientRef.current = null;
+    pureIdleMacroActiveRef.current = false;
+    pureIdleActiveRef.current = false;
+    pureIdleBackgroundOfflineAbortRef.current?.abort();
+    pureIdleBackgroundOfflineAbortRef.current = null;
+    const recovery = pureIdleRecoveryRef.current;
+    if (recovery) void releasePureIdleRecoveryLease(recovery.sessionId, pureIdleOwnerTokenRef.current);
+    setPureIdleActive(false);
+    setPureIdleRecoveryStatus("另一个标签页已接管，本页停止结算并转为只读");
+    const stopped = setPaused(setTimeWarpEnabled(gameRef.current, false), true);
+    gameRef.current = stopped;
+    setGame(stopped);
+    setNotice("另一个标签页已强制接管本地存档；本页已暂停并切换为只读，不会覆盖新主标签页");
+  }), []);
   const workerLatencyMsRef = useRef(0);
   const eventSequenceRef = useRef(0);
   const burstSequenceRef = useRef(0);
@@ -4077,7 +4103,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             skippedUnchanged: journal.changedChunks === 0,
           };
         } catch (error) {
-          if (import.meta.env.DEV) console.warn("[1.2.3] chunked autosave fell back to verified full save", error);
+          if (import.meta.env.DEV) console.warn("[1.2.4] chunked autosave fell back to verified full save", error);
           const returnedTransfer = (error as ChunkedSaveTransferFailure).sourceStateTransfer;
           if (checkpoint && returnedTransfer) {
             latestAuthoritativeCheckpointTransferRef.current = { ...checkpoint, transfer: returnedTransfer };
@@ -4154,10 +4180,68 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   persistPrimarySaveRef.current = persistPrimarySave;
   isCurrentPrimarySaveSourceRef.current = isCurrentPrimarySaveSource;
 
+  useEffect(() => registerCurrentTabTakeoverHandler(async () => {
+    const before = getLocalSaveWriterStatus();
+    if (before.role === "primary") {
+      return { ok: true, reload: false, message: "本页已经负责本地存档，无需接管" };
+    }
+    if (before.role === "conflict") {
+      return { ok: false, reload: false, message: "请先在存档管理中选择保留版本，再接管标签页" };
+    }
+    if (before.role !== "secondary") {
+      return { ok: false, reload: false, message: "本地存档写入权尚未就绪，请稍后重试" };
+    }
+    if (!await takeOverLocalSaveWriter()) {
+      return { ok: false, reload: false, message: "接管失败；原主存档未被覆盖，请重试" };
+    }
+    // Saving only starts after the IDB fence has advanced. The former writer
+    // can no longer pass its CAS, while saveGameVerified preserves the former
+    // primary as the normal backup and reads this page back before success.
+    const authoritativePageState = gameRef.current;
+    const saved = await saveVerifiedPrimaryCheckpoint(authoritativePageState, { force: true });
+    if (!saved.success) {
+      return {
+        ok: false,
+        reload: false,
+        message: `已取得写入权，但本页校验保存失败：${saved.message}。原主存档仍保留，请导出本页或重试保存。`,
+      };
+    }
+    if (saved.bytes !== undefined) setPersistedPrimaryBytes(saved.bytes);
+    try {
+      await clearChunkedSaveJournal(authoritativePageState.mode === "speedrun" ? "speedrun" : "normal");
+    } catch { /* the verified primary remains authoritative */ }
+    const finalized = await finalizePureIdleRecoveryForLocalTakeover(pureIdleOwnerTokenRef.current);
+    if (!finalized.ok) {
+      return {
+        ok: false,
+        reload: false,
+        message: `本页已保存并回读通过，但旧纯挂机日志未能安全收口：${finalized.message}。请勿关闭本页并重试接管。`,
+      };
+    }
+    const abandoned = finalized.finalized && finalized.abandonedWallSeconds > 0
+      ? `；旧标签页未提交的 ${Math.floor(finalized.abandonedWallSeconds)} 秒纯挂机未结算`
+      : "";
+    return { ok: true, reload: true, message: `本页已保存、回读并取得写入权${abandoned}，正在重新载入` };
+  }), [saveVerifiedPrimaryCheckpoint]);
+
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
     setPureIdleContinueAvailable(available);
   }, []);
+
+  const handlePureIdleLeaseLost = useCallback((sessionId: string) => {
+    if (pureIdleRecoveryRef.current?.sessionId !== sessionId) return;
+    pureIdleMacroClientRef.current?.close();
+    pureIdleMacroClientRef.current = null;
+    pureIdleMacroActiveRef.current = false;
+    pureIdleActiveRef.current = false;
+    pureIdleBackgroundOfflineAbortRef.current?.abort();
+    pureIdleBackgroundOfflineAbortRef.current = null;
+    setPureIdleActive(false);
+    setPureIdleRecoveryContinueState(false);
+    setPureIdleRecoveryStatus("纯挂机已由另一个标签页接管，本页停止结算");
+    setNotice("另一个标签页已接管纯挂机和本地存档；本页不会继续计算或写入");
+  }, [setPureIdleRecoveryContinueState]);
 
   const persistPureIdleTransition = useCallback(async (
     record: PureIdleRecoveryRecord,
@@ -4252,8 +4336,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       summary.settledWallSeconds,
       summary.phase,
       summary,
-    );
-  }, [setPureIdleRecoveryContinueState]);
+    ).then((retained) => { if (!retained) handlePureIdleLeaseLost(record.sessionId); });
+  }, [handlePureIdleLeaseLost, setPureIdleRecoveryContinueState]);
 
   const initializePureIdleMacroClient = useCallback(async (record: PureIdleRecoveryRecord): Promise<PureIdleMacroClient | null> => {
     pureIdleMacroRestartCountRef.current = Math.max(
@@ -6649,7 +6733,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             "failed",
             record.summary,
             "Worker 连续失败，自动重建已停止，等待玩家选择恢复或重试",
-          );
+          ).then((retained) => { if (!retained) handlePureIdleLeaseLost(record.sessionId); });
         }
         return;
       }
@@ -6718,7 +6802,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           settled,
           record.summary?.phase ?? "calibrating",
           record.summary,
-        );
+        ).then((retained) => { if (!retained) handlePureIdleLeaseLost(record.sessionId); });
       }
     };
     void tick();
@@ -6727,7 +6811,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [initializePureIdleMacroClient, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
+  }, [handlePureIdleLeaseLost, initializePureIdleMacroClient, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => () => {
     pureIdleMacroClientRef.current?.close();

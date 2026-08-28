@@ -295,15 +295,15 @@ export function writeLargeSaveAutosaveThrottlePreference(enabled: boolean): void
   try { storage.setItem(LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY, String(enabled)); } catch { /* optional preference */ }
 }
 
-/** Protect large factories from browser heap exhaustion. Device-only and on by default. */
+/** Optional browser heap/backlog guard. Device-only and off by default. */
 export function readMemoryAutoPauseEnabledPreference(): boolean {
   const storage = localStorageOrNull();
-  if (!storage) return true;
+  if (!storage) return false;
   try {
     const value = storage.getItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY);
-    return value == null ? true : value !== "false";
+    return value === "true";
   } catch {
-    return true;
+    return false;
   }
 }
 

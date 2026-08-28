@@ -174,6 +174,27 @@ describe("content pack runtime registry", () => {
     expect((CONSTRUCTION as Array<{ buildingId: string }>).some((definition) => definition.buildingId === "qa_fabricator")).toBe(true);
   });
 
+  it("lets declarative black-fog smelters and assemblers reuse their family recipes without duplicating the catalog", () => {
+    const validation = validateContentPack({
+      formatVersion: 2,
+      id: "alice_metals_dark_fog_pack",
+      name: "黑雾内容包完整版",
+      version: "0.1.0",
+      buildings: [
+        { id: "assembling_machine_mk4", name: "重组式制造台", family: "assembler", speed: 3, costs: [{ itemId: "universe_matrix", amount: 1 }] },
+        { id: "negentropy_smelter", name: "负熵熔炉", family: "smelter", speed: 3, costs: [{ itemId: "universe_matrix", amount: 1 }] },
+      ],
+    });
+    expect(validation.valid).toBe(true);
+    const registered = registerContentPack(createContentPackRegistry(), validation);
+    expect(applyContentPackRegistry(registered.registry).catalogValid).toBe(true);
+
+    expect(getBuilding("assembling_machine_mk4" as never).family).toBe("assembler");
+    expect(getRecipesForBuilding("assembling_machine_mk4" as never).map((recipe) => recipe.id)).toContain("gear");
+    expect(getBuilding("negentropy_smelter" as never).family).toBe("smelter");
+    expect(getRecipesForBuilding("negentropy_smelter" as never).map((recipe) => recipe.id)).toContain("iron_ingot");
+  });
+
   it("exposes runtime custom buildings in the deployment catalog and generic tray category", () => {
     const validation = validateContentPack({
       formatVersion: 1,

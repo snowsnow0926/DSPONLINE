@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-28-v1.2.3";
+const RELEASE_NOTE_ID = "2026-08-28-v1.2.4";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "终局自动化、挂机模式与 Windows 性能更新");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.3");
+  await expect(dialog).toHaveAttribute("aria-label", "大存档、标签页接管与内容包兼容更新");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.4");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("建筑制造与离线结算持续产出");
-  await expect(dialog).toContainText("符合条件的存档可选择产率复制挂机");
-  await expect(dialog).toContainText("Windows 原生热路径接回正式版身份");
-  await expect(dialog).toContainText("手机浅色主题完整检查器不再空白");
-  await expect(dialog).toContainText("存档、云端与回滚格式保持兼容");
+  await expect(dialog).toContainText("96 MiB 以上大存档可压缩上传");
+  await expect(dialog).toContainText("当前标签页可明确强制接管");
+  await expect(dialog).toContainText("黑雾建筑可复用通用配方");
+  await expect(dialog).toContainText("产率复制只发放终局成果");
+  await expect(dialog).toContainText("存档与服务器数据格式不升级");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

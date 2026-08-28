@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
-const RELEASE_NOTE_ID = "2026-08-28-v1.2.3";
+const RELEASE_NOTE_ID = "2026-08-28-v1.2.4";
 
 async function preparePage(page: Page, disableCoordinationApis = false) {
   await page.addInitScript(({ releaseNoteId, disable }) => {
@@ -539,36 +539,35 @@ test("a corrupted conflict candidate is preserved but cannot become the primary 
   expect(persisted).not.toBeNull();
 });
 
-test("an expired secondary lease requires explicit takeover and reload", async ({ context }) => {
+test("an explicit takeover fences an active writer, verifies the chosen tab, and reloads it as primary", async ({ context }) => {
   const primary = await context.newPage();
   const secondary = await context.newPage();
-  await preparePage(primary, true);
-  await preparePage(secondary, true);
+  await preparePage(primary);
+  await preparePage(secondary);
   await expect(secondary.getByRole("alert").filter({ hasText: "本页面为只读" })).toBeVisible();
+  const originalFence = await primary.evaluate(async () => (await import("/src/game/localSaveStore.ts")).getLocalSaveWriterStatus().fencingToken);
 
-  await primary.close();
-  await secondary.evaluate(async () => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("dsp-idle-network.local-saves");
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction("records", "readwrite");
-      const store = transaction.objectStore("records");
-      const request = store.get("dsp-idle-network.local-save-coordination.v1.writer-lease");
-      request.onsuccess = () => {
-        const lease = JSON.parse(request.result.value);
-        const value = JSON.stringify({ ...lease, heartbeatAt: Date.now() - 20_000, expiresAt: Date.now() - 1 });
-        store.put({ ...request.result, value, updatedAt: Date.now(), bytes: value.length });
-      };
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
-  });
-  await secondary.getByRole("button", { name: "接管保存" }).click();
+  await secondary.getByRole("button", { name: "强制接管本页" }).click();
+  await secondary.getByRole("button", { name: "确认接管本页" }).click();
   await expect(secondary.locator(".start-menu")).toBeVisible();
   await expect(secondary.getByRole("alert").filter({ hasText: "本页面为只读" })).toHaveCount(0);
+  await expect(primary.getByRole("alert").filter({ hasText: "本页面为只读" })).toBeVisible();
+
+  const statuses = await Promise.all([primary, secondary].map((page) => page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    return store.getLocalSaveWriterStatus();
+  })));
+  expect(statuses[0].role).toBe("secondary");
+  expect(statuses[1].role).toBe("primary");
+  expect(statuses[1].fencingToken).toBeGreaterThan(originalFence);
+
+  const staleWriterSave = await primary.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    return storage.saveGameVerified(engine.createInitialState());
+  });
+  expect(staleWriterSave.success).toBe(false);
+  expect(staleWriterSave.code).toBe("read-only");
 });
 
 test("a single writer can commit a runtime-generated 35 MiB save after its own lease expires", async ({ page }) => {

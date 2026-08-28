@@ -237,7 +237,7 @@ test("cache, worker scope, gzip and API transfer semantics survive security-head
     assert.match(config, /location = \/manifest\.webmanifest[^}]*Cache-Control "no-cache" always;/s);
     assert.match(config, /location \/assets\/[^}]*expires 1y;[^}]*Cache-Control "public, max-age=31536000, immutable" always;/s);
     assert.match(config, /location @archived_immutable_asset[^}]*expires 1y;[^}]*Cache-Control "public, max-age=31536000, immutable" always;/s);
-    assert.match(config, /location \/api\/[^}]*proxy_pass http:\/\/127\.0\.0\.1:4330;[^}]*proxy_read_timeout 300s;[^}]*client_max_body_size 112m;/s);
+    assert.match(config, /location \/api\/[^}]*proxy_pass http:\/\/127\.0\.0\.1:4330;[^}]*proxy_send_timeout 660s;[^}]*proxy_read_timeout 660s;[^}]*proxy_request_buffering off;[^}]*client_max_body_size 128m;/s);
   }
 });
 
@@ -267,10 +267,12 @@ test("active Nginx cloud proxies cover the shared maximum transfer timeout", asy
       timeoutMs >= contract.maximumTimeoutMs + requiredSafetyMarginMs,
       `${file} proxy_read_timeout must cover maximumTimeoutMs plus the safety margin`,
     );
-    assert.match(apiLocation, /client_max_body_size\s+112m;/);
+    assert.match(apiLocation, /proxy_send_timeout\s+660s;/);
+    assert.match(apiLocation, /proxy_request_buffering\s+off;/);
+    assert.match(apiLocation, /client_max_body_size\s+128m;/);
   }
 
-  assert.deepEqual([...configuredTimeouts], [300_000]);
+  assert.deepEqual([...configuredTimeouts], [660_000]);
 });
 
 test("Hong Kong cloud service authorizes the packaged Android WebView origin", async () => {

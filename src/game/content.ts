@@ -720,14 +720,18 @@ export const SORTER_CONSTRUCTION_BY_TIER: Record<SorterTier, SorterId> = {
 };
 
 export function getRecipesForBuilding(buildingId: BuildingId): RecipeDefinition[] {
-  const baseBuildingId = RECIPE_BUILDING_BASE[buildingId] ?? buildingId;
   // Content packs can add recipes at runtime. Keep the exported static index for
-  // core-data consumers, but resolve this lookup from the live registry.
-  return Object.values(RECIPES).filter((recipe) => recipe.buildingId === baseBuildingId);
+  // core-data consumers, but resolve this lookup from the live registry. A
+  // declarative building family is a capability contract: pack-provided
+  // smelters/assemblers/chemical plants receive the same generic recipes as
+  // their core counterparts without duplicating hundreds of definitions.
+  return Object.values(RECIPES).filter((recipe) => buildingSupportsRecipe(buildingId, recipe));
 }
 
 export function buildingSupportsRecipe(buildingId: BuildingId, recipe: RecipeDefinition): boolean {
-  return (RECIPE_BUILDING_BASE[buildingId] ?? buildingId) === recipe.buildingId;
+  if ((RECIPE_BUILDING_BASE[buildingId] ?? buildingId) === recipe.buildingId) return true;
+  const family = BUILDINGS[buildingId]?.family;
+  return Boolean(family && BUILDINGS[recipe.buildingId]?.family === family);
 }
 
 export function getBuildingUpgradeTarget(buildingId: BuildingId): BuildingId | undefined {

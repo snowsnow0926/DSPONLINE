@@ -1495,11 +1495,59 @@ export function subscribeLocalSaveChanges(listener: (message: LocalSaveBroadcast
 export async function takeOverLocalSaveWriter(): Promise<boolean> {
   if (writerStatus.role === "primary") return true;
   if (writerStatus.role === "conflict") return false;
-  if (backend === "indexeddb" && database) {
-    const durable = parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
-    return !durable || durable.expiresAt <= Date.now();
+  await initializeLocalSaveStore();
+  if (backend !== "indexeddb" || !database) {
+    publishWriterStatus({
+      role: "primary",
+      writerId,
+      fencingToken: Math.max(1, writerStatus.fencingToken),
+      leaseExpiresAt: Number.MAX_SAFE_INTEGER,
+      reason: "当前标签页已接管兼容存储后端",
+    });
+    return true;
   }
-  return writerStatus.leaseExpiresAt <= Date.now();
+  const now = Date.now();
+  try {
+    // IndexedDB serializes this read/write transaction across tabs. Deliberate
+    // takeover always advances the fence, even when the former lease is still
+    // alive, so every already-running writer fails its next CAS/heartbeat.
+    const transaction = database.transaction(RECORD_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(RECORD_STORE);
+    const currentRecord = await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>);
+    const current = parseLocalSaveWriterLease(currentRecord?.value);
+    const fencingToken = Math.max(writerStatus.fencingToken, current?.fencingToken ?? 0) + 1;
+    const lease: LocalSaveWriterLease = {
+      schemaVersion: 1,
+      ownerId: writerId,
+      fencingToken,
+      heartbeatAt: now,
+      expiresAt: now + LOCAL_SAVE_LEASE_DURATION_MS,
+    };
+    putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify(lease), now);
+    await done;
+    const verified = parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
+    if (!verified || verified.ownerId !== writerId || verified.fencingToken !== fencingToken) return false;
+    await reloadLocalSaveCache();
+    publishWriterStatus({
+      role: "primary",
+      writerId,
+      fencingToken,
+      leaseExpiresAt: verified.expiresAt,
+      reason: "当前标签页已强制接管本地存档",
+    });
+    postCoordinationMessage({
+      schemaVersion: 1,
+      type: "lease",
+      writerId,
+      sentAt: now,
+      fencingToken,
+      leaseExpiresAt: verified.expiresAt,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function canWriteLocalSaves(): boolean {

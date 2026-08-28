@@ -15,7 +15,18 @@ import type {
 const MICROS_PER_SECOND = 1_000_000;
 export const PURE_IDLE_REPLICATION_PREFERRED_WINDOW_SECONDS = 60;
 export const PURE_IDLE_REPLICATION_MINIMUM_WINDOW_SECONDS = 30;
-export const PURE_IDLE_REPLICATION_ALGORITHM_VERSION = "pure-idle-replication-v1-positive-output";
+export const PURE_IDLE_REPLICATION_ALGORITHM_VERSION = "pure-idle-replication-v2-endgame-output";
+/**
+ * Replication is an endgame reward, not a second unrestricted warehouse.
+ * Only player-facing terminal products are credited as materials; research
+ * investment and actual Dyson launch/absorption events remain independent
+ * terminal counters below.
+ */
+export const PURE_IDLE_REPLICATION_ENDGAME_MATERIAL_IDS = [
+  "universe_matrix",
+  "small_carrier_rocket",
+  "solar_sail",
+] as const satisfies readonly ItemId[];
 
 export interface PureIdleReplicationContract {
   windowSeconds: number;
@@ -88,10 +99,7 @@ export function getPureIdleReplicationReadiness(
   const start = selected.start.pureIdleReplication!;
   const end = selected.end.pureIdleReplication!;
   const materialByItem: Partial<Record<ItemId, bigint>> = {};
-  for (const itemId of new Set<ItemId>([
-    ...Object.keys(start.totalProduced),
-    ...Object.keys(end.totalProduced),
-  ] as ItemId[])) {
+  for (const itemId of PURE_IDLE_REPLICATION_ENDGAME_MATERIAL_IDS) {
     const delta = positiveDecimalDelta(end.totalProduced[itemId], start.totalProduced[itemId]);
     if (delta > 0n) materialByItem[itemId] = delta;
   }

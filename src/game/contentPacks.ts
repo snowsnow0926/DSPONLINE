@@ -393,6 +393,7 @@ function registerBuildings(packs: RegisteredContentPack[]): void {
       inputCapacity: Math.max(1, Math.floor(building.inputCapacity ?? 100)),
       outputCapacity: Math.max(1, Math.floor(building.outputCapacity ?? 100)),
       accepts: building.accepts ?? "any",
+      ...(building.family ? { family: building.family } : {}),
       ...(building.powerDemandKw !== undefined ? { powerDemandKw: Math.max(0, building.powerDemandKw) } : {}),
       ...(building.powerGenerationKw !== undefined ? { powerGenerationKw: Math.max(0, building.powerGenerationKw) } : {}),
       description: building.description?.trim() || `${pack.manifest.name} 提供的建筑。`,

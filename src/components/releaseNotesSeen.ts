@@ -1,5 +1,5 @@
 export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
-const CURRENT_RELEASE_ID = "2026-08-28-v1.2.3";
+const CURRENT_RELEASE_ID = "2026-08-28-v1.2.4";
 
 export function hasSeenCurrentReleaseNotes(): boolean {
   try {

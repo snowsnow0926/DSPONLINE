@@ -31,6 +31,7 @@ import {
   Upload,
   RotateCcw,
   Radio,
+  RefreshCw,
   Route,
   MessageSquare,
   MousePointer2,
@@ -85,7 +86,8 @@ import type {
 } from "../game/canvasDensityPresentation";
 import { CANVAS_FULL_ALL_MEDIUM_SAFETY_VISIBLE } from "../game/canvasDensityPresentation";
 import { readSettingsCategoryPreference, writeSettingsCategoryPreference, type ConnectionHitArea, type ConnectionPointSize, type SettingsCategory } from "../game/uiPreferences";
-import { deleteLocalSaveManagedEntries, dismissLocalSaveRecoveryPrompt, requestLocalSavePersistentStorage, subscribeLocalSaveStorageStatus } from "../game/localSaveStore";
+import { deleteLocalSaveManagedEntries, dismissLocalSaveRecoveryPrompt, getLocalSaveWriterStatus, requestLocalSavePersistentStorage, subscribeLocalSaveStorageStatus, subscribeLocalSaveWriterStatus } from "../game/localSaveStore";
+import { requestCurrentTabTakeover } from "../game/localSaveTakeover";
 
 export type OperationsTab = "alerts" | "achievements" | "logistics" | "settings" | "performance" | "saves" | "packs" | "support";
 
@@ -380,7 +382,11 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
   const currentReleaseNotes = getCurrentReleaseNotes(locale);
   const gameDialog = useGameDialog();
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>(readSettingsCategoryPreference);
+  const [localSaveWriterStatus, setLocalSaveWriterStatus] = useState(getLocalSaveWriterStatus);
+  const [localSaveTakeoverBusy, setLocalSaveTakeoverBusy] = useState(false);
+  const [localSaveTakeoverMessage, setLocalSaveTakeoverMessage] = useState<string | null>(null);
   useEffect(() => { writeSettingsCategoryPreference(settingsCategory); }, [settingsCategory]);
+  useEffect(() => subscribeLocalSaveWriterStatus(setLocalSaveWriterStatus), []);
   const canvasPerformanceCopy = locale === "en"
     ? {
         ariaLabel: "Independent canvas optimization fallbacks",
@@ -721,6 +727,35 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
         <ToggleSetting checked={lineFindMode} label="寻线模式默认开启" value={lineFindMode ? "选中建筑后追踪上下游" : "保持普通画布显示"} icon={<Route size={16} />} onChange={onLineFindModeChange} />
         <ToggleSetting checked={showItemHover} label="显示物品悬浮信息" value={showItemHover ? "悬浮或聚焦时显示详情" : "不显示完整悬浮详情卡"} icon={<MousePointer2 size={16} />} onChange={onItemHoverChange} />
         <ToggleSetting checked={showRunLog} label="显示运行记录" value={showRunLog ? "显示运行反馈浮条" : "仅保留错误、成就和诊断"} icon={<Activity size={16} />} onChange={onRunLogChange} />
+      </section>
+      <section className="settings-group" data-settings-category="storage">
+        <header><Database size={14} /><span>{locale === "en" ? "Tab and save authority" : "标签页与存档写入权"}</span><small>{localSaveWriterStatus.role === "primary" ? (locale === "en" ? "This tab is authoritative" : "当前页负责保存") : localSaveWriterStatus.role === "conflict" ? (locale === "en" ? "Save conflict requires resolution" : "存在存档冲突") : (locale === "en" ? "This tab is read-only" : "当前页为只读")}</small></header>
+        <p className={localSaveWriterStatus.role === "primary" ? "settings-help" : "settings-warning"}>{localSaveWriterStatus.reason}</p>
+        <button type="button" disabled={localSaveTakeoverBusy || localSaveWriterStatus.role !== "secondary"} onClick={() => {
+          void (async () => {
+            const confirmed = await gameDialog.confirm(locale === "en"
+              ? "Force this tab to become authoritative? The other tab will become read-only. This page will be saved and verified first; its current progress wins, while the previous persisted save remains as a backup. Any uncommitted pure-idle time in the other tab will not be awarded."
+              : "确认强制接管当前标签页？另一个标签页会立即转为只读。本页会先保存并回读校验，以本页当前进度为准；接管前的主存档仍保留为备份。另一个标签页尚未提交的纯挂机时间不会结算。", {
+              danger: true,
+              title: locale === "en" ? "Force current tab takeover" : "强制接管当前标签页",
+              confirmLabel: locale === "en" ? "Take over this tab" : "确认接管本页",
+            });
+            if (!confirmed) return;
+            setLocalSaveTakeoverBusy(true);
+            setLocalSaveTakeoverMessage(locale === "en" ? "Taking over and verifying the save…" : "正在接管并校验存档…");
+            try {
+              const result = await requestCurrentTabTakeover();
+              setLocalSaveTakeoverMessage(result.message);
+              if (result.ok && result.reload) window.setTimeout(() => window.location.reload(), 300);
+            } catch (error) {
+              setLocalSaveTakeoverMessage(error instanceof Error ? error.message : (locale === "en" ? "Takeover failed without overwriting either save." : "接管失败，双方存档均未被覆盖。"));
+            } finally {
+              setLocalSaveTakeoverBusy(false);
+            }
+          })();
+        }}><RefreshCw size={14} />{localSaveWriterStatus.role === "primary" ? (locale === "en" ? "This tab is already authoritative" : "本页已负责保存") : localSaveTakeoverBusy ? (locale === "en" ? "Taking over…" : "正在接管…") : (locale === "en" ? "Force takeover on this tab" : "强制接管当前标签页")}</button>
+        {localSaveTakeoverMessage ? <p className="settings-help" role="status">{localSaveTakeoverMessage}</p> : null}
+        <p className="settings-help">{locale === "en" ? "A takeover advances the cross-tab fencing token. The former tab cannot overwrite this save even if it remains open." : "接管会推进跨标签页防覆盖令牌；原标签页即使仍保持打开，也不能再覆盖本页存档。"}</p>
       </section>
       <section className="settings-group" data-settings-category="storage">
         <header><Clock3 size={14} /><span>自动保存间隔</span><small>{locale === "en" ? `configured ${formatAutosaveInterval(largeSaveAutosavePolicy.configuredIntervalSeconds)} · effective ${formatAutosaveInterval(largeSaveAutosavePolicy.effectiveIntervalSeconds)}` : `设置 ${formatAutosaveInterval(largeSaveAutosavePolicy.configuredIntervalSeconds)} · 实际 ${formatAutosaveInterval(largeSaveAutosavePolicy.effectiveIntervalSeconds)}`}</small></header>

@@ -35,6 +35,7 @@ import { createInitialState, createSpeedrunInitialState, placeBuilding } from ".
 import { exportGame, importGame } from "./storage";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import { sha256Text } from "./payloadDigest";
+import { CLOUD_TRANSFER_CONTRACT } from "./cloudTransferContract";
 
 function payload(checksum: string, elapsedSeconds: number): string {
   return JSON.stringify({
@@ -573,7 +574,8 @@ describe("cloud save synchronization markers", () => {
     expect(String(fetchMock.mock.calls[2]?.[0])).toContain("/api/account");
   });
 
-  it("falls back to a raw payload when the compression reader exceeds its safety timeout", async () => {
+  it("stops compression at the configured safety timeout so callers can use the bounded fallback", async () => {
+    vi.useFakeTimers();
     vi.stubGlobal("CompressionStream", TestCompressionStream);
     const descriptor = Object.getOwnPropertyDescriptor(Blob.prototype, "stream");
     Object.defineProperty(Blob.prototype, "stream", {
@@ -581,19 +583,17 @@ describe("cloud save synchronization markers", () => {
       value: () => new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => undefined) }),
     });
     const source = largePayload();
-    const cloudSave = await exactMetadata(1, source);
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ cloudSave }));
-    const startedAt = Date.now();
     try {
-      await expect(uploadCloudSaveWithOptions(source, 0, "main", { verified: true })).resolves.toMatchObject({ revision: 1 });
+      const pending = compressCloudRequestBody(source);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(CLOUD_TRANSFER_CONTRACT.compressionTimeoutMs + 1);
+      await expect(pending).resolves.toBeNull();
     } finally {
       if (descriptor) Object.defineProperty(Blob.prototype, "stream", descriptor);
       else delete (Blob.prototype as unknown as { stream?: unknown }).stream;
+      vi.useRealTimers();
     }
-    expect(Date.now() - startedAt).toBeLessThan(32_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(typeof (fetchMock.mock.calls[0]?.[1] as RequestInit).body).toBe("string");
-  }, 35_000);
+  });
 
   it("honors cancellation during compression without sending a raw fallback", async () => {
     vi.stubGlobal("CompressionStream", TestCompressionStream);

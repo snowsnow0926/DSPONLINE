@@ -18,12 +18,12 @@ const messages = {
     en: "The save changed elsewhere, so both versions were preserved. Choose which version to keep in save management.",
   },
   localSaveTakeOver: {
-    "zh-CN": "接管保存",
-    en: "Take over saving",
+    "zh-CN": "强制接管本页",
+    en: "Force takeover here",
   },
   localSaveTakeOverUnavailable: {
-    "zh-CN": "原标签页仍在活动，暂不能接管",
-    en: "The original tab is still active and cannot be taken over yet",
+    "zh-CN": "接管失败，原存档和双方页面均未被覆盖",
+    en: "Takeover failed; neither save nor tab was overwritten",
   },
   localSaveKeepPersisted: {
     "zh-CN": "保留当前存档",

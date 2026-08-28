@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-28-v1.2.3";
+const RELEASE_NOTE_ID = "2026-08-28-v1.2.4";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,14 +110,14 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Endgame Automation, Idle Modes, and Windows Performance" });
+  const dialog = page.getByRole("dialog", { name: "Large Saves, Tab Takeover, and Content Pack Compatibility" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.3");
-  await expect(dialog).toContainText("Construction and offline settlement stay productive");
-  await expect(dialog).toContainText("Eligible saves can choose rate-replication idle mode");
-  await expect(dialog).toContainText("Windows native hot paths retain the stable app identity");
-  await expect(dialog).toContainText("The mobile full inspector works in light theme");
-  await expect(dialog).toContainText("Save, cloud, and rollback formats remain compatible");
+  await expect(dialog).toContainText("1.2.4");
+  await expect(dialog).toContainText("Compressed saves above 96 MiB can upload");
+  await expect(dialog).toContainText("The current tab can explicitly take authority");
+  await expect(dialog).toContainText("Dark Fog buildings can reuse generic recipes");
+  await expect(dialog).toContainText("Rate replication awards endgame outputs only");
+  await expect(dialog).toContainText("Save and server data formats do not change");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

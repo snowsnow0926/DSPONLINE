@@ -27,6 +27,45 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release124Copy = {
+  date: { "zh-CN": "2026年8月28日", en: "August 28, 2026" },
+  title: { "zh-CN": "大存档、标签页接管与内容包兼容更新", en: "Large Saves, Tab Takeover, and Content Pack Compatibility" },
+  summary: {
+    "zh-CN": "1.2.4 将云端单修订硬上限提高到 256 MiB，为内置浏览器提供明确的当前标签页强制接管，并让内容包建筑按配方族复用通用配方。产率复制挂机只复制终局成果；内存与积压自动暂停改为设备默认关闭。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.4 raises the cloud revision hard limit to 256 MiB, adds explicit current-tab takeover for embedded browsers, and lets content-pack buildings reuse recipes by family. Rate-replication idle copies endgame outputs only, while memory/backlog auto-pause is now off by default per device. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  cloudTitle: { "zh-CN": "96 MiB 以上大存档可压缩上传", en: "Compressed saves above 96 MiB can upload" },
+  cloudDescription: {
+    "zh-CN": "Web、Windows、Android、API 与 Nginx 共用 256 MiB 单修订硬上限和有界 10 分钟传输超时；96 MiB 保证线、30 MiB 明文兼容兜底及账号总配额仍保留。",
+    en: "Web, Windows, Android, the API, and Nginx share a 256 MiB per-revision hard limit and a bounded ten-minute transfer timeout. The 96 MiB guaranteed boundary, 30 MiB raw compatibility fallback, and account quotas remain in place.",
+  },
+  takeoverTitle: { "zh-CN": "当前标签页可明确强制接管", en: "The current tab can explicitly take authority" },
+  takeoverDescription: {
+    "zh-CN": "设置和只读提示均可在确认后推进防覆盖令牌，以本页当前状态保存并回读；旧标签页立即只读，旧主存档仍作备份，旧页未提交的纯挂机尾段不结算。",
+    en: "Settings and the read-only banner can advance the fencing token after confirmation, save and read back this tab's current state, and make the former tab read-only. The former primary remains a backup and its uncommitted pure-idle tail is not awarded.",
+  },
+  packTitle: { "zh-CN": "黑雾建筑可复用通用配方", en: "Dark Fog buildings can reuse generic recipes" },
+  packDescription: {
+    "zh-CN": "内容包可声明 smelter、assembler 或 chemical 配方族；负熵熔炉和重组式制造台无需复制整套基础配方即可使用对应通用配方，减少大型内容包重复定义和冲突。",
+    en: "Content packs may declare a smelter, assembler, or chemical recipe family. Negentropy smelters and re-composing assemblers can use matching generic recipes without duplicating the core catalog, reducing large-pack duplication and conflicts.",
+  },
+  replicationTitle: { "zh-CN": "产率复制只发放终局成果", en: "Rate replication awards endgame outputs only" },
+  replicationDescription: {
+    "zh-CN": "复制模式继续按锁定供电倍率使用最近 60/30 模拟秒统计，但材料白名单仅含白矩阵、小型运载火箭和太阳帆；科研与逐恒星系戴森终端事件继续独立复制，普通库存不再膨胀。",
+    en: "Replication still uses the locked power multiplier and the most recent 60/30 simulated seconds, but its material allowlist contains only universe matrices, small carrier rockets, and solar sails. Research and per-system Dyson terminal events remain separate while ordinary inventory no longer expands.",
+  },
+  guardTitle: { "zh-CN": "内存与积压自动暂停默认关闭", en: "Memory and backlog auto-pause defaults off" },
+  guardDescription: {
+    "zh-CN": "新设备或没有保存过该偏好的浏览器默认继续运行，不因堆水位或模拟积压自动暂停；曾明确开启或关闭的设备选择继续保留，Worker、检查点和分配失败保护不变。",
+    en: "New devices and browsers without a saved preference keep running instead of auto-pausing on heap or simulation backlog pressure. An explicit existing device choice is preserved, while Worker, checkpoint, and allocation-failure safeguards remain.",
+  },
+  boundaryTitle: { "zh-CN": "存档与服务器数据格式不升级", en: "Save and server data formats do not change" },
+  boundaryDescription: {
+    "zh-CN": "本版仅调整有界传输、标签页写入权、运行时内容目录与可选挂机算法；不迁移玩家状态、云 schema 或 SQLite layout。",
+    en: "This release changes bounded transfer, tab write authority, runtime content catalogs, and an optional idle algorithm only; it does not migrate player state, the cloud schema, or the SQLite layout.",
+  },
+} as const;
+
 const release123Copy = {
   date: { "zh-CN": "2026年8月28日", en: "August 28, 2026" },
   title: { "zh-CN": "终局自动化、挂机模式与 Windows 性能更新", en: "Endgame Automation, Idle Modes, and Windows Performance" },
@@ -745,6 +784,10 @@ function release123Message(locale: AppLocale, key: keyof typeof release123Copy):
   return release123Copy[key][locale];
 }
 
+function release124Message(locale: AppLocale, key: keyof typeof release124Copy): string {
+  return release124Copy[key][locale];
+}
+
 function release117Message(locale: AppLocale, key: keyof typeof release117Copy): string {
   return release117Copy[key][locale];
 }
@@ -779,6 +822,24 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-28-v1.2.4",
+    date: release124Message(locale, "date"),
+    version: "1.2.4",
+    title: release124Message(locale, "title"),
+    summary: release124Message(locale, "summary"),
+    items: [
+      { id: "v124-cloud-256m", title: release124Message(locale, "cloudTitle"), description: release124Message(locale, "cloudDescription") },
+      { id: "v124-tab-takeover", title: release124Message(locale, "takeoverTitle"), description: release124Message(locale, "takeoverDescription") },
+      { id: "v124-content-family", title: release124Message(locale, "packTitle"), description: release124Message(locale, "packDescription") },
+      { id: "v124-endgame-replication", title: release124Message(locale, "replicationTitle"), description: release124Message(locale, "replicationDescription") },
+      { id: "v124-memory-guard-default-off", title: release124Message(locale, "guardTitle"), description: release124Message(locale, "guardDescription") },
+      { id: "v124-compatibility-boundary", title: release124Message(locale, "boundaryTitle"), description: release124Message(locale, "boundaryDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes123(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-28-v1.2.3",
     date: release123Message(locale, "date"),

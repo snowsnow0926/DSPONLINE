@@ -80,7 +80,7 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("selected");
       expect(readBlueprintAllowOverlapPreference()).toBe(false);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(true);
-      expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(false);
       expect(readMemoryAutoPauseThresholdPreference()).toBeNull();
       writeThemePreference("light");
       writeShowRunLogPreference(false);
@@ -97,7 +97,7 @@ describe("device-only UI preferences", () => {
       writeCanvasInteractionDetailPreference("hover");
       writeBlueprintAllowOverlapPreference(true);
       writeLargeSaveAutosaveThrottlePreference(false);
-      writeMemoryAutoPauseEnabledPreference(false);
+      writeMemoryAutoPauseEnabledPreference(true);
       writeMemoryAutoPauseThresholdPreference(1_536);
       expect(readThemePreference()).toBe("light");
       expect(readShowRunLogPreference()).toBe(false);
@@ -118,13 +118,13 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("hover");
       expect(readBlueprintAllowOverlapPreference()).toBe(true);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(false);
-      expect(readMemoryAutoPauseEnabledPreference()).toBe(false);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
       expect(readMemoryAutoPauseThresholdPreference()).toBe(1_536);
       expect(storage.getItem(CANVAS_DETAIL_PREFERENCE_KEY)).toBe("medium");
       expect(storage.getItem(CANVAS_OVERLAP_PREFERENCE_KEY)).toBe("representative");
       expect(storage.getItem(CANVAS_INTERACTION_DETAIL_PREFERENCE_KEY)).toBe("hover");
       expect(storage.getItem(BLUEPRINT_ALLOW_OVERLAP_PREFERENCE_KEY)).toBe("true");
-      expect(storage.getItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY)).toBe("false");
+      expect(storage.getItem(MEMORY_AUTO_PAUSE_PREFERENCE_KEY)).toBe("true");
       expect(storage.getItem(MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY)).toBe("1536");
     } finally {
       Object.defineProperty(globalThis, "window", { configurable: true, value: original });
@@ -168,7 +168,7 @@ describe("device-only UI preferences", () => {
       expect(readCanvasInteractionDetailPreference()).toBe("selected");
       expect(readBlueprintAllowOverlapPreference()).toBe(false);
       expect(readLargeSaveAutosaveThrottlePreference()).toBe(true);
-      expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
+      expect(readMemoryAutoPauseEnabledPreference()).toBe(false);
       expect(readMemoryAutoPauseThresholdPreference()).toBeNull();
       expect(storage.getItem(LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY)).toBe("damaged");
     } finally {

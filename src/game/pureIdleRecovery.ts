@@ -132,6 +132,10 @@ export type PureIdleRecoveryInspection =
   | { status: "committed"; record: PureIdleRecoveryRecord; message: string }
   | { status: "missing" | "invalid" | "unavailable"; record: null; message: string };
 
+export type PureIdleTakeoverFinalization =
+  | { ok: true; finalized: boolean; sessionId: string | null; abandonedWallSeconds: number }
+  | { ok: false; message: string };
+
 let databasePromise: Promise<IDBDatabase> | null = null;
 let heldBrowserLease: { ownerToken: string; release: () => void } | null = null;
 
@@ -448,6 +452,63 @@ export async function inspectPureIdleRecovery(): Promise<PureIdleRecoveryInspect
       record: null,
       message: error instanceof Error && error.message ? `无法读取纯挂机恢复日志：${error.message}` : "无法读取纯挂机恢复日志",
     };
+  }
+}
+
+/**
+ * Finalize an explicitly abandoned cross-tab pure-idle session after the new
+ * tab has already persisted its chosen authoritative primary save. The old
+ * checkpoint is retained as committed diagnostic evidence, but its owner is
+ * fenced out and none of its uncommitted wall time can later be awarded.
+ */
+export async function finalizePureIdleRecoveryForLocalTakeover(
+  ownerToken: string,
+  nowMs = Date.now(),
+): Promise<PureIdleTakeoverFinalization> {
+  if (!canUsePureIdleRecovery()) return { ok: true, finalized: false, sessionId: null, abandonedWallSeconds: 0 };
+  try {
+    const db = await openDatabase();
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const [checkpointValue, heartbeatValue] = await Promise.all([
+      requestResult(store.get(CHECKPOINT_KEY)),
+      requestResult(store.get(HEARTBEAT_KEY)),
+    ]);
+    if (checkpointValue === undefined && heartbeatValue === undefined) {
+      transaction.abort();
+      return { ok: true, finalized: false, sessionId: null, abandonedWallSeconds: 0 };
+    }
+    if (!validCheckpoint(checkpointValue) || !validHeartbeat(heartbeatValue) || checkpointValue.sessionId !== heartbeatValue.sessionId) {
+      transaction.abort();
+      return { ok: false, message: "纯挂机恢复日志不完整，未修改该日志" };
+    }
+    if (heartbeatValue.committed === true) {
+      transaction.abort();
+      return { ok: true, finalized: false, sessionId: heartbeatValue.sessionId, abandonedWallSeconds: heartbeatValue.abandonedWallSeconds ?? 0 };
+    }
+    const elapsedWallSeconds = Math.max(0, Math.floor((nowMs - checkpointValue.startedAtMs) / 1_000));
+    const abandonedWallSeconds = Math.max(0, elapsedWallSeconds - Math.max(0, heartbeatValue.settledWallSeconds));
+    store.put({
+      ...heartbeatValue,
+      schemaVersion: RECOVERY_SCHEMA_VERSION,
+      ownerToken,
+      heartbeatAtMs: nowMs,
+      leaseExpiresAtMs: nowMs,
+      phase: "failed",
+      stopReason: "user-cancelled",
+      stopRequestedAtMs: nowMs,
+      finalizedAtMs: nowMs,
+      committedAtMs: nowMs,
+      abandonedWallSeconds,
+      committed: true,
+      lastTransitionAtMs: nowMs,
+      lastError: "玩家已明确选择由当前标签页强制接管；旧标签页未提交的纯挂机时段未结算",
+    } satisfies PureIdleHeartbeatRecord);
+    await transactionDone(transaction);
+    releaseBrowserLease(ownerToken);
+    return { ok: true, finalized: true, sessionId: heartbeatValue.sessionId, abandonedWallSeconds };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "无法收口旧纯挂机恢复日志" };
   }
 }
 

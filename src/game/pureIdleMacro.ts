@@ -420,7 +420,7 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
   const running = lines.filter((entry): entry is PureIdleLineStatus & { efficiency: number } => entry.efficiency !== null);
   const minimum = running.length > 0 ? Math.min(...running.map((entry) => entry.efficiency)) : null;
   const limiting = session.mode === "replication"
-    ? `按最近 ${Math.floor(session.replicationContract?.windowSeconds ?? 0)} 个模拟秒的正向统计产率直接复制，不消耗原料`
+    ? `按最近 ${Math.floor(session.replicationContract?.windowSeconds ?? 0)} 个模拟秒复制白矩阵、火箭、太阳帆与科研等终局成果；不消耗原料，也不复制普通库存`
     : minimum === null
     ? "终局产线尚未在校准窗口运行"
     : lines.find((entry) => entry.efficiency === minimum)?.reason ?? "供给稳定";
@@ -1043,7 +1043,7 @@ function advanceReplicationSession(
   session.settledSimulationSeconds += simulationSeconds;
   session.actualMultiplier = multiplier;
   session.phase = "running";
-  session.lastValidationReason = `统计产率复制：材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}`;
+  session.lastValidationReason = `统计产率复制：终局材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}`;
   session.computationDurationMs = Math.max(0, macroNow() - startedAt);
   return summarizePureIdleMacroSession(session);
 }

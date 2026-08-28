@@ -37,18 +37,27 @@ function unlock(state: GameState, total = 201): void {
 function telemetry({
   iron = 0,
   white = 0,
+  rocketItems = 0,
+  sailItems = 0,
   research = 0,
   rockets = 0,
   sails = 0,
 }: {
   iron?: number;
   white?: number;
+  rocketItems?: number;
+  sailItems?: number;
   research?: number;
   rockets?: number;
   sails?: number;
 }): PureIdleReplicationTelemetry {
   return {
-    totalProduced: { iron_ingot: String(iron), universe_matrix: String(white) },
+    totalProduced: {
+      iron_ingot: String(iron),
+      universe_matrix: String(white),
+      small_carrier_rocket: String(rocketItems),
+      solar_sail: String(sailItems),
+    },
     researchInvestmentByItem: { universe_matrix: String(research) },
     structurePointsBySystem: { helios: rockets },
     shellSailsBySystem: { helios: sails },
@@ -82,8 +91,8 @@ function replicationState(windowSeconds = 60): GameState {
   state.dysonSphere.totalSailsAbsorbed = 5;
   state.endgame.activeInfiniteResearchId = "matrix_compression";
   state.productionHistory = [
-    sample(0, telemetry({ iron: 100, white: 10, research: 1_000, rockets: 10, sails: 2 })),
-    sample(windowSeconds, telemetry({ iron: 160, white: 30, research: 1_120, rockets: 14, sails: 5 })),
+    sample(0, telemetry({ iron: 100, white: 10, rocketItems: 20, sailItems: 40, research: 1_000, rockets: 10, sails: 2 })),
+    sample(windowSeconds, telemetry({ iron: 160, white: 30, rocketItems: 26, sailItems: 52, research: 1_120, rockets: 14, sails: 5 })),
   ];
   state.historyRecordedAt = windowSeconds;
   state.elapsedSeconds = windowSeconds;
@@ -148,7 +157,7 @@ describe("pure-idle production replication", () => {
     );
   });
 
-  it("copies positive materials, research, rockets and sails without debiting source inventory", () => {
+  it("copies only terminal materials plus research, rockets and sails without debiting source inventory", () => {
     const state = replicationState();
     state.tray.iron_ore = 77;
     const beforeProgress = BigInt(state.endgame.infiniteResearch.matrix_compression.progress);
@@ -158,7 +167,10 @@ describe("pure-idle production replication", () => {
     expect(summary.algorithmVersion).toBe(PURE_IDLE_REPLICATION_ALGORITHM_VERSION);
     expect(summary.minimumEfficiency).toBe(1);
     expect(state.tray.iron_ore).toBe(77);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBeGreaterThan(0n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBe(0n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBeGreaterThan(0n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.small_carrier_rocket ?? "0")).toBeGreaterThan(0n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.solar_sail ?? "0")).toBeGreaterThan(0n);
     expect(BigInt(state.endgame.infiniteResearch.matrix_compression.progress)).toBeGreaterThan(beforeProgress);
     expect(state.dysonPlans.helios.structurePoints).toBeGreaterThan(14);
     expect(state.dysonPlans.helios.shellSails).toBeGreaterThan(5);
@@ -174,9 +186,11 @@ describe("pure-idle production replication", () => {
 
     const summary = advancePureIdleMacroSession(session, 60);
 
-    // The locked sample produced 60 iron in 60 simulation seconds. One real
-    // minute at 15x therefore copies exactly 900 iron, not the 1x value 60.
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBe(900n);
+    // Intermediate iron is deliberately excluded. The locked sample produced
+    // 20 white matrices in 60 simulation seconds, so one real minute at 15x
+    // copies exactly 300 terminal matrices.
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBe(0n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBe(300n);
     expect(summary.actualMultiplier).toBe(15);
     expect(summary.settledSimulationSeconds).toBe(900);
     expect(summary.current.whiteMatrixProduced - summary.baseline.whiteMatrixProduced).toBe(300);

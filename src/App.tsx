@@ -403,6 +403,11 @@ import {
   type RecipeWorkspaceSelector,
 } from "./game/recipeWorkspaceReadModel";
 import {
+  RECIPE_FOCUS_NATIVE_BASE_FIELDS,
+  createWebRecipeFocusReadModel,
+  selectNativeRecipeFocusReadModel,
+} from "./game/recipeFocusReadModel";
+import {
   collectCanvasDragMembers,
   collectCanvasSelectionBeltIds,
   selectFactoryCanvasRows,
@@ -2207,6 +2212,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
+  const nativeRecipeFocusReadModel = useMemo(
+    () => selectNativeRecipeFocusReadModel(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: game.activePlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      game.activePlanetId,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const webRecipeFocusReadModel = useMemo(
+    () => nativePlayerAuthorityBoundFrame ? null : createWebRecipeFocusReadModel(game),
+    [game.recipeFocus, nativePlayerAuthorityBoundFrame],
+  );
+  const recipeFocusReadModel = nativePlayerAuthorityBoundFrame
+    ? nativeRecipeFocusReadModel
+    : webRecipeFocusReadModel;
   const webFactoryRunStatusReadModel = useMemo(
     () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryRunStatusReadModel(game),
     [game.activePlanetId, game.paused, nativeAuthoritativeFactoryWorkspaceFrame],
@@ -2350,7 +2377,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         selectedBeltIds: factoryThinViewSelectedBeltIds,
       },
       viewport: {
-        baseFields: [],
+        baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS],
         planetId: game.activePlanetId,
         bounds: nativeFactoryViewportBounds,
         entityCursor: 0,
@@ -13867,7 +13894,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <strong>{factoryActivePlanetNavigationRow?.displayName ?? factoryPlanetNavigationReadModel.activePlanetId} · {factoryActivePlanetNavigationRow?.code ?? factoryPlanetNavigationReadModel.activePlanetId}工厂区</strong>
           </div>
           <RecipeFocusPanel
-            game={game}
+            model={recipeFocusReadModel}
             onClear={() => onRecipeFocusChange(null)}
             onModeChange={(mode) => commitGame((current) => setRecipeFocusMode(current, mode))}
             onOpen={openRecipeFocus}

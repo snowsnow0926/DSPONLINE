@@ -2,7 +2,8 @@ import { ArrowDown, ArrowUp, BookOpen, ChevronDown, ChevronRight, Factory, Pin, 
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ITEMS, getBuilding, getItem } from "../game/content";
 import { getConsumingRecipes, getProducingRecipes, getResourceSources } from "../game/recipeGraph";
-import type { GameState, ItemId, RecipeDefinition, RecipeFocusMode } from "../game/types";
+import type { RecipeFocusReadModel } from "../game/recipeFocusReadModel";
+import type { ItemId, RecipeDefinition, RecipeFocusMode } from "../game/types";
 import { ItemGlyph } from "./ItemReference";
 
 function ItemBadge({ itemId, onOpen }: { itemId: ItemId; onOpen: (itemId: ItemId) => void }) {
@@ -64,23 +65,24 @@ function CompactLane({ itemId, direction, onOpen }: { itemId: ItemId; direction:
   );
 }
 
-export function RecipeFocusPanel({ game, onClear, onModeChange, onOpen, onPositionChange }: {
-  game: GameState;
+export function RecipeFocusPanel({ model, onClear, onModeChange, onOpen, onPositionChange }: {
+  model: RecipeFocusReadModel | null;
   onClear: () => void;
   onModeChange: (mode: RecipeFocusMode) => void;
   onOpen: (itemId?: ItemId) => void;
   onPositionChange: (position: { x: number; y: number }) => void;
 }) {
-  const itemId = game.recipeFocus.itemId;
-  const [position, setPosition] = useState(game.recipeFocus.position);
+  const itemId = model?.itemId ?? null;
+  const [position, setPosition] = useState(model?.position ?? { x: 24, y: 72 });
   const positionRef = useRef(position);
   const dragRef = useRef<{ offsetX: number; offsetY: number; parent: DOMRect } | null>(null);
   useEffect(() => {
-    setPosition(game.recipeFocus.position);
-    positionRef.current = game.recipeFocus.position;
-  }, [game.recipeFocus.position.x, game.recipeFocus.position.y]);
-  if (!itemId || !ITEMS[itemId]) return null;
-  const maxDepth = game.recipeFocus.mode === "full" ? 8 : 2;
+    if (!model) return;
+    setPosition(model.position);
+    positionRef.current = model.position;
+  }, [model?.position.x, model?.position.y]);
+  if (!model || !itemId || !ITEMS[itemId]) return null;
+  const maxDepth = model.mode === "full" ? 8 : 2;
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
     const panel = event.currentTarget.closest(".recipe-focus-panel") as HTMLElement | null;
@@ -109,13 +111,13 @@ export function RecipeFocusPanel({ game, onClear, onModeChange, onOpen, onPositi
     onPositionChange(positionRef.current);
   };
   return (
-    <aside className="recipe-focus-panel nodrag nopan" style={{ left: position.x, top: position.y, right: "auto", bottom: "auto" }} aria-label="当前聚焦生产链">
+    <aside className="recipe-focus-panel nodrag nopan" style={{ left: position.x, top: position.y, right: "auto", bottom: "auto" }} aria-label="当前聚焦生产链" data-recipe-focus-source={model.source}>
       <header className="recipe-focus-header" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
         <div><i><BookOpen size={14} /></i><span><small>聚焦材料 · 可拖动</small><strong>{getItem(itemId).name}</strong></span></div>
-        <div className="recipe-focus-actions"><div className="recipe-focus-mode" role="group" aria-label="生产链展开层级"><button type="button" className={game.recipeFocus.mode === "two-level" ? "active" : ""} onClick={() => onModeChange("two-level")}><ChevronRight size={12} />两层</button><button type="button" className={game.recipeFocus.mode === "full" ? "active" : ""} onClick={() => onModeChange("full")}><ChevronDown size={12} />完整</button></div><button type="button" onClick={() => onOpen()} title="打开生产资料库" aria-label="打开生产资料库"><BookOpen size={14} /></button><button type="button" onClick={onClear} title="取消聚焦材料" aria-label="取消聚焦材料"><X size={14} /></button></div>
+        <div className="recipe-focus-actions"><div className="recipe-focus-mode" role="group" aria-label="生产链展开层级"><button type="button" className={model.mode === "two-level" ? "active" : ""} onClick={() => onModeChange("two-level")}><ChevronRight size={12} />两层</button><button type="button" className={model.mode === "full" ? "active" : ""} onClick={() => onModeChange("full")}><ChevronDown size={12} />完整</button></div><button type="button" onClick={() => onOpen(itemId)} title="打开生产资料库" aria-label="打开生产资料库"><BookOpen size={14} /></button><button type="button" onClick={onClear} title="取消聚焦材料" aria-label="取消聚焦材料"><X size={14} /></button></div>
       </header>
       <div className="recipe-focus-strip"><CompactLane itemId={itemId} direction="up" onOpen={onOpen} /><section className="recipe-focus-center"><ItemBadge itemId={itemId} onOpen={onOpen} /><small>{getProducingRecipes(itemId).length + getResourceSources(itemId).length} 种来源</small></section><CompactLane itemId={itemId} direction="down" onOpen={onOpen} /></div>
-      {game.recipeFocus.mode === "full" ? <div className="recipe-focus-details"><section><header><ArrowUp size={12} /><span>完整上游链</span></header><ChainBranch itemId={itemId} direction="up" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section><section><header><ArrowDown size={12} /><span>完整下游链</span></header><ChainBranch itemId={itemId} direction="down" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section></div> : null}
+      {model.mode === "full" ? <div className="recipe-focus-details"><section><header><ArrowUp size={12} /><span>完整上游链</span></header><ChainBranch itemId={itemId} direction="up" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section><section><header><ArrowDown size={12} /><span>完整下游链</span></header><ChainBranch itemId={itemId} direction="down" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section></div> : null}
     </aside>
   );
 }

@@ -21,6 +21,24 @@ const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
+pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority-tick-v1";
+
+#[derive(Clone)]
+enum CoreLeaseAuthorization {
+    Experiment(ExactRealtimeLease),
+    PlayerAuthority {
+        lease: ExactRealtimeLease,
+        authority_session_id: String,
+    },
+}
+
+impl CoreLeaseAuthorization {
+    fn lease(&self) -> &ExactRealtimeLease {
+        match self {
+            Self::Experiment(lease) | Self::PlayerAuthority { lease, .. } => lease,
+        }
+    }
+}
 
 fn persist_statistics_sidecar_best_effort(
     store: &SaveStore,
@@ -389,6 +407,13 @@ pub struct CoreActivatePlayerAuthorityRequest {
     pub expected_checkpoint: ExactRealtimeCheckpoint,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityTickRequest {
+    pub run_id: String,
+    pub sequence: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointAcknowledgeExactRealtimeResult {
@@ -403,6 +428,26 @@ pub struct CoreCheckpointAcknowledgeExactRealtimeResult {
 pub struct CorePlayerAuthorityLeaseResult {
     pub lease: ExactRealtimeLease,
     pub summary: CoreStateSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCommitPlayerAuthorityTickResult {
+    pub sequence: u64,
+    pub revision: u64,
+    pub checkpoint: ExactRealtimeCheckpoint,
+    pub summary: CoreStateSummary,
+    pub duplicate: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlayerAuthorityTickFault {
+    None,
+    AfterStage,
+    AfterWal,
+    AfterCheckpoint,
+    AfterLeaseAcknowledge,
 }
 
 #[derive(Debug, Serialize)]
@@ -708,8 +753,9 @@ impl CoreRegistry {
             canonical_sha256: summary.canonical_sha256.clone(),
             domain_sha256: summary.domain_sha256.clone(),
         };
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
         let lease = store.prepare_player_authority_lease(
-            session_id.to_owned(),
+            authority_session_id,
             request.run_id,
             summary.registry_fingerprint.clone(),
             request.expected_checkpoint,
@@ -734,9 +780,10 @@ impl CoreRegistry {
             session_id,
             &request.expected_checkpoint,
         )?;
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
         let current = store.require_exact_realtime_lease()?;
         if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || current.authority_session_id.as_deref() != Some(session_id)
+            || current.authority_session_id.as_deref() != Some(authority_session_id.as_str())
             || current.run_id != request.run_id
             || current.registry_fingerprint != summary.registry_fingerprint
             || current.checkpoint != request.expected_checkpoint
@@ -747,11 +794,307 @@ impl CoreRegistry {
             bail!("native core domain coverage is not player-authority eligible");
         }
         let lease = store.activate_player_authority_lease(
-            session_id,
+            &authority_session_id,
             &request.run_id,
             &summary.registry_fingerprint,
         )?;
         Ok(CorePlayerAuthorityLeaseResult { lease, summary })
+    }
+
+    /// Settles one and only one player-authoritative realtime second. This is
+    /// intentionally a single host operation: Rust derives and durably stages
+    /// the pending command, commits its idempotent WAL entry, publishes an
+    /// incremental checkpoint, and finally advances the lease ACK. Retrying
+    /// the same sequence after a lost response resumes from whichever durable
+    /// boundary was reached.
+    pub fn commit_player_authority_tick(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityTickRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityTickResult> {
+        self.commit_player_authority_tick_internal(
+            store,
+            session_id,
+            request,
+            #[cfg(test)]
+            PlayerAuthorityTickFault::None,
+        )
+    }
+
+    #[cfg(not(test))]
+    fn commit_player_authority_tick_internal(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityTickRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityTickResult> {
+        self.commit_player_authority_tick_impl(store, session_id, request, || Ok(()))
+    }
+
+    #[cfg(test)]
+    fn commit_player_authority_tick_internal(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityTickRequest,
+        fault: PlayerAuthorityTickFault,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityTickResult> {
+        let reached = std::cell::Cell::new(PlayerAuthorityTickFault::None);
+        self.commit_player_authority_tick_impl(store, session_id, request, || {
+            let next = match reached.get() {
+                PlayerAuthorityTickFault::None => PlayerAuthorityTickFault::AfterStage,
+                PlayerAuthorityTickFault::AfterStage => PlayerAuthorityTickFault::AfterWal,
+                PlayerAuthorityTickFault::AfterWal => PlayerAuthorityTickFault::AfterCheckpoint,
+                PlayerAuthorityTickFault::AfterCheckpoint => {
+                    PlayerAuthorityTickFault::AfterLeaseAcknowledge
+                }
+                PlayerAuthorityTickFault::AfterLeaseAcknowledge => {
+                    PlayerAuthorityTickFault::AfterLeaseAcknowledge
+                }
+            };
+            reached.set(next);
+            if next == fault {
+                bail!("injected native player-authority tick lost response at {next:?}")
+            }
+            Ok(())
+        })
+    }
+
+    fn commit_player_authority_tick_impl(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityTickRequest,
+        mut after_durable_boundary: impl FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityTickResult> {
+        validate_session_id(session_id)?;
+        if request.sequence == 0 || request.sequence > MAX_SAFE_INTEGER {
+            bail!("native player-authority tick sequence is invalid");
+        }
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        let initial = store.require_exact_realtime_lease()?;
+        if initial.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || initial.authority_session_id.as_deref() != Some(authority_session_id.as_str())
+            || initial.run_id != request.run_id
+            || initial.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+        {
+            bail!("native player-authority tick lease session/run identity conflicts");
+        }
+
+        let initial_summary = self.status(session_id)?;
+        let initial_state = self.session(session_id)?;
+        if initial_state.identity.slot != "normal-main"
+            || initial_state.identity.mode != "normal"
+            || initial_state.identity.state_version != 47
+            || initial_state.identity.registry_fingerprint != initial.registry_fingerprint
+            || initial_summary.mode != "normal"
+            || initial_summary.state_version != 47
+            || initial_summary.registry_fingerprint != initial.registry_fingerprint
+            || initial_summary.paused
+        {
+            bail!("native player-authority tick requires a running v47 normal-main session");
+        }
+
+        if initial.pending_tick.is_none() && request.sequence == initial.acknowledged.sequence {
+            if initial_summary.revision != initial.acknowledged.revision
+                || initial_summary.canonical_sha256 != initial.acknowledged.proof.canonical_sha256
+                || initial_summary.domain_sha256 != initial.acknowledged.proof.domain_sha256
+            {
+                bail!("native player-authority duplicate tick differs from its durable ACK");
+            }
+            let latest = store
+                .latest_published_checkpoint_identity("normal-main")?
+                .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+            let checkpoint = initial.acknowledged.checkpoint.clone();
+            if latest.generation != checkpoint.generation
+                || latest.root_hash != checkpoint.root_hash
+                || latest.revision != checkpoint.revision
+                || latest.mode != "normal"
+                || latest.state_version != 47
+                || latest.registry_fingerprint != initial.registry_fingerprint
+                || initial_state.identity.generation != checkpoint.generation
+                || initial_state.identity.root_hash != checkpoint.root_hash
+                || initial_state.identity.revision != checkpoint.revision
+            {
+                bail!("native player-authority duplicate tick checkpoint is no longer current");
+            }
+            return Ok(CoreCommitPlayerAuthorityTickResult {
+                sequence: request.sequence,
+                revision: initial_summary.revision,
+                checkpoint,
+                summary: initial_summary,
+                duplicate: true,
+            });
+        }
+
+        let resumed = initial.pending_tick.is_some();
+        if let Some(pending) = initial.pending_tick.as_ref() {
+            if pending.sequence != request.sequence
+                || !matches!(
+                    initial_summary.revision,
+                    revision
+                        if revision == pending.base_revision
+                            || revision == pending.expected_revision
+                )
+            {
+                bail!("native player-authority pending tick conflicts with the request");
+            }
+        } else if request.sequence
+            != initial
+                .acknowledged
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("native player-authority sequence is exhausted"))?
+        {
+            bail!("native player-authority tick sequence is not next");
+        }
+
+        let staged = store.stage_player_authority_tick(
+            &authority_session_id,
+            &request.run_id,
+            request.sequence,
+        )?;
+        after_durable_boundary()?;
+        let pending = staged
+            .pending_tick
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority staged tick is missing"))?
+            .clone();
+        let published_before_commit = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        let state_before_commit = self.session(session_id)?;
+        let checkpoint_already_published = published_before_commit.revision
+            == pending.expected_revision
+            && state_before_commit.identity.generation == published_before_commit.generation
+            && state_before_commit.identity.root_hash == published_before_commit.root_hash
+            && state_before_commit.identity.revision == published_before_commit.revision
+            && state_before_commit.revision == pending.expected_revision;
+        let committed_duplicate = if checkpoint_already_published {
+            // Checkpoint publication compacted the covered WAL. Its exact
+            // generation plus the in-memory state proof is therefore the
+            // durable idempotency receipt for a retry after a lost response.
+            true
+        } else {
+            let operation = CoreCommitOperationRequest {
+                command_id: pending.command_id.clone(),
+                base_revision: pending.base_revision,
+                command: None,
+                simulation_seconds: pending.simulation_seconds as f64,
+                wall_seconds: pending.wall_seconds as f64,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: true,
+            };
+            let committed = self.commit_operation_internal(
+                store,
+                session_id,
+                operation,
+                Some(CoreLeaseAuthorization::PlayerAuthority {
+                    lease: staged.clone(),
+                    authority_session_id: authority_session_id.clone(),
+                }),
+            )?;
+            if committed.revision != pending.expected_revision
+                || committed.current_revision != pending.expected_revision
+            {
+                bail!("native player-authority WAL result differs from the pending tick");
+            }
+            committed.duplicate
+        };
+        after_durable_boundary()?;
+
+        let summary = self.status(session_id)?;
+        if summary.revision != pending.expected_revision {
+            bail!("native player-authority state differs from its durable WAL");
+        }
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if latest.mode != "normal"
+            || latest.state_version != 47
+            || latest.registry_fingerprint != staged.registry_fingerprint
+        {
+            bail!("native player-authority published checkpoint identity changed");
+        }
+        let (checkpoint, checkpoint_reused) = if latest.revision == pending.expected_revision {
+            let state = self.session(session_id)?;
+            if state.identity.generation != latest.generation
+                || state.identity.root_hash != latest.root_hash
+                || state.identity.revision != latest.revision
+            {
+                bail!("native player-authority session is not based on its pending checkpoint");
+            }
+            (
+                ExactRealtimeCheckpoint {
+                    generation: latest.generation,
+                    root_hash: latest.root_hash,
+                    revision: latest.revision,
+                },
+                true,
+            )
+        } else {
+            if latest.revision != pending.base_revision
+                || latest.generation != staged.acknowledged.checkpoint.generation
+                || latest.root_hash != staged.acknowledged.checkpoint.root_hash
+            {
+                bail!("native player-authority cannot checkpoint across an unproven publication");
+            }
+            let authorization = CoreLeaseAuthorization::PlayerAuthority {
+                lease: staged.clone(),
+                authority_session_id: authority_session_id.clone(),
+            };
+            let published = self.checkpoint_internal(
+                store,
+                session_id,
+                pending.settled_deadline_ms,
+                Some(&authorization),
+            )?;
+            if published.checkpoint.slot != "normal-main"
+                || published.checkpoint.revision != pending.expected_revision
+                || published.summary.revision != pending.expected_revision
+                || published.summary.canonical_sha256 != summary.canonical_sha256
+                || published.summary.domain_sha256 != summary.domain_sha256
+            {
+                bail!("native player-authority checkpoint differs from its durable WAL");
+            }
+            (
+                ExactRealtimeCheckpoint {
+                    generation: published.checkpoint.generation,
+                    root_hash: published.checkpoint.root_hash,
+                    revision: published.checkpoint.revision,
+                },
+                false,
+            )
+        };
+        after_durable_boundary()?;
+
+        let proof = ExactRealtimeStateProof {
+            revision: summary.revision,
+            canonical_sha256: summary.canonical_sha256.clone(),
+            domain_sha256: summary.domain_sha256.clone(),
+        };
+        let lease = store.acknowledge_player_authority_tick(
+            &authority_session_id,
+            &request.run_id,
+            proof,
+            checkpoint.clone(),
+        )?;
+        after_durable_boundary()?;
+        if lease.acknowledged.sequence != request.sequence
+            || lease.acknowledged.revision != summary.revision
+            || lease.pending_tick.is_some()
+        {
+            bail!("native player-authority lease ACK did not close the tick");
+        }
+        Ok(CoreCommitPlayerAuthorityTickResult {
+            sequence: request.sequence,
+            revision: summary.revision,
+            checkpoint,
+            summary,
+            duplicate: resumed || committed_duplicate || checkpoint_reused,
+        })
     }
 
     fn validated_player_authority_session(
@@ -965,7 +1308,12 @@ impl CoreRegistry {
                 &request,
             )?
         };
-        self.commit_operation_internal(store, session_id, operation, Some(lease))
+        self.commit_operation_internal(
+            store,
+            session_id,
+            operation,
+            Some(CoreLeaseAuthorization::Experiment(lease)),
+        )
     }
 
     fn commit_operation_internal(
@@ -973,7 +1321,7 @@ impl CoreRegistry {
         store: &SaveStore,
         session_id: &str,
         request: CoreCommitOperationRequest,
-        exact_realtime_lease: Option<ExactRealtimeLease>,
+        lease_authorization: Option<CoreLeaseAuthorization>,
     ) -> anyhow::Result<CoreCommitOperationResult> {
         validate_session_id(session_id)?;
         if request.base_revision > MAX_SAFE_INTEGER
@@ -1011,7 +1359,9 @@ impl CoreRegistry {
                 bail!("native authoritative idempotency key conflicts with another operation");
             }
             require_exact_realtime_result_revision(
-                exact_realtime_lease.as_ref(),
+                lease_authorization
+                    .as_ref()
+                    .map(CoreLeaseAuthorization::lease),
                 operation.result_revision,
             )?;
             if current_revision < operation.result_revision {
@@ -1032,23 +1382,35 @@ impl CoreRegistry {
             if state.revision < operation.result_revision {
                 bail!("native authoritative retry did not reach its durable revision");
             }
-            let receipt = if let Some(lease) = exact_realtime_lease.as_ref() {
-                store.append_wal_idempotent_exact_realtime(
+            let receipt = match lease_authorization.as_ref() {
+                Some(CoreLeaseAuthorization::Experiment(lease)) => store
+                    .append_wal_idempotent_exact_realtime(
+                        lease,
+                        &slot,
+                        operation.base_revision,
+                        operation.result_revision,
+                        &request.command_id,
+                        existing.payload,
+                    )?,
+                Some(CoreLeaseAuthorization::PlayerAuthority {
                     lease,
+                    authority_session_id,
+                }) => store.append_wal_idempotent_player_authority(
+                    lease,
+                    authority_session_id,
                     &slot,
                     operation.base_revision,
                     operation.result_revision,
                     &request.command_id,
                     existing.payload,
-                )?
-            } else {
-                store.append_wal_idempotent(
+                )?,
+                None => store.append_wal_idempotent(
                     &slot,
                     operation.base_revision,
                     operation.result_revision,
                     &request.command_id,
                     existing.payload,
-                )?
+                )?,
             };
             return Ok(CoreCommitOperationResult {
                 command_id: request.command_id,
@@ -1089,7 +1451,12 @@ impl CoreRegistry {
             bail!("native authoritative operation made no revision progress");
         }
         let result_revision = prepared.revision;
-        require_exact_realtime_result_revision(exact_realtime_lease.as_ref(), result_revision)?;
+        require_exact_realtime_result_revision(
+            lease_authorization
+                .as_ref()
+                .map(CoreLeaseAuthorization::lease),
+            result_revision,
+        )?;
         let payload = json!({
             "kind": "stable-operation-v1",
             "baseStateRevision": request.base_revision,
@@ -1101,23 +1468,35 @@ impl CoreRegistry {
             "approximate": request.advance_mode != CoreAdvanceMode::Exact,
             "registry": { "fingerprint": fingerprint },
         });
-        let receipt = if let Some(lease) = exact_realtime_lease.as_ref() {
-            store.append_wal_idempotent_exact_realtime(
+        let receipt = match lease_authorization.as_ref() {
+            Some(CoreLeaseAuthorization::Experiment(lease)) => store
+                .append_wal_idempotent_exact_realtime(
+                    lease,
+                    &slot,
+                    request.base_revision,
+                    result_revision,
+                    &request.command_id,
+                    payload,
+                )?,
+            Some(CoreLeaseAuthorization::PlayerAuthority {
                 lease,
+                authority_session_id,
+            }) => store.append_wal_idempotent_player_authority(
+                lease,
+                authority_session_id,
                 &slot,
                 request.base_revision,
                 result_revision,
                 &request.command_id,
                 payload,
-            )?
-        } else {
-            store.append_wal_idempotent(
+            )?,
+            None => store.append_wal_idempotent(
                 &slot,
                 request.base_revision,
                 result_revision,
                 &request.command_id,
                 payload,
-            )?
+            )?,
         };
         let state = self.session_mut(session_id)?;
         *state = prepared;
@@ -1155,13 +1534,13 @@ impl CoreRegistry {
         store: &mut SaveStore,
         session_id: &str,
         saved_at_ms: u64,
-        exact_realtime_lease: Option<&ExactRealtimeLease>,
+        lease_authorization: Option<&CoreLeaseAuthorization>,
     ) -> anyhow::Result<CoreCheckpointResult> {
         self.checkpoint_internal_with_commit(
             store,
             session_id,
             saved_at_ms,
-            exact_realtime_lease,
+            lease_authorization,
             |store, transaction_id| store.commit(transaction_id),
         )
     }
@@ -1188,7 +1567,7 @@ impl CoreRegistry {
         store: &mut SaveStore,
         session_id: &str,
         saved_at_ms: u64,
-        exact_realtime_lease: Option<&ExactRealtimeLease>,
+        lease_authorization: Option<&CoreLeaseAuthorization>,
         commit: impl FnOnce(&mut SaveStore, &str) -> anyhow::Result<SaveCommitResult>,
     ) -> anyhow::Result<CoreCheckpointResult> {
         validate_session_id(session_id)?;
@@ -1228,8 +1607,22 @@ impl CoreRegistry {
             bail!("native core checkpoint base generation changed");
         }
         let previous_keys = recovery.record_keys;
-        let begin = if let Some(lease) = exact_realtime_lease {
-            store.begin_exact_realtime_checkpoint(
+        let begin = match lease_authorization {
+            Some(CoreLeaseAuthorization::Experiment(lease)) => store
+                .begin_exact_realtime_checkpoint(
+                    &slot,
+                    &mode,
+                    state_version,
+                    &base_checksum,
+                    &fingerprint,
+                    revision,
+                    saved_at_ms,
+                    lease,
+                )?,
+            Some(CoreLeaseAuthorization::PlayerAuthority {
+                lease,
+                authority_session_id,
+            }) => store.begin_player_authority_checkpoint(
                 &slot,
                 &mode,
                 state_version,
@@ -1238,9 +1631,9 @@ impl CoreRegistry {
                 revision,
                 saved_at_ms,
                 lease,
-            )?
-        } else {
-            store.begin(
+                authority_session_id,
+            )?,
+            None => store.begin(
                 &slot,
                 &mode,
                 state_version,
@@ -1248,7 +1641,7 @@ impl CoreRegistry {
                 &fingerprint,
                 revision,
                 saved_at_ms,
-            )?
+            )?,
         };
         let transaction_id = begin.transaction_id;
         let written = self
@@ -1502,11 +1895,12 @@ impl CoreRegistry {
             {
                 bail!("native exact realtime cannot checkpoint across an unproven publication");
             }
+            let authorization = CoreLeaseAuthorization::Experiment(current.clone());
             let published = self.checkpoint_internal(
                 store,
                 session_id,
                 request.settled_deadline_ms,
-                Some(&current),
+                Some(&authorization),
             )?;
             if published.checkpoint.slot != "normal-main"
                 || published.checkpoint.revision != pending.expected_revision
@@ -1622,8 +2016,13 @@ impl CoreRegistry {
         let checkpoint = if latest.generation == current.acknowledged.checkpoint.generation
             && latest.root_hash == current.acknowledged.checkpoint.root_hash
         {
-            let published =
-                self.checkpoint_internal(store, session_id, request.saved_at_ms, Some(&current))?;
+            let authorization = CoreLeaseAuthorization::Experiment(current.clone());
+            let published = self.checkpoint_internal(
+                store,
+                session_id,
+                request.saved_at_ms,
+                Some(&authorization),
+            )?;
             if published.checkpoint.slot != "normal-main"
                 || published.checkpoint.revision != finalization.target_revision
                 || published.summary.canonical_sha256 != finalization.target_proof.canonical_sha256
@@ -1840,18 +2239,258 @@ mod tests {
     }
 
     fn import_envelope() -> Vec<u8> {
-        let state = serde_json::to_string(&json!({
-            "version": 47,
-            "mode": "normal",
-            "activePlanetId": "home",
-            "elapsedSeconds": 2,
-            "paused": false,
-            "tray": {},
-            "entities": [{
+        let mut plans = serde_json::Map::new();
+        let mut active_orbits = serde_json::Map::new();
+        let mut orbits = serde_json::Map::new();
+        let mut absorption = serde_json::Map::new();
+        for system in [
+            "helios",
+            "borealis",
+            "aurora",
+            "ember",
+            "sirius",
+            "white_dwarf",
+            "neutron",
+            "blue_giant",
+        ] {
+            let orbit_id = format!("test-orbit-{system}");
+            plans.insert(
+                system.to_owned(),
+                json!({
+                    "systemId": system,
+                    "activeLayerId": null,
+                    "structurePoints": 0,
+                    "shellSails": 0,
+                    "layers": []
+                }),
+            );
+            active_orbits.insert(system.to_owned(), Value::from(orbit_id.clone()));
+            orbits.insert(
+                system.to_owned(),
+                json!([{
+                    "id": orbit_id,
+                    "name": "test",
+                    "radius": 12000,
+                    "inclination": 0,
+                    "longitude": 0,
+                    "sailsInOrbit": 0,
+                    "totalLaunched": 0,
+                    "totalExpired": 0,
+                    "decayProgress": 0,
+                    "generationKw": 0
+                }]),
+            );
+            absorption.insert(system.to_owned(), Value::from(0));
+        }
+        let endgame = json!({
+            "activeInfiniteResearchId": null,
+            "autoResearch": false,
+            "autoDispatch": false,
+            "dispatchThrottle": 1,
+            "exportInputMode": "building",
+            "exportProjects": {
+                "universe_archive": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                "solar_sail_array": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                "carrier_rocket_fleet": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                "antimatter_exchange": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 }
+            },
+            "galacticCredits": 0,
+            "galacticScore": 0,
+            "totalExported": 0,
+            "exportedLastMinute": 0,
+            "exportWindowAmount": 0,
+            "exportWindowStartedAt": 0,
+            "infiniteResearch": {
+                "matrix_compression": { "level": 0, "progress": "0" },
+                "vein_utilization": { "level": 0, "progress": "0" },
+                "galactic_logistics": { "level": 0, "progress": "0" },
+                "stellar_harnessing": { "level": 0, "progress": "0" },
+                "continuum_simulation": { "level": 0, "progress": "0" }
+            },
+            "constructionActivity": { "activityId": null, "activityClockMs": 0 }
+        });
+        let mut state = serde_json::Map::new();
+        for (key, value) in [
+            ("version", json!(47)),
+            ("mode", json!("normal")),
+            ("activePlanetId", json!("home")),
+            ("elapsedSeconds", json!(2)),
+            ("historyRecordedAt", json!(0)),
+            ("productionHistory", json!([])),
+            ("paused", json!(false)),
+            ("manualMined", json!(0)),
+            ("totalProduced", json!({})),
+            ("blueprints", json!([])),
+            ("handcraftQueue", json!([])),
+            ("constructionQueue", json!([])),
+            ("systemSpaceStations", json!({})),
+            ("tray", json!({})),
+            ("belts", json!([])),
+        ] {
+            state.insert(key.to_owned(), value);
+        }
+        state.insert(
+            "settings".to_owned(),
+            json!({
+                "simulationSpeed": 1,
+                "resourceMode": "infinite",
+                "difficulty": "standard",
+                "productionBufferLimit": 1000000,
+                "logisticsBufferLimit": 1000000,
+                "beltBufferLimit": 100000000,
+                "proliferatorBufferLimit": 600
+            }),
+        );
+        for (key, value) in [
+            ("planetTrays", json!({ "home": {} })),
+            ("planetTrayItemLimits", json!({ "home": 1000000 })),
+            (
+                "portableFleet",
+                json!({ "logistics_drone": 0, "logistics_vessel": 0 }),
+            ),
+            (
+                "construction",
+                json!({ "mining_machine": 0, "conveyor_belt_mk1": 0 }),
+            ),
+            ("planetMetrics", json!({ "home": {} })),
+            ("powerGridMetrics", json!({ "home": {} })),
+        ] {
+            state.insert(key.to_owned(), value);
+        }
+        state.insert(
+            "research".to_owned(),
+            json!({
+                "selectedTechId": null,
+                "pausedTechId": null,
+                "queuedTechIds": [],
+                "progressByTech": {},
+                "completedTechIds": []
+            }),
+        );
+        state.insert(
+            "campaign".to_owned(),
+            json!({
+                "completedTaskIds": [],
+                "rewardedTaskIds": [],
+                "activeTaskId": "mine_first_ore",
+                "activeChapterId": "foundation"
+            }),
+        );
+        state.insert(
+            "constructionAutomation".to_owned(),
+            json!({
+                "enabled": false,
+                "jobs": {},
+                "targetStock": {},
+                "cursor": 0,
+                "totalCrafted": 0,
+                "lastCraftedId": null,
+                "destroyedByproducts": {}
+            }),
+        );
+        state.insert(
+            "exploration".to_owned(),
+            json!({
+                "missions": [],
+                "unlockedSystemIds": ["helios"],
+                "colonizedPlanetIds": ["home"],
+                "surveyProgressBySystem": { "helios": 1 }
+            }),
+        );
+        state.insert(
+            "galaxy".to_owned(),
+            json!({
+                "profiles": {
+                    "home": {
+                        "windMultiplier": 1,
+                        "solarMultiplier": 1,
+                        "geothermalMultiplier": 1,
+                        "miningMultiplier": 1,
+                        "productionSpeedMultiplier": 1,
+                        "specialization": "balanced",
+                        "oceanType": "none"
+                    }
+                },
+                "systemProfiles": { "helios": { "luminosity": 1 } }
+            }),
+        );
+        state.insert(
+            "timeWarp".to_owned(),
+            json!({
+                "enabled": false,
+                "pendingSimulationSeconds": 0,
+                "pendingWallSeconds": 0,
+                "effectiveMultiplier": 1,
+                "requiredPowerKw": 0,
+                "allocatedPowerKw": 0
+            }),
+        );
+        state.insert(
+            "dysonSwarm".to_owned(),
+            json!({
+                "sailsInOrbit": 0,
+                "totalLaunched": 0,
+                "totalExpired": 0,
+                "decayProgress": 0,
+                "generationKw": 0,
+                "receiverLoadKw": 0
+            }),
+        );
+        state.insert(
+            "dysonSphere".to_owned(),
+            json!({
+                "structurePoints": 0,
+                "totalRocketsLaunched": 0,
+                "shellSails": 0,
+                "totalSailsAbsorbed": 0,
+                "absorptionProgress": 0,
+                "generationKw": 0
+            }),
+        );
+        state.insert(
+            "dysonEngineering".to_owned(),
+            json!({
+                "launchMode": "balanced",
+                "launchThrottle": 1,
+                "launchEnabled": true,
+                "activeOrbitBySystem": Value::Object(active_orbits),
+                "orbitsBySystem": Value::Object(orbits),
+                "absorptionProgressBySystem": Value::Object(absorption),
+                "launchEnergySpentMj": 0
+            }),
+        );
+        state.insert("dysonPlans".to_owned(), Value::Object(plans));
+        state.insert(
+            "quantumLogisticsNetwork".to_owned(),
+            json!({
+                "enabled": false,
+                "inventory": {},
+                "itemCapacities": {},
+                "routingCursors": {},
+                "uploadRoutingCursors": {}
+            }),
+        );
+        state.insert(
+            "galacticHubNetwork".to_owned(),
+            json!({
+                "fleetInstalled": 0,
+                "fleetBusy": 0,
+                "fleetReturns": [],
+                "warpers": "0",
+                "warperTarget": "0",
+                "routingCursors": {}
+            }),
+        );
+        state.insert("endgame".to_owned(), endgame);
+        state.insert(
+            "entities".to_owned(),
+            json!([{
                 "id": "vein",
                 "kind": "vein",
                 "planetId": "home",
+                "gridId": "main",
                 "resourceId": "iron_ore",
+                "extractorBuildingId": "mining_machine",
                 "minerCount": 2,
                 "inputs": {},
                 "outputs": { "iron_ore": 3 },
@@ -1859,15 +2498,67 @@ mod tests {
                 "utilization": 0,
                 "productionRate": 0,
                 "routingCursor": 0,
-            }],
-            "belts": [],
-        }))
-        .unwrap();
+            }]),
+        );
+        let state = serde_json::to_string(&Value::Object(state)).unwrap();
         let checksum = utf16_fnv(&format!("{{\"formatVersion\":2,\"state\":{state}}}"));
         format!(
             "{{\"formatVersion\":2,\"kind\":\"primary\",\"savedAt\":42,\"mode\":\"normal\",\"slot\":\"main\",\"state\":{state},\"checksum\":\"{checksum}\"}}"
         )
         .into_bytes()
+    }
+
+    fn player_authority_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let checkpoint = ExactRealtimeCheckpoint {
+            generation: imported.checkpoint.generation,
+            root_hash: imported.checkpoint.root_hash,
+            revision: imported.checkpoint.revision,
+        };
+        let summary = registry.status(&imported.session_id).unwrap();
+        let authority_session_id = store
+            .player_authority_session_binding(&imported.session_id)
+            .unwrap();
+        store
+            .prepare_player_authority_lease(
+                authority_session_id.clone(),
+                "player-authority-run".to_owned(),
+                summary.registry_fingerprint.clone(),
+                checkpoint.clone(),
+                ExactRealtimeStateProof {
+                    revision: summary.revision,
+                    canonical_sha256: summary.canonical_sha256,
+                    domain_sha256: summary.domain_sha256,
+                },
+                42_000,
+            )
+            .unwrap();
+        store
+            .activate_player_authority_lease(
+                &authority_session_id,
+                "player-authority-run",
+                &summary.registry_fingerprint,
+            )
+            .unwrap();
+        (root, store, registry, imported.session_id, checkpoint)
     }
 
     fn exact_pending_lease() -> ExactRealtimeLease {
@@ -2105,9 +2796,12 @@ mod tests {
             revision: imported.checkpoint.revision,
         };
         let summary = registry.status(&imported.session_id).unwrap();
+        let authority_session_id = store
+            .player_authority_session_binding(&imported.session_id)
+            .unwrap();
         let prepared = store
             .prepare_player_authority_lease(
-                imported.session_id.clone(),
+                authority_session_id,
                 "player-authority-run".to_owned(),
                 summary.registry_fingerprint.clone(),
                 checkpoint.clone(),
@@ -2141,6 +2835,171 @@ mod tests {
             .unwrap_err();
         assert!(format!("{gated_activation:#}").contains("not player-authority eligible"));
         assert_eq!(store.require_exact_realtime_lease().unwrap(), prepared);
+    }
+
+    #[test]
+    fn player_authority_tick_derives_the_full_durable_chain_and_is_idempotent() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let request = || CoreCommitPlayerAuthorityTickRequest {
+            run_id: "player-authority-run".to_owned(),
+            sequence: 1,
+        };
+
+        let committed = registry
+            .commit_player_authority_tick(&mut store, &session_id, request())
+            .unwrap();
+        assert_eq!(committed.sequence, 1);
+        assert_eq!(committed.revision, entry_checkpoint.revision + 1);
+        assert_eq!(committed.checkpoint.revision, committed.revision);
+        assert!(!committed.duplicate);
+        let lease = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(
+            lease.purpose().unwrap(),
+            ExactRealtimeLeasePurpose::PlayerAuthority
+        );
+        assert_eq!(lease.acknowledged.sequence, 1);
+        assert_eq!(lease.acknowledged.revision, committed.revision);
+        assert_eq!(lease.acknowledged.checkpoint, committed.checkpoint);
+        assert!(lease.pending_tick.is_none());
+        let generation = committed.checkpoint.generation;
+
+        let retry = registry
+            .commit_player_authority_tick(&mut store, &session_id, request())
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.revision, committed.revision);
+        assert_eq!(retry.checkpoint, committed.checkpoint);
+        assert_eq!(
+            store.recover("normal-main").unwrap().unwrap().generation,
+            generation
+        );
+
+        let second = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 2,
+                },
+            )
+            .unwrap();
+        assert!(!second.duplicate);
+        assert_eq!(second.revision, committed.revision + 1);
+        let second_lease = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(second_lease.acknowledged.sequence, 2);
+        assert_eq!(second_lease.acknowledged.settled_deadline_ms, 44_000);
+    }
+
+    #[test]
+    fn player_authority_tick_resumes_after_each_lost_response_boundary() {
+        for fault in [
+            PlayerAuthorityTickFault::AfterStage,
+            PlayerAuthorityTickFault::AfterWal,
+            PlayerAuthorityTickFault::AfterCheckpoint,
+            PlayerAuthorityTickFault::AfterLeaseAcknowledge,
+        ] {
+            let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+                player_authority_fixture();
+            let request = || CoreCommitPlayerAuthorityTickRequest {
+                run_id: "player-authority-run".to_owned(),
+                sequence: 1,
+            };
+            let error = registry
+                .commit_player_authority_tick_internal(&mut store, &session_id, request(), fault)
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+
+            let durable_after_fault = store.require_exact_realtime_lease().unwrap();
+            match fault {
+                PlayerAuthorityTickFault::AfterStage
+                | PlayerAuthorityTickFault::AfterWal
+                | PlayerAuthorityTickFault::AfterCheckpoint => {
+                    assert_eq!(
+                        durable_after_fault.pending_tick.as_ref().unwrap().sequence,
+                        1
+                    );
+                    assert_eq!(durable_after_fault.acknowledged.sequence, 0);
+                }
+                PlayerAuthorityTickFault::AfterLeaseAcknowledge => {
+                    assert!(durable_after_fault.pending_tick.is_none());
+                    assert_eq!(durable_after_fault.acknowledged.sequence, 1);
+                }
+                PlayerAuthorityTickFault::None => unreachable!(),
+            }
+
+            let recovered = registry
+                .commit_player_authority_tick(&mut store, &session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
+            assert_eq!(recovered.checkpoint.revision, recovered.revision);
+            let durable = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(durable.acknowledged.sequence, 1);
+            assert_eq!(durable.acknowledged.revision, recovered.revision);
+            assert!(durable.pending_tick.is_none());
+
+            let second_retry = registry
+                .commit_player_authority_tick(&mut store, &session_id, request())
+                .unwrap();
+            assert!(second_retry.duplicate);
+            assert_eq!(second_retry.checkpoint, recovered.checkpoint);
+        }
+    }
+
+    #[test]
+    fn player_authority_restart_rejects_predictable_session_id_reuse() {
+        let (root, store, registry, session_id, checkpoint) = player_authority_fixture();
+        let old_binding = store.player_authority_session_binding(&session_id).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let recovered = reopened_store.recover("normal-main").unwrap().unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                "normal-main",
+                recovered.generation,
+                &recovered.root_hash,
+                recovered.revision,
+                &recovered.registry_fingerprint,
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.session_id, session_id);
+        assert_ne!(
+            reopened_store
+                .player_authority_session_binding(&reopened.session_id)
+                .unwrap(),
+            old_binding
+        );
+
+        let error = reopened_registry
+            .commit_player_authority_tick(
+                &mut reopened_store,
+                &reopened.session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 1,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("session/run identity conflicts"));
+        assert_eq!(
+            reopened_store.require_exact_realtime_lease().unwrap(),
+            lease_before
+        );
+        let checkpoint_after = reopened_store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(checkpoint_after.generation, checkpoint.generation);
+        assert_eq!(checkpoint_after.root_hash, checkpoint.root_hash);
+        assert_eq!(checkpoint_after.revision, checkpoint.revision);
     }
 
     #[test]

@@ -385,6 +385,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
+  assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
   const base = JSON.stringify({
     version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 2, paused: false,
     productionHistory: [

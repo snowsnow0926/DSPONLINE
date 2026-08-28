@@ -7,6 +7,7 @@ const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
@@ -477,6 +478,49 @@ test("player authority prepare and activate are main-owned, capability-gated, an
     sessionId: "core-1", runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000,
   }), (error) => {
     assert.equal(error.code, "NATIVE_CORE_PLAYER_AUTHORITY_GATE_UNAVAILABLE");
+    return true;
+  });
+});
+
+test("player authority tick is main-owned, sequence-keyed, and rejects caller state proofs", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      return { sequence: request.request.sequence, revision: request.request.sequence, duplicate: false };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+
+  await registry.commitPlayerAuthorityTick("main-authority", {
+    sessionId: "core-1",
+    runId: "player-run-1",
+    sequence: 8,
+  });
+  assert.deepEqual(calls, [{
+    operation: "coreCommitPlayerAuthorityTick",
+    sessionId: "core-1",
+    request: { runId: "player-run-1", sequence: 8 },
+  }]);
+
+  for (const field of ["baseRevision", "registryFingerprint", "proof", "checkpoint", "commandId"]) {
+    assert.throws(() => registry.commitPlayerAuthorityTick("main-authority", {
+      sessionId: "core-1", runId: "player-run-1", sequence: 9, [field]: "caller-controlled",
+    }), /invalid/);
+  }
+  assert.throws(() => registry.commitPlayerAuthorityTick("renderer-owner", {
+    sessionId: "core-1", runId: "player-run-1", sequence: 9,
+  }), /not owned/);
+
+  const oldClient = { hello: { capabilities: [] }, async request() { throw new Error("must not call host"); } };
+  const oldRegistry = new NativeCoreSessionRegistry(oldClient);
+  oldRegistry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  assert.throws(() => oldRegistry.commitPlayerAuthorityTick("main-authority", {
+    sessionId: "core-1", runId: "player-run-1", sequence: 1,
+  }), (error) => {
+    assert.equal(error.code, "NATIVE_CORE_PLAYER_AUTHORITY_TICK_UNAVAILABLE");
     return true;
   });
 });

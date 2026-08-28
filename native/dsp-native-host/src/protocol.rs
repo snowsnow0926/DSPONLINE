@@ -6,7 +6,8 @@ use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
 use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
-    CoreCommitOperationRequest, CorePreparePlayerAuthorityRequest,
+    CoreCommitOperationRequest, CoreCommitPlayerAuthorityTickRequest,
+    CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
 
@@ -29,6 +30,13 @@ pub struct CorePreparePlayerAuthorityControlRequest {
 pub struct CoreActivatePlayerAuthorityControlRequest {
     pub session_id: String,
     pub request: CoreActivatePlayerAuthorityRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityTickControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityTickRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +192,7 @@ pub enum ControlRequest {
     },
     CorePreparePlayerAuthority(CorePreparePlayerAuthorityControlRequest),
     CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
+    CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
     CoreCheckpoint {
         session_id: String,
         saved_at_ms: u64,
@@ -301,6 +310,66 @@ mod tests {
         });
         let error = serde_json::from_value::<ControlRequest>(top_level_proof).unwrap_err();
         assert!(error.to_string().contains("unknown field `proof`"));
+    }
+
+    #[test]
+    fn player_authority_tick_protocol_accepts_only_run_and_sequence() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreCommitPlayerAuthorityTick",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "sequence": 1
+            }
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreCommitPlayerAuthorityTick(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.run_id, "player-authority-run");
+                assert_eq!(control.request.sequence, 1);
+            }
+            _ => panic!("player-authority tick decoded as the wrong operation"),
+        }
+
+        for forbidden in [
+            "baseRevision",
+            "registryFingerprint",
+            "proof",
+            "checkpoint",
+            "commandId",
+        ] {
+            let mut value = json!({
+                "operation": "coreCommitPlayerAuthorityTick",
+                "sessionId": "core-1",
+                "request": {
+                    "runId": "player-authority-run",
+                    "sequence": 1
+                }
+            });
+            value["request"][forbidden] = json!(0);
+            let error = serde_json::from_value::<ControlRequest>(value).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{forbidden}: {error}"
+            );
+        }
+
+        let top_level_error = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreCommitPlayerAuthorityTick",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "sequence": 1
+            },
+            "checkpoint": {
+                "generation": 1,
+                "rootHash": "a".repeat(64),
+                "revision": 0
+            }
+        }))
+        .unwrap_err();
+        assert!(top_level_error.to_string().contains("unknown field"));
     }
 
     #[test]

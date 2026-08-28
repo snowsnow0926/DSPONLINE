@@ -134,7 +134,7 @@ test("exact commit bridge is capability-gated, identity-only, and absent from re
     assert.doesNotMatch(source, /coreCommitOperationExactRealtime|commitOperationExactRealtime/);
     assert.doesNotMatch(
       source,
-      /corePreparePlayerAuthority|preparePlayerAuthority|coreActivatePlayerAuthority|activatePlayerAuthority/,
+      /corePreparePlayerAuthority|preparePlayerAuthority|coreActivatePlayerAuthority|activatePlayerAuthority|coreCommitPlayerAuthorityTick|commitPlayerAuthorityTick/,
     );
   }
 });

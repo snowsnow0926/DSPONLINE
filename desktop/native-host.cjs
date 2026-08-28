@@ -15,6 +15,7 @@ const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
   "native-core-exact-realtime-writer-fence-v1";
 const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
+const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-tick-v1";
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
@@ -915,6 +916,31 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  commitPlayerAuthorityTick(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the player-authority tick capability",
+        "NATIVE_CORE_PLAYER_AUTHORITY_TICK_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "sequence",
+    ], "native player-authority tick request");
+    if (!validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.sequence) || request.sequence < 1) {
+      throw new TypeError("native player-authority tick request is invalid");
+    }
+    return this.client.request({
+      operation: "coreCommitPlayerAuthorityTick",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        sequence: request.sequence,
+      },
+    }, 300_000);
+  }
+
   checkpoint(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
@@ -1042,6 +1068,7 @@ module.exports = {
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NativeHostClient,
   NativeHostError,

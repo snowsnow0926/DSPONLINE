@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::disk_budget::{
     DiskBudgetOutcome, DiskBudgetStatus, DiskSpaceProbe, SystemDiskSpaceProbe, require_write_budget,
 };
-use crate::exact_realtime_lease::ExactRealtimeLease;
+use crate::exact_realtime_lease::{ExactRealtimeLease, ExactRealtimeLeasePurpose};
 
 const MAX_SLOT_BYTES: usize = 64;
 const MAX_KEY_BYTES: usize = 512;
@@ -542,6 +542,31 @@ impl SaveStore {
         &self.root
     }
 
+    /// Returns an opaque binding for one CoreRegistry session in this exact
+    /// SaveStore lifetime. The store lifetime owns the root lock, and its
+    /// namespace includes the process identity and open timestamp, so a
+    /// predictable `core-1` after process restart cannot silently inherit a
+    /// player-authority lease from the previous writer.
+    pub(crate) fn player_authority_session_binding(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("native player-authority session ID is invalid")
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"dsp-native-player-authority-session-v1\0");
+        digest.update(self.temporary_namespace.as_bytes());
+        digest.update(b"\0");
+        digest.update(session_id.as_bytes());
+        Ok(format!("pas-{}", hex::encode(digest.finalize())))
+    }
+
     fn require_disk_budget_in_directory(
         &self,
         directory: &Path,
@@ -813,6 +838,45 @@ impl SaveStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_player_authority_checkpoint(
+        &mut self,
+        slot: &str,
+        mode: &str,
+        state_version: u16,
+        base_checksum: &str,
+        registry_fingerprint: &str,
+        revision: u64,
+        saved_at_ms: u64,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+    ) -> anyhow::Result<SaveBeginResult> {
+        validate_slot(slot)?;
+        validate_mode(mode)?;
+        validate_hex_identity(base_checksum, "base checksum")?;
+        validate_fingerprint(registry_fingerprint)?;
+        self.require_player_authority_checkpoint_mutation(
+            expected_lease,
+            authority_session_id,
+            slot,
+            mode,
+            state_version,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+        )?;
+        self.begin_internal(
+            slot,
+            mode,
+            state_version,
+            base_checksum,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+            Some(expected_lease.clone()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn begin_internal(
         &mut self,
         slot: &str,
@@ -956,15 +1020,37 @@ impl SaveStore {
             .remove(transaction_id)
             .ok_or_else(|| anyhow!("unknown native save transaction"))?;
         if let Some(expected_lease) = transaction.exact_realtime_checkpoint_lease.as_ref() {
-            self.require_exact_realtime_checkpoint_mutation(
-                expected_lease,
-                &transaction.slot,
-                &transaction.mode,
-                transaction.state_version,
-                &transaction.registry_fingerprint,
-                transaction.revision,
-                transaction.saved_at_ms,
-            )?;
+            match expected_lease.purpose()? {
+                ExactRealtimeLeasePurpose::Experiment => {
+                    self.require_exact_realtime_checkpoint_mutation(
+                        expected_lease,
+                        &transaction.slot,
+                        &transaction.mode,
+                        transaction.state_version,
+                        &transaction.registry_fingerprint,
+                        transaction.revision,
+                        transaction.saved_at_ms,
+                    )?;
+                }
+                ExactRealtimeLeasePurpose::PlayerAuthority => {
+                    let authority_session_id = expected_lease
+                        .authority_session_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority checkpoint binding is missing")
+                        })?;
+                    self.require_player_authority_checkpoint_mutation(
+                        expected_lease,
+                        authority_session_id,
+                        &transaction.slot,
+                        &transaction.mode,
+                        transaction.state_version,
+                        &transaction.registry_fingerprint,
+                        transaction.revision,
+                        transaction.saved_at_ms,
+                    )?;
+                }
+            }
         } else {
             // Re-check at the publication boundary. A generic transaction may
             // have been admitted before the durable lease was prepared.
@@ -1393,6 +1479,29 @@ impl SaveStore {
     ) -> anyhow::Result<WalAppendResult> {
         self.require_exact_realtime_pending_wal_mutation(
             expected_lease,
+            slot,
+            &expected_lease.registry_fingerprint,
+            base_revision,
+            revision,
+            command_id,
+        )?;
+        self.append_wal_internal(slot, base_revision, revision, command_id, payload, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn append_wal_idempotent_player_authority(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+        slot: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<WalAppendResult> {
+        self.require_player_authority_pending_wal_mutation(
+            expected_lease,
+            authority_session_id,
             slot,
             &expected_lease.registry_fingerprint,
             base_revision,

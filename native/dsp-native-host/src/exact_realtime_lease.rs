@@ -446,6 +446,56 @@ impl SaveStore {
         self.activate_prepared_exact_realtime_lease(lease)
     }
 
+    /// Stages exactly the next one-second player-authority tick. Unlike the
+    /// public E1 protocol, every revision, deadline and command identity is
+    /// derived from the durable lease. The only caller precondition is the
+    /// sequence it intends to settle, which makes a lost response
+    /// distinguishable from a request for the following second.
+    pub(crate) fn stage_player_authority_tick(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_safe_integer(sequence, 1, "player-authority tick sequence")?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        require_player_authority_identity(&lease, authority_session_id, run_id)?;
+        if lease.phase != ExactRealtimeLeasePhase::Active {
+            bail!("only an active native player-authority lease can stage a tick")
+        }
+        if let Some(current) = lease.pending_tick.as_ref() {
+            if current.sequence == sequence {
+                return Ok(lease);
+            }
+            bail!("a different native player-authority tick is already pending")
+        }
+        let expected_sequence = safe_add(
+            lease.acknowledged.sequence,
+            1,
+            "player-authority tick sequence",
+        )?;
+        if sequence != expected_sequence {
+            bail!("native player-authority tick sequence is not next")
+        }
+        let base_revision = lease.acknowledged.revision;
+        let expected_revision = safe_add(base_revision, 1, "player-authority tick revision")?;
+        let settled_deadline_ms = safe_add(
+            lease.acknowledged.settled_deadline_ms,
+            EXACT_TICK_MILLISECONDS,
+            "player-authority tick deadline",
+        )?;
+        lease.pending_tick = Some(ExactRealtimePendingTick {
+            sequence,
+            command_id: derive_exact_tick_command_id(&lease.run_id, sequence)?,
+            base_revision,
+            expected_revision,
+            simulation_seconds: EXACT_TICK_SECONDS,
+            wall_seconds: EXACT_TICK_SECONDS,
+            settled_deadline_ms,
+        });
+        self.write_exact_realtime_lease(&lease)
+    }
+
     fn activate_prepared_exact_realtime_lease(
         &self,
         mut lease: ExactRealtimeLease,
@@ -621,6 +671,52 @@ impl SaveStore {
         self.write_exact_realtime_lease(&lease)
     }
 
+    /// Advances a player-authority ACK from its already-published checkpoint.
+    /// Sequence, command identity, revision and deadline are deliberately read
+    /// from the durable pending tick rather than accepted from the host caller.
+    pub(crate) fn acknowledge_player_authority_tick(
+        &self,
+        authority_session_id: &str,
+        run_id: &str,
+        proof: ExactRealtimeStateProof,
+        checkpoint: ExactRealtimeCheckpoint,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_state_proof(&proof)?;
+        validate_checkpoint(&checkpoint)?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        require_player_authority_identity(&lease, authority_session_id, run_id)?;
+        if lease.phase != ExactRealtimeLeasePhase::Active {
+            bail!("only an active native player-authority lease can acknowledge a tick")
+        }
+        let pending = lease
+            .pending_tick
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority ACK has no pending tick"))?;
+        if proof.revision != pending.expected_revision
+            || checkpoint.revision != pending.expected_revision
+        {
+            bail!("native player-authority ACK revision differs from the pending tick")
+        }
+        let expected_publication =
+            published_checkpoint_identity(&checkpoint, &lease.registry_fingerprint);
+        let published = self
+            .latest_published_checkpoint_identity(NORMAL_SLOT)?
+            .ok_or_else(|| anyhow!("normal-main has no published checkpoint for authority ACK"))?;
+        if published != expected_publication {
+            bail!("native player-authority ACK checkpoint is not current")
+        }
+        lease.acknowledged = ExactRealtimeAcknowledged {
+            sequence: pending.sequence,
+            command_id: Some(pending.command_id.clone()),
+            revision: pending.expected_revision,
+            proof,
+            checkpoint,
+            settled_deadline_ms: pending.settled_deadline_ms,
+        };
+        lease.pending_tick = None;
+        self.write_exact_realtime_lease(&lease)
+    }
+
     fn begin_exact_realtime_finalizing(
         &self,
         run_id: &str,
@@ -785,18 +881,80 @@ impl SaveStore {
         command_id: &str,
     ) -> anyhow::Result<()> {
         let current = self.require_exact_realtime_lease()?;
-        if current != *expected_lease {
+        self.require_pending_wal_mutation(
+            &current,
+            expected_lease,
+            ExactRealtimeLeasePurpose::Experiment,
+            None,
+            slot,
+            registry_fingerprint,
+            base_revision,
+            revision,
+            command_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn require_player_authority_pending_wal_mutation(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+        slot: &str,
+        registry_fingerprint: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+    ) -> anyhow::Result<()> {
+        let current = self.require_exact_realtime_lease()?;
+        self.require_pending_wal_mutation(
+            &current,
+            expected_lease,
+            ExactRealtimeLeasePurpose::PlayerAuthority,
+            Some(authority_session_id),
+            slot,
+            registry_fingerprint,
+            base_revision,
+            revision,
+            command_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_pending_wal_mutation(
+        &self,
+        current: &ExactRealtimeLease,
+        expected_lease: &ExactRealtimeLease,
+        expected_purpose: ExactRealtimeLeasePurpose,
+        authority_session_id: Option<&str>,
+        slot: &str,
+        registry_fingerprint: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+    ) -> anyhow::Result<()> {
+        if current != expected_lease {
             bail!("native exact realtime WAL authorization changed")
         }
-        require_lease_purpose(&current, ExactRealtimeLeasePurpose::Experiment)?;
+        require_lease_purpose(current, expected_purpose)?;
+        if expected_purpose == ExactRealtimeLeasePurpose::PlayerAuthority
+            && current.authority_session_id.as_deref() != authority_session_id
+        {
+            bail!("native player-authority WAL session identity conflicts")
+        }
+        let phase_authorized = match expected_purpose {
+            ExactRealtimeLeasePurpose::Experiment => matches!(
+                current.phase,
+                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+            ),
+            ExactRealtimeLeasePurpose::PlayerAuthority => {
+                current.phase == ExactRealtimeLeasePhase::Active
+            }
+        };
         if current.slot != slot
             || current.slot != NORMAL_SLOT
             || current.mode != NORMAL_MODE
             || current.registry_fingerprint != registry_fingerprint
-            || !matches!(
-                current.phase,
-                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
-            )
+            || !phase_authorized
         {
             bail!("native exact realtime WAL authorization is invalid")
         }
@@ -827,10 +985,70 @@ impl SaveStore {
         saved_at_ms: u64,
     ) -> anyhow::Result<()> {
         let current = self.require_exact_realtime_lease()?;
-        if current != *expected_lease {
+        self.require_checkpoint_mutation(
+            &current,
+            expected_lease,
+            ExactRealtimeLeasePurpose::Experiment,
+            None,
+            slot,
+            mode,
+            state_version,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn require_player_authority_checkpoint_mutation(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+        slot: &str,
+        mode: &str,
+        state_version: u16,
+        registry_fingerprint: &str,
+        revision: u64,
+        saved_at_ms: u64,
+    ) -> anyhow::Result<()> {
+        let current = self.require_exact_realtime_lease()?;
+        self.require_checkpoint_mutation(
+            &current,
+            expected_lease,
+            ExactRealtimeLeasePurpose::PlayerAuthority,
+            Some(authority_session_id),
+            slot,
+            mode,
+            state_version,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_checkpoint_mutation(
+        &self,
+        current: &ExactRealtimeLease,
+        expected_lease: &ExactRealtimeLease,
+        expected_purpose: ExactRealtimeLeasePurpose,
+        authority_session_id: Option<&str>,
+        slot: &str,
+        mode: &str,
+        state_version: u16,
+        registry_fingerprint: &str,
+        revision: u64,
+        saved_at_ms: u64,
+    ) -> anyhow::Result<()> {
+        if current != expected_lease {
             bail!("native exact realtime checkpoint authorization changed")
         }
-        require_lease_purpose(&current, ExactRealtimeLeasePurpose::Experiment)?;
+        require_lease_purpose(current, expected_purpose)?;
+        if expected_purpose == ExactRealtimeLeasePurpose::PlayerAuthority
+            && current.authority_session_id.as_deref() != authority_session_id
+        {
+            bail!("native player-authority checkpoint session identity conflicts")
+        }
         if current.slot != slot
             || current.slot != NORMAL_SLOT
             || current.mode != mode
@@ -841,17 +1059,26 @@ impl SaveStore {
             bail!("native exact realtime checkpoint authorization is invalid")
         }
         if let Some(pending) = current.pending_tick.as_ref() {
-            if !matches!(
-                current.phase,
-                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
-            ) || pending.expected_revision != revision
+            let phase_authorized = match expected_purpose {
+                ExactRealtimeLeasePurpose::Experiment => matches!(
+                    current.phase,
+                    ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+                ),
+                ExactRealtimeLeasePurpose::PlayerAuthority => {
+                    current.phase == ExactRealtimeLeasePhase::Active
+                }
+            };
+            if !phase_authorized
+                || pending.expected_revision != revision
                 || pending.settled_deadline_ms != saved_at_ms
             {
                 bail!("native exact realtime checkpoint differs from the pending tick")
             }
             return Ok(());
         }
-        if current.phase == ExactRealtimeLeasePhase::Finalizing {
+        if current.phase == ExactRealtimeLeasePhase::Finalizing
+            && expected_purpose == ExactRealtimeLeasePurpose::Experiment
+        {
             let finalization = current
                 .finalization
                 .as_ref()
@@ -1215,6 +1442,21 @@ fn require_lease_identity(
     validate_logical_id(registry_fingerprint, 256, "request registry fingerprint")?;
     if lease.run_id != run_id || lease.registry_fingerprint != registry_fingerprint {
         bail!("native exact realtime lease identity conflicts")
+    }
+    Ok(())
+}
+
+fn require_player_authority_identity(
+    lease: &ExactRealtimeLease,
+    authority_session_id: &str,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    validate_logical_id(authority_session_id, 128, "player-authority session ID")?;
+    validate_logical_id(run_id, 128, "player-authority run ID")?;
+    require_lease_purpose(lease, ExactRealtimeLeasePurpose::PlayerAuthority)?;
+    if lease.authority_session_id.as_deref() != Some(authority_session_id) || lease.run_id != run_id
+    {
+        bail!("native player-authority lease session/run identity conflicts")
     }
     Ok(())
 }
@@ -1645,6 +1887,25 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("purpose"));
         assert_eq!(store.require_exact_realtime_lease().unwrap(), prepared);
+
+        let active = store
+            .activate_player_authority_lease("core-1", RUN_ID, FINGERPRINT)
+            .unwrap();
+        let stage_error = store
+            .exact_realtime_lease(ExactRealtimeLeaseRequest::StageExactTick {
+                run_id: RUN_ID.to_owned(),
+                registry_fingerprint: FINGERPRINT.to_owned(),
+                sequence: 1,
+                command_id: derive_exact_tick_command_id(RUN_ID, 1).unwrap(),
+                base_revision: 7,
+                expected_revision: 8,
+                simulation_seconds: 1,
+                wall_seconds: 1,
+                settled_deadline_ms: 11_000,
+            })
+            .unwrap_err();
+        assert!(format!("{stage_error:#}").contains("purpose"));
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), active);
     }
 
     #[test]

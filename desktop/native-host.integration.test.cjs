@@ -384,6 +384,8 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-command-v1"));
@@ -588,6 +590,75 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(statisticsProjection.samples.length, 1);
   assert.equal(statisticsProjection.samples[0].productionPerMinute.iron_ore, 60);
   assert.equal(statisticsProjection.nextCursor, 1);
+  const starMapRequest = {
+    operation: "coreStarMapOverviewProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 64,
+  };
+  const starMapOverview = await client.request(starMapRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreStarMapOverviewProjection",
+    starMapOverview,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      cursor: 0,
+      limit: 64,
+    },
+  ));
+  assert.equal(starMapOverview.projectionType, "star-map-overview-v1");
+  assert.equal(starMapOverview.revision, 2);
+  assert.equal(starMapOverview.systems.rows[0].systemId, "helios");
+  assert.deepEqual(starMapOverview.systems.rows.map((row) => row.firstPlanetId), ["home"]);
+
+  const stellarIndustryRequest = {
+    operation: "coreStellarIndustryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "helios",
+    planetId: null,
+    planetCursor: 0,
+    planetLimit: 64,
+    stationCursor: 0,
+    stationLimit: 64,
+  };
+  const stellarIndustry = await client.request(stellarIndustryRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreStellarIndustryProjection",
+    stellarIndustry,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      systemId: "helios",
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 64,
+      stationCursor: 0,
+      stationLimit: 64,
+    },
+  ));
+  assert.equal(stellarIndustry.projectionType, "stellar-industry-v1");
+  assert.deepEqual(stellarIndustry.planets.rows.map((row) => row.planetId), ["home"]);
+  assert.deepEqual(stellarIndustry.stations.rows, []);
+
+  await assert.rejects(
+    client.request({ ...starMapRequest, expectedRevision: 1 }),
+    /identity is stale/i,
+  );
+  await assert.rejects(
+    client.request({ ...stellarIndustryRequest, expectedRegistryFingerprint: "builtin:other" }),
+    /identity is stale/i,
+  );
+  await assert.rejects(
+    client.request({ ...stellarIndustryRequest, planetLimit: 65 }),
+    /page limit is invalid/i,
+  );
   await assert.rejects(
     client.request({
       operation: "coreProjection",

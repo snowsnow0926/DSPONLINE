@@ -604,6 +604,30 @@ function nativeRecipeWorkspaceProjectionResultContext(request) {
   };
 }
 
+function nativeStarMapOverviewProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
+function nativeStellarIndustryProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemId: request?.systemId ?? null,
+    planetId: request?.planetId ?? null,
+    planetCursor: request?.planetCursor,
+    planetLimit: request?.planetLimit,
+    stationCursor: request?.stationCursor,
+    stationLimit: request?.stationLimit,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1153,6 +1177,34 @@ ipcMain.handle("desktop:native-core-recipe-workspace-projection", async (event, 
   });
 });
 
+ipcMain.handle("desktop:native-core-star-map-overview-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStarMapOverviewProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生星图总览投影请求失败，请重试",
+    resultContext: nativeStarMapOverviewProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "star-map-overview-v1", request);
+    }
+    return await nativeCoreSessions.starMapOverviewProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-stellar-industry-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarIndustryProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星工业投影请求失败，请重试",
+    resultContext: nativeStellarIndustryProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-industry-v1", request);
+    }
+    return await nativeCoreSessions.stellarIndustryProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1179,7 +1231,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1202,6 +1254,10 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "recipe-workspace-v1") {
       rawResult = await nativeCoreSessions.recipeWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "star-map-overview-v1") {
+      rawResult = await nativeCoreSessions.starMapOverviewProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-industry-v1") {
+      rawResult = await nativeCoreSessions.stellarIndustryProjection(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -1216,7 +1272,11 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
               ? "coreStatisticsProjection"
               : request.projectionType === "recipe-workspace-v1"
                 ? "coreRecipeWorkspaceProjection"
-                : "coreTechnologyProjection",
+                : request.projectionType === "star-map-overview-v1"
+                  ? "coreStarMapOverviewProjection"
+                  : request.projectionType === "stellar-industry-v1"
+                    ? "coreStellarIndustryProjection"
+                    : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
@@ -1228,7 +1288,11 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
               ? nativeStatisticsProjectionResultContext(request.payload)
               : request.projectionType === "recipe-workspace-v1"
                 ? nativeRecipeWorkspaceProjectionResultContext(normalizedRequest)
-                : nativeTechnologyProjectionResultContext(normalizedRequest),
+                : request.projectionType === "star-map-overview-v1"
+                  ? nativeStarMapOverviewProjectionResultContext(normalizedRequest)
+                  : request.projectionType === "stellar-industry-v1"
+                    ? nativeStellarIndustryProjectionResultContext(normalizedRequest)
+                    : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

@@ -95,6 +95,21 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   });
   assert.equal(factoryReadModelTransfer.header.projectionType, "factory-read-model-v1");
   assert.equal(JSON.parse(factoryReadModelTransfer.payload).schemaVersion, 1);
+  for (const projectionType of ["star-map-overview-v1", "stellar-industry-v1"]) {
+    const stellarTransfer = encodeNativeProjectionTransfer({
+      sessionId: "core-1",
+      sequence: 10,
+      projectionType,
+      result: {
+        schemaVersion: 1,
+        projectionType,
+        revision: 13,
+        registryFingerprint: "builtin:test",
+      },
+    });
+    assert.equal(stellarTransfer.header.projectionType, projectionType);
+    assert.equal(JSON.parse(stellarTransfer.payload).registryFingerprint, "builtin:test");
+  }
   assert.throws(() => encodeNativeProjectionTransfer({
     sessionId: "core-1",
     sequence: 9,
@@ -366,6 +381,42 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     selectedItemId: "iron_ore",
     location: null,
   }), /recipe workspace projection request is invalid/);
+  await registry.starMapOverviewProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 64,
+  });
+  assert.throws(() => registry.starMapOverviewProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 65,
+  }), /star-map overview projection request is invalid/);
+  await registry.stellarIndustryProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "helios",
+    planetId: null,
+    planetCursor: 0,
+    planetLimit: 32,
+    stationCursor: 64,
+    stationLimit: 64,
+  });
+  assert.throws(() => registry.stellarIndustryProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: null,
+    planetId: null,
+    planetCursor: 0,
+    planetLimit: 0,
+    stationCursor: 0,
+    stationLimit: 64,
+  }), /stellar industry projection request is invalid/);
   await registry.commandPaletteEntitySearchProjection(7, {
     sessionId: "core-1",
     expectedRevision: 2,
@@ -414,6 +465,7 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   assert.deepEqual(calls.map((call) => call.operation), [
     "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2",
     "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection",
+    "coreStarMapOverviewProjection", "coreStellarIndustryProjection",
     "coreCommandPaletteEntitySearchProjection", "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
@@ -449,6 +501,26 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     locationLimit: 32,
   });
   assert.deepEqual(calls[6], {
+    operation: "coreStarMapOverviewProjection",
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 64,
+  });
+  assert.deepEqual(calls[7], {
+    operation: "coreStellarIndustryProjection",
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "helios",
+    planetId: null,
+    planetCursor: 0,
+    planetLimit: 32,
+    stationCursor: 64,
+    stationLimit: 64,
+  });
+  assert.deepEqual(calls[8], {
     operation: "coreCommandPaletteEntitySearchProjection",
     sessionId: "core-1",
     expectedRevision: 2,

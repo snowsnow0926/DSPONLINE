@@ -219,6 +219,23 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
+  it.each(["star-map-overview-v1", "stellar-industry-v1"] as const)(
+    "verifies and decodes the bounded %s block",
+    async (projectionType) => {
+      const value = {
+        schemaVersion: 1,
+        projectionType,
+        revision: 15,
+        registryFingerprint: "builtin:test",
+        stateVersion: 47,
+      };
+      await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+        sessionId: "core-1",
+        projectionType,
+      })).resolves.toEqual(value);
+    },
+  );
+
   it("rejects a corrupted payload before installing it", async () => {
     const transfer = await transferFor({
       schemaVersion: 1,

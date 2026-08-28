@@ -453,6 +453,72 @@ function normalizeCommandPaletteEntitySearchContext(value, label) {
   };
 }
 
+function requireStellarRequestByteBudget(source, label) {
+  let encoded;
+  try {
+    encoded = JSON.stringify(source);
+  } catch {
+    throw protocolError(`${label} byte budget`);
+  }
+  if (typeof encoded !== "string" || Buffer.byteLength(encoded, "utf8") > 32_768) {
+    throw protocolError(`${label} byte budget`);
+  }
+}
+
+function stellarPageLimit(value, label) {
+  const limit = safeInteger(value, label, 1);
+  if (limit > 64) throw protocolError(label);
+  return limit;
+}
+
+function stellarCursor(value, label) {
+  const cursor = safeInteger(value, label);
+  if (cursor > 0xffff_ffff) throw protocolError(label);
+  return cursor;
+}
+
+function normalizeStarMapOverviewProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    cursor: stellarCursor(source.cursor, `${label} cursor`),
+    limit: stellarPageLimit(source.limit, `${label} limit`),
+  };
+}
+
+function normalizeStellarIndustryProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  const optionalId = (entry, entryLabel) => entry === null ? null : opaqueId(entry, entryLabel);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    systemId: optionalId(source.systemId, `${label} system`),
+    planetId: optionalId(source.planetId, `${label} planet`),
+    planetCursor: stellarCursor(source.planetCursor, `${label} planet cursor`),
+    planetLimit: stellarPageLimit(source.planetLimit, `${label} planet limit`),
+    stationCursor: stellarCursor(source.stationCursor, `${label} station cursor`),
+    stationLimit: stellarPageLimit(source.stationLimit, `${label} station limit`),
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -1895,6 +1961,542 @@ function normalizeCoreRecipeWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeStellarProjectionLimits(value, label) {
+  const source = exactObject(value, [
+    "requestBytes", "projectionBytes", "pageRows", "labelBytes",
+  ], label);
+  const limits = {
+    requestBytes: safeInteger(source.requestBytes, `${label}.requestBytes`, 1),
+    projectionBytes: safeInteger(source.projectionBytes, `${label}.projectionBytes`, 1),
+    pageRows: safeInteger(source.pageRows, `${label}.pageRows`, 1),
+    labelBytes: safeInteger(source.labelBytes, `${label}.labelBytes`, 1),
+  };
+  if (limits.requestBytes !== 32_768 || limits.projectionBytes !== 1_048_576 ||
+      limits.pageRows !== 64 || limits.labelBytes !== 512) {
+    throw protocolError(`${label} binding`);
+  }
+  return limits;
+}
+
+function stellarLabel(value, label, minimumBytes = 0) {
+  const result = boundedReadModelText(value, label, 512, minimumBytes);
+  if (/\p{Cc}/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function stellarNullableToken(value, label) {
+  if (value === null) return null;
+  const result = boundedReadModelText(value, label, 64);
+  if (/\p{Cc}/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function stellarUnitNumber(value, label) {
+  const result = finiteNumber(value, label);
+  if (result > 1) throw protocolError(label);
+  return result;
+}
+
+function normalizeStellarPage(value, expectedCursor, expectedLimit, label, normalizeRow) {
+  const source = exactObject(value, [
+    "cursor", "limit", "totalCount", "nextCursor", "rows",
+  ], label);
+  const cursor = stellarCursor(source.cursor, `${label}.cursor`);
+  const limit = stellarPageLimit(source.limit, `${label}.limit`);
+  const totalCount = safeInteger(source.totalCount, `${label}.totalCount`);
+  if (cursor !== expectedCursor || limit !== expectedLimit || totalCount < cursor ||
+      !Array.isArray(source.rows) || source.rows.length > limit) {
+    throw protocolError(`${label} binding`);
+  }
+  const rows = source.rows.map((row, index) => normalizeRow(row, `${label}.rows[${index}]`));
+  const expectedRows = Math.min(limit, totalCount - cursor);
+  if (rows.length !== expectedRows) throw protocolError(`${label} page size`);
+  const consumed = cursor + rows.length;
+  const nextCursor = source.nextCursor === null
+    ? null
+    : stellarCursor(source.nextCursor, `${label}.nextCursor`);
+  if (nextCursor !== (consumed < totalCount ? consumed : null)) {
+    throw protocolError(`${label} cursor chain`);
+  }
+  return { cursor, limit, totalCount, nextCursor, rows };
+}
+
+function normalizeCoreStarMapOverviewProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "activePlanetId", "activeSystemId", "galaxySeed", "summary", "systems",
+  ], "native star-map overview projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "star-map-overview-v1") {
+    throw protocolError("native star-map overview projection identity");
+  }
+  requireProjectionByteBudget(source, "native star-map overview projection");
+  const projectionContext = normalizeStarMapOverviewProjectionContext(
+    context,
+    "native star-map overview projection context",
+  );
+  const revision = safeInteger(source.revision, "native star-map overview revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native star-map overview registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint || source.stateVersion !== 47) {
+    throw protocolError("native star-map overview identity binding");
+  }
+  const limits = normalizeStellarProjectionLimits(
+    source.limits,
+    "native star-map overview limits",
+  );
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
+  ], "native star-map overview echoed request");
+  const echoed = normalizeStarMapOverviewProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native star-map overview echoed request");
+  if (echoed.expectedRevision !== projectionContext.expectedRevision ||
+      echoed.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      echoed.cursor !== projectionContext.cursor || echoed.limit !== projectionContext.limit) {
+    throw protocolError("native star-map overview request binding");
+  }
+
+  const activePlanetId = opaqueId(source.activePlanetId, "native star-map overview active planet");
+  const activeSystemId = opaqueId(source.activeSystemId, "native star-map overview active system");
+  const systemIds = new Set();
+  const systems = normalizeStellarPage(
+    source.systems,
+    echoed.cursor,
+    echoed.limit,
+    "native star-map overview systems",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "systemId", "displayName", "displayNameTruncated", "starTypeName", "starTypeNameTruncated",
+        "positionX", "positionY", "distanceFromOriginLy", "luminosity", "active", "unlocked",
+        "missionActive", "missionElapsedSeconds", "missionDurationSeconds", "surveyProgress",
+        "firstPlanetId", "planetCount", "colonizedPlanetCount", "entityCount", "deviceCount",
+        "beltCount", "stationCount", "interstellarStationCount", "orbitalCollectorCount",
+        "legacyStationCount", "quantumStationCount", "quantumAttachableCount",
+        "configuredImportSlotCount", "configuredExportSlotCount", "routeCount", "activeRouteCount",
+        "generationKw", "demandKw", "powerFactor",
+      ], label);
+      const systemId = opaqueId(entry.systemId, `${label}.systemId`);
+      if (systemIds.has(systemId)) throw protocolError(`${label}.systemId`);
+      systemIds.add(systemId);
+      const planetCount = safeInteger(entry.planetCount, `${label}.planetCount`, 1);
+      const colonizedPlanetCount = safeInteger(entry.colonizedPlanetCount, `${label}.colonizedPlanetCount`);
+      const stationCount = safeInteger(entry.stationCount, `${label}.stationCount`);
+      const interstellarStationCount = safeInteger(
+        entry.interstellarStationCount,
+        `${label}.interstellarStationCount`,
+      );
+      const orbitalCollectorCount = safeInteger(
+        entry.orbitalCollectorCount,
+        `${label}.orbitalCollectorCount`,
+      );
+      const legacyStationCount = safeInteger(entry.legacyStationCount, `${label}.legacyStationCount`);
+      const quantumStationCount = safeInteger(entry.quantumStationCount, `${label}.quantumStationCount`);
+      const quantumAttachableCount = safeInteger(
+        entry.quantumAttachableCount,
+        `${label}.quantumAttachableCount`,
+      );
+      const routeCount = safeInteger(entry.routeCount, `${label}.routeCount`);
+      const activeRouteCount = safeInteger(entry.activeRouteCount, `${label}.activeRouteCount`);
+      const active = boolean(entry.active, `${label}.active`);
+      const unlocked = boolean(entry.unlocked, `${label}.unlocked`);
+      if (colonizedPlanetCount > planetCount || interstellarStationCount > stationCount ||
+          orbitalCollectorCount > stationCount || legacyStationCount > stationCount ||
+          quantumStationCount > stationCount || quantumAttachableCount > stationCount ||
+          activeRouteCount > routeCount || active && (systemId !== activeSystemId || !unlocked)) {
+        throw protocolError(`${label} cardinality binding`);
+      }
+      return {
+        systemId,
+        displayName: stellarLabel(entry.displayName, `${label}.displayName`, 1),
+        displayNameTruncated: boolean(entry.displayNameTruncated, `${label}.displayNameTruncated`),
+        starTypeName: stellarLabel(entry.starTypeName, `${label}.starTypeName`, 1),
+        starTypeNameTruncated: boolean(entry.starTypeNameTruncated, `${label}.starTypeNameTruncated`),
+        positionX: finiteNumber(entry.positionX, `${label}.positionX`, -Number.MAX_VALUE),
+        positionY: finiteNumber(entry.positionY, `${label}.positionY`, -Number.MAX_VALUE),
+        distanceFromOriginLy: finiteNumber(entry.distanceFromOriginLy, `${label}.distanceFromOriginLy`),
+        luminosity: finiteNumber(entry.luminosity, `${label}.luminosity`),
+        active,
+        unlocked,
+        missionActive: boolean(entry.missionActive, `${label}.missionActive`),
+        missionElapsedSeconds: finiteNumber(entry.missionElapsedSeconds, `${label}.missionElapsedSeconds`),
+        missionDurationSeconds: finiteNumber(entry.missionDurationSeconds, `${label}.missionDurationSeconds`),
+        surveyProgress: stellarUnitNumber(entry.surveyProgress, `${label}.surveyProgress`),
+        firstPlanetId: opaqueId(entry.firstPlanetId, `${label}.firstPlanetId`),
+        planetCount,
+        colonizedPlanetCount,
+        entityCount: safeInteger(entry.entityCount, `${label}.entityCount`),
+        deviceCount: finiteNumber(entry.deviceCount, `${label}.deviceCount`),
+        beltCount: safeInteger(entry.beltCount, `${label}.beltCount`),
+        stationCount,
+        interstellarStationCount,
+        orbitalCollectorCount,
+        legacyStationCount,
+        quantumStationCount,
+        quantumAttachableCount,
+        configuredImportSlotCount: safeInteger(
+          entry.configuredImportSlotCount,
+          `${label}.configuredImportSlotCount`,
+        ),
+        configuredExportSlotCount: safeInteger(
+          entry.configuredExportSlotCount,
+          `${label}.configuredExportSlotCount`,
+        ),
+        routeCount,
+        activeRouteCount,
+        generationKw: finiteNumber(entry.generationKw, `${label}.generationKw`),
+        demandKw: finiteNumber(entry.demandKw, `${label}.demandKw`),
+        powerFactor: stellarUnitNumber(entry.powerFactor, `${label}.powerFactor`),
+      };
+    },
+  );
+  const summarySource = exactObject(source.summary, [
+    "systemCount", "unlockedSystemCount", "planetCount", "colonizedPlanetCount", "stationCount",
+  ], "native star-map overview summary");
+  const summary = {
+    systemCount: safeInteger(summarySource.systemCount, "native star-map overview system count", 1),
+    unlockedSystemCount: safeInteger(
+      summarySource.unlockedSystemCount,
+      "native star-map overview unlocked system count",
+      1,
+    ),
+    planetCount: safeInteger(summarySource.planetCount, "native star-map overview planet count", 1),
+    colonizedPlanetCount: safeInteger(
+      summarySource.colonizedPlanetCount,
+      "native star-map overview colonized planet count",
+      1,
+    ),
+    stationCount: safeInteger(summarySource.stationCount, "native star-map overview station count"),
+  };
+  if (systems.totalCount !== summary.systemCount || summary.unlockedSystemCount > summary.systemCount ||
+      summary.colonizedPlanetCount > summary.planetCount) {
+    throw protocolError("native star-map overview summary binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "star-map-overview-v1",
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: {
+      expectedRevision: echoed.expectedRevision,
+      expectedRegistryFingerprint: echoed.expectedRegistryFingerprint,
+      cursor: echoed.cursor,
+      limit: echoed.limit,
+    },
+    activePlanetId,
+    activeSystemId,
+    galaxySeed: safeInteger(source.galaxySeed, "native star-map overview galaxy seed"),
+    summary,
+    systems,
+  };
+}
+
+function normalizeCoreStellarIndustryProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "activePlanetId", "activeSystemId", "scopeSystemId", "scopePlanetId",
+    "truncated", "planets", "stations",
+  ], "native stellar industry projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "stellar-industry-v1") {
+    throw protocolError("native stellar industry projection identity");
+  }
+  requireProjectionByteBudget(source, "native stellar industry projection");
+  const projectionContext = normalizeStellarIndustryProjectionContext(
+    context,
+    "native stellar industry projection context",
+  );
+  const revision = safeInteger(source.revision, "native stellar industry revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native stellar industry registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint || source.stateVersion !== 47) {
+    throw protocolError("native stellar industry identity binding");
+  }
+  const limits = normalizeStellarProjectionLimits(source.limits, "native stellar industry limits");
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit",
+  ], "native stellar industry echoed request");
+  const echoed = normalizeStellarIndustryProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native stellar industry echoed request");
+  for (const key of [
+    "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+    "planetCursor", "planetLimit", "stationCursor", "stationLimit",
+  ]) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native stellar industry request binding");
+    }
+  }
+  const nullableId = (entry, label) => entry === null ? null : opaqueId(entry, label);
+  const activePlanetId = opaqueId(source.activePlanetId, "native stellar industry active planet");
+  const activeSystemId = opaqueId(source.activeSystemId, "native stellar industry active system");
+  const scopeSystemId = nullableId(source.scopeSystemId, "native stellar industry scope system");
+  const scopePlanetId = nullableId(source.scopePlanetId, "native stellar industry scope planet");
+  if (scopePlanetId !== echoed.planetId ||
+      echoed.systemId !== null && scopeSystemId !== echoed.systemId ||
+      echoed.systemId === null && echoed.planetId === null && scopeSystemId !== null ||
+      echoed.planetId !== null && scopeSystemId === null) {
+    throw protocolError("native stellar industry scope binding");
+  }
+
+  const planetIds = new Set();
+  const planets = normalizeStellarPage(
+    source.planets,
+    echoed.planetCursor,
+    echoed.planetLimit,
+    "native stellar industry planets",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "planetId", "displayName", "displayNameTruncated", "systemId", "systemDisplayName",
+        "systemDisplayNameTruncated", "kind", "orbitIndex", "simulationOrder", "systemPositionX",
+        "systemPositionY", "active", "discovered", "colonized", "industryRole", "entityCount",
+        "deviceCount", "beltCount", "stationCount", "interstellarStationCount",
+        "orbitalCollectorCount", "legacyStationCount", "quantumStationCount",
+        "quantumAttachableCount", "configuredImportSlotCount", "configuredExportSlotCount",
+        "routeCount", "activeRouteCount", "congestedStationId", "power", "profile",
+      ], label);
+      const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+      const systemId = opaqueId(entry.systemId, `${label}.systemId`);
+      if (planetIds.has(planetId) || scopeSystemId !== null && systemId !== scopeSystemId ||
+          scopePlanetId !== null && planetId !== scopePlanetId) {
+        throw protocolError(`${label} scope binding`);
+      }
+      planetIds.add(planetId);
+      const stationCount = safeInteger(entry.stationCount, `${label}.stationCount`);
+      const interstellarStationCount = safeInteger(
+        entry.interstellarStationCount,
+        `${label}.interstellarStationCount`,
+      );
+      const orbitalCollectorCount = safeInteger(
+        entry.orbitalCollectorCount,
+        `${label}.orbitalCollectorCount`,
+      );
+      const legacyStationCount = safeInteger(entry.legacyStationCount, `${label}.legacyStationCount`);
+      const quantumStationCount = safeInteger(entry.quantumStationCount, `${label}.quantumStationCount`);
+      const quantumAttachableCount = safeInteger(
+        entry.quantumAttachableCount,
+        `${label}.quantumAttachableCount`,
+      );
+      const routeCount = safeInteger(entry.routeCount, `${label}.routeCount`);
+      const activeRouteCount = safeInteger(entry.activeRouteCount, `${label}.activeRouteCount`);
+      if (interstellarStationCount > stationCount || orbitalCollectorCount > stationCount ||
+          legacyStationCount > stationCount || quantumStationCount > stationCount ||
+          quantumAttachableCount > stationCount || activeRouteCount > routeCount) {
+        throw protocolError(`${label} cardinality binding`);
+      }
+      const powerSource = exactObject(entry.power, [
+        "generationKw", "demandKw", "powerFactor", "totalItemsPerMinute",
+      ], `${label}.power`);
+      const profileSource = exactObject(entry.profile, [
+        "climateName", "climateNameTruncated", "oceanType", "specialization",
+        "specializationName", "specializationNameTruncated", "tidalLocked", "windMultiplier",
+        "solarMultiplier", "geothermalMultiplier", "miningMultiplier", "orbitalYieldMultiplier",
+        "reserveScale", "travelTimeMultiplier",
+      ], `${label}.profile`);
+      const active = boolean(entry.active, `${label}.active`);
+      if (active && (planetId !== activePlanetId || systemId !== activeSystemId)) {
+        throw protocolError(`${label} active binding`);
+      }
+      return {
+        planetId,
+        displayName: stellarLabel(entry.displayName, `${label}.displayName`, 1),
+        displayNameTruncated: boolean(entry.displayNameTruncated, `${label}.displayNameTruncated`),
+        systemId,
+        systemDisplayName: stellarLabel(entry.systemDisplayName, `${label}.systemDisplayName`, 1),
+        systemDisplayNameTruncated: boolean(
+          entry.systemDisplayNameTruncated,
+          `${label}.systemDisplayNameTruncated`,
+        ),
+        kind: stellarLabel(entry.kind, `${label}.kind`, 1),
+        orbitIndex: safeInteger(entry.orbitIndex, `${label}.orbitIndex`),
+        simulationOrder: safeInteger(entry.simulationOrder, `${label}.simulationOrder`),
+        systemPositionX: finiteNumber(entry.systemPositionX, `${label}.systemPositionX`, -Number.MAX_VALUE),
+        systemPositionY: finiteNumber(entry.systemPositionY, `${label}.systemPositionY`, -Number.MAX_VALUE),
+        active,
+        discovered: boolean(entry.discovered, `${label}.discovered`),
+        colonized: boolean(entry.colonized, `${label}.colonized`),
+        industryRole: oneOf(entry.industryRole, [
+          "auto", "mining", "smelting", "manufacturing", "chemical", "research", "logistics", "power",
+        ], `${label}.industryRole`),
+        entityCount: safeInteger(entry.entityCount, `${label}.entityCount`),
+        deviceCount: finiteNumber(entry.deviceCount, `${label}.deviceCount`),
+        beltCount: safeInteger(entry.beltCount, `${label}.beltCount`),
+        stationCount,
+        interstellarStationCount,
+        orbitalCollectorCount,
+        legacyStationCount,
+        quantumStationCount,
+        quantumAttachableCount,
+        configuredImportSlotCount: safeInteger(
+          entry.configuredImportSlotCount,
+          `${label}.configuredImportSlotCount`,
+        ),
+        configuredExportSlotCount: safeInteger(
+          entry.configuredExportSlotCount,
+          `${label}.configuredExportSlotCount`,
+        ),
+        routeCount,
+        activeRouteCount,
+        congestedStationId: nullableId(entry.congestedStationId, `${label}.congestedStationId`),
+        power: {
+          generationKw: finiteNumber(powerSource.generationKw, `${label}.power.generationKw`),
+          demandKw: finiteNumber(powerSource.demandKw, `${label}.power.demandKw`),
+          powerFactor: stellarUnitNumber(powerSource.powerFactor, `${label}.power.powerFactor`),
+          totalItemsPerMinute: finiteNumber(
+            powerSource.totalItemsPerMinute,
+            `${label}.power.totalItemsPerMinute`,
+          ),
+        },
+        profile: {
+          climateName: stellarLabel(profileSource.climateName, `${label}.profile.climateName`, 1),
+          climateNameTruncated: boolean(
+            profileSource.climateNameTruncated,
+            `${label}.profile.climateNameTruncated`,
+          ),
+          oceanType: stellarNullableToken(profileSource.oceanType, `${label}.profile.oceanType`),
+          specialization: stellarNullableToken(
+            profileSource.specialization,
+            `${label}.profile.specialization`,
+          ),
+          specializationName: stellarLabel(
+            profileSource.specializationName,
+            `${label}.profile.specializationName`,
+          ),
+          specializationNameTruncated: boolean(
+            profileSource.specializationNameTruncated,
+            `${label}.profile.specializationNameTruncated`,
+          ),
+          tidalLocked: boolean(profileSource.tidalLocked, `${label}.profile.tidalLocked`),
+          windMultiplier: finiteNumber(profileSource.windMultiplier, `${label}.profile.windMultiplier`),
+          solarMultiplier: finiteNumber(profileSource.solarMultiplier, `${label}.profile.solarMultiplier`),
+          geothermalMultiplier: finiteNumber(
+            profileSource.geothermalMultiplier,
+            `${label}.profile.geothermalMultiplier`,
+          ),
+          miningMultiplier: finiteNumber(profileSource.miningMultiplier, `${label}.profile.miningMultiplier`),
+          orbitalYieldMultiplier: finiteNumber(
+            profileSource.orbitalYieldMultiplier,
+            `${label}.profile.orbitalYieldMultiplier`,
+          ),
+          reserveScale: finiteNumber(profileSource.reserveScale, `${label}.profile.reserveScale`),
+          travelTimeMultiplier: finiteNumber(
+            profileSource.travelTimeMultiplier,
+            `${label}.profile.travelTimeMultiplier`,
+          ),
+        },
+      };
+    },
+  );
+  if (scopePlanetId !== null && planets.totalCount > 1) {
+    throw protocolError("native stellar industry planet scope cardinality");
+  }
+
+  const stationIds = new Set();
+  const stations = normalizeStellarPage(
+    source.stations,
+    echoed.stationCursor,
+    echoed.stationLimit,
+    "native stellar industry stations",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "stationId", "buildingId", "buildingLabel", "buildingLabelTruncated", "planetId",
+        "planetLabel", "planetLabelTruncated", "systemId", "positionX", "positionY",
+        "stationTier", "quantumMode", "quantumTransitionActive", "powerFactor", "congestion",
+        "installedDrones", "installedVessels", "availableWarpers", "slotCount",
+        "configuredImportSlotCount", "configuredExportSlotCount", "routeCount", "activeRouteCount",
+      ], label);
+      const stationId = opaqueId(entry.stationId, `${label}.stationId`);
+      const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+      const systemId = opaqueId(entry.systemId, `${label}.systemId`);
+      if (stationIds.has(stationId) || scopeSystemId !== null && systemId !== scopeSystemId ||
+          scopePlanetId !== null && planetId !== scopePlanetId) {
+        throw protocolError(`${label} scope binding`);
+      }
+      stationIds.add(stationId);
+      const routeCount = safeInteger(entry.routeCount, `${label}.routeCount`);
+      const activeRouteCount = safeInteger(entry.activeRouteCount, `${label}.activeRouteCount`);
+      if (activeRouteCount > routeCount) throw protocolError(`${label} route cardinality`);
+      return {
+        stationId,
+        buildingId: nullableId(entry.buildingId, `${label}.buildingId`),
+        buildingLabel: stellarLabel(entry.buildingLabel, `${label}.buildingLabel`, 1),
+        buildingLabelTruncated: boolean(
+          entry.buildingLabelTruncated,
+          `${label}.buildingLabelTruncated`,
+        ),
+        planetId,
+        planetLabel: stellarLabel(entry.planetLabel, `${label}.planetLabel`, 1),
+        planetLabelTruncated: boolean(entry.planetLabelTruncated, `${label}.planetLabelTruncated`),
+        systemId,
+        positionX: finiteNumber(entry.positionX, `${label}.positionX`, -Number.MAX_VALUE),
+        positionY: finiteNumber(entry.positionY, `${label}.positionY`, -Number.MAX_VALUE),
+        stationTier: safeInteger(entry.stationTier, `${label}.stationTier`),
+        quantumMode: stellarNullableToken(entry.quantumMode, `${label}.quantumMode`),
+        quantumTransitionActive: boolean(
+          entry.quantumTransitionActive,
+          `${label}.quantumTransitionActive`,
+        ),
+        powerFactor: stellarUnitNumber(entry.powerFactor, `${label}.powerFactor`),
+        congestion: stellarUnitNumber(entry.congestion, `${label}.congestion`),
+        installedDrones: safeInteger(entry.installedDrones, `${label}.installedDrones`),
+        installedVessels: safeInteger(entry.installedVessels, `${label}.installedVessels`),
+        availableWarpers: safeInteger(entry.availableWarpers, `${label}.availableWarpers`),
+        slotCount: safeInteger(entry.slotCount, `${label}.slotCount`),
+        configuredImportSlotCount: safeInteger(
+          entry.configuredImportSlotCount,
+          `${label}.configuredImportSlotCount`,
+        ),
+        configuredExportSlotCount: safeInteger(
+          entry.configuredExportSlotCount,
+          `${label}.configuredExportSlotCount`,
+        ),
+        routeCount,
+        activeRouteCount,
+      };
+    },
+  );
+  const truncated = boolean(source.truncated, "native stellar industry truncated");
+  if (truncated !== (planets.nextCursor !== null || stations.nextCursor !== null)) {
+    throw protocolError("native stellar industry truncation binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "stellar-industry-v1",
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: {
+      expectedRevision: echoed.expectedRevision,
+      expectedRegistryFingerprint: echoed.expectedRegistryFingerprint,
+      systemId: echoed.systemId,
+      planetId: echoed.planetId,
+      planetCursor: echoed.planetCursor,
+      planetLimit: echoed.planetLimit,
+      stationCursor: echoed.stationCursor,
+      stationLimit: echoed.stationLimit,
+    },
+    activePlanetId,
+    activeSystemId,
+    scopeSystemId,
+    scopePlanetId,
+    truncated,
+    planets,
+    stations,
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -2192,6 +2794,8 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,
+  coreStarMapOverviewProjection: normalizeCoreStarMapOverviewProjection,
+  coreStellarIndustryProjection: normalizeCoreStellarIndustryProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

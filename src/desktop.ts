@@ -94,6 +94,10 @@ export interface DesktopBridge {
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
   getNativeCoreRecipeWorkspaceProjection?: (request: DesktopNativeCoreRecipeWorkspaceProjectionRequest) => Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
+  /** Bounded star-system page tied to one exact native revision and catalog. */
+  getNativeCoreStarMapOverviewProjection?: (request: DesktopNativeCoreStarMapOverviewProjectionRequest) => Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
+  /** Independently bounded planet/station pages; never falls back to the Web GameState. */
+  getNativeCoreStellarIndustryProjection?: (request: DesktopNativeCoreStellarIndustryProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -848,6 +852,194 @@ export interface DesktopNativeCoreRecipeWorkspaceProjectionResult {
   };
 }
 
+export interface DesktopNativeCoreStellarProjectionLimits {
+  requestBytes: 32768;
+  projectionBytes: 1048576;
+  pageRows: 64;
+  labelBytes: 512;
+}
+
+export interface DesktopNativeCoreStellarPage<T> {
+  cursor: number;
+  limit: number;
+  totalCount: number;
+  nextCursor: number | null;
+  rows: T[];
+}
+
+export interface DesktopNativeCoreStarMapOverviewProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  cursor: number;
+  limit: number;
+}
+
+export interface DesktopNativeCoreStarMapSystemRow {
+  systemId: string;
+  displayName: string;
+  displayNameTruncated: boolean;
+  starTypeName: string;
+  starTypeNameTruncated: boolean;
+  positionX: number;
+  positionY: number;
+  distanceFromOriginLy: number;
+  luminosity: number;
+  active: boolean;
+  unlocked: boolean;
+  missionActive: boolean;
+  missionElapsedSeconds: number;
+  missionDurationSeconds: number;
+  surveyProgress: number;
+  firstPlanetId: string;
+  planetCount: number;
+  colonizedPlanetCount: number;
+  entityCount: number;
+  deviceCount: number;
+  beltCount: number;
+  stationCount: number;
+  interstellarStationCount: number;
+  orbitalCollectorCount: number;
+  legacyStationCount: number;
+  quantumStationCount: number;
+  quantumAttachableCount: number;
+  configuredImportSlotCount: number;
+  configuredExportSlotCount: number;
+  routeCount: number;
+  activeRouteCount: number;
+  generationKw: number;
+  demandKw: number;
+  powerFactor: number;
+}
+
+export interface DesktopNativeCoreStarMapOverviewProjectionResult {
+  schemaVersion: 1;
+  projectionType: "star-map-overview-v1";
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: DesktopNativeCoreStellarProjectionLimits;
+  request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">;
+  activePlanetId: string;
+  activeSystemId: string;
+  galaxySeed: number;
+  summary: {
+    systemCount: number;
+    unlockedSystemCount: number;
+    planetCount: number;
+    colonizedPlanetCount: number;
+    stationCount: number;
+  };
+  systems: DesktopNativeCoreStellarPage<DesktopNativeCoreStarMapSystemRow>;
+}
+
+export interface DesktopNativeCoreStellarIndustryProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  systemId: string | null;
+  planetId: string | null;
+  planetCursor: number;
+  planetLimit: number;
+  stationCursor: number;
+  stationLimit: number;
+}
+
+export interface DesktopNativeCoreStellarIndustryPlanetRow {
+  planetId: string;
+  displayName: string;
+  displayNameTruncated: boolean;
+  systemId: string;
+  systemDisplayName: string;
+  systemDisplayNameTruncated: boolean;
+  kind: string;
+  orbitIndex: number;
+  simulationOrder: number;
+  systemPositionX: number;
+  systemPositionY: number;
+  active: boolean;
+  discovered: boolean;
+  colonized: boolean;
+  industryRole: "auto" | "mining" | "smelting" | "manufacturing" | "chemical" | "research" | "logistics" | "power";
+  entityCount: number;
+  deviceCount: number;
+  beltCount: number;
+  stationCount: number;
+  interstellarStationCount: number;
+  orbitalCollectorCount: number;
+  legacyStationCount: number;
+  quantumStationCount: number;
+  quantumAttachableCount: number;
+  configuredImportSlotCount: number;
+  configuredExportSlotCount: number;
+  routeCount: number;
+  activeRouteCount: number;
+  congestedStationId: string | null;
+  power: {
+    generationKw: number;
+    demandKw: number;
+    powerFactor: number;
+    totalItemsPerMinute: number;
+  };
+  profile: {
+    climateName: string;
+    climateNameTruncated: boolean;
+    oceanType: string | null;
+    specialization: string | null;
+    specializationName: string;
+    specializationNameTruncated: boolean;
+    tidalLocked: boolean;
+    windMultiplier: number;
+    solarMultiplier: number;
+    geothermalMultiplier: number;
+    miningMultiplier: number;
+    orbitalYieldMultiplier: number;
+    reserveScale: number;
+    travelTimeMultiplier: number;
+  };
+}
+
+export interface DesktopNativeCoreStellarIndustryStationRow {
+  stationId: string;
+  buildingId: string | null;
+  buildingLabel: string;
+  buildingLabelTruncated: boolean;
+  planetId: string;
+  planetLabel: string;
+  planetLabelTruncated: boolean;
+  systemId: string;
+  positionX: number;
+  positionY: number;
+  stationTier: number;
+  quantumMode: string | null;
+  quantumTransitionActive: boolean;
+  powerFactor: number;
+  congestion: number;
+  installedDrones: number;
+  installedVessels: number;
+  availableWarpers: number;
+  slotCount: number;
+  configuredImportSlotCount: number;
+  configuredExportSlotCount: number;
+  routeCount: number;
+  activeRouteCount: number;
+}
+
+export interface DesktopNativeCoreStellarIndustryProjectionResult {
+  schemaVersion: 1;
+  projectionType: "stellar-industry-v1";
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: DesktopNativeCoreStellarProjectionLimits;
+  request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">;
+  activePlanetId: string;
+  activeSystemId: string;
+  scopeSystemId: string | null;
+  scopePlanetId: string | null;
+  truncated: boolean;
+  planets: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarIndustryPlanetRow>;
+  stations: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarIndustryStationRow>;
+}
+
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -924,6 +1116,16 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "recipe-workspace-v1";
       payload: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "star-map-overview-v1";
+      payload: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "stellar-industry-v1";
+      payload: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -931,7 +1133,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1";
   payloadLength: number;
   sha256: string;
 }

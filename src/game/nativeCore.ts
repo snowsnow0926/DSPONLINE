@@ -20,6 +20,10 @@ import {
   type DesktopNativeCoreTechnologyProjectionResult,
   type DesktopNativeCoreRecipeWorkspaceProjectionRequest,
   type DesktopNativeCoreRecipeWorkspaceProjectionResult,
+  type DesktopNativeCoreStarMapOverviewProjectionRequest,
+  type DesktopNativeCoreStarMapOverviewProjectionResult,
+  type DesktopNativeCoreStellarIndustryProjectionRequest,
+  type DesktopNativeCoreStellarIndustryProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -37,7 +41,9 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreFactoryReadModelResult
   | DesktopNativeCoreStatisticsProjectionResult
   | DesktopNativeCoreTechnologyProjectionResult
-  | DesktopNativeCoreRecipeWorkspaceProjectionResult;
+  | DesktopNativeCoreRecipeWorkspaceProjectionResult
+  | DesktopNativeCoreStarMapOverviewProjectionResult
+  | DesktopNativeCoreStellarIndustryProjectionResult;
 
 function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
   return projectionType === "viewport-v2" ? 2 : 1;
@@ -85,6 +91,8 @@ export interface WindowsNativeCoreShadow {
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
   technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
   recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
+  starMapOverviewProjection(request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
+  stellarIndustryProjection(request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -382,6 +390,52 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生生产资料库投影不可用");
     }
     return desktop.getNativeCoreRecipeWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async starMapOverviewProjection(
+    request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStarMapOverviewProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "star-map-overview-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStarMapOverviewProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "star-map-overview-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStarMapOverviewProjection !== "function") {
+      throw new Error("Windows 原生星图总览投影不可用");
+    }
+    return desktop.getNativeCoreStarMapOverviewProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async stellarIndustryProjection(
+    request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStellarIndustryProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStellarIndustryProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStellarIndustryProjection !== "function") {
+      throw new Error("Windows 原生恒星工业投影不可用");
+    }
+    return desktop.getNativeCoreStellarIndustryProjection({ sessionId: this.sessionId, ...request });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

@@ -285,6 +285,14 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     throw new Error("recipe workspace projection is not exercised by this controller fixture");
   }
 
+  async starMapOverviewProjection(_request: Parameters<WindowsNativeCoreShadow["starMapOverviewProjection"]>[0]): Promise<never> {
+    throw new Error("star-map overview projection is not exercised by this controller fixture");
+  }
+
+  async stellarIndustryProjection(_request: Parameters<WindowsNativeCoreShadow["stellarIndustryProjection"]>[0]): Promise<never> {
+    throw new Error("stellar industry projection is not exercised by this controller fixture");
+  }
+
   async applyCommand(_command: SimulationCommandPatch) {
     return { revision: this.current.revision, topologyDirty: false };
   }

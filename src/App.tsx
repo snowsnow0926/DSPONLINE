@@ -396,6 +396,10 @@ import {
   createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
 } from "./game/nativeRecipeWorkspaceStore";
 import {
+  NativeStellarWorkspaceStore,
+  createNativePlayerAuthorityStellarProjectionSource,
+} from "./game/nativeStellarWorkspaceStore";
+import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
   recipeWorkspaceSelectorsEqual,
@@ -2046,6 +2050,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeRecipeWorkspaceStore.getSnapshot,
   );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
+  if (nativeStellarWorkspaceStoreRef.current === null) {
+    nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
+  }
+  const nativeStellarWorkspaceStore = nativeStellarWorkspaceStoreRef.current;
+  const nativeStellarWorkspaceSnapshot = useSyncExternalStore(
+    nativeStellarWorkspaceStore.subscribe,
+    nativeStellarWorkspaceStore.getSnapshot,
+    nativeStellarWorkspaceStore.getSnapshot,
+  );
+  const nativeStarMapOverviewProjection = useMemo(() => {
+    const frame = nativeStellarWorkspaceSnapshot.overview.frame;
+    if (!frame || nativeStellarWorkspaceSnapshot.overview.status !== "ready" ||
+        !nativePlayerAuthorityActiveFrame || frame.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        frame.revision !== factoryThinViewExpectedRevision ||
+        frame.registryFingerprint !== recipeWorkspaceRegistryFingerprint) return null;
+    return frame.projection;
+  }, [
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    nativeStellarWorkspaceSnapshot.overview,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStellarIndustryProjection = useMemo(() => {
+    const frame = nativeStellarWorkspaceSnapshot.industry.frame;
+    if (!frame || nativeStellarWorkspaceSnapshot.industry.status !== "ready" ||
+        !nativePlayerAuthorityActiveFrame || frame.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        frame.revision !== factoryThinViewExpectedRevision ||
+        frame.registryFingerprint !== recipeWorkspaceRegistryFingerprint) return null;
+    return frame.projection;
+  }, [
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    nativeStellarWorkspaceSnapshot.industry,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
   const commandPaletteEntitySearchSelector = useMemo(
     () => createCommandPaletteEntitySearchSelector(
       commandPaletteEntitySearchRequest.query,
@@ -2542,6 +2582,47 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recipeWorkspaceRegistryFingerprint,
     recipeWorkspaceSelector,
     recipesOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame) {
+      nativeStellarWorkspaceStore.clear();
+      return;
+    }
+    if (!nativePlayerAuthorityActiveFrame) return;
+    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
+    if (!sessionId) {
+      nativeStellarWorkspaceStore.clear();
+      return;
+    }
+    const identity = {
+      sessionId,
+      revision: factoryThinViewExpectedRevision,
+      registryFingerprint: recipeWorkspaceRegistryFingerprint,
+    };
+    const source = createNativePlayerAuthorityStellarProjectionSource(desktopBridge, identity);
+    if (!source) {
+      nativeStellarWorkspaceStore.clear();
+      return;
+    }
+    void Promise.all([
+      nativeStellarWorkspaceStore.refreshOverview(source, identity, { cursor: 0, limit: 64 }),
+      nativeStellarWorkspaceStore.refreshIndustry(source, identity, {
+        systemId: null,
+        planetId: null,
+        planetCursor: 0,
+        planetLimit: 64,
+        stationCursor: 0,
+        stationLimit: 64,
+      }),
+    ]).catch(() => undefined);
+  }, [
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarWorkspaceStore,
+    recipeWorkspaceRegistryFingerprint,
+    starMapOpen,
   ]);
   useEffect(() => {
     if (!commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
@@ -14509,6 +14590,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           <StarMapWorkspace
             open
             game={game}
+            nativeOverviewProjection={nativeStarMapOverviewProjection}
+            nativeIndustryProjection={nativeStellarIndustryProjection}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}

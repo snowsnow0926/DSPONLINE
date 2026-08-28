@@ -12,6 +12,10 @@ import { useAppLocale } from "../i18n/locale";
 import { getQuantumBandwidthSummary, getQuantumItemCapacity, QUANTUM_ITEM_CAPACITY_MAX, QUANTUM_ITEM_CAPACITY_MIN, QUANTUM_ITEM_CAPACITY_PRESETS } from "../game/quantumLogisticsNetwork";
 import { StableTextArea, StableTextInput, clearStableTextDraft, readStableTextDraft } from "./CompositionSafeInput";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import type {
+  DesktopNativeCoreStarMapOverviewProjectionResult,
+  DesktopNativeCoreStellarIndustryProjectionResult,
+} from "../desktop";
 
 function formatDistance(distanceLy: number): string {
   return distanceLy <= 0 ? "本地" : `${distanceLy.toFixed(1)} 光年`;
@@ -342,6 +346,8 @@ function QuantumInventoryConsole({ game, onCollectorModeChange, onItemCapacityCh
 export function StarMapWorkspace({
   open,
   game,
+  nativeOverviewProjection,
+  nativeIndustryProjection,
   onClose,
   onExplore,
   onColonize,
@@ -363,6 +369,8 @@ export function StarMapWorkspace({
 }: {
   open: boolean;
   game: GameState;
+  nativeOverviewProjection?: DesktopNativeCoreStarMapOverviewProjectionResult | null;
+  nativeIndustryProjection?: DesktopNativeCoreStellarIndustryProjectionResult | null;
   onClose: () => void;
   onExplore: (systemId: StarSystemId) => void;
   onColonize: (planetId: PlanetId) => void;
@@ -387,19 +395,66 @@ export function StarMapWorkspace({
   const [batchBusy, setBatchBusy] = useState<"upgrade" | "quantum" | "collectors" | null>(null);
   const [batchReport, setBatchReport] = useState<StarMapBatchActionResult | null>(null);
   const normalizedMapQuery = mapQuery.trim().toLocaleLowerCase("zh-CN");
+  const nativeOverviewComplete = nativeOverviewProjection &&
+    nativeOverviewProjection.systems.cursor === 0 &&
+    nativeOverviewProjection.systems.nextCursor === null &&
+    nativeOverviewProjection.systems.rows.length === nativeOverviewProjection.systems.totalCount
+    ? nativeOverviewProjection
+    : null;
+  const nativeIndustryPlanetsComplete = nativeIndustryProjection &&
+    nativeIndustryProjection.planets.cursor === 0 &&
+    nativeIndustryProjection.planets.nextCursor === null &&
+    nativeIndustryProjection.planets.rows.length === nativeIndustryProjection.planets.totalCount
+    ? nativeIndustryProjection
+    : null;
+  const nativeIndustryStationsComplete = nativeIndustryProjection &&
+    nativeIndustryProjection.stations.cursor === 0 &&
+    nativeIndustryProjection.stations.nextCursor === null &&
+    nativeIndustryProjection.stations.rows.length === nativeIndustryProjection.stations.totalCount
+    ? nativeIndustryProjection
+    : null;
+  const nativeSystemRows = useMemo(() => new Map(
+    nativeOverviewComplete?.systems.rows.map((row) => [row.systemId, row]) ?? [],
+  ), [nativeOverviewComplete]);
+  const nativePlanetRows = useMemo(() => new Map(
+    nativeIndustryPlanetsComplete?.planets.rows.map((row) => [row.planetId, row]) ?? [],
+  ), [nativeIndustryPlanetsComplete]);
+  const nativeStationRows = nativeIndustryStationsComplete?.stations.rows ?? null;
   const visibleSystems = useMemo(() => STAR_SYSTEM_LIST.filter((system) => {
     if (!normalizedMapQuery) return true;
     const systemText = `${system.name} ${system.code} ${system.description} ${getStarSystemDisplayName(game, system.id)}`.toLocaleLowerCase("zh-CN");
     return systemText.includes(normalizedMapQuery) || system.planetIds.some((planetId) => getPlanetSearchText(game, planetId).includes(normalizedMapQuery));
   }), [game, normalizedMapQuery]);
   if (!open) return null;
-  const activeSystemId = getPlanet(game.activePlanetId).systemId;
-  const unlockedCount = STAR_SYSTEM_LIST.filter((system) => isStarSystemUnlocked(game, system.id)).length;
-  const pendingUpgradeCount = game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && (entity.stationTier ?? 1) < 2).length;
-  const pendingQuantumCount = game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && (entity.stationTier ?? 1) >= 2 && entity.quantumMode !== "quantum" && !entity.quantumTransition).length;
+  const nativeActiveSystemId = nativeOverviewComplete && STAR_SYSTEM_LIST.some(
+    (system) => system.id === nativeOverviewComplete.activeSystemId,
+  ) ? nativeOverviewComplete.activeSystemId as StarSystemId : null;
+  const activeSystemId = nativeActiveSystemId ?? getPlanet(game.activePlanetId).systemId;
+  const unlockedCount = nativeOverviewComplete?.summary.unlockedSystemCount ??
+    STAR_SYSTEM_LIST.filter((system) => isStarSystemUnlocked(game, system.id)).length;
+  const pendingUpgradeCount = nativeStationRows
+    ? nativeStationRows.filter((station) => station.buildingId === "interstellar_logistics_station" && station.stationTier < 2).length
+    : game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && (entity.stationTier ?? 1) < 2).length;
+  const pendingQuantumCount = nativeStationRows
+    ? nativeStationRows.filter((station) => station.buildingId === "interstellar_logistics_station" && station.stationTier >= 2 && station.quantumMode !== "quantum" && !station.quantumTransitionActive).length
+    : game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && (entity.stationTier ?? 1) >= 2 && entity.quantumMode !== "quantum" && !entity.quantumTransition).length;
   const pendingCollectorCount = isTechnologyCompleted(game, "quantum_logistics_network")
-    ? game.entities.filter((entity) => entity.buildingId === "orbital_collector" && !entity.interactionLocked && (entity.quantumMode ?? "legacy") === "legacy" && !entity.quantumTransition).length
+    ? nativeStationRows
+      ? nativeStationRows.filter((station) => station.buildingId === "orbital_collector" && (station.quantumMode ?? "legacy") === "legacy" && !station.quantumTransitionActive).length
+      : game.entities.filter((entity) => entity.buildingId === "orbital_collector" && !entity.interactionLocked && (entity.quantumMode ?? "legacy") === "legacy" && !entity.quantumTransition).length
     : 0;
+  const pendingSystemUpgradeCount = (systemId: StarSystemId): number => nativeStationRows
+    ? nativeStationRows.filter((station) => station.systemId === systemId &&
+      station.buildingId === "interstellar_logistics_station" && station.stationTier < 2).length
+    : game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" &&
+      getPlanet(entity.planetId).systemId === systemId && (entity.stationTier ?? 1) < 2).length;
+  const pendingSystemQuantumCount = (systemId: StarSystemId): number => nativeStationRows
+    ? nativeStationRows.filter((station) => station.systemId === systemId &&
+      station.buildingId === "interstellar_logistics_station" && station.stationTier >= 2 &&
+      station.quantumMode !== "quantum" && !station.quantumTransitionActive).length
+    : game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" &&
+      getPlanet(entity.planetId).systemId === systemId && (entity.stationTier ?? 1) >= 2 &&
+      entity.quantumMode !== "quantum" && !entity.quantumTransition).length;
   const runBatchAction = async (
     kind: "upgrade" | "quantum" | "collectors",
     action: () => Promise<StarMapBatchActionResult | null>,
@@ -428,16 +483,20 @@ export function StarMapWorkspace({
     const detailSystem = detailSystemId ? getStarSystem(detailSystemId) : systemForPlanet;
     const systemProfile = detailSystem ? getStarSystemProfile(game, detailSystem.id) : null;
     const planetProfile = detailPlanet ? getPlanetIndustrialProfile(game, detailPlanet.id) : null;
-    const colonized = detailPlanet ? isPlanetColonized(game, detailPlanet.id) : false;
+    const colonized = detailPlanet
+      ? nativePlanetRows.get(detailPlanet.id)?.colonized ?? isPlanetColonized(game, detailPlanet.id)
+      : false;
     const colonyRequirements = detailPlanet ? getColonizationRequirements(game, detailPlanet.id) : null;
     return <WorkspaceFrame className={`star-map-workspace star-map-workspace--${view} mobile-workspace mobile-star-map${mobileSubview ? " mobile-workspace--detail" : ""}`} ariaLabel="星图" onRequestClose={onClose}>
       {!mobileSubview ? <><nav className="star-map-tabs mobile-workspace-sticky" role="tablist" aria-label="星图视图"><button type="button" role="tab" aria-selected={view === "map"} className={view === "map" ? "active" : ""} onClick={() => setView("map")}><Telescope size={14} />星图探索</button><button type="button" role="tab" aria-selected={view === "industry"} className={view === "industry" ? "active" : ""} onClick={() => setView("industry")}><Factory size={14} />星际工业</button><button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button></nav>{view === "industry" ? <div className="mobile-workspace-scroll"><IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} /></div> : view === "quantum" ? <div className="mobile-workspace-scroll"><QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} /></div> : <div className="mobile-workspace-scroll mobile-star-system-list"><header><span>已勘探 {unlockedCount}/{STAR_SYSTEM_LIST.length}</span><strong>星区种子 #{game.galaxy.seed}</strong></header><label className="star-map-search"><Search size={15} /><StableTextInput draftId="star-map-search" value={mapQuery} onValueChange={setMapQuery} placeholder="搜索名称、备注或标签" aria-label="搜索星球资料" />{mapQuery ? <button type="button" onClick={() => setMapQuery("")} aria-label="清除星图搜索"><X size={14} /></button> : null}</label>{bulkActions}<StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />{visibleSystems.map((system) => {
+        const nativeSystem = nativeSystemRows.get(system.id);
         const profile = getStarSystemProfile(game, system.id);
-        const unlocked = isStarSystemUnlocked(game, system.id);
+        const unlocked = nativeSystem?.unlocked ?? isStarSystemUnlocked(game, system.id);
         const mission = game.exploration.missions.find((candidate) => candidate.systemId === system.id);
-        const stationCount = game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === system.id && (entity.stationTier ?? 1) < 2).length;
-        const quantumCount = game.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === system.id && (entity.stationTier ?? 1) >= 2 && entity.quantumMode !== "quantum" && !entity.quantumTransition).length;
-        return <div className="mobile-star-system-list__row" key={system.id}><button type="button" onClick={() => onMobileOpenDetail?.(`system:${system.id}`)}><i style={{ color: system.color }}><Sparkles size={21} /></i><span><small>{system.code} · {profile.starTypeName}</small><strong>{getStarSystemDisplayName(game, system.id)}</strong><em>{system.planetIds.length} 颗行星 · {profile.luminosity.toFixed(2)} L☉ · {formatDistance(profile.distanceFromOriginLy)}</em></span><b>{unlocked ? mission ? "勘探中" : "已发现" : "未勘探"}</b><ArrowRight size={18} /></button>{stationCount > 0 ? <button className="mobile-star-system-list__upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={15} />升级本系物流站（{stationCount}）</button> : null}{quantumCount > 0 ? <button className="mobile-star-system-list__upgrade mobile-star-system-list__upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={15} />切换本系量子物流站（{quantumCount}）</button> : null}</div>;
+        const missionActive = nativeSystem?.missionActive ?? Boolean(mission);
+        const stationCount = pendingSystemUpgradeCount(system.id);
+        const quantumCount = pendingSystemQuantumCount(system.id);
+        return <div className="mobile-star-system-list__row" key={system.id}><button type="button" onClick={() => onMobileOpenDetail?.(`system:${system.id}`)}><i style={{ color: system.color }}><Sparkles size={21} /></i><span><small>{system.code} · {nativeSystem?.starTypeName ?? profile.starTypeName}</small><strong>{nativeSystem?.displayName ?? getStarSystemDisplayName(game, system.id)}</strong><em>{nativeSystem?.planetCount ?? system.planetIds.length} 颗行星 · {(nativeSystem?.luminosity ?? profile.luminosity).toFixed(2)} L☉ · {formatDistance(nativeSystem?.distanceFromOriginLy ?? profile.distanceFromOriginLy)}</em></span><b>{unlocked ? missionActive ? "勘探中" : "已发现" : "未勘探"}</b><ArrowRight size={18} /></button>{stationCount > 0 ? <button className="mobile-star-system-list__upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={15} />升级本系物流站（{stationCount}）</button> : null}{quantumCount > 0 ? <button className="mobile-star-system-list__upgrade mobile-star-system-list__upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={15} />切换本系量子物流站（{quantumCount}）</button> : null}</div>;
       })}</div>}</> : detailPlanet && planetProfile && colonyRequirements ? <div className="mobile-workspace-scroll mobile-planet-detail">
         <header className="mobile-detail-heading"><i style={{ color: detailPlanet.color }}><Orbit size={22} /></i><span><small>{systemForPlanet ? getStarSystemDisplayName(game, systemForPlanet.id) : ""} · {detailPlanet.code}</small><strong>{getPlanetDisplayName(game, detailPlanet.id)}</strong></span><b>{colonized ? "已殖民" : "殖民候选"}</b></header>
         <StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />
@@ -446,7 +505,7 @@ export function StarMapWorkspace({
         {!colonized ? <section className={`mobile-colony-requirements mobile-colony-requirements--${colonyRequirements.status}`}><header><strong>殖民前哨需求</strong><small>材料取自{getPlanetDisplayName(game, colonyRequirements.sourcePlanetId)}，运输载具取自随身载具栏</small></header><p>{colonyRequirements.reason}</p><div>{colonyRequirements.costs.map((cost) => <span className={cost.missing === 0 ? "ready" : "missing"} key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{getItem(cost.itemId).name}<small>{cost.source === "portable-fleet" ? "随身载具" : "当前行星托盘"}</small></em><strong>{cost.current.toLocaleString("zh-CN")}/{cost.required.toLocaleString("zh-CN")}</strong></span>)}</div></section> : null}
         <div className="mobile-detail-spacer" /><footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={!colonized && !canColonizePlanet(game, detailPlanet.id)} onClick={() => colonized ? onTravel(detailPlanet.id) : onColonize(detailPlanet.id)}>{colonized ? <Navigation size={18} /> : <Factory size={18} />}{colonized ? "进入行星工厂" : "建立殖民前哨"}</button></footer>
       </div> : detailSystem && systemProfile ? <div className="mobile-workspace-scroll mobile-star-system-detail">
-        <header className="mobile-detail-heading"><i style={{ color: detailSystem.color }}><Sparkles size={22} /></i><span><small>{detailSystem.code} · {systemProfile.starTypeName}</small><strong>{getStarSystemDisplayName(game, detailSystem.id)}</strong></span><b>{systemProfile.luminosity.toFixed(2)} L☉</b></header><p className="mobile-detail-summary">{detailSystem.description}</p><div className="mobile-detail-system-actions">{game.entities.some((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === detailSystem.id && (entity.stationTier ?? 1) < 2) ? <button className="mobile-detail-system-upgrade" type="button" onClick={() => onUpgradeAllStations(detailSystem.id)}><Sparkles size={16} />一键升级本系物流站</button> : null}{game.entities.some((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === detailSystem.id && (entity.stationTier ?? 1) >= 2 && entity.quantumMode !== "quantum" && !entity.quantumTransition) ? <button className="mobile-detail-system-upgrade mobile-detail-system-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(detailSystem.id)}><Sparkles size={16} />一键切换本系量子物流站</button> : null}</div>
+        <header className="mobile-detail-heading"><i style={{ color: detailSystem.color }}><Sparkles size={22} /></i><span><small>{detailSystem.code} · {systemProfile.starTypeName}</small><strong>{getStarSystemDisplayName(game, detailSystem.id)}</strong></span><b>{systemProfile.luminosity.toFixed(2)} L☉</b></header><p className="mobile-detail-summary">{detailSystem.description}</p><div className="mobile-detail-system-actions">{pendingSystemUpgradeCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade" type="button" onClick={() => onUpgradeAllStations(detailSystem.id)}><Sparkles size={16} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade mobile-detail-system-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(detailSystem.id)}><Sparkles size={16} />一键切换本系量子物流站</button> : null}</div>
         <StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />
         <section className="mobile-detail-section"><header>行星</header><div className="mobile-system-planets">{detailSystem.planetIds.map((planetId) => { const planet = getPlanet(planetId); const profile = getPlanetIndustrialProfile(game, planetId); const ready = isPlanetColonized(game, planetId); return <button type="button" key={planetId} onClick={() => onMobileOpenDetail?.(`planet:${planetId}`)}><i style={{ color: planet.color }}><Orbit size={20} /></i><span><strong>{getPlanetDisplayName(game, planetId)}</strong><small>{profile.climateName} · {OCEAN_LABELS[profile.oceanType]}</small></span><b>{ready ? "已殖民" : "查看需求"}</b><ArrowRight size={18} /></button>; })}</div></section>
         {!isStarSystemUnlocked(game, detailSystem.id) ? <section className="mobile-colony-requirements"><header><strong>恒星系勘探</strong><small>{formatDistance(systemProfile.distanceFromOriginLy)}</small></header><div>{detailSystem.explorationCost.map((cost) => <span className={(game.tray[cost.itemId] ?? 0) >= cost.amount ? "ready" : "missing"} key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{getItem(cost.itemId).name}</em><strong>{Math.floor(game.tray[cost.itemId] ?? 0)}/{cost.amount}</strong></span>)}</div><button type="button" disabled={!canExploreStarSystem(game, detailSystem.id)} onClick={() => onExplore(detailSystem.id)}><Telescope size={18} />开始勘探</button></section> : null}
@@ -484,10 +543,13 @@ export function StarMapWorkspace({
 
       {view === "map" ? <div className="star-map-route" aria-label="恒星系航线">
         {visibleSystems.map((system, index) => {
+          const nativeSystem = nativeSystemRows.get(system.id);
           const systemProfile = getStarSystemProfile(game, system.id);
-          const unlocked = isStarSystemUnlocked(game, system.id);
+          const unlocked = nativeSystem?.unlocked ?? isStarSystemUnlocked(game, system.id);
           const mission = game.exploration.missions.find((candidate) => candidate.systemId === system.id);
-          const surveyProgress = game.exploration.surveyProgressBySystem[system.id] ?? (unlocked ? 1 : 0);
+          const missionActive = nativeSystem?.missionActive ?? Boolean(mission);
+          const surveyProgress = nativeSystem?.surveyProgress ??
+            game.exploration.surveyProgressBySystem[system.id] ?? (unlocked ? 1 : 0);
           const active = activeSystemId === system.id;
           const technologyReady = !system.requiredTechId || isTechnologyCompleted(game, system.requiredTechId);
           const prerequisiteReady = !system.prerequisiteSystemId || isStarSystemUnlocked(game, system.prerequisiteSystemId);
@@ -495,14 +557,14 @@ export function StarMapWorkspace({
           const style = { "--system-color": system.color } as CSSProperties;
           return (
             <div className="star-map-route__segment" key={system.id}>
-              {index > 0 ? <div className={`star-route-link${unlocked ? " star-route-link--open" : ""}`}><i /><ArrowRight size={16} /><span>{formatDistance(systemProfile.distanceFromOriginLy)}</span></div> : null}
+              {index > 0 ? <div className={`star-route-link${unlocked ? " star-route-link--open" : ""}`}><i /><ArrowRight size={16} /><span>{formatDistance(nativeSystem?.distanceFromOriginLy ?? systemProfile.distanceFromOriginLy)}</span></div> : null}
               <article className={`star-system-card${unlocked ? " star-system-card--unlocked" : " star-system-card--locked"}${active ? " star-system-card--active" : ""}`} style={style}>
                 <header>
                   <i className="star-system-orb"><Sparkles size={20} /></i>
-                  <div><span>{system.code}</span><strong>{getStarSystemDisplayName(game, system.id)}</strong><small>{systemProfile.starTypeName} · {systemProfile.luminosity.toFixed(2)} L☉ · {formatDistance(systemProfile.distanceFromOriginLy)}</small></div>
-                  <em>{active ? <><Navigation size={12} /> 当前</> : unlocked ? <><Check size={12} /> 已发现{mission ? " · 勘探中" : ""}</> : <><LockKeyhole size={12} /> 未勘探</>}</em>
+                  <div><span>{system.code}</span><strong>{nativeSystem?.displayName ?? getStarSystemDisplayName(game, system.id)}</strong><small>{nativeSystem?.starTypeName ?? systemProfile.starTypeName} · {(nativeSystem?.luminosity ?? systemProfile.luminosity).toFixed(2)} L☉ · {formatDistance(nativeSystem?.distanceFromOriginLy ?? systemProfile.distanceFromOriginLy)}</small></div>
+                  <em>{active ? <><Navigation size={12} /> 当前</> : unlocked ? <><Check size={12} /> 已发现{missionActive ? " · 勘探中" : ""}</> : <><LockKeyhole size={12} /> 未勘探</>}</em>
                 </header>
-                <div className="star-system-space-station-actions">{game.entities.some((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === system.id && (entity.stationTier ?? 1) < 2) ? <button className="star-system-space-station-upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={14} />一键升级本系物流站</button> : null}{game.entities.some((entity) => entity.buildingId === "interstellar_logistics_station" && getPlanet(entity.planetId).systemId === system.id && (entity.stationTier ?? 1) >= 2 && entity.quantumMode !== "quantum" && !entity.quantumTransition) ? <button className="star-system-space-station-upgrade star-system-space-station-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={14} />一键切换本系量子物流站</button> : null}</div>
+                <div className="star-system-space-station-actions">{pendingSystemUpgradeCount(system.id) > 0 ? <button className="star-system-space-station-upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={14} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(system.id) > 0 ? <button className="star-system-space-station-upgrade star-system-space-station-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={14} />一键切换本系量子物流站</button> : null}</div>
                 <p>{system.description}</p>
                 <div className="star-planet-list">
                   {system.planetIds.map((planetId) => {
@@ -510,9 +572,10 @@ export function StarMapWorkspace({
                     const profile = getPlanetIndustrialProfile(game, planet.id);
                     const recommendedRole = getRecommendedPlanetRole(game, planet.id);
                     const current = game.activePlanetId === planetId;
-                    const deviceCount = game.entities.reduce((sum, entity) => entity.planetId === planetId
-                      ? sum + entity.machineCount + entity.minerCount
-                      : sum, 0);
+                    const deviceCount = nativePlanetRows.get(planetId)?.deviceCount ??
+                      game.entities.reduce((sum, entity) => entity.planetId === planetId
+                        ? sum + entity.machineCount + entity.minerCount
+                        : sum, 0);
                     const resources = planet.kind === "gas-giant"
                       ? Object.keys(profile.orbitalYields).map((itemId) => getItem(itemId as ItemId).name)
                       : profile.resourceIds.map((itemId) => getItem(itemId).name);

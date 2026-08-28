@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -12,6 +13,8 @@ const SLOT_COUNT: usize = 5;
 const DRONES_PER_BUILDING: f64 = 50.0;
 const CARGO_PER_DRONE: f64 = 25.0;
 const BASE_TRIP_SECONDS: f64 = 8.0;
+const LOCAL_ROUTE_DENSE_NUMERATOR: usize = 3;
+const LOCAL_ROUTE_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -217,17 +220,20 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
         .collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct LocalPeerDirectory {
-    station_indices: Vec<usize>,
-    by_planet_item: HashMap<usize, HashMap<String, LocalPeers>>,
-    station_slots: HashMap<usize, Vec<Slot>>,
-    station_planets: HashMap<usize, usize>,
+    station_indices: Arc<[usize]>,
+    station_ranks: Arc<HashMap<usize, usize>>,
+    by_planet_item: Arc<HashMap<usize, HashMap<String, LocalPeers>>>,
+    station_slots: Arc<HashMap<usize, Vec<Slot>>>,
+    station_planets: Arc<HashMap<usize, usize>>,
+    local_route_demand_indices: Vec<usize>,
 }
 
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
-        let station_index_bytes = self.station_indices.capacity() * std::mem::size_of::<usize>();
+        let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
+            + self.local_route_demand_indices.capacity() * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
             .values()
@@ -253,8 +259,64 @@ impl LocalPeerDirectory {
         let hash_entry_bytes = self.by_planet_item.capacity()
             * std::mem::size_of::<(usize, HashMap<String, LocalPeers>)>()
             + self.station_slots.capacity() * std::mem::size_of::<(usize, Vec<Slot>)>()
-            + self.station_planets.capacity() * std::mem::size_of::<(usize, usize)>();
+            + self.station_planets.capacity() * std::mem::size_of::<(usize, usize)>()
+            + self.station_ranks.capacity() * std::mem::size_of::<(usize, usize)>();
         (station_index_bytes + planet_item_bytes + slot_bytes + hash_entry_bytes) as u64
+    }
+
+    fn has_local_routes(&self) -> bool {
+        !self.local_route_demand_indices.is_empty()
+    }
+
+    fn route_scan_indices(&self) -> (Vec<usize>, bool) {
+        let active = self.local_route_demand_indices.len();
+        let total = self.station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+                >= total.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+        if dense {
+            (self.station_indices.to_vec(), true)
+        } else {
+            (self.local_route_demand_indices.clone(), false)
+        }
+    }
+
+    fn update_local_route_demand(&mut self, station_index: usize, active: bool) {
+        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+            return;
+        };
+        match (
+            self.local_route_demand_indices
+                .binary_search_by_key(&rank, |candidate| {
+                    self.station_ranks
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                }),
+            active,
+        ) {
+            (Ok(position), false) => {
+                self.local_route_demand_indices.remove(position);
+            }
+            (Err(position), true) => {
+                self.local_route_demand_indices
+                    .insert(position, station_index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    fn replace_scanned_local_route_activity(&mut self, updates: &[(usize, bool)]) {
+        // Sparse scans contain every previously active demand; dense scans
+        // contain every station. In either case this stable-order filter is a
+        // complete next activity set and avoids quadratic Vec removals when a
+        // dense batch completes many routes together.
+        self.local_route_demand_indices.clear();
+        self.local_route_demand_indices.extend(
+            updates
+                .iter()
+                .filter_map(|(station_index, active)| active.then_some(*station_index)),
+        );
     }
 }
 
@@ -271,6 +333,7 @@ fn build_peer_directory(
     let mut by_planet_item = HashMap::<usize, HashMap<String, LocalPeers>>::new();
     let mut station_slots = HashMap::with_capacity(station_indices.len());
     let mut station_planets = HashMap::with_capacity(station_indices.len());
+    let mut local_route_demand_indices = Vec::new();
     let mut planet_symbols = HashMap::<String, usize>::new();
     for &station_index in station_indices {
         let station = entities[station_index].as_object().expect("station object");
@@ -311,6 +374,18 @@ fn build_peer_directory(
         }
         station_planets.insert(station_index, planet_key);
         station_slots.insert(station_index, parsed_slots);
+        if station
+            .get("stationRoutes")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                routes
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|route| string_at(route, "scope") == Some("local"))
+            })
+        {
+            local_route_demand_indices.push(station_index);
+        }
     }
     let sort_matches = |matches: &mut Vec<(usize, usize)>| {
         matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
@@ -346,11 +421,20 @@ fn build_peer_directory(
     by_planet_item.shrink_to_fit();
     station_slots.shrink_to_fit();
     station_planets.shrink_to_fit();
+    local_route_demand_indices.shrink_to_fit();
+    let station_ranks = station_indices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(rank, station_index)| (station_index, rank))
+        .collect::<HashMap<_, _>>();
     Ok(LocalPeerDirectory {
-        station_indices: station_indices.to_vec(),
-        by_planet_item,
-        station_slots,
-        station_planets,
+        station_indices: Arc::from(station_indices),
+        station_ranks: Arc::new(station_ranks),
+        by_planet_item: Arc::new(by_planet_item),
+        station_slots: Arc::new(station_slots),
+        station_planets: Arc::new(station_planets),
+        local_route_demand_indices,
     })
 }
 
@@ -389,23 +473,6 @@ fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
                 .map(|id| (id.to_owned(), index))
         })
         .collect()
-}
-
-fn has_local_route(entities: &[Value], station_indices: &[usize]) -> bool {
-    station_indices.iter().copied().any(|index| {
-        let Some(entity) = entities[index].as_object() else {
-            return false;
-        };
-        entity
-            .get("stationRoutes")
-            .and_then(Value::as_array)
-            .is_some_and(|routes| {
-                routes
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .any(|route| string_at(route, "scope") == Some("local"))
-            })
-    })
 }
 
 fn directory_has_local_pair(directory: &LocalPeerDirectory) -> bool {
@@ -749,7 +816,7 @@ pub(crate) fn transfer_buffers(
     directory: &LocalPeerDirectory,
 ) -> anyhow::Result<()> {
     let buffer_limit = normalized_buffer_limit(base);
-    for &station_index in &directory.station_indices {
+    for &station_index in directory.station_indices.iter() {
         let station_slots = directory
             .station_slots
             .get(&station_index)
@@ -790,7 +857,7 @@ where
     F: Fn(usize, &Map<String, Value>, &Slot) -> anyhow::Result<f64> + Send + Sync,
 {
     runtime.indexed_try_map(
-        &directory.station_indices,
+        directory.station_indices.as_ref(),
         |_, station_index| -> anyhow::Result<Option<usize>> {
             let station_index = *station_index;
             let station = entities[station_index].as_object().expect("station object");
@@ -885,12 +952,14 @@ pub(crate) fn ready_station_indices(
     entities: &[Value],
     directory: &LocalPeerDirectory,
 ) -> anyhow::Result<HashSet<usize>> {
-    if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
+    if !directory_has_local_pair(directory) && !directory.has_local_routes() {
         return Ok(HashSet::new());
     }
-    let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
+    let ledger = build_ledger(
+        entities,
+        &state.entity_index,
+        directory.station_indices.as_ref(),
+    );
     let buffer_limit = normalized_buffer_limit(base);
     let planned = plan_ready_station_indices_with(
         deterministic_runtime(),
@@ -931,19 +1000,18 @@ pub(crate) fn dispatch(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
-    directory: &LocalPeerDirectory,
+    directory: &mut LocalPeerDirectory,
 ) -> anyhow::Result<()> {
-    if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
+    if !directory_has_local_pair(directory) && !directory.has_local_routes() {
         return Ok(());
     }
     let indexes = &state.entity_index;
-    let mut ledger = build_ledger(entities, indexes, &directory.station_indices);
+    let mut ledger = build_ledger(entities, indexes, directory.station_indices.as_ref());
     let buffer_limit = normalized_buffer_limit(base);
     let cargo_capacity = cargo_capacity(base);
     let logistics_speed = logistics_speed(base);
-    for &demand_index in &directory.station_indices {
+    let mut activated_local_demands = Vec::new();
+    for &demand_index in directory.station_indices.iter() {
         let (eligible, cursor, demand_id) = {
             let demand = entities[demand_index]
                 .as_object()
@@ -1142,6 +1210,7 @@ pub(crate) fn dispatch(
                         .and_then(Value::as_array_mut)
                         .expect("initialized local demand routes")
                         .push(route);
+                    activated_local_demands.push(demand_index);
                     *ledger.busy.entry(owner_index).or_default() += dispatchable;
                     add_ledger_item_amount(&mut ledger.reserved, supply_index, &item_id, cargo);
                     add_ledger_item_amount(&mut ledger.in_flight, demand_index, &item_id, cargo);
@@ -1186,23 +1255,24 @@ pub(crate) fn dispatch(
             }
         }
     }
+    for demand_index in activated_local_demands {
+        directory.update_local_route_demand(demand_index, true);
+    }
     Ok(())
 }
 
-pub(crate) fn advance_routes(
+fn advance_routes_for_indices(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
     powers: &HashMap<usize, f64>,
-    directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
-    if !has_local_route(entities, &directory.station_indices) {
-        return Ok(());
-    }
+    route_scan_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
     let indexes = &state.entity_index;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
-    for &demand_index in &directory.station_indices {
+    let mut activity_updates = Vec::with_capacity(route_scan_indices.len());
+    for &demand_index in route_scan_indices {
         let demand_id = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local demand is invalid"))?
@@ -1216,6 +1286,7 @@ pub(crate) fn advance_routes(
             .and_then(Value::as_array_mut)
             .map(std::mem::take)
         else {
+            activity_updates.push((demand_index, false));
             continue;
         };
         let mut remaining = Vec::new();
@@ -1315,6 +1386,10 @@ pub(crate) fn advance_routes(
         let demand = entities[demand_index]
             .as_object_mut()
             .expect("station object");
+        let has_local_route = remaining
+            .iter()
+            .filter_map(Value::as_object)
+            .any(|route| string_at(route, "scope") == Some("local"));
         let max_progress = remaining
             .iter()
             .filter_map(Value::as_object)
@@ -1329,7 +1404,26 @@ pub(crate) fn advance_routes(
             };
         set_number(demand, "productionRate", rate)?;
         set_number(demand, "stationProgress", max_progress)?;
+        activity_updates.push((demand_index, has_local_route));
     }
+    Ok(activity_updates)
+}
+
+pub(crate) fn advance_routes(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<()> {
+    if !directory.has_local_routes() {
+        return Ok(());
+    }
+    let (route_scan_indices, _dense_fallback) = directory.route_scan_indices();
+    let activity_updates =
+        advance_routes_for_indices(state, base, entities, seconds, powers, &route_scan_indices)?;
+    directory.replace_scanned_local_route_activity(&activity_updates);
     Ok(())
 }
 
@@ -1367,7 +1461,7 @@ fn plan_congestion_updates(
     ledger: &Ledger,
 ) -> anyhow::Result<Vec<Option<CongestionUpdate>>> {
     runtime.indexed_try_map(
-        &directory.station_indices,
+        directory.station_indices.as_ref(),
         |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
             let station_index = *station_index;
             let station = entities[station_index].as_object().expect("station object");
@@ -1443,12 +1537,14 @@ pub(crate) fn update_congestion(
     directory: &LocalPeerDirectory,
 ) -> anyhow::Result<()> {
     let runtime = deterministic_runtime();
-    let updates = if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
-        plan_idle_congestion_updates(runtime, entities, &directory.station_indices)
+    let updates = if !directory_has_local_pair(directory) && !directory.has_local_routes() {
+        plan_idle_congestion_updates(runtime, entities, directory.station_indices.as_ref())
     } else {
-        let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
+        let ledger = build_ledger(
+            entities,
+            &state.entity_index,
+            directory.station_indices.as_ref(),
+        );
         plan_congestion_updates(runtime, entities, directory, &ledger)?
     };
     apply_congestion_updates(entities, updates)
@@ -1457,7 +1553,13 @@ pub(crate) fn update_congestion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
+        RuntimeCatalog,
+    };
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     fn json_key_pointer(record: &Map<String, Value>, key: &str) -> usize {
@@ -1599,6 +1701,235 @@ mod tests {
         })
     }
 
+    fn fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn route_fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "local-route-active-test".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "route-test".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: vec![ItemDefinition {
+                    id: "iron_ore".to_owned(),
+                    name: "route-item".to_owned(),
+                    kind: "solid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                }],
+                buildings: vec![BuildingDefinition {
+                    id: "planetary_logistics_station".to_owned(),
+                    kind: "station".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 100_000.0,
+                    output_capacity: 100_000.0,
+                    power_demand_kw: 1.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                }],
+                recipes: Vec::new(),
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "local-route-active-test",
+        )
+        .unwrap()
+    }
+
+    fn route_fixture_base() -> Value {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "paused": false,
+            "activePlanetId": "home",
+            "nextId": 1000,
+            "settings": {
+                "logisticsBufferLimit": 1000000,
+                "difficulty": "standard"
+            },
+            "research": { "completedTechIds": [] },
+            "endgame": {
+                "infiniteResearch": { "galactic_logistics": { "level": 0 } }
+            },
+            "mod:base/opaque": { "signedZero": -0.0, "text": "保持原样" }
+        })
+    }
+
+    fn route_station(index: usize, mode: &str) -> Value {
+        let mut station = local_station(&format!("station/{index:05}/Ω"), mode);
+        let station = station.as_object_mut().expect("route fixture station");
+        station.insert("planetId".to_owned(), Value::from("home"));
+        station["stationSlots"]
+            .as_array_mut()
+            .and_then(|slots| slots.first_mut())
+            .and_then(Value::as_object_mut)
+            .expect("route fixture primary slot")
+            .insert("itemId".to_owned(), Value::from("iron_ore"));
+        station.insert("inputs".to_owned(), json!({ "iron_ore": 0.0 }));
+        station.insert(
+            "outputs".to_owned(),
+            json!({ "iron_ore": if index == 0 { 100000000.0 } else { 0.0 } }),
+        );
+        station.insert("stationDrones".to_owned(), Value::from(50));
+        station.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+        station.insert("stationDispatchCursor".to_owned(), Value::from(0.0));
+        station.insert(
+            "stationLastSupplyPeerBySlot".to_owned(),
+            Value::Object(Map::new()),
+        );
+        station.insert("stationProgress".to_owned(), Value::from(0.0));
+        station.insert("stationCongestion".to_owned(), Value::from(0.0));
+        station.insert("stationTrips".to_owned(), Value::from(0.0));
+        station.insert("stationLastTransfer".to_owned(), Value::from(0.0));
+        station.insert("utilization".to_owned(), Value::from(0.0));
+        station.insert("productionRate".to_owned(), Value::from(0.0));
+        station.insert(
+            "mod:route/opaque".to_owned(),
+            json!({ "index": index, "signedZero": -0.0, "text": "原样" }),
+        );
+        Value::Object(station.clone())
+    }
+
+    fn local_route(
+        id: usize,
+        demand_index: usize,
+        progress: f64,
+        duration: f64,
+        cargo: f64,
+    ) -> Value {
+        json!({
+            "id": format!("local-route/{id:05}"),
+            "slotIndex": 0,
+            "peerId": "station/00000/Ω",
+            "itemId": "iron_ore",
+            "scope": "local",
+            "cargo": cargo,
+            "vehicleCount": 1,
+            "progress": progress,
+            "duration": duration,
+            "requiresWarp": false,
+            "waypointStationIds": [],
+            "distanceLy": 0,
+            "warpersPerVessel": 0,
+            "vehicleStationId": format!("station/{demand_index:05}/Ω")
+        })
+    }
+
+    fn route_matrix(count: usize, active: &[usize], progress: f64, duration: f64) -> Vec<Value> {
+        let active = active.iter().copied().collect::<HashSet<_>>();
+        (0..count)
+            .map(|index| {
+                let mut station =
+                    route_station(index, if index == 0 { "supply" } else { "demand" });
+                if active.contains(&index) {
+                    station["stationRoutes"] =
+                        Value::Array(vec![local_route(index, index, progress, duration, 11.0)]);
+                }
+                station
+            })
+            .collect()
+    }
+
+    fn route_fixture_state(entities: &[Value]) -> CoreState {
+        let entity_count = entities.len();
+        let base = serde_json::to_vec(&route_fixture_base()).unwrap();
+        let entities = serde_json::to_vec(entities).unwrap();
+        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base, 0, 1),
+            ("entities:00000000", "entities", &entities, 0, entity_count),
+            ("belts:00000000", "belts", &belts, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base.len() + entities.len() + belts.len(),
+            "entityCount": entity_count,
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entities,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belts,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "local-route-active-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            route_fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn route_powers(count: usize, factor: f64) -> HashMap<usize, f64> {
+        (0..count).map(|index| (index, factor)).collect()
+    }
+
     #[test]
     fn prepared_directory_survives_dynamic_updates_and_rebuilds_for_elevator_mode() {
         let mut entities = vec![
@@ -1622,7 +1953,7 @@ mod tests {
         entities[0]["stationOperationMode"] = Value::from("elevator");
         let rebuilt_boundary = prepare_step_directory(&entities, &station_indices).unwrap();
         assert!(peer_matches(&rebuilt_boundary, 1, 0).unwrap().is_empty());
-        assert_eq!(rebuilt_boundary.station_indices, vec![1]);
+        assert_eq!(rebuilt_boundary.station_indices.as_ref(), &[1]);
     }
 
     fn local_congestion_matrix(count: usize) -> (Vec<Value>, LocalPeerDirectory, Ledger) {
@@ -1710,8 +2041,8 @@ mod tests {
     #[test]
     fn local_congestion_parallel_failure_keeps_source_atomic() {
         let (entities, mut directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 11);
-        directory.station_slots.remove(&7);
-        directory.station_slots.remove(&(PARALLEL_MIN_ITEMS + 3));
+        Arc::make_mut(&mut directory.station_slots).remove(&7);
+        Arc::make_mut(&mut directory.station_slots).remove(&(PARALLEL_MIN_ITEMS + 3));
         let source = serde_json::to_vec(&entities).unwrap();
 
         for worker_count in [1, 2, 4, 8] {
@@ -1826,5 +2157,239 @@ mod tests {
         .unwrap();
         assert_eq!(planned.len(), directory.station_indices.len());
         assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    fn run_route_step(
+        state: &CoreState,
+        source: &[Value],
+        seconds: f64,
+        force_full_scan: bool,
+    ) -> (Value, Vec<Value>, LocalPeerDirectory, usize, bool) {
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let (planned_indices, dense) = directory.route_scan_indices();
+        let scan_count = if force_full_scan {
+            directory.station_indices.len()
+        } else {
+            planned_indices.len()
+        };
+        if force_full_scan {
+            let full_indices = directory.station_indices.to_vec();
+            let updates = advance_routes_for_indices(
+                state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                seconds,
+                &route_powers(source.len(), 1.0),
+                &full_indices,
+            )
+            .unwrap();
+            directory.replace_scanned_local_route_activity(&updates);
+        } else {
+            advance_routes(
+                state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                seconds,
+                &route_powers(source.len(), 1.0),
+                &mut directory,
+            )
+            .unwrap();
+        }
+        (base, entities, directory, scan_count, dense)
+    }
+
+    #[test]
+    fn sparse_route_advancement_scans_only_active_and_matches_full_oracle_at_1_5_60_seconds() {
+        let count = PARALLEL_MIN_ITEMS + 113;
+        let active = [7, 2_057, count - 1];
+        let source = route_matrix(count, &active, 0.125, 120.0);
+        let state = route_fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let sparse = run_route_step(&state, &source, seconds, false);
+            let oracle = run_route_step(&state, &source, seconds, true);
+            assert_eq!(sparse.3, active.len(), "sparse scan count at {seconds}s");
+            assert!(!sparse.4);
+            assert_eq!(
+                serde_json::to_vec(&(&sparse.0, &sparse.1)).unwrap(),
+                serde_json::to_vec(&(&oracle.0, &oracle.1)).unwrap(),
+                "active route replay diverged from full scan at {seconds}s"
+            );
+            assert_eq!(
+                sparse.2.local_route_demand_indices,
+                oracle.2.local_route_demand_indices
+            );
+            assert_eq!(sparse.2.local_route_demand_indices, active);
+            for (before, after) in source.iter().zip(&sparse.1) {
+                assert_eq!(
+                    serde_json::to_vec(&before["mod:route/opaque"]).unwrap(),
+                    serde_json::to_vec(&after["mod:route/opaque"]).unwrap()
+                );
+            }
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+    }
+
+    #[test]
+    fn dense_route_activity_explicitly_falls_back_to_full_station_order() {
+        let count = 80;
+        let active = (1..=60).collect::<Vec<_>>();
+        let source = route_matrix(count, &active, 0.2, 90.0);
+        let state = route_fixture_state(&source);
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let (scan_indices, dense) = directory.route_scan_indices();
+        assert!(dense);
+        assert_eq!(scan_indices, directory.station_indices.as_ref());
+        assert_eq!(scan_indices.len(), count);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let scheduled = run_route_step(&state, &source, seconds, false);
+            let oracle = run_route_step(&state, &source, seconds, true);
+            assert!(scheduled.4);
+            assert_eq!(scheduled.3, count);
+            assert_eq!(
+                serde_json::to_vec(&(&scheduled.0, &scheduled.1)).unwrap(),
+                serde_json::to_vec(&(&oracle.0, &oracle.1)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn powerless_route_stays_awake_then_completion_removes_it_without_material_loss() {
+        let source = route_matrix(32, &[7], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source.clone();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let material_before = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        let powerless = route_powers(entities.len(), 0.0);
+
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            60.0,
+            &powerless,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(directory.local_route_demand_indices, vec![7]);
+        assert_eq!(
+            entities[7]["stationRoutes"][0]["progress"],
+            Value::from(0.0)
+        );
+
+        let powered = route_powers(entities.len(), 1.0);
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            8.0,
+            &powered,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(directory.local_route_demand_indices.is_empty());
+        assert_eq!(entities[7]["stationRoutes"], json!([]));
+        let material_after = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        assert_eq!(material_after, material_before);
+        assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(11.0));
+    }
+
+    #[test]
+    fn dispatch_after_external_inventory_arrival_immediately_wakes_route_advancement() {
+        let mut entities = route_matrix(2, &[], 0.0, 8.0);
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let powers = route_powers(entities.len(), 1.0);
+
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(!directory.has_local_routes());
+
+        entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(directory.local_route_demand_indices, vec![1]);
+        assert_eq!(entities[1]["stationRoutes"].as_array().unwrap().len(), 1);
+
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            8.0,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(!directory.has_local_routes());
+        assert_eq!(entities[0]["outputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[1]["outputs"]["iron_ore"], Value::from(100.0));
+    }
+
+    #[test]
+    fn failed_candidate_keeps_source_activity_cache_and_source_json_unchanged() {
+        let source = route_matrix(128, &[7, 83], 0.2, 30.0);
+        let state = route_fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_directory = Arc::new(
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap(),
+        );
+        let source_activity = source_directory.local_route_demand_indices.clone();
+        let source_station_indices = Arc::clone(&source_directory.station_indices);
+        let mut candidate_directory = Arc::clone(&source_directory);
+        let candidate_runtime = Arc::make_mut(&mut candidate_directory);
+        assert!(Arc::ptr_eq(
+            &source_station_indices,
+            &candidate_runtime.station_indices
+        ));
+        let mut candidate = source.clone();
+        candidate[7]["stationRoutes"][0] = Value::Null;
+        let candidate_before = serde_json::to_vec(&candidate).unwrap();
+        let mut base = route_fixture_base();
+        let powers = route_powers(candidate.len(), 1.0);
+
+        let error = advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut candidate,
+            1.0,
+            &powers,
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native local route is invalid");
+        assert_eq!(source_directory.local_route_demand_indices, source_activity);
+        assert_eq!(
+            candidate_directory.local_route_demand_indices, source_activity,
+            "failed replay must not partially install activity updates"
+        );
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
     }
 }

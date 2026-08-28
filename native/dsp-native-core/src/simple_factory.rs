@@ -4411,7 +4411,11 @@ fn simulate_step(
         })
         .collect::<HashMap<_, _>>();
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::dispatch(state, base, entities, &station_powers, local_step_directory)?;
+    // The peer topology is shared across committed revisions, while route
+    // activity is candidate-local. Clone-on-write duplicates only the compact
+    // activity vector; a failed candidate can never mutate the source cache.
+    let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
+    crate::local_logistics::dispatch(state, base, entities, &station_powers, local_step_runtime)?;
     profile_mark!("local-dispatch");
     crate::interstellar_logistics::dispatch(state, base, entities, &station_powers)?;
     profile_mark!("interstellar-dispatch");
@@ -4421,13 +4425,13 @@ fn simulate_step(
         entities,
         seconds,
         &station_powers,
-        local_step_directory,
+        local_step_runtime,
     )?;
     profile_mark!("local-route-advance");
     crate::interstellar_logistics::advance_routes(entities, seconds, &station_powers)?;
     profile_mark!("interstellar-route-advance");
     crate::interstellar_logistics::refill_station_warpers(base, entities)?;
-    crate::local_logistics::update_congestion(state, entities, local_step_directory)?;
+    crate::local_logistics::update_congestion(state, entities, local_step_runtime)?;
     profile_mark!("local-congestion");
     crate::interstellar_logistics::update_congestion(state, base, entities)?;
     profile_mark!("interstellar-congestion");

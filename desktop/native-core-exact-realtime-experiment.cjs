@@ -13,6 +13,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const SCHEMA_VERSION = 2;
@@ -1002,6 +1003,22 @@ class NativeCoreExactRealtimeExperimentLeaseStore {
   }
 }
 
+function createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore(options) {
+  if (!isPlainRecord(options) || typeof options.storageDirectoryPath !== "string") {
+    throw new TypeError("test-only lease store options are required");
+  }
+  const temporaryRoot = path.resolve(os.tmpdir());
+  const storageDirectoryPath = path.resolve(options.storageDirectoryPath);
+  const relative = path.relative(temporaryRoot, storageDirectoryPath);
+  if (relative.length === 0 || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw leaseError(
+      "legacy JavaScript lease persistence is test-only and must stay under the operating-system temporary root",
+      "NATIVE_CORE_EXACT_REALTIME_EXPERIMENT_PATH_INVALID",
+    );
+  }
+  return new NativeCoreExactRealtimeExperimentLeaseStore(options);
+}
+
 module.exports = {
   EXACT_TICK_MILLISECONDS,
   EXACT_TICK_SECONDS,
@@ -1009,8 +1026,9 @@ module.exports = {
   LEASE_KIND,
   MAX_LEASE_BYTES,
   NativeCoreExactRealtimeExperimentLeaseError,
-  NativeCoreExactRealtimeExperimentLeaseStore,
   NativeCoreExactRealtimeRustLeaseStore,
   SCHEMA_VERSION,
   STORAGE_DIRECTORY_NAME,
+  createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore,
+  normalizeLease,
 };

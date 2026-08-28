@@ -3,6 +3,9 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
+use dsp_native_core::{
+    V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE, V47ImportJavascriptCompatibilityRequired,
+};
 use dsp_native_host::core_runtime::CoreRegistry;
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
@@ -10,6 +13,7 @@ use dsp_native_host::exact_realtime_lease::{
 use dsp_native_host::frame::{Frame, FrameKind, read_frame, write_frame};
 use dsp_native_host::protocol::{ControlRequest, ControlResponse, HelloResponse};
 use dsp_native_host::save_store::SaveStore;
+use dsp_native_host::v47_import::open_v47_import_source;
 use serde_json::{Value, json, to_value};
 
 enum HostAction {
@@ -73,6 +77,7 @@ fn handle_request(
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
+                    "native-core-v47-stream-import-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                 ],
@@ -168,6 +173,20 @@ fn handle_request(
             &registry_fingerprint,
             catalog,
         )?)?,
+        ControlRequest::CoreImportV47 {
+            source_path,
+            registry_fingerprint,
+            catalog,
+        } => {
+            let source = open_v47_import_source(&PathBuf::from(source_path))?;
+            to_value(cores.import_v47(
+                store,
+                source.file,
+                source.byte_length,
+                &registry_fingerprint,
+                catalog,
+            )?)?
+        }
         ControlRequest::CoreStatus { session_id } => to_value(cores.status(&session_id)?)?,
         ControlRequest::CoreProjection {
             session_id,
@@ -280,8 +299,15 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
             Ok((serde_json::to_vec(&ControlResponse::success(value))?, true))
         }
         Err(error) => {
-            let response =
-                ControlResponse::<Value>::failure("NATIVE_OPERATION_FAILED", format!("{error:#}"));
+            let code = if error
+                .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                .is_some()
+            {
+                V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE
+            } else {
+                "NATIVE_OPERATION_FAILED"
+            };
+            let response = ControlResponse::<Value>::failure(code, format!("{error:#}"));
             Ok((serde_json::to_vec(&response)?, false))
         }
     }

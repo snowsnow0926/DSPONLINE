@@ -13,6 +13,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
   "native-core-exact-realtime-writer-fence-v1";
+const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
   "DSP_NATIVE_CORE_SYNC_RECORD_DROP",
@@ -493,6 +494,36 @@ function normalizeNativeCoreOpen(value) {
   };
 }
 
+function normalizeNativeCoreImport(value, sourcePath) {
+  exactObjectKeys(value, ["registryFingerprint", "catalog"], "native core v47 import request");
+  if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath) || sourcePath.length > 32_767) {
+    throw new TypeError("native core v47 import source is invalid");
+  }
+  if (!validLogicalId(value.registryFingerprint, 256)) {
+    throw new TypeError("native core v47 import registry fingerprint is invalid");
+  }
+  const catalog = value.catalog;
+  if (!catalog || typeof catalog !== "object" || catalog.protocolVersion !== 1 ||
+    catalog.registryFingerprint !== value.registryFingerprint || !Array.isArray(catalog.items) ||
+    !Array.isArray(catalog.buildings) || !Array.isArray(catalog.recipes) || !Array.isArray(catalog.belts)) {
+    throw new TypeError("native core v47 import catalog is invalid");
+  }
+  const entryCount = catalog.items.length + catalog.buildings.length + catalog.recipes.length + catalog.belts.length;
+  if (entryCount < 1 || entryCount > 65_536) {
+    throw new RangeError("native core v47 import catalog entry count is invalid");
+  }
+  const request = {
+    operation: "coreImportV47",
+    sourcePath,
+    registryFingerprint: value.registryFingerprint,
+    catalog,
+  };
+  if (Buffer.byteLength(JSON.stringify(request), "utf8") > MAX_FRAME_PAYLOAD_BYTES - 16_384) {
+    throw new RangeError("native core v47 import catalog exceeds the bounded IPC limit");
+  }
+  return request;
+}
+
 function normalizeNativeCoreCommand(value) {
   if (!value || typeof value !== "object" || value.protocolVersion !== 1 ||
     !Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0) {
@@ -568,6 +599,29 @@ class NativeCoreSessionRegistry {
       throw new NativeHostError("native host returned an invalid core session", "NATIVE_PROTOCOL_INVALID");
     }
     this.sessions.set(value.sessionId, { ownerId, slot: request.slot });
+    return value;
+  }
+
+  async importV47(ownerId, request, sourcePath) {
+    if (!this.client.hello?.capabilities?.includes(NATIVE_V47_STREAM_IMPORT_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide bounded v47 import",
+        "NATIVE_CORE_V47_IMPORT_UNAVAILABLE",
+      );
+    }
+    const value = await this.client.request(normalizeNativeCoreImport(request, sourcePath), 300_000);
+    if (!validLogicalId(value?.sessionId, 128) || this.sessions.has(value.sessionId) ||
+      value?.authority !== "shadow" || !value?.checkpoint || !value?.import || !value?.summary ||
+      !["normal", "speedrun"].includes(value.import.mode) || value.summary.mode !== value.import.mode) {
+      if (validLogicalId(value?.sessionId, 128) && !this.sessions.has(value.sessionId)) {
+        await this.client.request({ operation: "coreClose", sessionId: value.sessionId }).catch(() => undefined);
+      }
+      throw new NativeHostError("native host returned an invalid imported core session", "NATIVE_PROTOCOL_INVALID");
+    }
+    this.sessions.set(value.sessionId, {
+      ownerId,
+      slot: value.import.mode === "speedrun" ? "speedrun-main" : "normal-main",
+    });
     return value;
   }
 
@@ -834,6 +888,7 @@ module.exports = {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
+  NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NativeHostClient,
   NativeHostError,
   NativeCoreSessionRegistry,
@@ -848,6 +903,7 @@ module.exports = {
   normalizeNativeCoreCommand,
   normalizeNativeCoreCommitOperation,
   normalizeNativeCoreOpen,
+  normalizeNativeCoreImport,
   normalizeNativeExactRealtimeLeaseRequest,
   normalizeNativeHostSpawnEnvironment,
   parseFrames,

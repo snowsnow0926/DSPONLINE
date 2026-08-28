@@ -19,6 +19,9 @@ const {
 const {
   inspectNativeExactRealtimeStartup,
 } = require("./native-exact-realtime-startup-guard.cjs");
+const {
+  normalizeRendererNativeResult,
+} = require("./native-renderer-boundary.cjs");
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -189,6 +192,7 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
     fs.rmSync(root, { recursive: true, force: true });
   });
   const hello = await client.start("integration-test");
+  assert.doesNotThrow(() => normalizeRendererNativeResult("hostHello", hello));
   assert.equal(hello.nativeFormatVersion, 1);
   assert.ok(hello.capabilities.includes("native-save-v1"));
   assert.ok(hello.capabilities.includes("native-save-put-batch-v1"));
@@ -213,11 +217,13 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
   );
   await sessions.abort(1, rejected.transactionId);
   const first = await sessions.begin(1, request);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("saveBegin", first));
   await sessions.write(1, first.transactionId, [
     { key: "base", value: "{\"version\":47}" },
     { key: "entities:00000000", value: "[]" },
   ]);
   const firstCommit = await sessions.commit(1, first.transactionId);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("saveCommit", firstCommit));
   assert.equal(firstCommit.changedRecords, 2);
   const second = await sessions.begin(1, { ...request, revision: 2, savedAtMs: 2 });
   await sessions.write(1, second.transactionId, [
@@ -235,8 +241,10 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
     commandId: "command-3",
     payload: { simulationSeconds: 1 },
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("walAppend", wal));
   assert.equal(wal.revision, 3);
   const recovery = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("saveRecovery", recovery));
   assert.equal(recovery.generation, 2);
   assert.equal(recovery.revision, 2);
   assert.equal(recovery.walLastRevision, 3);
@@ -248,6 +256,7 @@ test("Electron client commits, recovers, deduplicates and appends WAL through th
     generation: recovery.generation,
     rootHash: recovery.rootHash,
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("saveRead", readback));
   assert.equal(readback.value, "{\"version\":47}");
 });
 
@@ -368,6 +377,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     fs.rmSync(root, { recursive: true, force: true });
   });
   const hello = await client.start("integration-test");
+  assert.doesNotThrow(() => normalizeRendererNativeResult("hostHello", hello));
   assert.ok(hello.capabilities.includes("native-core-shadow-v1"));
   assert.ok(hello.capabilities.includes("native-core-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v1"));
@@ -376,11 +386,11 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   const base = JSON.stringify({
     version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 2, paused: false,
     productionHistory: [
-      { elapsedSeconds: 1, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 60 }, consumptionPerMinute: {}, inventory: { iron_ore: 3 }, planetProductionPerMinute: { home: { iron_ore: 60 } }, planetConsumptionPerMinute: { home: {} } },
-      { elapsedSeconds: 2, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 120 }, consumptionPerMinute: {}, inventory: { iron_ore: 5 }, planetProductionPerMinute: { home: { iron_ore: 120 } }, planetConsumptionPerMinute: { home: {} } },
+      { elapsedSeconds: 1, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 60 }, consumptionPerMinute: {}, inventory: { iron_ore: 3 }, planetProductionPerMinute: { home: { iron_ore: 60 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
+      { elapsedSeconds: 2, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 120 }, consumptionPerMinute: {}, inventory: { iron_ore: 5 }, planetProductionPerMinute: { home: { iron_ore: 120 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
     ],
   });
-  const entities = JSON.stringify([{ id: "vein", kind: "vein", planetId: "home", resourceId: "iron_ore", minerCount: 2, inputs: {}, outputs: { iron_ore: 3 }, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0 }]);
+  const entities = JSON.stringify([{ id: "vein", kind: "vein", planetId: "home", position: { x: 0, y: 0 }, interactionLocked: false, resourceId: "iron_ore", machineCount: 0, minerCount: 2, inputs: {}, outputs: { iron_ore: 3 }, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0 }]);
   const belts = JSON.stringify([{ id: "belt", planetId: "home", source: "vein", target: "sink", itemId: "iron_ore", lanes: 1, tier: 1, priority: 1, progress: 0, lastFlow: 0 }]);
   const chunks = [
     { id: "base", kind: "base", offset: 0, count: 1, checksum: fnv1a(base), bytes: Buffer.byteLength(base) },
@@ -452,6 +462,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     },
   };
   let opened = await client.request(coreOpenRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreOpen", opened));
   assert.equal(opened.authority, "shadow");
   assert.equal(opened.checkpointRevision, 1);
   assert.equal(opened.replayedWalEntries, 1);
@@ -468,6 +479,9 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     entityIds: ["vein"],
     beltIds: ["belt"],
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreProjection", projection, {
+    baseFields: ["paused", "elapsedSeconds"], entityIds: ["vein"], beltIds: ["belt"],
+  }));
   assert.deepEqual(projection.base, { paused: true, elapsedSeconds: 2 });
   assert.deepEqual(projection.entities, [JSON.parse(entities)[0]]);
   assert.deepEqual(projection.belts, [JSON.parse(belts)[0]]);
@@ -484,6 +498,14 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     entityLimit: 16,
     beltLimit: 32,
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreViewportProjection", viewportProjection, {
+    baseFields: ["paused"],
+    planetId: "home",
+    bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 },
+    entityCursor: 0,
+    entityLimit: 16,
+    beltLimit: 32,
+  }));
   assert.equal(viewportProjection.projectionType, "viewport-v1");
   assert.equal(viewportProjection.revision, 2);
   assert.deepEqual(viewportProjection.entities.map((entity) => entity.id), ["vein"]);
@@ -499,6 +521,14 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     planetId: "home",
     itemId: "iron_ore",
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreStatisticsProjection", statisticsProjection, {
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: 2,
+    cursor: 0,
+    limit: 1,
+    planetId: "home",
+    itemId: "iron_ore",
+  }));
   assert.equal(statisticsProjection.projectionType, "statistics-v1");
   assert.equal(statisticsProjection.revision, 2);
   assert.equal(statisticsProjection.samples.length, 1);
@@ -532,6 +562,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     },
   };
   const applied = await client.request(authorityRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreCommit", applied));
   assert.deepEqual(
     { revision: applied.revision, currentRevision: applied.currentRevision, duplicate: applied.duplicate },
     { revision: 3, currentRevision: 3, duplicate: false },
@@ -548,8 +579,12 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     }),
     /idempotency key conflicts/,
   );
-  assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).paused, false);
-  assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+  const status = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreSummary", status));
+  assert.equal(status.paused, false);
+  const firstClose = await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreClose", firstClose));
+  assert.equal(firstClose.closed, true);
 
   // Reopening from the old generation replays both durable operations and
   // lands on the exact accepted revision instead of an older checkpoint.
@@ -562,6 +597,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     sessionId: opened.sessionId,
     savedAtMs: 2,
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreCheckpoint", nativeCheckpoint));
   assert.equal(nativeCheckpoint.checkpoint.generation, 2);
   assert.equal(nativeCheckpoint.checkpoint.revision, 3);
   assert.equal(nativeCheckpoint.checkpoint.changedRecords, 2);
@@ -584,6 +620,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     exportId: "integration-v47",
     savedAtMs: 4,
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreExport", exported));
   const exportPath = path.join(root, "exports", "integration-v47.json");
   const exportRaw = fs.readFileSync(exportPath, "utf8");
   const exportEnvelope = JSON.parse(exportRaw);
@@ -607,6 +644,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     sessionId: opened.sessionId,
     request: { baseRevision: 3, simulationSeconds: 1, wallSeconds: 1 },
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreAdvance", unsupportedAdvance));
   assert.equal(unsupportedAdvance.supported, false);
   assert.equal(unsupportedAdvance.revision, 3);
   const repaused = await client.request({
@@ -614,6 +652,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     sessionId: opened.sessionId,
     command: { ...pauseCommand, baseRevision: 3 },
   });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreCommand", repaused));
   assert.equal(repaused.revision, 4);
   const pausedAdvance = await client.request({
     operation: "coreAdvance",

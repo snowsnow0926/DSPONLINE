@@ -9,9 +9,9 @@ const test = require("node:test");
 
 const {
   LEASE_FILE_NAME,
-  NativeCoreExactRealtimeExperimentLeaseStore,
   NativeCoreExactRealtimeRustLeaseStore,
   STORAGE_DIRECTORY_NAME,
+  createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore,
 } = require("./native-core-exact-realtime-experiment.cjs");
 const {
   NativeCoreExactRealtimeOrchestrator,
@@ -432,7 +432,7 @@ function createFixture(t, options = {}) {
   const temporaryParent = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-e1-"));
   const storageDirectoryPath = path.join(temporaryParent, STORAGE_DIRECTORY_NAME);
   t.after(() => fs.rmSync(temporaryParent, { recursive: true, force: true }));
-  const leaseStore = new NativeCoreExactRealtimeExperimentLeaseStore({ storageDirectoryPath });
+  const leaseStore = createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({ storageDirectoryPath });
   const events = [];
   let nativeCore = options.nativeCore ?? new MockNativeCore({ events });
   const publicPrimaryWriter = options.publicPrimaryWriter ?? new MockPublicPrimaryWriter(events);

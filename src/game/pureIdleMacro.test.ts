@@ -13,8 +13,15 @@ import {
 } from "./pureIdleMacro";
 import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
 import {
+  advanceConstructionAutomationMacroWithReceiptInPlace,
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
+  applyPureIdleLightweightContractInPlace,
+  capturePureIdleCombinedConservationCheckpoint,
+  createPureIdleLightweightCalibration,
+  reconcilePureIdleLightweightMaterialDeltas,
+  runFastOfflineSettlement,
+  validatePureIdleCombinedSettlementConservation,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
@@ -90,6 +97,409 @@ function addProductiveSmelter(state: GameState, machineCount = 1_000): void {
   });
 }
 
+function addFiniteArtificialStarSmelter(state: GameState, fuelSimulationSeconds: number): void {
+  state.timeWarp.requestedMultiplier = 16;
+  const totalFuelHeatMj = 100_000_000_000_000 * fuelSimulationSeconds;
+  const queuedFuelRods = Math.floor(totalFuelHeatMj / 7_200);
+  const loadedFuelHeatMj = totalFuelHeatMj - queuedFuelRods * 7_200;
+  state.entities.push({
+    id: "pure-idle-finite-star",
+    kind: "power",
+    planetId: "home",
+    position: { x: -100, y: 0 },
+    interactionLocked: false,
+    buildingId: "artificial_star",
+    machineCount: 1_527_777_777_778,
+    minerCount: 0,
+    fuelItemId: "antimatter_fuel_rod",
+    fuelRemainingMj: loadedFuelHeatMj,
+    inputs: { antimatter_fuel_rod: queuedFuelRods },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "pure-idle-smelter",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 100, y: 0 },
+    interactionLocked: false,
+    buildingId: "arc_smelter",
+    recipeId: "iron_ingot",
+    machineCount: 100,
+    minerCount: 0,
+    inputs: { iron_ore: 1_000_000 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
+function addSustainableArtificialStarSmelter(state: GameState): void {
+  state.settings.resourceMode = "infinite";
+  state.timeWarp.requestedMultiplier = 16;
+  // Renewable generation deliberately leaves a tiny (< 0.000001%) gap at
+  // the 1e17 kW 16x threshold. The artificial star is nevertheless essential:
+  // removing its fuel drops the discrete time-warp multiplier.
+  addWindGeneration(state, 347_222_222_172_362);
+  state.entities.push({
+    id: "pure-idle-sustainable-star",
+    kind: "power",
+    planetId: "home",
+    position: { x: -120, y: 0 },
+    interactionLocked: false,
+    buildingId: "artificial_star",
+    machineCount: 1_000,
+    minerCount: 0,
+    fuelItemId: "antimatter_fuel_rod",
+    fuelRemainingMj: 3_600,
+    inputs: { antimatter_fuel_rod: 100 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "pure-idle-sustainable-fuel",
+    kind: "vein",
+    planetId: "home",
+    position: { x: -200, y: -40 },
+    interactionLocked: false,
+    resourceId: "antimatter_fuel_rod",
+    extractorBuildingId: "mining_machine",
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 0,
+    minerCount: 10,
+    inputs: {},
+    outputs: { antimatter_fuel_rod: 100 },
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "pure-idle-smelter",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 100, y: 0 },
+    interactionLocked: false,
+    buildingId: "arc_smelter",
+    recipeId: "iron_ingot",
+    machineCount: 100,
+    minerCount: 0,
+    inputs: { iron_ore: 1_000_000 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.belts.push({
+    id: "pure-idle-sustainable-fuel-feed",
+    planetId: "home",
+    source: "pure-idle-sustainable-fuel",
+    target: "pure-idle-sustainable-star",
+    itemId: "antimatter_fuel_rod",
+    lanes: 4_096,
+    tier: 3,
+    sorterTier: 3,
+    progress: 0,
+    priority: 1,
+    totalTransferred: 0,
+    lastFlow: 0,
+  });
+}
+
+function addRecipeArtificialStarFuelChain(state: GameState, options: {
+  connectStar?: boolean;
+  sustainableInputs?: boolean;
+} = {}): void {
+  const connectStar = options.connectStar ?? true;
+  const sustainableInputs = options.sustainableInputs ?? true;
+  state.settings.resourceMode = "infinite";
+  state.galaxy.profiles.home.windMultiplier = 1;
+  state.timeWarp.requestedMultiplier = 5;
+  if (!state.research.completedTechIds.includes("antimatter")) {
+    state.research.completedTechIds.push("antimatter");
+  }
+  // Leave a measured 71.5 MW gap after the four input miners and fuel
+  // assembler. One artificial star must cover it to retain the requested 5x.
+  addWindGeneration(state, 3_160);
+  const recipeInputs = [
+    "antimatter",
+    "hydrogen",
+    "annihilation_constraint_sphere",
+    "titanium_alloy",
+  ] as const;
+  if (sustainableInputs) {
+    for (const [index, itemId] of recipeInputs.entries()) {
+      state.entities.push({
+        id: `pure-idle-recipe-fuel-source-${itemId}`,
+        kind: "vein",
+        planetId: "home",
+        position: { x: -300, y: index * 30 },
+        interactionLocked: false,
+        resourceId: itemId,
+        extractorBuildingId: "mining_machine",
+        powerGridId: "grid-a",
+        powerPriority: 2,
+        machineCount: 0,
+        minerCount: 10,
+        inputs: {},
+        outputs: { [itemId]: 0 },
+        progress: 0,
+        routingCursor: 0,
+        utilization: 0,
+        productionRate: 0,
+      });
+      state.belts.push({
+        id: `pure-idle-recipe-fuel-input-${itemId}`,
+        planetId: "home",
+        source: `pure-idle-recipe-fuel-source-${itemId}`,
+        target: "pure-idle-recipe-fuel-producer",
+        itemId,
+        lanes: 1,
+        tier: 3,
+        sorterTier: 3,
+        progress: 0,
+        priority: 1,
+        totalTransferred: 0,
+        lastFlow: 0,
+      });
+    }
+  }
+  state.entities.push({
+    id: "pure-idle-recipe-fuel-producer",
+    kind: "machine",
+    planetId: "home",
+    position: { x: -160, y: 0 },
+    interactionLocked: false,
+    buildingId: "assembling_machine_mk1",
+    recipeId: "antimatter_fuel_rod",
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 10,
+    minerCount: 0,
+    inputs: {
+      antimatter: 1_000,
+      hydrogen: 1_000,
+      annihilation_constraint_sphere: 1_000,
+      titanium_alloy: 1_000,
+    },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "pure-idle-recipe-fuel-relay",
+    kind: "splitter",
+    planetId: "home",
+    position: { x: -80, y: 0 },
+    interactionLocked: false,
+    buildingId: "splitter_4way",
+    storedItemId: "antimatter_fuel_rod",
+    machineCount: 10,
+    minerCount: 0,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "pure-idle-recipe-fuel-star",
+    kind: "power",
+    planetId: "home",
+    position: { x: 0, y: 0 },
+    interactionLocked: false,
+    buildingId: "artificial_star",
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 1,
+    minerCount: 0,
+    fuelItemId: "antimatter_fuel_rod",
+    fuelRemainingMj: 3_600,
+    inputs: { antimatter_fuel_rod: 10 },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.belts.push({
+    id: "pure-idle-recipe-fuel-to-relay",
+    planetId: "home",
+    source: "pure-idle-recipe-fuel-producer",
+    target: "pure-idle-recipe-fuel-relay",
+    itemId: "antimatter_fuel_rod",
+    lanes: 1,
+    tier: 3,
+    sorterTier: 3,
+    progress: 0,
+    priority: 1,
+    totalTransferred: 0,
+    lastFlow: 0,
+  });
+  if (connectStar) {
+    state.belts.push({
+      id: "pure-idle-recipe-fuel-relay-to-star",
+      planetId: "home",
+      source: "pure-idle-recipe-fuel-relay",
+      target: "pure-idle-recipe-fuel-star",
+      itemId: "antimatter_fuel_rod",
+      lanes: 1,
+      tier: 3,
+      sorterTier: 3,
+      progress: 0,
+      priority: 1,
+      totalTransferred: 0,
+      lastFlow: 0,
+    });
+  }
+}
+
+function addInfiniteIronSupply(state: GameState): void {
+  state.settings.resourceMode = "infinite";
+  state.entities.push({
+    id: "pure-idle-infinite-iron",
+    kind: "vein",
+    planetId: "home",
+    position: { x: -200, y: 0 },
+    interactionLocked: false,
+    resourceId: "iron_ore",
+    extractorBuildingId: "mining_machine",
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 0,
+    minerCount: 1_000,
+    inputs: {},
+    outputs: { iron_ore: 1_000 },
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.belts.push({
+    id: "pure-idle-infinite-iron-feed",
+    planetId: "home",
+    source: "pure-idle-infinite-iron",
+    target: "pure-idle-smelter",
+    itemId: "iron_ore",
+    lanes: 1,
+    tier: 3,
+    sorterTier: 3,
+    progress: 0,
+    priority: 1,
+    totalTransferred: 0,
+    lastFlow: 0,
+  });
+}
+
+function addRecursiveConstructionCenter(state: GameState, target = 100): void {
+  addWindGeneration(state, 50_000_000);
+  if (!state.research.completedTechIds.includes("construction_automation")) {
+    state.research.completedTechIds.push("construction_automation");
+  }
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.targetStock.arc_smelter = target;
+  state.construction.arc_smelter = 0;
+  state.tray = { iron_ore: target * 20, copper_ore: target * 10, stone: target * 10 };
+  state.planetTrays.home = state.tray;
+  state.entities.push({
+    id: "pure-idle-construction-center",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 0, y: 0 },
+    interactionLocked: false,
+    buildingId: "construction_center",
+    machineCount: 1_000,
+    minerCount: 0,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
+function addJointConstructionPowerFixture(state: GameState, options: {
+  target?: number;
+  centerCount?: number;
+  centerGrid?: "grid-a" | "grid-b" | "grid-c";
+  wind?: number;
+  smelters?: number;
+  otherGridWind?: number;
+  idleExhaustibles?: boolean;
+} = {}): void {
+  const target = options.target ?? 12;
+  const centerCount = options.centerCount ?? 1;
+  const centerGrid = options.centerGrid ?? "grid-b";
+  const controller = state.entities.find((entity) => entity.id === "pure-idle-controller")!;
+  controller.powerGridId = "grid-c";
+  state.galaxy.profiles.home.windMultiplier = 1;
+  state.settings.simulationSpeed = 4;
+  state.timeWarp.requestedMultiplier = 8;
+  if (!state.research.completedTechIds.includes("construction_automation")) {
+    state.research.completedTechIds.push("construction_automation");
+  }
+  state.constructionAutomation.enabled = true;
+  state.constructionAutomation.targetStock.arc_smelter = target;
+  state.construction.arc_smelter = 0;
+  state.tray = {
+    iron_ingot: target * 4,
+    stone_brick: target * 2,
+    circuit_board: target * 4,
+    magnetic_coil: target * 2,
+  };
+  state.planetTrays.home = state.tray;
+  const pushWind = (id: string, gridId: "grid-a" | "grid-b" | "grid-c", machineCount: number) => {
+    if (machineCount <= 0) return;
+    state.entities.push({
+      id, kind: "power", planetId: "home", position: { x: -100, y: 0 }, interactionLocked: false,
+      buildingId: "wind_turbine", powerGridId: gridId, machineCount, minerCount: 0,
+      inputs: {}, outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    });
+  };
+  pushWind("joint-wind", centerGrid, options.wind ?? 80);
+  pushWind("joint-other-wind", centerGrid === "grid-a" ? "grid-b" : "grid-a", options.otherGridWind ?? 0);
+  if ((options.smelters ?? 20) > 0) {
+    state.entities.push({
+      id: "joint-load", kind: "machine", planetId: "home", position: { x: 100, y: 0 },
+      interactionLocked: false, buildingId: "arc_smelter", recipeId: "iron_ingot",
+      powerGridId: centerGrid, machineCount: options.smelters ?? 20, minerCount: 0,
+      inputs: { iron_ore: 1_000_000 }, outputs: {}, progress: 0, routingCursor: 0,
+      utilization: 0, productionRate: 0,
+    });
+  }
+  for (let index = 0; index < centerCount; index += 1) {
+    state.entities.push({
+      id: `joint-center-${index}`, kind: "machine", planetId: "home", position: { x: index * 20, y: 40 },
+      interactionLocked: false, buildingId: "construction_center", powerGridId: centerGrid,
+      machineCount: 1, minerCount: 0, inputs: {}, outputs: {}, progress: 0, routingCursor: 0,
+      utilization: 0, productionRate: 0,
+    });
+  }
+  if (options.idleExhaustibles) {
+    state.entities.push({
+      id: "joint-idle-star", kind: "power", planetId: "home", position: { x: -140, y: 0 },
+      interactionLocked: false, buildingId: "artificial_star", powerGridId: centerGrid,
+      machineCount: 1, minerCount: 0, fuelItemId: "antimatter_fuel_rod", fuelRemainingMj: 3_600,
+      inputs: { antimatter_fuel_rod: 1 }, outputs: {}, progress: 0, routingCursor: 0,
+      utilization: 0, productionRate: 0, powerOutputKw: 0,
+    }, {
+      id: "joint-full-acc", kind: "power", planetId: "home", position: { x: -160, y: 0 },
+      interactionLocked: false, buildingId: "accumulator", powerGridId: centerGrid,
+      machineCount: 1, minerCount: 0, storedEnergyMj: 90, inputs: {}, outputs: {}, progress: 0,
+      routingCursor: 0, utilization: 0, productionRate: 0, powerOutputKw: 0, powerInputKw: 0,
+    });
+  }
+}
+
 function addSlowProductiveAssembler(state: GameState): void {
   addWindGeneration(state, 50_000_000);
   if (!state.research.completedTechIds.includes("antimatter")) state.research.completedTechIds.push("antimatter");
@@ -110,6 +520,110 @@ function addSlowProductiveAssembler(state: GameState): void {
     utilization: 0,
     productionRate: 0,
   });
+}
+
+function addPrefilledResearchLabWithoutUpstream(state: GameState, amount = 500): void {
+  addWindGeneration(state, 50_000_000);
+  state.research.selectedTechId = "time_warp_engineering";
+  state.entities.push({
+    id: "prefilled-research-lab",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 160, y: 80 },
+    interactionLocked: false,
+    buildingId: "matrix_lab",
+    recipeId: "matrix_research",
+    machineCount: 1,
+    minerCount: 0,
+    inputs: { electromagnetic_matrix: amount },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+}
+
+function addPartiallySuppliedResearchChain(state: GameState): void {
+  state.settings.resourceMode = "infinite";
+  addWindGeneration(state, 1_000_000_000);
+  const machine = (
+    id: string,
+    buildingId: GameState["entities"][number]["buildingId"],
+    recipeId: GameState["entities"][number]["recipeId"],
+    machineCount: number,
+    inputs: GameState["entities"][number]["inputs"],
+  ): GameState["entities"][number] => ({
+    id,
+    kind: "machine",
+    planetId: "home",
+    position: { x: state.entities.length * 40, y: 120 },
+    interactionLocked: false,
+    buildingId,
+    recipeId,
+    machineCount,
+    minerCount: 0,
+    inputs,
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  });
+  state.entities.push({
+    id: "steady-research-iron-vein",
+    kind: "vein",
+    planetId: "home",
+    position: { x: -400, y: 120 },
+    interactionLocked: false,
+    resourceId: "iron_ore",
+    extractorBuildingId: "mining_machine",
+    machineCount: 0,
+    minerCount: 1_000,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  }, {
+    id: "steady-research-copper-vein",
+    kind: "vein",
+    planetId: "home",
+    position: { x: -360, y: 120 },
+    interactionLocked: false,
+    resourceId: "copper_ore",
+    extractorBuildingId: "mining_machine",
+    machineCount: 0,
+    minerCount: 1_000,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  },
+  machine("steady-research-magnet", "arc_smelter", "magnet", 100, { iron_ore: 1_000_000 }),
+  machine("steady-research-iron", "arc_smelter", "iron_ingot", 100, { iron_ore: 1_000_000 }),
+  machine("steady-research-copper", "arc_smelter", "copper_ingot", 100, { copper_ore: 1_000_000 }),
+  // One coil assembler intentionally supplies less than the matrix labs use.
+  // Its own inputs remain sustainably supplied by the high-rate upstream.
+  machine("steady-research-coil", "assembling_machine_mk1", "magnetic_coil", 1, {
+    magnet: 1_000_000,
+    copper_ingot: 1_000_000,
+  }),
+  machine("steady-research-board", "assembling_machine_mk1", "circuit_board", 20, {
+    iron_ingot: 1_000_000,
+    copper_ingot: 1_000_000,
+  }),
+  machine("steady-research-matrix", "matrix_lab", "electromagnetic_matrix", 12, {
+    magnetic_coil: 1_000_000,
+    circuit_board: 1_000_000,
+  }),
+  machine("steady-research-consumer", "matrix_lab", "matrix_research", 1, {
+    electromagnetic_matrix: 1_000,
+  }));
+  state.research.selectedTechId = "high_efficiency_plasma_control";
 }
 
 function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000_000): void {
@@ -166,6 +680,41 @@ function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000
     priority: 1,
     totalTransferred: 0,
     lastFlow: 0,
+  });
+}
+
+function addSecondRocketSystemFixture(state: GameState, prefilledRockets = 1_000_000): void {
+  const wind = state.entities.find((entity) => entity.id.startsWith("pure-idle-wind-"));
+  const producer = state.entities.find((entity) => entity.id === "slow-rocket-producer");
+  const silo = state.entities.find((entity) => entity.id === "prefilled-rocket-silo");
+  const feed = state.belts.find((belt) => belt.id === "slow-rocket-feed");
+  if (!wind || !producer || !silo || !feed) throw new Error("primary rocket fixture is incomplete");
+  producer.machineCount = 600;
+  producer.inputs = {
+    dyson_sphere_component: 1_000_000_000,
+    deuteron_fuel_rod: 2_000_000_000,
+    quantum_chip: 1_000_000_000,
+  };
+  state.entities.push({
+    ...structuredClone(wind),
+    id: "borealis-rocket-wind",
+    planetId: "frost",
+  }, {
+    ...structuredClone(producer),
+    id: "borealis-rocket-producer",
+    planetId: "frost",
+  }, {
+    ...structuredClone(silo),
+    id: "borealis-rocket-silo",
+    planetId: "frost",
+    inputs: { small_carrier_rocket: prefilledRockets },
+  });
+  state.belts.push({
+    ...structuredClone(feed),
+    id: "borealis-rocket-feed",
+    planetId: "frost",
+    source: "borealis-rocket-producer",
+    target: "borealis-rocket-silo",
   });
 }
 
@@ -314,6 +863,35 @@ describe("pure idle macro session", () => {
     expect(extremeSummary.nextValidationAtWallSeconds).toBeNull();
   });
 
+  it("drops a stale rocket ledger and starts a fresh remainder epoch after stable shadow validation", () => {
+    const rocketSource = pureIdleState();
+    rocketSource.settings.simulationSpeed = 4;
+    rocketSource.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(rocketSource, 0);
+    const rocketSession = createConservativePureIdleMacroSession(
+      structuredClone(rocketSource),
+      "stable",
+      "shadow validation rocket epoch regression",
+    );
+    expect(rocketSession.rocketLedger).toBeDefined();
+
+    const stable = createPureIdleMacroSession(structuredClone(pureIdleState()), "stable");
+    stable.rocketLedger = rocketSession.rocketLedger;
+    stable.rocketLaunchRemaindersBySystem = { helios: 0.75 };
+    stable.nextValidationAtWallSeconds = stable.settledWallSeconds;
+    // Enter the public settlement path without advancing a rocket bucket. The
+    // pending construction second is harmless for this fixture, but allows
+    // the due stable validation to run at the current wall-clock boundary.
+    stable.pendingConstructionSimulationSeconds = 1;
+
+    const summary = advancePureIdleMacroSession(stable, stable.settledWallSeconds);
+
+    expect(summary.validationCount).toBe(1);
+    expect(summary.validationFailures).toBe(0);
+    expect(stable.rocketLedger).toBeUndefined();
+    expect(stable.rocketLaunchRemaindersBySystem).toEqual({});
+  });
+
   it("reports current terminal efficiency against the immutable calibration rate", () => {
     const session = createPureIdleMacroSession(structuredClone(pureIdleState()), "stable");
     session.calibrationRate.whiteMatrixProduced = 10;
@@ -454,6 +1032,69 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
+  it("applies the closed lightweight contract without cloning the full state", () => {
+    const source = pureIdleState();
+    source.entities[0].inputs.iron_ore = 100;
+    const contract = {
+      calibrationSeconds: 10,
+      calibrationWallSeconds: 10,
+      deltas: [
+        { path: ["entities", 0, "inputs", "iron_ore"], kind: "number", delta: -10, integer: true },
+        { path: ["totalProduced", "iron_ingot"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+    const expected = structuredClone(source);
+    const actual = structuredClone(source);
+
+    expect(applyPureIdleAffineContract(expected, contract, 10, 10)).toMatchObject({ ok: true });
+    expect(applyPureIdleLightweightContractInPlace(actual, contract, 10, 10)).toMatchObject({ ok: true });
+    expect(hashGameState(actual)).toBe(hashGameState(expected));
+  });
+
+  it("rolls back every primitive and remainder when an in-place bucket overflows", () => {
+    const state = pureIdleState();
+    state.entities[0].inputs.iron_ore = 100;
+    state.totalProduced.iron_ingot = Number.MAX_SAFE_INTEGER - 5;
+    const before = hashGameState(state);
+    const integerRemainders = { retained: 0.25 };
+    const contract = {
+      calibrationSeconds: 10,
+      calibrationWallSeconds: 10,
+      deltas: [
+        { path: ["entities", 0, "inputs", "iron_ore"], kind: "number", delta: -10, integer: true },
+        { path: ["totalProduced", "iron_ingot"], kind: "number", delta: 10, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleLightweightContractInPlace(state, contract, 10, 10, { integerRemainders });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.failure).toContain("超过安全整数");
+    expect(hashGameState(state)).toBe(before);
+    expect(integerRemainders).toEqual({ retained: 0.25 });
+  });
+
+  it("turns an unmatched sampled replenishment into balanced transfer and finite consumption", () => {
+    const state = pureIdleState();
+    state.tray.coal = 100;
+    state.entities[0].inputs.coal = 100;
+    const contract = reconcilePureIdleLightweightMaterialDeltas({
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["tray", "coal"], kind: "number", delta: 100, integer: true },
+        { path: ["entities", 0, "inputs", "coal"], kind: "number", delta: -40, integer: true },
+      ],
+    });
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(state.tray.coal).toBe(140);
+    expect(state.entities[0].inputs.coal).toBe(60);
+    expect((state.tray.coal ?? 0) + (state.entities[0].inputs.coal ?? 0)).toBe(200);
+  });
+
   it("keeps the 30-second lightweight calibration isolated until wall time reaches its checkpoint", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
@@ -569,6 +1210,113 @@ describe("pure idle macro session", () => {
       .toMatchObject({ particle_container: 0, processor: 0 });
   });
 
+  it("freezes prefilled research after the exact prefix when no matrix input has a steady certificate", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addPrefilledResearchLabWithoutUpstream(source);
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "prefilled research without sustainable upstream",
+    );
+    const prefix = session.calibrationCheckpoint!.candidate;
+    const prefixProgress = prefix.research.progressByTech.time_warp_engineering?.electromagnetic_matrix ?? 0;
+    const prefixInput = prefix.entities.find((entity) => entity.id === "prefilled-research-lab")!
+      .inputs.electromagnetic_matrix ?? 0;
+
+    expect(prefixProgress).toBeGreaterThan(0);
+    expect(prefixInput).toBeLessThan(500);
+    expect(session.researchLedger.unitsPerWindow).toBe(0n);
+
+    advancePureIdleMacroSession(session, 60 * 60);
+
+    expect(session.candidate.research.progressByTech.time_warp_engineering?.electromagnetic_matrix ?? 0)
+      .toBe(prefixProgress);
+    expect(session.candidate.entities.find((entity) => entity.id === "prefilled-research-lab")!
+      .inputs.electromagnetic_matrix ?? 0).toBe(prefixInput);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("applies a fractional steady research factor exactly once", () => {
+    const source = pureIdleState();
+    addPartiallySuppliedResearchChain(source);
+    const sourceProgress = source.research.progressByTech.high_efficiency_plasma_control
+      ?.electromagnetic_matrix ?? 0;
+
+    const calibration = createPureIdleLightweightCalibration(source, 30, {
+      isolateConstructionAutomation: true,
+    });
+
+    expect(calibration).not.toBeNull();
+    if (!calibration) return;
+    const factor = calibration.contract.steadyStateFactorsByItem?.electromagnetic_matrix ?? 0;
+    const calibratedProgress = calibration.calibratedState.research.progressByTech.high_efficiency_plasma_control
+      ?.electromagnetic_matrix ?? 0;
+    const observedInvestment = BigInt(calibratedProgress - sourceProgress);
+    const scaledFactor = BigInt(Math.floor(factor * 1_000_000));
+    const onceScaled = observedInvestment * scaledFactor / 1_000_000n;
+    const twiceScaled = onceScaled * scaledFactor / 1_000_000n;
+
+    expect(factor).toBeGreaterThan(0);
+    expect(factor).toBeLessThan(1);
+    expect(observedInvestment).toBeGreaterThan(0n);
+    expect(onceScaled).toBeGreaterThan(twiceScaled);
+    expect(calibration.researchLedger.unitsPerWindow).toBe(onceScaled);
+    expect(calibration.researchLedger.observedUnits).toBe(onceScaled);
+  });
+
+  it("rejects a combined pure-idle candidate that gains unsupported inventory after its checkpoint", () => {
+    const source = pureIdleState();
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "combined conservation rejection regression",
+    );
+    advancePureIdleMacroSession(session, 30);
+    session.candidate.tray.iron_ore = (session.candidate.tray.iron_ore ?? 0) + 1;
+
+    expect(() => advancePureIdleMacroSession(session, 31)).toThrow(/最终物资守恒门禁拒绝候选/);
+    expect(session.phase).toBe("failed");
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps an infinite closed supply chain productive after its transient caches would have expired", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addProductiveSmelter(source, 100);
+    addInfiniteIronSupply(source);
+    advanceExactSimulationWindow(source, 60, 4);
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "steady-flow certificate regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "steady-flow certificate segmented regression",
+    );
+    const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
+
+    const summary = advancePureIdleMacroSession(session, 24 * 60 * 60);
+    advancePureIdleMacroSession(segmented, 102);
+    advancePureIdleMacroSession(segmented, 10 * 60);
+    advancePureIdleMacroSession(segmented, 24 * 60 * 60);
+
+    expect(session.contract.steadyStateFactorsByItem?.iron_ingot).toBeGreaterThan(0);
+    expect(session.contract.maximumSimulationSecondsByItem?.iron_ingot).toBeUndefined();
+    expect(session.candidate.totalProduced.iron_ingot ?? 0).toBeGreaterThan(prefixProduced);
+    expect(summary.minimumEfficiency === null || summary.minimumEfficiency > 0).toBe(true);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(session.candidate));
+    expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
   it("keeps compact conservative counters deterministic across idle boundaries", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
@@ -589,11 +1337,643 @@ describe("pure idle macro session", () => {
     expect(incremental.researchRemainder).toBe(single.researchRemainder);
   });
 
+  it("uses and debits a finite artificial-star reserve beyond the 30-second prefix without replaying it", () => {
+    const source = pureIdleState();
+    addFiniteArtificialStarSmelter(source, 100);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "finite fuel power horizon",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "finite fuel power horizon",
+    );
+
+    advancePureIdleMacroSession(single, 10);
+    advancePureIdleMacroSession(segmented, 5);
+    advancePureIdleMacroSession(segmented, 10);
+    const producedAtExhaustion = single.candidate.totalProduced.iron_ingot ?? 0;
+    const singleAtTenHash = hashGameState(single.candidate);
+    advancePureIdleMacroSession(single, 11);
+
+    expect(single.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-finite-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: false,
+    }]);
+    expect(producedAtExhaustion).toBe(10_000);
+    expect(single.candidate.totalProduced.iron_ingot ?? 0).toBe(producedAtExhaustion);
+    expect(single.candidate.entities.find((entity) => entity.id === "pure-idle-finite-star")?.fuelRemainingMj)
+      .toBe(0);
+    expect(single.powerBoundaryRecalibrations).toBe(0);
+    expect(single.calibrationWindowsCompleted).toBe(3);
+    expect(hashGameState(segmented.candidate)).toBe(singleAtTenHash);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("freezes quantum construction when finite generation cannot issue a renewable headroom certificate", () => {
+    const source = pureIdleState();
+    addFiniteArtificialStarSmelter(source, 40);
+    source.research.completedTechIds.push("construction_automation");
+    source.construction.arc_smelter = 0;
+    source.constructionAutomation.enabled = true;
+    source.constructionAutomation.quantumSourceEnabled = true;
+    source.constructionAutomation.targetStock.arc_smelter = 1_000_000;
+    source.constructionAutomation.quantumMaterialBuffer = {
+      "pure-idle-quantum-center": {
+        iron_ore: 1_000_000_000,
+        copper_ore: 1_000_000_000,
+        stone: 1_000_000_000,
+      },
+    };
+    source.entities.push({
+      id: "pure-idle-quantum-center",
+      kind: "machine",
+      planetId: "home",
+      position: { x: 160, y: 0 },
+      interactionLocked: false,
+      buildingId: "construction_center",
+      machineCount: 1_000,
+      minerCount: 0,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      routingCursor: 0,
+      utilization: 0,
+      productionRate: 0,
+    });
+    const sourceHash = hashGameState(source);
+    const session = createPureIdleMacroSession(structuredClone(source), "extreme");
+    const calibratedCrafted = session.calibrationCheckpoint!.candidate.constructionAutomation.totalCrafted;
+
+    // The ordinary factory may consume its finite 40-second power horizon,
+    // but isolated construction receives no renewable-headroom certificate
+    // and therefore cannot borrow that same finite fuel a second time.
+    advancePureIdleMacroSession(session, 4);
+    const craftedAtFuelExhaustion = session.candidate.constructionAutomation.totalCrafted;
+    advancePureIdleMacroSession(session, 5);
+
+    expect(session.conservativeOnly).toBe(false);
+    expect(craftedAtFuelExhaustion).toBe(calibratedCrafted);
+    expect(session.candidate.constructionAutomation.totalCrafted)
+      .toBe(calibratedCrafted);
+    expect(session.actualMultiplier).toBeLessThan(16);
+    expect(session.powerRemainingSimulationSeconds).toBe(0);
+    expect(session.candidate.entities.find((entity) => entity.id === "pure-idle-finite-star")?.fuelRemainingMj)
+      .toBeLessThan(7_200);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps the normal affine session productive for a proven continuous fuel flow", () => {
+    const source = pureIdleState();
+    addSustainableArtificialStarSmelter(source);
+    advanceExactSimulationWindow(source, 60, 60 / 16);
+    const sourceHash = hashGameState(source);
+    const single = createPureIdleMacroSession(structuredClone(source), "extreme");
+    const segmented = createPureIdleMacroSession(structuredClone(source), "extreme");
+    const calibrated = single.calibrationCheckpoint!.candidate;
+    const calibratedStar = calibrated.entities.find((entity) => entity.id === "pure-idle-sustainable-star")!;
+    const calibratedFuelBank = (calibratedStar.fuelRemainingMj ?? 0) +
+      (calibratedStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+    const calibratedFuelProduced = calibrated.totalProduced.antimatter_fuel_rod ?? 0;
+
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 20);
+    advancePureIdleMacroSession(segmented, 40);
+    advancePureIdleMacroSession(segmented, 60);
+
+    const finalStar = single.candidate.entities.find((entity) => entity.id === "pure-idle-sustainable-star")!;
+    const finalFuelBank = (finalStar.fuelRemainingMj ?? 0) +
+      (finalStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+    expect(single.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-sustainable-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: true,
+    }]);
+    expect(single.powerTail.maximumSimulationSeconds).toBeNull();
+    expect(single.contract.steadyStateFactorsByItem?.antimatter_fuel_rod).toBe(1);
+    expect(single.candidate.totalProduced.antimatter_fuel_rod ?? 0).toBeGreaterThan(calibratedFuelProduced);
+    // The generic affine normalizer stores sub-MJ fuel heat as a safe integer;
+    // one normalization may conservatively discard less than 1 MJ.
+    expect(Math.abs(finalFuelBank - calibratedFuelBank)).toBeLessThan(1);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps a continuously produced fuel flow closed, bank-steady, and segment deterministic", () => {
+    const source = pureIdleState();
+    addSustainableArtificialStarSmelter(source);
+    // Enter a stable fuel-routing phase before taking the immutable source
+    // checkpoint used by both settlement shapes.
+    advanceExactSimulationWindow(source, 60, 60 / 16);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "sustainable fuel-flow power certificate",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "sustainable fuel-flow power certificate",
+    );
+    const calibrated = single.calibrationCheckpoint!.candidate;
+    const calibratedStar = calibrated.entities.find((entity) => entity.id === "pure-idle-sustainable-star")!;
+    const calibratedFuelProduced = calibrated.totalProduced.antimatter_fuel_rod ?? 0;
+    const calibratedFuelBank = (calibratedStar.fuelRemainingMj ?? 0) +
+      (calibratedStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 20);
+    advancePureIdleMacroSession(segmented, 40);
+    advancePureIdleMacroSession(segmented, 60);
+
+    const finalStar = single.candidate.entities.find((entity) => entity.id === "pure-idle-sustainable-star")!;
+    const finalFuelBank = (finalStar.fuelRemainingMj ?? 0) +
+      (finalStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+    expect(single.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-sustainable-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: true,
+    }]);
+    expect(single.powerTail.maximumSimulationSeconds).toBeNull();
+    expect(single.contract.steadyStateFactorsByItem?.antimatter_fuel_rod).toBeGreaterThan(0);
+    // The credited cumulative fuel production is paired with generator
+    // consumption inside the closed flow; it must not accumulate as free
+    // generator inventory when the specialized input delta is stripped.
+    expect(single.candidate.totalProduced.antimatter_fuel_rod ?? 0).toBeGreaterThan(calibratedFuelProduced);
+    expect(finalFuelBank).toBeCloseTo(calibratedFuelBank, 6);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("certifies a fractional recipe-fuel flow through a relay when its credited rate covers total burn", () => {
+    const source = pureIdleState();
+    addRecipeArtificialStarFuelChain(source);
+    // Settle the belt/relay phase before both sessions take their immutable
+    // source checkpoint. The following contract still comes only from 3x10s.
+    advanceExactSimulationWindow(source, 60, 12);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "connected recipe fuel ledger",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "connected recipe fuel ledger",
+    );
+    const factor = single.contract.steadyStateFactorsByItem?.antimatter_fuel_rod ?? 0;
+    const fuelProduction = single.contract.deltas.find((delta) =>
+      delta.path[0] === "totalProduced" && delta.path[1] === "antimatter_fuel_rod");
+    const creditedFuelPerSimulationSecond = fuelProduction?.kind === "number"
+      ? Number(fuelProduction.delta) / single.contract.calibrationSeconds
+      : 0;
+    const requiredFuelPerSimulationSecond = single.powerTail.fuelDebits.reduce((sum, debit) =>
+      sum + debit.thermalMjPerSimulationSecond / 7_200, 0);
+    const calibratedStar = single.calibrationCheckpoint!.candidate.entities.find((entity) =>
+      entity.id === "pure-idle-recipe-fuel-star")!;
+    const calibratedStarBank = (calibratedStar.fuelRemainingMj ?? 0) +
+      (calibratedStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+
+    expect(single.actualMultiplier).toBe(5);
+    expect(factor).toBeGreaterThan(0);
+    expect(factor).toBeLessThan(1);
+    expect(creditedFuelPerSimulationSecond).toBeGreaterThanOrEqual(requiredFuelPerSimulationSecond);
+    expect(single.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-recipe-fuel-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: true,
+    }]);
+    expect(single.powerTail.maximumSimulationSeconds).toBeNull();
+
+    advancePureIdleMacroSession(single, 2 * 60 * 60);
+    advancePureIdleMacroSession(segmented, 60);
+    advancePureIdleMacroSession(segmented, 60 * 60);
+    advancePureIdleMacroSession(segmented, 2 * 60 * 60);
+
+    const finalStar = single.candidate.entities.find((entity) => entity.id === "pure-idle-recipe-fuel-star")!;
+    const finalStarBank = (finalStar.fuelRemainingMj ?? 0) +
+      (finalStar.inputs.antimatter_fuel_rod ?? 0) * 7_200;
+    expect(finalStarBank).toBeCloseTo(calibratedStarBank, 6);
+    expect(single.powerBoundaryRecalibrations).toBe(0);
+    expect(single.calibrationWindowsCompleted).toBe(3);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it.each([
+    ["disconnected global recipe output", { connectStar: false, sustainableInputs: true }],
+    ["finite prefilled recipe inputs", { connectStar: true, sustainableInputs: false }],
+  ] as const)("keeps %s on a finite power bank and never recalibrates it", (_label, options) => {
+    const source = pureIdleState();
+    addRecipeArtificialStarFuelChain(source, options);
+    advanceExactSimulationWindow(source, 60, 12);
+    const sourceHash = hashGameState(source);
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "unproven recipe fuel ledger",
+    );
+    const prefixFuelProduced = (session.calibrationCheckpoint!.candidate.totalProduced.antimatter_fuel_rod ?? 0) -
+      (source.totalProduced.antimatter_fuel_rod ?? 0);
+
+    expect(prefixFuelProduced).toBeGreaterThan(0);
+    expect(session.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-recipe-fuel-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: false,
+    }]);
+    expect(session.powerTail.maximumSimulationSeconds).not.toBeNull();
+
+    advancePureIdleMacroSession(session, 1_000);
+    const producedAtBoundary = session.candidate.totalProduced.antimatter_fuel_rod ?? 0;
+    advancePureIdleMacroSession(session, 1_100);
+
+    const star = session.candidate.entities.find((entity) => entity.id === "pure-idle-recipe-fuel-star")!;
+    expect((star.fuelRemainingMj ?? 0) + (star.inputs.antimatter_fuel_rod ?? 0) * 7_200).toBe(0);
+    expect(session.candidate.totalProduced.antimatter_fuel_rod ?? 0).toBe(producedAtBoundary);
+    expect(session.powerRemainingSimulationSeconds).toBe(0);
+    expect(session.powerBoundaryRecalibrations).toBe(0);
+    expect(session.calibrationWindowsCompleted).toBe(3);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("does not certify a finite upstream fuel cache as an endless local generator supply", () => {
+    const source = pureIdleState();
+    addSustainableArtificialStarSmelter(source);
+    source.settings.resourceMode = "finite";
+    const fuelSource = source.entities.find((entity) => entity.id === "pure-idle-sustainable-fuel")!;
+    fuelSource.resourceRemaining = 1_000_000_000;
+    advanceExactSimulationWindow(source, 60, 60 / 16);
+
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "extreme",
+      "finite upstream fuel must retain a physical horizon",
+    );
+
+    expect(session.powerTail.fuelDebits).toMatchObject([{
+      entityId: "pure-idle-sustainable-star",
+      fuelItemId: "antimatter_fuel_rod",
+      sustainable: false,
+    }]);
+    expect(session.powerTail.maximumSimulationSeconds).not.toBeNull();
+  });
+
+  it("does not treat a fully charged but idle accumulator as active exhaustible dispatch", () => {
+    const source = pureIdleState();
+    source.timeWarp.requestedMultiplier = 8;
+    addProductiveSmelter(source, 100);
+    source.entities.push({
+      id: "pure-idle-idle-accumulator",
+      kind: "power",
+      planetId: "home",
+      position: { x: -160, y: 0 },
+      interactionLocked: false,
+      buildingId: "accumulator",
+      machineCount: 1_000,
+      minerCount: 0,
+      storedEnergyMj: 90_000,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      routingCursor: 0,
+      utilization: 0,
+      productionRate: 0,
+    });
+    const session = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "idle storage must not block renewable proof",
+    );
+    const prefixProduced = session.calibrationCheckpoint!.candidate.totalProduced.iron_ingot ?? 0;
+
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.powerTail.storageDispatchDetected).toBe(false);
+    expect(session.powerTail.rejectionReason).toBeUndefined();
+    expect(session.powerTail.maximumSimulationSeconds).toBeNull();
+    expect(session.candidate.totalProduced.iron_ingot ?? 0).toBeGreaterThan(prefixProduced);
+  });
+
+  it("advances recursive construction only after the isolated calibration issues a joint power grant", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addRecursiveConstructionCenter(source, 100);
+    const sourceHash = hashGameState(source);
+
+    const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "large-save memory guard");
+    expect(single.calibrationCheckpoint!.candidate.construction.arc_smelter).toBe(0);
+    advancePureIdleMacroSession(single, 60);
+
+    const segmented = createConservativePureIdleMacroSession(structuredClone(source), "stable", "large-save memory guard");
+    advancePureIdleMacroSession(segmented, 15);
+    advancePureIdleMacroSession(segmented, 30);
+    advancePureIdleMacroSession(segmented, 60);
+
+    expect(single.candidate.construction.arc_smelter).toBe(100);
+    expect(single.candidate.constructionAutomation.jobs).toEqual({});
+    expect(single.candidate.constructionAutomation.totalCrafted).toBeGreaterThanOrEqual(100);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(Object.values(single.candidate.tray).every((amount) => (amount ?? 0) >= 0)).toBe(true);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("uses only same-grid renewable headroom and stays deterministic across partial calibration boundaries", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, { target: 12, wind: 80, smelters: 20, otherGridWind: 1 });
+    const sourceHash = hashGameState(source);
+
+    const single = createConservativePureIdleMacroSession(structuredClone(source), "stable", "joint grid proof");
+    advancePureIdleMacroSession(single, 60);
+    const segmented = createConservativePureIdleMacroSession(structuredClone(source), "stable", "joint grid proof");
+    advancePureIdleMacroSession(segmented, 17);
+    advancePureIdleMacroSession(segmented, 43);
+    advancePureIdleMacroSession(segmented, 60);
+
+    expect(single.candidate.construction.arc_smelter).toBe(12);
+    expect(single.candidate.constructionAutomation.totalCrafted).toBe(12);
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("does not borrow renewable construction power across grids", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, {
+      target: 12,
+      wind: 0,
+      smelters: 0,
+      otherGridWind: 1_000,
+    });
+    const beforeTray = structuredClone(source.tray);
+    const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "no cross-grid power");
+
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.candidate.construction.arc_smelter).toBe(0);
+    expect(session.candidate.constructionAutomation.totalCrafted).toBe(0);
+    expect(session.candidate.tray).toEqual(beforeTray);
+  });
+
+  it("freezes a grid whose ordinary demand consumes its complete renewable floor", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, {
+      target: 12,
+      wind: 60,
+      smelters: 50,
+      idleExhaustibles: true,
+    });
+    const starBefore = structuredClone(source.entities.find((entity) => entity.id === "joint-idle-star"));
+    const accumulatorBefore = structuredClone(source.entities.find((entity) => entity.id === "joint-full-acc"));
+    const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "ordinary load floor");
+
+    advancePureIdleMacroSession(session, 60);
+
+    const star = session.candidate.entities.find((entity) => entity.id === "joint-idle-star")!;
+    const accumulator = session.candidate.entities.find((entity) => entity.id === "joint-full-acc")!;
+    expect(session.candidate.construction.arc_smelter).toBe(0);
+    expect(star.fuelRemainingMj).toBe(starBefore?.fuelRemainingMj);
+    expect(star.inputs.antimatter_fuel_rod).toBe(starBefore?.inputs.antimatter_fuel_rod);
+    expect(accumulator.storedEnergyMj).toBe(accumulatorBefore?.storedEnergyMj);
+  });
+
+  it("allows renewable headroom beside idle exhaustibles without dispatching or draining them", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, {
+      target: 12,
+      wind: 80,
+      smelters: 20,
+      idleExhaustibles: true,
+    });
+    const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "idle exhaustibles");
+
+    advancePureIdleMacroSession(session, 60);
+
+    const star = session.candidate.entities.find((entity) => entity.id === "joint-idle-star")!;
+    const accumulator = session.candidate.entities.find((entity) => entity.id === "joint-full-acc")!;
+    expect(session.candidate.construction.arc_smelter).toBe(12);
+    expect(star.fuelRemainingMj).toBe(3_600);
+    expect(star.inputs.antimatter_fuel_rod).toBe(1);
+    expect(star.powerOutputKw ?? 0).toBe(0);
+    expect(accumulator.storedEnergyMj).toBe(90);
+    expect(accumulator.powerOutputKw ?? 0).toBe(0);
+    expect(accumulator.powerInputKw ?? 0).toBe(0);
+  });
+
+  it("caps two construction centers to one grid's certified energy and keeps bucket segmentation deterministic", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, {
+      target: 100,
+      centerCount: 2,
+      wind: 40,
+      smelters: 0,
+    });
+    const settle = (segments: number[]) => {
+      const calibration = createPureIdleLightweightCalibration(
+        structuredClone(source),
+        30 / 4,
+        { isolateConstructionAutomation: true },
+      )!;
+      const checkpoint = capturePureIdleCombinedConservationCheckpoint(calibration.calibratedState);
+      for (const seconds of segments) {
+        advanceConstructionAutomationMacroWithReceiptInPlace(
+          calibration.calibratedState,
+          seconds,
+          checkpoint,
+          {
+            powerCertificate: calibration.constructionPowerCertificate,
+            contract: calibration.contract,
+          },
+        );
+      }
+      expect(validatePureIdleCombinedSettlementConservation(
+        checkpoint,
+        calibration.calibratedState,
+      )).toBeNull();
+      return calibration.calibratedState;
+    };
+
+    const single = settle([10]);
+    const segmented = settle([5, 5]);
+    expect(single.construction.arc_smelter).toBe(2);
+    expect(single.constructionAutomation.totalCrafted).toBe(2);
+    expect(hashGameState(segmented)).toBe(hashGameState(single));
+  });
+
+  it("fails closed when a certificate is paired with a different contract or center grid", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, { target: 12, wind: 80, smelters: 20 });
+    const contractCalibration = createPureIdleLightweightCalibration(
+      structuredClone(source),
+      30 / 4,
+      { isolateConstructionAutomation: true },
+    )!;
+    // Keep the certificate-authorized state graph so this branch isolates the
+    // contract identity check instead of failing earlier on array identity.
+    const contractMismatch = contractCalibration.calibratedState;
+    const contractCheckpoint = capturePureIdleCombinedConservationCheckpoint(contractMismatch);
+    advanceConstructionAutomationMacroWithReceiptInPlace(
+      contractMismatch,
+      60,
+      contractCheckpoint,
+      {
+        powerCertificate: contractCalibration.constructionPowerCertificate,
+        contract: { ...contractCalibration.contract },
+      },
+    );
+    expect(contractMismatch.construction.arc_smelter).toBe(0);
+    expect(validatePureIdleCombinedSettlementConservation(contractCheckpoint, contractMismatch)).toBeNull();
+
+    // Use an independent accepted calibration graph so this branch reaches
+    // the center/grid topology check without polluting another certificate.
+    const gridCalibration = createPureIdleLightweightCalibration(
+      structuredClone(source),
+      30 / 4,
+      { isolateConstructionAutomation: true },
+    )!;
+    const gridMismatch = gridCalibration.calibratedState;
+    gridMismatch.entities.find((entity) => entity.id === "joint-center-0")!.powerGridId = "grid-a";
+    const gridCheckpoint = capturePureIdleCombinedConservationCheckpoint(gridMismatch);
+    advanceConstructionAutomationMacroWithReceiptInPlace(
+      gridMismatch,
+      60,
+      gridCheckpoint,
+      {
+        powerCertificate: gridCalibration.constructionPowerCertificate,
+        contract: gridCalibration.contract,
+      },
+    );
+    expect(gridMismatch.construction.arc_smelter).toBe(0);
+    expect(validatePureIdleCombinedSettlementConservation(gridCheckpoint, gridMismatch)).toBeNull();
+  });
+
+  it("never lets a zero-stack construction center work in exact or certified macro simulation", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, { target: 12, wind: 80, smelters: 0 });
+    source.entities.find((entity) => entity.id === "joint-center-0")!.machineCount = 0;
+
+    const exact = advanceExactSimulationWindow(structuredClone(source), 60, 60);
+    const exactCenter = exact.entities.find((entity) => entity.id === "joint-center-0")!;
+    expect(exact.construction.arc_smelter).toBe(0);
+    expect(exact.constructionAutomation.totalCrafted).toBe(0);
+    expect(exactCenter.powerFactor).toBe(0);
+
+    const macro = createConservativePureIdleMacroSession(structuredClone(source), "stable", "zero stack");
+    advancePureIdleMacroSession(macro, 60);
+    const macroCenter = macro.candidate.entities.find((entity) => entity.id === "joint-center-0")!;
+    expect(macro.candidate.construction.arc_smelter).toBe(0);
+    expect(macro.candidate.constructionAutomation.totalCrafted).toBe(0);
+    expect(macroCenter.powerFactor).toBe(0);
+  });
+
+  it("freezes construction for the bucket when macro research completes after power certification", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, { target: 12, wind: 80, smelters: 0 });
+    source.research.completedTechIds.push("gravity_matrix");
+    source.research.selectedTechId = "construction_capacity_1";
+    source.entities.push({
+      id: "joint-research-boundary", kind: "machine", planetId: "home", position: { x: 160, y: 80 },
+      interactionLocked: false, buildingId: "matrix_lab", recipeId: "matrix_research",
+      powerGridId: "grid-b", machineCount: 1, minerCount: 0,
+      inputs: {
+        electromagnetic_matrix: 150,
+        energy_matrix: 150,
+        structure_matrix: 150,
+        information_matrix: 150,
+        gravity_matrix: 150,
+      },
+      outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    });
+    const session = createPureIdleMacroSession(source, "stable");
+    expect(session.candidate.research.completedTechIds).not.toContain("construction_capacity_1");
+    expect(session.constructionPowerCertificate).toBeDefined();
+    // The finite lab cache is deliberately not a sustainable-flow proof, so
+    // production calibration freezes it. Inject only the sampled-work budget
+    // here to exercise the same-bucket research boundary deterministically;
+    // all matrices still come from the candidate's real calibrated inventory.
+    session.researchLedger = {
+      unitsPerWindow: 1_000n,
+      windowSeconds: 30,
+      observedUnits: 1_000n,
+      inflowPerWindow: {},
+    };
+
+    advancePureIdleMacroSession(session, 60);
+
+    expect(session.candidate.research.completedTechIds).toContain("construction_capacity_1");
+    expect(session.constructionPowerCertificate).toBeUndefined();
+    expect(session.candidate.construction.arc_smelter).toBe(0);
+  });
+
+  it("refreshes the joint power certificate across the ten-minute shadow validation", () => {
+    const source = pureIdleState();
+    addJointConstructionPowerFixture(source, { target: 100, wind: 2, smelters: 0 });
+    const single = createPureIdleMacroSession(structuredClone(source), "stable");
+    const segmented = createPureIdleMacroSession(structuredClone(source), "stable");
+
+    advancePureIdleMacroSession(single, 900);
+    advancePureIdleMacroSession(segmented, PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS);
+    const craftedAtValidation = segmented.candidate.constructionAutomation.totalCrafted;
+    expect(segmented.validationCount).toBe(1);
+    expect(segmented.constructionPowerCertificate).toBeDefined();
+    advancePureIdleMacroSession(segmented, 900);
+
+    expect(segmented.candidate.constructionAutomation.totalCrafted).toBeGreaterThan(craftedAtValidation);
+    expect(segmented.contractVersion).toBe(single.contractVersion);
+    // Shadow calibration records diagnostic history at the point each caller
+    // crosses the boundary, so the complete save hash is intentionally not a
+    // segmentation oracle here. The construction material domain must match.
+    expect(segmented.candidate.constructionAutomation).toEqual(single.candidate.constructionAutomation);
+    expect(segmented.candidate.construction).toEqual(single.candidate.construction);
+    expect(segmented.candidate.tray).toEqual(single.candidate.tray);
+    expect(segmented.candidate.entities.filter((entity) => entity.buildingId === "construction_center"))
+      .toEqual(single.candidate.entities.filter((entity) => entity.buildingId === "construction_center"));
+  });
+
+  it("consumes a Worker-owned calibration graph without changing the 60-second result", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 8;
+    addProductiveSmelter(source, 1_000);
+    addRecursiveConstructionCenter(source, 100);
+    const sourceHash = hashGameState(source);
+
+    const retained = createPureIdleMacroSession(structuredClone(source), "stable", {
+      forceConservativeReason: "retained checkpoint reference",
+    });
+    const consumed = createPureIdleMacroSession(structuredClone(source), "stable", {
+      forceConservativeReason: "Worker-owned checkpoint",
+      consumeCalibrationState: true,
+    });
+
+    expect(consumed.calibrationCheckpoint).toBeUndefined();
+    expect(consumed.settledSimulationSeconds).toBe(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS);
+    expect(consumed.settledWallSeconds).toBeCloseTo(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS / 8, 9);
+    expect(consumed.pendingConstructionSimulationSeconds).toBe(PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS);
+    expect(hashGameState(consumed.candidate)).toBe(hashGameState(retained.calibrationCheckpoint!.candidate));
+
+    advancePureIdleMacroSession(retained, 60);
+    advancePureIdleMacroSession(consumed, 60);
+
+    expect(hashGameState(consumed.candidate)).toBe(hashGameState(retained.candidate));
+    expect(consumed.pendingConstructionSimulationSeconds).toBe(0);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
   it("does not duplicate prefilled silo launches when low-rate production cannot fund a conservative tail", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
     source.timeWarp.requestedMultiplier = 15;
     addRocketConservationFixture(source);
+    const producer = source.entities.find((entity) => entity.id === "slow-rocket-producer")!;
+    producer.machineCount = 0;
+    producer.inputs = {};
     const sourceHash = hashGameState(source);
     const initialRockets = source.entities.find((entity) => entity.id === "prefilled-rocket-silo")!.inputs.small_carrier_rocket ?? 0;
     const session = createConservativePureIdleMacroSession(structuredClone(source), "stable", "forced conservative regression");
@@ -611,6 +1991,131 @@ describe("pure idle macro session", () => {
     expect(launches).toBe(exactPrefixLaunches);
     expect(launches).toBeLessThanOrEqual(produced + initialRockets - endingRockets);
     expect(validatePureIdleTerminalMaterialConservation(source, finalized)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps the ordinary small-save rocket tail deterministic across segmented affine buckets", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source, 0);
+    const sourceHash = hashGameState(source);
+    const single = createPureIdleMacroSession(structuredClone(source), "stable");
+    const segmented = createPureIdleMacroSession(structuredClone(source), "stable");
+
+    expect(single.conservativeOnly).toBe(false);
+    expect(single.rocketLedger).toBeUndefined();
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 7);
+    advancePureIdleMacroSession(segmented, 19);
+    advancePureIdleMacroSession(segmented, 60);
+
+    const launched = single.candidate.dysonSphere.totalRocketsLaunched -
+      source.dysonSphere.totalRocketsLaunched;
+    const produced = (single.candidate.totalProduced.small_carrier_rocket ?? 0) -
+      (source.totalProduced.small_carrier_rocket ?? 0);
+    expect(launched).toBeGreaterThan(0);
+    expect(produced).toBeGreaterThanOrEqual(launched);
+    expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("continues a stable single-system rocket line only when sampled manufacture funds every launch", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source, 0);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "closed rocket event-domain regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "closed rocket event-domain regression",
+    );
+    const exactPrefixLaunches = single.calibrationCheckpoint!.candidate.dysonSphere.totalRocketsLaunched -
+      source.dysonSphere.totalRocketsLaunched;
+
+    expect(single.rocketLedger).toBeDefined();
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 19);
+    advancePureIdleMacroSession(segmented, 60);
+
+    const launches = single.candidate.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched;
+    const produced = (single.candidate.totalProduced.small_carrier_rocket ?? 0) -
+      (source.totalProduced.small_carrier_rocket ?? 0);
+    expect(launches).toBeGreaterThan(exactPrefixLaunches);
+    expect(produced).toBeGreaterThanOrEqual(launches);
+    expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("keeps a stable multi-system rocket ledger deterministic across segmented macro buckets", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addRocketConservationFixture(source, 0);
+    addSecondRocketSystemFixture(source, 0);
+    advanceExactSimulationWindow(source, 30, 2);
+    const sourceHash = hashGameState(source);
+    const single = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "multi-system closed rocket event-domain regression",
+    );
+    const segmented = createConservativePureIdleMacroSession(
+      structuredClone(source),
+      "stable",
+      "multi-system closed rocket event-domain regression",
+    );
+
+    expect(single.rocketLedger, single.degradedReason).toBeDefined();
+    expect(Object.keys(single.rocketLedger?.launchesBySystemPerWindow ?? {}).sort())
+      .toEqual(["borealis", "helios"]);
+    const prefix = single.calibrationCheckpoint!.candidate;
+    const prefixHelios = prefix.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints;
+    const prefixBorealis = prefix.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints;
+
+    advancePureIdleMacroSession(single, 60);
+    advancePureIdleMacroSession(segmented, 7);
+    advancePureIdleMacroSession(segmented, 19);
+    advancePureIdleMacroSession(segmented, 60);
+
+    expect(single.candidate.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints)
+      .toBeGreaterThan(prefixHelios);
+    expect(single.candidate.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints)
+      .toBeGreaterThan(prefixBorealis);
+    expect(validatePureIdleTerminalMaterialConservation(source, single.candidate)).toBeNull();
+    expect(hashGameState(segmented.candidate)).toBe(hashGameState(single.candidate));
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("uses the same closed multi-system rocket ledger during fast offline settlement", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.enabled = false;
+    source.timeWarp.requestedMultiplier = 1;
+    addRocketConservationFixture(source, 0);
+    addSecondRocketSystemFixture(source, 0);
+    advanceExactSimulationWindow(source, 30, 30);
+    const sourceHash = hashGameState(source);
+
+    const result = runFastOfflineSettlement(source, 10 * 60);
+
+    expect(result.status).toBe("approximate");
+    if (result.status !== "approximate") return;
+    expect(result.state.dysonSphere.totalRocketsLaunched - source.dysonSphere.totalRocketsLaunched)
+      .toBeGreaterThan(200);
+    expect(result.state.dysonPlans.helios.structurePoints - source.dysonPlans.helios.structurePoints)
+      .toBeGreaterThan(0);
+    expect(result.state.dysonPlans.borealis.structurePoints - source.dysonPlans.borealis.structurePoints)
+      .toBeGreaterThan(0);
+    expect(validatePureIdleTerminalMaterialConservation(source, result.state)).toBeNull();
     expect(hashGameState(source)).toBe(sourceHash);
   });
 

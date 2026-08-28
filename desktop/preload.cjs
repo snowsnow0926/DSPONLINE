@@ -1,15 +1,29 @@
 const { contextBridge, ipcRenderer } = require("electron");
 const { createHash } = require("node:crypto");
+const {
+  createRendererNativeError,
+  createRendererNativeRejection,
+} = require("./native-renderer-boundary.cjs");
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 let nativeProjectionSequence = 0;
+
+function invokeNative(channel, options, ...args) {
+  return ipcRenderer.invoke(channel, ...args).catch((error) => {
+    throw createRendererNativeRejection(error, options);
+  });
+}
+
+function localNativeError(options) {
+  return createRendererNativeError(null, options);
+}
 
 function requestNativeCoreProjectionTransfer(request) {
   return new Promise((resolve, reject) => {
     if (!request || typeof request !== "object" || typeof request.sessionId !== "string" ||
       !["viewport-v1", "statistics-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object") {
-      reject(new TypeError("原生投影二进制请求无效"));
+      reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求无效" }));
       return;
     }
     nativeProjectionSequence = nativeProjectionSequence >= Number.MAX_SAFE_INTEGER
@@ -19,7 +33,7 @@ function requestNativeCoreProjectionTransfer(request) {
     const channel = new MessageChannel();
     let settled = false;
     const watchdog = setTimeout(() => {
-      finish(() => reject(new Error("原生投影二进制响应超时")));
+      finish(() => reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_TIMEOUT", message: "原生投影响应超时，请重试" })));
     }, 15_000);
     const finish = (callback) => {
       if (settled) return;
@@ -30,9 +44,10 @@ function requestNativeCoreProjectionTransfer(request) {
     };
     channel.port1.onmessage = (event) => {
       if (event.data?.error) {
-        const error = new Error(event.data.error.message || "原生投影二进制请求失败");
-        error.name = event.data.error.name || "Error";
-        error.code = event.data.error.code;
+        const error = createRendererNativeError(event.data.error, {
+          fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+          message: "原生投影请求失败，请重试",
+        });
         finish(() => reject(error));
         return;
       }
@@ -50,14 +65,14 @@ function requestNativeCoreProjectionTransfer(request) {
         header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
         typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
         !payload || payload.byteLength !== header.payloadLength) {
-        finish(() => reject(new Error("原生投影二进制响应头无效")));
+        finish(() => reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生投影响应验证失败，请重试" })));
         return;
       }
       const checksum = createHash("sha256")
         .update(Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength))
         .digest("hex");
       if (checksum !== header.sha256) {
-        finish(() => reject(new Error("原生投影二进制响应校验失败")));
+        finish(() => reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生投影响应验证失败，请重试" })));
         return;
       }
       const bodyBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
@@ -65,7 +80,7 @@ function requestNativeCoreProjectionTransfer(request) {
       finish(() => resolve({ header, bodyBuffer }));
     };
     channel.port1.onmessageerror = () => {
-      finish(() => reject(new Error("原生投影二进制响应无法读取")));
+      finish(() => reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生投影响应无法读取，请重试" })));
     };
     ipcRenderer.postMessage("desktop:native-core-projection-transfer", {
       sessionId: request.sessionId,
@@ -80,31 +95,32 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   isDesktop: true,
   setFontScale: (scale) => ipcRenderer.invoke("desktop:set-font-scale", scale),
   getReleaseInfo: () => ipcRenderer.invoke("desktop:release-info"),
-  getNativePerformanceStatus: () => ipcRenderer.invoke("desktop:native-status"),
+  getNativePerformanceStatus: () => invokeNative("desktop:native-status", { fallbackCode: "NATIVE_STATUS_FAILED", message: "无法读取 Windows 原生性能服务状态" }),
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
-  getNativePerformancePolicy: () => ipcRenderer.invoke("desktop:native-performance-policy"),
-  setNativePerformancePolicy: (request) => ipcRenderer.invoke("desktop:set-native-performance-policy", request),
-  beginNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-begin", request),
-  writeNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-write", request),
-  commitNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-commit", request),
-  abortNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-abort", request),
-  recoverNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-recover", request),
-  readNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-read", request),
-  appendNativeWal: (request) => ipcRenderer.invoke("desktop:native-wal-append", request),
-  compactNativeSave: (request) => ipcRenderer.invoke("desktop:native-save-compact", request),
-  openNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-open", request),
-  getNativeCoreStatus: (request) => ipcRenderer.invoke("desktop:native-core-status", request),
-  getNativeCoreProjection: (request) => ipcRenderer.invoke("desktop:native-core-projection", request),
-  getNativeCoreViewportProjection: (request) => ipcRenderer.invoke("desktop:native-core-viewport-projection", request),
-  getNativeCoreStatisticsProjection: (request) => ipcRenderer.invoke("desktop:native-core-statistics-projection", request),
+  getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
+  setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),
+  beginNativeSave: (request) => invokeNative("desktop:native-save-begin", { fallbackCode: "NATIVE_SAVE_BEGIN_FAILED", message: "原生存档事务启动失败，请重试" }, request),
+  writeNativeSave: (request) => invokeNative("desktop:native-save-write", { fallbackCode: "NATIVE_SAVE_WRITE_FAILED", message: "原生存档分块写入失败，请重试" }, request),
+  commitNativeSave: (request) => invokeNative("desktop:native-save-commit", { fallbackCode: "NATIVE_SAVE_COMMIT_FAILED", message: "原生存档提交失败，请重新检查存档状态" }, request),
+  abortNativeSave: (request) => invokeNative("desktop:native-save-abort", { fallbackCode: "NATIVE_SAVE_ABORT_FAILED", message: "原生存档事务取消失败，请重新检查存档状态" }, request),
+  recoverNativeSave: (request) => invokeNative("desktop:native-save-recover", { fallbackCode: "NATIVE_SAVE_RECOVER_FAILED", message: "原生存档恢复检查失败，请重试" }, request),
+  readNativeSave: (request) => invokeNative("desktop:native-save-read", { fallbackCode: "NATIVE_SAVE_READ_FAILED", message: "原生存档区块读取失败，请重试" }, request),
+  appendNativeWal: (request) => invokeNative("desktop:native-wal-append", { fallbackCode: "NATIVE_WAL_APPEND_FAILED", message: "原生存档日志写入失败，请重新检查存档状态" }, request),
+  compactNativeSave: (request) => invokeNative("desktop:native-save-compact", { fallbackCode: "NATIVE_SAVE_COMPACT_FAILED", message: "原生存档空闲合并失败，请稍后重试" }, request),
+  openNativeCore: (request) => invokeNative("desktop:native-core-open", { fallbackCode: "NATIVE_CORE_OPEN_FAILED", message: "原生影子核心打开失败，请重试" }, request),
+  importNativeCoreV47: (request) => invokeNative("desktop:native-core-import-v47", { fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED", message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话" }, request),
+  getNativeCoreStatus: (request) => invokeNative("desktop:native-core-status", { fallbackCode: "NATIVE_CORE_STATUS_FAILED", message: "原生影子核心状态读取失败，请重试" }, request),
+  getNativeCoreProjection: (request) => invokeNative("desktop:native-core-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求失败，请重试" }, request),
+  getNativeCoreViewportProjection: (request) => invokeNative("desktop:native-core-viewport-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生视口投影请求失败，请重试" }, request),
+  getNativeCoreStatisticsProjection: (request) => invokeNative("desktop:native-core-statistics-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生统计投影请求失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
-  applyNativeCoreCommand: (request) => ipcRenderer.invoke("desktop:native-core-apply-command", request),
-  advanceNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-advance", request),
-  commitNativeCoreOperation: (request) => ipcRenderer.invoke("desktop:native-core-commit-operation", request),
-  checkpointNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-checkpoint", request),
-  exportNativeCoreV47: (request) => ipcRenderer.invoke("desktop:native-core-export-v47", request),
-  compareNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-compare", request),
-  closeNativeCore: (request) => ipcRenderer.invoke("desktop:native-core-close", request),
+  applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),
+  advanceNativeCore: (request) => invokeNative("desktop:native-core-advance", { fallbackCode: "NATIVE_CORE_ADVANCE_FAILED", message: "原生影子模拟推进失败，请重试" }, request),
+  commitNativeCoreOperation: (request) => invokeNative("desktop:native-core-commit-operation", { fallbackCode: "NATIVE_CORE_COMMIT_FAILED", message: "原生影子事务提交失败，请重新检查影子状态" }, request),
+  checkpointNativeCore: (request) => invokeNative("desktop:native-core-checkpoint", { fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED", message: "原生影子检查点生成失败，请重试" }, request),
+  exportNativeCoreV47: (request) => invokeNative("desktop:native-core-export-v47", { fallbackCode: "NATIVE_CORE_V47_EXPORT_FAILED", message: "原生 v47 存档导出失败；目标文件不会接收未经校验的内容" }, request),
+  compareNativeCore: (request) => invokeNative("desktop:native-core-compare", { fallbackCode: "NATIVE_CORE_COMPARE_FAILED", message: "原生影子一致性比较失败，请重试" }, request),
+  closeNativeCore: (request) => invokeNative("desktop:native-core-close", { fallbackCode: "NATIVE_CORE_CLOSE_FAILED", message: "原生影子会话关闭失败，请重新检查影子状态" }, request),
   requestApi: (request) => ipcRenderer.invoke("desktop:api-request", request),
   requestApiTransfer: (request, body) => new Promise((resolve, reject) => {
     if (!(body instanceof ArrayBuffer)) {

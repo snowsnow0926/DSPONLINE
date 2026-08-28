@@ -2,16 +2,24 @@ import { expect, test, type Page } from "@playwright/test";
 
 const RELEASE_NOTE_ID = "2026-08-27-v1.2.3";
 
-async function openMenu(page: Page): Promise<void> {
+async function installMenuPreferences(page: Page): Promise<void> {
   await page.addInitScript((releaseNoteId) => {
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", releaseNoteId);
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   }, RELEASE_NOTE_ID);
-  await page.goto("/?menu=1&storageMigration=production");
-  await expect(page.locator(".start-menu")).toBeVisible();
 }
 
 async function seedOrphanedBudget(page: Page, pendingWallSeconds: number, pendingSimulationSeconds: number, ageSeconds: number) {
+  const seedPath = "/__dsp_timewarp_recovery_seed.html";
+  await page.route(`**${seedPath}`, (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html; charset=utf-8",
+    body: "<!doctype html><html><body><main>time-warp recovery seed harness</main></body></html>",
+  }));
+  // Seed from a blank same-origin harness. Leaving a mounted game page can
+  // otherwise persist its current runtime during navigation and overwrite the
+  // fixture between saveVerifiedPayload() and reload().
+  await page.goto(seedPath);
   return page.evaluate(async ({ pendingWall, pendingSimulation, age }) => {
     const engine = await import("/src/game/engine.ts");
     const storage = await import("/src/game/storage.ts");
@@ -24,6 +32,13 @@ async function seedOrphanedBudget(page: Page, pendingWallSeconds: number, pendin
     state.timeWarp.pendingSimulationSeconds = pendingSimulation;
     state.idleSettlement.currentRunStartedAt = Date.now() - pendingWall * 1_000;
     const raw = storage.serializeEnvelope(state, Date.now() - age * 1_000);
+    const roundTrip = storage.inspectSave(raw);
+    const inertResourceTopology = roundTrip.state?.entities.every((entity) =>
+      entity.kind === "vein" && Number.isFinite(entity.minerCount) && entity.minerCount <= 0,
+    );
+    if (!roundTrip.valid || roundTrip.state?.entities.length === 0 || roundTrip.state?.belts.length !== 0 || !inertResourceTopology) {
+      throw new Error(`time-warp seed topology changed during serialization: ${roundTrip.state?.entities.length ?? -1}/${roundTrip.state?.belts.length ?? -1}`);
+    }
     const saved = await storage.saveVerifiedPayload(raw, { mode: "normal" });
     if (!saved.success) throw new Error(saved.message);
     return raw;
@@ -32,9 +47,9 @@ async function seedOrphanedBudget(page: Page, pendingWallSeconds: number, pendin
 
 test("an orphaned time-warp budget is converted to one ordinary offline interval before fast settlement", async ({ page }) => {
   test.setTimeout(90_000);
-  await openMenu(page);
+  await installMenuPreferences(page);
   await seedOrphanedBudget(page, 60, 720, 3_600);
-  await page.reload();
+  await page.goto("/?menu=1&storageMigration=production");
   await expect(page.locator(".start-menu")).toBeVisible();
 
   await page.getByRole("button", { name: /继续游戏/ }).click();
@@ -76,7 +91,7 @@ test("an orphaned time-warp budget is converted to one ordinary offline interval
 
 test("an unavailable recovery journal offers explicit checkpoint recovery and preserves the source when cancelled", async ({ page }) => {
   test.setTimeout(90_000);
-  await openMenu(page);
+  await installMenuPreferences(page);
   const original = await seedOrphanedBudget(page, 75, 900, 0);
   await page.addInitScript(() => {
     const nativeOpen = indexedDB.open.bind(indexedDB);
@@ -88,7 +103,7 @@ test("an unavailable recovery journal offers explicit checkpoint recovery and pr
       },
     });
   });
-  await page.reload();
+  await page.goto("/?menu=1&storageMigration=production");
   await expect(page.locator(".start-menu")).toBeVisible();
 
   await page.getByRole("button", { name: /继续游戏/ }).click();
@@ -124,4 +139,3 @@ test("an unavailable recovery journal offers explicit checkpoint recovery and pr
   expect(settled.elapsedSeconds).toBeGreaterThanOrEqual(75);
   expect(settled.elapsedSeconds).toBeLessThan(200);
 });
-

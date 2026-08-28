@@ -19,8 +19,8 @@ const realSaveDescribe = fixturePath ? describe : describe.skip;
  *
  *   DSP_V120_REAL_PURE_IDLE_FIXTURE=<path> npx vitest run src/game/pureIdleMacroRealSave.test.ts
  */
-realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
-  it("extrapolates ordinary production while keeping terminal tails frozen and reloadable", { timeout: 180_000 }, () => {
+realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () => {
+  it("extrapolates ordinary production and funded multi-system rockets without mutating the source", { timeout: 180_000 }, () => {
     const testStartedAt = performance.now();
     const beforeStat = statSync(fixturePath!);
     const sourceRaw = readFileSync(fixturePath!, "utf8");
@@ -43,33 +43,78 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
 
     const calibrationStartedAt = performance.now();
     const session = createPureIdleMacroSession(structuredClone(checkpoint), "extreme", {
-      forceConservativeReason: "1.2.2 real-save lightweight calibration release gate",
+      forceConservativeReason: "1.2.3 real-save event-ledger development gate",
+      // Match the production Worker: the incoming graph is already isolated
+      // by postMessage, so calibration consumes it instead of cloning again.
+      consumeCalibrationState: true,
     });
     const calibrationFinishedAt = performance.now();
-    const calibrated = session.calibrationCheckpoint?.candidate;
-    expect(calibrated).toBeDefined();
-    const calibratedWhiteDelta = (calibrated!.totalProduced.universe_matrix ?? 0) -
+    const calibrated = session.candidate;
+    expect(session.calibrationCheckpoint).toBeUndefined();
+    expect(session.settledSimulationSeconds).toBe(30);
+    const calibratedWhiteDelta = (calibrated.totalProduced.universe_matrix ?? 0) -
       (checkpoint.totalProduced.universe_matrix ?? 0);
-    const calibratedRocketDelta = calibrated!.dysonSphere.totalRocketsLaunched -
+    const calibratedRocketDelta = calibrated.dysonSphere.totalRocketsLaunched -
       checkpoint.dysonSphere.totalRocketsLaunched;
+    const calibratedRocketPlanDeltas = Object.fromEntries(Object.entries(calibrated.dysonPlans)
+      .map(([systemId, plan]) => [
+        systemId,
+        plan.structurePoints - checkpoint.dysonPlans[systemId as keyof typeof checkpoint.dysonPlans].structurePoints,
+      ] as const)
+      .filter(([, delta]) => delta > 0));
+    expect(Object.keys(calibratedRocketPlanDeltas).length).toBeGreaterThan(1);
+    expect(session.rocketLedger).toBeDefined();
     expect(calibratedWhiteDelta).toBeGreaterThan(0);
     const targetWallSeconds = 10 * 60;
     const result = finalizePureIdleMacroCandidate(session, targetWallSeconds);
     const settlementFinishedAt = performance.now();
     const finalWhiteDelta = (result.state.totalProduced.universe_matrix ?? 0) -
       (checkpoint.totalProduced.universe_matrix ?? 0);
+    const whiteLine = result.summary.terminalLines.find((line) => line.id === "white-matrix");
+    const rocketLine = result.summary.terminalLines.find((line) => line.id === "dyson-rockets");
+    const sailLine = result.summary.terminalLines.find((line) => line.id === "solar-sails");
 
     expect(result.summary).toMatchObject({
       algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
       conservativeOnly: true,
-      calibrationWindowsCompleted: 3,
-      contractVersion: 1,
       settledWallSeconds: targetWallSeconds,
     });
+    // A local finite generator can leave dispatch before the full window ends.
+    // The session is allowed to rebuild its contract at that exact power
+    // boundary, so these counters are intentionally no longer fixed at 3/1.
+    expect(result.summary.calibrationWindowsCompleted).toBeGreaterThanOrEqual(3);
+    expect(result.summary.contractVersion).toBeGreaterThanOrEqual(1);
+    const finalRocketDelta = result.state.dysonSphere.totalRocketsLaunched -
+      checkpoint.dysonSphere.totalRocketsLaunched;
+    console.info("[pure-idle-v10-final-conservation-gate-real-save-settlement]", JSON.stringify({
+      contractDeltas: session.contract.deltas.length,
+      rocketLedger: session.rocketLedger,
+      rocketBoundarySeconds: session.contract.maximumSimulationSecondsByItem?.small_carrier_rocket,
+      calibratedRocketPlanDeltas,
+      finalWhiteDelta,
+      calibratedWhiteDelta,
+      lastValidationReason: result.summary.lastValidationReason,
+      degradedReason: result.summary.degradedReason,
+      boundaryCorrections: result.summary.boundaryCorrections,
+      steadyStateItemCount: Object.keys(session.contract.steadyStateFactorsByItem ?? {}).length,
+      universeMatrixSteadyFactor: session.contract.steadyStateFactorsByItem?.universe_matrix,
+      minimumEfficiency: result.summary.minimumEfficiency,
+    }));
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
     expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
-    expect(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched)
-      .toBe(calibratedRocketDelta);
+    expect(finalRocketDelta).toBeGreaterThan(calibratedRocketDelta);
+    expect(session.contract.steadyStateFactorsByItem?.universe_matrix).toBeGreaterThan(0);
+    expect(session.contract.maximumSimulationSecondsByItem?.universe_matrix).toBeUndefined();
+    expect(whiteLine?.efficiency).toBeGreaterThan(0);
+    expect(whiteLine?.sustainableRatePerMinute).toBeGreaterThan(0);
+    expect(rocketLine).toBeDefined();
+    expect(rocketLine?.efficiency === null || (rocketLine?.efficiency ?? 0) > 0).toBe(true);
+    expect(sailLine?.efficiency).toBeNull();
+    expect(result.summary.minimumEfficiency).toBeGreaterThan(0);
+    for (const systemId of Object.keys(calibratedRocketPlanDeltas) as Array<keyof typeof checkpoint.dysonPlans>) {
+      expect(result.state.dysonPlans[systemId].structurePoints - checkpoint.dysonPlans[systemId].structurePoints)
+        .toBeGreaterThan(calibratedRocketPlanDeltas[systemId]);
+    }
     expect(validatePureIdleTerminalMaterialConservation(checkpoint, result.state)).toBeNull();
     expect(result.state.dysonSphere.structurePoints - checkpoint.dysonSphere.structurePoints)
       .toBe(result.state.dysonSphere.totalRocketsLaunched - checkpoint.dysonSphere.totalRocketsLaunched);
@@ -88,7 +133,7 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
       mtimeMs: afterStat.mtimeMs,
       hash: createHash("sha256").update(afterRaw, "utf8").digest("hex"),
     }).toEqual({ size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, hash: sourceFileHash });
-    console.info("[pure-idle-v5-lite-real-save]", JSON.stringify({
+    console.info("[pure-idle-v10-final-conservation-gate-real-save]", JSON.stringify({
       sourceBytes: beforeStat.size,
       entityCount: checkpoint.entities.length,
       beltCount: checkpoint.belts.length,
@@ -97,6 +142,7 @@ realSaveDescribe("1.2.2 real-save 30-second lightweight pure-idle gate", () => {
       calibratedWhiteDelta,
       finalWhiteDelta,
       calibratedRocketDelta,
+      finalRocketDelta,
       calibrationMs: Math.round(calibrationFinishedAt - calibrationStartedAt),
       settlementMs: Math.round(settlementFinishedAt - calibrationFinishedAt),
       serializationAndReloadMs: Math.round(serializationFinishedAt - serializationStartedAt),

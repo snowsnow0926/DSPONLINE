@@ -6,7 +6,11 @@ import { BrowserMulticoreExecutor, planMulticoreSimulation, type MulticoreSimula
 import type { GameState } from "./types";
 import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjectionWithBaseline, type SimulationProjection, type SimulationProjectionBaseline } from "./simulationProjection";
 import { createSimulationStateDelta, shouldUseSimulationDelta, type SimulationStateDelta } from "./simulationDelta";
-import { runTimeWarpApproximateSettlement, type TimeWarpApproximationReport } from "./offlineApproximation";
+import {
+  invalidateTimeWarpApproximationCertificate,
+  runTimeWarpApproximateSettlementInPlace,
+  type TimeWarpApproximationReport,
+} from "./offlineApproximation";
 import { createFactoryAlertProjection } from "./alerts";
 import { streamChunkedSaveJournalFromRuntimeState, type ChunkedSaveCollectionReuse, type ChunkedSaveJournalContext, type PersistChunkedSaveOptions, type PersistChunkedSaveResult } from "./chunkedSaveJournal";
 import type { LocalSaveInternalWrite } from "./localSaveStore";
@@ -170,6 +174,7 @@ let uiProjectionBaseline: SimulationProjectionBaseline | null = null;
 
 function applyCommandToPersistentRuntime(command: SimulationCommandPatch, profiler?: SimulationProfiler): void {
   if (!runtime) throw new Error("模拟 Worker 尚未建立权威运行时");
+  invalidateTimeWarpApproximationCertificate(runtime.state);
   const applied = applySimulationCommandPatchMutable(runtime.state, command, runtime.records);
   if (applied.topologyDirty) {
     replacePersistentSimulationRuntimeState(runtime, applied.state, profiler);
@@ -256,7 +261,10 @@ function activateRuntimeRegistry(registry: ContentPackRuntimeSnapshot, profiler?
   activeRegistrySnapshot = registry;
   // Registry changes rebuild catalog-dependent lookup state only. Inventories,
   // route progress and production remain owned by the existing runtime.
-  if (runtime) replacePersistentSimulationRuntimeState(runtime, runtime.state, profiler);
+  if (runtime) {
+    invalidateTimeWarpApproximationCertificate(runtime.state);
+    replacePersistentSimulationRuntimeState(runtime, runtime.state, profiler);
+  }
   multicoreExecutor?.setRegistry(registry);
 }
 
@@ -287,11 +295,12 @@ async function advanceAuthoritativeRuntime(
       multicoreExecutor = null;
       multicoreExecutorWorkerCount = 0;
     }
-    const settled = runTimeWarpApproximateSettlement(runtime.state, simulationSeconds, wallSeconds);
+    const settled = runTimeWarpApproximateSettlementInPlace(runtime.state, simulationSeconds, wallSeconds);
     timeWarpApproximation = settled.report;
     replacePersistentSimulationRuntimeState(runtime, settled.state, profiler);
     result = { state: runtime.state, changed: simulationSeconds > 0 || wallSeconds > 0, cacheRebuilt: true };
   } else if (multicorePlan.enabled && multicorePlan.mode === "planet-phase") {
+    invalidateTimeWarpApproximationCertificate(runtime.state);
     const baseline = structuredClone(runtime.state);
     try {
       if (!multicoreExecutor || multicoreExecutorWorkerCount !== multicorePlan.workerCount) {
@@ -314,6 +323,7 @@ async function advanceAuthoritativeRuntime(
       void error;
     }
   } else {
+    invalidateTimeWarpApproximationCertificate(runtime.state);
     if (multicoreExecutor) {
       multicoreExecutor.terminate();
       multicoreExecutor = null;
@@ -332,6 +342,18 @@ self.onmessage = (event: MessageEvent<SimulationWorkerRequest>) => {
   simulationMessageQueue = simulationMessageQueue
     .then(() => processSimulationRequest(event, receivedAt))
     .catch((error) => {
+      // Any failed authoritative request may have crossed an in-place macro
+      // boundary. Discard the isolated runtime so the next request cannot
+      // continue from a partially advanced graph; the UI/durable checkpoint
+      // remains the only permitted recovery authority.
+      runtime = null;
+      runtimeRevision = 0;
+      chunkedSaveCollectionCache = null;
+      runtimeInvalidated = true;
+      uiProjectionBaseline = null;
+      multicoreExecutor?.terminate();
+      multicoreExecutor = null;
+      multicoreExecutorWorkerCount = 0;
       self.postMessage({
         id: event.data.id,
         changed: false,

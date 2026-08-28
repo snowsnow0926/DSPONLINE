@@ -1606,8 +1606,8 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.3");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(releaseNotes).toContainText("活动存档只编码真实脏页");
-  await expect(releaseNotes).toContainText("稳定线路可休眠并在同一步准确唤醒");
-  await expect(releaseNotes).toContainText("UI 只请求有界视口与统计页");
+  await expect(releaseNotes).toContainText("稳定线路使用安全稀疏筛选");
+  await expect(releaseNotes).toContainText("原生 Host 提供有界视口与统计协议");
   await expect(releaseNotes).toContainText("v47 兼容存档由原生核心流式导出");
   await expect(releaseNotes).toContainText("原生权威继续失败关闭");
 

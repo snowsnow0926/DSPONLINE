@@ -81,6 +81,11 @@ pub enum ControlRequest {
         registry_fingerprint: String,
         catalog: Value,
     },
+    CoreImportV47 {
+        source_path: String,
+        registry_fingerprint: String,
+        catalog: Value,
+    },
     CoreStatus {
         session_id: String,
     },

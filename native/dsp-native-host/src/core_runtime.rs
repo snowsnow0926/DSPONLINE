@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 
 use anyhow::{anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
@@ -6,7 +7,7 @@ use dsp_native_core::catalog::RuntimeCatalog;
 use dsp_native_core::{
     CommandApplyResult, CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult,
     CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
-    V47EnvelopeExportResult,
+    V47EnvelopeExportResult, V47ImportProof, parse_v47_envelope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -371,6 +372,16 @@ pub struct CoreExportResult {
     pub result: V47EnvelopeExportResult,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreImportV47Result {
+    pub session_id: String,
+    pub authority: &'static str,
+    pub checkpoint: SaveCommitResult,
+    pub import: V47ImportProof,
+    pub summary: CoreStateSummary,
+}
+
 pub struct CoreRegistry {
     next_session_id: u64,
     sessions: HashMap<String, CoreState>,
@@ -440,6 +451,124 @@ impl CoreRegistry {
             checkpoint_revision: revision,
             replayed_wal_entries: wal.len(),
             replayed_revision: summary.revision,
+            summary,
+        })
+    }
+
+    pub fn import_v47<R: Read>(
+        &mut self,
+        store: &mut SaveStore,
+        reader: R,
+        expected_byte_length: u64,
+        registry_fingerprint: &str,
+        catalog_value: Value,
+    ) -> anyhow::Result<CoreImportV47Result> {
+        self.import_v47_with_commit(
+            store,
+            reader,
+            expected_byte_length,
+            registry_fingerprint,
+            catalog_value,
+            |store, transaction_id| store.commit(transaction_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn import_v47_with_commit<R: Read>(
+        &mut self,
+        store: &mut SaveStore,
+        reader: R,
+        expected_byte_length: u64,
+        registry_fingerprint: &str,
+        catalog_value: Value,
+        commit: impl FnOnce(&mut SaveStore, &str) -> anyhow::Result<SaveCommitResult>,
+    ) -> anyhow::Result<CoreImportV47Result> {
+        if self.sessions.len() >= MAX_CORE_SESSIONS {
+            bail!("native core session limit has been reached");
+        }
+        let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
+        let parsed = parse_v47_envelope(reader, expected_byte_length)?;
+        let slot = match parsed.proof().mode.as_str() {
+            "normal" => "normal-main",
+            "speedrun" => "speedrun-main",
+            _ => bail!("native v47 import mode is invalid"),
+        };
+        let previous = store.recover(slot)?;
+        let revision = previous
+            .as_ref()
+            .map(|checkpoint| {
+                checkpoint
+                    .revision
+                    .checked_add(1)
+                    .filter(|revision| *revision <= MAX_SAFE_INTEGER)
+                    .ok_or_else(|| anyhow!("native v47 import revision is exhausted"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let (mut state, import) =
+            parsed.into_core_state(revision, registry_fingerprint, catalog)?;
+        let summary = state.summary()?;
+
+        // Allocate every in-memory identity before the durable publication.
+        // After `store.commit` succeeds, installing the already-validated
+        // state and inserting it into the bounded map are infallible.
+        let session_id = format!("core-{}", self.next_session_id);
+        let next_session_id = self
+            .next_session_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("native core session counter exhausted"))?;
+        let begin = store.begin(
+            slot,
+            &import.mode,
+            47,
+            &import.state_checksum,
+            registry_fingerprint,
+            revision,
+            import.saved_at_ms,
+        )?;
+        let transaction_id = begin.transaction_id;
+        let visited = state
+            .visit_dirty_internal_checkpoint_records(import.saved_at_ms, |key, value| {
+                store.put(&transaction_id, key, Some(value))
+            });
+        let visit = match visited {
+            Ok(visit) => visit,
+            Err(error) => {
+                state.abort_checkpoint_visit();
+                store.abort(&transaction_id);
+                return Err(error.context("stream imported native checkpoint records"));
+            }
+        };
+        let active = visit.active_keys.iter().cloned().collect::<HashSet<_>>();
+        let prefix = format!("dsp-idle-network.internal.v1.chunked.v1.{}.", import.mode);
+        if let Some(previous) = previous {
+            for key in previous.record_keys {
+                if key.starts_with(&prefix)
+                    && !active.contains(&key)
+                    && let Err(error) = store.put(&transaction_id, &key, None)
+                {
+                    state.abort_checkpoint_visit();
+                    store.abort(&transaction_id);
+                    return Err(error.context("remove stale imported native checkpoint record"));
+                }
+            }
+        }
+        let checkpoint = match commit(store, &transaction_id) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                state.abort_checkpoint_visit();
+                store.abort(&transaction_id);
+                return Err(error.context("publish imported native checkpoint"));
+            }
+        };
+        state.install_checkpoint_identity(checkpoint.generation, checkpoint.root_hash.clone());
+        self.next_session_id = next_session_id;
+        self.sessions.insert(session_id.clone(), state);
+        Ok(CoreImportV47Result {
+            session_id,
+            authority: "shadow",
+            checkpoint,
+            import,
             summary,
         })
     }
@@ -1216,6 +1345,79 @@ fn validate_session_id(value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use tempfile::tempdir;
+
+    fn import_catalog() -> Value {
+        json!({
+            "protocolVersion": 1,
+            "registryFingerprint": "builtin:test",
+            "planets": [{
+                "id": "home",
+                "name": "home",
+                "systemId": "helios",
+                "kind": "terrestrial",
+                "orbitIndex": 1,
+                "simulationOrder": 0,
+                "orbitalYields": {},
+            }],
+            "items": [{ "id": "iron_ore", "name": "iron_ore", "kind": "solid" }],
+            "buildings": [{
+                "id": "mining_machine",
+                "kind": "miner",
+                "speed": 1,
+                "inputCapacity": 0,
+                "outputCapacity": 50,
+                "powerDemandKw": 1,
+                "powerGenerationKw": 0,
+            }],
+            "recipes": [],
+            "constructions": [],
+            "belts": [{ "tier": 1, "speed": 6 }],
+            "proliferators": [],
+            "technologies": [],
+        })
+    }
+
+    fn utf16_fnv(text: &str) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for unit in text.encode_utf16() {
+            hash ^= u32::from(unit);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn import_envelope() -> Vec<u8> {
+        let state = serde_json::to_string(&json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 2,
+            "paused": false,
+            "tray": {},
+            "entities": [{
+                "id": "vein",
+                "kind": "vein",
+                "planetId": "home",
+                "resourceId": "iron_ore",
+                "minerCount": 2,
+                "inputs": {},
+                "outputs": { "iron_ore": 3 },
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0,
+            }],
+            "belts": [],
+        }))
+        .unwrap();
+        let checksum = utf16_fnv(&format!("{{\"formatVersion\":2,\"state\":{state}}}"));
+        format!(
+            "{{\"formatVersion\":2,\"kind\":\"primary\",\"savedAt\":42,\"mode\":\"normal\",\"slot\":\"main\",\"state\":{state},\"checksum\":\"{checksum}\"}}"
+        )
+        .into_bytes()
+    }
 
     fn exact_pending_lease() -> ExactRealtimeLease {
         let checkpoint = ExactRealtimeCheckpoint {
@@ -1258,6 +1460,120 @@ mod tests {
             pause: None,
             finalization: None,
         }
+    }
+
+    #[test]
+    fn v47_import_publishes_checkpoint_and_session_only_after_full_validation() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(imported.authority, "shadow");
+        assert_eq!(imported.checkpoint.generation, 1);
+        assert_eq!(imported.summary.revision, 0);
+        assert_eq!(imported.summary.entity_count, 1);
+        assert_eq!(registry.sessions.len(), 1);
+        let published = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(published.generation, imported.checkpoint.generation);
+        assert_eq!(published.root_hash, imported.checkpoint.root_hash);
+
+        let before = published;
+        let session_count = registry.sessions.len();
+        let mut corrupt = bytes;
+        let checksum = corrupt
+            .windows(b"\"checksum\":\"".len())
+            .position(|window| window == b"\"checksum\":\"")
+            .unwrap()
+            + b"\"checksum\":\"".len();
+        corrupt[checksum] = if corrupt[checksum] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        assert!(
+            registry
+                .import_v47(
+                    &mut store,
+                    Cursor::new(corrupt.clone()),
+                    corrupt.len() as u64,
+                    "builtin:test",
+                    import_catalog(),
+                )
+                .is_err()
+        );
+        assert_eq!(registry.sessions.len(), session_count);
+        let after = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.root_hash, before.root_hash);
+        assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn v47_import_prepublication_failure_leaves_no_session_or_published_slot() {
+        use crate::save_store::CommitFaultPoint;
+
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let error = registry
+            .import_v47_with_commit(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+                |store, transaction_id| {
+                    store.commit_with_fault(
+                        transaction_id,
+                        CommitFaultPoint::BeforeSuperblockPublish,
+                    )
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("publish imported native checkpoint"));
+        assert!(registry.sessions.is_empty());
+        assert_eq!(registry.next_session_id, 1);
+        assert!(store.recover("normal-main").unwrap().is_none());
+    }
+
+    #[test]
+    fn v47_lone_surrogate_fallback_publishes_neither_session_nor_checkpoint() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let state = r#"{"version":47,"mode":"normal","activePlanetId":"home","elapsedSeconds":0,"paused":false,"note":"\ud800","entities":[],"belts":[]}"#;
+        let bytes = format!(
+            "{{\"formatVersion\":2,\"kind\":\"primary\",\"savedAt\":42,\"mode\":\"normal\",\"slot\":\"main\",\"state\":{state},\"checksum\":\"00000000\"}}"
+        )
+        .into_bytes();
+        let error = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<dsp_native_core::V47ImportJavascriptCompatibilityRequired>()
+                .is_some(),
+            "unexpected error: {error:#}"
+        );
+        assert!(registry.sessions.is_empty());
+        assert_eq!(registry.next_session_id, 1);
+        assert!(store.recover("normal-main").unwrap().is_none());
     }
 
     fn exact_pending_request() -> CoreCommitOperationExactRealtimeRequest {

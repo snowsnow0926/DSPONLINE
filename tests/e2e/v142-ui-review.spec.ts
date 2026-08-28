@@ -524,8 +524,8 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.3");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(dialog).toContainText("活动存档只编码真实脏页");
-  await expect(dialog).toContainText("稳定线路可休眠并在同一步准确唤醒");
-  await expect(dialog).toContainText("UI 只请求有界视口与统计页");
+  await expect(dialog).toContainText("稳定线路使用安全稀疏筛选");
+  await expect(dialog).toContainText("原生 Host 提供有界视口与统计协议");
   await expect(dialog).toContainText("v47 兼容存档由原生核心流式导出");
   await expect(dialog).toContainText("原生权威继续失败关闭");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();

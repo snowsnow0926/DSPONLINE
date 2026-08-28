@@ -4267,6 +4267,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       record,
       pureIdleMacroRestartCountRef.current,
     );
+    const workerFailureFallback = Math.max(record.workerRestartCount, pureIdleMacroRestartCountRef.current) >=
+      PURE_IDLE_WORKER_RESTART_LIMIT;
     const forceConservativeReason = recoveryConservativeReason ?? (complexity.recommendedStrategy === "conservative"
       ? `${complexity.warning ?? "当前设备无法安全容纳多份校准状态"}；${offlineProfileLabel(complexity.profile)}`
       : undefined);
@@ -4298,7 +4300,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (summary.settledWallSeconds > 0) pureIdleMacroRestartCountRef.current = 0;
       setPureIdleRecoveryContinueState(false);
       setNotice(summary.conservativeOnly
-        ? "精确 Worker 连续失败，已先结算短窗口后冻结不确定工厂；原存档和恢复日志保持有效"
+        ? workerFailureFallback
+          ? "精确 Worker 重建已切换到低内存路径；3 × 10 秒校准完成，闭合稳态产线继续结算，原存档和恢复日志保持有效"
+          : "大型工厂已用 3 × 10 秒校准建立低内存稳态结算；闭合供需产线持续推进，缓存产线仍受真实边界保护"
         : record.summary ? "纯挂机已从恢复日志继续，未结算墙钟时间保持不变" : "纯挂机校准完成，宏观守恒结算已开始");
       return client;
     } catch (error) {

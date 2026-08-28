@@ -129,7 +129,9 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
 
     const nativeSetInterval = window.setInterval.bind(window);
     window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      const delay = timeout === 30_000 ? 1_500 : timeout;
+      // Leave the first manual-save assertion a deterministic startup window;
+      // subsequent 4-second autosaves still exercise three complete cycles.
+      const delay = timeout === 30_000 ? 4_000 : timeout;
       return nativeSetInterval(handler, delay, ...args);
     }) as typeof window.setInterval;
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
@@ -326,6 +326,49 @@ const RARE_ITEMS: &[&str] = &[
     "spiniform_stalagmite_crystal",
     "unipolar_magnet",
 ];
+
+/// Cumulative material grants represented by the campaign reward ledger.
+///
+/// This is intentionally read-only and is used by the native settlement proof
+/// to distinguish audited one-time rewards from factory production. Returning
+/// the cumulative ledger (rather than a per-step event list) keeps adjacent
+/// snapshots replay-safe. Unknown legacy task IDs and catalog entries are
+/// ignored exactly like reward application itself.
+pub(crate) fn cumulative_material_grants(state: &CoreState) -> BTreeMap<String, u64> {
+    let rewarded = state
+        .base_value()
+        .get("campaign")
+        .and_then(Value::as_object)
+        .and_then(|campaign| campaign.get("rewardedTaskIds"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    let mut totals = BTreeMap::<String, u64>::new();
+    for task in TASKS.iter().filter(|task| rewarded.contains(task.id)) {
+        for reward in task.rewards {
+            let (item_id, amount, present) = match reward {
+                Reward::Construction(item_id, amount) => (
+                    *item_id,
+                    *amount,
+                    state.catalog.constructions.contains_key(*item_id),
+                ),
+                Reward::Item(item_id, amount) => (
+                    *item_id,
+                    *amount,
+                    state.catalog.items.contains_key(*item_id),
+                ),
+            };
+            if !present {
+                continue;
+            }
+            let amount = amount.floor().max(0.0) as u64;
+            *totals.entry(item_id.to_owned()).or_default() += amount;
+        }
+    }
+    totals
+}
 
 fn finite_number(value: Option<&Value>) -> f64 {
     value

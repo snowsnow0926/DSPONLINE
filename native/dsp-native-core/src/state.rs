@@ -1808,21 +1808,87 @@ impl CoreState {
             bail!("native core checkpoint contains unreferenced records");
         }
         drop(records);
+        Self::from_raw_record_parts(
+            identity,
+            base,
+            entity_raw
+                .into_iter()
+                .map(Option::unwrap)
+                .collect::<Vec<_>>(),
+            belt_raw.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+            catalog,
+            manifest.chunks,
+            pure_idle_session,
+            SaveDirtyPages::default(),
+        )
+    }
+
+    pub(crate) fn from_public_v47_parts(
+        identity: CoreCheckpointIdentity,
+        base: Map<String, Value>,
+        entities: Vec<String>,
+        belts: Vec<String>,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        if identity.state_version != 47
+            || !matches!(identity.mode.as_str(), "normal" | "speedrun")
+            || identity.root_hash.len() != 64
+            || !identity
+                .root_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || identity.base_primary_checksum.len() != 8
+            || !identity
+                .base_primary_checksum
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || entities.len() > MAX_ENTITY_COUNT
+            || belts.len() > MAX_BELT_COUNT
+        {
+            bail!("native v47 import identity is invalid");
+        }
+        if base.get("version").and_then(Value::as_u64) != Some(47)
+            || base.get("mode").and_then(Value::as_str) != Some(identity.mode.as_str())
+            || base.contains_key("entities")
+            || base.contains_key("belts")
+        {
+            bail!("native v47 import state identity is invalid");
+        }
+        Self::from_raw_record_parts(
+            identity,
+            base,
+            entities.into_iter().map(RawRecord::from).collect(),
+            belts.into_iter().map(RawRecord::from).collect(),
+            catalog,
+            Vec::new(),
+            None,
+            SaveDirtyPages {
+                base: true,
+                entity_topology: true,
+                belt_topology: true,
+                ..SaveDirtyPages::default()
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_raw_record_parts(
+        identity: CoreCheckpointIdentity,
+        base: Map<String, Value>,
+        entity_raw: Vec<RawRecord>,
+        belt_raw: Vec<RawRecord>,
+        catalog: RuntimeCatalog,
+        checkpoint_chunks: Vec<ChunkMetadata>,
+        pure_idle_session: Option<PureIdleSessionState>,
+        save_dirty: SaveDirtyPages,
+    ) -> anyhow::Result<Self> {
         let mut state = Self {
             revision: identity.revision,
             identity,
             catalog: Arc::new(catalog),
             base,
-            entity_raw: entity_raw
-                .into_iter()
-                .map(Option::unwrap)
-                .collect::<Vec<_>>()
-                .into(),
-            belt_raw: belt_raw
-                .into_iter()
-                .map(Option::unwrap)
-                .collect::<Vec<_>>()
-                .into(),
+            entity_raw: entity_raw.into(),
+            belt_raw: belt_raw.into(),
             entity_index: ExactRowIdIndex::default().into(),
             belt_index: ExactRowIdIndex::default().into(),
             symbols: Symbols::default().into(),
@@ -1837,8 +1903,8 @@ impl CoreState {
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
             prepared_local_peer_directory: None,
-            save_dirty: SaveDirtyPages::default(),
-            checkpoint_chunks: manifest.chunks,
+            save_dirty,
+            checkpoint_chunks,
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
             summary_cache: SyncCell::new(None),

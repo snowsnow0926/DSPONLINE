@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value};
@@ -446,12 +446,16 @@ fn planned_job_value(
 
 #[derive(Debug, Clone)]
 struct RepeatableBatch {
+    jobs_per_cycle: usize,
     work_seconds: f64,
     tray_costs: BTreeMap<String, f64>,
     tray_returns: BTreeMap<String, f64>,
     fleet_returns: BTreeMap<String, f64>,
     produced_items: BTreeMap<String, f64>,
-    relevant_items: std::collections::HashSet<String>,
+    relevant_items: BTreeSet<String>,
+    touched_tray_items: BTreeSet<String>,
+    cycle_state_items: Vec<String>,
+    cycle_start_inventory: BTreeMap<String, f64>,
 }
 
 fn safe_multiply(left: f64, right: f64) -> f64 {
@@ -484,7 +488,8 @@ fn analyze_repeatable_plan(
     let mut tray_returns = BTreeMap::<String, f64>::new();
     let mut fleet_returns = BTreeMap::<String, f64>::new();
     let mut produced_items = BTreeMap::<String, f64>::new();
-    let mut relevant_items = std::collections::HashSet::<String>::new();
+    let mut relevant_items = BTreeSet::<String>::new();
+    let mut touched_tray_items = BTreeSet::<String>::new();
     let mut work_seconds = 0.0;
     let values = job
         .get("steps")
@@ -495,6 +500,7 @@ fn analyze_repeatable_plan(
         work_seconds += step_duration(state, base, &step)?;
         for requirement in requirements(state, &step)? {
             relevant_items.insert(requirement.item_id.clone());
+            touched_tray_items.insert(requirement.item_id.clone());
             let mut remaining = floor_amount(requirement.amount);
             let available = inventory_amount(&inventory, &requirement.item_id);
             let consumed = remaining.min(available);
@@ -547,13 +553,191 @@ fn analyze_repeatable_plan(
         return Ok(None);
     }
     Ok(Some(RepeatableBatch {
+        jobs_per_cycle: 1,
         work_seconds,
         tray_costs,
         tray_returns,
         fleet_returns,
         produced_items,
         relevant_items,
+        touched_tray_items,
+        cycle_state_items: Vec::new(),
+        cycle_start_inventory: BTreeMap::new(),
     }))
+}
+
+fn add_batch_amount(target: &mut BTreeMap<String, f64>, item_id: &str, amount: f64) {
+    let amount = floor_amount(amount);
+    if amount < 1.0 {
+        return;
+    }
+    let current = target.get(item_id).copied().unwrap_or(0.0);
+    target.insert(item_id.to_owned(), floor_amount(current + amount));
+}
+
+fn compose_repeatable_batches(
+    first: &RepeatableBatch,
+    second: &RepeatableBatch,
+) -> RepeatableBatch {
+    let material_items = first
+        .tray_costs
+        .keys()
+        .chain(first.tray_returns.keys())
+        .chain(second.tray_costs.keys())
+        .chain(second.tray_returns.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut tray_costs = BTreeMap::new();
+    let mut tray_returns = BTreeMap::new();
+    for item_id in material_items {
+        let first_cost = floor_amount(first.tray_costs.get(&item_id).copied().unwrap_or(0.0));
+        let first_return = floor_amount(first.tray_returns.get(&item_id).copied().unwrap_or(0.0));
+        let second_cost = floor_amount(second.tray_costs.get(&item_id).copied().unwrap_or(0.0));
+        let second_return = floor_amount(second.tray_returns.get(&item_id).copied().unwrap_or(0.0));
+        // The first job's return is working capital for the second job. Keep
+        // the exact prefix requirement and the final external return instead
+        // of adding two independent net deltas.
+        add_batch_amount(
+            &mut tray_costs,
+            &item_id,
+            first_cost + (second_cost - first_return).max(0.0),
+        );
+        add_batch_amount(
+            &mut tray_returns,
+            &item_id,
+            second_return + (first_return - second_cost).max(0.0),
+        );
+    }
+
+    let mut fleet_returns = BTreeMap::new();
+    for item_id in first
+        .fleet_returns
+        .keys()
+        .chain(second.fleet_returns.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+    {
+        add_batch_amount(
+            &mut fleet_returns,
+            &item_id,
+            first.fleet_returns.get(&item_id).copied().unwrap_or(0.0)
+                + second.fleet_returns.get(&item_id).copied().unwrap_or(0.0),
+        );
+    }
+
+    let mut produced_items = BTreeMap::new();
+    for item_id in first
+        .produced_items
+        .keys()
+        .chain(second.produced_items.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+    {
+        add_batch_amount(
+            &mut produced_items,
+            &item_id,
+            first.produced_items.get(&item_id).copied().unwrap_or(0.0)
+                + second.produced_items.get(&item_id).copied().unwrap_or(0.0),
+        );
+    }
+
+    RepeatableBatch {
+        jobs_per_cycle: first
+            .jobs_per_cycle
+            .max(1)
+            .saturating_add(second.jobs_per_cycle.max(1)),
+        work_seconds: first.work_seconds + second.work_seconds,
+        tray_costs,
+        tray_returns,
+        fleet_returns,
+        produced_items,
+        relevant_items: first
+            .relevant_items
+            .union(&second.relevant_items)
+            .cloned()
+            .collect(),
+        touched_tray_items: first
+            .touched_tray_items
+            .union(&second.touched_tray_items)
+            .cloned()
+            .collect(),
+        cycle_state_items: first
+            .cycle_state_items
+            .iter()
+            .chain(second.cycle_state_items.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        cycle_start_inventory: first.cycle_start_inventory.clone(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RepeatableBatchSignature {
+    work_seconds_bits: u64,
+    tray_costs: BTreeMap<String, f64>,
+    tray_returns: BTreeMap<String, f64>,
+    fleet_returns: BTreeMap<String, f64>,
+    produced_items: BTreeMap<String, f64>,
+    relevant_items: BTreeSet<String>,
+    touched_tray_items: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ConstructionCycleFingerprint {
+    batch: RepeatableBatchSignature,
+    tray: Vec<(String, f64)>,
+}
+
+fn batch_signature(batch: &RepeatableBatch) -> RepeatableBatchSignature {
+    RepeatableBatchSignature {
+        work_seconds_bits: batch.work_seconds.to_bits(),
+        tray_costs: batch.tray_costs.clone(),
+        tray_returns: batch.tray_returns.clone(),
+        fleet_returns: batch.fleet_returns.clone(),
+        produced_items: batch.produced_items.clone(),
+        relevant_items: batch.relevant_items.clone(),
+        touched_tray_items: batch.touched_tray_items.clone(),
+    }
+}
+
+fn construction_cycle_fingerprint(
+    base: &Map<String, Value>,
+    planet_id: &str,
+    batch: &RepeatableBatch,
+) -> ConstructionCycleFingerprint {
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    ConstructionCycleFingerprint {
+        batch: batch_signature(batch),
+        tray: batch
+            .tray_returns
+            .keys()
+            .map(|item_id| (item_id.clone(), inventory_amount(planet_tray, item_id)))
+            .collect(),
+    }
+}
+
+fn construction_planning_base(base: &Map<String, Value>) -> Map<String, Value> {
+    // A cycle probe must not duplicate the resident entity/belt domains. The
+    // recursive planner and batch settlement only read or mutate these small
+    // top-level construction fields.
+    const KEYS: [&str; 10] = [
+        "mode",
+        "orbitalStation",
+        "research",
+        "activePlanetId",
+        "tray",
+        "planetTrays",
+        "planetTrayItemLimits",
+        "construction",
+        "portableFleet",
+        "totalProduced",
+    ];
+    KEYS.into_iter()
+        .filter_map(|key| base.get(key).cloned().map(|value| (key.to_owned(), value)))
+        .collect()
 }
 
 fn active_target_count(
@@ -586,14 +770,234 @@ fn batch_can_repeat(base: &Map<String, Value>, planet_id: &str, batch: &Repeatab
             return true;
         }
         let cost = floor_amount(batch.tray_costs.get(item_id).copied().unwrap_or(0.0));
-        if cost > 0.0 && inventory_amount(planet_tray, item_id) > limit {
-            return false;
+        if cost > 0.0 {
+            let current = inventory_amount(planet_tray, item_id);
+            if current > limit {
+                return false;
+            }
+            // A relevant return is the next cycle's working capital. If the
+            // first return would overflow, the destroyed portion cannot be
+            // reused and arithmetic batching would underpay a later cycle.
+            let free_after_prefix = (limit - (current - cost).max(0.0)).max(0.0);
+            if returned <= cost && returned > free_after_prefix {
+                return false;
+            }
         }
         !batch.relevant_items.contains(item_id) || returned <= cost
     }) && batch
         .fleet_returns
         .values()
         .all(|amount| floor_amount(*amount) < 1.0)
+}
+
+fn batch_maximum_cycles_for_stock(
+    base: &Map<String, Value>,
+    planet_id: &str,
+    batch: &RepeatableBatch,
+    quantum: &Map<String, Value>,
+) -> f64 {
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let mut maximum = MAX_SAFE_INTEGER;
+    for (item_id, raw_cost) in &batch.tray_costs {
+        let cost = floor_amount(*raw_cost);
+        if cost < 1.0 {
+            continue;
+        }
+        let returned = floor_amount(batch.tray_returns.get(item_id).copied().unwrap_or(0.0));
+        let available = floor_amount(
+            inventory_amount(planet_tray, item_id) + inventory_amount(quantum, item_id),
+        );
+        if available < cost {
+            return 0.0;
+        }
+        // The first cycle needs the complete principal. Each later cycle can
+        // immediately reuse its prior return and pays only the net loss.
+        let net_cost = (cost - returned).max(0.0);
+        if net_cost < 1.0 {
+            continue;
+        }
+        maximum = maximum.min(1.0 + ((available - cost) / net_cost).floor());
+    }
+    maximum
+}
+
+fn construction_cycle_state_matches(
+    base: &Map<String, Value>,
+    planet_id: &str,
+    batch: &RepeatableBatch,
+) -> bool {
+    if batch.jobs_per_cycle <= 1 {
+        return true;
+    }
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    batch.cycle_state_items.iter().all(|item_id| {
+        inventory_amount(planet_tray, item_id)
+            == floor_amount(
+                batch
+                    .cycle_start_inventory
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0.0),
+            )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_build_stable_cycle(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    target: &crate::construction_planner::Target,
+    first: &RepeatableBatch,
+) -> anyhow::Result<Option<RepeatableBatch>> {
+    const MAX_PROBE_JOBS: usize = 8;
+    if first.jobs_per_cycle != 1 {
+        return Ok(None);
+    }
+
+    let mut planning_base = construction_planning_base(base);
+    let mut planning_automation = automation.clone();
+    let mut planning_buffers = Map::new();
+    if let Some(buffer) = buffers.get(entity_id).cloned() {
+        planning_buffers.insert(entity_id.to_owned(), buffer);
+    }
+    let destroyed_before = planning_automation.get("destroyedByproducts").cloned();
+    let initial_fingerprint = construction_cycle_fingerprint(&planning_base, planet_id, first);
+    let mut current = first.clone();
+    let mut cycle = first.clone();
+    let mut cycle_state_items = BTreeSet::<String>::new();
+
+    for _ in 0..MAX_PROBE_JOBS {
+        cycle_state_items.extend(current.tray_returns.keys().cloned());
+        let completed = match apply_repeatable_batch(
+            &mut planning_base,
+            &mut planning_automation,
+            &mut planning_buffers,
+            entity_id,
+            planet_id,
+            target,
+            &current,
+            1.0,
+        ) {
+            Ok(completed) => completed,
+            // A speculative phase proof is never authority. Any unexpected
+            // probe-only mismatch falls back to the ordinary atomic job path.
+            Err(_) => return Ok(None),
+        };
+        if completed < 1.0
+            || planning_automation.get("destroyedByproducts") != destroyed_before.as_ref()
+        {
+            return Ok(None);
+        }
+
+        let empty = Map::new();
+        let planet_tray = tray(&planning_base, planet_id).unwrap_or(&empty);
+        let quantum = planning_buffers
+            .get(entity_id)
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+        let Some(next_plan) =
+            crate::construction_planner::build_plan(state, &planning_base, target, inventory)
+        else {
+            return Ok(None);
+        };
+        let Some(next) = analyze_repeatable_plan(state, &planning_base, target, &next_plan)? else {
+            return Ok(None);
+        };
+        cycle_state_items.extend(next.tray_returns.keys().cloned());
+        if construction_cycle_fingerprint(&planning_base, planet_id, &next) == initial_fingerprint {
+            if !batch_can_repeat(base, planet_id, &cycle) {
+                return Ok(None);
+            }
+            cycle.cycle_state_items = cycle_state_items.into_iter().collect();
+            let initial_tray = tray(base, planet_id).unwrap_or(&empty);
+            cycle.cycle_start_inventory = cycle
+                .cycle_state_items
+                .iter()
+                .map(|item_id| (item_id.clone(), inventory_amount(initial_tray, item_id)))
+                .collect();
+            return Ok(Some(cycle));
+        }
+        cycle = compose_repeatable_batches(&cycle, &next);
+        current = next;
+    }
+    Ok(None)
+}
+
+fn consume_combined_item(
+    base: &mut Map<String, Value>,
+    quantum: &mut Map<String, Value>,
+    planet_id: &str,
+    item_id: &str,
+    raw_amount: f64,
+    raw_tray_floor: f64,
+    direct: bool,
+) -> anyhow::Result<bool> {
+    let mut remaining = floor_amount(raw_amount);
+    let tray_floor = floor_amount(raw_tray_floor);
+    {
+        let planet_tray = tray_mut(base, planet_id)
+            .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+        let current = inventory_amount(planet_tray, item_id);
+        let from_tray = remaining.min((current - tray_floor).max(0.0));
+        set_inventory_amount(planet_tray, item_id, current - from_tray)?;
+        remaining -= from_tray;
+    }
+    if direct && remaining > 0.0 {
+        let current = inventory_amount(quantum, item_id);
+        let from_quantum = remaining.min(current);
+        let next = current - from_quantum;
+        if next < 1.0 {
+            quantum.remove(item_id);
+        } else {
+            set_inventory_amount(quantum, item_id, next)?;
+        }
+        remaining -= from_quantum;
+    }
+    Ok(remaining < 1.0)
+}
+
+fn store_tray_return(
+    base: &mut Map<String, Value>,
+    automation: &mut Map<String, Value>,
+    planet_id: &str,
+    item_id: &str,
+    raw_amount: f64,
+) -> anyhow::Result<()> {
+    let returned = floor_amount(raw_amount);
+    if returned < 1.0 {
+        return Ok(());
+    }
+    let limit = tray_limit(base, planet_id);
+    let destroyed = {
+        let planet_tray = tray_mut(base, planet_id)
+            .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+        let current = inventory_amount(planet_tray, item_id);
+        let stored = returned.min((limit - current).max(0.0));
+        if stored > 0.0 {
+            set_inventory_amount(planet_tray, item_id, current + stored)?;
+        }
+        returned - stored
+    };
+    if destroyed > 0.0 {
+        let byproducts = automation
+            .get_mut("destroyedByproducts")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native construction destroyed-byproduct state is missing"))?;
+        let current = inventory_amount(byproducts, item_id);
+        set_inventory_amount(
+            byproducts,
+            item_id,
+            floor_amount(current + destroyed).min(MAX_SAFE_INTEGER),
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,72 +1020,106 @@ fn apply_repeatable_batch(
             .get(entity_id)
             .and_then(Value::as_object)
             .is_some_and(|buffer| !buffer.is_empty());
+    let empty = Map::new();
+    let quantum_before = if direct {
+        buffers
+            .get(entity_id)
+            .and_then(Value::as_object)
+            .unwrap_or(&empty)
+    } else {
+        &empty
+    };
+    if batch_maximum_cycles_for_stock(base, planet_id, batch, quantum_before) < cycles {
+        return Ok(0.0);
+    }
+    if batch.jobs_per_cycle > 1 && !construction_cycle_state_matches(base, planet_id, batch) {
+        return Ok(0.0);
+    }
+    {
+        let planet_tray = tray_mut(base, planet_id)
+            .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+        for item_id in &batch.touched_tray_items {
+            if !planet_tray.contains_key(item_id) {
+                set_inventory_amount(planet_tray, item_id, 0.0)?;
+            }
+        }
+    }
     let mut quantum = buffers
         .remove(entity_id)
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    {
-        let planet_tray = tray_mut(base, planet_id)
-            .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-        for (item_id, amount) in &batch.tray_costs {
-            let mut remaining = safe_multiply(*amount, cycles);
-            let current = inventory_amount(planet_tray, item_id);
-            let from_tray = remaining.min(current);
-            let next = current - from_tray;
-            if direct && next < 1.0 {
-                planet_tray.remove(item_id);
-            } else {
-                set_inventory_amount(planet_tray, item_id, next)?;
-            }
-            remaining -= from_tray;
-            if direct && remaining > 0.0 {
-                let current_quantum = inventory_amount(&quantum, item_id);
-                let from_quantum = remaining.min(current_quantum);
-                let next_quantum = current_quantum - from_quantum;
-                if next_quantum < 1.0 {
-                    quantum.remove(item_id);
-                } else {
-                    set_inventory_amount(&mut quantum, item_id, next_quantum)?;
-                }
-            }
-        }
-    }
-    if direct && !quantum.is_empty() {
-        buffers.insert(entity_id.to_owned(), Value::Object(quantum));
-    }
-    let limit = tray_limit(base, planet_id);
-    let mut destroyed = Vec::<(String, f64)>::new();
-    {
-        let planet_tray = tray_mut(base, planet_id)
-            .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-        for (item_id, amount) in &batch.tray_returns {
-            let returned = floor_amount(*amount * cycles);
-            if returned < 1.0 {
-                continue;
-            }
-            let current = inventory_amount(planet_tray, item_id);
-            let stored = returned.min((limit - current).max(0.0));
-            if stored > 0.0 {
-                set_inventory_amount(planet_tray, item_id, current + stored)?;
-            }
-            if returned > stored {
-                destroyed.push((item_id.clone(), returned - stored));
-            }
-        }
-    }
-    if !destroyed.is_empty() {
-        let byproducts = automation
-            .get_mut("destroyedByproducts")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native construction destroyed-byproduct state is missing"))?;
-        for (item_id, amount) in destroyed {
-            let current = inventory_amount(byproducts, &item_id);
-            set_inventory_amount(
-                byproducts,
+    let material_items = batch
+        .tray_costs
+        .keys()
+        .chain(batch.tray_returns.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for item_id in material_items {
+        let cost = floor_amount(batch.tray_costs.get(&item_id).copied().unwrap_or(0.0));
+        let returned = floor_amount(batch.tray_returns.get(&item_id).copied().unwrap_or(0.0));
+        if cost < 1.0 {
+            store_tray_return(
+                base,
+                automation,
+                planet_id,
                 &item_id,
-                floor_amount(current + amount).min(MAX_SAFE_INTEGER),
+                safe_multiply(returned, cycles),
+            )?;
+            continue;
+        }
+        if returned < 1.0 {
+            if !consume_combined_item(
+                base,
+                &mut quantum,
+                planet_id,
+                &item_id,
+                safe_multiply(cost, cycles),
+                0.0,
+                direct,
+            )? {
+                bail!("native construction arithmetic batch exceeded its material certificate");
+            }
+            continue;
+        }
+
+        // Replay the exact first prefix once, then retain its return as the
+        // next cycle's working capital and aggregate only the tail net loss.
+        if !consume_combined_item(base, &mut quantum, planet_id, &item_id, cost, 0.0, direct)? {
+            bail!("native construction arithmetic batch exceeded its first-cycle principal");
+        }
+        store_tray_return(base, automation, planet_id, &item_id, returned)?;
+        let tail_cycles = cycles - 1.0;
+        if tail_cycles < 1.0 {
+            continue;
+        }
+        if cost > returned {
+            let current_tray = tray(base, planet_id)
+                .map(|planet_tray| inventory_amount(planet_tray, &item_id))
+                .unwrap_or(0.0);
+            if !consume_combined_item(
+                base,
+                &mut quantum,
+                planet_id,
+                &item_id,
+                safe_multiply(cost - returned, tail_cycles),
+                returned.min(current_tray),
+                direct,
+            )? {
+                bail!("native construction arithmetic batch exceeded its net material budget");
+            }
+        } else if returned > cost {
+            store_tray_return(
+                base,
+                automation,
+                planet_id,
+                &item_id,
+                safe_multiply(returned - cost, tail_cycles),
             )?;
         }
+    }
+    quantum.retain(|_, amount| floor_amount(finite_number(Some(amount))) > 0.0);
+    if direct && !quantum.is_empty() {
+        buffers.insert(entity_id.to_owned(), Value::Object(quantum));
     }
     if !batch.fleet_returns.is_empty() {
         let fleet = base
@@ -689,7 +1127,7 @@ fn apply_repeatable_batch(
             .and_then(Value::as_object_mut)
             .ok_or_else(|| anyhow!("native portable fleet state is missing"))?;
         for (item_id, amount) in &batch.fleet_returns {
-            let returned = floor_amount(*amount * cycles);
+            let returned = safe_multiply(*amount, cycles);
             if returned > 0.0 {
                 let current = inventory_amount(fleet, item_id);
                 set_inventory_amount(fleet, item_id, current + returned)?;
@@ -703,10 +1141,13 @@ fn apply_repeatable_batch(
             .ok_or_else(|| anyhow!("native total production record is missing"))?;
         for (item_id, amount) in &batch.produced_items {
             let current = inventory_amount(produced, item_id);
-            set_inventory_amount(produced, item_id, current + amount * cycles)?;
+            set_inventory_amount(produced, item_id, current + safe_multiply(*amount, cycles))?;
         }
     }
-    let completed = target.output_amount * cycles;
+    let completed = safe_multiply(
+        target.output_amount,
+        safe_multiply(cycles, batch.jobs_per_cycle.max(1) as f64),
+    );
     if matches!(target.id.as_str(), "logistics_drone" | "logistics_vessel") {
         let fleet = base
             .get_mut("portableFleet")
@@ -725,7 +1166,7 @@ fn apply_repeatable_batch(
     set_number(
         automation,
         "totalCrafted",
-        finite_number(automation.get("totalCrafted")) + completed,
+        floor_amount(finite_number(automation.get("totalCrafted")) + completed),
     )?;
     automation.insert("lastCraftedId".to_owned(), Value::from(target.id.clone()));
     Ok(completed)
@@ -749,10 +1190,23 @@ fn try_run_repeatable_batch(
         return Ok(None);
     }
     let active_targets = active_target_count(state, base, automation, jobs).max(1);
-    let Some(batch) = analyze_repeatable_plan(state, base, target, plan)? else {
+    let Some(mut batch) = analyze_repeatable_plan(state, base, target, plan)? else {
         return Ok(None);
     };
-    if batch.work_seconds <= EPSILON || !batch_can_repeat(base, planet_id, &batch) {
+    if batch.work_seconds <= EPSILON {
+        return Ok(None);
+    }
+    if !batch_can_repeat(base, planet_id, &batch)
+        && active_targets == 1
+        && let Some(stable) = try_build_stable_cycle(
+            state, base, automation, buffers, entity_id, planet_id, target, &batch,
+        )?
+    {
+        batch = stable;
+    }
+    if !batch_can_repeat(base, planet_id, &batch)
+        || !construction_cycle_state_matches(base, planet_id, &batch)
+    {
         return Ok(None);
     }
     let target_stock = automation
@@ -775,7 +1229,6 @@ fn try_run_repeatable_batch(
             .and_then(Value::as_object)
             .is_some_and(|buffer| !buffer.is_empty());
     let empty = Map::new();
-    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
     let quantum = if direct {
         buffers
             .get(entity_id)
@@ -784,15 +1237,7 @@ fn try_run_repeatable_batch(
     } else {
         &empty
     };
-    let mut cycles_for_stock = MAX_SAFE_INTEGER;
-    for (item_id, amount) in &batch.tray_costs {
-        let amount = floor_amount(*amount);
-        if amount < 1.0 {
-            continue;
-        }
-        let available = inventory_amount(planet_tray, item_id) + inventory_amount(quantum, item_id);
-        cycles_for_stock = cycles_for_stock.min((available / amount.max(1.0)).floor());
-    }
+    let cycles_for_stock = batch_maximum_cycles_for_stock(base, planet_id, &batch, quantum);
     let can_repeat = active_targets == 1 && jobs.is_empty();
     let high_load = machine_count >= 10_000.0 || remaining_work > 256.0;
     if !can_repeat && !high_load {
@@ -804,13 +1249,19 @@ fn try_run_repeatable_batch(
         4_096.0
     };
     let fair_share = max_fair_jobs.min((jobs_for_work / active_targets as f64).ceil().max(1.0));
-    let cycles = jobs_for_target
-        .min(jobs_for_work)
+    let jobs_per_cycle = batch.jobs_per_cycle.max(1) as f64;
+    let cycles_for_target = (jobs_for_target / jobs_per_cycle).floor();
+    // Keep the same conservative work guard as the JavaScript oracle for a
+    // proven multi-job cycle. It may leave a small amount of work unused, but
+    // cannot over-credit a construction bucket.
+    let cycles_for_work = (jobs_for_work / jobs_per_cycle).floor();
+    let cycles = cycles_for_target
+        .min(cycles_for_work)
         .min(cycles_for_stock)
         .min(if can_repeat {
             MAX_SAFE_INTEGER
         } else {
-            fair_share
+            (fair_share / jobs_per_cycle).floor()
         });
     if cycles < 1.0 {
         return Ok(None);
@@ -818,6 +1269,9 @@ fn try_run_repeatable_batch(
     let completed = apply_repeatable_batch(
         base, automation, buffers, entity_id, planet_id, target, &batch, cycles,
     )?;
+    if completed < 1.0 {
+        return Ok(None);
+    }
     Ok(Some((batch.work_seconds * cycles, completed)))
 }
 
@@ -888,6 +1342,136 @@ fn consume_requirements(
         let in_quantum = inventory_amount(quantum, &requirement.item_id);
         set_inventory_amount(quantum, &requirement.item_id, in_quantum - remaining)?;
     }
+    Ok(true)
+}
+
+fn reserve_requirements(
+    base: &mut Map<String, Value>,
+    buffers: &mut Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    job: &mut Map<String, Value>,
+    requirements: &[ItemAmount],
+) -> anyhow::Result<bool> {
+    let mut inventory = job
+        .get("inventory")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+    let mut planet_tray = tray(base, planet_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+    let mut quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in requirements {
+        let required = floor_amount(requirement.amount);
+        let already_reserved = required.min(inventory_amount(&inventory, &requirement.item_id));
+        let mut remaining = required - already_reserved;
+        let in_tray = inventory_amount(&planet_tray, &requirement.item_id);
+        let from_tray = remaining.min(in_tray);
+        set_inventory_amount(&mut planet_tray, &requirement.item_id, in_tray - from_tray)?;
+        remaining -= from_tray;
+        let in_quantum = inventory_amount(&quantum, &requirement.item_id);
+        let from_quantum = remaining.min(in_quantum);
+        set_inventory_amount(
+            &mut quantum,
+            &requirement.item_id,
+            in_quantum - from_quantum,
+        )?;
+        remaining -= from_quantum;
+        if remaining > 0.0 {
+            return Ok(false);
+        }
+        let current = inventory_amount(&inventory, &requirement.item_id);
+        set_inventory_amount(
+            &mut inventory,
+            &requirement.item_id,
+            current + from_tray + from_quantum,
+        )?;
+    }
+    *tray_mut(base, planet_id)
+        .ok_or_else(|| anyhow!("native construction planet tray is missing"))? = planet_tray;
+    job.insert("inventory".to_owned(), Value::Object(inventory));
+    if quantum
+        .values()
+        .any(|amount| floor_amount(finite_number(Some(amount))) > 0.0)
+    {
+        buffers.insert(entity_id.to_owned(), Value::Object(quantum));
+    } else {
+        buffers.remove(entity_id);
+    }
+    Ok(true)
+}
+
+fn repair_job(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    job: &mut Map<String, Value>,
+) -> anyhow::Result<bool> {
+    let Some(construction_id) = string_at(job, "constructionId").map(str::to_owned) else {
+        return Ok(false);
+    };
+    let Some(target) = crate::construction_planner::targets(state)
+        .into_iter()
+        .find(|target| target.id == construction_id)
+    else {
+        return Ok(false);
+    };
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+    if let Some(job_inventory) = job.get("inventory").and_then(Value::as_object) {
+        for (item_id, amount) in job_inventory {
+            let current = inventory.get(item_id).copied().unwrap_or(0.0);
+            inventory.insert(
+                item_id.clone(),
+                floor_amount(current + finite_number(Some(amount))),
+            );
+        }
+    }
+    let Some(plan) = crate::construction_planner::build_plan(state, base, &target, inventory)
+    else {
+        return Ok(false);
+    };
+    if plan.steps.is_empty() {
+        return Ok(false);
+    }
+    let replacement = planned_job_value(&target, plan)
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("native repaired construction job is invalid"))?;
+    let replacement_steps = replacement
+        .get("steps")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow!("native repaired construction steps are invalid"))?;
+    let replacement_decisions = replacement
+        .get("recipeDecisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+    let steps = job
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native construction job steps are missing"))?;
+    steps.truncate(step_index.min(steps.len()));
+    steps.extend(replacement_steps);
+    job.insert(
+        "recipeDecisions".to_owned(),
+        Value::Array(replacement_decisions),
+    );
+    set_number(job, "elapsedSeconds", 0.0)?;
     Ok(true)
 }
 
@@ -1310,18 +1894,34 @@ pub(crate) fn run_centers(
             };
             let step = parse_step(step_value)?;
             let requirements = requirements(state, &step)?;
-            let job_inventory = current_job
-                .get("inventory")
-                .and_then(Value::as_object)
-                .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-            let empty_quantum = Map::new();
-            let quantum = buffers
-                .get(&entity_id)
-                .and_then(Value::as_object)
-                .unwrap_or(&empty_quantum);
-            let tray = tray(base, &planet_id)
-                .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-            if !requirements_available(job_inventory, tray, quantum, &requirements) {
+            let inputs_available = {
+                let job_inventory = current_job
+                    .get("inventory")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+                let empty_quantum = Map::new();
+                let quantum = buffers
+                    .get(&entity_id)
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty_quantum);
+                let planet_tray = tray(base, &planet_id)
+                    .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+                requirements_available(job_inventory, planet_tray, quantum, &requirements)
+            };
+            if !inputs_available {
+                if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
+                    continue;
+                }
+                break;
+            }
+            if !reserve_requirements(
+                base,
+                &mut buffers,
+                &entity_id,
+                &planet_id,
+                current_job,
+                &requirements,
+            )? {
                 break;
             }
             let duration = step_duration(state, base, &step)?;
@@ -1661,4 +2261,245 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::construction_planner::TargetKind;
+    use serde_json::json;
+
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().expect("test object").clone()
+    }
+
+    fn batch(
+        costs: &[(&str, f64)],
+        returns: &[(&str, f64)],
+        produced: &[(&str, f64)],
+    ) -> RepeatableBatch {
+        let tray_costs = costs
+            .iter()
+            .map(|(item_id, amount)| ((*item_id).to_owned(), *amount))
+            .collect::<BTreeMap<_, _>>();
+        let tray_returns = returns
+            .iter()
+            .map(|(item_id, amount)| ((*item_id).to_owned(), *amount))
+            .collect::<BTreeMap<_, _>>();
+        let touched_tray_items = costs
+            .iter()
+            .map(|(item_id, _)| (*item_id).to_owned())
+            .collect::<BTreeSet<_>>();
+        RepeatableBatch {
+            jobs_per_cycle: 1,
+            work_seconds: 1.0,
+            tray_costs,
+            tray_returns,
+            fleet_returns: BTreeMap::new(),
+            produced_items: produced
+                .iter()
+                .map(|(item_id, amount)| ((*item_id).to_owned(), *amount))
+                .collect(),
+            relevant_items: touched_tray_items.clone(),
+            touched_tray_items,
+            cycle_state_items: Vec::new(),
+            cycle_start_inventory: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn stock_limit_uses_full_first_principal_then_only_net_loss() {
+        let base = object(json!({
+            "activePlanetId": "planet-a",
+            "tray": { "feed": 2 },
+            "planetTrays": {},
+            "planetTrayItemLimits": { "planet-a": 1_000_000 },
+        }));
+        let quantum = object(json!({ "feed": 12 }));
+        let working_capital = batch(&[("feed", 10.0)], &[("feed", 8.0)], &[]);
+        let no_return = batch(&[("feed", 10.0)], &[], &[]);
+
+        assert_eq!(
+            batch_maximum_cycles_for_stock(&base, "planet-a", &working_capital, &quantum),
+            3.0
+        );
+        assert_eq!(
+            batch_maximum_cycles_for_stock(&base, "planet-a", &no_return, &quantum),
+            1.0
+        );
+    }
+
+    #[test]
+    fn direct_quantum_batch_preserves_working_capital_and_is_atomic_when_underfunded() {
+        let mut base = object(json!({
+            "activePlanetId": "planet-a",
+            "tray": { "feed": 2 },
+            "planetTrays": {},
+            "planetTrayItemLimits": { "planet-a": 1_000_000 },
+            "construction": { "widget": 0 },
+            "portableFleet": {},
+            "totalProduced": { "intermediate": 0 },
+        }));
+        let mut automation = object(json!({
+            "quantumSourceEnabled": true,
+            "destroyedByproducts": {},
+            "totalCrafted": 0,
+        }));
+        let mut buffers = object(json!({ "center-a": { "feed": 12 } }));
+        let target = crate::construction_planner::Target {
+            index: 0,
+            id: "widget".to_owned(),
+            output_amount: 1.0,
+            required_tech_id: None,
+            kind: TargetKind::Building,
+        };
+        let working_capital = batch(
+            &[("feed", 10.0)],
+            &[("feed", 8.0)],
+            &[("intermediate", 2.0)],
+        );
+
+        let before_base = base.clone();
+        let before_automation = automation.clone();
+        let before_buffers = buffers.clone();
+        assert_eq!(
+            apply_repeatable_batch(
+                &mut base,
+                &mut automation,
+                &mut buffers,
+                "center-a",
+                "planet-a",
+                &target,
+                &working_capital,
+                4.0,
+            )
+            .expect("underfunded batch should be rejected without mutation"),
+            0.0
+        );
+        assert_eq!(base, before_base);
+        assert_eq!(automation, before_automation);
+        assert_eq!(buffers, before_buffers);
+
+        assert_eq!(
+            apply_repeatable_batch(
+                &mut base,
+                &mut automation,
+                &mut buffers,
+                "center-a",
+                "planet-a",
+                &target,
+                &working_capital,
+                3.0,
+            )
+            .expect("funded direct batch"),
+            3.0
+        );
+        assert_eq!(
+            tray(&base, "planet-a").map(|tray| inventory_amount(tray, "feed")),
+            Some(8.0)
+        );
+        assert!(buffers.get("center-a").is_none());
+        assert_eq!(
+            base.get("construction")
+                .and_then(Value::as_object)
+                .map(|inventory| inventory_amount(inventory, "widget")),
+            Some(3.0)
+        );
+        assert_eq!(
+            base.get("totalProduced")
+                .and_then(Value::as_object)
+                .map(|inventory| inventory_amount(inventory, "intermediate")),
+            Some(6.0)
+        );
+        assert_eq!(finite_number(automation.get("totalCrafted")), 3.0);
+    }
+
+    #[test]
+    fn composed_byproduct_cycle_has_exact_external_cost_and_phase_guard() {
+        let first = batch(&[("ore", 5.0)], &[("catalyst", 2.0)], &[("part", 1.0)]);
+        let second = batch(
+            &[("ore", 3.0), ("catalyst", 2.0)],
+            &[("ore", 1.0)],
+            &[("part", 2.0)],
+        );
+        let mut cycle = compose_repeatable_batches(&first, &second);
+        cycle.cycle_state_items = vec!["catalyst".to_owned()];
+        cycle
+            .cycle_start_inventory
+            .insert("catalyst".to_owned(), 0.0);
+        let mut base = object(json!({
+            "activePlanetId": "planet-a",
+            "tray": { "ore": 100, "catalyst": 0 },
+            "planetTrays": {},
+            "planetTrayItemLimits": { "planet-a": 1_000_000 },
+            "construction": { "widget": 0 },
+            "portableFleet": {},
+            "totalProduced": { "part": 0 },
+        }));
+
+        assert_eq!(cycle.jobs_per_cycle, 2);
+        assert_eq!(cycle.work_seconds, 2.0);
+        assert_eq!(cycle.tray_costs.get("ore"), Some(&8.0));
+        assert_eq!(cycle.tray_returns.get("ore"), Some(&1.0));
+        assert!(!cycle.tray_costs.contains_key("catalyst"));
+        assert!(!cycle.tray_returns.contains_key("catalyst"));
+        assert_eq!(cycle.produced_items.get("part"), Some(&3.0));
+        assert!(batch_can_repeat(&base, "planet-a", &cycle));
+        assert!(construction_cycle_state_matches(&base, "planet-a", &cycle));
+
+        let mut applied = base.clone();
+        let mut automation = object(json!({
+            "quantumSourceEnabled": false,
+            "destroyedByproducts": {},
+            "totalCrafted": 0,
+        }));
+        let mut buffers = Map::new();
+        let target = crate::construction_planner::Target {
+            index: 0,
+            id: "widget".to_owned(),
+            output_amount: 1.0,
+            required_tech_id: None,
+            kind: TargetKind::Building,
+        };
+        assert_eq!(
+            apply_repeatable_batch(
+                &mut applied,
+                &mut automation,
+                &mut buffers,
+                "center-a",
+                "planet-a",
+                &target,
+                &cycle,
+                3.0,
+            )
+            .expect("stable cycle batch"),
+            6.0
+        );
+        assert_eq!(
+            tray(&applied, "planet-a").map(|tray| inventory_amount(tray, "ore")),
+            Some(79.0)
+        );
+        assert_eq!(
+            applied
+                .get("construction")
+                .and_then(Value::as_object)
+                .map(|inventory| inventory_amount(inventory, "widget")),
+            Some(6.0)
+        );
+        assert_eq!(
+            applied
+                .get("totalProduced")
+                .and_then(Value::as_object)
+                .map(|inventory| inventory_amount(inventory, "part")),
+            Some(9.0)
+        );
+
+        set_inventory_amount(
+            tray_mut(&mut base, "planet-a").expect("planet tray"),
+            "catalyst",
+            1.0,
+        )
+        .expect("set cycle phase");
+        assert!(!construction_cycle_state_matches(&base, "planet-a", &cycle));
+    }
 }

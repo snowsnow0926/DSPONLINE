@@ -4787,6 +4787,43 @@ describe("factory simulation", () => {
     expect(status.missingItemId).toBeDefined();
   });
 
+  it("repairs a persisted construction job when a previously available intermediate was depleted", () => {
+    let state = createInitialState();
+    state.research.completedTechIds.push("construction_automation");
+    state.construction.wind_turbine = 80;
+    state.construction.construction_center = 1;
+    state.construction.arc_smelter = 0;
+    state = placeBuilding(state, "wind_turbine", { x: -200, y: -180 }, 80);
+    state = placeBuilding(state, "construction_center", { x: 120, y: 0 });
+    const center = state.entities.find((entity) => entity.buildingId === "construction_center")!;
+    state.tray = { iron_ore: 4, copper_ore: 2 };
+    state.planetTrays.home = state.tray;
+    state.constructionAutomation.targetStock.arc_smelter = 1;
+    state.constructionAutomation.jobs[center.id] = {
+      constructionId: "arc_smelter",
+      // This is the persisted shape produced when circuit boards were present
+      // during planning but disappeared before the final building step.
+      steps: [{ kind: "building", constructionId: "arc_smelter" }],
+      stepIndex: 0,
+      elapsedSeconds: 0.25,
+      inventory: { iron_ingot: 4, stone_brick: 2, magnetic_coil: 2 },
+    };
+
+    expect(getConstructionAutomationStatus(state, center.id)).toMatchObject({
+      stage: "等待材料",
+      missingItemId: "circuit_board",
+      missingAmount: 4,
+    });
+
+    const advanced = advanceSimulation(state, 10);
+    expect(advanced.construction.arc_smelter).toBe(1);
+    expect(advanced.constructionAutomation.jobs[center.id]).toBeUndefined();
+    expect(advanced.constructionAutomation.totalCrafted).toBe(1);
+    expect(advanced.tray).toMatchObject({ iron_ore: 0, copper_ore: 0 });
+    expect(advanced.totalProduced).toMatchObject({ iron_ingot: 4, copper_ingot: 2, circuit_board: 4 });
+    expect(getConstructionAutomationStatus(advanced, center.id).stage).toBe("目标库存已满足");
+  });
+
   it("continues from iron ore through iron ingots and steel for construction-center targets", () => {
     let state = createInitialState();
     state.research.completedTechIds.push("construction_automation", "high_efficiency_plasma_control");

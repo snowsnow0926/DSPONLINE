@@ -95,7 +95,8 @@ interface CriticalSnapshot {
   shellSails: number;
   sailsAbsorbed: number;
   sailsLaunched: number;
-  dysonGenerationKw: number;
+  sphereGenerationKw: number;
+  swarmGenerationKw: number;
 }
 
 let fixtureRoot: string | null = null;
@@ -320,7 +321,11 @@ function criticalSnapshot(state: GameState): CriticalSnapshot {
     shellSails: Math.max(0, state.dysonSphere.shellSails),
     sailsAbsorbed: Math.max(0, state.dysonSphere.totalSailsAbsorbed),
     sailsLaunched: Math.max(0, state.dysonSwarm.totalLaunched),
-    dysonGenerationKw: Math.max(0, state.dysonSphere.generationKw + state.dysonSwarm.generationKw),
+    // Compare independently derived domains separately. Summing a growing
+    // sphere and an expiring swarm can make a small component error look
+    // greater than 100% when the oracle deltas nearly cancel each other.
+    sphereGenerationKw: Math.max(0, state.dysonSphere.generationKw),
+    swarmGenerationKw: Math.max(0, state.dysonSwarm.generationKw),
   };
 }
 

@@ -46,6 +46,22 @@ describe("game storage", () => {
     expect(reloaded?.constructionAutomation.quantumMaterialBuffer).toEqual({ "save-center": { iron_ore: 12 } });
   });
 
+  it("keeps legal lone UTF-16 surrogates compatible with the public JavaScript importer", () => {
+    const envelope = JSON.parse(exportGame(createInitialState())) as {
+      formatVersion: number;
+      state: Record<string, unknown>;
+      checksum: string;
+    };
+    envelope.state.modCompatibilityProbe = "\ud800";
+    envelope.checksum = computeSaveStateChecksum(envelope.formatVersion, envelope.state);
+    const raw = JSON.stringify(envelope);
+
+    expect(raw).toContain("\\ud800");
+    expect((JSON.parse(raw).state.modCompatibilityProbe as string).charCodeAt(0)).toBe(0xd800);
+    expect(inspectSave(raw)).toMatchObject({ valid: true, checksum: "valid" });
+    expect(importGame(raw)).not.toBeNull();
+  });
+
   it("repairs duplicate station contract IDs through the normal import/export path", () => {
     const source = createInitialState();
     source.version = 47;

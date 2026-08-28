@@ -15,6 +15,7 @@ const {
   normalizeNativeSaveBegin,
   normalizeNativeSaveRecords,
   normalizeNativeCoreOpen,
+  normalizeNativeCoreImport,
   normalizeNativeHostSpawnEnvironment,
   parseFrames,
 } = require("./native-host.cjs");
@@ -224,6 +225,84 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   assert.deepEqual(calls.map((call) => call.operation), [
     "coreOpen", "coreStatus", "coreCommitOperation", "coreCheckpoint", "coreClose",
   ]);
+});
+
+test("v47 import keeps the selected path outside the renderer request and owner-binds the new session", async () => {
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  const sourcePath = process.platform === "win32" ? "C:\\selected\\save.json" : "/selected/save.json";
+  const normalized = normalizeNativeCoreImport({ registryFingerprint: "builtin:test", catalog }, sourcePath);
+  assert.equal(normalized.operation, "coreImportV47");
+  assert.equal(normalized.sourcePath, sourcePath);
+  assert.throws(() => normalizeNativeCoreImport({
+    registryFingerprint: "builtin:test", catalog, sourcePath,
+  }, sourcePath), /request is invalid/);
+  assert.throws(() => normalizeNativeCoreImport({ registryFingerprint: "builtin:test", catalog }, "relative.json"), /source/);
+
+  const calls = [];
+  const client = {
+    hello: { capabilities: ["native-core-v47-stream-import-v1"] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreImportV47") {
+        return {
+          sessionId: "core-import-1",
+          authority: "shadow",
+          checkpoint: { generation: 2 },
+          import: { mode: "normal" },
+          summary: { mode: "normal" },
+        };
+      }
+      return { revision: 1 };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  const imported = await registry.importV47(7, { registryFingerprint: "builtin:test", catalog }, sourcePath);
+  assert.equal(imported.sessionId, "core-import-1");
+  assert.equal(calls[0].sourcePath, sourcePath);
+  assert.throws(() => registry.status(8, "core-import-1"), /not owned/);
+  await registry.close(7, "core-import-1");
+});
+
+test("v47 import closes an unowned host session when its receipt is malformed", async () => {
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [], recipes: [], belts: [],
+  };
+  const sourcePath = process.platform === "win32" ? "C:\\selected\\save.json" : "/selected/save.json";
+  const calls = [];
+  const client = {
+    hello: { capabilities: ["native-core-v47-stream-import-v1"] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreImportV47") {
+        return {
+          sessionId: "core-import-invalid",
+          authority: "unexpected-authority",
+          checkpoint: { generation: 1 },
+          import: { mode: "normal" },
+          summary: { mode: "normal" },
+        };
+      }
+      return { closed: true };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  await assert.rejects(
+    registry.importV47(7, { registryFingerprint: "builtin:test", catalog }, sourcePath),
+    /invalid imported core session/,
+  );
+  assert.deepEqual(calls.map((request) => request.operation), ["coreImportV47", "coreClose"]);
+  assert.equal(calls[1].sessionId, "core-import-invalid");
+  assert.equal(registry.sessions.size, 0);
 });
 
 test("mock child primitives remain compatible with client event expectations", () => {

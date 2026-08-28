@@ -7,6 +7,10 @@ const { PassThrough } = require("node:stream");
 const nodeV8 = require("node:v8");
 const { createReleaseChannels, optionalHttpsUrl, resolveReleaseChannel } = require("./release-channels.cjs");
 const {
+  finishCommittedNativeV47Import,
+  registerWindowClosedCleanup,
+} = require("./window-lifecycle.cjs");
+const {
   contract: cloudTransferContract,
   exactUint8Array,
   normalizeRequestHeaders,
@@ -35,6 +39,8 @@ const {
 } = require("./native-core-exact-realtime-experiment.cjs");
 const {
   inspectNativeExactRealtimeStartup,
+  inspectNativeExactRealtimeStartupWithoutHost,
+  resolveFixedNativeSaveRootPath,
   unavailableStartupStatus,
 } = require("./native-exact-realtime-startup-guard.cjs");
 const {
@@ -46,6 +52,12 @@ const {
   initializePerformanceEditionIdentity,
   validatePerformanceEditionPackageIdentity,
 } = require("./performance-edition-identity.cjs");
+const {
+  createRendererNativeError,
+  normalizeRendererNativeResult,
+  rendererNativeErrorCode,
+  serializeRendererNativeError,
+} = require("./native-renderer-boundary.cjs");
 const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
 const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
@@ -81,6 +93,7 @@ const maximumSmallRequestBytes = 8 * 1024 * 1024;
 const maximumResponseBytes = cloudTransferContract.singleSaveResponseLimitBytes;
 const DESKTOP_BASE_SCALE = 0.8;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+const MAX_NATIVE_V47_IMPORT_BYTES = 256 * 1024 * 1024;
 
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {
@@ -125,6 +138,7 @@ let nativeHostState = {
   available: false,
   state: process.platform === "win32" ? "starting" : "unsupported",
   message: process.platform === "win32" ? "Windows 原生性能服务尚未启动" : "当前平台不启用 Windows 原生性能服务",
+  errorCode: null,
   capabilities: [],
   performancePolicy: nativePerformancePolicyStatus,
 };
@@ -243,21 +257,32 @@ function initializeNativePerformancePolicy() {
 }
 
 async function initializeNativeHost() {
-  if (process.platform !== "win32") return nativeHostState;
+  const rootPath = resolveFixedNativeSaveRootPath(performanceEditionRuntimeIdentity.userDataPath);
+  const inspectWithoutHost = () => inspectNativeExactRealtimeStartupWithoutHost({
+    performanceEditionUserDataPath: performanceEditionRuntimeIdentity.userDataPath,
+    environment: process.env,
+  });
+  if (process.platform !== "win32") {
+    nativeExactRealtimeStartupStatus = inspectWithoutHost();
+    nativeHostState = {
+      ...nativeHostState,
+      exactRealtime: nativeExactRealtimeStartupStatus,
+    };
+    return nativeHostState;
+  }
   if (!nativePerformancePolicyStore) initializeNativePerformancePolicy();
   const binaryPath = nativeHostBinaryPath({
     appPath: app.getAppPath(),
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
   });
-  const rootPath = path.join(app.getPath("userData"), "native-saves-v1");
   try {
     nativeHostClient = new NativeHostClient({
       binaryPath,
       rootPath,
       spawnEnvironment: nativePerformancePolicyStore.spawnEnvironment(),
     });
-    const hello = await nativeHostClient.start(app.getVersion());
+    const hello = normalizeRendererNativeResult("hostHello", await nativeHostClient.start(app.getVersion()));
     nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
     nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
@@ -270,6 +295,7 @@ async function initializeNativeHost() {
       available: true,
       state: "ready",
       message: "Windows 原生存档服务已就绪",
+      errorCode: null,
       protocolVersion: hello.protocolVersion,
       nativeFormatVersion: hello.nativeFormatVersion,
       hostVersion: hello.hostVersion,
@@ -278,11 +304,21 @@ async function initializeNativeHost() {
       performancePolicy: nativePerformancePolicyStatus,
     };
   } catch (error) {
-    nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
+    const failedNativeHostClient = nativeHostClient;
+    if (failedNativeHostClient && !failedNativeHostClient.exited) {
+      try {
+        await failedNativeHostClient.stop();
+      } catch {
+        // Startup remains fail-closed below; a failed graceful stop must not
+        // skip the fixed-root lease inspection or retain a usable client.
+      }
+    }
+    nativeExactRealtimeStartupStatus = inspectWithoutHost();
     nativeHostState = {
       available: false,
       state: "unavailable",
-      message: `Windows 原生性能服务启动失败：${error instanceof Error ? error.message : "未知错误"}`,
+      message: "Windows 原生性能服务启动失败；已完成本地权威租约安全检查",
+      errorCode: rendererNativeErrorCode(error, "NATIVE_HOST_START_FAILED"),
       capabilities: [],
       exactRealtime: nativeExactRealtimeStartupStatus,
       performancePolicy: nativePerformancePolicyStatus,
@@ -356,6 +392,61 @@ function closeTransferPort(port) {
 function postTransferError(port, error) {
   try { port.postMessage({ error: serializedApiError(error) }); } catch { /* renderer is gone */ }
   closeTransferPort(port);
+}
+
+function postNativeProjectionTransferError(port, error) {
+  const safe = serializeRendererNativeError(error, {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生投影请求失败，请重试",
+  });
+  try { port.postMessage({ error: safe }); } catch { /* renderer is gone */ }
+  closeTransferPort(port);
+}
+
+async function runRendererNativeOperation(kind, options, operation) {
+  try {
+    const raw = await operation();
+    try {
+      return normalizeRendererNativeResult(kind, raw, options.resultContext);
+    } catch (error) {
+      if (typeof options.onInvalidResult === "function") {
+        await options.onInvalidResult(raw).catch(() => undefined);
+      }
+      throw error;
+    }
+  } catch (error) {
+    throw createRendererNativeError(error, options);
+  }
+}
+
+function nativeCoreProjectionResultContext(request) {
+  return {
+    baseFields: request?.baseFields,
+    entityIds: request?.entityIds,
+    beltIds: request?.beltIds,
+  };
+}
+
+function nativeViewportProjectionResultContext(request) {
+  return {
+    baseFields: request?.baseFields ?? [],
+    planetId: request?.planetId,
+    bounds: request?.bounds,
+    entityCursor: request?.entityCursor ?? 0,
+    entityLimit: request?.entityLimit,
+    beltLimit: request?.beltLimit,
+  };
+}
+
+function nativeStatisticsProjectionResultContext(request) {
+  return {
+    minElapsedSeconds: request?.minElapsedSeconds,
+    maxElapsedSeconds: request?.maxElapsedSeconds,
+    cursor: request?.cursor ?? 0,
+    limit: request?.limit,
+    planetId: request?.planetId ?? null,
+    itemId: request?.itemId ?? null,
+  };
 }
 
 async function waitForResponseAck(record, expectedBytes) {
@@ -473,7 +564,7 @@ function openExternalUrl(url) {
 
 function createWindow() {
   const saved = visibleWindowState();
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: saved?.bounds.width ?? 1500,
     height: saved?.bounds.height ?? 960,
     x: saved?.bounds.x,
@@ -492,16 +583,17 @@ function createWindow() {
       backgroundThrottling: true,
     },
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow = window;
+  window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
+  window.webContents.on("will-navigate", (event, url) => {
     if (allowLoadedNavigation(url)) return;
     event.preventDefault();
     openExternalUrl(url);
   });
-  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+  window.webContents.on("render-process-gone", (_event, details) => {
     if (details.reason === "clean-exit") return;
     dialog.showMessageBox({
       type: "error",
@@ -510,35 +602,41 @@ function createWindow() {
       detail: `原因：${details.reason}`,
     }).catch(() => undefined);
   });
-  mainWindow.on("page-title-updated", (event) => {
+  window.on("page-title-updated", (event) => {
     event.preventDefault();
-    mainWindow?.setTitle(PERFORMANCE_EDITION_IDENTITY.productName);
+    if (!window.isDestroyed()) window.setTitle(PERFORMANCE_EDITION_IDENTITY.productName);
   });
-  mainWindow.on("resize", () => {
+  window.on("resize", () => {
     scheduleReadableDesktopZoom();
     scheduleWindowStateSave();
   });
-  mainWindow.on("move", scheduleWindowStateSave);
-  mainWindow.on("close", persistWindowState);
-  mainWindow.on("closed", () => {
-    const ownerId = mainWindow?.webContents?.id;
-    if (ownerId && nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
-    if (ownerId && nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
-    cancelAllApiRequests();
-    cancelAllAccountArchiveDownloads();
-    mainWindow = null;
+  window.on("move", scheduleWindowStateSave);
+  window.on("close", persistWindowState);
+  registerWindowClosedCleanup(window, {
+    abortNativeSaveOwner: (ownerId) => {
+      if (nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
+    },
+    closeNativeCoreOwner: (ownerId) => {
+      if (nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
+    },
+    cancelApiRequests: cancelAllApiRequests,
+    cancelAccountArchiveDownloads: cancelAllAccountArchiveDownloads,
+    clearWindow: (closedWindow) => {
+      if (mainWindow === closedWindow) mainWindow = null;
+    },
   });
 
   if (isDevelopment) {
-    void mainWindow.loadURL(process.env.DSP_DESKTOP_DEV_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    void window.loadURL(process.env.DSP_DESKTOP_DEV_URL);
+    window.webContents.openDevTools({ mode: "detach" });
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    void window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
-  mainWindow.once("ready-to-show", () => {
-    if (saved?.maximized || !saved) mainWindow.maximize();
+  window.once("ready-to-show", () => {
+    if (window.isDestroyed() || mainWindow !== window) return;
+    if (saved?.maximized || !saved) window.maximize();
     scheduleReadableDesktopZoom();
-    mainWindow.show();
+    window.show();
   });
 }
 
@@ -585,122 +683,237 @@ ipcMain.handle("desktop:set-font-scale", (_event, requestedScale) => {
   return { scale: fontScale, zoomFactor: applyReadableDesktopZoom() };
 });
 
-ipcMain.handle("desktop:native-status", (event) => {
-  if (!trustedSender(event)) throw new Error("原生性能服务调用来源无效");
+ipcMain.handle("desktop:native-status", async (event) => runRendererNativeOperation("nativeStatus", {
+  fallbackCode: "NATIVE_STATUS_FAILED",
+  message: "无法读取 Windows 原生性能服务状态",
+}, async () => {
+  if (!trustedSender(event)) throw new Error("invalid native status sender");
   return nativeHostState;
-});
+}));
 
 ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
   if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");
   return runtimeDiagnosticsSampler.sample();
 });
 
-ipcMain.handle("desktop:native-performance-policy", (event) => {
-  if (!trustedSender(event)) throw new Error("原生性能策略调用来源无效");
+ipcMain.handle("desktop:native-performance-policy", async (event) => runRendererNativeOperation("performancePolicy", {
+  fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED",
+  message: "无法读取 Windows 原生性能策略",
+}, async () => {
+  if (!trustedSender(event)) throw new Error("invalid native performance policy sender");
   return nativePerformancePolicyStatus;
-});
+}));
 
-ipcMain.handle("desktop:set-native-performance-policy", (event, request) => {
-  if (!trustedSender(event)) throw new Error("原生性能策略调用来源无效");
-  if (!nativePerformancePolicyStore) throw new Error("原生性能策略尚未初始化");
+ipcMain.handle("desktop:set-native-performance-policy", async (event, request) => runRendererNativeOperation("performancePolicy", {
+  fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
+  message: "无法保存 Windows 原生性能策略",
+}, async () => {
+  if (!trustedSender(event)) throw new Error("invalid native performance policy sender");
+  if (!nativePerformancePolicyStore) throw new Error("native performance policy is not initialized");
   nativePerformancePolicyStatus = nativePerformancePolicyStore.save(request);
   nativeHostState = { ...nativeHostState, performancePolicy: nativePerformancePolicyStatus };
   return nativePerformancePolicyStatus;
-});
+}));
 
 ipcMain.handle("desktop:native-save-begin", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeSaveSessions.begin(ownerId, request);
+  let ownerId = null;
+  return runRendererNativeOperation("saveBegin", {
+    fallbackCode: "NATIVE_SAVE_BEGIN_FAILED",
+    message: "原生存档事务启动失败，请重试",
+    onInvalidResult: async (raw) => {
+      if (ownerId !== null && typeof raw?.transactionId === "string") {
+        await nativeSaveSessions?.abort(ownerId, raw.transactionId);
+      }
+    },
+  }, async () => {
+    ownerId = requireTrustedNativeSender(event);
+    return nativeSaveSessions.begin(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-save-write", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeSaveSessions.write(ownerId, request?.transactionId, request?.records);
+  return runRendererNativeOperation("saveWrite", {
+    fallbackCode: "NATIVE_SAVE_WRITE_FAILED",
+    message: "原生存档分块写入失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeSaveSessions.write(ownerId, request?.transactionId, request?.records);
+  });
 });
 
 ipcMain.handle("desktop:native-save-commit", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeSaveSessions.commit(ownerId, request?.transactionId);
+  return runRendererNativeOperation("saveCommit", {
+    fallbackCode: "NATIVE_SAVE_COMMIT_FAILED",
+    message: "原生存档提交失败，请重新检查存档状态",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeSaveSessions.commit(ownerId, request?.transactionId);
+  });
 });
 
 ipcMain.handle("desktop:native-save-abort", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeSaveSessions.abort(ownerId, request?.transactionId);
+  return runRendererNativeOperation("saveAbort", {
+    fallbackCode: "NATIVE_SAVE_ABORT_FAILED",
+    message: "原生存档事务取消失败，请重新检查存档状态",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeSaveSessions.abort(ownerId, request?.transactionId);
+  });
 });
 
 ipcMain.handle("desktop:native-save-recover", async (event, request) => {
-  requireTrustedNativeSender(event);
-  if (!validNativeLogicalId(request?.slot, 64)) throw new Error("原生存档槽位无效");
-  return nativeHostClient.request({ operation: "saveRecover", slot: request.slot });
+  return runRendererNativeOperation("saveRecovery", {
+    fallbackCode: "NATIVE_SAVE_RECOVER_FAILED",
+    message: "原生存档恢复检查失败，请重试",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!validNativeLogicalId(request?.slot, 64)) throw new Error("invalid native save slot");
+    return nativeHostClient.request({ operation: "saveRecover", slot: request.slot });
+  });
 });
 
 ipcMain.handle("desktop:native-save-read", async (event, request) => {
-  requireTrustedNativeSender(event);
-  if (!validNativeLogicalId(request?.slot, 64) || !Number.isSafeInteger(request?.generation) || request.generation < 1 ||
-    typeof request?.rootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.rootHash) ||
-    typeof request?.key !== "string" || request.key.length < 1 || request.key.length > 512 ||
-    request.key.includes("..") || /[\\/\0]/.test(request.key)) {
-    throw new Error("原生存档读取请求无效");
-  }
-  return nativeHostClient.request({
-    operation: "saveRead",
-    slot: request.slot,
-    key: request.key,
-    generation: request.generation,
-    rootHash: request.rootHash,
+  return runRendererNativeOperation("saveRead", {
+    fallbackCode: "NATIVE_SAVE_READ_FAILED",
+    message: "原生存档区块读取失败，请重试",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!validNativeLogicalId(request?.slot, 64) || !Number.isSafeInteger(request?.generation) || request.generation < 1 ||
+      typeof request?.rootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.rootHash) ||
+      typeof request?.key !== "string" || request.key.length < 1 || request.key.length > 512 ||
+      request.key.includes("..") || /[\\/\0]/.test(request.key)) throw new Error("invalid native save read request");
+    return nativeHostClient.request({ operation: "saveRead", slot: request.slot, key: request.key, generation: request.generation, rootHash: request.rootHash });
   });
 });
 
 ipcMain.handle("desktop:native-wal-append", async (event, request) => {
-  requireTrustedNativeSender(event);
-  if (!validNativeLogicalId(request?.slot, 64) || !validNativeLogicalId(request?.commandId, 128) ||
-    !Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
-    !Number.isSafeInteger(request?.revision) || request.revision <= request.baseRevision ||
-    !request.payload || typeof request.payload !== "object") {
-    throw new Error("原生 WAL 请求无效");
-  }
-  return nativeHostClient.request({
-    operation: "walAppend",
-    slot: request.slot,
-    baseRevision: request.baseRevision,
-    revision: request.revision,
-    commandId: request.commandId,
-    payload: request.payload,
+  return runRendererNativeOperation("walAppend", {
+    fallbackCode: "NATIVE_WAL_APPEND_FAILED",
+    message: "原生存档日志写入失败，请重新检查存档状态",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!validNativeLogicalId(request?.slot, 64) || !validNativeLogicalId(request?.commandId, 128) ||
+      !Number.isSafeInteger(request?.baseRevision) || request.baseRevision < 0 ||
+      !Number.isSafeInteger(request?.revision) || request.revision <= request.baseRevision ||
+      !request.payload || typeof request.payload !== "object") throw new Error("invalid native WAL request");
+    return nativeHostClient.request({ operation: "walAppend", slot: request.slot, baseRevision: request.baseRevision, revision: request.revision, commandId: request.commandId, payload: request.payload });
   });
 });
 
 ipcMain.handle("desktop:native-save-compact", async (event, request) => {
-  requireTrustedNativeSender(event);
-  if (!validNativeLogicalId(request?.slot, 64)) throw new Error("原生存档槽位无效");
-  const retainGenerations = Number.isSafeInteger(request?.retainGenerations)
-    ? Math.max(2, Math.min(8, request.retainGenerations))
-    : 2;
-  return nativeHostClient.request({ operation: "compact", slot: request.slot, retainGenerations });
+  return runRendererNativeOperation("saveCompact", {
+    fallbackCode: "NATIVE_SAVE_COMPACT_FAILED",
+    message: "原生存档空闲合并失败，请稍后重试",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!validNativeLogicalId(request?.slot, 64)) throw new Error("invalid native save slot");
+    const retainGenerations = Number.isSafeInteger(request?.retainGenerations) ? Math.max(2, Math.min(8, request.retainGenerations)) : 2;
+    return nativeHostClient.request({ operation: "compact", slot: request.slot, retainGenerations });
+  });
 });
 
 ipcMain.handle("desktop:native-core-open", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.open(ownerId, request);
+  let ownerId = null;
+  return runRendererNativeOperation("coreOpen", {
+    fallbackCode: "NATIVE_CORE_OPEN_FAILED",
+    message: "原生影子核心打开失败，请重试",
+    onInvalidResult: async (raw) => {
+      if (ownerId !== null && typeof raw?.sessionId === "string") await nativeCoreSessions?.close(ownerId, raw.sessionId);
+    },
+  }, async () => {
+    ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.open(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
+  try {
+    const ownerId = requireTrustedNativeSender(event);
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: "导入 DSP极简网络 v47 存档到 Windows 原生核心",
+      buttonLabel: "验证并导入",
+      filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
+      properties: ["openFile", "dontAddToRecent"],
+    });
+    if (selection.canceled || selection.filePaths.length !== 1) {
+      return { cancelled: true };
+    }
+    if (!trustedSender(event) || event.sender.id !== ownerId) {
+      throw Object.assign(new Error("renderer owner closed"), {
+        name: "AbortError",
+        code: "NATIVE_CORE_V47_IMPORT_CANCELLED",
+      });
+    }
+    const sourcePath = path.resolve(selection.filePaths[0]);
+    const sourceStat = await fs.promises.lstat(sourcePath);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size < 1 ||
+      sourceStat.size > MAX_NATIVE_V47_IMPORT_BYTES) {
+      throw Object.assign(new Error("unsupported native v47 import selection"), {
+        code: "NATIVE_CORE_V47_IMPORT_FILE_INVALID",
+      });
+    }
+    const imported = await runRendererNativeOperation("coreImport", {
+      fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
+      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+      onInvalidResult: async (raw) => {
+        if (typeof raw?.sessionId === "string") await nativeCoreSessions?.close(ownerId, raw.sessionId);
+      },
+    }, () => nativeCoreSessions.importV47(ownerId, request, sourcePath));
+    return finishCommittedNativeV47Import({
+      imported,
+      fileName: path.basename(sourcePath),
+      ownerStillTrusted: trustedSender(event) && event.sender.id === ownerId,
+      closeSession: () => nativeCoreSessions.close(ownerId, imported.sessionId),
+    });
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
+      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+    });
+  }
 });
 
 ipcMain.handle("desktop:native-core-status", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.status(ownerId, request?.sessionId);
+  return runRendererNativeOperation("coreSummary", {
+    fallbackCode: "NATIVE_CORE_STATUS_FAILED",
+    message: "原生影子核心状态读取失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.status(ownerId, request?.sessionId);
+  });
 });
 
 ipcMain.handle("desktop:native-core-projection", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.projection(ownerId, request);
+  return runRendererNativeOperation("coreProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生投影请求失败，请重试",
+    resultContext: nativeCoreProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await nativeCoreSessions.projection(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-viewport-projection", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.viewportProjection(ownerId, request);
+  return runRendererNativeOperation("coreViewportProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生视口投影请求失败，请重试",
+    resultContext: nativeViewportProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await nativeCoreSessions.viewportProjection(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.statisticsProjection(ownerId, request);
+  return runRendererNativeOperation("coreStatisticsProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生统计投影请求失败，请重试",
+    resultContext: nativeStatisticsProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await nativeCoreSessions.statisticsProjection(ownerId, request);
+  });
 });
 
 ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
@@ -717,9 +930,16 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       throw new Error("原生投影二进制请求无效");
     }
     const normalizedRequest = { ...request.payload, sessionId: request.sessionId };
-    const result = request.projectionType === "viewport-v1"
+    const rawResult = request.projectionType === "viewport-v1"
       ? await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest)
       : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    const result = normalizeRendererNativeResult(
+      request.projectionType === "viewport-v1" ? "coreViewportProjection" : "coreStatisticsProjection",
+      rawResult,
+      request.projectionType === "viewport-v1"
+        ? nativeViewportProjectionResultContext(request.payload)
+        : nativeStatisticsProjectionResultContext(request.payload),
+    );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,
       sequence: request.sequence,
@@ -745,99 +965,155 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   };
   port.start();
   void run()
-    .catch((error) => postTransferError(port, error))
+    .catch((error) => postNativeProjectionTransferError(port, error))
     .finally(() => closeTransferPort(port));
 });
 
 ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_CORE_COMMAND_FAILED",
+    message: "原生影子命令执行失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
+  });
 });
 
 ipcMain.handle("desktop:native-core-advance", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.advance(ownerId, request);
+  return runRendererNativeOperation("coreAdvance", {
+    fallbackCode: "NATIVE_CORE_ADVANCE_FAILED",
+    message: "原生影子模拟推进失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.advance(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-commit-operation", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.commitOperation(ownerId, request);
+  return runRendererNativeOperation("coreCommit", {
+    fallbackCode: "NATIVE_CORE_COMMIT_FAILED",
+    message: "原生影子事务提交失败，请重新检查影子状态",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.commitOperation(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.checkpoint(ownerId, request);
+  return runRendererNativeOperation("coreCheckpoint", {
+    fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED",
+    message: "原生影子检查点生成失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.checkpoint(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
-    ? request.suggestedName
-    : `dsp-idle-native-${Date.now()}.json`;
-  const prepared = await nativeCoreSessions.exportV47(ownerId, request);
-  const sourcePath = path.join(nativeHostClient.rootPath, "exports", `${prepared.exportId}.json`);
-  const sourceStat = await fs.promises.stat(sourcePath);
-  const sourceSha256 = sourceStat.isFile() ? await sha256File(sourcePath) : "";
-  if (!sourceStat.isFile() || sourceStat.size !== prepared.result.byteLength ||
-    sourceSha256 !== prepared.result.envelopeSha256) {
-    throw new Error("原生兼容导出文件身份校验失败");
-  }
-  const selection = await dialog.showSaveDialog(mainWindow, {
-    title: "导出 DSP极简网络 v47 存档",
-    defaultPath: path.join(app.getPath("downloads"), suggestedName),
-    buttonLabel: "保存存档",
-    filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
-    properties: ["showOverwriteConfirmation", "createDirectory"],
-  });
-  if (selection.canceled || !selection.filePath) {
-    return { ...prepared, cancelled: true };
-  }
-  const targetPath = path.resolve(selection.filePath);
-  const targetDirectory = path.dirname(targetPath);
-  const replacementToken = `${process.pid}-${Date.now()}-${prepared.exportId}`;
-  const temporaryPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.part`);
-  const backupPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.previous`);
-  let existingTargetMoved = false;
   try {
-    await fs.promises.copyFile(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
-    const temporaryStat = await fs.promises.stat(temporaryPath);
-    const temporarySha256 = temporaryStat.isFile() ? await sha256File(temporaryPath) : "";
-    if (!temporaryStat.isFile() || temporaryStat.size !== prepared.result.byteLength ||
-      temporarySha256 !== prepared.result.envelopeSha256) {
-      throw new Error("原生导出副本长度校验失败");
+    const ownerId = requireTrustedNativeSender(event);
+    const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
+      ? request.suggestedName
+      : `dsp-idle-native-${Date.now()}.json`;
+    const prepared = normalizeRendererNativeResult("coreExport", await nativeCoreSessions.exportV47(ownerId, request));
+    const sourcePath = path.join(nativeHostClient.rootPath, "exports", `${prepared.exportId}.json`);
+    const sourceStat = await fs.promises.stat(sourcePath);
+    const sourceSha256 = sourceStat.isFile() ? await sha256File(sourcePath) : "";
+    if (!sourceStat.isFile() || sourceStat.size !== prepared.result.byteLength ||
+      sourceSha256 !== prepared.result.envelopeSha256) {
+      throw Object.assign(new Error("native export source identity mismatch"), {
+        code: "NATIVE_CORE_V47_EXPORT_IDENTITY_INVALID",
+      });
     }
-    const targetStat = await fs.promises.lstat(targetPath).catch((error) => {
-      if (error?.code === "ENOENT") return null;
-      throw error;
+    const selection = await dialog.showSaveDialog(mainWindow, {
+      title: "导出 DSP极简网络 v47 存档",
+      defaultPath: path.join(app.getPath("downloads"), suggestedName),
+      buttonLabel: "保存存档",
+      filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
+      properties: ["showOverwriteConfirmation", "createDirectory"],
     });
-    if (targetStat && !targetStat.isFile()) throw new Error("原生导出目标不是普通文件");
-    if (targetStat) {
-      await fs.promises.rename(targetPath, backupPath);
-      existingTargetMoved = true;
+    if (selection.canceled || !selection.filePath) {
+      return {
+        exportId: prepared.exportId,
+        mode: prepared.mode,
+        result: prepared.result,
+        cancelled: true,
+      };
     }
-    await fs.promises.rename(temporaryPath, targetPath);
+    const targetPath = path.resolve(selection.filePath);
+    const targetDirectory = path.dirname(targetPath);
+    const replacementToken = `${process.pid}-${Date.now()}-${prepared.exportId}`;
+    const temporaryPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.part`);
+    const backupPath = path.join(targetDirectory, `.${path.basename(targetPath)}.${replacementToken}.previous`);
+    let existingTargetMoved = false;
+    try {
+      await fs.promises.copyFile(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
+      const temporaryStat = await fs.promises.stat(temporaryPath);
+      const temporarySha256 = temporaryStat.isFile() ? await sha256File(temporaryPath) : "";
+      if (!temporaryStat.isFile() || temporaryStat.size !== prepared.result.byteLength ||
+        temporarySha256 !== prepared.result.envelopeSha256) {
+        throw Object.assign(new Error("native export copy identity mismatch"), {
+          code: "NATIVE_CORE_V47_EXPORT_IDENTITY_INVALID",
+        });
+      }
+      const targetStat = await fs.promises.lstat(targetPath).catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      if (targetStat && !targetStat.isFile()) {
+        throw Object.assign(new Error("native export target is not a direct file"), {
+          code: "NATIVE_CORE_V47_EXPORT_TARGET_INVALID",
+        });
+      }
+      if (targetStat) {
+        await fs.promises.rename(targetPath, backupPath);
+        existingTargetMoved = true;
+      }
+      await fs.promises.rename(temporaryPath, targetPath);
+    } catch (error) {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+      if (existingTargetMoved) {
+        const targetExists = await fs.promises.lstat(targetPath)
+          .then(() => true)
+          .catch((targetError) => targetError?.code === "ENOENT" ? false : true);
+        if (!targetExists) await fs.promises.rename(backupPath, targetPath).catch(() => undefined);
+      }
+      throw error;
+    }
+    if (existingTargetMoved) await fs.promises.rm(backupPath, { force: true }).catch(() => undefined);
+    return {
+      exportId: prepared.exportId,
+      mode: prepared.mode,
+      result: prepared.result,
+      cancelled: false,
+      fileName: path.basename(targetPath),
+    };
   } catch (error) {
-    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
-    if (existingTargetMoved) {
-      const targetExists = await fs.promises.lstat(targetPath)
-        .then(() => true)
-        .catch((targetError) => targetError?.code === "ENOENT" ? false : true);
-      if (!targetExists) await fs.promises.rename(backupPath, targetPath).catch(() => undefined);
-    }
-    throw error;
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_CORE_V47_EXPORT_FAILED",
+      message: "原生 v47 存档导出失败；目标文件不会接收未经校验的内容",
+    });
   }
-  if (existingTargetMoved) await fs.promises.rm(backupPath, { force: true }).catch(() => undefined);
-  return { ...prepared, cancelled: false, fileName: path.basename(targetPath) };
 });
 
 ipcMain.handle("desktop:native-core-compare", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.compare(ownerId, request);
+  return runRendererNativeOperation("coreCompare", {
+    fallbackCode: "NATIVE_CORE_COMPARE_FAILED",
+    message: "原生影子一致性比较失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.compare(ownerId, request);
+  });
 });
 
 ipcMain.handle("desktop:native-core-close", async (event, request) => {
-  const ownerId = requireTrustedNativeSender(event);
-  return nativeCoreSessions.close(ownerId, request?.sessionId);
+  return runRendererNativeOperation("coreClose", {
+    fallbackCode: "NATIVE_CORE_CLOSE_FAILED",
+    message: "原生影子会话关闭失败，请重新检查影子状态",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return nativeCoreSessions.close(ownerId, request?.sessionId);
+  });
 });
 
 ipcMain.handle("desktop:api-request", requestCloudApi);
@@ -1057,7 +1333,10 @@ ipcMain.handle("desktop:update-ready", (event) => {
 });
 
 async function requestRendererSaveBeforeUpdate() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  const contents = window.webContents;
+  if (contents.isDestroyed()) return;
   if (updateShutdownPromise) return updateShutdownPromise;
   updateShutdownRequested = true;
   updateShutdownPromise = new Promise((resolve) => {
@@ -1069,7 +1348,7 @@ async function requestRendererSaveBeforeUpdate() {
       resolve();
     };
     updateShutdownResolve = finish;
-    mainWindow.webContents.send("desktop:prepare-for-update");
+    if (!contents.isDestroyed()) contents.send("desktop:prepare-for-update");
     setTimeout(finish, 15_000);
   }).finally(() => {
     updateShutdownPromise = null;
@@ -1096,7 +1375,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();

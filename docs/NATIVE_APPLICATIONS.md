@@ -1,30 +1,30 @@
 # 原生应用构建与更新
 
-> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。clean 源提交 `460742f86483` 已在标准 `release-performance-edition/win-unpacked` 成功生成 Build ID `1.2.3+460742f86483` 的目录包；本轮清单只选择该标准目录，历史 fallback 与 `.tmp` 均不属于最终候选。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；两者仍只能有一个被清单选中。
+> 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。clean 源提交 `460742f86483` 生成的 Build ID `1.2.3+460742f86483` 目录包只属于冻结 E18 工作树，是当前 E18 + e503 整合的历史基础，不是整合态制品。整合候选在形成 clean commit、重新执行完整门禁并重打包前没有可交付的新 Build ID、清单或哈希，禁止沿用该 E18 包冒充当前结果。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；标准目录与 fallback 仍只能有一个被清单选中。
 
-> 本工作树的 Windows 包是可与稳定版并存的 1.2.3 **性能开发版**：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
+> 冻结 E18 包及后续整合态沿用同一套可与稳定版并存的 1.2.3 **性能开发版**身份：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
 
 > Windows Electron 壳层默认保留 Chromium 硬件加速，不设置 `--disable-gpu`、`--js-flags`、`max-old-space-size` 或进程优先级。受信桌面 bridge 的 `getRuntimeDiagnostics()` 只读返回有界 GPU、Electron 进程、内存、V8 heap limit 和优先级快照；5 秒内并发请求合并，输出不含参数、环境、路径、URL、存档或异常正文。该快照只覆盖 Electron `getAppMetrics()` 进程，独立 Rust Host 仅列 PID，不能代替发布报告的完整进程树 Private Bytes 采样。
 
 > Windows 原生 Host 的线程数现在有独立设备策略：默认 `balanced/auto`，另有安静、性能和自定义档；性能/自定义档会按当前可用逻辑 CPU 保守下调到 `1/2/4/8`。策略文件位于 Electron `userData`，原子保存且损坏时安全回退。运营中心的设置页只在受信 Windows bridge 存在时显示，会同时返回请求策略、当前进程实际策略、逻辑 CPU 和 `restartRequired`；Web、Android 及旧 bridge 不显示也不调用该面板。为保护活动原生会话及权威 revision，修改后必须完整重启应用才生效，程序不会在运行中重启 Host。
 
-> 1.2.3 Windows 开发候选为活动 revision 增加原生脏页保存，为线路增加带闭合唤醒与稠密全扫描回退的 active queue，并提供有界视口/统计二进制投影和 Rust 流式 v47 导出。该候选不修改公开存档、云协议或 Android 路径；`authorityEligible=false`，未完成 24 小时/多硬件 Gate C、签名和灰度。架构决策见 [ADR-007](./architecture/ADR-007-WINDOWS-NATIVE-INCREMENTAL-RUNTIME.md)，实测见 [1.2.3 开发报告](./releases/1.2.3-windows-native-performance-development-report-2026-08-27.md)。
+> 1.2.3 Windows 开发候选为活动 revision 增加原生脏页保存，为线路增加安全稀疏 route mask 和稠密全扫描回退，并提供有界视口/统计二进制投影协议、Rust 流式 v47 导出与 current-v47 流式导入切片。当前线路实现每步仍遍历全部 route group，不是闭合反向唤醒队列；玩家 renderer 也尚未消费原生薄投影。导入文件由主进程选择，renderer 不接收路径或正文，验证成功后只创建 `authority:"shadow"` 会话。Host 的保存、WAL、核心、导入/导出和投影等 24 类回执在主进程经过精确字段、范围和关联身份校验后才进入 context-isolated bridge；这只收紧返回边界，不代表薄 UI 已完成。该候选不修改公开存档、云协议或 Android 路径；`authorityEligible=false`，未完成 24 小时/多硬件 Gate C、签名和灰度。架构决策见 [ADR-007](./architecture/ADR-007-WINDOWS-NATIVE-INCREMENTAL-RUNTIME.md)，整合边界见 [三层计划书第 21 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md#21-e18-与-e503-方案整合复核2026-08-28)。
 
 > 1.2.1 开发候选优化 Windows 76.9 MB 大型存档的原生冷启动、摘要诊断、事务内存和同 revision 重复保存，并为 Electron 包增加 Android Gradle 残留的排除与生成后硬校验。`authorityEligible=false` 和 JavaScript 权威保持不变；本版不是原生核心默认接管，也没有完成 24 小时/多硬件 Gate C。开发实测与残余边界见 [1.2.1 Windows 性能报告](./releases/1.2.1-windows-performance-development-report-2026-08-27.md)。
 
-> 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段不改变下方 1.1.5 当前公开稳定版本事实。
+> 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段只描述历史候选边界，不改变下方 1.2.2 当前公开稳定版本事实。
 
-> 当前发布版本：Web/Windows `1.1.5`；Android 正式包 `1.1.5 / 1001005`
-> 1.1.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.4。
-> 当前公开稳定版本：Windows `1.1.5` 安装包按历史策略为 `NotSigned`；Android `1.1.5 / 1001005` 使用既有长期证书签名。
+> 当前发布版本：Web/Windows `1.2.2`；Android 正式包 `1.2.2 / 1002002`
+> 1.2.2 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.9。
+> 当前公开稳定版本：Windows `1.2.2` 安装包按历史策略为 `NotSigned`；Android `1.2.2 / 1002002` 使用既有长期证书签名。
 > 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
-> 1.1.5 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；大存档稀疏投影与压缩不改变旧档迁移边界。
+> 1.2.2 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；纯挂机 30 秒轻量采样不改变旧档迁移边界。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
 
-> 冻结 APK：5,211,333 B，SHA-256 `56aa74f0b5f72be320bbaffa0f3476119458137741e21745e2b4fc5281f8036e`；AAB：5,000,249 B，SHA-256 `92fe6f0759cddf8a99c740da8ee78336edf7e370186e0b5d3f1ac35285f5e6a1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户明确豁免，未创建新证书。
+> 冻结 APK：5,316,145 B，SHA-256 `67f340c7d2585c21e196d59dcf049760cfc7f1a7975eb2f21561150211edec31`；AAB：5,105,232 B，SHA-256 `4fabf007426a9d4ba64d43edd406382173f6aa12c18740f4fdc1943e9f50f429`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；API 36.1 模拟器覆盖升级通过，实体 Android 设备门禁由用户对本候选明确豁免，未创建新证书。
 
-> Windows setup：110,426,594 B，SHA-256 `8304d9bae267dcff4f480daf178bbb49b71e5c39148ca9c16065500a14a9b5cb`；blockmap SHA-256 `08f555b95dd7b91f54acab651c37e9396a295788ede10bbf4e8106078b525f78`。完整下载哈希、更新清单和残余边界见 [1.1.5 正式发布记录](./releases/1.1.5.md)。
+> Windows setup：104,838,532 B，SHA-256 `b2ff8dbb5cfb1b06470de15e719851af64f7e37d519eb9f2a5dc28ff2d017b4b`；blockmap SHA-256 `8cf411515bc281c6a11efc9af2ba1c7e3f8dc10f936257258e0b5e8e0414edf5`。完整下载哈希、更新清单和残余边界见 [1.2.2 正式发布记录](./releases/1.2.2.md)。
 
 > 历史 1.0.42 制品和门禁记录仍保留在 [1.0.42 正式发布记录](./releases/1.0.42.md)，不代表当前 stable。
 

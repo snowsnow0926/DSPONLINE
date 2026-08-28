@@ -264,7 +264,8 @@ test("main applies isolated data identity before locks or userData reads and bin
   assert.ok(lockOffset > initializeOffset);
   assert.ok(readyOffset > initializeOffset);
   assert.match(source, /app\.setAppUserModelId\(PERFORMANCE_EDITION_IDENTITY\.appUserModelId\)/);
-  assert.match(source, /mainWindow\?\.setTitle\(PERFORMANCE_EDITION_IDENTITY\.productName\)/);
+  assert.match(source, /window\.on\("page-title-updated"/);
+  assert.match(source, /if \(!window\.isDestroyed\(\)\) window\.setTitle\(PERFORMANCE_EDITION_IDENTITY\.productName\)/);
   assert.equal(source.includes('app.setAppUserModelId("com.dspidle.network")'), false);
 });
 

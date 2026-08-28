@@ -60,6 +60,17 @@ function createConstructionState(options: {
   return setConstructionAutomationTarget(state, options.targetId, options.target);
 }
 
+function moveConstructionTrayToDirectQuantumBuffer(state: GameState): GameState {
+  const center = state.entities.find((entity) => entity.buildingId === "construction_center");
+  if (!center) throw new Error("construction center missing from fixture");
+  const direct = { ...state.tray };
+  state.tray = {};
+  state.planetTrays[center.planetId] = state.tray;
+  state.constructionAutomation.quantumSourceEnabled = true;
+  state.constructionAutomation.quantumMaterialBuffer = { [center.id]: direct };
+  return state;
+}
+
 function recursiveRawTray(amount = 100_000_000): Partial<Record<ItemId, number>> {
   return Object.fromEntries([
     "iron_ore",
@@ -361,6 +372,70 @@ describe("P2 deterministic batch settlement", () => {
     // hash-identical to the legacy oracle.
     expect(batched.profiler.constructionJobsBatched).toBeGreaterThanOrEqual(997);
     expect(batched.profiler.constructionPlanBuilds).toBeLessThanOrEqual(24);
+  });
+
+  it("batches a recursive byproduct cycle from the center-owned quantum buffer", () => {
+    const initial = moveConstructionTrayToDirectQuantumBuffer(createConstructionState({
+      targetId: "plane_smelter",
+      target: 100_000,
+      centerMachines: 1_000_000,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: recursiveRawTray(2_000_000_000),
+    }));
+    const result = runSimulation(initial, 1, { batchConstructionAutomation: true });
+
+    expect(result.state.construction.plane_smelter).toBe(100_000);
+    expect(result.profiler.constructionJobsBatched).toBe(100_000);
+    expect(result.profiler.constructionIterations).toBeLessThan(24);
+    expect(result.profiler.constructionPlanBuilds).toBeLessThanOrEqual(24);
+    for (const inventory of Object.values(result.state.constructionAutomation.quantumMaterialBuffer ?? {})) {
+      for (const amount of Object.values(inventory)) {
+        expect(Number.isSafeInteger(amount)).toBe(true);
+        expect(amount).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it("keeps direct-quantum working capital exact across a recursive cycle", () => {
+    const initial = moveConstructionTrayToDirectQuantumBuffer(createConstructionState({
+      targetId: "plane_smelter",
+      target: 1_000,
+      centerMachines: 1_000_000,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: recursiveRawTray(),
+    }));
+    initial.tray.titanium_alloy = 1;
+    const legacy = runSimulation(initial, 1, { batchConstructionAutomation: false });
+    const batched = runSimulation(initial, 1, { batchConstructionAutomation: true });
+
+    expect(batched.state).toEqual(legacy.state);
+    expect(batched.state.construction.plane_smelter).toBe(1_000);
+    expect(batched.profiler.constructionJobsBatched).toBeGreaterThanOrEqual(997);
+  });
+
+  it("keeps a long direct-quantum construction bucket equal to segmented seconds", () => {
+    const initial = moveConstructionTrayToDirectQuantumBuffer(createConstructionState({
+      targetId: "plane_smelter",
+      target: 400_000,
+      centerMachines: 1_000_000,
+      completedTechIds: Object.keys(TECHNOLOGIES) as TechId[],
+      tray: recursiveRawTray(2_000_000_000),
+    }));
+    const long = runSimulation(initial, 4, { batchConstructionAutomation: true }, 4);
+    const segmented = runSimulation(initial, 4, { batchConstructionAutomation: true }, 1);
+
+    expect({
+      construction: long.state.construction,
+      constructionAutomation: long.state.constructionAutomation,
+      tray: long.state.tray,
+      totalProduced: long.state.totalProduced,
+    }).toEqual({
+      construction: segmented.state.construction,
+      constructionAutomation: segmented.state.constructionAutomation,
+      tray: segmented.state.tray,
+      totalProduced: segmented.state.totalProduced,
+    });
+    expect(long.state.construction.plane_smelter).toBe(400_000);
   });
 
   it("matches legacy hashes for both one long construction step and segmented steps", () => {

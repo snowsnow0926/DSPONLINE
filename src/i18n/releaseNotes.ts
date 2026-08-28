@@ -31,23 +31,23 @@ const release123Copy = {
   date: { "zh-CN": "2026年8月27日", en: "August 27, 2026" },
   title: { "zh-CN": "Windows 原生增量热路径优化", en: "Windows Native Incremental Hot-path Optimization" },
   summary: {
-    "zh-CN": "1.2.3 为 Windows 原生候选补齐活动 revision 脏页保存、可证明唤醒的线路队列、有界视口与统计投影，以及不经过 renderer 完整正文的 v47 流式导出。极限档若绝大多数线路确实活跃，会自动退回精确全扫描；Rust 权威接管仍由 24 小时与多硬件 Gate 阻止。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
-    en: "Version 1.2.3 adds active-revision dirty-page saves, a provably wakeable belt queue, bounded viewport/statistics projections, and streaming v47 export that avoids a full renderer body to the Windows native candidate. Endgame saves automatically retain the exact full scan when most belts are genuinely active, and Rust authority cutover remains blocked by the 24-hour and multi-hardware gates. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+    "zh-CN": "1.2.3 为 Windows 原生候选补齐活动 revision 脏页保存、安全稀疏线路筛选、有界视口与统计投影，以及不经过 renderer 完整正文的 v47 流式导出。当前线路结算仍保留精确全路由组扫描；Rust 权威接管仍由完整功能覆盖、24 小时与多硬件 Gate 阻止。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.3 adds active-revision dirty-page saves, safe sparse belt filtering, bounded viewport/statistics projections, and streaming v47 export that avoids a full renderer body to the Windows native candidate. Belt settlement still retains an exact scan of every route group, and Rust authority cutover remains blocked by complete feature coverage plus the 24-hour and multi-hardware gates. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
   },
   saveTitle: { "zh-CN": "活动存档只编码真实脏页", en: "Active saves encode only genuinely dirty pages" },
   saveDescription: {
     "zh-CN": "实体与线路页、顶层状态和拓扑分别记脏；只有 manifest、chunk、WAL 与 superblock 全部持久提交后才清除标记，失败重试会再次写出同一批脏页。",
     en: "Entity pages, belt pages, top-level state, and topology track dirtiness separately. Flags clear only after the manifest, chunks, WAL, and superblock commit durably; a failed attempt emits the same dirty pages again.",
   },
-  beltTitle: { "zh-CN": "稳定线路可休眠并在同一步准确唤醒", en: "Stable belts sleep and wake at the exact simulation boundary" },
+  beltTitle: { "zh-CN": "稳定线路使用安全稀疏筛选", en: "Stable belts use safe sparse filtering" },
   beltDescription: {
-    "zh-CN": "源产出、目标消费、库存、电力和物流信号会唤醒对应路由组；活动比例过高时自动全扫描。开发指标同时报告检查、跳过、唤醒和退化次数，不能靠少结算换性能。",
-    en: "Source production, target consumption, inventory, power, and logistics signals wake the relevant route groups. Dense active factories fall back to full scans, and diagnostics report checks, skips, wakes, and fallbacks rather than hiding reduced settlement.",
+    "zh-CN": "紧凑索引会跳过可证明无效的线路记录，但每个模拟步仍检查全部路由组并保持原有顺序；真正的反向依赖唤醒队列尚未完成，不会用少结算来冒充性能提升。",
+    en: "Compact indexes skip records proven inactive, while every simulation step still checks every route group in its original order. The full reverse-dependency wake queue is not complete, so performance is never claimed by settling less game state.",
   },
-  projectionTitle: { "zh-CN": "UI 只请求有界视口与统计页", en: "The UI requests bounded viewport and statistics pages" },
+  projectionTitle: { "zh-CN": "原生 Host 提供有界视口与统计协议", en: "The native host provides bounded viewport and statistics protocols" },
   projectionDescription: {
-    "zh-CN": "原生 Host 返回带 session、revision、sequence、长度和 SHA-256 的最多 1 MiB 二进制块；当前行星视口与生产历史可以分页获取，不要求把完整工厂送回 renderer。",
-    en: "The native host returns binary blocks capped at 1 MiB with session, revision, sequence, length, and SHA-256 identity. The current viewport and production history are pageable without returning the complete factory to the renderer.",
+    "zh-CN": "原生 Host 已能返回带 session、revision、sequence、长度和 SHA-256 的最多 1 MiB 二进制块，并支持分页视口与生产历史；玩家 UI 尚未切换到该协议，renderer 目前仍持有完整 GameState。",
+    en: "The native host can return binary blocks capped at 1 MiB with session, revision, sequence, length, and SHA-256 identity, including paged viewport and production-history projections. The player UI has not switched to this protocol yet, so the renderer still holds the complete GameState.",
   },
   exportTitle: { "zh-CN": "v47 兼容存档由原生核心流式导出", en: "The native core streams compatible v47 exports" },
   exportDescription: {

@@ -114,8 +114,8 @@ test("English light release notes are localized and persist dismissal", async ({
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("1.2.3");
   await expect(dialog).toContainText("Active saves encode only genuinely dirty pages");
-  await expect(dialog).toContainText("Stable belts sleep and wake at the exact simulation boundary");
-  await expect(dialog).toContainText("The UI requests bounded viewport and statistics pages");
+  await expect(dialog).toContainText("Stable belts use safe sparse filtering");
+  await expect(dialog).toContainText("The native host provides bounded viewport and statistics protocols");
   await expect(dialog).toContainText("The native core streams compatible v47 exports");
   await expect(dialog).toContainText("Native authority remains fail-closed");
   expect(await visibleHanStrings(dialog)).toEqual([]);

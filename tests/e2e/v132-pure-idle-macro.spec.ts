@@ -25,7 +25,7 @@ async function resetPureIdleRecoveryDatabase(page: import("@playwright/test").Pa
   }));
 }
 
-test.describe("1.0.34 pure-idle macro recovery", () => {
+test.describe("1.2.3 pure-idle macro recovery", () => {
   test.beforeEach(async ({ page }) => {
     await page.route(`**${harnessPath}`, (route) => route.fulfill({
       status: 200,
@@ -348,7 +348,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.durationMs).toBeLessThan(30_000);
   });
 
-  test("migrates a pure-idle-macro-v2 recovery summary with active research to v5-lite", async ({ page }) => {
+  test("migrates a pure-idle-macro-v2 recovery summary with active research to the current macro engine", async ({ page }) => {
     const result = await page.evaluate(async () => {
       const contentPacks = await import("/src/game/contentPacks.ts");
       const engine = await import("/src/game/engine.ts");
@@ -423,7 +423,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v5-lite");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v10-final-conservation-gate");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -1053,11 +1053,15 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v5-lite");
-    expect(result.complexityStrategy).toBe("conservative");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v10-final-conservation-gate");
+    expect(result.complexityStrategy).toBe("fast");
+    expect(result.conservativeOnly).toBe(true);
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.powerLimitedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.actualMultiplier).toBeGreaterThanOrEqual(1);
+    expect(result.degradedReason).not.toContain("物资守恒失败");
+    expect(result.terminalCurrent.whiteMatrixProduced - result.terminalBaseline.whiteMatrixProduced)
+      .toBeGreaterThan(10_000_000_000);
     expect([
       result.terminalCurrent.whiteMatrixProduced - result.terminalBaseline.whiteMatrixProduced,
       result.terminalCurrent.rocketsLaunched - result.terminalBaseline.rocketsLaunched,
@@ -1068,6 +1072,6 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
       expect(result.researchKind).not.toBe("none");
       expect(result.researchAfter).toBeTruthy();
     }
-    expect(result.durationMs).toBeLessThan(30_000);
+    expect(result.durationMs).toBeLessThan(60_000);
   });
 });

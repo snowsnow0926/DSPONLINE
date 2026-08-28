@@ -652,7 +652,7 @@ describe("quantum logistics network", () => {
       .reduce((sum, amount) => sum + Number(amount), 0)).toBe(3000);
   });
 
-  it("纯挂机直供模式在宏观边界仍走精确制造，不会冻结在第一件建筑前", () => {
+  it("纯挂机直供模式在有界宏观窗口按五秒共享结算，不会冻结在第一件建筑前", () => {
     const state = createPlayerInitialState();
     state.quantumLogisticsNetwork.enabled = true;
     state.quantumLogisticsNetwork.inventory = { iron_ore: "100000", copper_ore: "100000", stone: "100000" };
@@ -677,7 +677,7 @@ describe("quantum logistics network", () => {
       {
         id: "pure-direct-power", kind: "power", planetId: "home", position: { x: 120, y: 0 }, interactionLocked: false,
         buildingId: "wind_turbine", inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0,
-        routingCursor: 0, machineCount: 100, minerCount: 0,
+        routingCursor: 0, machineCount: 100_000, minerCount: 0,
       },
       {
         id: "pure-direct-warp", kind: "machine", planetId: "home", position: { x: 160, y: 0 }, interactionLocked: false,

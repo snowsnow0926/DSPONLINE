@@ -8,11 +8,23 @@ import {
 import { MATRIX_ITEM_IDS } from "./content";
 import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
+  advanceConstructionAutomationMacroWithReceiptInPlace,
   advanceExactSimulationWindow,
+  advanceExactSimulationWindowWithConstructionReceipt,
+  advancePureIdleRocketMacroLedgerInPlace,
+  applyPureIdlePowerTailFuelDebitInPlace,
   applyPureIdleAffineContract,
+  applyPureIdleLightweightContractInPlace,
+  capturePureIdleCombinedConservationCheckpoint,
+  creditPureIdleConstructionQuantumReplay,
   createPureIdleAffineCalibration,
   createPureIdleLightweightCalibration,
+  validatePureIdleCombinedSettlementConservation,
   type PureIdleAffineContract,
+  type PureIdleCombinedConservationCheckpoint,
+  type PureIdleConstructionPowerCertificate,
+  type PureIdlePowerTailCertificate,
+  type PureIdleRocketMacroLedger,
 } from "./offlineApproximation";
 import {
   advanceResearchMacroInPlace,
@@ -22,7 +34,7 @@ import {
 } from "./researchMacro";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v5-lite";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v10-final-conservation-gate";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -35,6 +47,9 @@ export const PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS = 30;
 // The default must cover the three-window lightweight calibration. Device
 // classification can raise it further for constrained/low-memory hardware.
 export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 90_000;
+export const PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD = 3_000;
+export const PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD = 6_000;
+const PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT = 4;
 
 export type PureIdleMacroMode = "stable" | "extreme";
 export type PureIdleMacroPhase =
@@ -119,6 +134,11 @@ export interface PureIdleMacroSession {
   researchLedger: ResearchMacroLedger;
   researchRemainder: bigint;
   researchInflowRemainders: ResearchMacroApplicationRemainders;
+  rocketLedger?: PureIdleRocketMacroLedger;
+  /** Per-system fractional launch carries keep bucket segmentation deterministic. */
+  rocketLaunchRemaindersBySystem: Record<string, number>;
+  /** Compact source checkpoint for the final combined material gate. */
+  conservationCheckpoint: PureIdleCombinedConservationCheckpoint;
   baseline: PureIdleTerminalSnapshot;
   baselineResearch: ResearchMacroStatus;
   calibrationRate: PureIdleRateSnapshot;
@@ -139,14 +159,29 @@ export interface PureIdleMacroSession {
   degradedReason?: string;
   computationDurationMs: number;
   conservativeOnly: boolean;
-  /** Fractional carry for repeated compact integer counter buckets. */
+  /** Fractional carry for repeated affine integer counter buckets. */
   conservativeIntegerRemainders: Record<string, number>;
-  /** Exact carry for repeated compact decimal inventory buckets. */
+  /** Exact carry for repeated affine decimal inventory buckets. */
   conservativeDecimalRemainders: Record<string, bigint>;
   /** Remaining productive tail before the sampled input/output boundary. */
   conservativeRemainingSimulationSeconds: number | null;
+  /** Exact-proven finite fuel bank or closed replenishment proof for all macro domains. */
+  powerTail: PureIdlePowerTailCertificate;
+  /** Renewable headroom authority bound to the current ordinary contract. */
+  constructionPowerCertificate?: PureIdleConstructionPowerCertificate;
+  /** Remaining finite power horizon; null means closed/renewable supply. */
+  powerRemainingSimulationSeconds: number | null;
+  /** Bounded exact re-probes after a local exhaustible power source leaves dispatch. */
+  powerBoundaryRecalibrations: number;
   /** Per-item productive horizons for the lightweight sampled contract. */
   conservativeRemainingSimulationSecondsByItem: Record<string, number>;
+  /**
+   * Construction is intentionally isolated from the ordinary calibration
+   * contract. This counter preserves its requested duration for boundary
+   * accounting, but the current P0 policy freezes every unmetered domain-only
+   * construction tail; receipt-aware exact windows still advance normally.
+   */
+  pendingConstructionSimulationSeconds: number;
   /**
    * Exact one-shot prefix produced by calibration. It is consumed when the
    * wall clock crosses the calibration boundary and then released.
@@ -164,6 +199,8 @@ export interface PureIdleMacroOperationOptions {
   deadlineAtMs?: number;
   shouldCancel?: () => boolean;
   forceConservativeReason?: string;
+  /** Worker-only: the supplied state is already an isolated structured clone. */
+  consumeCalibrationState?: boolean;
 }
 
 /**
@@ -292,10 +329,12 @@ function line(
   currentRate: number,
   boundaryCorrections: number,
   itemId?: ItemId,
+  supported = true,
+  unsupportedReason = "该终局事件尚未纳入可证明宏观账本",
 ): PureIdleLineStatus {
   const calibrationRatePerMinute = Math.max(0, rate * 60);
   const sustainableRatePerMinute = Math.max(0, currentRate * 60);
-  const efficiency = calibrationRatePerMinute <= 1e-9
+  const efficiency = !supported || calibrationRatePerMinute <= 1e-9
     ? null
     : Math.max(0, Math.min(1, sustainableRatePerMinute / calibrationRatePerMinute));
   return {
@@ -305,8 +344,10 @@ function line(
     calibrationRatePerMinute,
     sustainableRatePerMinute,
     efficiency,
-    reason: efficiency === null
-      ? "启动校准期间未运行"
+    reason: !supported
+      ? unsupportedReason
+      : efficiency === null
+        ? "启动校准期间未运行"
       : boundaryCorrections > 0
         ? "库存或容量边界已执行安全修正"
         : efficiency >= 0.9
@@ -317,12 +358,30 @@ function line(
 
 function terminalLines(session: PureIdleMacroSession): PureIdleLineStatus[] {
   const currentRate = session.currentRate;
+  const extrapolatesWhiteMatrix = session.contract.deltas.some((delta) =>
+    delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix") ||
+    currentRate.whiteMatrixProduced > 1e-9;
   return [
-    line("white-matrix", "白矩阵", session.calibrationRate.whiteMatrixProduced, currentRate.whiteMatrixProduced, session.boundaryCorrections, "universe_matrix"),
-    line("dyson-rockets", "小型运载火箭", session.calibrationRate.rocketsLaunched, currentRate.rocketsLaunched, session.boundaryCorrections, "small_carrier_rocket"),
-    line("solar-sails", "太阳帆吸收", session.calibrationRate.sailsAbsorbed, currentRate.sailsAbsorbed, session.boundaryCorrections, "solar_sail"),
-    line("dyson-structure", "戴森结构点", session.calibrationRate.structurePoints, currentRate.structurePoints, session.boundaryCorrections),
+    line("white-matrix", "白矩阵", session.calibrationRate.whiteMatrixProduced, currentRate.whiteMatrixProduced,
+      session.boundaryCorrections, "universe_matrix", extrapolatesWhiteMatrix,
+      "白矩阵没有形成可持续供需证书"),
+    line("dyson-rockets", "小型运载火箭", session.calibrationRate.rocketsLaunched, currentRate.rocketsLaunched,
+      session.boundaryCorrections, "small_carrier_rocket", Boolean(session.rocketLedger),
+      "火箭制造与多星系发射没有形成闭合事件账本"),
+    line("solar-sails", "太阳帆吸收", session.calibrationRate.sailsAbsorbed, currentRate.sailsAbsorbed,
+      session.boundaryCorrections, "solar_sail", false, "太阳帆吸收暂未纳入可证明宏观账本，不计入最低效率"),
+    line("dyson-structure", "戴森结构点", session.calibrationRate.structurePoints, currentRate.structurePoints,
+      session.boundaryCorrections, undefined, Boolean(session.rocketLedger),
+      "戴森结构没有形成闭合火箭事件账本"),
   ];
+}
+
+function pureIdleContractProductionRate(contract: PureIdleAffineContract, itemId: ItemId): number {
+  const delta = contract.deltas.find((entry) =>
+    entry.path[0] === "totalProduced" && entry.path[1] === itemId && entry.kind === "number");
+  return delta && contract.calibrationSeconds > 0
+    ? Math.max(0, Number(delta.delta) / contract.calibrationSeconds)
+    : 0;
 }
 
 export function summarizePureIdleMacroSession(session: PureIdleMacroSession): PureIdleMacroSummary {
@@ -370,6 +429,11 @@ function calibrate(state: GameState): {
   rate: PureIdleRateSnapshot;
   calibratedState: GameState;
   calibrationWallSeconds: number;
+  rocketLedger?: PureIdleRocketMacroLedger;
+  powerTailCertified: boolean;
+  powerTailRejectionReason?: string;
+  powerTail: PureIdlePowerTailCertificate;
+  constructionPowerCertificate: PureIdleConstructionPowerCertificate;
 } {
   const multiplier = Math.max(1, getEffectiveSimulationMultiplier(state));
   const result = createPureIdleAffineCalibration(state, PURE_IDLE_MACRO_CALIBRATION_SECONDS / multiplier);
@@ -385,56 +449,106 @@ function calibrate(state: GameState): {
     ),
     calibratedState: result.calibratedState,
     calibrationWallSeconds: result.calibrationWallSeconds,
+    powerTailCertified: result.powerTailCertified,
+    powerTail: result.powerTail,
+    constructionPowerCertificate: result.constructionPowerCertificate,
+    ...(result.powerTailRejectionReason
+      ? { powerTailRejectionReason: result.powerTailRejectionReason }
+      : {}),
+    ...(result.rocketLedger ? { rocketLedger: result.rocketLedger } : {}),
   };
 }
 
-/**
- * Quantum-fed construction centers have a deliberately stateful boundary:
- * every five seconds the engine may create a new per-center job or direct
- * material buffer.  The affine pure-idle contract cannot safely invent or
- * remove those map entries, so opt-in direct-feed sessions keep their tail on
- * the ordinary exact engine.  This is a correctness guard for the feature,
- * not a change to the default local-tray pure-idle path.
- */
-function hasQuantumFedConstructionWork(state: GameState): boolean {
-  if (state.constructionAutomation.quantumSourceEnabled !== true || !state.constructionAutomation.enabled) return false;
-  if (!state.entities.some((entity) => entity.buildingId === "construction_center")) return false;
-  if (Object.keys(state.constructionAutomation.jobs).length > 0 ||
-    Object.keys(state.constructionAutomation.quantumMaterialBuffer ?? {}).length > 0) return true;
-  return Object.entries(state.constructionAutomation.targetStock).some(([targetId, amount]) => {
-    const target = Math.max(0, Math.floor(amount ?? 0));
-    if (target < 1) return false;
-    const current = Object.prototype.hasOwnProperty.call(state.portableFleet, targetId)
-      ? Math.max(0, Math.floor(state.portableFleet[targetId as keyof typeof state.portableFleet] ?? 0))
-      : Math.max(0, Math.floor(state.construction[targetId as keyof typeof state.construction] ?? 0));
-    return target > current;
-  });
-}
+function recalibrateAfterPowerBoundary(
+  session: PureIdleMacroSession,
+  targetWallSeconds: number,
+): "productive" | "frozen" | null {
+  if (session.powerBoundaryRecalibrations >= PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT) return null;
+  refreshTimeWarpPowerSnapshotInPlace(session.candidate);
+  const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
+  const calibrationWallSeconds = PURE_IDLE_MACRO_CALIBRATION_SECONDS / multiplier;
+  if (session.settledWallSeconds + calibrationWallSeconds > targetWallSeconds + 1e-9) return null;
+  const terminalBefore = capturePureIdleTerminalSnapshot(session.candidate);
 
-const PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS = 900;
-
-function advanceQuantumConstructionExactWindow(
-  source: GameState,
-  simulationSeconds: number,
-  wallSeconds: number,
-  options: PureIdleMacroOperationOptions,
-): GameState {
-  let state = source;
-  let remainingSimulation = Math.max(0, simulationSeconds);
-  let remainingWall = Math.max(0, wallSeconds);
-  while (remainingSimulation > 1e-9 || remainingWall > 1e-9) {
-    throwIfMacroInterrupted(options);
-    const fraction = remainingSimulation > PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS
-      ? PURE_IDLE_QUANTUM_CONSTRUCTION_EXACT_CHUNK_SECONDS / remainingSimulation
-      : 1;
-    const simulationChunk = remainingSimulation * fraction;
-    const wallChunk = remainingWall * fraction;
-    state = advanceExactSimulationWindow(state, simulationChunk, wallChunk);
-    remainingSimulation = Math.max(0, remainingSimulation - simulationChunk);
-    remainingWall = Math.max(0, remainingWall - wallChunk);
+  if (session.conservativeOnly) {
+    const recalibrated = createPureIdleLightweightCalibration(
+      session.candidate,
+      calibrationWallSeconds,
+      { isolateConstructionAutomation: true, consumeState: true },
+    );
+    if (!recalibrated) throw new Error("供电边界后的 30 秒轻量校准没有形成可用样本");
+    session.candidate = recalibrated.calibratedState;
+    session.contract = recalibrated.contract;
+    session.constructionPowerCertificate = recalibrated.constructionPowerCertificate;
+    session.researchLedger = recalibrated.researchLedger;
+    if (recalibrated.rocketLedger) session.rocketLedger = recalibrated.rocketLedger;
+    else delete session.rocketLedger;
+    session.powerTail = recalibrated.powerTail;
+    session.powerRemainingSimulationSeconds = recalibrated.powerTailCertified
+      ? recalibrated.powerTail.maximumSimulationSeconds
+      : 0;
+    const productiveTail = recalibrated.powerTailCertified &&
+      recalibrated.contract.deltas.length > 0 && recalibrated.contract.maximumSimulationSeconds !== 0;
+    session.conservativeRemainingSimulationSeconds = productiveTail
+      ? recalibrated.contract.maximumSimulationSeconds ?? null
+      : 0;
+    session.conservativeRemainingSimulationSecondsByItem = productiveTail
+      ? { ...(recalibrated.contract.maximumSimulationSecondsByItem ?? {}) }
+      : {};
+  } else {
+    const recalibrated = calibrate(session.candidate);
+    session.candidate = recalibrated.calibratedState;
+    session.contract = recalibrated.contract;
+    session.constructionPowerCertificate = recalibrated.constructionPowerCertificate;
+    session.researchLedger = recalibrated.researchLedger;
+    if (recalibrated.rocketLedger) session.rocketLedger = recalibrated.rocketLedger;
+    else delete session.rocketLedger;
+    session.powerTail = recalibrated.powerTail;
+    session.powerRemainingSimulationSeconds = recalibrated.powerTailCertified
+      ? recalibrated.powerTail.maximumSimulationSeconds
+      : 0;
   }
-  throwIfMacroInterrupted(options);
-  return state;
+
+  session.researchRemainder = 0n;
+  session.researchInflowRemainders = {};
+  session.rocketLaunchRemaindersBySystem = {};
+  session.conservativeIntegerRemainders = {};
+  session.conservativeDecimalRemainders = {};
+  session.currentRate = rateBetween(
+    terminalBefore,
+    capturePureIdleTerminalSnapshot(session.candidate),
+    PURE_IDLE_MACRO_CALIBRATION_SECONDS,
+  );
+  session.settledWallSeconds += calibrationWallSeconds;
+  session.settledSimulationSeconds += PURE_IDLE_MACRO_CALIBRATION_SECONDS;
+  if (session.powerRemainingSimulationSeconds !== 0) {
+    // Both recalibration variants consumed a real thirty-second candidate with
+    // construction isolated. Carry that exact interval into the next
+    // receipt-aware construction bucket instead of silently losing it.
+    session.pendingConstructionSimulationSeconds += PURE_IDLE_MACRO_CALIBRATION_SECONDS;
+    creditPureIdleConstructionQuantumReplay(
+      session.conservationCheckpoint,
+      PURE_IDLE_MACRO_CALIBRATION_SECONDS,
+    );
+  }
+  session.contractVersion += 1;
+  session.calibrationWindowsCompleted += 3;
+  session.powerBoundaryRecalibrations += 1;
+  session.calibrationCheckpoint = undefined;
+  refreshDysonGenerationSnapshot(session.candidate);
+  refreshTimeWarpPowerSnapshotInPlace(session.candidate);
+  session.actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
+  const conservationFailure = validatePureIdleCombinedSettlementConservation(
+    session.conservationCheckpoint,
+    session.candidate,
+  );
+  if (conservationFailure) throw new Error(`供电边界重校准最终物资守恒失败：${conservationFailure}`);
+  const productive = session.powerRemainingSimulationSeconds !== 0 &&
+    (session.contract.deltas.length > 0 || Boolean(session.rocketLedger));
+  session.lastValidationReason = productive
+    ? `局部燃料或储能在第 ${session.powerBoundaryRecalibrations} 个边界耗尽；已用新的 30 秒精确样本重建剩余电网合同`
+    : "局部燃料或储能耗尽后的精确样本没有形成可持续尾段；剩余时间只推进时钟";
+  return productive ? "productive" : "frozen";
 }
 
 /** Consumes an isolated Worker-owned state. The main-thread source is never mutated. */
@@ -442,10 +556,12 @@ export function createConservativePureIdleMacroSession(
   state: GameState,
   mode: PureIdleMacroMode,
   reason: string,
+  options: Pick<PureIdleMacroOperationOptions, "consumeCalibrationState"> = {},
 ): PureIdleMacroSession {
   if (!state.timeWarp.enabled || state.paused) throw new Error("纯挂机保守会话要求已启用且未暂停的时间扭曲状态");
   if (state.speedrun?.enabled) throw new Error("速通工厂必须继续使用独立的精确时间规则");
   refreshTimeWarpPowerSnapshotInPlace(state);
+  const conservationCheckpoint = capturePureIdleCombinedConservationCheckpoint(state);
   const baseline = capturePureIdleTerminalSnapshot(state);
   const baselineResearch = captureResearchMacroStatus(state);
   const actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(state));
@@ -474,47 +590,87 @@ export function createConservativePureIdleMacroSession(
     observedUnits: 0n,
     inflowPerWindow: {},
   };
+  let rocketLedger: PureIdleRocketMacroLedger | undefined;
+  let rocketLedgerRejectionReason: string | undefined;
+  let powerTailCertified = false;
+  let powerTailRejectionReason: string | undefined;
+  let powerTail: PureIdlePowerTailCertificate = {
+    productiveMultiplier: actualMultiplier,
+    fuelDebits: [],
+    maximumSimulationSeconds: 0,
+    storageDispatchDetected: false,
+    rejectionReason: "30 秒供电校准尚未完成",
+  };
+  let constructionPowerCertificate: PureIdleConstructionPowerCertificate | undefined;
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
   try {
     const calibrated = createPureIdleLightweightCalibration(
       state,
       prefixSeconds / actualMultiplier,
+      {
+        isolateConstructionAutomation: true,
+        consumeState: options.consumeCalibrationState === true,
+      },
     );
     if (!calibrated) throw new Error("30 秒轻量校准没有形成可用样本");
     contract = calibrated.contract;
     researchLedger = calibrated.researchLedger;
+    rocketLedger = calibrated.rocketLedger;
+    rocketLedgerRejectionReason = calibrated.rocketLedgerRejectionReason;
+    powerTailCertified = calibrated.powerTailCertified;
+    powerTailRejectionReason = calibrated.powerTailRejectionReason;
+    powerTail = calibrated.powerTail;
+    constructionPowerCertificate = calibrated.constructionPowerCertificate;
     refreshDysonGenerationSnapshot(calibrated.calibratedState);
     measuredRate = rateBetween(
       baseline,
       capturePureIdleTerminalSnapshot(calibrated.calibratedState),
       prefixSeconds,
     );
-    const extrapolatesWhiteMatrix = contract.deltas.some((delta) =>
-      delta.path[0] === "totalProduced" && delta.path[1] === "universe_matrix");
     currentRate = {
       ...emptyRate,
-      whiteMatrixProduced: extrapolatesWhiteMatrix ? measuredRate.whiteMatrixProduced : 0,
+      whiteMatrixProduced: pureIdleContractProductionRate(contract, "universe_matrix"),
+      rocketsLaunched: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
+      structurePoints: rocketLedger ? rocketLedger.launchedPerWindow / rocketLedger.calibrationSeconds : 0,
     };
-    calibrationCheckpoint = {
-      baseWallSeconds: 0,
-      baseSimulationSeconds: 0,
-      wallSeconds: prefixSeconds / actualMultiplier,
-      simulationSeconds: prefixSeconds,
-      candidate: calibrated.calibratedState,
-    };
+    if (options.consumeCalibrationState) {
+      // The Worker request itself is already a structured clone of the
+      // durable checkpoint. Keep only its calibrated form and account for the
+      // exact prefix as elapsed wall time; the Worker waits for this boundary
+      // before publishing the ready response.
+      candidate = calibrated.calibratedState;
+    } else {
+      calibrationCheckpoint = {
+        baseWallSeconds: 0,
+        baseSimulationSeconds: 0,
+        wallSeconds: prefixSeconds / actualMultiplier,
+        simulationSeconds: prefixSeconds,
+        candidate: calibrated.calibratedState,
+      };
+    }
   } catch (error) {
+    if (options.consumeCalibrationState) throw error;
     // A failed calibration must not turn a recoverable fallback into a failed
     // settlement. Keep time-only behavior and expose the reason instead of
     // fabricating a rate from an incomplete sample.
     prefixFailure = error instanceof Error ? error.message : "30 秒轻量校准失败";
     candidate = state;
   }
-  const productiveTail = !prefixFailure && contract.deltas.length > 0 && contract.maximumSimulationSeconds !== 0;
+  const productiveTail = !prefixFailure && powerTailCertified &&
+    contract.deltas.length > 0 && contract.maximumSimulationSeconds !== 0;
+  const steadyStateItemCount = Object.keys(contract.steadyStateFactorsByItem ?? {}).length;
+  const terminalTailDescription = rocketLedger
+    ? `火箭按 ${Object.keys(rocketLedger.launchesBySystemPerWindow).length} 个恒星系的稳定事件账本推进；太阳帆、出口和合同尾段冻结`
+    : `${rocketLedgerRejectionReason ?? "火箭样本未形成闭合事件账本"}；戴森发射、太阳帆、出口和合同尾段冻结`;
   const degradedReason = prefixFailure
     ? `${reason}；30 秒轻量校准未完成：${prefixFailure}`
+    : !powerTailCertified
+      ? `${reason}；${powerTailRejectionReason ?? "燃料或储能供电没有形成闭合证书"}；普通生产、科研、火箭和建筑制造尾段全部冻结`
     : productiveTail
-      ? `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料各自的净消耗边界推进，戴森发射、出口、合同和巨构交付尾段冻结`
+      ? steadyStateItemCount > 0
+        ? `${reason}；已用 3 个 10 秒精确窗口为 ${steadyStateItemCount} 类物料建立闭合稳态供需证书；可持续产线不再受物流缓存波动误停，未获证明的缓存产线仍按真实边界停止；建筑制造只使用同电网 30 秒逐秒证明的持续可再生余电，未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
+        : `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进；建筑制造只使用同电网 30 秒逐秒证明的持续可再生余电，未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
       : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
@@ -524,12 +680,19 @@ export function createConservativePureIdleMacroSession(
     researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
+    ...(rocketLedger ? { rocketLedger } : {}),
+    rocketLaunchRemaindersBySystem: {},
+    conservationCheckpoint,
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(measuredRate),
     currentRate,
-    settledWallSeconds: 0,
-    settledSimulationSeconds: 0,
+    settledWallSeconds: options.consumeCalibrationState && !prefixFailure
+      ? prefixSeconds / actualMultiplier
+      : 0,
+    settledSimulationSeconds: options.consumeCalibrationState && !prefixFailure
+      ? prefixSeconds
+      : 0,
     contractVersion: productiveTail ? 1 : 0,
     validationCount: 0,
     validationFailures: prefixFailure ? 1 : 0,
@@ -548,9 +711,18 @@ export function createConservativePureIdleMacroSession(
     conservativeRemainingSimulationSeconds: productiveTail
       ? contract.maximumSimulationSeconds ?? null
       : 0,
+    powerTail,
+    ...(constructionPowerCertificate ? { constructionPowerCertificate } : {}),
+    powerRemainingSimulationSeconds: powerTailCertified
+      ? powerTail.maximumSimulationSeconds
+      : 0,
+    powerBoundaryRecalibrations: 0,
     conservativeRemainingSimulationSecondsByItem: productiveTail
       ? { ...(contract.maximumSimulationSecondsByItem ?? {}) }
       : {},
+    pendingConstructionSimulationSeconds: options.consumeCalibrationState && !prefixFailure
+      ? powerTailCertified ? prefixSeconds : 0
+      : 0,
     ...(calibrationCheckpoint ? { calibrationCheckpoint } : {}),
   };
 }
@@ -567,9 +739,19 @@ export function createPureIdleMacroSession(
   }
   throwIfMacroInterrupted(options);
   if (options.forceConservativeReason) {
-    return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason);
+    return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason, options);
+  }
+  if (state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
+    state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD) {
+    return createConservativePureIdleMacroSession(
+      state,
+      mode,
+      `终局规模 ${state.entities.length.toLocaleString("zh-CN")} 实体 / ${state.belts.length.toLocaleString("zh-CN")} 线路，自动使用单影子轻量校准`,
+      options,
+    );
   }
   refreshTimeWarpPowerSnapshotInPlace(state);
+  const conservationCheckpoint = capturePureIdleCombinedConservationCheckpoint(state);
   const baseline = capturePureIdleTerminalSnapshot(state);
   const baselineResearch = captureResearchMacroStatus(state);
   const calibrated = calibrate(state);
@@ -582,6 +764,9 @@ export function createPureIdleMacroSession(
     researchLedger: calibrated.researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
+    ...(calibrated.rocketLedger ? { rocketLedger: calibrated.rocketLedger } : {}),
+    rocketLaunchRemaindersBySystem: {},
+    conservationCheckpoint,
     baseline,
     baselineResearch,
     calibrationRate: cloneRate(calibrated.rate),
@@ -602,7 +787,12 @@ export function createPureIdleMacroSession(
     conservativeIntegerRemainders: {},
     conservativeDecimalRemainders: {},
     conservativeRemainingSimulationSeconds: null,
+    powerTail: calibrated.powerTail,
+    constructionPowerCertificate: calibrated.constructionPowerCertificate,
+    powerRemainingSimulationSeconds: calibrated.powerTail.maximumSimulationSeconds,
+    powerBoundaryRecalibrations: 0,
     conservativeRemainingSimulationSecondsByItem: {},
+    pendingConstructionSimulationSeconds: 0,
     calibrationCheckpoint: {
       baseWallSeconds: 0,
       baseSimulationSeconds: 0,
@@ -625,6 +815,11 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
     const deviation = maximumRateDeviation(session.currentRate, next.rate);
     session.currentRate = next.rate;
     session.researchLedger = next.researchLedger;
+    if (next.rocketLedger) session.rocketLedger = next.rocketLedger;
+    else delete session.rocketLedger;
+    session.rocketLaunchRemaindersBySystem = {};
+    session.powerTail = next.powerTail;
+    session.powerRemainingSimulationSeconds = next.powerTail.maximumSimulationSeconds;
     session.researchRemainder = 0n;
     session.researchInflowRemainders = {};
     session.lastValidationDeviation = deviation;
@@ -638,13 +833,27 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
     };
     if (deviation >= 0.15) {
       session.contract = next.contract;
+      session.constructionPowerCertificate = next.constructionPowerCertificate;
       session.contractVersion += 1;
       session.lastValidationReason = deviation >= 0.3
         ? "产线变化超过 30%，未来宏观合同已替换"
         : "产线变化超过 15%，未来宏观合同已校正";
     } else {
-      session.lastValidationReason = "产线偏差低于 15%，继续使用当前合同";
+      // Even a low-drift validation advances to a new exact checkpoint. Keep
+      // the ordinary material contract and its joint power proof from the
+      // same 30-second sample; mixing either half across checkpoints would
+      // leave construction permanently frozen or bind it to stale headroom.
+      session.contract = next.contract;
+      session.constructionPowerCertificate = next.constructionPowerCertificate;
+      session.contractVersion += 1;
+      session.lastValidationReason = "产线偏差低于 15%，合同与施工电力证书已同步刷新";
     }
+    // Fractional carries belong to the exact affine rates that created them.
+    // A refreshed contract must start a new remainder epoch; otherwise a
+    // sub-item carry from the previous sample can leak into the first bucket
+    // of the replacement contract.
+    session.conservativeIntegerRemainders = {};
+    session.conservativeDecimalRemainders = {};
   } catch (error) {
     if (error instanceof Error && (error.name === "AbortError" || error.name === "PureIdleMacroDeadlineError")) {
       throw error;
@@ -658,21 +867,43 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
   }
 }
 
+function advanceClosedRocketDomainInPlace(
+  session: PureIdleMacroSession,
+  simulationSeconds: number,
+): { launched: number; failure?: string } {
+  const ledger = session.rocketLedger;
+  if (!ledger || simulationSeconds <= 1e-9) return { launched: 0 };
+  const result = advancePureIdleRocketMacroLedgerInPlace(
+    session.candidate,
+    ledger,
+    simulationSeconds,
+    session.rocketLaunchRemaindersBySystem,
+  );
+  if (result.failure) return { launched: 0, failure: result.failure };
+  session.rocketLaunchRemaindersBySystem = result.remaindersBySystem;
+  return { launched: result.launched };
+}
+
 export function advancePureIdleMacroSession(
   session: PureIdleMacroSession,
   targetWallSeconds: number,
   options: PureIdleMacroOperationOptions = {},
 ): PureIdleMacroSummary {
   throwIfMacroInterrupted(options);
+  if (session.phase === "failed") {
+    throw new Error(session.degradedReason ?? "纯挂机候选已被最终物资守恒门禁拒绝");
+  }
   if (!Number.isFinite(targetWallSeconds) || targetWallSeconds < session.settledWallSeconds) {
     throw new Error("纯挂机目标墙钟时间无效或发生倒退");
   }
-  if (session.settledWallSeconds + 1e-9 < targetWallSeconds) {
+  if (session.settledWallSeconds + 1e-9 < targetWallSeconds ||
+    session.pendingConstructionSimulationSeconds > 1e-9) {
     const operationStartedAt = macroNow();
     // Live orchestration calls this at each 30-second boundary. A tab that
     // slept or reloaded can arrive with days of debt; applying one equivalent
     // affine window keeps recovery cost independent of wall-clock duration.
     let exactSimulationSeconds = 0;
+    let isolatedConstructionPrefixSeconds = session.pendingConstructionSimulationSeconds;
     let macroWallSeconds = targetWallSeconds - session.settledWallSeconds;
     const checkpoint = session.calibrationCheckpoint;
     if (checkpoint && checkpoint.baseWallSeconds <= session.settledWallSeconds + 1e-9) {
@@ -686,14 +917,47 @@ export function advancePureIdleMacroSession(
             session.candidate,
             exactSimulationSeconds,
             exactWallSeconds,
+            { isolateConstructionAutomation: true },
           );
+          if (session.powerRemainingSimulationSeconds !== 0) {
+            isolatedConstructionPrefixSeconds += exactSimulationSeconds;
+            if (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9) {
+              creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint, exactSimulationSeconds);
+            }
+          }
           macroWallSeconds = 0;
         } else {
           exactSimulationSeconds = Math.max(
             0,
             checkpointEndSimulationSeconds - session.settledSimulationSeconds,
           );
-          session.candidate = checkpoint.candidate;
+          if (session.settledWallSeconds > checkpoint.baseWallSeconds + 1e-9) {
+            const exactWallSeconds = checkpointEndWallSeconds - session.settledWallSeconds;
+            session.candidate = advanceExactSimulationWindow(
+              session.candidate,
+              exactSimulationSeconds,
+              exactWallSeconds,
+              { isolateConstructionAutomation: true },
+            );
+            if (session.powerRemainingSimulationSeconds !== 0) {
+              isolatedConstructionPrefixSeconds += exactSimulationSeconds;
+              if (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9) {
+                creditPureIdleConstructionQuantumReplay(session.conservationCheckpoint, exactSimulationSeconds);
+              }
+            }
+          } else {
+            session.candidate = checkpoint.candidate;
+            isolatedConstructionPrefixSeconds = session.powerRemainingSimulationSeconds === 0
+              ? 0
+              : exactSimulationSeconds;
+            if (isolatedConstructionPrefixSeconds > 1e-9 &&
+              (checkpoint.baseWallSeconds > 1e-9 || checkpoint.baseSimulationSeconds > 1e-9)) {
+              creditPureIdleConstructionQuantumReplay(
+                session.conservationCheckpoint,
+                isolatedConstructionPrefixSeconds,
+              );
+            }
+          }
           macroWallSeconds = Math.max(0, targetWallSeconds - checkpointEndWallSeconds);
           session.calibrationCheckpoint = undefined;
         }
@@ -706,11 +970,14 @@ export function advancePureIdleMacroSession(
     const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     session.actualMultiplier = multiplier;
     const macroSimulationSeconds = macroWallSeconds * multiplier;
+    const powerCreditedMacroSimulationSeconds = session.powerRemainingSimulationSeconds === null
+      ? macroSimulationSeconds
+      : Math.min(macroSimulationSeconds, Math.max(0, session.powerRemainingSimulationSeconds));
     const conservativeMacroSimulationSeconds = session.conservativeOnly
       ? session.conservativeRemainingSimulationSeconds === null
-        ? macroSimulationSeconds
-        : Math.min(macroSimulationSeconds, Math.max(0, session.conservativeRemainingSimulationSeconds))
-      : macroSimulationSeconds;
+        ? powerCreditedMacroSimulationSeconds
+        : Math.min(powerCreditedMacroSimulationSeconds, Math.max(0, session.conservativeRemainingSimulationSeconds))
+      : powerCreditedMacroSimulationSeconds;
     const conservativeSimulationSecondsByItem = session.conservativeOnly
       ? Object.fromEntries(Object.entries(session.conservativeRemainingSimulationSecondsByItem).map(([itemId, remaining]) => [
         itemId,
@@ -722,39 +989,17 @@ export function advancePureIdleMacroSession(
         const itemSeconds = conservativeSimulationSecondsByItem?.[itemId];
         return itemSeconds === undefined ? seconds : Math.min(seconds, itemSeconds);
       }, conservativeMacroSimulationSeconds)
-      : macroSimulationSeconds;
-    let exactQuantumConstructionTail = false;
+      : powerCreditedMacroSimulationSeconds;
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
-      : !session.conservativeOnly && hasQuantumFedConstructionWork(session.candidate)
-        ? (() => {
-          const terminalBeforeExact = capturePureIdleTerminalSnapshot(session.candidate);
-          // Direct quantum delivery changes jobs and center-local buffers at
-          // five-second boundaries. Replay this bounded tail through the
-          // authoritative engine instead of extrapolating a stale job map.
-          session.candidate = advanceQuantumConstructionExactWindow(
-            session.candidate,
-            macroSimulationSeconds,
-            macroWallSeconds,
-            options,
-          );
-          session.currentRate = rateBetween(
-            terminalBeforeExact,
-            capturePureIdleTerminalSnapshot(session.candidate),
-            macroSimulationSeconds,
-          );
-          exactQuantumConstructionTail = true;
-          return { ok: true as const, boundaryCorrections: 0 };
-        })()
       : session.conservativeOnly
         ? session.contract.deltas.length > 0 && conservativeMacroSimulationSeconds > 1e-9
-          ? applyPureIdleAffineContract(
+          ? applyPureIdleLightweightContractInPlace(
             session.candidate,
             session.contract,
             conservativeMacroSimulationSeconds,
             multiplier > 0 ? conservativeMacroSimulationSeconds / multiplier : 0,
             {
-              allowExactFallback: false,
               skipUnsafeIntegerPaths: true,
               integerRemainders: session.conservativeIntegerRemainders,
               decimalRemainders: session.conservativeDecimalRemainders,
@@ -762,8 +1007,49 @@ export function advancePureIdleMacroSession(
             },
           )
           : { ok: true as const, boundaryCorrections: 0 }
-        : applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
+        : applyPureIdleAffineContract(
+          session.candidate,
+          session.contract,
+          powerCreditedMacroSimulationSeconds,
+          multiplier > 0 ? powerCreditedMacroSimulationSeconds / multiplier : 0,
+          {
+            constructionCheckpoint: session.conservationCheckpoint,
+            constructionPowerCertificate: session.constructionPowerCertificate,
+            integerRemainders: session.conservativeIntegerRemainders,
+            decimalRemainders: session.conservativeDecimalRemainders,
+          },
+        );
+    // A complex conservative session promises one bounded 30-second
+    // calibration. Re-running that full graph at every finite fuel boundary
+    // made a ten-minute idle request cost another minute of CPU. Its power
+    // ledger already debits the proven prefix exactly; freeze the unproven tail
+    // instead of silently starting more exact calibrations. Small generic
+    // affine sessions retain their boundary rebuild behavior.
+    const powerBoundaryReached = !session.conservativeOnly && applied.ok &&
+      powerCreditedMacroSimulationSeconds + 1e-9 < macroSimulationSeconds &&
+      session.powerBoundaryRecalibrations < PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT;
+    const committedMacroSimulationSeconds = powerBoundaryReached
+      ? powerCreditedMacroSimulationSeconds
+      : macroSimulationSeconds;
+    const deferredPowerBoundaryWallSeconds = powerBoundaryReached && multiplier > 0
+      ? (macroSimulationSeconds - powerCreditedMacroSimulationSeconds) / multiplier
+      : 0;
     throwIfMacroInterrupted(options);
+    if (applied.ok &&
+      !(applied.exactSimulationSeconds && applied.exactSimulationSeconds > 0)) {
+      const fuelDebitFailure = applyPureIdlePowerTailFuelDebitInPlace(
+        session.candidate,
+        session.powerTail,
+        powerCreditedMacroSimulationSeconds,
+      );
+      if (fuelDebitFailure) {
+        session.phase = "failed";
+        session.validationFailures += 1;
+        session.degradedReason = `供电燃料宏观扣账失败：${fuelDebitFailure}`;
+        session.lastValidationReason = session.degradedReason;
+        throw new Error(session.degradedReason);
+      }
+    }
     if (!applied.ok) {
       // The last complete candidate remains intact because affine application
       // is transactional. Freeze uncertain factory and research subsystems,
@@ -787,7 +1073,7 @@ export function advancePureIdleMacroSession(
       // (and all transient caches). Advance the high-multiplier clock exactly
       // once after its cumulative counters have been applied.
       if (session.conservativeOnly) {
-        session.candidate.elapsedSeconds += macroSimulationSeconds;
+        session.candidate.elapsedSeconds += committedMacroSimulationSeconds;
         if (session.conservativeRemainingSimulationSeconds !== null) {
           session.conservativeRemainingSimulationSeconds = Math.max(
             0,
@@ -819,13 +1105,62 @@ export function advancePureIdleMacroSession(
         } else if (exhaustedItems > 0) {
           session.lastValidationReason = `30 秒样本中 ${exhaustedItems} 类净消耗物料已到边界；相关物料停止外推，其他产线继续`;
         }
+        const rocketSimulationSeconds = Math.min(
+          conservativeMacroSimulationSeconds,
+          Math.max(0, conservativeSimulationSecondsByItem?.small_carrier_rocket ?? conservativeMacroSimulationSeconds),
+        );
+        const rocketDomain = advanceClosedRocketDomainInPlace(session, rocketSimulationSeconds);
+        if (rocketDomain.failure) {
+          session.rocketLedger = undefined;
+          session.boundaryCorrections += 1;
+          session.lastValidationReason = `${rocketDomain.failure}；普通生产与科研合同继续生效`;
+        } else if (rocketDomain.launched > 0) {
+          const rate = rocketDomain.launched / Math.max(1e-9, rocketSimulationSeconds);
+          session.currentRate = {
+            ...session.currentRate,
+            rocketsLaunched: rate,
+            structurePoints: rate,
+          };
+        } else if (session.rocketLedger && rocketSimulationSeconds <= 1e-9) {
+          session.currentRate = {
+            ...session.currentRate,
+            rocketsLaunched: 0,
+            structurePoints: 0,
+          };
+        }
+      } else if (!powerBoundaryReached &&
+        powerCreditedMacroSimulationSeconds + 1e-9 < macroSimulationSeconds) {
+        // Affine settlement and bounded construction replay advance only the
+        // physically powered prefix. The rest of the requested
+        // high-multiplier clock remains time-only.
+        session.candidate.elapsedSeconds += macroSimulationSeconds - powerCreditedMacroSimulationSeconds;
+      }
+      if (session.powerRemainingSimulationSeconds !== null) {
+        session.powerRemainingSimulationSeconds = Math.max(
+          0,
+          session.powerRemainingSimulationSeconds - powerCreditedMacroSimulationSeconds,
+        );
+      }
+      if (!powerBoundaryReached &&
+        powerCreditedMacroSimulationSeconds + 1e-9 < macroSimulationSeconds) {
+        session.currentRate = {
+          dysonGenerationKw: 0,
+          whiteMatrixProduced: 0,
+          rocketsLaunched: 0,
+          sailsAbsorbed: 0,
+          structurePoints: 0,
+          shellSails: 0,
+          sailsInOrbit: 0,
+          activityDelivered: {},
+        };
+        session.lastValidationReason = "供电燃料或储能安全时长已耗尽；剩余尾段只推进时间";
       }
     }
     const macroResearchSeconds = session.conservativeOnly
       ? applied.ok ? conservativeResearchSimulationSeconds : 0
-      : exactQuantumConstructionTail
-        ? 0
-        : Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
+      : applied.ok
+        ? Math.max(0, powerCreditedMacroSimulationSeconds - (applied.exactSimulationSeconds ?? 0))
+        : 0;
     const research = macroResearchSeconds > 1e-9
       ? advanceResearchMacroInPlace(
         session.candidate,
@@ -838,22 +1173,122 @@ export function advancePureIdleMacroSession(
         completedFiniteTechIds: [], completedInfiniteLevels: [] };
     session.researchRemainder = research.remainder;
     session.researchInflowRemainders = research.inflowRemainders;
+    if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
+      // Research can change production/power multipliers inside this same
+      // bucket. The 30-second joint power proof predates that boundary, so
+      // construction must wait for the next exact recalibration.
+      delete session.constructionPowerCertificate;
+    }
+    throwIfMacroInterrupted(options);
+    const constructionSeconds = isolatedConstructionPrefixSeconds +
+      (applied.ok
+        ? Math.max(0, powerCreditedMacroSimulationSeconds - (applied.exactSimulationSeconds ?? 0))
+        : 0);
+    const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
+      session.candidate,
+      constructionSeconds,
+      session.conservationCheckpoint,
+      {
+        powerCertificate: session.constructionPowerCertificate,
+        contract: session.contract,
+      },
+    );
+    session.pendingConstructionSimulationSeconds = 0;
+    if (construction.completed > 0) {
+      const productionGuard = session.conservativeOnly
+        ? Object.keys(session.contract.steadyStateFactorsByItem ?? {}).length > 0
+          ? "普通产线继续按闭合稳态证书结算"
+          : "普通产线仍受轻量物料边界保护"
+        : "普通产线继续按已验证宏观合同结算";
+      session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；${productionGuard}`;
+    }
     throwIfMacroInterrupted(options);
     if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
       session.lastValidationReason = `科研边界完成：有限科技 ${research.completedFiniteTechIds.length} 项，无限科技 ${research.completedInfiniteLevels.length} 级`;
     }
-    session.settledWallSeconds = targetWallSeconds;
-    session.settledSimulationSeconds += exactSimulationSeconds + macroSimulationSeconds;
-    if (applied.exactSimulationSeconds && !session.conservativeOnly) {
+    const combinedConservationFailure = validatePureIdleCombinedSettlementConservation(
+      session.conservationCheckpoint,
+      session.candidate,
+    );
+    if (combinedConservationFailure) {
+      // The Worker remains an isolated speculative authority until it emits a
+      // finalized envelope. Reject the entire candidate here; the main thread
+      // retains its last acknowledged checkpoint and must rebuild the Worker.
+      session.phase = "failed";
+      session.validationFailures += 1;
+      session.degradedReason = `最终物资守恒门禁拒绝候选：${combinedConservationFailure}`;
+      session.lastValidationReason = session.degradedReason;
+      throw new Error(session.degradedReason);
+    }
+    session.settledWallSeconds = powerBoundaryReached
+      ? targetWallSeconds - deferredPowerBoundaryWallSeconds
+      : targetWallSeconds;
+    session.settledSimulationSeconds += exactSimulationSeconds + committedMacroSimulationSeconds;
+    if (powerBoundaryReached && session.settledWallSeconds + 1e-9 < targetWallSeconds) {
+      const recalibration = recalibrateAfterPowerBoundary(session, targetWallSeconds);
+      if (recalibration === "productive" && session.settledWallSeconds + 1e-9 < targetWallSeconds) {
+        return advancePureIdleMacroSession(session, targetWallSeconds, options);
+      }
+      const remainingWallSeconds = Math.max(0, targetWallSeconds - session.settledWallSeconds);
+      if (remainingWallSeconds > 1e-9) {
+        refreshTimeWarpPowerSnapshotInPlace(session.candidate);
+        const fallbackMultiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
+        const timeOnlySimulationSeconds = remainingWallSeconds * fallbackMultiplier;
+        if (recalibration === null && session.powerBoundaryRecalibrations <
+          PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT) {
+          const terminalBeforeExact = capturePureIdleTerminalSnapshot(session.candidate);
+          session.candidate = advanceExactSimulationWindowWithConstructionReceipt(
+            session.candidate,
+            timeOnlySimulationSeconds,
+            remainingWallSeconds,
+            session.conservationCheckpoint,
+          );
+          session.currentRate = rateBetween(
+            terminalBeforeExact,
+            capturePureIdleTerminalSnapshot(session.candidate),
+            Math.max(1e-9, timeOnlySimulationSeconds),
+          );
+          session.lastValidationReason =
+            "剩余墙钟不足以建立新的 30 秒宏观证书；已通过真实引擎精确推进到请求边界";
+        } else {
+          session.candidate.elapsedSeconds += timeOnlySimulationSeconds;
+          session.currentRate = {
+            dysonGenerationKw: 0,
+            whiteMatrixProduced: 0,
+            rocketsLaunched: 0,
+            sailsAbsorbed: 0,
+            structurePoints: 0,
+            shellSails: 0,
+            sailsInOrbit: 0,
+            activityDelivered: {},
+          };
+          if (recalibration === null) {
+            session.lastValidationReason =
+              `供电边界重校准已达到 ${PURE_IDLE_POWER_BOUNDARY_RECALIBRATION_LIMIT} 次上限；剩余时间只推进时钟`;
+          }
+        }
+        session.settledWallSeconds = targetWallSeconds;
+        session.settledSimulationSeconds += timeOnlySimulationSeconds;
+        session.actualMultiplier = fallbackMultiplier;
+      }
+    } else if (applied.exactSimulationSeconds && !session.conservativeOnly) {
       // A finite-resource or transport boundary changed the sustainable tail.
       // Recalibrate once from the exact committed state so future calls do not
       // repeatedly replay an already-crossed boundary.
       try {
         const recalibrated = calibrate(session.candidate);
         session.contract = recalibrated.contract;
+        session.constructionPowerCertificate = recalibrated.constructionPowerCertificate;
         session.researchLedger = recalibrated.researchLedger;
+        if (recalibrated.rocketLedger) session.rocketLedger = recalibrated.rocketLedger;
+        else delete session.rocketLedger;
+        session.rocketLaunchRemaindersBySystem = {};
+        session.powerTail = recalibrated.powerTail;
+        session.powerRemainingSimulationSeconds = recalibrated.powerTail.maximumSimulationSeconds;
         session.researchRemainder = 0n;
         session.researchInflowRemainders = {};
+        session.conservativeIntegerRemainders = {};
+        session.conservativeDecimalRemainders = {};
         session.currentRate = recalibrated.rate;
         session.contractVersion += 1;
         session.calibrationWindowsCompleted += 3;
@@ -870,6 +1305,17 @@ export function advancePureIdleMacroSession(
           ? `边界后重校准失败：${error.message}`
           : "边界后重校准失败，下一结算段将继续使用精确保护";
       }
+    }
+    const postBoundaryConservationFailure = validatePureIdleCombinedSettlementConservation(
+      session.conservationCheckpoint,
+      session.candidate,
+    );
+    if (postBoundaryConservationFailure) {
+      session.phase = "failed";
+      session.validationFailures += 1;
+      session.degradedReason = `供电边界处理后的最终物资守恒门禁失败：${postBoundaryConservationFailure}`;
+      session.lastValidationReason = session.degradedReason;
+      throw new Error(session.degradedReason);
     }
     refreshDysonGenerationSnapshot(session.candidate);
     refreshTimeWarpPowerSnapshotInPlace(session.candidate);
@@ -900,6 +1346,17 @@ export function finalizePureIdleMacroCandidate(
 ): { state: GameState; summary: PureIdleMacroSummary } {
   throwIfMacroInterrupted(options);
   advancePureIdleMacroSession(session, targetWallSeconds, options);
+  const combinedConservationFailure = validatePureIdleCombinedSettlementConservation(
+    session.conservationCheckpoint,
+    session.candidate,
+  );
+  if (combinedConservationFailure) {
+    session.phase = "failed";
+    session.validationFailures += 1;
+    session.degradedReason = `最终物资守恒门禁拒绝候选：${combinedConservationFailure}`;
+    session.lastValidationReason = session.degradedReason;
+    throw new Error(session.degradedReason);
+  }
   session.phase = "finalizing";
   session.candidate.timeWarp = {
     ...session.candidate.timeWarp,

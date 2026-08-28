@@ -9,8 +9,8 @@ const test = require("node:test");
 const {
   LEASE_FILE_NAME,
   MAX_LEASE_BYTES,
-  NativeCoreExactRealtimeExperimentLeaseStore,
   STORAGE_DIRECTORY_NAME,
+  createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore,
 } = require("./native-core-exact-realtime-experiment.cjs");
 
 const ERROR_CONFLICT = "NATIVE_CORE_EXACT_REALTIME_EXPERIMENT_CONFLICT";
@@ -41,7 +41,7 @@ function createFixture(t, options = {}) {
   return {
     temporaryParent,
     storageDirectoryPath,
-    store: new NativeCoreExactRealtimeExperimentLeaseStore({
+    store: createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
       storageDirectoryPath,
       ...options,
     }),
@@ -150,16 +150,24 @@ function makeActive(store) {
 }
 
 test("store accepts only the fixed absolute main-process storage location", (t) => {
-  assertThrowsCode(() => new NativeCoreExactRealtimeExperimentLeaseStore({
+  assertThrowsCode(() => createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
     storageDirectoryPath: path.join("relative", STORAGE_DIRECTORY_NAME),
   }), ERROR_PATH);
-  assertThrowsCode(() => new NativeCoreExactRealtimeExperimentLeaseStore({
+  assertThrowsCode(() => createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
     storageDirectoryPath: path.join(os.tmpdir(), "renderer-selected-name"),
   }), ERROR_PATH);
-  assert.throws(() => new NativeCoreExactRealtimeExperimentLeaseStore({
+  assert.throws(() => createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
     storageDirectoryPath: path.join(os.tmpdir(), STORAGE_DIRECTORY_NAME),
     filePath: path.join(os.tmpdir(), "renderer.json"),
   }), /unknown field/);
+  assertThrowsCode(() => createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
+    storageDirectoryPath: path.join(path.parse(os.tmpdir()).root, "outside-node-test-temp", STORAGE_DIRECTORY_NAME),
+  }), ERROR_PATH);
+  assert.equal(
+    require("./native-core-exact-realtime-experiment.cjs").NativeCoreExactRealtimeExperimentLeaseStore,
+    undefined,
+    "the obsolete writable JavaScript store must not remain a production export",
+  );
 
   const { store, storageDirectoryPath } = createFixture(t);
   assert.equal(store.leaseFilePath, path.join(storageDirectoryPath, LEASE_FILE_NAME));
@@ -515,7 +523,7 @@ test("oversized and indirect storage objects are blocked without parsing or writ
       return fs.lstatSync(target);
     },
   });
-  const indirectStore = new NativeCoreExactRealtimeExperimentLeaseStore({
+  const indirectStore = createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
     storageDirectoryPath,
     fileSystem,
   });
@@ -571,7 +579,7 @@ test("a post-publish readback mismatch throws but the next process can recover t
   assertThrowsCode(() => store.pause({ ...identity(), reasonCode: "readback-mismatch" }), ERROR_READBACK);
   injectMismatch = false;
 
-  const recovered = new NativeCoreExactRealtimeExperimentLeaseStore({ storageDirectoryPath });
+  const recovered = createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({ storageDirectoryPath });
   assert.equal(recovered.readLease().phase, "paused");
   assert.equal(recovered.readLease().pause.reasonCode, "readback-mismatch");
 });
@@ -592,7 +600,7 @@ test("a clear readback failure never reports success and leaves the finalized le
       return fs.unlinkSync(target);
     },
   });
-  const faultedStore = new NativeCoreExactRealtimeExperimentLeaseStore({
+  const faultedStore = createTestOnlyNativeCoreExactRealtimeExperimentLeaseStore({
     storageDirectoryPath,
     fileSystem,
   });

@@ -136,23 +136,27 @@ export function TimeWarpIdleOverlay({
   const persistentBaseline = useMemo(() => stateSnapshot(baselineGame), [baselineGame]);
   const projected = projectPureIdleTerminalSnapshot(macroSummary, fallback, elapsed);
   const baseline = macroSummary?.baseline ?? persistentBaseline;
+  const calibrationPending = !macroSummary && !continueAvailable;
   const conservativeOnly = macroSummary?.conservativeOnly === true;
   const modeLabel = macroSummary?.mode === "extreme" ? "终局极限模式" : "宏观纯挂机";
   const phaseLabel = macroSummary
     ? macroSummary.phase === "preparing-power" ? "正在准备供电快照"
       : macroSummary.phase === "calibrating" ? "正在执行有界精确校准"
-        : macroSummary.phase === "conservative" ? "保守宏观结算中"
+        : macroSummary.phase === "conservative"
+          ? macroSummary.conservativeOnly && macroSummary.validationFailures === 0
+            ? "稳态宏观结算中"
+            : "保守宏观结算中"
           : macroSummary.phase === "research-boundary" ? "正在处理科研边界"
             : macroSummary.phase === "validating" ? "正在后台校验"
               : macroSummary.phase === "finalizing" ? "正在结算并验证存档"
                 : macroSummary.phase === "recovering" ? "正在恢复 Worker"
                   : macroSummary.phase === "failed" ? "正在等待安全恢复"
                     : "正常宏观结算中"
-    : continueAvailable ? "源存档或恢复日志需要处理" : "正在准备供电快照";
+    : continueAvailable ? "源存档或恢复日志需要处理" : "正在执行 3 × 10 秒校准";
   const nextValidationSeconds = macroSummary?.nextValidationAtWallSeconds == null
     ? null
     : Math.max(0, macroSummary.nextValidationAtWallSeconds - elapsed);
-  const activityRows = Object.entries(projected.activityDelivered)
+  const activityRows = (macroSummary ? Object.entries(projected.activityDelivered) : [])
     .filter(([, amount]) => amount > 0)
     .map(([itemId, amount]) => ({ itemId, amount, delta: amount - (baseline.activityDelivered[itemId] ?? 0) }));
   const stop = async () => {
@@ -195,7 +199,9 @@ export function TimeWarpIdleOverlay({
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
           : conservativeOnly
-            ? "精确 Worker 连续失败，已先结算 1 秒可验证前缀；其余不确定产线冻结，不会伪造产量，停止后仍可重试精确恢复。"
+            ? macroSummary?.validationFailures
+              ? "精确校准未能形成完整证书；系统仅提交已验证前缀，未获证明的尾段保持冻结，主存档不会被不完整候选覆盖。"
+              : "终局大存档已通过 3 × 10 秒精确校准建立闭合稳态供需证书；可持续产线长期按高倍率结算，只有依赖一次性缓存或尚未建模的事件会安全停止。"
             : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
 
         <section className="time-warp-idle-metrics" aria-label="运行摘要">
@@ -203,7 +209,7 @@ export function TimeWarpIdleOverlay({
           <div><Zap size={17} /><span>请求 / 供电倍率</span><strong>{macroSummary?.requestedMultiplier ?? game.timeWarp.requestedMultiplier}x / {macroSummary?.powerLimitedMultiplier ?? computeLimits.powerLimitedMultiplier}x</strong></div>
           <div><Clock3 size={17} /><span>本次挂机</span><strong>{formatDuration(elapsed)}</strong></div>
           <div><Clock3 size={17} /><span>历史累计挂机</span><strong>{formatDuration(game.idleSettlement.totalIdleTime)}</strong><small>仅统计已验证提交的时间段</small></div>
-          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{efficiencyLabel(macroSummary?.minimumEfficiency ?? null, conservativeOnly)}</strong><small>{macroSummary?.limitingReason ?? (conservativeOnly ? "仅显示可验证短窗口；不确定尾段已冻结" : "等待校准")}</small></div>
+          <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{calibrationPending ? "校准中" : efficiencyLabel(macroSummary?.minimumEfficiency ?? null, conservativeOnly)}</strong><small>{macroSummary?.limitingReason ?? (conservativeOnly ? "仅显示可验证短窗口；不确定尾段已冻结" : "等待首个验证快照")}</small></div>
           <div><HardDrive size={17} /><span>保存与恢复</span><strong className={saveFailure ? "warning" : "ready"}>{saveFailure ? "需要处理" : "检查点正常"}</strong><small>{recoveryStatus}</small></div>
           <div><ShieldCheck size={17} /><span>下次真实校验</span><strong>{macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
         </section>
@@ -211,15 +217,15 @@ export function TimeWarpIdleOverlay({
         <section className="time-warp-idle-output" aria-label="终局产出">
           <header><span>终局产出</span><small>累计值与本次挂机增量</small></header>
           <div className="time-warp-terminal-grid">
-            <article><Zap size={19} /><span>戴森总发电功率</span><strong>{formatPowerKw(projected.dysonGenerationKw)}</strong><small>已结算快照 · 30 秒更新</small></article>
-            <article><Activity size={19} /><span>白矩阵累计上传</span><strong title={formatQuantityExact(projected.whiteMatrixProduced)}>{formatQuantityCompact(projected.whiteMatrixProduced)}</strong><small>本次 {signedQuantity(projected.whiteMatrixProduced - baseline.whiteMatrixProduced)} · {formatQuantityCompact((macroSummary?.ratePerSimulationSecond.whiteMatrixProduced ?? 0) * (macroSummary?.actualMultiplier ?? 1) * 60)}/分钟</small></article>
-            <article><Rocket size={19} /><span>小型火箭实际发射</span><strong title={formatQuantityExact(projected.rocketsLaunched)}>{formatQuantityCompact(projected.rocketsLaunched)}</strong><small>本次 {signedQuantity(projected.rocketsLaunched - baseline.rocketsLaunched)}</small></article>
-            <article><Sun size={19} /><span>太阳帆吸收</span><strong title={formatQuantityExact(projected.sailsAbsorbed)}>{formatQuantityCompact(projected.sailsAbsorbed)}</strong><small>本次 {signedQuantity(projected.sailsAbsorbed - baseline.sailsAbsorbed)}</small></article>
+            <article><Zap size={19} /><span>戴森总发电功率</span><strong>{formatPowerKw(projected.dysonGenerationKw)}</strong><small>{calibrationPending ? "首个验证快照生成中" : "已结算快照 · 30 秒更新"}</small></article>
+            <article><Activity size={19} /><span>白矩阵累计上传</span><strong title={formatQuantityExact(projected.whiteMatrixProduced)}>{formatQuantityCompact(projected.whiteMatrixProduced)}</strong><small>{calibrationPending ? "首个验证快照生成中，校准完成后显示增量" : <>本次 {signedQuantity(projected.whiteMatrixProduced - baseline.whiteMatrixProduced)} · {formatQuantityCompact((macroSummary?.ratePerSimulationSecond.whiteMatrixProduced ?? 0) * (macroSummary?.actualMultiplier ?? 1) * 60)}/分钟</>}</small></article>
+            <article><Rocket size={19} /><span>小型火箭实际发射</span><strong title={formatQuantityExact(projected.rocketsLaunched)}>{formatQuantityCompact(projected.rocketsLaunched)}</strong><small>{calibrationPending ? "校准完成后显示本次增量" : <>本次 {signedQuantity(projected.rocketsLaunched - baseline.rocketsLaunched)}</>}</small></article>
+            <article><Sun size={19} /><span>太阳帆吸收</span><strong title={formatQuantityExact(projected.sailsAbsorbed)}>{formatQuantityCompact(projected.sailsAbsorbed)}</strong><small>{calibrationPending ? "校准完成后显示本次增量" : <>本次 {signedQuantity(projected.sailsAbsorbed - baseline.sailsAbsorbed)}</>}</small></article>
           </div>
           <div className="time-warp-terminal-secondary">
-            <span>戴森结构点<strong>{formatQuantityCompact(projected.structurePoints)}</strong><small>{signedQuantity(projected.structurePoints - baseline.structurePoints)}</small></span>
-            <span>当前壳面帆<strong>{formatQuantityCompact(projected.shellSails)}</strong><small>{signedQuantity(projected.shellSails - baseline.shellSails)}</small></span>
-            <span>轨道太阳帆<strong>{formatQuantityCompact(projected.sailsInOrbit)}</strong><small>{signedQuantity(projected.sailsInOrbit - baseline.sailsInOrbit)}</small></span>
+            <span>戴森结构点<strong>{formatQuantityCompact(projected.structurePoints)}</strong><small>{calibrationPending ? "校准后显示" : signedQuantity(projected.structurePoints - baseline.structurePoints)}</small></span>
+            <span>当前壳面帆<strong>{formatQuantityCompact(projected.shellSails)}</strong><small>{calibrationPending ? "校准后显示" : signedQuantity(projected.shellSails - baseline.shellSails)}</small></span>
+            <span>轨道太阳帆<strong>{formatQuantityCompact(projected.sailsInOrbit)}</strong><small>{calibrationPending ? "校准后显示" : signedQuantity(projected.sailsInOrbit - baseline.sailsInOrbit)}</small></span>
           </div>
           {macroSummary ? <div className="time-warp-activity-output" aria-label="科研结算">
             <strong>科研整数账本</strong>
@@ -240,11 +246,11 @@ export function TimeWarpIdleOverlay({
             <div><span>供电上限</span><strong>{macroSummary?.powerLimitedMultiplier ?? computeLimits.powerLimitedMultiplier}x</strong></div>
             <div><span>精确计算能力</span><strong>约 {computeLimits.computeLimitedMultiplier}x</strong></div>
             <div><span>宏观算法</span><strong>{macroSummary?.algorithmVersion ?? "等待初始化"}</strong></div>
-            <div><span>已结算墙钟</span><strong>{formatDuration(macroSummary?.settledWallSeconds ?? 0)}</strong></div>
-            <div><span>已结算模拟</span><strong>{formatDuration(macroSummary?.settledSimulationSeconds ?? 0)}</strong></div>
-            <div><span>合同版本</span><strong>{macroSummary?.contractVersion ?? 0}</strong></div>
+            <div><span>已结算墙钟</span><strong>{macroSummary ? formatDuration(macroSummary.settledWallSeconds) : "等待校准"}</strong></div>
+            <div><span>已结算模拟</span><strong>{macroSummary ? formatDuration(macroSummary.settledSimulationSeconds) : "等待校准"}</strong></div>
+            <div><span>合同版本</span><strong>{macroSummary?.contractVersion ?? "等待校准"}</strong></div>
             <div><span>影子校验</span><strong>{macroSummary ? `${macroSummary.validationCount} 次 · 失败 ${macroSummary.validationFailures}` : "等待校准"}</strong></div>
-            <div><span>边界修正</span><strong>{macroSummary?.boundaryCorrections ?? 0}</strong></div>
+            <div><span>边界修正</span><strong>{macroSummary?.boundaryCorrections ?? "等待校准"}</strong></div>
             {!macroSummary ? <><div><span>旧调度积压</span><strong>{pendingSimulationSeconds.toFixed(1)} 秒</strong></div><div><span>旧 Worker 状态</span><strong>{workerActive ? "可用" : "不可用"}</strong></div><div><span>旧调度原因</span><strong>{THROTTLE_REASON_LABELS[computeLimits.reason]}</strong></div><div><span>最近耗时</span><strong>{computeState.sampleCount > 0 ? `${Math.round(computeState.recentWorkerDurationMs)} ms` : "测量中"}</strong></div></> : null}
             {macroSummary?.lastValidationReason ? <div><span>最近校验</span><strong>{macroSummary.lastValidationReason}</strong></div> : null}
             {macroSummary?.degradedReason ? <div><span>降级原因</span><strong>{macroSummary.degradedReason}</strong></div> : null}

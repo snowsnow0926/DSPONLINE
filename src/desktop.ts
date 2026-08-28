@@ -1,3 +1,5 @@
+import type { BeltConnection, FactoryEntity, ProductionHistorySample } from "./game/types";
+
 export type DesktopUpdateState = "development" | "idle" | "checking" | "available" | "up-to-date" | "downloading" | "downloaded" | "error";
 
 export interface DesktopUpdateStatus {
@@ -37,6 +39,8 @@ export interface DesktopBridge {
   appendNativeWal: (request: DesktopNativeWalAppendRequest) => Promise<DesktopNativeWalAppendResult>;
   compactNativeSave: (request: DesktopNativeSaveSlotRequest & { retainGenerations?: number }) => Promise<{ removedGenerations: number }>;
   openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
+  /** Current Windows host only; legacy/web import remains the compatibility fallback. */
+  importNativeCoreV47?: (request: DesktopNativeCoreImportRequest) => Promise<DesktopNativeCoreImportResult>;
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
   getNativeCoreViewportProjection: (request: DesktopNativeCoreViewportProjectionRequest) => Promise<DesktopNativeCoreViewportProjectionResult>;
@@ -66,6 +70,8 @@ export interface DesktopNativePerformanceStatus {
   available: boolean;
   state: "starting" | "ready" | "unavailable" | "unsupported";
   message: string;
+  /** Stable renderer-safe code only; older rollback hosts may omit it. */
+  errorCode?: string | null;
   protocolVersion?: number;
   nativeFormatVersion?: number;
   hostVersion?: string;
@@ -385,6 +391,11 @@ export interface DesktopNativeCoreOpenRequest extends DesktopNativeSaveSlotReque
   catalog: DesktopNativeCoreCatalog;
 }
 
+export interface DesktopNativeCoreImportRequest {
+  registryFingerprint: string;
+  catalog: DesktopNativeCoreCatalog;
+}
+
 export interface DesktopNativeCoreDomainCoverage {
   stateContainer: boolean;
   commandPatches: boolean;
@@ -486,6 +497,43 @@ export interface DesktopNativeCoreOpenResult {
   summary: DesktopNativeCoreSummary;
 }
 
+export interface DesktopNativeCoreImportProof {
+  formatVersion: 2;
+  stateVersion: 47;
+  kind: "primary" | "slot" | "snapshot";
+  envelopeSlot: "main" | "1" | "2" | "3";
+  mode: "normal" | "speedrun";
+  savedAtMs: number;
+  stateChecksum: string;
+  sourceSha256: string;
+  sourceByteLength: number;
+  entityCount: number;
+  beltCount: number;
+}
+
+export type DesktopNativeCoreImportResult =
+  | { cancelled: true }
+  | ({
+    cancelled: false;
+    committed: true;
+    fileName: string;
+    authority: "shadow";
+    checkpoint: DesktopNativeSaveCommitResult;
+    import: DesktopNativeCoreImportProof;
+    summary: DesktopNativeCoreSummary;
+  } & (
+    | {
+      ownerClosed: false;
+      sessionClosed: false;
+      sessionId: string;
+    }
+    | {
+      ownerClosed: true;
+      sessionClosed: boolean;
+      sessionId: null;
+    }
+  ));
+
 export interface DesktopNativeCoreSessionRequest {
   sessionId: string;
 }
@@ -503,9 +551,12 @@ export interface DesktopNativeCoreProjectionRequest extends DesktopNativeCoreSes
 export interface DesktopNativeCoreProjectionResult {
   revision: number;
   base: Record<string, unknown>;
-  entities: Array<Record<string, unknown>>;
-  belts: Array<Record<string, unknown>>;
+  entities: DesktopNativeCoreEntityProjection[];
+  belts: DesktopNativeCoreBeltProjection[];
 }
+
+export type DesktopNativeCoreEntityProjection = { id: string } & Partial<Omit<FactoryEntity, "id">>;
+export type DesktopNativeCoreBeltProjection = { id: string } & Partial<Omit<BeltConnection, "id">>;
 
 export interface DesktopNativeCoreViewportProjectionRequest extends DesktopNativeCoreSessionRequest {
   baseFields?: string[];
@@ -523,8 +574,8 @@ export interface DesktopNativeCoreViewportProjectionResult {
   planetId: string;
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   base: Record<string, unknown>;
-  entities: Array<Record<string, unknown>>;
-  belts: Array<Record<string, unknown>>;
+  entities: DesktopNativeCoreEntityProjection[];
+  belts: DesktopNativeCoreBeltProjection[];
   nextEntityCursor: number | null;
   truncatedBelts: boolean;
 }
@@ -544,7 +595,7 @@ export interface DesktopNativeCoreStatisticsProjectionResult {
   revision: number;
   window: { minElapsedSeconds: number; maxElapsedSeconds: number };
   filters: { planetId: string | null; itemId: string | null };
-  samples: Array<Record<string, unknown>>;
+  samples: ProductionHistorySample[];
   nextCursor: number | null;
 }
 

@@ -251,6 +251,16 @@ fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
         ] if root == "recipeFocus"
             && position == "position"
             && matches!(axis.as_str(), "x" | "y")
+    ) || matches!(
+        change.path.as_slice(),
+        [
+            PathSegment::Key(root),
+            PathSegment::Key(_planet_id),
+            PathSegment::Key(field),
+        ] if root == "planetViewports"
+            && matches!(field.as_str(), "x" | "y" | "zoom")
+            && change.operation == "set"
+            && change.value.is_some()
     ) {
         return true;
     }
@@ -268,7 +278,6 @@ fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
                 | "powerGridMetrics"
                 | "canvasBookmarks"
                 | "canvasRegions"
-                | "planetViewports"
                 | "timeWarp"
                 | "idleSettlement"
         )
@@ -358,6 +367,13 @@ fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> 
         .and_then(Value::as_u64)
         .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
         .ok_or_else(|| anyhow!("native player-authority {label} is not a safe integer"))
+}
+
+fn finite_json_number(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority {label} is not a finite number"))
 }
 
 fn normalized_construction_inventory(value: Option<&Value>) -> anyhow::Result<u64> {
@@ -1122,6 +1138,98 @@ fn validate_recipe_focus_command(
     Ok(())
 }
 
+fn validate_planet_viewport_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.is_empty()
+        || command.top_level_changes.len() > 3
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority planet viewport command shape is invalid")
+    }
+
+    let mut command_planet_id = None;
+    let mut fields = HashSet::new();
+    for change in &command.top_level_changes {
+        let (planet_id, field) = match change.path.as_slice() {
+            [
+                PathSegment::Key(root),
+                PathSegment::Key(planet_id),
+                PathSegment::Key(field),
+            ] if root == "planetViewports" && matches!(field.as_str(), "x" | "y" | "zoom") => {
+                (planet_id.as_str(), field.as_str())
+            }
+            _ => bail!("native player-authority planet viewport patch path is not canonical"),
+        };
+        if command_planet_id.is_some_and(|current| current != planet_id) {
+            bail!("native player-authority planet viewport command spans multiple planets")
+        }
+        command_planet_id = Some(planet_id);
+        if !fields.insert(field) || change.operation != "set" || change.value.is_none() {
+            bail!("native player-authority planet viewport field is repeated or invalid")
+        }
+    }
+
+    let planet_id = command_planet_id
+        .ok_or_else(|| anyhow!("native player-authority planet viewport target is missing"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == planet_id)
+    {
+        bail!("native player-authority planet viewport target is unknown")
+    }
+    let viewport = state
+        .base_value()
+        .get("planetViewports")
+        .and_then(Value::as_object)
+        .and_then(|viewports| viewports.get(planet_id))
+        .and_then(Value::as_object)
+        .filter(|viewport| {
+            viewport.len() == 3
+                && viewport.contains_key("x")
+                && viewport.contains_key("y")
+                && viewport.contains_key("zoom")
+        })
+        .ok_or_else(|| anyhow!("native player-authority planet viewport state is invalid"))?;
+    let current_x = finite_json_number(viewport.get("x"), "planet viewport X")?;
+    let current_y = finite_json_number(viewport.get("y"), "planet viewport Y")?;
+    let current_zoom = finite_json_number(viewport.get("zoom"), "planet viewport zoom")?;
+    if !(0.25..=1.8).contains(&current_zoom) {
+        bail!("native player-authority current planet viewport zoom is out of range")
+    }
+
+    for change in &command.top_level_changes {
+        let field = match &change.path[2] {
+            PathSegment::Key(field) => field.as_str(),
+            PathSegment::Index(_) => unreachable!("canonical viewport path was already checked"),
+        };
+        let target = finite_json_number(change.value.as_ref(), "planet viewport value")?;
+        let current = match field {
+            "x" => current_x,
+            "y" => current_y,
+            "zoom" => {
+                if !(0.25..=1.8).contains(&target) {
+                    bail!("native player-authority planet viewport zoom is out of range")
+                }
+                current_zoom
+            }
+            _ => unreachable!("canonical viewport field was already checked"),
+        };
+        if target == current {
+            bail!("native player-authority planet viewport patch is unchanged")
+        }
+    }
+    Ok(())
+}
+
 fn validate_player_position_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -1354,6 +1462,11 @@ impl CoreState {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
         }) {
             return validate_recipe_focus_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "planetViewports")
+        }) {
+            return validate_planet_viewport_command(self, command);
         }
         if !command.top_level_changes.is_empty() {
             return validate_player_pause_command(self, command);
@@ -1637,6 +1750,13 @@ mod tests {
                 PathSegment::Key("itemId".to_owned()),
             ])
         ));
+        assert!(!command_requires_production_history_rebuild(
+            &command_for_path(vec![
+                PathSegment::Key("planetViewports".to_owned()),
+                PathSegment::Key("home".to_owned()),
+                PathSegment::Key("x".to_owned()),
+            ])
+        ));
         assert!(command_requires_production_history_rebuild(
             &command_for_path(vec![PathSegment::Key("futureUnknownField".to_owned())])
         ));
@@ -1677,6 +1797,36 @@ mod tests {
         let whole_recipe_focus = command_for_path(vec![PathSegment::Key("recipeFocus".to_owned())]);
         assert!(
             whole_recipe_focus
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let planet_viewport_leaf = command_for_path(vec![
+            PathSegment::Key("planetViewports".to_owned()),
+            PathSegment::Key("home".to_owned()),
+            PathSegment::Key("zoom".to_owned()),
+        ]);
+        assert!(
+            !planet_viewport_leaf
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let mut deleted_planet_viewport_leaf = planet_viewport_leaf.clone();
+        deleted_planet_viewport_leaf.top_level_changes[0].operation = "delete".to_owned();
+        deleted_planet_viewport_leaf.top_level_changes[0].value = None;
+        assert!(
+            deleted_planet_viewport_leaf
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let whole_planet_viewport = command_for_path(vec![
+            PathSegment::Key("planetViewports".to_owned()),
+            PathSegment::Key("home".to_owned()),
+        ]);
+        assert!(
+            whole_planet_viewport
                 .deterministic_apply_result(1, 2)
                 .unwrap()
                 .topology_dirty
@@ -1842,6 +1992,11 @@ mod tests {
                 "mode": "two-level",
                 "position": { "x": 24, "y": 72 }
             },
+            "planetViewports": {
+                "home": { "x": 510, "y": 250, "zoom": 0.84 },
+                "ashen": { "x": 510, "y": 250, "zoom": 0.84 },
+                "giant": { "x": 510, "y": 250, "zoom": 0.84 }
+            },
             "construction": { "arc_smelter": 4, "em_rail_ejector": 0 },
             "constructionQueue": [],
             "blueprintVersions": [],
@@ -1994,6 +2149,26 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(Value::from(y)),
         });
+        command
+    }
+
+    fn planet_viewport_command(
+        revision: u64,
+        planet_id: &str,
+        fields: &[(&str, Value)],
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = fields
+            .iter()
+            .map(|(field, value)| ValuePatch {
+                path: ["planetViewports", planet_id, *field]
+                    .into_iter()
+                    .map(|segment| PathSegment::Key(segment.to_owned()))
+                    .collect(),
+                operation: "set".to_owned(),
+                value: Some(value.clone()),
+            })
+            .collect();
         command
     }
 
@@ -2174,6 +2349,137 @@ mod tests {
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before);
         }
+    }
+
+    #[test]
+    fn player_authority_applies_only_canonical_planet_viewport_leaf_commands() {
+        let mut state = player_command_state();
+        let pan_and_zoom = planet_viewport_command(
+            state.revision,
+            "home",
+            &[
+                ("x", Value::from(-123.25)),
+                ("y", Value::from(456.5)),
+                ("zoom", Value::from(1.125)),
+            ],
+        );
+        let panned = state.apply_player_authority_command(&pan_and_zoom).unwrap();
+        assert!(panned.changed_entity_ids.is_empty());
+        assert!(panned.changed_belt_ids.is_empty());
+        assert!(!panned.topology_dirty);
+        assert_eq!(state.base_value()["planetViewports"]["home"]["x"], -123.25);
+        assert_eq!(state.base_value()["planetViewports"]["home"]["y"], 456.5);
+        assert_eq!(state.base_value()["planetViewports"]["home"]["zoom"], 1.125);
+
+        let queued_other_planet =
+            planet_viewport_command(state.revision, "ashen", &[("x", Value::from(512.25))]);
+        let queued = state
+            .apply_player_authority_command(&queued_other_planet)
+            .unwrap();
+        assert!(!queued.topology_dirty);
+        assert_eq!(state.base_value()["planetViewports"]["ashen"]["x"], 512.25);
+
+        for zoom in [0.25, 1.8] {
+            let zoom_command =
+                planet_viewport_command(state.revision, "home", &[("zoom", Value::from(zoom))]);
+            let zoomed = state.apply_player_authority_command(&zoom_command).unwrap();
+            assert!(!zoomed.topology_dirty);
+            assert_eq!(state.base_value()["planetViewports"]["home"]["zoom"], zoom);
+        }
+        assert_eq!(state.revision, 13);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state
+            .apply_player_authority_command(&pan_and_zoom)
+            .unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_planet_viewport_rejects_whole_mixed_or_invalid_patches() {
+        let whole_viewport = planet_viewport_command(
+            9,
+            "home",
+            &[("viewport", serde_json::json!({ "x": 1, "y": 2, "zoom": 1 }))],
+        );
+        let whole_entry = {
+            let mut command = empty_player_command(9);
+            command.top_level_changes = vec![ValuePatch {
+                path: ["planetViewports", "home"]
+                    .into_iter()
+                    .map(|segment| PathSegment::Key(segment.to_owned()))
+                    .collect(),
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({ "x": 1, "y": 2, "zoom": 1 })),
+            }];
+            command
+        };
+        let whole_map = {
+            let mut command = empty_player_command(9);
+            command.top_level_changes = vec![ValuePatch {
+                path: vec![PathSegment::Key("planetViewports".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "home": { "x": 1, "y": 2, "zoom": 1 }
+                })),
+            }];
+            command
+        };
+        let mut delete_x = planet_viewport_command(9, "home", &[("x", Value::from(511))]);
+        delete_x.top_level_changes[0].operation = "delete".to_owned();
+        delete_x.top_level_changes[0].value = None;
+        let mut duplicate_x = planet_viewport_command(9, "home", &[("x", Value::from(511))]);
+        duplicate_x
+            .top_level_changes
+            .push(duplicate_x.top_level_changes[0].clone());
+        let mut cross_planet = planet_viewport_command(9, "home", &[("x", Value::from(511))]);
+        cross_planet.top_level_changes.push(
+            planet_viewport_command(9, "ashen", &[("y", Value::from(251))])
+                .top_level_changes
+                .remove(0),
+        );
+        let mut mixed = planet_viewport_command(9, "home", &[("x", Value::from(511))]);
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(false)),
+        });
+        let commands = [
+            planet_viewport_command(9, "missing", &[("x", Value::from(1))]),
+            planet_viewport_command(9, "home", &[("zoom", Value::from(0.249))]),
+            planet_viewport_command(9, "home", &[("zoom", Value::from(1.801))]),
+            planet_viewport_command(9, "home", &[("x", Value::from("far"))]),
+            planet_viewport_command(9, "home", &[("x", Value::from(510))]),
+            whole_viewport,
+            whole_entry,
+            whole_map,
+            delete_x,
+            duplicate_x,
+            cross_planet,
+            mixed,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = player_command_state();
+        malformed.base_value_mut()["planetViewports"]["home"]["zoom"] = Value::from(2);
+        let before = malformed.canonical_sha256().unwrap();
+        let error = malformed
+            .apply_player_authority_command(&planet_viewport_command(
+                9,
+                "home",
+                &[("x", Value::from(511))],
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("current planet viewport zoom"));
+        assert_eq!(malformed.revision, 9);
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 
     #[test]

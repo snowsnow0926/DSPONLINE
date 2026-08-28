@@ -3155,6 +3155,12 @@ mod tests {
                     "position": { "x": 24, "y": 72 }
                 }),
             ),
+            (
+                "planetViewports",
+                json!({
+                    "home": { "x": 510, "y": 250, "zoom": 0.84 }
+                }),
+            ),
         ] {
             state.insert(key.to_owned(), value);
         }
@@ -4594,6 +4600,189 @@ mod tests {
                 .commit_player_authority_command(&mut store, &session_id, request)
                 .unwrap_err();
             assert!(format!("{error:#}").contains("recipe focus"), "{error:#}");
+            assert_eq!(
+                serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+                summary_before
+            );
+            assert_eq!(
+                serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+                checkpoint_before
+            );
+            assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
+        }
+    }
+
+    #[test]
+    fn typed_planet_viewport_recovers_retries_exports_and_reloads_exactly() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let source_hash = registry.status(&session_id).unwrap().canonical_sha256;
+        let source_checkpoint =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let request = || {
+            player_authority_raw_top_level_command(
+                entry_checkpoint.revision,
+                "planet-viewport-pan",
+                vec![
+                    json!({
+                        "path": ["planetViewports", "home", "x"],
+                        "operation": "set",
+                        "value": -123.25
+                    }),
+                    json!({
+                        "path": ["planetViewports", "home", "y"],
+                        "operation": "set",
+                        "value": 456.5
+                    }),
+                    json!({
+                        "path": ["planetViewports", "home", "zoom"],
+                        "operation": "set",
+                        "value": 0.75
+                    }),
+                ],
+            )
+        };
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            source_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            source_checkpoint
+        );
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_some()
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("typed planet viewport must recover from its durable stage");
+        assert_eq!(recovered.command_id.as_deref(), Some("planet-viewport-pan"));
+        assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
+        assert!(recovered.changed_entity_ids.is_empty());
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(!recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, recovered.revision);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+        assert!(!duplicate.topology_dirty);
+
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "planet-viewport-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let exported =
+            std::fs::read(root.path().join("exports/planet-viewport-recovered.json")).unwrap();
+        let envelope: Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(envelope["state"]["planetViewports"]["home"]["x"], -123.25);
+        assert_eq!(envelope["state"]["planetViewports"]["home"]["y"], 456.5);
+        assert_eq!(envelope["state"]["planetViewports"]["home"]["zoom"], 0.75);
+        assert_eq!(envelope["state"]["productionHistory"], json!([]));
+
+        let reload_root = tempdir().unwrap();
+        let mut reload_store = SaveStore::open(reload_root.path()).unwrap();
+        let mut reload_registry = CoreRegistry::default();
+        let reloaded = reload_registry
+            .import_v47(
+                &mut reload_store,
+                Cursor::new(exported.clone()),
+                exported.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
+        assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
+    }
+
+    #[test]
+    fn forged_planet_viewport_fails_before_stage_and_preserves_checkpoint() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let summary_before = serde_json::to_value(registry.status(&session_id).unwrap()).unwrap();
+        let checkpoint_before =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let lease_before = store.require_exact_realtime_lease().unwrap();
+        let requests = [
+            player_authority_raw_top_level_command(
+                entry_checkpoint.revision,
+                "unknown-planet-viewport",
+                vec![json!({
+                    "path": ["planetViewports", "missing", "x"],
+                    "operation": "set",
+                    "value": 1
+                })],
+            ),
+            player_authority_raw_top_level_command(
+                entry_checkpoint.revision,
+                "whole-planet-viewport",
+                vec![json!({
+                    "path": ["planetViewports", "home"],
+                    "operation": "set",
+                    "value": { "x": 1, "y": 2, "zoom": 1 }
+                })],
+            ),
+            player_authority_raw_top_level_command(
+                entry_checkpoint.revision,
+                "invalid-planet-viewport-zoom",
+                vec![json!({
+                    "path": ["planetViewports", "home", "zoom"],
+                    "operation": "set",
+                    "value": 2
+                })],
+            ),
+            player_authority_raw_top_level_command(
+                entry_checkpoint.revision,
+                "mixed-planet-viewport-command",
+                vec![
+                    json!({
+                        "path": ["planetViewports", "home", "x"],
+                        "operation": "set",
+                        "value": 1
+                    }),
+                    json!({
+                        "path": ["paused"],
+                        "operation": "set",
+                        "value": false
+                    }),
+                ],
+            ),
+        ];
+        for request in requests {
+            let error = registry
+                .commit_player_authority_command(&mut store, &session_id, request)
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("planet viewport"),
+                "{error:#}"
+            );
             assert_eq!(
                 serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
                 summary_before

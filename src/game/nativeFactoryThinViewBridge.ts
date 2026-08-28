@@ -28,4 +28,3 @@ export function selectFactoryRunStatusReadModel(
     paused: shell.paused,
   });
 }
-

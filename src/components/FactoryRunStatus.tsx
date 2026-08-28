@@ -16,4 +16,3 @@ export const FactoryRunStatus = memo(function FactoryRunStatus({ model }: {
     </span>
   );
 });
-

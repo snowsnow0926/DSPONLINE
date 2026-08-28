@@ -45,4 +45,3 @@ describe("FactoryRunStatus", () => {
     expect(host.firstElementChild?.getAttribute("data-factory-read-model-revision")).toBe("9");
   });
 });
-

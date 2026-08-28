@@ -21,4 +21,3 @@ describe("factory thin-view App consumption", () => {
     expect(component).not.toMatch(/\.\/game\/types|\.\.\/game\/types/);
   });
 });
-

@@ -380,6 +380,94 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   });
 });
 
+test("core owner transfer is atomic against in-flight requests and epoch-protected against ABA", async () => {
+  let registry;
+  const pendingStatus = {};
+  pendingStatus.promise = new Promise((resolve) => { pendingStatus.resolve = resolve; });
+  let reentrantTransferError = null;
+  const client = {
+    request(request) {
+      if (request.operation === "coreStatus") {
+        try {
+          registry.transferOwner(7, "main-player-authority", {
+            sessionId: "core-1",
+            expectedSlot: "normal-main",
+            expectedOwnerEpoch: 1,
+          });
+        } catch (error) {
+          reentrantTransferError = error;
+        }
+        return pendingStatus.promise;
+      }
+      return Promise.resolve({});
+    },
+  };
+  registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-1", {
+    ownerId: 7, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+
+  const status = registry.status(7, "core-1");
+  assert.equal(reentrantTransferError?.code, "NATIVE_CORE_SESSION_BUSY");
+  assert.equal(registry.inspectSession(7, "core-1").inFlight, 1);
+  assert.throws(() => registry.transferOwner(7, "main-player-authority", {
+    sessionId: "core-1", expectedSlot: "normal-main", expectedOwnerEpoch: 1,
+  }), (error) => error.code === "NATIVE_CORE_SESSION_BUSY");
+
+  pendingStatus.resolve({ revision: 4 });
+  await status;
+  const receipt = registry.transferOwner(7, "main-player-authority", {
+    sessionId: "core-1", expectedSlot: "normal-main", expectedOwnerEpoch: 1,
+  });
+  assert.deepEqual(receipt, {
+    kind: "native-core-session-owner-transfer-v1",
+    sessionId: "core-1",
+    previousOwnerId: 7,
+    ownerId: "main-player-authority",
+    slot: "normal-main",
+    previousOwnerEpoch: 1,
+    ownerEpoch: 2,
+    inFlight: 0,
+  });
+  assert.throws(() => registry.status(7, "core-1"), (error) => error.code === "NATIVE_CORE_SESSION_INVALID");
+  assert.throws(() => registry.transferOwner("main-player-authority", "next-owner", {
+    sessionId: "core-1", expectedSlot: "normal-main", expectedOwnerEpoch: 1,
+  }), (error) => error.code === "NATIVE_CORE_SESSION_TRANSFER_INVALID");
+  assert.equal(registry.inspectSession("main-player-authority", "core-1").ownerEpoch, 2);
+});
+
+test("core registry fails closed on in-flight counter exhaustion and forced owner teardown", async () => {
+  const closeGate = {};
+  closeGate.promise = new Promise((resolve) => { closeGate.resolve = resolve; });
+  const client = {
+    request(request) {
+      return request.operation === "coreClose" ? closeGate.promise : Promise.resolve({ revision: 1 });
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  const session = {
+    ownerId: 7, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: Number.MAX_SAFE_INTEGER,
+  };
+  registry.sessions.set("core-1", session);
+  assert.throws(() => registry.status(7, "core-1"), (error) => error.code === "NATIVE_CORE_SESSION_BUSY");
+
+  session.inFlight = 1;
+  const closing = registry.closeOwner(7);
+  assert.equal(session.state, "closing");
+  assert.throws(() => registry.inspectSession(7, "core-1"), (error) => error.code === "NATIVE_CORE_SESSION_INVALID");
+  closeGate.resolve({ closed: true });
+  await closing;
+
+  const throwingRegistry = new NativeCoreSessionRegistry({
+    request() { throw new Error("synchronous host failure"); },
+  });
+  throwingRegistry.sessions.set("core-2", {
+    ownerId: 8, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  assert.throws(() => throwingRegistry.status(8, "core-2"), /synchronous host failure/);
+  assert.equal(throwingRegistry.inspectSession(8, "core-2").inFlight, 0);
+});
+
 test("v47 import keeps the selected path outside the renderer request and owner-binds the new session", async () => {
   const catalog = {
     protocolVersion: 1,
@@ -433,7 +521,9 @@ test("player authority prepare and activate are main-owned, capability-gated, an
     },
   };
   const registry = new NativeCoreSessionRegistry(client);
-  registry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  registry.sessions.set("core-1", {
+    ownerId: "main-authority", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   const expectedCheckpoint = { generation: 3, rootHash: "a".repeat(64), revision: 7 };
 
   await registry.preparePlayerAuthority("main-authority", {
@@ -473,7 +563,9 @@ test("player authority prepare and activate are main-owned, capability-gated, an
 
   const oldClient = { hello: { capabilities: [] }, async request() { throw new Error("must not call host"); } };
   const oldRegistry = new NativeCoreSessionRegistry(oldClient);
-  oldRegistry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  oldRegistry.sessions.set("core-1", {
+    ownerId: "main-authority", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   assert.throws(() => oldRegistry.preparePlayerAuthority("main-authority", {
     sessionId: "core-1", runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000,
   }), (error) => {
@@ -492,7 +584,9 @@ test("player authority tick is main-owned, sequence-keyed, and rejects caller st
     },
   };
   const registry = new NativeCoreSessionRegistry(client);
-  registry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  registry.sessions.set("core-1", {
+    ownerId: "main-authority", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
 
   await registry.commitPlayerAuthorityTick("main-authority", {
     sessionId: "core-1",
@@ -516,7 +610,9 @@ test("player authority tick is main-owned, sequence-keyed, and rejects caller st
 
   const oldClient = { hello: { capabilities: [] }, async request() { throw new Error("must not call host"); } };
   const oldRegistry = new NativeCoreSessionRegistry(oldClient);
-  oldRegistry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  oldRegistry.sessions.set("core-1", {
+    ownerId: "main-authority", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   assert.throws(() => oldRegistry.commitPlayerAuthorityTick("main-authority", {
     sessionId: "core-1", runId: "player-run-1", sequence: 1,
   }), (error) => {

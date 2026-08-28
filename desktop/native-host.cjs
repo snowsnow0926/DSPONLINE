@@ -635,7 +635,13 @@ class NativeCoreSessionRegistry {
     if (!validLogicalId(value?.sessionId, 128) || this.sessions.has(value.sessionId) || value?.authority !== "shadow") {
       throw new NativeHostError("native host returned an invalid core session", "NATIVE_PROTOCOL_INVALID");
     }
-    this.sessions.set(value.sessionId, { ownerId, slot: request.slot });
+    this.sessions.set(value.sessionId, {
+      ownerId,
+      slot: request.slot,
+      ownerEpoch: 1,
+      state: "owned",
+      inFlight: 0,
+    });
     return value;
   }
 
@@ -658,13 +664,15 @@ class NativeCoreSessionRegistry {
     this.sessions.set(value.sessionId, {
       ownerId,
       slot: value.import.mode === "speedrun" ? "speedrun-main" : "normal-main",
+      ownerEpoch: 1,
+      state: "owned",
+      inFlight: 0,
     });
     return value;
   }
 
   status(ownerId, sessionId) {
-    this.assertOwner(ownerId, sessionId);
-    return this.client.request({ operation: "coreStatus", sessionId });
+    return this.requestOwned(ownerId, sessionId, { operation: "coreStatus", sessionId });
   }
 
   projection(ownerId, request) {
@@ -676,7 +684,7 @@ class NativeCoreSessionRegistry {
       request.baseFields.some((field) => field === "entities" || field === "belts")) {
       throw new TypeError("native core projection request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreProjection",
       sessionId: request.sessionId,
       baseFields: request.baseFields,
@@ -701,7 +709,7 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request?.beltLimit) || request.beltLimit < 0 || request.beltLimit > 8192) {
       throw new TypeError("native core viewport projection request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreViewportProjection",
       sessionId: request.sessionId,
       baseFields,
@@ -738,7 +746,7 @@ class NativeCoreSessionRegistry {
       pinnedEntityIds.some((id) => !validOpaqueId(id)) || pinnedBeltIds.some((id) => !validOpaqueId(id))) {
       throw new TypeError("native core viewport v2 projection request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreViewportProjectionV2",
       sessionId: request.sessionId,
       baseFields,
@@ -767,7 +775,7 @@ class NativeCoreSessionRegistry {
       selectedBeltIds.some((id) => !validOpaqueId(id))) {
       throw new TypeError("native factory read-model projection request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreFactoryReadModelProjection",
       sessionId: request.sessionId,
       selectedEntityIds,
@@ -786,7 +794,7 @@ class NativeCoreSessionRegistry {
       request?.itemId !== undefined && request.itemId !== null && !validLogicalId(request.itemId, 160)) {
       throw new TypeError("native core statistics projection request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreStatisticsProjection",
       sessionId: request.sessionId,
       minElapsedSeconds: request.minElapsedSeconds,
@@ -800,7 +808,11 @@ class NativeCoreSessionRegistry {
 
   applyCommand(ownerId, sessionId, command) {
     this.assertOwner(ownerId, sessionId);
-    return this.client.request({ operation: "coreApplyCommand", sessionId, command: normalizeNativeCoreCommand(command) });
+    return this.requestOwned(ownerId, sessionId, {
+      operation: "coreApplyCommand",
+      sessionId,
+      command: normalizeNativeCoreCommand(command),
+    });
   }
 
   advance(ownerId, request) {
@@ -812,7 +824,7 @@ class NativeCoreSessionRegistry {
       request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10"].includes(request.advanceMode)) {
       throw new TypeError("native core advance request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreAdvance",
       sessionId: request.sessionId,
       request: {
@@ -827,7 +839,7 @@ class NativeCoreSessionRegistry {
 
   commitOperation(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCommitOperation",
       sessionId: request.sessionId,
       request: normalizeNativeCoreCommitOperation(request),
@@ -848,7 +860,7 @@ class NativeCoreSessionRegistry {
     if (!validLogicalId(request.runId, 128) || !validLogicalId(request.registryFingerprint, 256)) {
       throw new TypeError("native exact realtime commit identity is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCommitOperationExactRealtime",
       sessionId: request.sessionId,
       request: {
@@ -877,7 +889,7 @@ class NativeCoreSessionRegistry {
       request.expectedCheckpoint,
       "native player-authority prepare checkpoint",
     );
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "corePreparePlayerAuthority",
       sessionId: request.sessionId,
       request: {
@@ -906,7 +918,7 @@ class NativeCoreSessionRegistry {
       request.expectedCheckpoint,
       "native player-authority activate checkpoint",
     );
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreActivatePlayerAuthority",
       sessionId: request.sessionId,
       request: {
@@ -931,7 +943,7 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request.sequence) || request.sequence < 1) {
       throw new TypeError("native player-authority tick request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCommitPlayerAuthorityTick",
       sessionId: request.sessionId,
       request: {
@@ -946,7 +958,7 @@ class NativeCoreSessionRegistry {
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
       throw new TypeError("native core checkpoint timestamp is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCheckpoint",
       sessionId: request.sessionId,
       savedAtMs: request.savedAtMs,
@@ -969,7 +981,7 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request.settledDeadlineMs) || request.settledDeadlineMs < 0) {
       throw new TypeError("native exact realtime checkpoint ACK request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCheckpointAcknowledgeExactRealtime",
       sessionId: request.sessionId,
       request: {
@@ -997,7 +1009,7 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request.savedAtMs) || request.savedAtMs < 0) {
       throw new TypeError("native exact realtime finalization checkpoint request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCheckpointExactRealtimeFinalization",
       sessionId: request.sessionId,
       request: {
@@ -1014,7 +1026,7 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
       throw new TypeError("native core export request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreExportV47",
       sessionId: request.sessionId,
       exportId: request.exportId,
@@ -1029,7 +1041,7 @@ class NativeCoreSessionRegistry {
       typeof request?.domainSha256 !== "string" || !/^[a-f0-9]{64}$/.test(request.domainSha256)) {
       throw new TypeError("native core comparison request is invalid");
     }
-    return this.client.request({
+    return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreCompare",
       sessionId: request.sessionId,
       revision: request.revision,
@@ -1038,22 +1050,124 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  inspectSession(ownerId, sessionId) {
+    const session = this.assertOwner(ownerId, sessionId);
+    return Object.freeze({
+      kind: "native-core-session-owner-state-v1",
+      sessionId,
+      ownerId: session.ownerId,
+      slot: session.slot,
+      ownerEpoch: session.ownerEpoch,
+      state: session.state,
+      inFlight: session.inFlight,
+    });
+  }
+
+  transferOwner(ownerId, nextOwnerId, request) {
+    exactObjectKeys(request, [
+      "sessionId", "expectedSlot", "expectedOwnerEpoch",
+    ], "native core session owner transfer request");
+    const session = this.assertOwner(ownerId, request.sessionId);
+    if ((!validLogicalId(nextOwnerId, 128) &&
+        !(Number.isSafeInteger(nextOwnerId) && nextOwnerId >= 1)) || nextOwnerId === ownerId ||
+      !validLogicalId(request.expectedSlot, 64) || session.slot !== request.expectedSlot ||
+      !Number.isSafeInteger(request.expectedOwnerEpoch) || request.expectedOwnerEpoch < 1 ||
+      session.ownerEpoch !== request.expectedOwnerEpoch) {
+      throw new NativeHostError(
+        "native core session owner transfer identity is invalid",
+        "NATIVE_CORE_SESSION_TRANSFER_INVALID",
+      );
+    }
+    if (session.state !== "owned" || session.inFlight !== 0) {
+      throw new NativeHostError(
+        "native core session has in-flight work and cannot transfer owners",
+        "NATIVE_CORE_SESSION_BUSY",
+      );
+    }
+    if (!Number.isSafeInteger(session.ownerEpoch + 1)) {
+      throw new NativeHostError(
+        "native core session owner epoch is exhausted",
+        "NATIVE_CORE_SESSION_TRANSFER_INVALID",
+      );
+    }
+
+    // No await or host call is allowed between the zero-in-flight check and
+    // the owner/epoch write.  In the main-process event loop this makes the
+    // handoff atomic with requestOwned's synchronous in-flight increment.
+    session.state = "transferring";
+    const previousOwnerEpoch = session.ownerEpoch;
+    session.ownerId = nextOwnerId;
+    session.ownerEpoch += 1;
+    session.state = "owned";
+    return Object.freeze({
+      kind: "native-core-session-owner-transfer-v1",
+      sessionId: request.sessionId,
+      previousOwnerId: ownerId,
+      ownerId: nextOwnerId,
+      slot: session.slot,
+      previousOwnerEpoch,
+      ownerEpoch: session.ownerEpoch,
+      inFlight: session.inFlight,
+    });
+  }
+
+  requestOwned(ownerId, sessionId, request, timeoutMs) {
+    const session = this.assertOwner(ownerId, sessionId);
+    if (!request || typeof request !== "object" || Array.isArray(request) || request.sessionId !== sessionId) {
+      throw new TypeError("native core owner request session is invalid");
+    }
+    if (session.state !== "owned" || !Number.isSafeInteger(session.inFlight) || session.inFlight < 0 ||
+      session.inFlight === Number.MAX_SAFE_INTEGER) {
+      throw new NativeHostError(
+        "native core session is not accepting owner operations",
+        "NATIVE_CORE_SESSION_BUSY",
+      );
+    }
+    session.inFlight += 1;
+    let operation;
+    try {
+      operation = this.client.request(request, timeoutMs);
+    } catch (error) {
+      session.inFlight -= 1;
+      throw error;
+    }
+    return Promise.resolve(operation).finally(() => {
+      session.inFlight -= 1;
+    });
+  }
+
   async close(ownerId, sessionId) {
-    this.assertOwner(ownerId, sessionId);
+    const session = this.assertOwner(ownerId, sessionId);
+    if (session.state !== "owned" || session.inFlight !== 0) {
+      throw new NativeHostError(
+        "native core session has in-flight work and cannot close",
+        "NATIVE_CORE_SESSION_BUSY",
+      );
+    }
+    session.state = "closing";
     this.sessions.delete(sessionId);
     return this.client.request({ operation: "coreClose", sessionId });
   }
 
   async closeOwner(ownerId) {
     const owned = [...this.sessions.entries()].filter(([, session]) => session.ownerId === ownerId);
+    // Window destruction is a forced teardown, not a handoff proof.  Remove
+    // ownership synchronously even when host requests are still in flight so
+    // a concurrent coordinator must fail closed instead of transferring a
+    // session whose renderer disappeared.
+    for (const [sessionId, session] of owned) {
+      session.state = "closing";
+      this.sessions.delete(sessionId);
+    }
     await Promise.allSettled(owned.map(([sessionId]) => this.client.request({ operation: "coreClose", sessionId })));
-    for (const [sessionId] of owned) this.sessions.delete(sessionId);
   }
 
   assertOwner(ownerId, sessionId) {
-    if (!validLogicalId(sessionId, 128) || this.sessions.get(sessionId)?.ownerId !== ownerId) {
-      throw new NativeHostError("native core session is not owned by this renderer", "NATIVE_CORE_SESSION_INVALID");
+    const session = this.sessions.get(sessionId);
+    if (!validLogicalId(sessionId, 128) || session?.ownerId !== ownerId) {
+      throw new NativeHostError("native core session is not owned by this caller", "NATIVE_CORE_SESSION_INVALID");
     }
+    return session;
   }
 }
 

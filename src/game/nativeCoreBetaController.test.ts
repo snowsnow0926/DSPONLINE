@@ -77,6 +77,14 @@ function proof(revision: number, rootHash = ROOT): NativeCoreRevisionProof {
   };
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 class FakeNativeSession implements WindowsNativeCoreShadow {
   readonly sessionId: string;
   readonly checkpoint: DesktopNativeSaveCommitResult;
@@ -95,7 +103,20 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   statisticsProjectionRevisionOffset = 0;
   technologyProjectionCalls = 0;
   technologyProjectionRevisionOffset = 0;
+  starMapOverviewProjectionCalls = 0;
+  starMapOverviewProjectionRevisionOffset = 0;
+  starMapOverviewProjectionFingerprint = FINGERPRINT;
+  starMapOverviewProjectionError: Error | null = null;
+  starMapOverviewProjectionBarrier: Promise<void> | null = null;
+  stellarIndustryProjectionCalls = 0;
+  stellarIndustryProjectionRevisionOffset = 0;
+  stellarIndustryProjectionFingerprint = FINGERPRINT;
+  stellarIndustryProjectionError: Error | null = null;
+  stellarIndustryProjectionBarrier: Promise<void> | null = null;
+  commitBarrier: Promise<void> | null = null;
   lastStatisticsProjectionRequest: Parameters<WindowsNativeCoreShadow["statisticsProjection"]>[0] | null = null;
+  lastStarMapOverviewProjectionRequest: Parameters<WindowsNativeCoreShadow["starMapOverviewProjection"]>[0] | null = null;
+  lastStellarIndustryProjectionRequest: Parameters<WindowsNativeCoreShadow["stellarIndustryProjection"]>[0] | null = null;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
 
@@ -285,12 +306,76 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     throw new Error("recipe workspace projection is not exercised by this controller fixture");
   }
 
-  async starMapOverviewProjection(_request: Parameters<WindowsNativeCoreShadow["starMapOverviewProjection"]>[0]): Promise<never> {
-    throw new Error("star-map overview projection is not exercised by this controller fixture");
+  async starMapOverviewProjection(
+    request: Parameters<WindowsNativeCoreShadow["starMapOverviewProjection"]>[0],
+  ): Promise<Awaited<ReturnType<WindowsNativeCoreShadow["starMapOverviewProjection"]>>> {
+    this.starMapOverviewProjectionCalls += 1;
+    this.lastStarMapOverviewProjectionRequest = structuredClone(request);
+    if (this.starMapOverviewProjectionBarrier) await this.starMapOverviewProjectionBarrier;
+    if (this.starMapOverviewProjectionError) throw this.starMapOverviewProjectionError;
+    return {
+      schemaVersion: 1,
+      projectionType: "star-map-overview-v1",
+      revision: this.current.revision + this.starMapOverviewProjectionRevisionOffset,
+      registryFingerprint: this.starMapOverviewProjectionFingerprint,
+      stateVersion: 47,
+      limits: { requestBytes: 32768, projectionBytes: 1048576, pageRows: 64, labelBytes: 512 },
+      request: structuredClone(request),
+      activePlanetId: "home",
+      activeSystemId: "helios",
+      galaxySeed: 1,
+      summary: {
+        systemCount: 1,
+        unlockedSystemCount: 1,
+        planetCount: 1,
+        colonizedPlanetCount: 1,
+        stationCount: 0,
+      },
+      systems: {
+        cursor: request.cursor,
+        limit: request.limit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+    };
   }
 
-  async stellarIndustryProjection(_request: Parameters<WindowsNativeCoreShadow["stellarIndustryProjection"]>[0]): Promise<never> {
-    throw new Error("stellar industry projection is not exercised by this controller fixture");
+  async stellarIndustryProjection(
+    request: Parameters<WindowsNativeCoreShadow["stellarIndustryProjection"]>[0],
+  ): Promise<Awaited<ReturnType<WindowsNativeCoreShadow["stellarIndustryProjection"]>>> {
+    this.stellarIndustryProjectionCalls += 1;
+    this.lastStellarIndustryProjectionRequest = structuredClone(request);
+    if (this.stellarIndustryProjectionBarrier) await this.stellarIndustryProjectionBarrier;
+    if (this.stellarIndustryProjectionError) throw this.stellarIndustryProjectionError;
+    return {
+      schemaVersion: 1,
+      projectionType: "stellar-industry-v1",
+      revision: this.current.revision + this.stellarIndustryProjectionRevisionOffset,
+      registryFingerprint: this.stellarIndustryProjectionFingerprint,
+      stateVersion: 47,
+      limits: { requestBytes: 32768, projectionBytes: 1048576, pageRows: 64, labelBytes: 512 },
+      request: structuredClone(request),
+      activePlanetId: "home",
+      activeSystemId: "helios",
+      scopeSystemId: request.systemId,
+      scopePlanetId: request.planetId,
+      truncated: false,
+      planets: {
+        cursor: request.planetCursor,
+        limit: request.planetLimit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+      stations: {
+        cursor: request.stationCursor,
+        limit: request.stationLimit,
+        totalCount: 0,
+        nextCursor: null,
+        rows: [],
+      },
+    };
   }
 
   async applyCommand(_command: SimulationCommandPatch) {
@@ -315,6 +400,7 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
     request: Parameters<WindowsNativeCoreShadow["commitOperation"]>[0],
   ): Promise<DesktopNativeCoreCommitOperationResult> {
     this.commitRequests.push(structuredClone(request));
+    if (this.commitBarrier) await this.commitBarrier;
     if (this.alwaysFail) throw new Error("native host unavailable");
     const existing = this.receipts.get(request.commandId);
     if (existing) return { ...existing, duplicate: true, summary: await this.status() };
@@ -536,6 +622,192 @@ describe("Windows native core invitation-Beta controller", () => {
     });
     await expect(controller.readVerifiedTechnologyProjection({}, 2)).resolves.toBeNull();
     expect(session.technologyProjectionCalls).toBe(2);
+  });
+
+  it("serves stellar projections in verified shadow/native-ready state and derives fingerprint from proof", async () => {
+    const shadowSession = new FakeNativeSession();
+    const shadowController = await openController(shadowSession);
+    const forgedStarMapRequest = {
+      cursor: 0,
+      limit: 32,
+      expectedRevision: 999,
+      expectedRegistryFingerprint: "renderer:forged",
+    } as Parameters<WindowsNativeCoreBetaController["readVerifiedStarMapOverviewProjection"]>[0];
+    await expect(shadowController.readVerifiedStarMapOverviewProjection(
+      forgedStarMapRequest,
+      1,
+    )).resolves.toMatchObject({
+      projectionType: "star-map-overview-v1",
+      revision: 1,
+      registryFingerprint: FINGERPRINT,
+    });
+    expect(shadowSession.lastStarMapOverviewProjectionRequest).toMatchObject({
+      cursor: 0,
+      limit: 32,
+      expectedRevision: 1,
+      expectedRegistryFingerprint: FINGERPRINT,
+    });
+
+    const readySession = new FakeNativeSession();
+    const readyController = await gatedController(readySession);
+    expect(readyController.snapshot().authority.phase).toBe("native-ready");
+    await expect(readyController.readVerifiedStellarIndustryProjection({
+      systemId: "helios",
+      planetId: "home",
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 2)).resolves.toMatchObject({
+      projectionType: "stellar-industry-v1",
+      revision: 2,
+      registryFingerprint: FINGERPRINT,
+      scopeSystemId: "helios",
+      scopePlanetId: "home",
+    });
+    expect(readySession.lastStellarIndustryProjectionRequest).toMatchObject({
+      expectedRevision: 2,
+      expectedRegistryFingerprint: FINGERPRINT,
+    });
+  });
+
+  it("does not dispatch stellar reads while the latest proof is stale", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "stellar-proof-pending",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    expect(controller.snapshot().authority).toMatchObject({
+      shadowRevision: 2,
+      latestVerifiedProof: { revision: 1 },
+    });
+    await expect(controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 2))
+      .resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryProjection({
+      systemId: null,
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 2)).resolves.toBeNull();
+    expect(session.starMapOverviewProjectionCalls).toBe(0);
+    expect(session.stellarIndustryProjectionCalls).toBe(0);
+  });
+
+  it("rejects stellar responses from another revision without changing authority", async () => {
+    const session = new FakeNativeSession();
+    session.starMapOverviewProjectionRevisionOffset = 1;
+    session.stellarIndustryProjectionRevisionOffset = 1;
+    const controller = await openController(session);
+    const authorityBefore = controller.snapshot().authority;
+    await expect(controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 1))
+      .resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryProjection({
+      systemId: null,
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 1)).resolves.toBeNull();
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+  });
+
+  it("rejects stellar responses with another registry fingerprint", async () => {
+    const session = new FakeNativeSession();
+    session.starMapOverviewProjectionFingerprint = "pack:other";
+    session.stellarIndustryProjectionFingerprint = "pack:other";
+    const controller = await openController(session);
+    const authorityBefore = controller.snapshot().authority;
+    await expect(controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 1))
+      .resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryProjection({
+      systemId: null,
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 1)).resolves.toBeNull();
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+    expect(session.lastStarMapOverviewProjectionRequest?.expectedRegistryFingerprint).toBe(FINGERPRINT);
+    expect(session.lastStellarIndustryProjectionRequest?.expectedRegistryFingerprint).toBe(FINGERPRINT);
+  });
+
+  it("does not dispatch stellar reads while a native operation is in flight", async () => {
+    const session = new FakeNativeSession();
+    const gate = deferred();
+    session.commitBarrier = gate.promise;
+    const controller = await openController(session);
+    const operation = controller.mirrorJavaScriptOperationUnverified({
+      commandId: "stellar-in-flight",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    expect(session.commitRequests).toHaveLength(1);
+    const authorityBefore = controller.snapshot().authority;
+    await expect(controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 1))
+      .resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryProjection({
+      systemId: null,
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 1)).resolves.toBeNull();
+    expect(session.starMapOverviewProjectionCalls).toBe(0);
+    expect(session.stellarIndustryProjectionCalls).toBe(0);
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+    gate.resolve();
+    await expect(operation).resolves.toMatchObject({ mirrored: true });
+  });
+
+  it("drops an in-flight stellar response after the shadow session is replaced", async () => {
+    const first = new FakeNativeSession("stellar-session-1");
+    const second = new FakeNativeSession("stellar-session-2");
+    const gate = deferred();
+    first.starMapOverviewProjectionBarrier = gate.promise;
+    let opens = 0;
+    const controller = new WindowsNativeCoreBetaController(
+      async () => opens++ === 0 ? first : second,
+      () => 1_000,
+    );
+    await controller.openShadow({ mode: "normal", checkpoint, runtime, javascriptProof: proof(1) });
+    const pending = controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 1);
+    expect(first.starMapOverviewProjectionCalls).toBe(1);
+    await controller.openShadow({ mode: "normal", checkpoint, runtime, javascriptProof: proof(1) });
+    expect(controller.snapshot().authority.sessionId).toBe("stellar-session-2");
+    gate.resolve();
+    await expect(pending).resolves.toBeNull();
+    expect(second.starMapOverviewProjectionCalls).toBe(0);
+  });
+
+  it("turns stellar read exceptions into null without changing authority", async () => {
+    const session = new FakeNativeSession();
+    session.starMapOverviewProjectionError = new Error("star map read failed");
+    session.stellarIndustryProjectionError = new Error("stellar industry read failed");
+    const controller = await openController(session);
+    const authorityBefore = controller.snapshot().authority;
+    await expect(controller.readVerifiedStarMapOverviewProjection({ cursor: 0, limit: 32 }, 1))
+      .resolves.toBeNull();
+    await expect(controller.readVerifiedStellarIndustryProjection({
+      systemId: null,
+      planetId: null,
+      planetCursor: 0,
+      planetLimit: 32,
+      stationCursor: 0,
+      stationLimit: 32,
+    }, 1)).resolves.toBeNull();
+    expect(controller.snapshot().authority).toEqual(authorityBefore);
+    expect(session.closed).toBe(false);
   });
 
   it("mirrors JavaScript durably while JavaScript remains authoritative", async () => {

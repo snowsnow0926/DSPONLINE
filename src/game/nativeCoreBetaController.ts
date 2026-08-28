@@ -5,6 +5,10 @@ import type {
   DesktopNativeCoreProjectionResult,
   DesktopNativeCoreStatisticsProjectionRequest,
   DesktopNativeCoreStatisticsProjectionResult,
+  DesktopNativeCoreStarMapOverviewProjectionRequest,
+  DesktopNativeCoreStarMapOverviewProjectionResult,
+  DesktopNativeCoreStellarIndustryProjectionRequest,
+  DesktopNativeCoreStellarIndustryProjectionResult,
   DesktopNativeCoreTechnologyProjectionRequest,
   DesktopNativeCoreTechnologyProjectionResult,
   DesktopNativeCoreViewportProjectionV2Request,
@@ -91,6 +95,16 @@ type NativeCoreShadowOpener = (
   checkpoint: DesktopNativeSaveCommitResult,
   runtime: ContentPackRuntimeSnapshot,
 ) => Promise<WindowsNativeCoreShadow | null>;
+
+interface VerifiedNativeShadowReadIdentity {
+  session: WindowsNativeCoreShadow;
+  sessionId: string;
+  revision: number;
+  registryFingerprint: string;
+  rootHash: string;
+  canonicalSha256: string;
+  domainSha256: string;
+}
 
 function cloneProof(proof: NativeCoreRevisionProof | null): NativeCoreRevisionProof | null {
   return proof ? { ...proof } : null;
@@ -613,6 +627,73 @@ export class WindowsNativeCoreBetaController {
   }
 
   /**
+   * Exposes the bounded native star-map page only while the exact JavaScript
+   * shadow proof remains current. The registry fingerprint is always derived
+   * from that proof and overwrites any runtime property supplied by a caller.
+   */
+  async readVerifiedStarMapOverviewProjection(
+    request: Omit<
+      DesktopNativeCoreStarMapOverviewProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+  >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStarMapOverviewProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.starMapOverviewProjection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 1 || projection.projectionType !== "star-map-overview-v1" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.cursor !== request.cursor || projection.request.limit !== request.limit) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  async readVerifiedStellarIndustryProjection(
+    request: Omit<
+      DesktopNativeCoreStellarIndustryProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+  >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStellarIndustryProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.stellarIndustryProjection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 1 || projection.projectionType !== "stellar-industry-v1" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.systemId !== request.systemId || projection.request.planetId !== request.planetId ||
+        projection.request.planetCursor !== request.planetCursor || projection.request.planetLimit !== request.planetLimit ||
+        projection.request.stationCursor !== request.stationCursor || projection.request.stationLimit !== request.stationLimit) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Returns a viewport block only when the native shadow is still proven to be
    * the exact renderer revision both before and after the asynchronous IPC.
    * The main process independently binds expectedRevision to the response.
@@ -653,6 +734,39 @@ export class WindowsNativeCoreBetaController {
     const projection = await this.session.projection(normalizeProjectionSelection(selection));
     if (projection.revision !== expectedRevision) throw new Error("原生投影 revision 与权威回执不一致");
     return projection;
+  }
+
+  private verifiedShadowReadIdentity(expectedRevision: number): VerifiedNativeShadowReadIdentity | null {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    const proof = state.latestVerifiedProof;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) || state.sessionId !== session.sessionId ||
+      state.shadowRevision !== expectedRevision || proof?.revision !== expectedRevision ||
+      typeof proof.registryFingerprint !== "string" || proof.registryFingerprint.length < 1) {
+      return null;
+    }
+    return {
+      session,
+      sessionId: session.sessionId,
+      revision: expectedRevision,
+      registryFingerprint: proof.registryFingerprint,
+      rootHash: proof.rootHash,
+      canonicalSha256: proof.canonicalSha256,
+      domainSha256: proof.domainSha256,
+    };
+  }
+
+  private isVerifiedShadowReadIdentityCurrent(identity: VerifiedNativeShadowReadIdentity): boolean {
+    const current = this.authorityState;
+    const proof = current.latestVerifiedProof;
+    return this.session === identity.session && identity.session.sessionId === identity.sessionId &&
+      !this.operationInFlight && current.authority === "javascript" &&
+      ["shadow", "native-ready"].includes(current.phase) && current.sessionId === identity.sessionId &&
+      current.shadowRevision === identity.revision && proof?.revision === identity.revision &&
+      proof.registryFingerprint === identity.registryFingerprint && proof.rootHash === identity.rootHash &&
+      proof.canonicalSha256 === identity.canonicalSha256 && proof.domainSha256 === identity.domainSha256;
   }
 
   private async commitWithIdempotentRetry(input: {

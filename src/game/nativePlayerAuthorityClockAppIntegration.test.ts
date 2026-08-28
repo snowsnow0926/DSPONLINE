@@ -13,6 +13,7 @@ describe("main-owned authority clock App wiring", () => {
     expect(app).toMatch(/nativePlayerAuthorityClock\.bindSession\(nativeCoreProjectionSessionId\)/);
     expect(app).toMatch(/selectActiveNativePlayerAuthorityFrame\([\s\S]*?nativeCoreProjectionSessionId/);
     expect(app).toMatch(/selectBoundNativePlayerAuthorityFrame\([\s\S]*?nativeCoreProjectionSessionId/);
+    expect(app).toMatch(/selectNativePlayerAuthorityMacroStatus\([\s\S]*?nativePlayerAuthorityClockSnapshot,[\s\S]*?nativeCoreProjectionSessionId/);
   });
 
   it("uses the Rust authority revision without allowing the JS revision to overwrite it", () => {
@@ -41,6 +42,96 @@ describe("main-owned authority clock App wiring", () => {
     expect(refreshEffect).toMatch(/nativeFactoryThinViewMode === "native-authoritative"[\s\S]*?createNativePlayerAuthorityProjectionSource\([\s\S]*?desktopBridge[\s\S]*?nativePlayerAuthorityActiveFrame\?\.sessionId/);
     expect(refreshEffect).toMatch(/nativeFactoryThinViewStore\.refresh\(projectionSource,[\s\S]*?expectedRevision:\s*factoryThinViewExpectedRevision/);
     expect(refreshEffect).not.toMatch(/applyNativeCoreCommand|advanceNativeCore|commitNativeCoreOperation|checkpointNativeCore/);
+  });
+
+  it("holds every macro push or pull as read-only without projection, command, or JS simulation fallback", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const modeBlock = app.slice(
+      app.indexOf("const nativeFactoryThinViewMode"),
+      app.indexOf("const nativeFactoryThinViewActive"),
+    );
+    expect(modeBlock).toMatch(/nativePlayerAuthorityMacroReadOnly[\s\S]*?"native-authoritative-paused"/);
+    expect(modeBlock.indexOf("nativePlayerAuthorityMacroReadOnly")).toBeLessThan(
+      modeBlock.indexOf("nativePlayerAuthorityActiveFrame"),
+    );
+    expect(modeBlock.indexOf("nativePlayerAuthorityMacroReadOnly")).toBeLessThan(
+      modeBlock.indexOf("javascript-shadow"),
+    );
+
+    const refreshEffects = app.slice(
+      app.indexOf("if (nativeFactoryThinViewMode === \"native-authoritative-paused\")"),
+      app.indexOf("const simulationProjectionIndexRef"),
+    );
+    const pausedReturn = refreshEffects.indexOf("return;");
+    const factoryProjection = refreshEffects.indexOf("createNativePlayerAuthorityProjectionSource(");
+    expect(pausedReturn).toBeGreaterThanOrEqual(0);
+    expect(factoryProjection).toBeGreaterThan(pausedReturn);
+    for (const sourceName of [
+      "createNativePlayerAuthorityTechnologyProjectionSource(",
+      "createNativePlayerAuthorityRecipeWorkspaceProjectionSource(",
+      "createNativePlayerAuthorityStellarProjectionSource(",
+      "createNativePlayerAuthorityCommandPaletteEntitySearchSource(",
+    ]) {
+      const sourceIndex = refreshEffects.indexOf(sourceName);
+      expect(sourceIndex).toBeGreaterThanOrEqual(0);
+      expect(refreshEffects.lastIndexOf("!nativePlayerAuthorityActiveFrame", sourceIndex))
+        .toBeGreaterThanOrEqual(0);
+    }
+
+    const simulationLoop = app.slice(
+      app.indexOf("let previous = performance.now();"),
+      app.indexOf("// Keep the autosave timer responsive"),
+    );
+    const macroStop = simulationLoop.indexOf("if (nativePlayerAuthorityMacroReadOnlyRef.current)");
+    expect(macroStop).toBeGreaterThanOrEqual(0);
+    expect(simulationLoop.indexOf("return;", macroStop)).toBeLessThan(
+      simulationLoop.indexOf("simulationWorkerRef.current"),
+    );
+    expect(simulationLoop.indexOf("return;", macroStop)).toBeLessThan(
+      simulationLoop.indexOf("advanceSimulationBudget("),
+    );
+
+    const editGuard = app.slice(
+      app.indexOf("const rejectPlayerStateEditDuringPrimarySave"),
+      app.indexOf("const lifecycleExitStartedRef"),
+    );
+    expect(editGuard).toMatch(/nativePlayerAuthorityMacroReadOnlyRef\.current[\s\S]*?本次操作未应用[\s\S]*?return true/);
+  });
+
+  it("narrows every second authority pull to v1 before reading identity fields", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const locateProduction = app.slice(
+      app.indexOf("const locateRecipeWorkspaceProduction"),
+      app.indexOf("const itemReferenceActions"),
+    );
+    const pull = locateProduction.indexOf("getNativePlayerAuthorityState()");
+    const schemaGuard = locateProduction.indexOf("clock.schemaVersion !== 1", pull);
+    const identityRead = locateProduction.indexOf("clock.sessionId", pull);
+    expect(pull).toBeGreaterThanOrEqual(0);
+    expect(schemaGuard).toBeGreaterThan(pull);
+    expect(identityRead).toBeGreaterThan(schemaGuard);
+    expect(locateProduction).not.toMatch(/nativePlayerAuthorityMacroStatus\??\.(?:sessionId|runId|macroSessionId|operationId|algorithmVersion|lastErrorCode)/);
+  });
+
+  it("renders only bounded macro scalars and no authority identity", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const display = app.slice(
+      app.indexOf("const nativePlayerAuthorityMacroDisplay"),
+      app.indexOf("const nativeFactoryThinViewStoreRef"),
+    );
+    expect(display).toMatch(/status\.phase/);
+    expect(display).toMatch(/status\.simulationProgressMilliseconds[\s\S]*?status\.simulationBudgetMilliseconds/);
+    expect(display).toMatch(/status\.wallProgressMilliseconds[\s\S]*?status\.wallBudgetMilliseconds/);
+    expect(display).toMatch(/status\.nextDeadlineMs/);
+    expect(display).toMatch(/status\.pausedReason/);
+    expect(display).not.toMatch(/sessionId|runId|macroSessionId|operationId|algorithmVersion|lastErrorCode/);
+
+    const bannerStart = app.indexOf('className="paused native-player-authority-macro-status"');
+    const banner = app.slice(bannerStart, app.indexOf("</span>", bannerStart));
+    expect(bannerStart).toBeGreaterThanOrEqual(0);
+    expect(banner).toMatch(/data-phase=[\s\S]*?data-deadline-ms=[\s\S]*?data-paused-reason=/);
+    expect(banner).toMatch(/模拟进度[\s\S]*?墙钟进度[\s\S]*?截止时钟[\s\S]*?暂停原因/);
+    expect(banner).not.toMatch(/sessionId|runId|macroSessionId|operationId|algorithmVersion|lastErrorCode/);
   });
 
   it("keeps this as consumer/revision wiring rather than claiming a complete thin UI", () => {

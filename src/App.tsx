@@ -453,6 +453,7 @@ import {
   createNativePlayerAuthorityProjectionSource,
   selectActiveNativePlayerAuthorityFrame,
   selectBoundNativePlayerAuthorityFrame,
+  selectNativePlayerAuthorityMacroStatus,
 } from "./game/nativePlayerAuthorityClock";
 import {
   createPlanetNavigationReadModel,
@@ -1899,6 +1900,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // after the install response has made the Worker ready to advance.
   const deferredDurableUiSubmissionRef = useRef<DeferredDurableUiSubmission | null>(null);
   const dispatchDurableUiCommandRef = useRef<() => void>(() => undefined);
+  // Schema v2 deliberately carries no authority identity. Keep a render-fed
+  // boolean ref so stable player-edit and scheduler callbacks can fail closed
+  // without ever probing a macro frame for session/run/operation IDs.
+  const nativePlayerAuthorityMacroReadOnlyRef = useRef(false);
   const durablePrimarySaveInFlightRef = useRef(false);
   // The stable 1.0.43-compatible coordinator also needs the player-edit lock
   // while its verified primary write is in flight. Keep a depth instead of a
@@ -1937,6 +1942,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (nativePlayerAuthorityMacroReadOnlyRef.current) {
+      setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
+      return true;
+    }
     if (durableWorkerRecoveryInFlightRef.current) {
       setNotice("正在从 durable recovery 精确重建模拟 Worker，请稍候");
       return true;
@@ -1987,6 +1996,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityClockSnapshot,
     nativeCoreProjectionSessionId,
   );
+  const nativePlayerAuthorityMacroStatus = selectNativePlayerAuthorityMacroStatus(
+    nativePlayerAuthorityClockSnapshot,
+    nativeCoreProjectionSessionId,
+  );
+  const nativePlayerAuthorityMacroReadOnly = nativePlayerAuthorityMacroStatus !== null;
+  nativePlayerAuthorityMacroReadOnlyRef.current = nativePlayerAuthorityMacroReadOnly;
+  const nativePlayerAuthorityMacroDisplay = useMemo(() => {
+    const status = nativePlayerAuthorityMacroStatus;
+    if (!status) return null;
+    const progressLabel = (progress: number | null, budget: number | null) => budget === null
+      ? "等待权威预算"
+      : `${progress === null ? "待确认" : progress.toLocaleString("zh-CN")} / ${budget.toLocaleString("zh-CN")} ms`;
+    return Object.freeze({
+      phase: status.phase,
+      simulationProgress: progressLabel(
+        status.simulationProgressMilliseconds,
+        status.simulationBudgetMilliseconds,
+      ),
+      wallProgress: progressLabel(
+        status.wallProgressMilliseconds,
+        status.wallBudgetMilliseconds,
+      ),
+      deadlineMilliseconds: status.nextDeadlineMs,
+      deadline: `${status.nextDeadlineMs.toLocaleString("zh-CN")} ms`,
+      pausedReason: status.pausedReason,
+    });
+  }, [nativePlayerAuthorityMacroStatus]);
   const nativeFactoryThinViewStoreRef = useRef<NativeFactoryThinViewStore | null>(null);
   if (nativeFactoryThinViewStoreRef.current === null) {
     nativeFactoryThinViewStoreRef.current = new NativeFactoryThinViewStore();
@@ -2002,6 +2038,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // mirror must never overwrite that revision. Uncertain/faulted phases retain
   // the last confirmed frame but do not issue another native read.
   const factoryThinViewExpectedRevision = nativePlayerAuthorityBoundFrame?.revision ??
+    nativePlayerAuthorityMacroStatus?.revision ??
     simulationStateRevisionRef.current;
   const nativeTechnologyWorkspaceStoreRef = useRef<NativeTechnologyWorkspaceStore | null>(null);
   if (nativeTechnologyWorkspaceStoreRef.current === null) {
@@ -2174,14 +2211,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const recipeWorkspaceReadModel = nativePlayerAuthorityBoundFrame
     ? nativeRecipeWorkspaceReadModel
     : webRecipeWorkspaceReadModel;
-  const nativeFactoryThinViewMode = nativePlayerAuthorityActiveFrame
-    ? "native-authoritative"
-    : nativePlayerAuthorityBoundFrame
-      ? "native-authoritative-paused"
-      : windowsNativeCoreAvailable && windowsNativeCoreBetaEnabled &&
-          ["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)
-        ? "javascript-shadow"
-        : "inactive";
+  const nativeFactoryThinViewMode = nativePlayerAuthorityMacroReadOnly
+    ? "native-authoritative-paused"
+    : nativePlayerAuthorityActiveFrame
+      ? "native-authoritative"
+      : nativePlayerAuthorityBoundFrame
+        ? "native-authoritative-paused"
+        : windowsNativeCoreAvailable && windowsNativeCoreBetaEnabled &&
+            ["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)
+          ? "javascript-shadow"
+          : "inactive";
   const nativeFactoryThinViewActive = nativeFactoryThinViewMode === "native-authoritative" ||
     nativeFactoryThinViewMode === "javascript-shadow";
   const factoryThinViewAllSelectedEntityIds = useMemo(
@@ -7663,6 +7702,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const timer = window.setInterval(() => {
       const now = performance.now();
       const currentState = gameRef.current;
+      if (nativePlayerAuthorityMacroReadOnlyRef.current) {
+        // Rust owns the productive macro window. Do not accumulate wall debt,
+        // post a Worker projection/command, or fall through to the JavaScript
+        // simulation fallback while schema v2 is the current authority state.
+        previous = now;
+        return;
+      }
       if (pureIdleMacroActiveRef.current) {
         previous = now;
         return;
@@ -9021,7 +9067,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (projection.truncated || projection.revision !== authorityRevision ||
           projection.registryFingerprint !== recipeWorkspaceRegistryFingerprint || !page ||
           page.planetId !== planetId || page.cursor !== 0 || page.nextCursor !== null ||
-          page.totalCount !== page.entities.length || clock.phase !== "active" || clock.inFlight ||
+          page.totalCount !== page.entities.length || clock.schemaVersion !== 1 ||
+          clock.phase !== "active" || clock.inFlight ||
           clock.sessionId !== authority.sessionId || clock.revision !== authorityRevision) {
         setNotice("原生资料库版本已变化或生产设备过多，本次定位已安全取消");
         return;
@@ -13258,6 +13305,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-mobile-performance={mobilePerformanceMode ? "true" : "false"}
       data-simulation-paused={game.paused ? "true" : "false"}
       data-simulation-worker={simulationWorkerActive ? "active" : "fallback"}
+      data-native-authority-mode={nativePlayerAuthorityMacroReadOnly
+        ? "macro-read-only"
+        : nativePlayerAuthorityActiveFrame ? "exact-active" : nativePlayerAuthorityBoundFrame ? "exact-paused" : "unbound"}
+      data-native-authority-macro-phase={nativePlayerAuthorityMacroStatus?.phase ?? "none"}
       data-runtime-recovery={durableRecoveryLifecycleRef.current}
       data-runtime-recovery-sequence={durableRecoveryHeadRef.current?.sequence ?? -1}
       data-runtime-recovery-revision={durableRecoveryHeadRef.current?.stateRevision ?? -1}
@@ -14120,6 +14171,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           ) : null}
           <div className="canvas-status">
             <FactoryRunStatus model={factoryRunStatusReadModel} />
+            {nativePlayerAuthorityMacroDisplay ? (
+              <span
+                className="paused native-player-authority-macro-status"
+                role="status"
+                aria-live="polite"
+                data-phase={nativePlayerAuthorityMacroDisplay.phase}
+                data-deadline-ms={nativePlayerAuthorityMacroDisplay.deadlineMilliseconds}
+                data-paused-reason={nativePlayerAuthorityMacroDisplay.pausedReason}
+              >
+                Windows 原生宏观结算（只读） · 阶段 {nativePlayerAuthorityMacroDisplay.phase}
+                {` · 模拟进度 ${nativePlayerAuthorityMacroDisplay.simulationProgress}`}
+                {` · 墙钟进度 ${nativePlayerAuthorityMacroDisplay.wallProgress}`}
+                {` · 截止时钟 ${nativePlayerAuthorityMacroDisplay.deadline}`}
+                {` · 暂停原因 ${nativePlayerAuthorityMacroDisplay.pausedReason}`}
+              </span>
+            ) : null}
             <strong>{factoryActivePlanetNavigationRow?.displayName ?? factoryPlanetNavigationReadModel.activePlanetId} · {factoryActivePlanetNavigationRow?.code ?? factoryPlanetNavigationReadModel.activePlanetId}工厂区</strong>
           </div>
           <RecipeFocusPanel

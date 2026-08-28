@@ -80,6 +80,17 @@ impl DeterministicRuntime {
         }
     }
 
+    /// Returns the number of worker threads that actually answer a broadcast
+    /// on this process-lifetime pool. This is intentionally used only by the
+    /// opt-in benchmark/profile path: normal simulation does not pay for a
+    /// diagnostic barrier and no runtime detail enters GameState or a public
+    /// protocol response.
+    pub(crate) fn observed_worker_count(&self) -> usize {
+        self.pool
+            .as_ref()
+            .map_or(1, |pool| pool.broadcast(|_| ()).len())
+    }
+
     pub(crate) fn indexed_map<T, R, F>(&self, values: &[T], map: F) -> Vec<R>
     where
         T: Sync,
@@ -320,6 +331,7 @@ mod tests {
         for worker_limit in [1, 2, 4, 8] {
             let runtime = DeterministicRuntime::for_test(worker_limit);
             assert_eq!(runtime.worker_limit(), worker_limit);
+            assert_eq!(runtime.observed_worker_count(), worker_limit);
             let names = runtime.worker_names();
             if worker_limit == 1 {
                 assert!(names.is_empty());

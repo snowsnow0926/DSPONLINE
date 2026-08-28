@@ -10,6 +10,7 @@ import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { advanceSimulationBudget, createSimulationLookupContext, createSimulationProfiler, getEntityOperatingStatus } from "./engine";
+import { captureAggregateConservationBaseline, validateAggregateConservation } from "./offlineApproximation";
 import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
@@ -71,6 +72,41 @@ function stableCanonicalSha256(value: unknown): string {
   };
   visit(value);
   return hash.digest("hex");
+}
+
+function aggregateConservationSummary(state: GameState) {
+  const captured = captureAggregateConservationBaseline(state);
+  const orderedEntries = (values: Map<string, bigint>) => [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([itemId, amount]) => [itemId, amount.toString()]);
+  const material = {
+    totals: orderedEntries(captured.totals),
+    totalProduced: orderedEntries(captured.totalProduced),
+    knownConsumed: orderedEntries(captured.knownConsumed),
+    knownGranted: orderedEntries(captured.knownGranted),
+    constructionOutputs: orderedEntries(captured.constructionOutputs),
+    constructionCrafted: captured.constructionCrafted.toString(),
+    failure: captured.failure ?? null,
+  };
+  return {
+    sha256: stableCanonicalSha256(material),
+    captureFailure: captured.failure ?? null,
+    itemCounts: {
+      totals: captured.totals.size,
+      totalProduced: captured.totalProduced.size,
+      knownConsumed: captured.knownConsumed.size,
+      knownGranted: captured.knownGranted.size,
+      constructionOutputs: captured.constructionOutputs.size,
+    },
+  };
+}
+
+function lastNativeProfileValue(stderr: string | undefined, label: string): number | null {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const values = [...String(stderr ?? "").matchAll(
+    new RegExp(`DSP_NATIVE_CORE_PROFILE\\t${escapedLabel}\\t([^\\r\\n]+)`, "g"),
+  )].map((match) => Number(match[1].trim())).filter(Number.isFinite);
+  return values.length > 0 ? values[values.length - 1] : null;
 }
 
 function privateBytes(pid: number | undefined): number | null {
@@ -517,10 +553,13 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     if (admission.supported) {
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
+      const conservationBefore = captureAggregateConservationBaseline(expectedInitial);
       const jsProfiler = createSimulationProfiler();
       const jsAdvanceStartedAt = performance.now();
       const expected = advanceSimulationBudget(expectedInitial, 1, 1, jsProfiler);
       const jsAdvanceDurationMs = performance.now() - jsAdvanceStartedAt;
+      const conservationSummary = aggregateConservationSummary(expected);
+      const conservationValidationFailure = validateAggregateConservation(conservationBefore, expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
@@ -559,9 +598,19 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
+          revision: advancedSummary.revision,
+          expectedRevision: resumed.revision + 1,
           canonicalSha256: advancedSummary.canonicalSha256,
           expectedCanonicalSha256: stableCanonicalSha256(expected),
+          domainSha256: advancedSummary.domainSha256,
           canonicalComponents: advancedSummary.canonicalComponents,
+          conservationSummarySha256: conservationSummary.sha256,
+          conservationCaptureFailure: conservationSummary.captureFailure,
+          conservationValidationFailure,
+          conservationItemCounts: conservationSummary.itemCounts,
+          requestedThreadSetting: process.env.DSP_NATIVE_CORE_THREADS ?? null,
+          effectiveWorkerLimit: lastNativeProfileValue(client.stderrTail, "runtime-worker-limit"),
+          observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
           fieldMismatches,
           mismatchDetails,
           blockedMachineGroups,
@@ -584,6 +633,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       });
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);
+      expect(advancedSummary.revision).toBe(resumed.revision + 1);
+      expect(conservationSummary.captureFailure).toBeNull();
       expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
       if (benchmarkExactOnly) {
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });

@@ -4445,6 +4445,17 @@ pub(crate) fn prepare_advance(
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
     let mut profile_checkpoint = std::time::Instant::now();
+    if profile_enabled {
+        let runtime = crate::deterministic_runtime::runtime();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\truntime-worker-limit\t{}",
+            runtime.worker_limit()
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\truntime-observed-workers\t{}",
+            runtime.observed_worker_count()
+        );
+    }
     macro_rules! profile_mark {
         ($label:literal) => {
             if profile_enabled {

@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
@@ -419,6 +420,65 @@ test("v47 import keeps the selected path outside the renderer request and owner-
   assert.equal(calls[0].sourcePath, sourcePath);
   assert.throws(() => registry.status(8, "core-import-1"), /not owned/);
   await registry.close(7, "core-import-1");
+});
+
+test("player authority prepare and activate are main-owned, capability-gated, and proof-free", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      return { lease: { phase: request.operation === "corePreparePlayerAuthority" ? "prepared" : "active" }, summary: {} };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  const expectedCheckpoint = { generation: 3, rootHash: "a".repeat(64), revision: 7 };
+
+  await registry.preparePlayerAuthority("main-authority", {
+    sessionId: "core-1",
+    runId: "player-run-1",
+    expectedCheckpoint,
+    settledDeadlineMs: 10_000,
+  });
+  await registry.activatePlayerAuthority("main-authority", {
+    sessionId: "core-1",
+    runId: "player-run-1",
+    expectedCheckpoint,
+  });
+
+  assert.deepEqual(calls, [
+    {
+      operation: "corePreparePlayerAuthority",
+      sessionId: "core-1",
+      request: { runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000 },
+    },
+    {
+      operation: "coreActivatePlayerAuthority",
+      sessionId: "core-1",
+      request: { runId: "player-run-1", expectedCheckpoint },
+    },
+  ]);
+  assert.throws(() => registry.preparePlayerAuthority("renderer-owner", {
+    sessionId: "core-1", runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000,
+  }), /not owned/);
+  assert.throws(() => registry.preparePlayerAuthority("main-authority", {
+    sessionId: "core-1", runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000,
+    proof: { revision: 7, canonicalSha256: "b".repeat(64), domainSha256: "c".repeat(64) },
+  }), /invalid/);
+  assert.throws(() => registry.activatePlayerAuthority("main-authority", {
+    sessionId: "core-1", runId: "player-run-1", expectedCheckpoint: { ...expectedCheckpoint, rootHash: "not-a-hash" },
+  }), /checkpoint is invalid/);
+
+  const oldClient = { hello: { capabilities: [] }, async request() { throw new Error("must not call host"); } };
+  const oldRegistry = new NativeCoreSessionRegistry(oldClient);
+  oldRegistry.sessions.set("core-1", { ownerId: "main-authority", slot: "normal-main" });
+  assert.throws(() => oldRegistry.preparePlayerAuthority("main-authority", {
+    sessionId: "core-1", runId: "player-run-1", expectedCheckpoint, settledDeadlineMs: 10_000,
+  }), (error) => {
+    assert.equal(error.code, "NATIVE_CORE_PLAYER_AUTHORITY_GATE_UNAVAILABLE");
+    return true;
+  });
 });
 
 test("v47 import closes an unowned host session when its receipt is malformed", async () => {

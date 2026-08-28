@@ -14,6 +14,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
   "native-core-exact-realtime-writer-fence-v1";
+const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
@@ -589,6 +590,20 @@ function normalizeNativeCoreCommitOperation(value) {
   return request;
 }
 
+function normalizePlayerAuthorityCheckpoint(value, label) {
+  exactObjectKeys(value, ["generation", "rootHash", "revision"], label);
+  if (!Number.isSafeInteger(value.generation) || value.generation < 1 ||
+    typeof value.rootHash !== "string" || !/^[a-f0-9]{64}$/.test(value.rootHash) ||
+    !Number.isSafeInteger(value.revision) || value.revision < 0) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return {
+    generation: value.generation,
+    rootHash: value.rootHash,
+    revision: value.revision,
+  };
+}
+
 class NativeExactRealtimeLeaseRegistry {
   constructor(client) {
     this.client = client;
@@ -842,6 +857,64 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  preparePlayerAuthority(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the player-authority gate capability",
+        "NATIVE_CORE_PLAYER_AUTHORITY_GATE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedCheckpoint", "settledDeadlineMs",
+    ], "native player-authority prepare request");
+    if (!validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.settledDeadlineMs) || request.settledDeadlineMs < 0) {
+      throw new TypeError("native player-authority prepare request is invalid");
+    }
+    const expectedCheckpoint = normalizePlayerAuthorityCheckpoint(
+      request.expectedCheckpoint,
+      "native player-authority prepare checkpoint",
+    );
+    return this.client.request({
+      operation: "corePreparePlayerAuthority",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        expectedCheckpoint,
+        settledDeadlineMs: request.settledDeadlineMs,
+      },
+    }, 300_000);
+  }
+
+  activatePlayerAuthority(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the player-authority gate capability",
+        "NATIVE_CORE_PLAYER_AUTHORITY_GATE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedCheckpoint",
+    ], "native player-authority activate request");
+    if (!validLogicalId(request.runId, 128)) {
+      throw new TypeError("native player-authority activate request is invalid");
+    }
+    const expectedCheckpoint = normalizePlayerAuthorityCheckpoint(
+      request.expectedCheckpoint,
+      "native player-authority activate checkpoint",
+    );
+    return this.client.request({
+      operation: "coreActivatePlayerAuthority",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        expectedCheckpoint,
+      },
+    }, 300_000);
+  }
+
   checkpoint(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!Number.isSafeInteger(request?.savedAtMs) || request.savedAtMs < 0) {
@@ -968,6 +1041,7 @@ module.exports = {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NativeHostClient,
   NativeHostError,

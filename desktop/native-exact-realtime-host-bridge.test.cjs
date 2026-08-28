@@ -132,6 +132,10 @@ test("exact commit bridge is capability-gated, identity-only, and absent from re
   for (const file of ["main.cjs", "preload.cjs"]) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     assert.doesNotMatch(source, /coreCommitOperationExactRealtime|commitOperationExactRealtime/);
+    assert.doesNotMatch(
+      source,
+      /corePreparePlayerAuthority|preparePlayerAuthority|coreActivatePlayerAuthority|activatePlayerAuthority/,
+    );
   }
 });
 

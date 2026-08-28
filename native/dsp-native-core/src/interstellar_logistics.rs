@@ -1263,6 +1263,130 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     Ok(None)
 }
 
+struct ReadyProbeEnvironment<P, E, C> {
+    peer_matches: P,
+    route_economics: E,
+    station_capacity: C,
+}
+
+fn plan_ready_station_indices_with<P, E, C>(
+    runtime: &DeterministicRuntime,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    station_indices: &[usize],
+    ledger: &Ledger,
+    probes: ReadyProbeEnvironment<P, E, C>,
+) -> anyhow::Result<Vec<Option<usize>>>
+where
+    P: Fn(usize, usize) -> anyhow::Result<Vec<(usize, usize)>> + Send + Sync,
+    E: Fn(usize, usize, &Slot) -> anyhow::Result<Option<RouteEconomics>> + Send + Sync,
+    C: Fn(usize, &Map<String, Value>, &Slot) -> anyhow::Result<f64> + Send + Sync,
+{
+    runtime.indexed_try_map(
+        station_indices,
+        |_, station_index| -> anyhow::Result<Option<usize>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !is_legacy_interstellar_station(station) {
+                return Ok(None);
+            }
+            if traditional_remote_disabled(station) {
+                return Ok(None);
+            }
+            if ledger.active_remote_stations.contains(&station_index) {
+                return Ok(Some(station_index));
+            }
+            let station_slots = slots(station)?;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.remote_mode == "storage" {
+                    continue;
+                }
+                for (peer_index, peer_slot_index) in
+                    (probes.peer_matches)(station_index, slot_index)?
+                {
+                    let peer = entities[peer_index].as_object().expect("station object");
+                    let peer_slots = if string_at(peer, "buildingId") == Some("orbital_collector") {
+                        vec![orbital_slot(peer)]
+                    } else {
+                        slots(peer)?
+                    };
+                    let (demand_index, demand_slot, supply_index, supply_slot) =
+                        if slot.remote_mode == "demand" {
+                            (
+                                station_index,
+                                slot,
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                            )
+                        } else {
+                            (
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                                station_index,
+                                slot,
+                            )
+                        };
+                    let demand = entities[demand_index].as_object().expect("station object");
+                    let supply = entities[supply_index].as_object().expect("station object");
+                    let Some(economics) =
+                        (probes.route_economics)(supply_index, demand_index, demand_slot)?
+                    else {
+                        continue;
+                    };
+                    let available = (item_amount(supply, "outputs", item_id)
+                        - supply_slot.min_stock)
+                        .max(0.0)
+                        .floor();
+                    let free = ((probes.station_capacity)(demand_index, demand, demand_slot)?
+                        - item_amount(demand, "outputs", item_id)
+                        - ledger
+                            .in_flight
+                            .get(&(demand_index, item_id.to_owned()))
+                            .copied()
+                            .unwrap_or(0.0))
+                    .max(0.0)
+                    .floor();
+                    for (owner_index, owner_slot) in
+                        [(demand_index, demand_slot), (supply_index, supply_slot)]
+                    {
+                        let owner = entities[owner_index].as_object().expect("station object");
+                        let has_vehicle = installed_vessels(owner)
+                            - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
+                            > 0.0;
+                        let warp_ready = !economics.requires_warp
+                            || (completed_tech(base, "space_warp")
+                                && owner
+                                    .get("stationWarpEnabled")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false)
+                                && finite_number(owner.get("stationWarpers"))
+                                    >= economics.warpers_per_vessel);
+                        let minimum = minimum_cargo(base, owner_slot);
+                        if has_vehicle && warp_ready && available >= minimum && free >= minimum {
+                            return Ok(Some(station_index));
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        },
+    )
+}
+
+fn replay_ready_station_indices(planned: Vec<Option<usize>>) -> HashSet<usize> {
+    let mut ready = HashSet::with_capacity(planned.len());
+    // Preserve topology order at the merge boundary. The caller sorts the
+    // combined local/remote set before power probes, so worker scheduling can
+    // never affect the following simulation phase.
+    for station_index in planned.into_iter().flatten() {
+        ready.insert(station_index);
+    }
+    ready
+}
+
 pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -1278,102 +1402,32 @@ pub(crate) fn ready_station_indices(
     }
     let indexes = &state.entity_index;
     let ledger = build_ledger(entities, indexes);
-    let mut ready = HashSet::with_capacity(station_indices.len());
-    for station_index in station_indices.iter().copied() {
-        let station = entities[station_index].as_object().expect("station object");
-        if !is_legacy_interstellar_station(station) {
-            continue;
-        }
-        if traditional_remote_disabled(station) {
-            continue;
-        }
-        if ledger.active_remote_stations.contains(&station_index) {
-            ready.insert(station_index);
-            continue;
-        }
-        let station_slots = slots(station)?;
-        'slots: for (slot_index, slot) in station_slots.iter().enumerate() {
-            let Some(item_id) = slot.item_id.as_deref() else {
-                continue;
-            };
-            if slot.remote_mode == "storage" {
-                continue;
-            }
-            for (peer_index, peer_slot_index) in
-                peer_matches(state, base, entities, station_index, slot_index)?
-            {
-                let peer = entities[peer_index].as_object().expect("station object");
-                let peer_slots = if string_at(peer, "buildingId") == Some("orbital_collector") {
-                    vec![orbital_slot(peer)]
-                } else {
-                    slots(peer)?
-                };
-                let (demand_index, demand_slot, supply_index, supply_slot) =
-                    if slot.remote_mode == "demand" {
-                        (
-                            station_index,
-                            slot,
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                        )
-                    } else {
-                        (
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                            station_index,
-                            slot,
-                        )
-                    };
-                let demand = entities[demand_index].as_object().expect("station object");
-                let supply = entities[supply_index].as_object().expect("station object");
-                let Some(economics) = route_economics(
+    let planned = plan_ready_station_indices_with(
+        deterministic_runtime(),
+        base,
+        entities,
+        station_indices,
+        &ledger,
+        ReadyProbeEnvironment {
+            peer_matches: |station_index, slot_index| {
+                peer_matches(state, base, entities, station_index, slot_index)
+            },
+            route_economics: |supply_index, demand_index, demand_slot: &Slot| {
+                route_economics(
                     state,
                     base,
                     entities,
                     supply_index,
                     demand_index,
                     demand_slot,
-                )?
-                else {
-                    continue;
-                };
-                let available = (item_amount(supply, "outputs", item_id) - supply_slot.min_stock)
-                    .max(0.0)
-                    .floor();
-                let free = (station_capacity(state, base, demand, demand_slot)?
-                    - item_amount(demand, "outputs", item_id)
-                    - ledger
-                        .in_flight
-                        .get(&(demand_index, item_id.to_owned()))
-                        .copied()
-                        .unwrap_or(0.0))
-                .max(0.0)
-                .floor();
-                for (owner_index, owner_slot) in
-                    [(demand_index, demand_slot), (supply_index, supply_slot)]
-                {
-                    let owner = entities[owner_index].as_object().expect("station object");
-                    let has_vehicle = installed_vessels(owner)
-                        - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
-                        > 0.0;
-                    let warp_ready = !economics.requires_warp
-                        || (completed_tech(base, "space_warp")
-                            && owner
-                                .get("stationWarpEnabled")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false)
-                            && finite_number(owner.get("stationWarpers"))
-                                >= economics.warpers_per_vessel);
-                    let minimum = minimum_cargo(base, owner_slot);
-                    if has_vehicle && warp_ready && available >= minimum && free >= minimum {
-                        ready.insert(station_index);
-                        break 'slots;
-                    }
-                }
-            }
-        }
-    }
-    Ok(ready)
+                )
+            },
+            station_capacity: |_, demand: &Map<String, Value>, demand_slot: &Slot| {
+                station_capacity(state, base, demand, demand_slot)
+            },
+        },
+    )?;
+    Ok(replay_ready_station_indices(planned))
 }
 
 fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
@@ -2656,6 +2710,167 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updates.len(), station_indices.len());
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    fn interstellar_ready_matrix(
+        count: usize,
+    ) -> (Vec<Value>, Vec<usize>, Ledger, Map<String, Value>) {
+        let (mut entities, station_indices, ledger, _) = interstellar_congestion_matrix(count);
+        for (index, value) in entities.iter_mut().enumerate() {
+            let station = value.as_object_mut().expect("ready station object");
+            station["stationSlots"]
+                .as_array_mut()
+                .expect("ready station slots")[0]["remoteMode"] =
+                Value::from(if index == 0 { "supply" } else { "demand" });
+            station.insert("stationVessels".to_owned(), Value::from(10));
+            station.insert("stationWarpEnabled".to_owned(), Value::from(true));
+            station.insert("stationWarpers".to_owned(), Value::from(100));
+            station.insert(
+                "outputs".to_owned(),
+                json!({ "mod:星际物料/Ω🚀": if index == 0 { 1000 } else { 0 } }),
+            );
+        }
+        let base = json!({
+            "settings": { "difficulty": "standard" },
+            "research": { "completedTechIds": ["space_warp"] },
+            "endgame": { "infiniteResearch": { "galactic_logistics": { "level": 0 } } },
+        })
+        .as_object()
+        .expect("ready base object")
+        .clone();
+        (entities, station_indices, ledger, base)
+    }
+
+    fn direct_ready_economics() -> RouteEconomics {
+        RouteEconomics {
+            requires_warp: false,
+            duration: 1.0,
+            distance_ly: 0.0,
+            warpers_per_vessel: 0.0,
+            waypoint_station_ids: Vec::new(),
+        }
+    }
+
+    fn run_interstellar_ready_plan(worker_count: usize) -> (Vec<Option<usize>>, Vec<usize>) {
+        let (entities, station_indices, mut ledger, base) =
+            interstellar_ready_matrix(PARALLEL_MIN_ITEMS + 61);
+        ledger.active_remote_stations.insert(7);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let base_source = serde_json::to_vec(&base).unwrap();
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(worker_count),
+            &base,
+            &entities,
+            &station_indices,
+            &ledger,
+            ReadyProbeEnvironment {
+                peer_matches: |station_index, slot_index| {
+                    assert_eq!(slot_index, 0);
+                    Ok(vec![(if station_index == 0 { 2 } else { 0 }, 0)])
+                },
+                route_economics: |_, _, _: &Slot| Ok(Some(direct_ready_economics())),
+                station_capacity: |demand_index, _: &Map<String, Value>, _: &Slot| {
+                    Ok(if demand_index % 2 == 0 { 1000.0 } else { 0.0 })
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+        assert_eq!(serde_json::to_vec(&base).unwrap(), base_source);
+        let mut ready = replay_ready_station_indices(planned.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        (planned, ready)
+    }
+
+    #[test]
+    fn interstellar_ready_parallel_probe_is_exact_for_1_2_4_8_workers() {
+        let expected = run_interstellar_ready_plan(1);
+        for worker_count in [2, 4, 8] {
+            assert_eq!(run_interstellar_ready_plan(worker_count), expected);
+        }
+
+        let (planned, ready) = expected;
+        assert_eq!(planned[0], Some(0));
+        assert_eq!(planned[1], None);
+        assert_eq!(planned[2], Some(2));
+        assert_eq!(planned[7], Some(7));
+        assert!(ready.contains(&0));
+        assert!(ready.contains(&2));
+        assert!(ready.contains(&7));
+        assert!(!ready.contains(&1));
+        assert!(!ready.contains(&9));
+    }
+
+    #[test]
+    fn interstellar_ready_failure_uses_lowest_input_and_keeps_sources_atomic() {
+        let (entities, station_indices, ledger, base) =
+            interstellar_ready_matrix(PARALLEL_MIN_ITEMS + 29);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let base_source = serde_json::to_vec(&base).unwrap();
+        let later_failure = PARALLEL_MIN_ITEMS + 17;
+
+        for worker_count in [1, 2, 4, 8] {
+            let visited_later_failure = AtomicBool::new(false);
+            let error = plan_ready_station_indices_with(
+                &DeterministicRuntime::for_test(worker_count),
+                &base,
+                &entities,
+                &station_indices,
+                &ledger,
+                ReadyProbeEnvironment {
+                    peer_matches: |station_index, _| {
+                        Ok(vec![(if station_index == 0 { 2 } else { 0 }, 0)])
+                    },
+                    route_economics: |_, _, _: &Slot| Ok(Some(direct_ready_economics())),
+                    station_capacity: |demand_index, _: &Map<String, Value>, _: &Slot| {
+                        if demand_index == later_failure {
+                            visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                            bail!("later interstellar ready probe failure");
+                        }
+                        if demand_index == 7 {
+                            bail!("first interstellar ready probe failure");
+                        }
+                        Ok(1000.0)
+                    },
+                },
+            )
+            .expect_err("any failed readiness probe must reject the whole batch");
+            assert_eq!(error.to_string(), "first interstellar ready probe failure");
+            assert!(
+                visited_later_failure.load(AtomicOrdering::SeqCst),
+                "all probes must complete before ordered error selection"
+            );
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+            assert_eq!(serde_json::to_vec(&base).unwrap(), base_source);
+        }
+    }
+
+    #[test]
+    fn small_interstellar_ready_batches_stay_serial() {
+        let (entities, station_indices, ledger, base) = interstellar_ready_matrix(31);
+        let saw_rayon_worker = AtomicBool::new(false);
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(8),
+            &base,
+            &entities,
+            &station_indices,
+            &ledger,
+            ReadyProbeEnvironment {
+                peer_matches: |station_index, _| {
+                    if rayon::current_thread_index().is_some() {
+                        saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                    }
+                    Ok(vec![(if station_index == 0 { 2 } else { 0 }, 0)])
+                },
+                route_economics: |_, _, _: &Slot| Ok(Some(direct_ready_economics())),
+                station_capacity: |_, _: &Map<String, Value>, _: &Slot| Ok(1000.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(planned.len(), station_indices.len());
         assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
     }
 }

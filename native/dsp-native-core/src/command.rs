@@ -4010,6 +4010,48 @@ fn validate_dyson_launch_configuration_command(
                 bail!("native player-authority Dyson launch enabled state is unchanged")
             }
         }
+        [
+            PathSegment::Key(root),
+            PathSegment::Key(directory),
+            PathSegment::Key(system_id),
+        ] if root == "dysonEngineering" && directory == "activeOrbitBySystem" => {
+            let target = value
+                .as_str()
+                .filter(|orbit_id| {
+                    !orbit_id.is_empty() && orbit_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES
+                })
+                .ok_or_else(|| {
+                    anyhow!("native player-authority active Dyson orbit ID is invalid")
+                })?;
+            let current = engineering
+                .get("activeOrbitBySystem")
+                .and_then(Value::as_object)
+                .and_then(|systems| systems.get(system_id))
+                .and_then(Value::as_str)
+                .filter(|orbit_id| {
+                    !orbit_id.is_empty() && orbit_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES
+                })
+                .ok_or_else(|| {
+                    anyhow!("native player-authority current active Dyson orbit is invalid")
+                })?;
+            if target == current {
+                bail!("native player-authority active Dyson orbit is unchanged")
+            }
+            let orbits = engineering
+                .get("orbitsBySystem")
+                .and_then(Value::as_object)
+                .and_then(|systems| systems.get(system_id))
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority Dyson orbit directory is invalid")
+                })?;
+            if !orbits
+                .iter()
+                .any(|orbit| orbit.get("id").and_then(Value::as_str) == Some(target))
+            {
+                bail!("native player-authority active Dyson orbit is outside its stellar system")
+            }
+        }
         _ => bail!("native player-authority Dyson launch patch path is not canonical"),
     }
     Ok(())
@@ -8681,7 +8723,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_applies_only_canonical_dyson_launch_controls() {
+    fn player_authority_applies_only_canonical_dyson_launch_and_orbit_selection_controls() {
         let mut state = player_command_state();
 
         let mode = dyson_launch_command(state.revision, "launchMode", Value::from("sphere"));
@@ -8718,7 +8760,18 @@ mod tests {
             state.base_value()["dysonEngineering"]["launchEnabled"],
             false
         );
-        assert_eq!(state.revision, 12);
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["dysonEngineering", "activeOrbitBySystem", "helios"],
+                Value::from("orbit-home-new"),
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["dysonEngineering"]["activeOrbitBySystem"]["helios"],
+            "orbit-home-new"
+        );
+        assert_eq!(state.revision, 13);
 
         let committed_hash = state.canonical_sha256().unwrap();
         let retry_error = state.apply_player_authority_command(&mode).unwrap_err();
@@ -8727,7 +8780,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_dyson_launch_controls_fail_closed_without_mutation() {
+    fn player_authority_dyson_launch_and_orbit_selection_fail_closed_without_mutation() {
         let mut delete_mode = dyson_launch_command(9, "launchMode", Value::from("sphere"));
         delete_mode.top_level_changes[0].operation = "delete".to_owned();
         delete_mode.top_level_changes[0].value = None;
@@ -8753,6 +8806,26 @@ mod tests {
             dyson_launch_command(9, "launchThrottle", Value::from(1)),
             dyson_launch_command(9, "launchEnabled", Value::from("false")),
             dyson_launch_command(9, "launchEnergySpentMj", Value::from(0)),
+            top_level_leaf_command(
+                9,
+                &["dysonEngineering", "activeOrbitBySystem", "helios"],
+                Value::from("orbit-home-old"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonEngineering", "activeOrbitBySystem", "helios"],
+                Value::from("orbit-foreign"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonEngineering", "activeOrbitBySystem", "missing"],
+                Value::from("orbit-home-new"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["dysonEngineering", "activeOrbitBySystem", "helios"],
+                Value::from(""),
+            ),
             delete_mode,
             mixed,
             entity_mixed,

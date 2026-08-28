@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Number, Value};
@@ -9,7 +10,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-v8";
+    "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-v9";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -75,6 +76,22 @@ struct ResearchProofSnapshot {
     labs: Vec<ResearchLabProofSnapshot>,
 }
 
+/// Compact persisted-resource identity captured at a settlement boundary.
+/// Infinite-mode veins and naturally infinite oceans are deliberately absent:
+/// only a finite reserve can fund a finite-tail certificate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FiniteVeinProofSnapshot {
+    entity_index: usize,
+    entity_id: String,
+    planet_id: String,
+    resource_id: String,
+    miner_count: i128,
+    consumption_tenths: i128,
+    tracks_depletion_remainder: bool,
+    remaining: i128,
+    depletion_remainder: i128,
+}
+
 /// Ephemeral proof input for one native candidate. It is never serialized into
 /// public GameState v47, the save envelope, or a canonical hash. Each capture
 /// owns only compact per-item counters; entity rows are decoded one at a time.
@@ -90,6 +107,7 @@ struct SettlementProofSnapshot {
     construction_crafted: i128,
     dyson: DysonTerminalSnapshot,
     research: ResearchProofSnapshot,
+    finite_veins: BTreeMap<String, FiniteVeinProofSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,8 +153,17 @@ struct DysonSailSinkCertificate {
     expected: DysonTerminalSnapshot,
 }
 
+/// Per-vein depletion receipt for a stable finite source. The current public
+/// v47 fields remain the ledger: no new persisted format or hidden material
+/// balance is introduced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FiniteVeinCertificate {
+    units_per_second: i128,
+    expected: FiniteVeinProofSnapshot,
+}
+
 /// A deliberately narrow productive contract. Every admitted item is an
-/// exclusive infinite-vein output whose aggregate owned-stock increase equals
+/// exclusive vein output whose aggregate owned-stock increase equals
 /// its cumulative production increase in each of three adjacent ten-second
 /// exact windows. Rates are whole units per simulated second, so applying them
 /// over the absolute microsecond clock is deterministic across request splits
@@ -151,6 +178,9 @@ struct OrdinaryFlowCertificate {
     /// Inferred internal recipe consumption per simulated second. GameState
     /// v47 has no persisted totalConsumed map; this remains runtime proof.
     consumed_units_per_second: MaterialTotals,
+    /// Stable finite source rows whose public reserve fields must be debited
+    /// before the corresponding gross production can be committed.
+    finite_veins: Vec<FiniteVeinCertificate>,
     /// Active ordinary recipes in first-seen entity order. An empty vector is
     /// the legacy source-only proof; non-empty means the complete acyclic
     /// recipe domain was closed without reordering any persisted entity.
@@ -890,6 +920,135 @@ fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<Research
     })
 }
 
+fn finite_vein_snapshot_at(
+    state: &CoreState,
+    entity_index: usize,
+) -> anyhow::Result<Option<FiniteVeinProofSnapshot>> {
+    let base = state.base_value();
+    let resource_mode = base
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("resourceMode"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("settings.resourceMode is missing"))?;
+    if resource_mode == "infinite" {
+        return Ok(None);
+    }
+    if resource_mode != "finite" {
+        bail!("settings.resourceMode is invalid");
+    }
+
+    let entity = state.parse_entity(entity_index)?;
+    let entity = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("finite vein entity is not an object"))?;
+    if entity.get("kind").and_then(Value::as_str) != Some("vein") {
+        bail!("finite vein topology points at a non-vein entity");
+    }
+    let required_id = |key: &str| -> anyhow::Result<String> {
+        entity
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("finite vein is missing {key}"))
+    };
+    let entity_id = required_id("id")?;
+    let planet_id = required_id("planetId")?;
+    let resource_id = required_id("resourceId")?;
+    let item_kind = state
+        .catalog
+        .items
+        .get(&resource_id)
+        .map(|item| item.kind.as_str())
+        .ok_or_else(|| anyhow!("finite vein resource {resource_id} is absent from the catalog"))?;
+    if !matches!(item_kind, "solid" | "fluid") {
+        bail!("finite vein resource {resource_id} is not mineable");
+    }
+
+    let vein_level = proof_counter(
+        base.get("endgame")
+            .and_then(Value::as_object)
+            .and_then(|endgame| endgame.get("infiniteResearch"))
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("vein_utilization"))
+            .and_then(Value::as_object)
+            .and_then(|progress| progress.get("level")),
+        "endgame.infiniteResearch.vein_utilization.level",
+    )?;
+    let consumption_tenths = if item_kind == "solid" {
+        10_i128.saturating_sub(vein_level.min(10))
+    } else {
+        10
+    };
+    let ocean_type = base
+        .get("galaxy")
+        .and_then(Value::as_object)
+        .and_then(|galaxy| galaxy.get("profiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| profiles.get(&planet_id))
+        .and_then(Value::as_object)
+        .and_then(|profile| profile.get("oceanType"))
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let naturally_infinite = consumption_tenths == 0
+        || resource_id == "water" && ocean_type == "water"
+        || resource_id == "sulfuric_acid" && ocean_type == "sulfuric-acid";
+    if naturally_infinite {
+        return Ok(None);
+    }
+
+    let remaining_value = entity
+        .get("resourceRemaining")
+        .ok_or_else(|| anyhow!("finite vein {entity_id} has no resourceRemaining"))?;
+    let remaining = proof_counter(
+        Some(remaining_value),
+        &format!("entities.{entity_id}.resourceRemaining"),
+    )?;
+    let tracks_depletion_remainder = item_kind == "solid";
+    let depletion_remainder = if tracks_depletion_remainder {
+        let remainder_value = entity.get("resourceDepletionRemainder").ok_or_else(|| {
+            anyhow!("finite solid vein {entity_id} has no resourceDepletionRemainder")
+        })?;
+        proof_counter(
+            Some(remainder_value),
+            &format!("entities.{entity_id}.resourceDepletionRemainder"),
+        )?
+    } else {
+        0
+    };
+    if depletion_remainder >= 10 {
+        bail!("finite vein {entity_id} depletion remainder is outside 0..9");
+    }
+    Ok(Some(FiniteVeinProofSnapshot {
+        entity_index,
+        entity_id,
+        planet_id,
+        resource_id,
+        miner_count: proof_counter(entity.get("minerCount"), "finiteVein.minerCount")?,
+        consumption_tenths,
+        tracks_depletion_remainder,
+        remaining,
+        depletion_remainder,
+    }))
+}
+
+fn capture_finite_veins(
+    state: &CoreState,
+) -> anyhow::Result<BTreeMap<String, FiniteVeinProofSnapshot>> {
+    let mut veins = BTreeMap::new();
+    for &entity_index in &state.factory_topology.vein_indices {
+        let Some(snapshot) = finite_vein_snapshot_at(state, entity_index)? else {
+            continue;
+        };
+        let entity_id = snapshot.entity_id.clone();
+        if veins.insert(entity_id.clone(), snapshot).is_some() {
+            bail!("finite vein proof repeats entity ID {entity_id}");
+        }
+    }
+    Ok(veins)
+}
+
 fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementProofSnapshot> {
     let base = state.base_value();
     let mut snapshot = SettlementProofSnapshot {
@@ -902,6 +1061,7 @@ fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementPr
         )?,
         dyson: capture_dyson_terminal(base)?,
         research: capture_research_proof_snapshot(state)?,
+        finite_veins: capture_finite_veins(state)?,
         ..SettlementProofSnapshot::default()
     };
 
@@ -1523,6 +1683,96 @@ fn capture_construction_conversion_ledger(
     Ok(ledger)
 }
 
+fn finite_vein_static_state_matches(
+    before: &FiniteVeinProofSnapshot,
+    after: &FiniteVeinProofSnapshot,
+) -> bool {
+    before.entity_index == after.entity_index
+        && before.entity_id == after.entity_id
+        && before.planet_id == after.planet_id
+        && before.resource_id == after.resource_id
+        && before.miner_count == after.miner_count
+        && before.consumption_tenths == after.consumption_tenths
+        && before.tracks_depletion_remainder == after.tracks_depletion_remainder
+}
+
+fn finite_vein_extracted_units(
+    before: &FiniteVeinProofSnapshot,
+    after: &FiniteVeinProofSnapshot,
+) -> Result<i128, String> {
+    if !finite_vein_static_state_matches(before, after) {
+        return Err(format!(
+            "finite vein {} configuration changed during settlement",
+            before.entity_id
+        ));
+    }
+    if before.consumption_tenths <= 0
+        || before.consumption_tenths > 10
+        || !(0..10).contains(&before.depletion_remainder)
+        || !(0..10).contains(&after.depletion_remainder)
+    {
+        return Err(format!(
+            "finite vein {} depletion parameters are invalid",
+            before.entity_id
+        ));
+    }
+    let depleted = before
+        .remaining
+        .checked_sub(after.remaining)
+        .ok_or_else(|| format!("finite vein {} reserve delta overflowed", before.entity_id))?;
+    if depleted < 0 {
+        return Err(format!(
+            "finite vein {} reserve increased without an audited source",
+            before.entity_id
+        ));
+    }
+    let consumed_tenths = depleted
+        .checked_mul(10)
+        .and_then(|value| value.checked_add(after.depletion_remainder))
+        .and_then(|value| value.checked_sub(before.depletion_remainder))
+        .ok_or_else(|| {
+            format!(
+                "finite vein {} depletion ledger overflowed",
+                before.entity_id
+            )
+        })?;
+    if consumed_tenths < 0 || consumed_tenths % before.consumption_tenths != 0 {
+        return Err(format!(
+            "finite vein {} reserve/remainder delta is not a whole mined-unit receipt",
+            before.entity_id
+        ));
+    }
+    Ok(consumed_tenths / before.consumption_tenths)
+}
+
+fn validate_finite_vein_depletion(
+    before: &SettlementProofSnapshot,
+    after: &SettlementProofSnapshot,
+) -> Result<MaterialTotals, String> {
+    if before.finite_veins.keys().ne(after.finite_veins.keys()) {
+        return Err("finite vein topology changed during settlement".to_owned());
+    }
+    let mut extracted_by_item = MaterialTotals::new();
+    for (entity_id, before_vein) in &before.finite_veins {
+        let after_vein = after
+            .finite_veins
+            .get(entity_id)
+            .ok_or_else(|| format!("finite vein {entity_id} disappeared"))?;
+        let extracted = finite_vein_extracted_units(before_vein, after_vein)?;
+        let current = extracted_by_item
+            .get(&before_vein.resource_id)
+            .copied()
+            .unwrap_or(0);
+        extracted_by_item.insert(
+            before_vein.resource_id.clone(),
+            current.checked_add(extracted).ok_or_else(|| {
+                format!("{} finite extraction overflowed", before_vein.resource_id)
+            })?,
+        );
+    }
+    Ok(extracted_by_item)
+}
+
 fn fleet_recipe_proof<'a>(
     catalog: &'a crate::catalog::RuntimeCatalog,
     item_id: &'static str,
@@ -1787,6 +2037,7 @@ fn validate_settlement_proof(
     construction_receipt: Option<&ConstructionRecipeReceipt>,
 ) -> Result<(), String> {
     let construction = capture_construction_conversion_ledger(before, after)?;
+    let finite_extraction = validate_finite_vein_depletion(before, after)?;
 
     for item_id in material_ids([
         &before.owned,
@@ -1804,6 +2055,12 @@ fn validate_settlement_proof(
         let granted_delta = material_delta(&before.granted, &after.granted, &item_id);
         if produced_delta < 0 {
             return Err(format!("{item_id} cumulative production regressed"));
+        }
+        let finite_mined = finite_extraction.get(&item_id).copied().unwrap_or(0);
+        if finite_mined > produced_delta {
+            return Err(format!(
+                "{item_id} finite reserve funded {finite_mined} mined unit(s), but cumulative production increased by only {produced_delta}"
+            ));
         }
         if consumed_delta < 0 {
             return Err(format!(
@@ -1999,21 +2256,7 @@ fn checked_material_delta(
         .ok_or_else(|| format!("{label}.{item_id} delta overflowed"))
 }
 
-fn exclusive_infinite_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String> {
-    if state
-        .base_value()
-        .get("settings")
-        .and_then(Value::as_object)
-        .and_then(|settings| settings.get("resourceMode"))
-        .and_then(Value::as_str)
-        != Some("infinite")
-    {
-        return Err(
-            "finite resources have no native depletion horizon certificate; ordinary-flow tail is frozen"
-                .to_owned(),
-        );
-    }
-
+fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String> {
     // Material-fuel generators and charge/discharge stores can make a short
     // window productive by spending a finite cache. Their energy budget is not
     // represented in the material snapshot, so none may back this certificate.
@@ -2080,9 +2323,109 @@ fn exclusive_infinite_vein_sources(state: &CoreState) -> Result<BTreeSet<String>
         }
     }
     if sources.is_empty() {
-        return Err("no exclusive active infinite-vein source is available".to_owned());
+        return Err("no exclusive active vein source is available".to_owned());
     }
     Ok(sources)
+}
+
+fn source_has_unbounded_vein(state: &CoreState, item_id: &str) -> Result<bool, String> {
+    for &entity_index in &state.factory_topology.vein_indices {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("vein decode failed: {error:#}"))?;
+        if number_at(Some(&entity), &["minerCount"]) <= EPSILON
+            || entity.get("resourceId").and_then(Value::as_str) != Some(item_id)
+        {
+            continue;
+        }
+        if finite_vein_snapshot_at(state, entity_index)
+            .map_err(|error| format!("finite vein proof failed: {error:#}"))?
+            .is_none()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn build_finite_vein_certificates(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+    sources: &BTreeSet<String>,
+) -> Result<Vec<FiniteVeinCertificate>, String> {
+    let current = capture_finite_veins(state)
+        .map_err(|error| format!("current finite vein state is invalid: {error:#}"))?;
+    if current != snapshots[0].finite_veins && current != snapshots[3].finite_veins {
+        return Err("current finite vein state is not a calibration endpoint".to_owned());
+    }
+    let mut certificates = Vec::new();
+    for (entity_id, expected) in current {
+        if expected.miner_count <= 0 || !sources.contains(&expected.resource_id) {
+            continue;
+        }
+        let mut deltas = Vec::with_capacity(3);
+        for window in snapshots.windows(2) {
+            let before = window[0]
+                .finite_veins
+                .get(&entity_id)
+                .ok_or_else(|| format!("finite vein {entity_id} is missing before a window"))?;
+            let after = window[1]
+                .finite_veins
+                .get(&entity_id)
+                .ok_or_else(|| format!("finite vein {entity_id} is missing after a window"))?;
+            deltas.push(finite_vein_extracted_units(before, after)?);
+        }
+        let rate = stable_window_rate(&deltas, &format!("finite vein {entity_id} extraction"))?;
+        if rate > 0 {
+            certificates.push(FiniteVeinCertificate {
+                units_per_second: rate,
+                expected,
+            });
+        }
+    }
+    Ok(certificates)
+}
+
+fn validate_finite_source_rates(
+    state: &CoreState,
+    sources: &BTreeSet<String>,
+    produced_units_per_second: &MaterialTotals,
+    finite_veins: &[FiniteVeinCertificate],
+) -> Result<(), String> {
+    let mut finite_rates = MaterialTotals::new();
+    for certificate in finite_veins {
+        let current = finite_rates
+            .get(&certificate.expected.resource_id)
+            .copied()
+            .unwrap_or(0);
+        finite_rates.insert(
+            certificate.expected.resource_id.clone(),
+            current
+                .checked_add(certificate.units_per_second)
+                .ok_or_else(|| {
+                    format!(
+                        "{} finite source rate overflowed",
+                        certificate.expected.resource_id
+                    )
+                })?,
+        );
+    }
+    for item_id in sources {
+        let produced = produced_units_per_second.get(item_id).copied().unwrap_or(0);
+        let finite = finite_rates.get(item_id).copied().unwrap_or(0);
+        let has_unbounded = source_has_unbounded_vein(state, item_id)?;
+        if finite > produced || !has_unbounded && finite != produced {
+            return Err(format!(
+                "{item_id} source production {produced}/s does not close against finite reserve debit {finite}/s{}",
+                if has_unbounded {
+                    " plus the certified unbounded vein remainder"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn collection_has_entries(value: Option<&Value>) -> bool {
@@ -3287,6 +3630,7 @@ fn build_closed_recipe_certificate(
     state: &CoreState,
     sources: &BTreeSet<String>,
     flow: &OrdinaryWindowFlow,
+    finite_veins: Vec<FiniteVeinCertificate>,
     research: Option<ResearchSinkCertificate>,
     dyson_rocket: Option<DysonRocketSinkCertificate>,
     dyson_sail: Option<DysonSailSinkCertificate>,
@@ -3339,7 +3683,7 @@ fn build_closed_recipe_certificate(
         for item_id in outputs.keys() {
             if sources.contains(item_id) {
                 return Err(format!(
-                    "recipe {recipe_id} output {item_id} overlaps an infinite-vein source"
+                    "recipe {recipe_id} output {item_id} overlaps a certified vein source"
                 ));
             }
             if let Some(previous_index) = output_producer.insert(item_id.clone(), recipe_index) {
@@ -3365,7 +3709,7 @@ fn build_closed_recipe_certificate(
                     continue;
                 }
                 return Err(format!(
-                    "recipe {} input {item_id} has no certified infinite source or active producer",
+                    "recipe {} input {item_id} has no certified vein source or active producer",
                     recipe_ids[consumer_index]
                 ));
             };
@@ -3411,7 +3755,7 @@ fn build_closed_recipe_certificate(
         for item_id in research.consumed_units_per_second.keys() {
             if !sources.contains(item_id) && !output_producer.contains_key(item_id) {
                 return Err(format!(
-                    "research input {item_id} has no certified infinite source or active producer"
+                    "research input {item_id} has no certified vein source or active producer"
                 ));
             }
             allowed_consumption.insert(item_id.clone());
@@ -3581,6 +3925,7 @@ fn build_closed_recipe_certificate(
         units_per_second: flow.net_owned_per_second.clone(),
         produced_units_per_second: flow.produced_per_second.clone(),
         consumed_units_per_second: flow.consumed_per_second.clone(),
+        finite_veins,
         recipe_ids,
         research,
         dyson_rocket,
@@ -3622,7 +3967,8 @@ fn build_ordinary_flow_certificate(
         return Err("quantum inventory or capacity ledger is malformed".to_owned());
     }
 
-    let sources = exclusive_infinite_vein_sources(state)?;
+    let sources = exclusive_vein_sources(state)?;
+    let finite_veins = build_finite_vein_certificates(state, snapshots, &sources)?;
     let research = build_research_sink_certificate(state, snapshots)?;
     let dyson_sail = build_dyson_sail_sink_certificate(state, snapshots)?;
     let dyson_rocket = if dyson_sail.is_none() {
@@ -3646,10 +3992,12 @@ fn build_ordinary_flow_certificate(
         if windows.iter().skip(1).any(|window| window != &flow) {
             return Err("ordinary production/consumption/ownership rates were unstable across the three calibration windows".to_owned());
         }
+        validate_finite_source_rates(state, &sources, &flow.produced_per_second, &finite_veins)?;
         build_closed_recipe_certificate(
             state,
             &sources,
             &flow,
+            finite_veins.clone(),
             research.clone(),
             dyson_rocket.clone(),
             dyson_sail.clone(),
@@ -3673,30 +4021,26 @@ fn build_ordinary_flow_certificate(
 
     let mut rates = MaterialTotals::new();
     let mut first_rejection = None;
-    for item_id in sources {
+    for item_id in &sources {
         let mut stable_production = None;
         let mut rejected = None;
         for window in snapshots.windows(2) {
             let owned =
-                checked_material_delta(&window[0].owned, &window[1].owned, &item_id, "owned")?;
+                checked_material_delta(&window[0].owned, &window[1].owned, item_id, "owned")?;
             let produced = checked_material_delta(
                 &window[0].produced,
                 &window[1].produced,
-                &item_id,
+                item_id,
                 "produced",
             )?;
             let consumed = checked_material_delta(
                 &window[0].consumed,
                 &window[1].consumed,
-                &item_id,
+                item_id,
                 "consumed",
             )?;
-            let granted = checked_material_delta(
-                &window[0].granted,
-                &window[1].granted,
-                &item_id,
-                "granted",
-            )?;
+            let granted =
+                checked_material_delta(&window[0].granted, &window[1].granted, item_id, "granted")?;
             if produced <= 0 {
                 rejected = Some("did not produce in every calibration window".to_owned());
                 break;
@@ -3731,16 +4075,18 @@ fn build_ordinary_flow_certificate(
         let produced = stable_production.unwrap_or(0);
         let rate = produced / (MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128);
         if rate > 0 {
-            rates.insert(item_id, rate);
+            rates.insert(item_id.clone(), rate);
         }
     }
     if rates.is_empty() {
         return Err(first_rejection.unwrap_or(recipe_rejection));
     }
+    validate_finite_source_rates(state, &sources, &rates, &finite_veins)?;
     Ok(OrdinaryFlowCertificate {
         units_per_second: rates.clone(),
         produced_units_per_second: rates,
         consumed_units_per_second: MaterialTotals::new(),
+        finite_veins,
         recipe_ids: Vec::new(),
         research: None,
         dyson_rocket: None,
@@ -3824,6 +4170,179 @@ struct OrdinaryFlowApplication {
     sails_expired: i128,
     sails_absorbed: i128,
     capacity_limited: bool,
+}
+
+fn finite_vein_available_units(vein: &FiniteVeinProofSnapshot) -> Result<i128, String> {
+    if vein.consumption_tenths <= 0 || vein.consumption_tenths > 10 {
+        return Err(format!(
+            "finite vein {} has an invalid consumption rate",
+            vein.entity_id
+        ));
+    }
+    vein.remaining
+        .checked_mul(10)
+        .and_then(|value| value.checked_sub(vein.depletion_remainder))
+        .map(|value| value.max(0))
+        .and_then(|value| value.checked_div(vein.consumption_tenths))
+        .ok_or_else(|| format!("finite vein {} reserve horizon overflowed", vein.entity_id))
+}
+
+fn finite_vein_capacity_seconds(
+    state: &CoreState,
+    certificate: &OrdinaryFlowCertificate,
+) -> Result<i128, String> {
+    let sources = exclusive_vein_sources(state)?;
+    validate_finite_source_rates(
+        state,
+        &sources,
+        &certificate.produced_units_per_second,
+        &certificate.finite_veins,
+    )?;
+    let mut horizon = i128::MAX;
+    let mut seen = HashSet::new();
+    for vein in &certificate.finite_veins {
+        if vein.units_per_second <= 0 {
+            return Err(format!(
+                "finite vein {} has a non-positive certified rate",
+                vein.expected.entity_id
+            ));
+        }
+        if !seen.insert(vein.expected.entity_id.clone()) {
+            return Err(format!(
+                "finite vein certificate repeats {}",
+                vein.expected.entity_id
+            ));
+        }
+        let current = finite_vein_snapshot_at(state, vein.expected.entity_index)
+            .map_err(|error| {
+                format!(
+                    "finite vein {} current state is invalid: {error:#}",
+                    vein.expected.entity_id
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "finite vein {} is no longer a finite source",
+                    vein.expected.entity_id
+                )
+            })?;
+        if current != vein.expected {
+            return Err(format!(
+                "finite vein {} state diverged from its certified endpoint",
+                vein.expected.entity_id
+            ));
+        }
+        horizon = horizon.min(finite_vein_available_units(&current)? / vein.units_per_second);
+    }
+    Ok(horizon)
+}
+
+fn apply_finite_vein_debits(
+    state: &mut CoreState,
+    certificates: &mut [FiniteVeinCertificate],
+    accepted_seconds: i128,
+) -> Result<(), String> {
+    if accepted_seconds < 0 {
+        return Err("finite vein schedule regressed".to_owned());
+    }
+    for certificate in certificates {
+        let units = certificate
+            .units_per_second
+            .checked_mul(accepted_seconds)
+            .ok_or_else(|| {
+                format!(
+                    "finite vein {} extraction schedule overflowed",
+                    certificate.expected.entity_id
+                )
+            })?;
+        if units == 0 {
+            continue;
+        }
+        let current = finite_vein_snapshot_at(state, certificate.expected.entity_index)
+            .map_err(|error| {
+                format!(
+                    "finite vein {} current state is invalid: {error:#}",
+                    certificate.expected.entity_id
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "finite vein {} is no longer a finite source",
+                    certificate.expected.entity_id
+                )
+            })?;
+        if current != certificate.expected {
+            return Err(format!(
+                "finite vein {} state diverged before debit",
+                certificate.expected.entity_id
+            ));
+        }
+        if units > finite_vein_available_units(&current)? {
+            return Err(format!(
+                "finite vein {} extraction exceeds its remaining reserve",
+                current.entity_id
+            ));
+        }
+        let accrued_tenths = current
+            .depletion_remainder
+            .checked_add(
+                units
+                    .checked_mul(current.consumption_tenths)
+                    .ok_or_else(|| format!("finite vein {} debit overflowed", current.entity_id))?,
+            )
+            .ok_or_else(|| format!("finite vein {} debit overflowed", current.entity_id))?;
+        let depleted = accrued_tenths / 10;
+        let next_remaining = current
+            .remaining
+            .checked_sub(depleted)
+            .ok_or_else(|| format!("finite vein {} reserve underflowed", current.entity_id))?;
+        let next_remainder = accrued_tenths % 10;
+        let mut entity = state.parse_entity(current.entity_index).map_err(|error| {
+            format!("finite vein {} decode failed: {error:#}", current.entity_id)
+        })?;
+        let entity = entity
+            .as_object_mut()
+            .ok_or_else(|| format!("finite vein {} is not an object", current.entity_id))?;
+        entity.insert(
+            "resourceRemaining".to_owned(),
+            Value::Number(Number::from(i64::try_from(next_remaining).map_err(
+                |_| {
+                    format!(
+                        "finite vein {} reserve cannot be encoded",
+                        current.entity_id
+                    )
+                },
+            )?)),
+        );
+        if current.tracks_depletion_remainder {
+            entity.insert(
+                "resourceDepletionRemainder".to_owned(),
+                Value::Number(Number::from(i64::try_from(next_remainder).map_err(
+                    |_| {
+                        format!(
+                            "finite vein {} remainder cannot be encoded",
+                            current.entity_id
+                        )
+                    },
+                )?)),
+            );
+        } else if next_remainder != 0 {
+            return Err(format!(
+                "finite fluid vein {} produced a fractional reserve debit",
+                current.entity_id
+            ));
+        }
+        state.replace_entity_raw(
+            current.entity_index,
+            Arc::<str>::from(
+                serde_json::to_string(&Value::Object(entity.clone()))
+                    .map_err(|error| format!("finite vein encode failed: {error:#}"))?,
+            ),
+        );
+        certificate.expected.remaining = next_remaining;
+        certificate.expected.depletion_remainder = next_remainder;
+    }
+    Ok(())
 }
 
 fn apply_source_only_flow_certificate(
@@ -3963,6 +4482,7 @@ fn apply_ordinary_flow_certificate(
         && certificate.research.is_none()
         && certificate.dyson_rocket.is_none()
         && certificate.dyson_sail.is_none()
+        && certificate.finite_veins.is_empty()
     {
         return apply_source_only_flow_certificate(
             state,
@@ -4115,6 +4635,7 @@ fn apply_ordinary_flow_certificate(
     }
 
     let mut accepted_seconds = scheduled_seconds;
+    accepted_seconds = accepted_seconds.min(finite_vein_capacity_seconds(state, certificate)?);
     if let Some(research) = &research {
         match &research.kind {
             ResearchSinkKind::Finite {
@@ -4280,26 +4801,30 @@ fn apply_ordinary_flow_certificate(
             .ok_or_else(|| "ordinary-flow consumed-unit total overflowed".to_owned())?;
     }
 
-    let base = state.base_value_mut();
-    let inventory = base
-        .get_mut("quantumLogisticsNetwork")
-        .and_then(Value::as_object_mut)
-        .and_then(|network| network.get_mut("inventory"))
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "quantum inventory disappeared before commit".to_owned())?;
-    for (item_id, next_inventory) in &inventory_updates {
-        inventory.insert(item_id.clone(), Value::String(next_inventory.to_string()));
+    {
+        let base = state.base_value_mut();
+        let inventory = base
+            .get_mut("quantumLogisticsNetwork")
+            .and_then(Value::as_object_mut)
+            .and_then(|network| network.get_mut("inventory"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "quantum inventory disappeared before commit".to_owned())?;
+        for (item_id, next_inventory) in &inventory_updates {
+            inventory.insert(item_id.clone(), Value::String(next_inventory.to_string()));
+        }
+        let produced = base
+            .get_mut("totalProduced")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "totalProduced disappeared before commit".to_owned())?;
+        for (item_id, next_produced) in produced_updates {
+            let next_produced = i64::try_from(next_produced)
+                .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
+            produced.insert(item_id, Value::Number(Number::from(next_produced)));
+        }
     }
-    let produced = base
-        .get_mut("totalProduced")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "totalProduced disappeared before commit".to_owned())?;
-    for (item_id, next_produced) in produced_updates {
-        let next_produced = i64::try_from(next_produced)
-            .map_err(|_| format!("totalProduced.{item_id} cannot be encoded"))?;
-        produced.insert(item_id, Value::Number(Number::from(next_produced)));
-    }
+    apply_finite_vein_debits(state, &mut certificate.finite_veins, accepted_seconds)?;
     if let Some(research) = research {
+        let base = state.base_value_mut();
         match research.kind {
             ResearchSinkKind::Finite { technology_id, .. } => {
                 let progress = base
@@ -4470,7 +4995,9 @@ fn prove_internal_exact_settlement_candidate(
 /// The compact settlement proof closes aggregate ownership, production,
 /// audited grants/consumption and Dyson terminal deltas before any candidate
 /// commits. Macro-v10 additionally admits a narrow three-window certificate
-/// for exclusive infinite-vein source flow backed only by non-fuel power. A
+/// for exclusive vein-source flow backed only by non-fuel power. Infinite and
+/// naturally renewable sources require no debit; finite sources carry a
+/// per-vein reserve/remainder receipt and stop at the first depletion horizon. A
 /// stricter slice may also close an acyclic ordinary-recipe DAG whose root
 /// inputs are funded by those sources and whose shared intermediates balance
 /// exactly. Its tail writes only non-negative net ownership into bounded
@@ -4483,8 +5010,7 @@ fn prove_internal_exact_settlement_candidate(
 /// solar-sail sink may consume only same-window manufactured whole sails and
 /// feed a stable per-orbit launch schedule into the native decay/absorption
 /// lifecycle. Starting launcher inventories are never renewable sources.
-/// Finite resources, stored/fuel energy, construction and every other terminal
-/// remain frozen.
+/// Stored/fuel energy, construction and every other terminal remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -7179,7 +7705,7 @@ mod tests {
         let rejection = build_ordinary_flow_certificate(&prefilled, &snapshots).unwrap_err();
         assert!(
             rejection.contains("depleted owned inventory")
-                || rejection.contains("no certified infinite source or active producer"),
+                || rejection.contains("no certified vein source or active producer"),
             "{rejection}"
         );
 
@@ -7473,7 +7999,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_v10_rocket_sink_freezes_finite_exhausted_unpowered_and_stopped_domains() {
+    fn macro_v10_rocket_sink_supports_finite_sources_and_freezes_unfunded_domains() {
         let mut finite = productive_rocket_macro_fixture(15.0, "finite", 1, 1, 1_000);
         let revision = finite.revision;
         let result =
@@ -7484,13 +8010,23 @@ mod tests {
             capture_dyson_terminal(finite.base_value())
                 .unwrap()
                 .rockets_launched,
-            30
+            600
         );
         assert!(
             result
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("finite"))
+                .is_some_and(|reason| reason.contains("material-funded rocket")),
+            "reason={:?}",
+            result.reason
+        );
+        assert!(
+            proof_counter(
+                finite.parse_entity(2).unwrap().get("resourceRemaining"),
+                "finite.resourceRemaining",
+            )
+            .unwrap()
+                < 1_000_000
         );
 
         let mut exhausted = productive_rocket_macro_fixture(15.0, "infinite", 1, 1, 15);
@@ -8498,10 +9034,17 @@ mod tests {
         cycle.replace_entity_raw(4, serde_json::to_string(&ingot_entity).unwrap().into());
         cycle.rebuild_indexes().unwrap();
         let cycle_hash = cycle.summary().unwrap().canonical_sha256;
-        let cycle_sources = exclusive_infinite_vein_sources(&cycle).unwrap();
-        let rejection =
-            build_closed_recipe_certificate(&cycle, &cycle_sources, &flows[0], None, None, None)
-                .unwrap_err();
+        let cycle_sources = exclusive_vein_sources(&cycle).unwrap();
+        let rejection = build_closed_recipe_certificate(
+            &cycle,
+            &cycle_sources,
+            &flows[0],
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(rejection.contains("dependency cycle"), "{rejection}");
         assert_eq!(cycle.summary().unwrap().canonical_sha256, cycle_hash);
 
@@ -8519,11 +9062,12 @@ mod tests {
         alternate.replace_entity_raw(3, serde_json::to_string(&magnet_entity).unwrap().into());
         alternate.rebuild_indexes().unwrap();
         let alternate_hash = alternate.summary().unwrap().canonical_sha256;
-        let alternate_sources = exclusive_infinite_vein_sources(&alternate).unwrap();
+        let alternate_sources = exclusive_vein_sources(&alternate).unwrap();
         let rejection = build_closed_recipe_certificate(
             &alternate,
             &alternate_sources,
             &flows[0],
+            Vec::new(),
             None,
             None,
             None,
@@ -8544,11 +9088,12 @@ mod tests {
         hidden_producer.replace_entity_raw(1, serde_json::to_string(&controller).unwrap().into());
         hidden_producer.rebuild_indexes().unwrap();
         let hidden_hash = hidden_producer.summary().unwrap().canonical_sha256;
-        let hidden_sources = exclusive_infinite_vein_sources(&hidden_producer).unwrap();
+        let hidden_sources = exclusive_vein_sources(&hidden_producer).unwrap();
         let rejection = build_closed_recipe_certificate(
             &hidden_producer,
             &hidden_sources,
             &flows[0],
+            Vec::new(),
             None,
             None,
             None,
@@ -8568,11 +9113,12 @@ mod tests {
         entity["sprayCoaterInstalled"] = json!(true);
         sprayed.replace_entity_raw(3, serde_json::to_string(&entity).unwrap().into());
         sprayed.rebuild_indexes().unwrap();
-        let sprayed_sources = exclusive_infinite_vein_sources(&sprayed).unwrap();
+        let sprayed_sources = exclusive_vein_sources(&sprayed).unwrap();
         let rejection = build_closed_recipe_certificate(
             &sprayed,
             &sprayed_sources,
             &flows[0],
+            Vec::new(),
             None,
             None,
             None,
@@ -8677,7 +9223,7 @@ mod tests {
             result
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("no exclusive active infinite-vein source")),
+                .is_some_and(|reason| reason.contains("no exclusive active vein source")),
             "reason={:?}",
             result.reason
         );
@@ -8972,8 +9518,27 @@ mod tests {
     }
 
     #[test]
-    fn macro_v10_rejects_finite_source_and_fuel_backed_power_certificates() {
-        let mut finite = productive_quantum_macro_fixture(15.0, "finite");
+    fn macro_v10_certifies_finite_source_and_rejects_fuel_backed_power() {
+        let initial = productive_quantum_macro_fixture(15.0, "finite");
+        let mut prefix = initial.clone();
+        let prefix_revision = prefix.revision;
+        advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(prefix_revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let prefix_reserve = proof_counter(
+            prefix.parse_entity(2).unwrap().get("resourceRemaining"),
+            "prefix.resourceRemaining",
+        )
+        .unwrap();
+        let prefix_produced = proof_counter(
+            prefix.base_value()["totalProduced"].get("iron_ore"),
+            "prefix.totalProduced.iron_ore",
+        )
+        .unwrap();
+
+        let mut finite = initial;
         let finite_revision = finite.revision;
         let finite_result = advance_macro_v10(
             &mut finite,
@@ -8985,16 +9550,28 @@ mod tests {
             finite_result
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("finite resources")),
+                .is_some_and(|reason| reason.contains("source-only ordinary")),
             "reason={:?}",
             finite_result.reason
         );
-        assert!(
-            finite.base_value()["quantumLogisticsNetwork"]["inventory"]
-                .as_object()
-                .unwrap()
-                .is_empty()
-        );
+        let deposited = proof_counter(
+            finite.base_value()["quantumLogisticsNetwork"]["inventory"].get("iron_ore"),
+            "finite.quantum.iron_ore",
+        )
+        .unwrap();
+        let final_reserve = proof_counter(
+            finite.parse_entity(2).unwrap().get("resourceRemaining"),
+            "finite.resourceRemaining",
+        )
+        .unwrap();
+        let final_produced = proof_counter(
+            finite.base_value()["totalProduced"].get("iron_ore"),
+            "finite.totalProduced.iron_ore",
+        )
+        .unwrap();
+        assert!(deposited > 0);
+        assert_eq!(prefix_reserve - final_reserve, deposited);
+        assert_eq!(final_produced - prefix_produced, deposited);
 
         let mut fuel_backed = productive_quantum_macro_fixture(15.0, "infinite");
         std::sync::Arc::make_mut(&mut fuel_backed.catalog)
@@ -9023,6 +9600,333 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn macro_v10_finite_vein_horizon_is_conservative_and_segment_invariant() {
+        let mut initial = productive_quantum_macro_fixture(15.0, "finite");
+        let mut vein = initial.parse_entity(2).unwrap();
+        vein["resourceCapacity"] = json!(120);
+        vein["resourceRemaining"] = json!(120);
+        vein["resourceDepletionRemainder"] = json!(5);
+        initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capacity horizon")),
+            "reason={:?}",
+            result.reason
+        );
+        let final_vein = long.parse_entity(2).unwrap();
+        // The whole-second schedule stops one two-unit batch before the final
+        // single unit. Under-production is intentional; reserve must never be
+        // overspent merely to make the horizon exact.
+        assert_eq!(final_vein["resourceRemaining"], json!(2));
+        assert_eq!(final_vein["resourceDepletionRemainder"], json!(5));
+        assert_eq!(
+            long.base_value()["quantumLogisticsNetwork"]["inventory"]["iron_ore"],
+            json!("58")
+        );
+        assert_eq!(
+            proof_counter(
+                long.base_value()["totalProduced"].get("iron_ore"),
+                "long.totalProduced.iron_ore",
+            )
+            .unwrap(),
+            118
+        );
+
+        let mut segmented = initial;
+        for seconds in [30.0, 200.0, 370.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_finite_vein_uses_the_public_tenths_remainder_ledger() {
+        let mut initial = productive_quantum_macro_fixture(15.0, "finite");
+        initial.base_value_mut()["endgame"]["infiniteResearch"]["vein_utilization"]["level"] =
+            json!(1);
+        let mut vein = initial.parse_entity(2).unwrap();
+        vein["minerCount"] = json!(10);
+        vein["resourceCapacity"] = json!(10_000);
+        vein["resourceRemaining"] = json!(10_000);
+        vein["resourceDepletionRemainder"] = json!(7);
+        initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+        initial.rebuild_indexes().unwrap();
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 60.0, 4.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let produced = proof_counter(
+            long.base_value()["totalProduced"].get("iron_ore"),
+            "long.totalProduced.iron_ore",
+        )
+        .unwrap();
+        let accrued_tenths = 7 + produced * 9;
+        let final_vein = long.parse_entity(2).unwrap();
+        assert_eq!(
+            proof_counter(
+                final_vein.get("resourceRemaining"),
+                "long.resourceRemaining",
+            )
+            .unwrap(),
+            10_000 - accrued_tenths / 10
+        );
+        assert_eq!(
+            proof_counter(
+                final_vein.get("resourceDepletionRemainder"),
+                "long.resourceDepletionRemainder",
+            )
+            .unwrap(),
+            accrued_tenths % 10
+        );
+
+        let mut segmented = initial;
+        for seconds in [10.0, 20.0, 30.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_finite_fluid_vein_accepts_missing_solid_remainder_and_uses_whole_reserve() {
+        let mut state = productive_quantum_macro_fixture(15.0, "finite");
+        let catalog = Arc::make_mut(&mut state.catalog);
+        catalog.items.insert(
+            "crude_oil".to_owned(),
+            ItemDefinition {
+                id: "crude_oil".to_owned(),
+                name: "crude_oil".to_owned(),
+                kind: "fluid".to_owned(),
+                fuel_energy_mj: 0.0,
+            },
+        );
+        catalog.buildings.insert(
+            "oil_extractor".to_owned(),
+            BuildingDefinition {
+                id: "oil_extractor".to_owned(),
+                kind: "miner".to_owned(),
+                speed: 1.0,
+                input_capacity: 0.0,
+                output_capacity: 1_000_000.0,
+                power_demand_kw: 1.0,
+                power_generation_kw: 0.0,
+                power_charge_kw: 0.0,
+                energy_capacity_mj: 0.0,
+                fuel_item_ids: Vec::new(),
+                fuel_efficiency: 1.0,
+                family: None,
+                accepts: None,
+            },
+        );
+        state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
+            json!({ "crude_oil": "10000000000" });
+        let mut vein = state.parse_entity(2).unwrap();
+        vein["resourceId"] = json!("crude_oil");
+        vein["extractorBuildingId"] = json!("oil_extractor");
+        vein["outputs"] = json!({ "crude_oil": 0 });
+        vein.as_object_mut()
+            .unwrap()
+            .remove("resourceDepletionRemainder");
+        state.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+        state.rebuild_indexes().unwrap();
+
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 60.0, 4.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let produced = proof_counter(
+            state.base_value()["totalProduced"].get("crude_oil"),
+            "totalProduced.crude_oil",
+        )
+        .unwrap();
+        assert!(produced > 0);
+        let final_vein = state.parse_entity(2).unwrap();
+        assert_eq!(
+            proof_counter(final_vein.get("resourceRemaining"), "fluid.remaining").unwrap(),
+            1_000_000 - produced
+        );
+        assert_eq!(
+            proof_counter(
+                final_vein.get("resourceDepletionRemainder"),
+                "fluid.remainder",
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn macro_v10_finite_vein_is_segment_invariant_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_quantum_macro_fixture(multiplier, "finite");
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(revision, 60.0, 60.0 / multiplier),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "multiplier={multiplier} reason={:?}",
+                result.reason
+            );
+
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 30.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "multiplier={multiplier} segment={seconds} reason={:?}",
+                    result.reason
+                );
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_finite_vein_funds_the_complete_closed_recipe_ledger() {
+        let mut initial = productive_closed_recipe_macro_fixture(15.0);
+        initial.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        let prefix_state = prefix.materialize().unwrap();
+        let prefix_reserve = proof_counter(
+            prefix_state["entities"][2].get("resourceRemaining"),
+            "prefix.resourceRemaining",
+        )
+        .unwrap();
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 60.0, 4.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("acyclic closed ordinary recipe")),
+            "reason={:?}",
+            result.reason
+        );
+        let long_state = long.materialize().unwrap();
+        let deposited = proof_counter(
+            long_state["quantumLogisticsNetwork"]["inventory"].get("iron_ingot"),
+            "long.quantum.iron_ingot",
+        )
+        .unwrap();
+        assert!(deposited > 0);
+        assert!(
+            proof_counter(
+                long_state["entities"][2].get("resourceRemaining"),
+                "long.resourceRemaining",
+            )
+            .unwrap()
+                < prefix_reserve
+        );
+
+        let mut segmented = initial;
+        for seconds in [10.0, 20.0, 30.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn macro_v10_finite_vein_certificate_divergence_is_atomic() {
+        let mut state = productive_quantum_macro_fixture(15.0, "finite");
+        let revision = state.revision;
+        advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        state
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .and_then(|certificate| certificate.finite_veins.first_mut())
+            .expect("finite vein certificate")
+            .expected
+            .remaining += 1;
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("diverged from its certified endpoint")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
+    }
+
+    #[test]
+    fn settlement_proof_rejects_uncredited_finite_vein_depletion() {
+        let state = productive_quantum_macro_fixture(15.0, "finite");
+        let before = capture_settlement_snapshot(&state).unwrap();
+        let mut after = before.clone();
+        after.finite_veins.get_mut("vein").unwrap().remaining -= 1;
+        let rejection =
+            validate_settlement_proof(&before, &after, &state.catalog, None).unwrap_err();
+        assert!(rejection.contains("finite reserve funded"), "{rejection}");
     }
 
     #[test]
@@ -9056,28 +9960,40 @@ mod tests {
 
     #[test]
     fn macro_v10_rebuilds_missing_runtime_certificate_deterministically() {
-        let mut calibrated = productive_quantum_macro_fixture(15.0, "infinite");
-        let revision = calibrated.revision;
-        let result = advance_macro_v10(
-            &mut calibrated,
-            &pure_idle_macro_request(revision, 30.0, 2.0),
-        )
-        .unwrap();
-        assert!(result.supported, "reason={:?}", result.reason);
+        for resource_mode in ["infinite", "finite"] {
+            let mut calibrated = productive_quantum_macro_fixture(15.0, resource_mode);
+            let revision = calibrated.revision;
+            let result = advance_macro_v10(
+                &mut calibrated,
+                &pure_idle_macro_request(revision, 30.0, 2.0),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "mode={resource_mode} reason={:?}",
+                result.reason
+            );
 
-        let mut cached = calibrated.clone();
-        let mut rebuilt = calibrated;
-        rebuilt.pure_idle_macro_runtime = None;
-        for state in [&mut cached, &mut rebuilt] {
-            let revision = state.revision;
-            let result =
-                advance_macro_v10(state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
-            assert!(result.supported, "reason={:?}", result.reason);
+            let mut cached = calibrated.clone();
+            let mut rebuilt = calibrated;
+            rebuilt.pure_idle_macro_runtime = None;
+            for state in [&mut cached, &mut rebuilt] {
+                let revision = state.revision;
+                let result =
+                    advance_macro_v10(state, &pure_idle_macro_request(revision, 30.0, 2.0))
+                        .unwrap();
+                assert!(
+                    result.supported,
+                    "mode={resource_mode} reason={:?}",
+                    result.reason
+                );
+            }
+            assert_eq!(
+                rebuilt.summary().unwrap().canonical_sha256,
+                cached.summary().unwrap().canonical_sha256,
+                "mode={resource_mode}"
+            );
         }
-        assert_eq!(
-            rebuilt.summary().unwrap().canonical_sha256,
-            cached.summary().unwrap().canonical_sha256
-        );
     }
 
     #[test]
@@ -9134,6 +10050,7 @@ mod tests {
                 units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
                 produced_units_per_second: BTreeMap::from([("iron_ore".to_owned(), i128::MAX)]),
                 consumed_units_per_second: MaterialTotals::new(),
+                finite_veins: Vec::new(),
                 recipe_ids: Vec::new(),
                 research: None,
                 dyson_rocket: None,

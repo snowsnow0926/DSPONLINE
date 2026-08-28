@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 #[derive(Clone, Copy)]
@@ -407,17 +408,38 @@ fn number_in_record(base: &Map<String, Value>, record: &str, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
+struct CampaignBuildingMetrics {
+    count: f64,
+    station_trips: f64,
+}
+
+#[derive(Debug, Default, PartialEq)]
 struct CampaignFactoryMetrics {
-    building_counts: HashMap<String, f64>,
-    station_trips: HashMap<String, f64>,
+    buildings: HashMap<String, CampaignBuildingMetrics>,
     miner_count: f64,
     belt_counts_by_minimum_tier: HashMap<u8, f64>,
     spray_coater_installed: bool,
 }
 
+struct CampaignEntityMetricProbe {
+    building_id: Option<String>,
+    building_count: f64,
+    station_trips: f64,
+    miner_count: f64,
+    spray_coater_installed: bool,
+}
+
 impl CampaignFactoryMetrics {
     fn collect(state: &CoreState, entities: &[Value]) -> Self {
+        Self::collect_with_runtime(deterministic_runtime(), &state.belts.tiers, entities)
+    }
+
+    fn collect_with_runtime(
+        runtime: &DeterministicRuntime,
+        belt_tiers: &[u8],
+        entities: &[Value],
+    ) -> Self {
         let mut metrics = Self::default();
         let minimum_belt_tiers = TASKS
             .iter()
@@ -426,31 +448,44 @@ impl CampaignFactoryMetrics {
                 _ => None,
             })
             .collect::<HashSet<_>>();
-        for entity in entities.iter().filter_map(Value::as_object) {
-            metrics.miner_count += finite_number(entity.get("minerCount"));
-            metrics.spray_coater_installed |= entity
-                .get("sprayCoaterInstalled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let Some(building_id) = string_at(entity, "buildingId") else {
+        // Entity inspection is read-only and independent. Parallel workers
+        // produce an index-aligned probe vector; the serial replay below keeps
+        // legacy entity-order floating-point accumulation and map mutation.
+        let probes = runtime.indexed_map(entities, |_, entity| {
+            let entity = entity.as_object()?;
+            let miner_count = finite_number(entity.get("minerCount"));
+            let building_id = string_at(entity, "buildingId").map(str::to_owned);
+            let building_count = building_id.as_ref().map_or(0.0, |_| {
+                let machine_count = finite_number(entity.get("machineCount"));
+                if machine_count != 0.0 {
+                    machine_count
+                } else {
+                    miner_count
+                }
+                .max(1.0)
+            });
+            Some(CampaignEntityMetricProbe {
+                building_id,
+                building_count,
+                station_trips: finite_number(entity.get("stationTrips")),
+                miner_count,
+                spray_coater_installed: entity
+                    .get("sprayCoaterInstalled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        });
+        for probe in probes.into_iter().flatten() {
+            metrics.miner_count += probe.miner_count;
+            metrics.spray_coater_installed |= probe.spray_coater_installed;
+            let Some(building_id) = probe.building_id else {
                 continue;
             };
-            let machine_count = finite_number(entity.get("machineCount"));
-            let count = if machine_count != 0.0 {
-                machine_count
-            } else {
-                finite_number(entity.get("minerCount"))
-            };
-            *metrics
-                .building_counts
-                .entry(building_id.to_owned())
-                .or_default() += count.max(1.0);
-            *metrics
-                .station_trips
-                .entry(building_id.to_owned())
-                .or_default() += finite_number(entity.get("stationTrips"));
+            let building = metrics.buildings.entry(building_id).or_default();
+            building.count += probe.building_count;
+            building.station_trips += probe.station_trips;
         }
-        for &tier in &state.belts.tiers {
+        for &tier in belt_tiers {
             for &minimum_tier in &minimum_belt_tiers {
                 if minimum_tier == 0 || tier >= minimum_tier {
                     *metrics
@@ -473,9 +508,9 @@ fn metric_value(
         Metric::ManualMined(_) => finite_number(base.get("manualMined")),
         Metric::Produced(item_id, _) => number_in_record(base, "totalProduced", item_id),
         Metric::Building(building_id, _) => factory
-            .building_counts
+            .buildings
             .get(building_id)
-            .copied()
+            .map(|building| building.count)
             .unwrap_or(0.0),
         Metric::Miner(_) => factory.miner_count,
         Metric::Belt { minimum_tier, .. } => factory
@@ -491,9 +526,9 @@ fn metric_value(
             .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(system_id)))
             as u8 as f64,
         Metric::StationTrips(building_id, _) => factory
-            .station_trips
+            .buildings
             .get(building_id)
-            .copied()
+            .map(|building| building.station_trips)
             .unwrap_or(0.0),
         Metric::Dyson(measure, _) => {
             let (record, key) = match measure {
@@ -838,4 +873,48 @@ pub(crate) fn validate_state(base: &Map<String, Value>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use serde_json::json;
+
+    #[test]
+    fn campaign_factory_probe_is_identical_at_every_worker_limit() {
+        let entities = (0..(PARALLEL_MIN_ITEMS * 2 + 17))
+            .map(|index| {
+                if index % 17 == 0 {
+                    return Value::Null;
+                }
+                json!({
+                    "buildingId": if index % 3 == 0 { "mod-建筑" } else { "assembler" },
+                    "machineCount": if index % 5 == 0 { 0.0 } else { (index % 7 + 1) as f64 },
+                    "minerCount": (index % 11) as f64 / 8.0,
+                    "stationTrips": (index % 13) as f64 / 16.0,
+                    "sprayCoaterInstalled": index == PARALLEL_MIN_ITEMS + 3,
+                })
+            })
+            .collect::<Vec<_>>();
+        let belt_tiers = (0..(PARALLEL_MIN_ITEMS + 13))
+            .map(|index| (index % 4) as u8)
+            .collect::<Vec<_>>();
+        let expected = CampaignFactoryMetrics::collect_with_runtime(
+            &DeterministicRuntime::for_test(1),
+            &belt_tiers,
+            &entities,
+        );
+        assert!(expected.spray_coater_installed);
+        assert!(expected.buildings.contains_key("mod-建筑"));
+        for worker_limit in [2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            assert_eq!(runtime.worker_count_for_items(entities.len()), worker_limit);
+            assert_eq!(
+                CampaignFactoryMetrics::collect_with_runtime(&runtime, &belt_tiers, &entities,),
+                expected,
+                "campaign metrics diverged at {worker_limit} workers",
+            );
+        }
+    }
 }

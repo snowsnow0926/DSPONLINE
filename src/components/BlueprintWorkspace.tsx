@@ -1,7 +1,7 @@
 import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Download, FlipHorizontal2, Focus, Layers3, ListChecks, Lock, MousePointer2, PackageCheck, PackageOpen, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Redo2, RotateCw, Route, Trash2, Truck, Undo2, Unlock, Upload, WandSparkles, X } from "lucide-react";
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
-import type { FactoryConstructionHeadlineReadModel } from "../game/factoryReadModels";
+import type { FactoryConstructionHeadlineReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
@@ -172,14 +172,11 @@ export function CanvasRegionEditor({ region, onChange, onRemove, onClose }: {
   );
 }
 
-export function SelectionToolbar({ selectedCount, selectedBeltCount, eligibleCount, canUpgrade, canUpgradeBelts, canLock, canUnlock, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
-  selectedCount: number;
-  selectedBeltCount: number;
+export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
+  model: FactorySelectionToolbarReadModel;
   eligibleCount: number;
   canUpgrade: boolean;
   canUpgradeBelts: boolean;
-  canLock: boolean;
-  canUnlock: boolean;
   onFocus: () => void;
   onAutoLayout: () => void;
   onCopy: () => void;
@@ -192,6 +189,7 @@ export function SelectionToolbar({ selectedCount, selectedBeltCount, eligibleCou
   onClear: () => void;
   onDone: () => void;
 }) {
+  const { selectedCount, selectedBeltCount, canLock, canUnlock } = model;
   const [customIncrease, setCustomIncrease] = useState("");
   const applyCustomIncrease = () => {
     if (!/^\d+$/.test(customIncrease.trim())) return;
@@ -200,7 +198,13 @@ export function SelectionToolbar({ selectedCount, selectedBeltCount, eligibleCou
   };
   if (selectedCount + selectedBeltCount === 0) return null;
   return (
-    <div className="selection-toolbar nodrag nopan" role="toolbar" aria-label="选区操作">
+    <div
+      className="selection-toolbar nodrag nopan"
+      role="toolbar"
+      aria-label="选区操作"
+      data-factory-read-model-source={model.source}
+      data-factory-read-model-revision={model.revision ?? "web"}
+    >
       <span><BoxSelect size={14} /><strong>{selectedCount}</strong> 节点 · <strong>{selectedBeltCount}</strong> 线路</span>
       <button type="button" disabled={selectedCount === 0} onClick={onFocus} title="定位到所选设备" aria-label="定位到所选设备"><Focus size={16} /></button>
       <button type="button" disabled={selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>

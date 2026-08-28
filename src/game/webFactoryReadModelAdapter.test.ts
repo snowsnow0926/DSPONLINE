@@ -17,6 +17,7 @@ import {
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryReadModels,
   createWebFactoryRunStatusReadModel,
+  createWebFactorySelectionToolbarReadModel,
 } from "./webFactoryReadModelAdapter";
 
 const asItemId = (id: string) => id as ItemId;
@@ -104,6 +105,36 @@ describe("Web/PWA factory read-model adapter", () => {
     });
     expect(model).not.toHaveProperty("entities");
     expect(model).not.toHaveProperty("belts");
+  });
+
+  it("preserves the legacy selection-toolbar count and active-planet lock semantics", () => {
+    const state = createInitialState();
+    const unlocked = { ...makeEntity(state.entities[0], "entity-unlocked"), interactionLocked: false };
+    const locked = { ...makeEntity(state.entities[1], "entity-locked"), interactionLocked: true };
+    const remote = {
+      ...makeEntity(state.entities[0], "entity-remote"),
+      planetId: "ashen" as const,
+      interactionLocked: false,
+    };
+    const selectedBelt = makeBelt("belt-selected", unlocked.id, locked.id);
+    const remoteBelt = { ...makeBelt("belt-remote", remote.id, remote.id), planetId: "ashen" as const };
+    state.entities = [unlocked, locked, remote];
+    state.belts = [selectedBelt, remoteBelt];
+
+    expect(createWebFactorySelectionToolbarReadModel(
+      state,
+      [unlocked.id, locked.id, remote.id, "missing-entity"],
+      [selectedBelt.id, remoteBelt.id, "missing-belt"],
+    )).toEqual({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "web-game-state",
+      revision: null,
+      activePlanetId: "home",
+      selectedCount: 4,
+      selectedBeltCount: 1,
+      canLock: true,
+      canUnlock: true,
+    });
   });
 
   it("returns detached bounded projections without full GameState, entity, or belt objects", () => {

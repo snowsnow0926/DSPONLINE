@@ -4,13 +4,17 @@ import type { DesktopNativeCoreFactoryReadModelResult } from "../desktop";
 import type {
   FactoryConstructionHeadlineReadModel,
   FactoryRunStatusReadModel,
+  FactorySelectionToolbarReadModel,
   PlanetNavigationReadModel,
+  SelectedBeltReadModel,
+  SelectedEntityReadModel,
 } from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 import {
   selectFactoryConstructionHeadlineReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
+  selectFactorySelectionToolbarReadModel,
 } from "./nativeFactoryThinViewBridge";
 
 const web: FactoryRunStatusReadModel = {
@@ -53,6 +57,91 @@ const navigationWeb: PlanetNavigationReadModel = {
     truncated: false,
   },
 };
+
+const selectionToolbarWeb: FactorySelectionToolbarReadModel = {
+  schema: "factory-read-model-v1",
+  source: "web-game-state",
+  revision: null,
+  activePlanetId: "home",
+  selectedCount: 2,
+  selectedBeltCount: 1,
+  canLock: true,
+  canUnlock: true,
+};
+
+function selectedEntity(entityId: string, interactionLocked: boolean): SelectedEntityReadModel {
+  const emptyRows = { rows: [], totalCount: 0, truncated: false };
+  return {
+    entityId,
+    planetId: "home",
+    kind: "machine",
+    position: { x: 0, y: 0 },
+    interactionLocked,
+    buildingId: "assembling_machine_mk1",
+    resourceId: null,
+    recipeId: "iron_ingot",
+    storedItemId: null,
+    fuelItemId: null,
+    machineCount: 1,
+    minerCount: 0,
+    progress: 0,
+    utilization: 0,
+    productionRate: 0,
+    powerFactor: 1,
+    inputItems: emptyRows,
+    outputItems: emptyRows,
+  };
+}
+
+function selectedBelt(beltId: string): SelectedBeltReadModel {
+  return {
+    beltId,
+    planetId: "home",
+    sourceEntityId: "entity-open",
+    targetEntityId: "entity-locked",
+    itemId: "iron_ingot",
+    lanes: 1,
+    tier: 1,
+    sorterTier: 1,
+    stackSize: null,
+    priority: 1,
+    progress: 0,
+    lastFlow: 0,
+    totalTransferred: 0,
+    congestion: 0,
+  };
+}
+
+function selectionSnapshot(revision = 21): NativeFactoryThinViewSnapshot {
+  const current = snapshot(revision);
+  const entityRows = [selectedEntity("entity-open", false), selectedEntity("entity-locked", true)];
+  const beltRows = [selectedBelt("belt-inspected"), selectedBelt("belt-selected")];
+  return {
+    ...current,
+    frame: {
+      ...current.frame!,
+      factory: {
+        ...current.frame!.factory,
+        selection: {
+          schema: "factory-read-model-v1",
+          activePlanetId: "home",
+          requestedEntityCount: entityRows.length,
+          requestedBeltCount: beltRows.length,
+          entityRows: { rows: entityRows, totalCount: entityRows.length, truncated: false },
+          beltRows: { rows: beltRows, totalCount: beltRows.length, truncated: false },
+        },
+      },
+    },
+  };
+}
+
+const selectionBinding = {
+  requestedEntityIds: ["entity-open", "entity-locked"],
+  requestedBeltIds: ["belt-inspected", "belt-selected"],
+  requestTruncated: false,
+  selectedEntityIds: ["entity-open", "entity-locked"],
+  selectedBeltIds: ["belt-selected"],
+} as const;
 
 function factory(revision: number, paused = false): DesktopNativeCoreFactoryReadModelResult {
   const emptyRows = { rows: [], totalCount: 0, truncated: false };
@@ -252,6 +341,120 @@ describe("native factory thin-view construction headline bridge", () => {
       },
     };
     expect(selectFactoryConstructionHeadlineReadModel(constructionWeb, inactivePlanet, 9)).toBe(constructionWeb);
+  });
+});
+
+describe("native factory thin-view selection toolbar bridge", () => {
+  it("uses complete ordered atomic selection rows for all visible toolbar fields", () => {
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      selectionSnapshot(),
+      21,
+      selectionBinding,
+    )).toEqual({
+      ...selectionToolbarWeb,
+      source: "native-core",
+      revision: 21,
+    });
+  });
+
+  it("fails closed for stale frames, reordered IDs, truncation, or visible semantic drift", () => {
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      selectionSnapshot(20),
+      21,
+      selectionBinding,
+    )).toBe(selectionToolbarWeb);
+
+    const current = selectionSnapshot();
+    const reorderedRows = [...current.frame!.factory.selection.entityRows.rows].reverse();
+    const reordered: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: { rows: reorderedRows, totalCount: reorderedRows.length, truncated: false },
+          },
+        },
+      },
+    };
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      reordered,
+      21,
+      selectionBinding,
+    )).toBe(selectionToolbarWeb);
+
+    const truncated: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            beltRows: { ...current.frame!.factory.selection.beltRows, truncated: true },
+          },
+        },
+      },
+    };
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      truncated,
+      21,
+      selectionBinding,
+    )).toBe(selectionToolbarWeb);
+
+    const wrongLock: NativeFactoryThinViewSnapshot = {
+      ...current,
+      frame: {
+        ...current.frame!,
+        factory: {
+          ...current.frame!.factory,
+          selection: {
+            ...current.frame!.factory.selection,
+            entityRows: {
+              rows: current.frame!.factory.selection.entityRows.rows.map((row) => ({
+                ...row,
+                interactionLocked: false,
+              })),
+              totalCount: 2,
+              truncated: false,
+            },
+          },
+        },
+      },
+    };
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      wrongLock,
+      21,
+      selectionBinding,
+    )).toBe(selectionToolbarWeb);
+  });
+
+  it("never selects native rows for over-cap or incomplete request bindings", () => {
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      selectionSnapshot(),
+      21,
+      { ...selectionBinding, selectedEntityIds: Array.from({ length: 65 }, (_, index) => `entity-${index}`) },
+    )).toBe(selectionToolbarWeb);
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      selectionSnapshot(),
+      21,
+      { ...selectionBinding, requestedEntityIds: ["entity-open"] },
+    )).toBe(selectionToolbarWeb);
+    expect(selectFactorySelectionToolbarReadModel(
+      selectionToolbarWeb,
+      selectionSnapshot(),
+      21,
+      { ...selectionBinding, requestTruncated: true },
+    )).toBe(selectionToolbarWeb);
   });
 });
 

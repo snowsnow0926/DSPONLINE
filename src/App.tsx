@@ -383,15 +383,18 @@ import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure 
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
+import { FACTORY_READ_MODEL_LIMITS } from "./game/factoryReadModels";
 import {
   selectFactoryConstructionHeadlineReadModel,
   selectFactoryPlanetNavigationReadModel,
   selectFactoryRunStatusReadModel,
+  selectFactorySelectionToolbarReadModel,
 } from "./game/nativeFactoryThinViewBridge";
 import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryRunStatusReadModel,
+  createWebFactorySelectionToolbarReadModel,
 } from "./game/webFactoryReadModelAdapter";
 import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
 import { readWindowsNativeCoreBetaEnabled, writeWindowsNativeCoreBetaEnabled } from "./game/nativeCoreBetaSettings";
@@ -1880,13 +1883,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryThinViewStore.getSnapshot,
   );
   const factoryThinViewExpectedRevision = simulationStateRevisionRef.current;
-  const factoryThinViewSelectedEntityIds = useMemo(
-    () => [...new Set(selectedEntityIds)].slice(0, 64),
+  const factoryThinViewAllSelectedEntityIds = useMemo(
+    () => [...new Set(selectedEntityIds)],
     [selectedEntityIds],
   );
-  const factoryThinViewSelectedBeltIds = useMemo(
-    () => [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)].slice(0, 64),
+  const factoryThinViewSelectedEntityIds = useMemo(
+    () => factoryThinViewAllSelectedEntityIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedEntityRows),
+    [factoryThinViewAllSelectedEntityIds],
+  );
+  const factoryThinViewAllSelectedBeltIds = useMemo(
+    () => [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
     [selectedBeltId, selectedBeltIds],
+  );
+  const factoryThinViewSelectedBeltIds = useMemo(
+    () => factoryThinViewAllSelectedBeltIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedBeltRows),
+    [factoryThinViewAllSelectedBeltIds],
   );
   const webFactoryRunStatusReadModel = useMemo(
     () => createWebFactoryRunStatusReadModel(game),
@@ -1923,6 +1934,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewExpectedRevision,
     ),
     [factoryThinViewExpectedRevision, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
+  );
+  const webFactorySelectionToolbarReadModel = useMemo(
+    () => createWebFactorySelectionToolbarReadModel(game, selectedEntityIds, selectedBeltIds),
+    [game.activePlanetId, game.belts, game.entities, selectedBeltIds, selectedEntityIds],
+  );
+  const factorySelectionToolbarReadModel = useMemo(
+    () => selectFactorySelectionToolbarReadModel(
+      webFactorySelectionToolbarReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+      {
+        requestedEntityIds: factoryThinViewSelectedEntityIds,
+        requestedBeltIds: factoryThinViewSelectedBeltIds,
+        requestTruncated:
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+        selectedEntityIds,
+        selectedBeltIds,
+      },
+    ),
+    [
+      factoryThinViewExpectedRevision,
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      selectedBeltIds,
+      selectedEntityIds,
+      webFactorySelectionToolbarReadModel,
+    ],
   );
   const factoryActivePlanetNavigationRow = useMemo(
     () => factoryPlanetNavigationReadModel.planets.rows.find(
@@ -13087,13 +13129,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onClose={() => setSelectedRegionId(null)}
           /> : null}
           <SelectionToolbar
-            selectedCount={selectedEntityIds.length}
-            selectedBeltCount={selectedBelts.length}
+            model={factorySelectionToolbarReadModel}
             eligibleCount={blueprintEligibleIds.length}
             canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
             canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
-            canLock={selectedEntities.some((entity) => !entity.interactionLocked)}
-            canUnlock={selectedEntities.some((entity) => entity.interactionLocked)}
             onFocus={() => focusEntityIds(selectedEntityIds)}
             onAutoLayout={() => autoLayoutEntities(selectedEntityIds)}
             onCopy={copySelectionAsBlueprint}

@@ -65,4 +65,28 @@ describe("factory thin-view App consumption", () => {
     expect(app).not.toMatch(/beltCount=\{game\.belts\.filter\(/);
     expect(app).not.toMatch(/<strong>\{getPlanetDisplayName\(game, game\.activePlanetId\)/);
   });
+
+  it("feeds SelectionToolbar counts and lock state from the bounded atomic selection", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const workspace = readFileSync(resolve("src/components/BlueprintWorkspace.tsx"), "utf8");
+    const toolbar = workspace.slice(
+      workspace.indexOf("export function SelectionToolbar"),
+      workspace.indexOf("export function BlueprintPlacementCursor"),
+    );
+
+    expect(app).toMatch(/createWebFactorySelectionToolbarReadModel\(game, selectedEntityIds, selectedBeltIds\)/);
+    expect(app).toMatch(/selectFactorySelectionToolbarReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
+    expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
+    expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
+    expect(app).toMatch(/<SelectionToolbar\s+model=\{factorySelectionToolbarReadModel\}/);
+    expect(app).not.toMatch(/<SelectionToolbar\s+selectedCount=/);
+    expect(toolbar).toMatch(/FactorySelectionToolbarReadModel/);
+    expect(toolbar).toMatch(/data-factory-read-model-source=\{model\.source\}/);
+    expect(toolbar).not.toMatch(/GameState|FactoryEntity|game\.entities/);
+
+    // Read-only native coverage does not grant command authority.
+    expect(app).toMatch(/canUpgrade=\{canUpgradeEntities\(game, selectedEntityIds\)\}/);
+    expect(app).toMatch(/eligibleCount=\{blueprintEligibleIds\.length\}/);
+    expect(app).toMatch(/onLock=\{\(\) => \{[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked/);
+  });
 });

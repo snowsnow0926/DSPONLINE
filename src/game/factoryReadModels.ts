@@ -56,6 +56,18 @@ export interface FactoryRunStatusReadModel {
   readonly paused: boolean;
 }
 
+/** Visible, read-only selection state used by the desktop canvas toolbar. */
+export interface FactorySelectionToolbarReadModel {
+  readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
+  readonly source: "web-game-state" | "native-core";
+  readonly revision: number | null;
+  readonly activePlanetId: string;
+  readonly selectedCount: number;
+  readonly selectedBeltCount: number;
+  readonly canLock: boolean;
+  readonly canUnlock: boolean;
+}
+
 /** Bounded headline used by the visible blueprint construction workspace. */
 export interface FactoryConstructionHeadlineReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;

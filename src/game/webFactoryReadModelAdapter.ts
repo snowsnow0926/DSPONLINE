@@ -13,6 +13,7 @@ import {
   type FactoryReadModelBundle,
   type FactoryReadModelRequest,
   type FactoryRunStatusReadModel,
+  type FactorySelectionToolbarReadModel,
   type FactorySelectionReadModel,
   type FactoryShellReadModel,
   type ItemQuantityReadModel,
@@ -116,6 +117,44 @@ export function createWebFactoryRunStatusReadModel(state: GameState): FactoryRun
     revision: null,
     activePlanetId: state.activePlanetId,
     paused: state.paused,
+  };
+}
+
+/**
+ * Web/PWA fallback for the visible desktop selection toolbar.
+ *
+ * Preserve the legacy UI semantics exactly: the node badge reflects the raw
+ * React selection list, while belt and lock actions include only records that
+ * still exist on the active planet. Native selection rows are intentionally
+ * selected in a separate fail-closed bridge.
+ */
+export function createWebFactorySelectionToolbarReadModel(
+  state: GameState,
+  selectedEntityIds: readonly string[],
+  selectedBeltIds: readonly string[],
+): FactorySelectionToolbarReadModel {
+  const selectedEntityIdSet = new Set(selectedEntityIds);
+  const selectedBeltIdSet = new Set(selectedBeltIds);
+  let selectedBeltCount = 0;
+  let canLock = false;
+  let canUnlock = false;
+  for (const entity of state.entities) {
+    if (entity.planetId !== state.activePlanetId || !selectedEntityIdSet.has(entity.id)) continue;
+    if (entity.interactionLocked) canUnlock = true;
+    else canLock = true;
+  }
+  for (const belt of state.belts) {
+    if (belt.planetId === state.activePlanetId && selectedBeltIdSet.has(belt.id)) selectedBeltCount += 1;
+  }
+  return {
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "web-game-state",
+    revision: null,
+    activePlanetId: state.activePlanetId,
+    selectedCount: selectedEntityIds.length,
+    selectedBeltCount,
+    canLock,
+    canUnlock,
   };
 }
 

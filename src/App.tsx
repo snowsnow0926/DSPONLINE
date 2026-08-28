@@ -460,6 +460,10 @@ import {
   type NativePlayerAuthorityCommandSource,
 } from "./game/nativePlayerAuthorityCommandSource";
 import {
+  NativePlayerAuthorityMacroController,
+  createNativePlayerAuthorityMacroController,
+} from "./game/nativePlayerAuthorityMacroController";
+import {
   createPlanetNavigationReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
@@ -2036,6 +2040,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         : null;
     }
   }
+  const nativePlayerAuthorityCommandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
   const nativePlayerAuthorityMacroDisplay = useMemo(() => {
     const status = nativePlayerAuthorityMacroStatus;
     if (!status) return null;
@@ -2396,6 +2401,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
+  const nativePlayerAuthorityMacroControllerRef = useRef<
+    NativePlayerAuthorityMacroController | null | undefined
+  >(undefined);
+  if (nativePlayerAuthorityMacroControllerRef.current === undefined) {
+    nativePlayerAuthorityMacroControllerRef.current = createNativePlayerAuthorityMacroController(desktopBridge);
+  }
+  const nativePlayerAuthorityMacroController = nativePlayerAuthorityMacroControllerRef.current;
+  const [nativePlayerAuthorityMacroControllerSnapshot, setNativePlayerAuthorityMacroControllerSnapshot] =
+    useState(() => nativePlayerAuthorityMacroController?.getSnapshot() ?? null);
+  useEffect(() => {
+    if (!nativePlayerAuthorityMacroController) {
+      setNativePlayerAuthorityMacroControllerSnapshot(null);
+      return;
+    }
+    setNativePlayerAuthorityMacroControllerSnapshot(nativePlayerAuthorityMacroController.getSnapshot());
+    return nativePlayerAuthorityMacroController.subscribe(() => {
+      setNativePlayerAuthorityMacroControllerSnapshot(nativePlayerAuthorityMacroController.getSnapshot());
+    });
+  }, [nativePlayerAuthorityMacroController]);
+  useEffect(() => {
+    nativePlayerAuthorityMacroController?.bind({
+      activeFrame: nativePlayerAuthorityActiveFrame,
+      macroStatus: nativePlayerAuthorityMacroStatus,
+      paused: nativeAuthoritativeFactoryWorkspaceFrame?.runStatus.paused ?? null,
+      simulationSpeed: nativeAuthoritativeFactoryWorkspaceFrame?.simulationSpeed ?? null,
+      timeWarp: nativeAuthoritativeFactoryWorkspaceFrame?.timeWarp ?? null,
+      commandSource: nativePlayerAuthorityCommandSource,
+    });
+  }, [
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandSource,
+    nativePlayerAuthorityMacroController,
+    nativePlayerAuthorityMacroStatus,
+  ]);
+  useEffect(() => () => nativePlayerAuthorityMacroController?.dispose(), [nativePlayerAuthorityMacroController]);
   const nativeRecipeFocusReadModel = useMemo(
     () => selectNativeRecipeFocusReadModel(nativeFactoryThinViewSnapshot, {
       enabled: nativeFactoryThinViewMode === "native-authoritative",
@@ -5633,9 +5674,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const handleTimeWarpEnabledChange = useCallback((enabled: boolean) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      setNotice(enabled
-        ? "Windows 原生权威的纯挂机控制仍在闭合中；本次操作未应用"
-        : "Windows 原生权威的停止结算仍在闭合中；本次操作未应用");
+      const accepted = enabled
+        ? nativePlayerAuthorityMacroController?.requestStart() ?? false
+        : nativePlayerAuthorityMacroController?.requestStop() ?? false;
+      if (accepted) {
+        setNotice(enabled
+          ? "正在由 Windows 原生权威启用时间扭曲并等待供电确认；不会预支未来时间"
+          : "正在结清已经流逝的时间并停止 Windows 原生纯挂机；不会丢弃或重复结算");
+      } else {
+        const phase = nativePlayerAuthorityMacroController?.getSnapshot().phase ?? "unavailable";
+        setNotice(`Windows 原生纯挂机当前无法${enabled ? "启动" : "停止"}（${phase}）；本次操作未应用`);
+      }
       return;
     }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
@@ -5757,7 +5806,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, setPureIdleRecoveryContinueState]);
+  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {
@@ -13430,7 +13479,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-native-authority-mode={nativePlayerAuthorityMacroReadOnly
         ? "macro-read-only"
         : nativePlayerAuthorityActiveFrame ? "exact-active" : nativePlayerAuthorityBoundFrame ? "exact-paused" : "unbound"}
-      data-native-authority-macro-phase={nativePlayerAuthorityMacroStatus?.phase ?? "none"}
+      data-native-authority-macro-phase={nativePlayerAuthorityMacroControllerSnapshot?.phase ??
+        nativePlayerAuthorityMacroStatus?.phase ?? "none"}
       data-runtime-recovery={durableRecoveryLifecycleRef.current}
       data-runtime-recovery-sequence={durableRecoveryHeadRef.current?.sequence ?? -1}
       data-runtime-recovery-revision={durableRecoveryHeadRef.current?.stateRevision ?? -1}
@@ -14307,6 +14357,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 {` · 墙钟进度 ${nativePlayerAuthorityMacroDisplay.wallProgress}`}
                 {` · 截止时钟 ${nativePlayerAuthorityMacroDisplay.deadline}`}
                 {` · 暂停原因 ${nativePlayerAuthorityMacroDisplay.pausedReason}`}
+                <button
+                  type="button"
+                  onClick={() => handleTimeWarpEnabledChange(false)}
+                  disabled={nativePlayerAuthorityMacroControllerSnapshot?.requested === false}
+                >安全停止原生纯挂机</button>
               </span>
             ) : null}
             <strong>{factoryActivePlanetNavigationRow?.displayName ?? factoryPlanetNavigationReadModel.activePlanetId} · {factoryActivePlanetNavigationRow?.code ?? factoryPlanetNavigationReadModel.activePlanetId}工厂区</strong>

@@ -60,17 +60,34 @@ describe("native player-authority command App boundary", () => {
     );
   });
 
-  it("fails closed for still-untyped pause, time-warp and history commands", () => {
+  it("fails closed for still-untyped pause and history commands", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     for (const [start, end] of [
       ["const togglePause", "const handleTimeWarpEnabledChange"],
-      ["const handleTimeWarpEnabledChange", "const abortPureIdleForWorkerFailure"],
       ["const undoGame", "const redoGame"],
       ["const redoGame", "const clearHistory"],
     ] as const) {
       const block = app.slice(app.indexOf(start), app.indexOf(end));
       expect(block).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?本次操作未应用[\s\S]*?return;/);
     }
+  });
+
+  it("routes native time-warp start and stop through the main-owned macro controller", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const block = app.slice(
+      app.indexOf("const handleTimeWarpEnabledChange"),
+      app.indexOf("const abortPureIdleForWorkerFailure"),
+    );
+    const nativeBranch = block.slice(
+      block.indexOf("if (nativePlayerAuthorityOwnsRuntimeRef.current)"),
+      block.indexOf("if (rejectPlayerStateEditDuringPrimarySave())"),
+    );
+
+    expect(nativeBranch).toMatch(/nativePlayerAuthorityMacroController\?\.requestStart\(\)/);
+    expect(nativeBranch).toMatch(/nativePlayerAuthorityMacroController\?\.requestStop\(\)/);
+    expect(nativeBranch).toMatch(/不会预支未来时间/);
+    expect(nativeBranch).toMatch(/不会丢弃或重复结算/);
+    expect(nativeBranch).not.toMatch(/setTimeWarpEnabled|publishRuntimeGame|gameRef\.current\s*=|setGame\(/);
   });
 
   it("keeps contract rollover and persisted viewports behind the native authority boundary", () => {

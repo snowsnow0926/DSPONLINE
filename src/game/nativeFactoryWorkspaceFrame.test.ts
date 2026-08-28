@@ -146,6 +146,7 @@ describe("native authoritative factory workspace frame", () => {
       source: "native-authoritative",
       sessionId: "authority-1",
       revision: 17,
+      simulationSpeed: 1,
       runStatus: { source: "native-core", paused: false },
       timeWarp: { enabled: true, requestedMultiplier: 15, effectiveMultiplier: 12 },
       constructionHeadline: { activePlanetDisplayName: "家园星", constructionQueueCount: 1 },

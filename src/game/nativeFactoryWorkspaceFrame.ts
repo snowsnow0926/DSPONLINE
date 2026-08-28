@@ -15,6 +15,7 @@ export interface NativeAuthoritativeFactoryWorkspaceFrame {
   readonly source: "native-authoritative";
   readonly sessionId: string;
   readonly revision: number;
+  readonly simulationSpeed: number;
   readonly runStatus: FactoryRunStatusReadModel;
   readonly timeWarp: FactoryTimeWarpReadModel;
   readonly constructionHeadline: FactoryConstructionHeadlineReadModel;
@@ -133,6 +134,7 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
     source: "native-authoritative",
     sessionId: binding.sessionId,
     revision: binding.expectedRevision,
+    simulationSpeed: shell.simulationSpeed,
     runStatus: Object.freeze({
       schema: FACTORY_READ_MODEL_SCHEMA,
       source: "native-core",

@@ -105,6 +105,56 @@ fn add_planet_rate(target: &mut PlanetRateAccumulator, planet: &str, item: &str,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn add_history_entity_rates<'a>(
+    state: &'a CoreState,
+    index: usize,
+    entity: &Map<String, Value>,
+    kind: &str,
+    planet: &str,
+    building: &str,
+    recipe_cache: &mut HashMap<u32, Option<&'a crate::catalog::RecipeDefinition>>,
+    production: &mut RateAccumulator,
+    consumption: &mut RateAccumulator,
+    planet_production: &mut PlanetRateAccumulator,
+    planet_consumption: &mut PlanetRateAccumulator,
+) {
+    let rate = finite_number(entity.get("productionRate")).unwrap_or(0.0);
+    if kind == "vein" {
+        let Some(resource) = state.symbols.resolve(state.entities.resources[index]) else {
+            return;
+        };
+        add_rate(production, resource, rate);
+        add_planet_rate(planet_production, planet, resource, rate);
+    } else if building == "orbital_collector" {
+        let Some(item_id) = state.symbols.resolve(state.entities.stored_items[index]) else {
+            return;
+        };
+        add_rate(production, item_id, rate);
+        add_planet_rate(planet_production, planet, item_id, rate);
+    } else if kind == "machine" {
+        let recipe_symbol = state.entities.recipes[index];
+        let Some(recipe) = *recipe_cache.entry(recipe_symbol).or_insert_with(|| {
+            state
+                .symbols
+                .resolve(recipe_symbol)
+                .and_then(|id| state.catalog.recipes.get(id))
+        }) else {
+            return;
+        };
+        for input in &recipe.inputs {
+            let amount = rate * input.amount;
+            add_rate(consumption, &input.item_id, amount);
+            add_planet_rate(planet_consumption, planet, &input.item_id, amount);
+        }
+        for output in &recipe.outputs {
+            let amount = rate * output.amount;
+            add_rate(production, &output.item_id, amount);
+            add_planet_rate(planet_production, planet, &output.item_id, amount);
+        }
+    }
+}
+
 fn rates_to_value(values: RateAccumulator) -> Value {
     let mut entries = values.into_iter().collect::<Vec<_>>();
     // Hash iteration order is deliberately irrelevant to both simulation and
@@ -881,90 +931,118 @@ impl CoreState {
         // Completed campaigns pay no extra per-entity work.
         let mut campaign_factory_metrics = crate::campaign::factory_metrics_needed(base)
             .then(crate::campaign::CampaignFactoryMetrics::default);
-        for (index, entity) in entities.iter().enumerate() {
-            let Some(entity) = entity.as_object() else {
-                continue;
-            };
-            if let Some(metrics) = &mut campaign_factory_metrics {
-                metrics.observe_indexed_entity(self, index, entity);
-            }
-            // Kind, planet, building, recipe and resource are topology fields.
-            // They already live in the compact columns and do not change during
-            // an ordinary simulation revision. Reusing those symbols avoids
-            // five hash-table lookups per entity in this once-per-second pass,
-            // while the dynamic rate, utilization and inventories still come
-            // from the just-simulated record below.
-            let kind = self
-                .symbols
-                .resolve(self.entities.kinds[index])
-                .unwrap_or_default();
-            let planet = self
-                .symbols
-                .resolve(self.entities.planets[index])
-                .unwrap_or_default();
-            let building = self
-                .symbols
-                .resolve(self.entities.buildings[index])
-                .unwrap_or_default();
-            if let Some(inventory) = &mut inventory_values {
-                for record in [entity.get("inputs"), entity.get("outputs")] {
-                    let Some(record) = record.and_then(Value::as_object) else {
-                        continue;
-                    };
-                    for (item, amount) in record {
-                        if let Some(amount) = finite_number(Some(amount)) {
-                            add_rate(inventory, item, amount.floor());
+        let rate_indices = &self.factory_topology.production_history_rate_indices;
+        let rate_index_dense =
+            rate_indices.len().saturating_mul(4) >= entities.len().saturating_mul(3);
+        let rate_index_invalid = rate_indices
+            .last()
+            .is_some_and(|index| *index >= entities.len());
+        let full_entity_scan =
+            refresh || campaign_factory_metrics.is_some() || rate_index_dense || rate_index_invalid;
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\thistory-rate-index\t{}/{}\tdense={}\tfull-scan={}",
+                rate_indices.len(),
+                entities.len(),
+                rate_index_dense,
+                full_entity_scan,
+            );
+        }
+        if full_entity_scan {
+            for (index, entity) in entities.iter().enumerate() {
+                let Some(entity) = entity.as_object() else {
+                    continue;
+                };
+                if let Some(metrics) = &mut campaign_factory_metrics {
+                    metrics.observe_indexed_entity(self, index, entity);
+                }
+                // Kind, planet, building, recipe and resource are topology
+                // fields. They already live in compact columns and do not
+                // change during an ordinary simulation revision.
+                let kind = self
+                    .symbols
+                    .resolve(self.entities.kinds[index])
+                    .unwrap_or_default();
+                let planet = self
+                    .symbols
+                    .resolve(self.entities.planets[index])
+                    .unwrap_or_default();
+                let building = self
+                    .symbols
+                    .resolve(self.entities.buildings[index])
+                    .unwrap_or_default();
+                if let Some(inventory) = &mut inventory_values {
+                    for record in [entity.get("inputs"), entity.get("outputs")] {
+                        let Some(record) = record.and_then(Value::as_object) else {
+                            continue;
+                        };
+                        for (item, amount) in record {
+                            if let Some(amount) = finite_number(Some(amount)) {
+                                add_rate(inventory, item, amount.floor());
+                            }
                         }
                     }
                 }
+                if refresh
+                    && (kind == "machine"
+                        || kind == "vein" && self.entities.miner_counts[index] > 0.0)
+                {
+                    let count = if kind == "vein" {
+                        self.entities.miner_counts[index]
+                    } else {
+                        self.entities.machine_counts[index]
+                    };
+                    let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
+                    productive_units += count;
+                    utilized_units += count * utilization;
+                    if utilization > EPSILON {
+                        active += count;
+                    }
+                }
+                add_history_entity_rates(
+                    self,
+                    index,
+                    entity,
+                    kind,
+                    planet,
+                    building,
+                    &mut recipe_cache,
+                    &mut production,
+                    &mut consumption,
+                    &mut planet_production,
+                    &mut planet_consumption,
+                );
             }
-            if refresh
-                && (kind == "machine" || kind == "vein" && self.entities.miner_counts[index] > 0.0)
-            {
-                let count = if kind == "vein" {
-                    self.entities.miner_counts[index]
-                } else {
-                    self.entities.machine_counts[index]
-                };
-                let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
-                productive_units += count;
-                utilized_units += count * utilization;
-                if utilization > EPSILON {
-                    active += count;
-                }
-            }
-            let rate = finite_number(entity.get("productionRate")).unwrap_or(0.0);
-            if kind == "vein" {
-                let Some(resource) = self.symbols.resolve(self.entities.resources[index]) else {
+        } else {
+            for &index in rate_indices {
+                let Some(entity) = entities.get(index).and_then(Value::as_object) else {
                     continue;
                 };
-                add_rate(&mut production, resource, rate);
-                add_planet_rate(&mut planet_production, planet, resource, rate);
-            } else if building == "orbital_collector" {
-                let Some(item_id) = self.symbols.resolve(self.entities.stored_items[index]) else {
-                    continue;
-                };
-                add_rate(&mut production, item_id, rate);
-                add_planet_rate(&mut planet_production, planet, item_id, rate);
-            } else if kind == "machine" {
-                let recipe_symbol = self.entities.recipes[index];
-                let Some(recipe) = *recipe_cache.entry(recipe_symbol).or_insert_with(|| {
-                    self.symbols
-                        .resolve(recipe_symbol)
-                        .and_then(|id| self.catalog.recipes.get(id))
-                }) else {
-                    continue;
-                };
-                for input in &recipe.inputs {
-                    let amount = rate * input.amount;
-                    add_rate(&mut consumption, &input.item_id, amount);
-                    add_planet_rate(&mut planet_consumption, planet, &input.item_id, amount);
-                }
-                for output in &recipe.outputs {
-                    let amount = rate * output.amount;
-                    add_rate(&mut production, &output.item_id, amount);
-                    add_planet_rate(&mut planet_production, planet, &output.item_id, amount);
-                }
+                let kind = self
+                    .symbols
+                    .resolve(self.entities.kinds[index])
+                    .unwrap_or_default();
+                let planet = self
+                    .symbols
+                    .resolve(self.entities.planets[index])
+                    .unwrap_or_default();
+                let building = self
+                    .symbols
+                    .resolve(self.entities.buildings[index])
+                    .unwrap_or_default();
+                add_history_entity_rates(
+                    self,
+                    index,
+                    entity,
+                    kind,
+                    planet,
+                    building,
+                    &mut recipe_cache,
+                    &mut production,
+                    &mut consumption,
+                    &mut planet_production,
+                    &mut planet_consumption,
+                );
             }
         }
         if let Some(metrics) = &mut campaign_factory_metrics {
@@ -1714,6 +1792,86 @@ mod tests {
         for candidate in &encoded[1..] {
             assert_eq!(candidate, &encoded[0]);
         }
+    }
+
+    #[test]
+    fn sparse_rate_index_matches_persisted_order_full_scan_oracle() {
+        let (state, mut base, mut entities, _) = history_parallel_fixture();
+        base.insert("elapsedSeconds".to_owned(), Value::from(11));
+        base.insert("historyRecordedAt".to_owned(), Value::from(10));
+        base.insert(
+            "productionHistory".to_owned(),
+            Value::Array(vec![history_sample(10.0, 1.0, 10.0)]),
+        );
+        // Only the first 64 machines contribute a non-zero rate in this
+        // snapshot. Keeping thousands of zero-rate producers in the oracle
+        // proves that the indexed path preserves the exact per-item rounding
+        // and materialization bytes of the former persisted-order scan.
+        for entity in entities.iter_mut().skip(65) {
+            entity
+                .as_object_mut()
+                .expect("fixture entity")
+                .insert("productionRate".to_owned(), Value::from(0));
+        }
+
+        let mut indexed_state = state.clone();
+        std::sync::Arc::make_mut(&mut indexed_state.factory_topology)
+            .production_history_rate_indices = (1..65).collect();
+        let mut full_scan_state = state;
+        std::sync::Arc::make_mut(&mut full_scan_state.factory_topology)
+            .production_history_rate_indices = (1..entities.len()).collect();
+
+        let mut indexed = base.clone();
+        let indexed_started = Instant::now();
+        indexed_state
+            .record_production_history_with_records_and_runtime(
+                &mut indexed,
+                &entities,
+                Some(PreparedBeltFlow::NotRequired),
+                &DeterministicRuntime::for_test(8),
+            )
+            .unwrap();
+        let indexed_micros = indexed_started.elapsed().as_micros();
+        let mut oracle = base;
+        let oracle_started = Instant::now();
+        full_scan_state
+            .record_production_history_with_records_and_runtime(
+                &mut oracle,
+                &entities,
+                Some(PreparedBeltFlow::NotRequired),
+                &DeterministicRuntime::for_test(1),
+            )
+            .unwrap();
+        let oracle_micros = oracle_started.elapsed().as_micros();
+        eprintln!(
+            "production-history-rate-index-synthetic\tentities={}\tindexed={}\tindexed-us={indexed_micros}\tfull-scan-us={oracle_micros}",
+            entities.len(),
+            indexed_state
+                .factory_topology
+                .production_history_rate_indices
+                .len(),
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&indexed).unwrap(),
+            serde_json::to_vec(&oracle).unwrap()
+        );
+        assert_eq!(
+            indexed_state
+                .factory_topology
+                .production_history_rate_indices
+                .len(),
+            64
+        );
+        assert!(
+            indexed_state
+                .factory_topology
+                .production_history_rate_indices
+                .len()
+                * 4
+                < entities.len() * 3,
+            "fixture must exercise the sparse indexed path"
+        );
     }
 
     #[test]

@@ -2264,6 +2264,11 @@ pub(crate) struct FactoryTopology {
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
     pub ordinary_machine_indices: Vec<usize>,
+    /// Stable persisted-row order for every entity that can contribute a
+    /// production-history item rate. The common non-refresh sample can visit
+    /// only these rows; ten-second inventory snapshots and pending campaign
+    /// probes deliberately retain their complete entity scan.
+    pub production_history_rate_indices: Vec<usize>,
     pub non_station_indices: Vec<usize>,
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
@@ -2295,6 +2300,7 @@ impl FactoryTopology {
         self.power_source_indices.shrink_to_fit();
         self.vein_indices.shrink_to_fit();
         self.ordinary_machine_indices.shrink_to_fit();
+        self.production_history_rate_indices.shrink_to_fit();
         self.non_station_indices.shrink_to_fit();
         self.research_entity_indices.shrink_to_fit();
         self.entity_planet_indices.shrink_to_fit();
@@ -2327,6 +2333,7 @@ impl FactoryTopology {
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
+            + self.production_history_rate_indices.capacity()
             + self.non_station_indices.capacity()
             + self.research_entity_indices.capacity()
             + self.entity_planet_indices.capacity()
@@ -3566,6 +3573,9 @@ impl CoreState {
             let kind = object_string(object, "kind").unwrap_or_default();
             let building = object_string(object, "buildingId").unwrap_or_default();
             let recipe = object_string(object, "recipeId").unwrap_or_default();
+            if matches!(kind, "machine" | "vein") || building == "orbital_collector" {
+                factory_topology.production_history_rate_indices.push(index);
+            }
             if building == "orbital_collector" {
                 factory_topology.orbital_collector_indices.push(index);
                 factory_topology.orbital_collector_full_scan_required |= kind != "station";
@@ -6289,6 +6299,7 @@ mod tests {
         assert_eq!(
             state.factory_topology.estimated_bytes(),
             (state.factory_topology.vein_indices.len()
+                + state.factory_topology.production_history_rate_indices.len()
                 + state.factory_topology.non_station_indices.len()
                 + state.factory_topology.entity_planet_indices.len()
                 + state.factory_topology.entity_grid_indices.len()
@@ -6375,6 +6386,51 @@ mod tests {
             state.memory_estimate().topology_index_bytes
                 >= state.factory_topology.estimated_bytes(),
             "public memory diagnostics must include the dedicated receiver index"
+        );
+    }
+
+    #[test]
+    fn production_history_rate_index_is_complete_compact_and_counted() {
+        let entities = json!([
+            {"id":"vein","kind":"vein","planetId":"home","resourceId":"iron_ore","minerCount":1,"inputs":{},"outputs":{},"productionRate":1},
+            {"id":"machine","kind":"machine","planetId":"home","buildingId":"mining_machine","recipeId":"iron_ingot","machineCount":1,"inputs":{},"outputs":{},"productionRate":2},
+            {"id":"collector","kind":"station","planetId":"home","buildingId":"orbital_collector","storedItemId":"iron_ore","inputs":{},"outputs":{},"productionRate":3},
+            {"id":"station","kind":"station","planetId":"home","buildingId":"interstellar_logistics_station","inputs":{},"outputs":{},"productionRate":4},
+            {"id":"mod-collector","kind":"storage","planetId":"home","buildingId":"orbital_collector","storedItemId":"iron_ore","inputs":{},"outputs":{},"productionRate":5},
+            {"id":"power","kind":"power","planetId":"home","buildingId":"solar_panel","inputs":{},"outputs":{},"productionRate":6}
+        ]);
+        let values = entities.as_array().unwrap();
+        let mut records =
+            fixture_records_with_entity_json(&serde_json::to_string(values).unwrap(), values.len());
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        let expected = vec![0_usize, 1, 2, 4];
+        assert_eq!(
+            state.factory_topology.production_history_rate_indices,
+            expected
+        );
+        assert_eq!(
+            state
+                .factory_topology
+                .production_history_rate_indices
+                .capacity(),
+            expected.len(),
+            "the immutable rate index must not retain geometric growth slack"
+        );
+        let indexed_bytes = (expected.len() * size_of::<usize>()) as u64;
+        let mut topology_without_rates = (*state.factory_topology).clone();
+        topology_without_rates.production_history_rate_indices = Vec::new();
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            topology_without_rates.estimated_bytes() + indexed_bytes
+        );
+        assert!(
+            state.memory_estimate().topology_index_bytes
+                >= state.factory_topology.estimated_bytes(),
+            "public memory diagnostics must include the history rate index"
         );
     }
 

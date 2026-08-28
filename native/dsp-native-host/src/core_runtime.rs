@@ -2772,6 +2772,47 @@ impl CoreRegistry {
             )
     }
 
+    pub fn star_map_overview_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.star_map_overview_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            cursor,
+            limit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stellar_industry_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        system_id: Option<&str>,
+        planet_id: Option<&str>,
+        planet_cursor: usize,
+        planet_limit: usize,
+        station_cursor: usize,
+        station_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.stellar_industry_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            system_id,
+            planet_id,
+            planet_cursor,
+            planet_limit,
+            station_cursor,
+            station_limit,
+        )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

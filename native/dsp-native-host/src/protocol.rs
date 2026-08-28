@@ -7,7 +7,8 @@ use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
     CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
-    CoreCommitPlayerAuthorityTickRequest, CorePlayerAuthorityStartupRecoveryReceipt,
+    CoreCommitPlayerAuthorityMacroAdvanceRequest, CoreCommitPlayerAuthorityTickRequest,
+    CoreFinishPlayerAuthorityMacroSessionRequest, CorePlayerAuthorityStartupRecoveryReceipt,
     CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
@@ -50,6 +51,26 @@ pub struct CoreCommitPlayerAuthorityCommandControlRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreRecoverPlayerAuthorityCommandControlRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityMacroAdvanceControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityMacroAdvanceRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreFinishPlayerAuthorityMacroSessionControlRequest {
+    pub session_id: String,
+    pub request: CoreFinishPlayerAuthorityMacroSessionRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreRecoverPlayerAuthorityMacroAdvanceControlRequest {
     pub session_id: String,
 }
 
@@ -219,6 +240,29 @@ pub enum ControlRequest {
         #[serde(default)]
         planet_ids: Vec<String>,
     },
+    CoreStarMapOverviewProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+    },
+    CoreStellarIndustryProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        system_id: Option<String>,
+        #[serde(default)]
+        planet_id: Option<String>,
+        #[serde(default)]
+        planet_cursor: usize,
+        planet_limit: usize,
+        #[serde(default)]
+        station_cursor: usize,
+        station_limit: usize,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -240,6 +284,9 @@ pub enum ControlRequest {
     CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
     CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
     CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),
+    CoreCommitPlayerAuthorityMacroAdvance(CoreCommitPlayerAuthorityMacroAdvanceControlRequest),
+    CoreFinishPlayerAuthorityMacroSession(CoreFinishPlayerAuthorityMacroSessionControlRequest),
+    CoreRecoverPlayerAuthorityMacroAdvance(CoreRecoverPlayerAuthorityMacroAdvanceControlRequest),
     CoreCheckpoint {
         session_id: String,
         saved_at_ms: u64,
@@ -495,6 +542,84 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_macro_protocol_accepts_only_bounded_operation_identity_and_budget() {
+        let value = json!({
+            "operation": "coreCommitPlayerAuthorityMacroAdvance",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "macroSessionId": "macro-session-1",
+                "operationId": "macro-operation-1",
+                "baseRevision": 7,
+                "simulationMilliseconds": 60_000,
+                "wallMilliseconds": 4_000
+            }
+        });
+        match serde_json::from_value::<ControlRequest>(value.clone()).unwrap() {
+            ControlRequest::CoreCommitPlayerAuthorityMacroAdvance(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.run_id, "player-authority-run");
+                assert_eq!(control.request.macro_session_id, "macro-session-1");
+                assert_eq!(control.request.operation_id, "macro-operation-1");
+                assert_eq!(control.request.base_revision, 7);
+                assert_eq!(control.request.simulation_milliseconds, 60_000);
+                assert_eq!(control.request.wall_milliseconds, 4_000);
+            }
+            _ => panic!("player-authority macro decoded as the wrong operation"),
+        }
+        for forbidden in [
+            "proof",
+            "checkpoint",
+            "algorithmVersion",
+            "state",
+            "command",
+            "registryFingerprint",
+        ] {
+            let mut invalid = value.clone();
+            invalid["request"][forbidden] = json!(0);
+            let error = serde_json::from_value::<ControlRequest>(invalid).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{forbidden}: {error}"
+            );
+        }
+
+        match serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreFinishPlayerAuthorityMacroSession",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "macroSessionId": "macro-session-1"
+            }
+        }))
+        .unwrap()
+        {
+            ControlRequest::CoreFinishPlayerAuthorityMacroSession(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.run_id, "player-authority-run");
+                assert_eq!(control.request.macro_session_id, "macro-session-1");
+            }
+            _ => panic!("player-authority macro finish decoded as the wrong operation"),
+        }
+
+        assert!(matches!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreRecoverPlayerAuthorityMacroAdvance",
+                "sessionId": "core-1"
+            }))
+            .unwrap(),
+            ControlRequest::CoreRecoverPlayerAuthorityMacroAdvance(_)
+        ));
+        let error = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreRecoverPlayerAuthorityMacroAdvance",
+            "sessionId": "core-1",
+            "operationId": "renderer-forged"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn factory_read_model_protocol_preserves_bounded_opaque_selectors() {
         let request = serde_json::from_value::<ControlRequest>(json!({
             "operation": "coreFactoryReadModelProjection",
@@ -630,6 +755,98 @@ mod tests {
                 assert_eq!(planet_ids, ["home"]);
             }
             _ => panic!("command palette search decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn stellar_workspace_protocol_preserves_revision_bound_pages_and_filters() {
+        let overview = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStarMapOverviewProjection",
+            "sessionId": "core-1",
+            "expectedRevision": 42,
+            "expectedRegistryFingerprint": "builtin:test",
+            "cursor": 8,
+            "limit": 16
+        }))
+        .unwrap();
+        match overview {
+            ControlRequest::CoreStarMapOverviewProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(expected_revision, 42);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(cursor, 8);
+                assert_eq!(limit, 16);
+            }
+            _ => panic!("star-map overview decoded as the wrong variant"),
+        }
+
+        let industry = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStellarIndustryProjection",
+            "sessionId": "core-2",
+            "expectedRevision": 43,
+            "expectedRegistryFingerprint": "builtin:test",
+            "systemId": "sol",
+            "planetId": "home",
+            "planetCursor": 1,
+            "planetLimit": 32,
+            "stationCursor": 2,
+            "stationLimit": 16
+        }))
+        .unwrap();
+        match industry {
+            ControlRequest::CoreStellarIndustryProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                system_id,
+                planet_id,
+                planet_cursor,
+                planet_limit,
+                station_cursor,
+                station_limit,
+            } => {
+                assert_eq!(session_id, "core-2");
+                assert_eq!(expected_revision, 43);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(system_id.as_deref(), Some("sol"));
+                assert_eq!(planet_id.as_deref(), Some("home"));
+                assert_eq!(planet_cursor, 1);
+                assert_eq!(planet_limit, 32);
+                assert_eq!(station_cursor, 2);
+                assert_eq!(station_limit, 16);
+            }
+            _ => panic!("stellar-industry projection decoded as the wrong variant"),
+        }
+
+        let defaults = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStellarIndustryProjection",
+            "sessionId": "core-3",
+            "expectedRevision": 44,
+            "expectedRegistryFingerprint": "builtin:test",
+            "planetLimit": 1,
+            "stationLimit": 1
+        }))
+        .unwrap();
+        match defaults {
+            ControlRequest::CoreStellarIndustryProjection {
+                system_id,
+                planet_id,
+                planet_cursor,
+                station_cursor,
+                ..
+            } => {
+                assert!(system_id.is_none());
+                assert!(planet_id.is_none());
+                assert_eq!(planet_cursor, 0);
+                assert_eq!(station_cursor, 0);
+            }
+            _ => panic!("stellar-industry defaults decoded as the wrong variant"),
         }
     }
 }

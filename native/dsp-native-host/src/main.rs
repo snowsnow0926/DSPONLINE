@@ -8,8 +8,8 @@ use dsp_native_core::{
 };
 use dsp_native_host::core_runtime::{
     CorePlayerAuthorityStartupRecoveryReceipt, CoreRegistry, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
-    PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
-    PLAYER_AUTHORITY_TICK_CAPABILITY,
+    PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
+    PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY, PLAYER_AUTHORITY_TICK_CAPABILITY,
 };
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
@@ -84,6 +84,8 @@ fn handle_request(
                     "native-core-technology-projection-v1",
                     "native-core-recipe-workspace-projection-v1",
                     "native-core-command-palette-entity-search-v1",
+                    "native-core-star-map-overview-projection-v1",
+                    "native-core-stellar-industry-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
@@ -93,6 +95,7 @@ fn handle_request(
                     PLAYER_AUTHORITY_GATE_CAPABILITY,
                     PLAYER_AUTHORITY_TICK_CAPABILITY,
                     PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+                    PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
                     PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
                 ],
                 player_authority_startup_recovery: player_authority_startup_recovery.take(),
@@ -334,6 +337,40 @@ fn handle_request(
             &resource_ids,
             &planet_ids,
         )?,
+        ControlRequest::CoreStarMapOverviewProjection {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            cursor,
+            limit,
+        } => cores.star_map_overview_projection(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            cursor,
+            limit,
+        )?,
+        ControlRequest::CoreStellarIndustryProjection {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            system_id,
+            planet_id,
+            planet_cursor,
+            planet_limit,
+            station_cursor,
+            station_limit,
+        } => cores.stellar_industry_projection(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            system_id.as_deref(),
+            planet_id.as_deref(),
+            planet_cursor,
+            planet_limit,
+            station_cursor,
+            station_limit,
+        )?,
         ControlRequest::CoreApplyCommand {
             session_id,
             command,
@@ -365,6 +402,23 @@ fn handle_request(
         ControlRequest::CoreRecoverPlayerAuthorityCommand(control) => {
             to_value(cores.recover_player_authority_pending_command(store, &control.session_id)?)?
         }
+        ControlRequest::CoreCommitPlayerAuthorityMacroAdvance(control) => {
+            to_value(cores.commit_player_authority_macro_advance(
+                store,
+                &control.session_id,
+                control.request,
+            )?)?
+        }
+        ControlRequest::CoreFinishPlayerAuthorityMacroSession(control) => {
+            to_value(cores.finish_player_authority_macro_session(
+                store,
+                &control.session_id,
+                control.request,
+            )?)?
+        }
+        ControlRequest::CoreRecoverPlayerAuthorityMacroAdvance(control) => to_value(
+            cores.recover_player_authority_pending_macro_advance(store, &control.session_id)?,
+        )?,
         ControlRequest::CoreCheckpoint {
             session_id,
             saved_at_ms,

@@ -1401,6 +1401,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [technologyOpen, setTechnologyOpen] = useState(false);
   const [statisticsOpen, setStatisticsOpen] = useState(false);
   const [statisticsHistory, setStatisticsHistory] = useState<readonly ProductionHistorySample[] | null>(null);
+  const statisticsHistoryRecordedAtRef = useRef<number | null>(null);
   const [authorityWorkspaceSync, setAuthorityWorkspaceSync] = useState<"statistics" | "dyson" | null>(null);
   const [statisticsFocusTab, setStatisticsFocusTab] = useState<StatisticsTab | null>(null);
   const [recipesOpen, setRecipesOpen] = useState(false);
@@ -2186,6 +2187,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const closeAllWorkspaces = useCallback(() => {
     authorityWorkspaceSyncIdRef.current += 1;
     setAuthorityWorkspaceSync(null);
+    statisticsHistoryRecordedAtRef.current = null;
     setStatisticsHistory(null);
     setTechnologyOpen(false);
     setStatisticsOpen(false);
@@ -2205,6 +2207,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => {
     if (statisticsOpen) return;
     authorityWorkspaceSyncIdRef.current += 1;
+    statisticsHistoryRecordedAtRef.current = null;
     setStatisticsHistory(null);
   }, [statisticsOpen]);
   const returnMobileToFactory = useCallback(() => {
@@ -3186,11 +3189,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // full-top-level publication without freezing the chart at open time.
   useEffect(() => {
     if (!statisticsOpen || authorityWorkspaceSync === "statistics") return;
+    if (statisticsHistoryRecordedAtRef.current === game.historyRecordedAt) return;
     const authoritySyncId = authorityWorkspaceSyncIdRef.current;
+    const requestedHistoryRecordedAt = game.historyRecordedAt;
     let cancelled = false;
     void requestAuthoritativeStatisticsHistory()
       .then((readModel) => {
         if (!cancelled && authorityWorkspaceSyncIdRef.current === authoritySyncId) {
+          statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
           setStatisticsHistory(readModel.samples);
         }
       })
@@ -7882,8 +7888,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (requiresAuthoritySync) {
       try {
         if (workspace === "statistics") {
+          const requestedHistoryRecordedAt = gameRef.current.historyRecordedAt;
           const readModel = await requestAuthoritativeStatisticsHistory();
-          if (authorityWorkspaceSyncIdRef.current === authoritySyncId) setStatisticsHistory(readModel.samples);
+          if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
+            statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
+            setStatisticsHistory(readModel.samples);
+          }
         } else {
           await refreshAuthoritativeUiMirror();
         }

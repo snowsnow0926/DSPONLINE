@@ -962,6 +962,172 @@ fn validate_ejector_target_command(
     Ok(())
 }
 
+fn validate_interaction_lock_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty()
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority interaction lock command shape is invalid")
+    }
+    let mut entity_ids = HashSet::new();
+    let mut shared_target = None;
+    for record in &command.changed_entities {
+        if !entity_ids.insert(record.id.as_str()) || record.changes.len() != 1 {
+            bail!("native player-authority interaction lock target set is invalid")
+        }
+        let target = require_exact_set_patch(&record.changes, &["interactionLocked"])?
+            .as_bool()
+            .ok_or_else(|| anyhow!("native player-authority interaction lock target is invalid"))?;
+        if shared_target.is_some_and(|candidate| candidate != target) {
+            bail!("native player-authority interaction lock batch targets disagree")
+        }
+        shared_target = Some(target);
+        let index = *state
+            .entity_index
+            .get(&record.id)
+            .ok_or_else(|| anyhow!("native player-authority interaction lock entity is missing"))?;
+        let entity = state.parse_entity(index)?;
+        // v47 treats an absent optional field as unlocked. Setting either
+        // explicit boolean is still a real canonicalization command and must
+        // remain reachable for an older/MOD-authored entity.
+        if let Some(current) = entity.get("interactionLocked") {
+            let current = current.as_bool().ok_or_else(|| {
+                anyhow!("native player-authority current interaction lock is invalid")
+            })?;
+            if current == target {
+                bail!("native player-authority interaction lock target is unchanged")
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_entity_power_or_splitter_configuration_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority entity configuration command shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let index = *state
+        .entity_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority configured entity is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority configured entity is invalid"))?;
+    if let Some(locked) = object.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority configured entity is locked or malformed")
+    }
+    let change = &record.changes[0];
+    if change.operation != "set" {
+        bail!("native player-authority entity configuration operation is invalid")
+    }
+    let target = change
+        .value
+        .as_ref()
+        .ok_or_else(|| anyhow!("native player-authority entity configuration has no value"))?;
+    let [PathSegment::Key(field)] = change.path.as_slice() else {
+        bail!("native player-authority entity configuration path is invalid")
+    };
+    if object.get(field) == Some(target) {
+        bail!("native player-authority entity configuration target is unchanged")
+    }
+    match field.as_str() {
+        "powerGridId" => {
+            target
+                .as_str()
+                .filter(|grid_id| matches!(*grid_id, "grid-a" | "grid-b" | "grid-c"))
+                .ok_or_else(|| anyhow!("native player-authority power grid target is invalid"))?;
+            if let Some(current) = object.get("powerGridId") {
+                current
+                    .as_str()
+                    .filter(|grid_id| matches!(*grid_id, "grid-a" | "grid-b" | "grid-c"))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority current power grid is invalid")
+                    })?;
+            }
+        }
+        "powerPriority" => {
+            target
+                .as_u64()
+                .filter(|priority| (1..=3).contains(priority))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority power priority target is invalid")
+                })?;
+            if let Some(current) = object.get("powerPriority") {
+                current
+                    .as_u64()
+                    .filter(|priority| (1..=3).contains(priority))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority current power priority is invalid")
+                    })?;
+            }
+        }
+        "generationPriority" => {
+            target
+                .as_u64()
+                .filter(|priority| (1..=3).contains(priority))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority generation priority target is invalid")
+                })?;
+            if object.get("kind").and_then(Value::as_str) != Some("power")
+                && object.get("buildingId").and_then(Value::as_str) != Some("ray_receiver")
+            {
+                bail!("native player-authority generation priority target cannot generate power")
+            }
+            if let Some(current) = object.get("generationPriority") {
+                current
+                    .as_u64()
+                    .filter(|priority| (1..=3).contains(priority))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority current generation priority is invalid")
+                    })?;
+            }
+        }
+        "distributionMode" => {
+            target
+                .as_str()
+                .filter(|mode| matches!(*mode, "balanced" | "priority"))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority splitter mode target is invalid")
+                })?;
+            if object.get("kind").and_then(Value::as_str) != Some("splitter") {
+                bail!("native player-authority splitter mode target is not a splitter")
+            }
+            if let Some(current) = object.get("distributionMode") {
+                current
+                    .as_str()
+                    .filter(|mode| matches!(*mode, "balanced" | "priority"))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority current splitter mode is invalid")
+                    })?;
+            }
+        }
+        _ => bail!("native player-authority entity configuration field is not typed"),
+    }
+    Ok(())
+}
+
 fn validate_player_pause_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -1742,6 +1908,30 @@ impl CoreState {
         }) {
             return validate_ejector_target_command(self, command);
         }
+        if command.changed_entities.iter().any(|record| {
+            record
+                .changes
+                .iter()
+                .any(|change| path_matches(&change.path, &["interactionLocked"]))
+        }) {
+            return validate_interaction_lock_command(self, command);
+        }
+        if command.changed_entities.iter().any(|record| {
+            record.changes.iter().any(|change| {
+                matches!(
+                    change.path.as_slice(),
+                    [PathSegment::Key(field)] if matches!(
+                        field.as_str(),
+                        "powerGridId"
+                            | "powerPriority"
+                            | "generationPriority"
+                            | "distributionMode"
+                    )
+                )
+            })
+        }) {
+            return validate_entity_power_or_splitter_configuration_command(self, command);
+        }
         if !command.changed_entities.is_empty()
             && command.changed_entities.iter().all(|record| {
                 record.changes.iter().all(|change| {
@@ -2237,6 +2427,18 @@ mod tests {
                 {
                     "id": "em_rail_ejector", "kind": "machine", "speed": 1,
                     "inputCapacity": 100, "outputCapacity": 100
+                },
+                {
+                    "id": "wind_turbine", "kind": "power", "speed": 1,
+                    "inputCapacity": 0, "outputCapacity": 0
+                },
+                {
+                    "id": "splitter_4way", "kind": "splitter", "speed": 1,
+                    "inputCapacity": 100, "outputCapacity": 100
+                },
+                {
+                    "id": "ray_receiver", "kind": "machine", "speed": 1,
+                    "inputCapacity": 100, "outputCapacity": 100
                 }
             ],
             "recipes": [
@@ -2385,6 +2587,124 @@ mod tests {
         player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
     }
 
+    fn player_entity_configuration_state() -> CoreState {
+        let mut state = player_command_state();
+        let mut addition = empty_player_command(state.revision);
+        addition.added_entities = vec![
+            AddedRecord {
+                index: 3,
+                value: serde_json::json!({
+                    "id": "generator-a",
+                    "kind": "power",
+                    "planetId": "home",
+                    "position": { "x": 7.0, "y": 2.0 },
+                    "interactionLocked": false,
+                    "buildingId": "wind_turbine",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "generationPriority": 3,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "powerOutputKw": 0,
+                    "powerInputKw": 0,
+                    "modPayload": { "owner": "pack:test", "revision": 11 }
+                }),
+            },
+            AddedRecord {
+                index: 4,
+                value: serde_json::json!({
+                    "id": "splitter-a",
+                    "kind": "splitter",
+                    "planetId": "home",
+                    "position": { "x": 9.0, "y": 2.0 },
+                    "interactionLocked": false,
+                    "buildingId": "splitter_4way",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "distributionMode": "balanced",
+                    "modPayload": { "owner": "pack:test", "revision": 12 }
+                }),
+            },
+            AddedRecord {
+                index: 5,
+                value: serde_json::json!({
+                    "id": "receiver-a",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "position": { "x": 11.0, "y": 2.0 },
+                    "interactionLocked": false,
+                    "buildingId": "ray_receiver",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "powerOutputKw": 0
+                }),
+            },
+            AddedRecord {
+                index: 6,
+                value: serde_json::json!({
+                    "id": "legacy-defaults-a",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "position": { "x": 13.0, "y": 2.0 },
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "modPayload": { "owner": "pack:test", "revision": 13 }
+                }),
+            },
+            AddedRecord {
+                index: 7,
+                value: serde_json::json!({
+                    "id": "splitter-defaults-a",
+                    "kind": "splitter",
+                    "planetId": "home",
+                    "position": { "x": 15.0, "y": 2.0 },
+                    "buildingId": "splitter_4way",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "modPayload": { "owner": "pack:test", "revision": 14 }
+                }),
+            },
+        ];
+        state.apply_command(&addition).unwrap();
+        state
+    }
+
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
         SimulationCommandPatch {
             protocol_version: crate::CORE_PROTOCOL_VERSION,
@@ -2479,6 +2799,24 @@ mod tests {
                 .collect(),
             operation: "set".to_owned(),
             value: Some(value),
+        }];
+        command
+    }
+
+    fn entity_leaf_command(
+        revision: u64,
+        entity_id: &str,
+        field: &str,
+        value: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key(field.to_owned())],
+                operation: "set".to_owned(),
+                value: Some(value),
+            }],
         }];
         command
     }
@@ -2899,6 +3237,181 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("current planet viewport zoom"));
         assert_eq!(malformed.revision, 9);
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_interaction_lock_power_and_splitter_configuration() {
+        let mut state = player_entity_configuration_state();
+        assert_eq!(state.revision, 10);
+
+        let mut lock = entity_leaf_command(
+            state.revision,
+            "smelter-a",
+            "interactionLocked",
+            Value::from(true),
+        );
+        lock.changed_entities.push(RecordPatch {
+            id: "ejector-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("interactionLocked".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(true)),
+            }],
+        });
+        let locked = state.apply_player_authority_command(&lock).unwrap();
+        assert_eq!(locked.changed_entity_ids, ["ejector-a", "smelter-a"]);
+        assert!(state.parse_entity(0).unwrap()["interactionLocked"] == Value::Bool(true));
+        assert!(state.parse_entity(1).unwrap()["interactionLocked"] == Value::Bool(true));
+
+        let unlock = entity_leaf_command(
+            state.revision,
+            "smelter-a",
+            "interactionLocked",
+            Value::from(false),
+        );
+        state.apply_player_authority_command(&unlock).unwrap();
+
+        for (entity_id, field, value) in [
+            ("smelter-a", "powerGridId", Value::from("grid-b")),
+            ("smelter-a", "powerPriority", Value::from(1)),
+            ("generator-a", "generationPriority", Value::from(2)),
+            ("receiver-a", "generationPriority", Value::from(1)),
+            ("splitter-a", "distributionMode", Value::from("priority")),
+        ] {
+            let command = entity_leaf_command(state.revision, entity_id, field, value.clone());
+            let applied = state.apply_player_authority_command(&command).unwrap();
+            assert_eq!(applied.changed_entity_ids, [entity_id]);
+            let index = *state.entity_index.get(entity_id).unwrap();
+            assert_eq!(state.parse_entity(index).unwrap()[field], value);
+        }
+        for (entity_id, field, value) in [
+            ("legacy-defaults-a", "powerGridId", Value::from("grid-c")),
+            ("legacy-defaults-a", "powerPriority", Value::from(3)),
+            (
+                "splitter-defaults-a",
+                "distributionMode",
+                Value::from("priority"),
+            ),
+            ("legacy-defaults-a", "interactionLocked", Value::from(false)),
+        ] {
+            let command = entity_leaf_command(state.revision, entity_id, field, value.clone());
+            state.apply_player_authority_command(&command).unwrap();
+            let index = *state.entity_index.get(entity_id).unwrap();
+            assert_eq!(state.parse_entity(index).unwrap()[field], value);
+        }
+        let generator_index = *state.entity_index.get("generator-a").unwrap();
+        assert_eq!(
+            state.parse_entity(generator_index).unwrap()["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 11 })
+        );
+        let splitter_index = *state.entity_index.get("splitter-a").unwrap();
+        assert_eq!(
+            state.parse_entity(splitter_index).unwrap()["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 12 })
+        );
+        let legacy_index = *state.entity_index.get("legacy-defaults-a").unwrap();
+        assert_eq!(
+            state.parse_entity(legacy_index).unwrap()["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 13 })
+        );
+        let default_splitter_index = *state.entity_index.get("splitter-defaults-a").unwrap();
+        assert_eq!(
+            state.parse_entity(default_splitter_index).unwrap()["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 14 })
+        );
+        assert_eq!(state.revision, 21);
+    }
+
+    #[test]
+    fn player_authority_entity_configuration_fails_closed_on_forged_or_mixed_changes() {
+        let mut delete_lock =
+            entity_leaf_command(10, "smelter-a", "interactionLocked", Value::from(true));
+        delete_lock.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete_lock.changed_entities[0].changes[0].value = None;
+
+        let mut mixed_lock_targets =
+            entity_leaf_command(10, "smelter-a", "interactionLocked", Value::from(true));
+        mixed_lock_targets.changed_entities.push(RecordPatch {
+            id: "ejector-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("interactionLocked".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(false)),
+            }],
+        });
+
+        let mut mixed_configuration =
+            entity_leaf_command(10, "smelter-a", "powerGridId", Value::from("grid-b"));
+        mixed_configuration.changed_entities[0]
+            .changes
+            .push(ValuePatch {
+                path: vec![PathSegment::Key("powerPriority".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(1)),
+            });
+
+        let commands = [
+            entity_leaf_command(10, "missing", "interactionLocked", Value::from(true)),
+            entity_leaf_command(10, "smelter-a", "interactionLocked", Value::from(false)),
+            entity_leaf_command(10, "smelter-a", "powerGridId", Value::from("grid-d")),
+            entity_leaf_command(10, "smelter-a", "powerPriority", Value::from(4)),
+            entity_leaf_command(10, "smelter-a", "generationPriority", Value::from(2)),
+            entity_leaf_command(10, "smelter-a", "distributionMode", Value::from("priority")),
+            entity_leaf_command(10, "splitter-a", "distributionMode", Value::from("random")),
+            entity_leaf_command(10, "splitter-a", "powerGridId", Value::from("grid-a")),
+            delete_lock,
+            mixed_lock_targets,
+            mixed_configuration,
+        ];
+        for command in commands {
+            let mut state = player_entity_configuration_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 10);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut locked = player_entity_configuration_state();
+        locked
+            .apply_player_authority_command(&entity_leaf_command(
+                locked.revision,
+                "smelter-a",
+                "interactionLocked",
+                Value::from(true),
+            ))
+            .unwrap();
+        let before = locked.canonical_sha256().unwrap();
+        let error = locked
+            .apply_player_authority_command(&entity_leaf_command(
+                locked.revision,
+                "smelter-a",
+                "powerPriority",
+                Value::from(1),
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("locked or malformed"));
+        assert_eq!(locked.canonical_sha256().unwrap(), before);
+
+        let mut malformed = player_entity_configuration_state();
+        malformed
+            .apply_command(&entity_leaf_command(
+                malformed.revision,
+                "legacy-defaults-a",
+                "powerGridId",
+                Value::from(7),
+            ))
+            .unwrap();
+        let before = malformed.canonical_sha256().unwrap();
+        let error = malformed
+            .apply_player_authority_command(&entity_leaf_command(
+                malformed.revision,
+                "legacy-defaults-a",
+                "powerGridId",
+                Value::from("grid-b"),
+            ))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("current power grid is invalid"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 

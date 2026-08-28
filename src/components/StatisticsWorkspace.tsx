@@ -11,7 +11,7 @@ import { getInfiniteResearchCostString, isInfiniteResearchComplete } from "../ga
 import type { GalacticActivityPublicStatus } from "../game/galacticActivity";
 import { getPlanetDisplayName, getPlanetIndustrialProfile } from "../game/galaxy";
 import { listBeltNetworks, type BeltHealth } from "../game/network";
-import type { BeltRouteMode, CanvasBookmark, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameState, InfiniteResearchId, ItemId, PlanetId, RecipeId, StationSlotTemplate } from "../game/types";
+import type { BeltRouteMode, CanvasBookmark, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameState, InfiniteResearchId, ItemId, PlanetId, ProductionHistorySample, RecipeId, StationSlotTemplate } from "../game/types";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ProductionManagement } from "./ProductionManagement";
 import { GalacticActivityPanel } from "./GalacticActivityPanel";
@@ -45,6 +45,7 @@ interface ItemSort {
 interface StatisticsWorkspaceProps {
   open: boolean;
   game: GameState;
+  productionHistory: readonly ProductionHistorySample[];
   onClose: () => void;
   onCreatePlan: (itemId: ItemId, targetPerMinute: number, planetId: PlanetId | "all") => void;
   onUpdatePlan: (planId: string, changes: { name?: string; itemId?: ItemId; targetPerMinute?: number; planetId?: PlanetId | "all" }) => void;
@@ -267,7 +268,7 @@ function NetworkOverview({ game, onFocusBeltNetwork, onBulkBeltUpgrade, onBulkBe
   );
 }
 
-export function StatisticsWorkspace({ open, game, onClose, onCreatePlan, onUpdatePlan, onSetPlanRecipe, onRemovePlan, onSelectInfiniteResearch, onInfiniteResearchAutomation, onGalacticDispatchAutomation, onGalacticDispatchThrottle, onGalacticExporterPausedChange, onGalacticExportEnabled, onGalacticExportPriority, onDispatchGalacticExport, onFocusEntity, onFocusBeltNetwork, onBulkRecipeChange, onBulkStationSlotApply, onBulkBeltUpgrade, onBulkBeltRoute, onBulkBeltConfiguration, onBulkBeltRemove, onBeltHeatmapChange, onAddCanvasBookmark, onRenameCanvasBookmark, onOpenCanvasBookmark, onRemoveCanvasBookmark, focusTab, mobile = false, galacticActivityStatus, contentPackRuntimeSnapshot }: StatisticsWorkspaceProps) {
+export function StatisticsWorkspace({ open, game, productionHistory, onClose, onCreatePlan, onUpdatePlan, onSetPlanRecipe, onRemovePlan, onSelectInfiniteResearch, onInfiniteResearchAutomation, onGalacticDispatchAutomation, onGalacticDispatchThrottle, onGalacticExporterPausedChange, onGalacticExportEnabled, onGalacticExportPriority, onDispatchGalacticExport, onFocusEntity, onFocusBeltNetwork, onBulkRecipeChange, onBulkStationSlotApply, onBulkBeltUpgrade, onBulkBeltRoute, onBulkBeltConfiguration, onBulkBeltRemove, onBeltHeatmapChange, onAddCanvasBookmark, onRenameCanvasBookmark, onOpenCanvasBookmark, onRemoveCanvasBookmark, focusTab, mobile = false, galacticActivityStatus, contentPackRuntimeSnapshot }: StatisticsWorkspaceProps) {
   const { isEnglish } = useAppLocale();
   const [tab, setTab] = useState<StatisticsTab>("production");
   const [filter, setFilter] = useState<ItemFilter>("all");
@@ -378,12 +379,12 @@ export function StatisticsWorkspace({ open, game, onClose, onCreatePlan, onUpdat
   }, [contentPackRuntimeSnapshot.fingerprint, planetScope, statisticsRequired]);
   const galactic = useMemo(() => open && tab === "galaxy" ? getGalacticIndustrySnapshot(game) : null, [game, open, tab]);
   const scopedProductionHistory = useMemo(() => planetScope === "all"
-    ? game.productionHistory
-    : game.productionHistory.map((sample) => ({
+    ? productionHistory
+    : productionHistory.map((sample) => ({
       ...sample,
       productionPerMinute: sample.planetProductionPerMinute?.[planetScope] ?? {},
       consumptionPerMinute: sample.planetConsumptionPerMinute?.[planetScope] ?? {},
-    })), [game.productionHistory, planetScope]);
+    })), [planetScope, productionHistory]);
   const productionWindow = useMemo(() => {
     const fallbackProduction = Object.fromEntries(statistics.items.map((item) => [item.itemId, item.productionPerMinute])) as Partial<Record<ItemId, number>>;
     const fallbackConsumption = Object.fromEntries(statistics.items.map((item) => [item.itemId, item.consumptionPerMinute])) as Partial<Record<ItemId, number>>;
@@ -438,20 +439,20 @@ export function StatisticsWorkspace({ open, game, onClose, onCreatePlan, onUpdat
   }));
   const selectedPlan = tab === "planning" ? game.productionPlans.find((plan) => plan.id === selectedPlanId) ?? game.productionPlans[0] ?? null : null;
   const planResult = useMemo(() => open && tab === "planning" && selectedPlan ? calculateProductionPlan(game, selectedPlan) : null, [game, open, selectedPlan, tab]);
-  const targetHistory = useMemo(() => open && tab === "planning" && selectedPlan ? game.productionHistory.map((sample) => ({
+  const targetHistory = useMemo(() => open && tab === "planning" && selectedPlan ? productionHistory.map((sample) => ({
     elapsedSeconds: sample.elapsedSeconds,
     production: sample.productionPerMinute[selectedPlan.itemId] ?? 0,
     consumption: sample.consumptionPerMinute[selectedPlan.itemId] ?? 0,
     inventory: sample.inventory[selectedPlan.itemId] ?? 0,
-  })).slice(-60) : [], [game.productionHistory, open, selectedPlan, tab]);
-  const efficiencyHistory = useMemo(() => open && tab === "efficiency" ? game.productionHistory.slice(-90).map((sample) => ({
+  })).slice(-60) : [], [open, productionHistory, selectedPlan, tab]);
+  const efficiencyHistory = useMemo(() => open && tab === "efficiency" ? productionHistory.slice(-90).map((sample) => ({
     elapsedSeconds: sample.elapsedSeconds,
     machine: sample.machineEfficiency ?? 0,
     logistics: sample.logisticsEfficiency ?? 0,
     power: sample.powerEfficiency ?? (sample.demandKw > 0 ? 0 : 1),
     activeMachines: sample.activeMachines ?? 0,
     blockedMachines: sample.blockedMachines ?? 0,
-  })) : [], [game.productionHistory, open, tab]);
+  })) : [], [open, productionHistory, tab]);
   const latestEfficiency = efficiencyHistory.at(-1);
 
   useEffect(() => {

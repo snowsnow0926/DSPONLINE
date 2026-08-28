@@ -88,6 +88,8 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   alwaysFail = false;
   closed = false;
   projectionCalls = 0;
+  statisticsProjectionCalls = 0;
+  statisticsProjectionRevisionOffset = 0;
   readonly commitRequests: Array<Parameters<WindowsNativeCoreShadow["commitOperation"]>[0]> = [];
   private readonly receipts = new Map<string, DesktopNativeCoreCommitOperationResult>();
 
@@ -127,10 +129,11 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   }
 
   async statisticsProjection(request: { minElapsedSeconds: number; maxElapsedSeconds: number }) {
+    this.statisticsProjectionCalls += 1;
     return {
       schemaVersion: 1 as const,
       projectionType: "statistics-v1" as const,
-      revision: this.current.revision,
+      revision: this.current.revision + this.statisticsProjectionRevisionOffset,
       window: {
         minElapsedSeconds: request.minElapsedSeconds,
         maxElapsedSeconds: request.maxElapsedSeconds,
@@ -254,6 +257,47 @@ async function readyController(session: FakeNativeSession) {
 }
 
 describe("Windows native core invitation-Beta controller", () => {
+  it("serves statistics only from a verified same-revision JavaScript shadow", async () => {
+    const session = new FakeNativeSession();
+    const controller = await openController(session);
+    const verified = await controller.readVerifiedStatisticsProjection({
+      minElapsedSeconds: 0,
+      maxElapsedSeconds: 60,
+      cursor: 0,
+      limit: 512,
+    }, 1);
+    expect(verified).toMatchObject({ projectionType: "statistics-v1", revision: 1 });
+    expect(session.statisticsProjectionCalls).toBe(1);
+
+    await controller.mirrorJavaScriptOperationUnverified({
+      commandId: "statistics-unverified",
+      baseRevision: 1,
+      resultRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    expect(await controller.readVerifiedStatisticsProjection({
+      minElapsedSeconds: 0,
+      maxElapsedSeconds: 60,
+      cursor: 0,
+      limit: 512,
+    }, 2)).toBeNull();
+    expect(session.statisticsProjectionCalls).toBe(1);
+  });
+
+  it("falls back without changing authority when native statistics returns another revision", async () => {
+    const session = new FakeNativeSession();
+    session.statisticsProjectionRevisionOffset = 1;
+    const controller = await openController(session);
+    expect(await controller.readVerifiedStatisticsProjection({
+      minElapsedSeconds: 0,
+      maxElapsedSeconds: 60,
+      cursor: 0,
+      limit: 512,
+    }, 1)).toBeNull();
+    expect(controller.snapshot().authority).toMatchObject({ authority: "javascript", phase: "shadow", shadowRevision: 1 });
+  });
+
   it("mirrors JavaScript durably while JavaScript remains authoritative", async () => {
     const session = new FakeNativeSession();
     const controller = await openController(session);

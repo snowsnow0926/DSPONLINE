@@ -1,6 +1,8 @@
 import type {
   DesktopNativeCoreCommitOperationResult,
   DesktopNativeCoreProjectionResult,
+  DesktopNativeCoreStatisticsProjectionRequest,
+  DesktopNativeCoreStatisticsProjectionResult,
   DesktopNativeCoreSummary,
   DesktopNativeSaveCommitResult,
   DesktopNativeCoreExportResult,
@@ -504,6 +506,39 @@ export class WindowsNativeCoreBetaController {
     this.authorityState = handleNativeCoreExit(this.authorityState, reason);
     await this.closeSession();
     return this.snapshot();
+  }
+
+  /**
+   * Optional read-only acceleration for the renderer. JavaScript remains the
+   * authority: a native result is exposed only while the shadow and its latest
+   * verified proof identify the exact revision requested by the caller.
+   */
+  async readVerifiedStatisticsProjection(
+    request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStatisticsProjectionResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.statisticsProjection(request);
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
   }
 
   private async readBoundedProjection(

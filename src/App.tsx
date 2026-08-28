@@ -306,7 +306,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -339,8 +339,10 @@ import {
   createSimulationProjectionStateIndex,
   hydrateSimulationProjection,
   mergeSimulationProjections,
+  createStatisticsHistoryReadModel,
   type SimulationProjection,
   type SimulationProjectionStateIndex,
+  type StatisticsHistoryReadModel,
 } from "./game/simulationProjection";
 import { applySimulationStateDelta, readExperimentalSimulationDeltaMode } from "./game/simulationDelta";
 import {
@@ -1398,6 +1400,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [autoLayoutUndo, setAutoLayoutUndo] = useState<AutoLayoutUndoSnapshot | null>(null);
   const [technologyOpen, setTechnologyOpen] = useState(false);
   const [statisticsOpen, setStatisticsOpen] = useState(false);
+  const [statisticsHistory, setStatisticsHistory] = useState<readonly ProductionHistorySample[] | null>(null);
   const [authorityWorkspaceSync, setAuthorityWorkspaceSync] = useState<"statistics" | "dyson" | null>(null);
   const [statisticsFocusTab, setStatisticsFocusTab] = useState<StatisticsTab | null>(null);
   const [recipesOpen, setRecipesOpen] = useState(false);
@@ -1742,6 +1745,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const lineFindTraceCacheRef = useRef<{ planetId: PlanetId; revision: number; traces: Map<string, ReturnType<typeof analyzeEntityLineTrace>> } | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const simulationWorkerRef = useRef<Worker | null>(null);
+  const statisticsReadModelRequestRef = useRef<{
+    id: number;
+    promise: Promise<StatisticsHistoryReadModel>;
+    resolve: (readModel: StatisticsHistoryReadModel) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
   const simulationWorkerDisabledRef = useRef(false);
   const durableSimulationRuntimeEnabled = isDurableSimulationRuntimeEnabled();
   const contentPackRuntimeSnapshotRef = useRef<ContentPackRuntimeSnapshot>(createContentPackRuntimeSnapshot(INITIAL_CONTENT_PACK_REGISTRY));
@@ -1849,7 +1858,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const simulationStateRevisionRef = useRef(durableSimulationRuntimeEnabled ? loaded.runtimeRecovery?.stateRevision ?? 0 : 0);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
-  simulationProjectionScopeRef.current = fullRealtimeSimulation || statisticsOpen || dysonPlannerOpen ? "full-top-level" : "default";
+  simulationProjectionScopeRef.current = fullRealtimeSimulation || dysonPlannerOpen ? "full-top-level" : "default";
   const simulationCheckpointBarrierRef = useRef(false);
   const simulationSaveBarrierDepthRef = useRef(0);
   const simulationCheckpointRequestRef = useRef<{
@@ -2175,6 +2184,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       : mobileCanvasMode;
   const pointerOverlayActive = Boolean(placement || blueprintPlacementId || connectionDraft || clickConnectionPreview || game.cargo || connectionHint);
   const closeAllWorkspaces = useCallback(() => {
+    authorityWorkspaceSyncIdRef.current += 1;
+    setAuthorityWorkspaceSync(null);
+    setStatisticsHistory(null);
     setTechnologyOpen(false);
     setStatisticsOpen(false);
     setStatisticsFocusTab(null);
@@ -2190,6 +2202,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setGalaxyOpen(false);
     setConstructionCenterOpen(false);
   }, []);
+  useEffect(() => {
+    if (statisticsOpen) return;
+    authorityWorkspaceSyncIdRef.current += 1;
+    setStatisticsHistory(null);
+  }, [statisticsOpen]);
   const returnMobileToFactory = useCallback(() => {
     closeAllWorkspaces();
     setMobilePanel(null);
@@ -3111,6 +3128,80 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const refreshAuthoritativeUiMirror = useCallback(async (): Promise<void> => {
     await requestAuthoritativeDeferredTopLevelProjection();
   }, [requestAuthoritativeDeferredTopLevelProjection]);
+
+  const requestAuthoritativeStatisticsHistory = useCallback(async (): Promise<StatisticsHistoryReadModel> => {
+    const expectedRevision = simulationStateRevisionRef.current;
+    const nativeProjection = await windowsNativeCoreBetaControllerRef.current?.readVerifiedStatisticsProjection({
+      minElapsedSeconds: 0,
+      maxElapsedSeconds: Math.max(0, gameRef.current.elapsedSeconds),
+      cursor: 0,
+      limit: 512,
+    }, expectedRevision);
+    if (nativeProjection && simulationStateRevisionRef.current === expectedRevision &&
+      nativeProjection.revision === expectedRevision && nativeProjection.nextCursor === null) {
+      return {
+        schemaVersion: 1,
+        kind: "statistics-history-v1",
+        revision: nativeProjection.revision,
+        samples: nativeProjection.samples,
+      };
+    }
+
+    const existing = statisticsReadModelRequestRef.current;
+    if (existing) return existing.promise;
+    const worker = simulationWorkerRef.current;
+    if (!worker || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) {
+      return createStatisticsHistoryReadModel(gameRef.current, simulationStateRevisionRef.current);
+    }
+    let resolve!: (readModel: StatisticsHistoryReadModel) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<StatisticsHistoryReadModel>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const id = simulationRequestIdRef.current + 1;
+    simulationRequestIdRef.current = id;
+    statisticsReadModelRequestRef.current = { id, promise, resolve, reject };
+    try {
+      const registrySnapshot = contentPackRuntimeSnapshotRef.current;
+      worker.postMessage({
+        id,
+        kind: "sync-statistics",
+        simulationSeconds: 0,
+        wallSeconds: 0,
+        registryFingerprint: registrySnapshot.fingerprint,
+        ...(simulationWorkerRegistryFingerprintRef.current === registrySnapshot.fingerprint ? {} : { registry: registrySnapshot }),
+        protocol: "projection",
+      } satisfies SimulationWorkerRequest);
+    } catch (error) {
+      statisticsReadModelRequestRef.current = null;
+      reject(error instanceof Error ? error : new Error("权威生产历史请求失败"));
+    }
+    return promise;
+  }, []);
+
+  // Production history advances on its own one-second boundary even though it
+  // is intentionally excluded from the default factory projection. Keep the
+  // open workspace live through its narrow read model; this replaces the old
+  // full-top-level publication without freezing the chart at open time.
+  useEffect(() => {
+    if (!statisticsOpen || authorityWorkspaceSync === "statistics") return;
+    const authoritySyncId = authorityWorkspaceSyncIdRef.current;
+    let cancelled = false;
+    void requestAuthoritativeStatisticsHistory()
+      .then((readModel) => {
+        if (!cancelled && authorityWorkspaceSyncIdRef.current === authoritySyncId) {
+          setStatisticsHistory(readModel.samples);
+        }
+      })
+      .catch(() => {
+        // A transient read failure leaves the last verified chart visible.
+        // The next authoritative history boundary retries automatically.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authorityWorkspaceSync, game.historyRecordedAt, requestAuthoritativeStatisticsHistory, statisticsOpen]);
 
   /** Replace the live simulation Worker from the exact terminal state that
    * was just persisted (pure-idle handoff). This uses the existing durable
@@ -5488,6 +5579,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
         return;
       }
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest?.id === event.data.id) {
+        statisticsReadModelRequestRef.current = null;
+        const readModel = event.data.statisticsReadModel;
+        if (event.data.needsRegistry || event.data.registryError || event.data.needsState || event.data.needsResync ||
+          !readModel || readModel.schemaVersion !== 1 || readModel.kind !== "statistics-history-v1" ||
+          readModel.revision !== event.data.stateRevision) {
+          statisticsRequest.reject(new Error(event.data.registryError ?? "Worker 无法提供权威生产历史"));
+        } else {
+          simulationWorkerRegistryFingerprintRef.current = event.data.registryFingerprint ?? simulationWorkerRegistryFingerprintRef.current;
+          statisticsRequest.resolve(readModel);
+        }
+        return;
+      }
       const checkpointRequest = simulationCheckpointRequestRef.current;
       if (checkpointRequest?.id === event.data.id) {
         const abortNativeSaveTransaction = () => {
@@ -6366,6 +6471,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     worker.onerror = () => {
       if (simulationWorkerRef.current !== worker) return;
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest) {
+        statisticsReadModelRequestRef.current = null;
+        statisticsRequest.reject(new Error("模拟 Worker 异常，无法读取权威生产历史"));
+      }
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
       if (checkpointWriteRequest) {
@@ -6477,6 +6587,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       worker.terminate();
     }
     return () => {
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest) {
+        statisticsReadModelRequestRef.current = null;
+        statisticsRequest.reject(new Error("模拟 Worker 已重建，生产历史请求已取消"));
+      }
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
       if (checkpointWriteRequest) {
@@ -7712,13 +7827,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
+    closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
     const requiresAuthoritySync = workspace === "statistics" || workspace === "dyson";
     setCommandPaletteOpen(false);
-    closeAllWorkspaces();
     setAuthorityWorkspaceSync(requiresAuthoritySync ? workspace : null);
-    if (requiresAuthoritySync) setNotice("正在从模拟 Worker 同步权威历史与戴森规划…");
+    if (workspace === "statistics") setNotice("正在读取权威生产历史…");
+    else if (workspace === "dyson") setNotice("正在从模拟 Worker 同步权威戴森规划…");
     setMobilePanel(null);
     if (workspace === "inspector" || workspace === "resources") {
       const sheet = workspace === "resources" ? "inventory" : "inspector";
@@ -7765,10 +7881,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (requiresAuthoritySync) {
       try {
-        await refreshAuthoritativeUiMirror();
+        if (workspace === "statistics") {
+          const readModel = await requestAuthoritativeStatisticsHistory();
+          if (authorityWorkspaceSyncIdRef.current === authoritySyncId) setStatisticsHistory(readModel.samples);
+        } else {
+          await refreshAuthoritativeUiMirror();
+        }
         if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
           setAuthorityWorkspaceSync(null);
-          setNotice("权威历史与戴森规划已同步");
+          setNotice(workspace === "statistics" ? "权威生产历史已同步" : "权威戴森规划已同步");
         }
       } catch (error) {
         if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
@@ -7779,7 +7900,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror]);
+  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror, requestAuthoritativeStatisticsHistory]);
 
   const openSystemSpaceStation = useCallback((systemId: StarSystemId) => {
     closeAllWorkspaces();
@@ -13277,6 +13398,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
           open
           game={game}
+          productionHistory={statisticsHistory ?? game.productionHistory}
           contentPackRuntimeSnapshot={contentPackRuntimeSnapshotRef.current}
           mobile={nextMobileShell}
           galacticActivityStatus={galacticActivityStatus}

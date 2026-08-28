@@ -4,7 +4,7 @@ import { applyContentPackRuntimeSnapshot, type ContentPackRuntimeSnapshot } from
 import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, markPersistentSimulationRuntimeDirty, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";
 import { BrowserMulticoreExecutor, planMulticoreSimulation, type MulticoreSimulationOptions } from "./multicoreSimulation";
 import type { GameState } from "./types";
-import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjectionWithBaseline, type SimulationProjection, type SimulationProjectionBaseline } from "./simulationProjection";
+import { captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjectionWithBaseline, createStatisticsHistoryReadModel, type SimulationProjection, type SimulationProjectionBaseline, type StatisticsHistoryReadModel } from "./simulationProjection";
 import { createSimulationStateDelta, shouldUseSimulationDelta, type SimulationStateDelta } from "./simulationDelta";
 import {
   invalidateTimeWarpApproximationCertificate,
@@ -36,7 +36,7 @@ import {
 
 export interface SimulationWorkerRequest {
   id: number;
-  kind?: "advance" | "checkpoint" | "sync-projection" | "replay-durable";
+  kind?: "advance" | "checkpoint" | "sync-projection" | "sync-statistics" | "replay-durable";
   state?: GameState;
   /** One-time/bootstrap state; callers transfer the backing buffer. */
   stateTransfer?: SimulationStateTransfer;
@@ -115,6 +115,8 @@ export interface SimulationWorkerResponse {
   registryError?: string;
   /** Optional P4 projection; `state` remains the compatibility oracle. */
   projection?: SimulationProjection;
+  /** Read-only history channel used by the statistics workspace. */
+  statisticsReadModel?: StatisticsHistoryReadModel;
   /** The authoritative revision advanced, but this response intentionally
    * omitted the large record projection. */
   projectionDeferred?: boolean;
@@ -635,6 +637,22 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       durationMs: Math.max(0, performance.now() - receivedAt),
       needsState: true,
       registryFingerprint: activeRegistryFingerprint ?? undefined,
+    } satisfies SimulationWorkerResponse);
+    return;
+  }
+  if (event.data.kind === "sync-statistics") {
+    const statisticsReadModel = createStatisticsHistoryReadModel(runtime.state, runtimeRevision);
+    self.postMessage({
+      id,
+      changed: false,
+      durationMs: Math.max(0, performance.now() - receivedAt),
+      ...(profile ? {
+        transferBytes: new TextEncoder().encode(JSON.stringify(statisticsReadModel)).byteLength,
+      } : {}),
+      protocol: "projection",
+      stateRevision: runtimeRevision,
+      registryFingerprint: activeRegistryFingerprint ?? undefined,
+      statisticsReadModel,
     } satisfies SimulationWorkerResponse);
     return;
   }

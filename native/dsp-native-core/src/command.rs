@@ -1855,6 +1855,134 @@ fn validate_station_fleet_target_command(
     Ok(())
 }
 
+fn validate_station_warper_inventory_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || command.top_level_changes.len() != 1
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station warper inventory command shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let final_count = require_exact_set_patch(&record.changes, &["stationWarpers"])?
+        .as_u64()
+        .ok_or_else(|| anyhow!("native player-authority station warper count is invalid"))?;
+    let station_index = *state
+        .entity_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority station warper entity is missing"))?;
+    let station = state.parse_entity(station_index)?;
+    let station = station
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station warper entity is invalid"))?;
+    if station.get("kind").and_then(Value::as_str) != Some("station")
+        || station.get("buildingId").and_then(Value::as_str)
+            != Some("interstellar_logistics_station")
+        || state
+            .catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .is_none_or(|building| building.kind != "station")
+    {
+        bail!("native player-authority station warper target is incompatible")
+    }
+    if let Some(locked) = station.get("interactionLocked")
+        && locked.as_bool() != Some(false)
+    {
+        bail!("native player-authority station warper target is locked or malformed")
+    }
+    if !technology_is_completed(state, "space_warp") {
+        bail!("native player-authority station warper technology is locked")
+    }
+    if !state.catalog.items.contains_key("space_warper") {
+        bail!("native player-authority space warper is not in the catalog")
+    }
+    let current = finite_json_number(
+        station.get("stationWarpers"),
+        "current station warper count",
+    )?
+    .floor()
+    .max(0.0);
+    if current > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority current station warper count is too large")
+    }
+    let current = current as u64;
+    if current == final_count {
+        bail!("native player-authority station warper count is unchanged")
+    }
+    let machine_count = safe_json_integer(station.get("machineCount"), "station stack")?;
+    let capacity = machine_count
+        .checked_mul(50)
+        .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station warper capacity overflows"))?;
+    if final_count > capacity {
+        bail!("native player-authority station warper count exceeds capacity")
+    }
+    let planet_id = station
+        .get("planetId")
+        .and_then(Value::as_str)
+        .filter(|planet_id| {
+            state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == *planet_id)
+        })
+        .ok_or_else(|| anyhow!("native player-authority station warper planet is invalid"))?;
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    let (tray, tray_path) = if planet_id == active_planet_id {
+        (
+            state
+                .base_value()
+                .get("tray")
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native player-authority active tray is missing"))?,
+            vec!["tray", "space_warper"],
+        )
+    } else {
+        (
+            state
+                .base_value()
+                .get("planetTrays")
+                .and_then(Value::as_object)
+                .and_then(|trays| trays.get(planet_id))
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native player-authority remote planet tray is missing"))?,
+            vec!["planetTrays", planet_id, "space_warper"],
+        )
+    };
+    let tray_count = normalized_construction_inventory(tray.get("space_warper"))?;
+    let expected_tray = if final_count > current {
+        tray_count
+            .checked_sub(final_count - current)
+            .ok_or_else(|| {
+                anyhow!("native player-authority station warper stock is insufficient")
+            })?
+    } else {
+        tray_count
+            .checked_add(current - final_count)
+            .filter(|count| *count <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority station warper refund overflows"))?
+    };
+    if require_exact_set_patch(&command.top_level_changes, &tray_path)?.as_u64()
+        != Some(expected_tray)
+    {
+        bail!("native player-authority station warper inventory accounting is invalid")
+    }
+    Ok(())
+}
+
 struct ValidatedTimeWarpState<'a> {
     value: &'a Map<String, Value>,
     controller_entity_id: Option<&'a str>,
@@ -2922,6 +3050,14 @@ impl CoreState {
         }) {
             return validate_station_fleet_target_command(self, command);
         }
+        if command.changed_entities.iter().any(|record| {
+            record
+                .changes
+                .iter()
+                .any(|change| path_matches(&change.path, &["stationWarpers"]))
+        }) {
+            return validate_station_warper_inventory_command(self, command);
+        }
         if !command.changed_entities.is_empty()
             && command.changed_entities.iter().all(|record| {
                 record.changes.iter().all(|change| {
@@ -3414,7 +3550,8 @@ mod tests {
                 { "id": "iron_ingot", "kind": "solid" },
                 { "id": "solar_sail", "kind": "solid" },
                 { "id": "logistics_drone", "kind": "solid" },
-                { "id": "logistics_vessel", "kind": "solid" }
+                { "id": "logistics_vessel", "kind": "solid" },
+                { "id": "space_warper", "kind": "solid" }
             ],
             "buildings": [
                 {
@@ -3565,7 +3702,8 @@ mod tests {
                 "giant": { "x": 510, "y": 250, "zoom": 0.84 }
             },
             "construction": { "arc_smelter": 4, "em_rail_ejector": 0, "conveyor_belt_mk1": 5 },
-            "tray": { "logistics_drone": 0, "logistics_vessel": 0 },
+            "tray": { "logistics_drone": 0, "logistics_vessel": 0, "space_warper": 10 },
+            "planetTrays": { "ashen": { "space_warper": 7 } },
             "portableFleet": { "logistics_drone": 20, "logistics_vessel": 5 },
             "constructionQueue": [],
             "blueprintVersions": [],
@@ -3815,6 +3953,12 @@ mod tests {
                 false,
                 station_slots(None),
             ),
+            (
+                "station-remote",
+                "interstellar_logistics_station",
+                false,
+                station_slots(Some("iron_ore")),
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -3824,7 +3968,7 @@ mod tests {
                 value: serde_json::json!({
                     "id": id,
                     "kind": "station",
-                    "planetId": "home",
+                    "planetId": if id == "station-remote" { "ashen" } else { "home" },
                     "position": { "x": 10.0 + offset as f64, "y": 3.0 },
                     "interactionLocked": interaction_locked,
                     "buildingId": building_id,
@@ -3845,6 +3989,7 @@ mod tests {
                     "stationProgress": 0,
                     "stationDrones": 5,
                     "stationVessels": 2,
+                    "stationWarpers": 0,
                     "stationPeerId": null,
                     "stationRoutes": [],
                     "stationWarpEnabled": true,
@@ -5171,6 +5316,206 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("busy vehicles"));
         assert_eq!(busy.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_moves_station_warpers_against_the_owning_planet_tray() {
+        let mut state = player_station_configuration_state();
+        state
+            .apply_command(&top_level_leaf_command(
+                state.revision,
+                &["research", "completedTechIds"],
+                serde_json::json!(["space_warp"]),
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&station_fleet_command(
+                state.revision,
+                "station-ils",
+                "stationWarpers",
+                6,
+                "tray",
+                "space_warper",
+                4,
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&station_fleet_command(
+                state.revision,
+                "station-ils",
+                "stationWarpers",
+                2,
+                "tray",
+                "space_warper",
+                8,
+            ))
+            .unwrap();
+
+        let mut remote = entity_leaf_command(
+            state.revision,
+            "station-remote",
+            "stationWarpers",
+            Value::from(3),
+        );
+        remote.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("planetTrays".to_owned()),
+                PathSegment::Key("ashen".to_owned()),
+                PathSegment::Key("space_warper".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(4)),
+        }];
+        state.apply_player_authority_command(&remote).unwrap();
+
+        let local_index = *state.entity_index.get("station-ils").unwrap();
+        let remote_index = *state.entity_index.get("station-remote").unwrap();
+        assert_eq!(
+            state.parse_entity(local_index).unwrap()["stationWarpers"],
+            2
+        );
+        assert_eq!(
+            state.parse_entity(remote_index).unwrap()["stationWarpers"],
+            3
+        );
+        assert_eq!(state.base_value()["tray"]["space_warper"], 8);
+        assert_eq!(
+            state.base_value()["planetTrays"]["ashen"]["space_warper"],
+            4
+        );
+        assert_eq!(state.revision, 14);
+    }
+
+    #[test]
+    fn player_authority_station_warper_inventory_fails_closed_without_material() {
+        let no_technology = station_fleet_command(
+            10,
+            "station-ils",
+            "stationWarpers",
+            1,
+            "tray",
+            "space_warper",
+            9,
+        );
+        let mut state = player_station_configuration_state();
+        let before = state.canonical_sha256().unwrap();
+        assert!(
+            state
+                .apply_player_authority_command(&no_technology)
+                .is_err()
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+
+        let unlocked_state = || {
+            let mut state = player_station_configuration_state();
+            state
+                .apply_command(&top_level_leaf_command(
+                    state.revision,
+                    &["research", "completedTechIds"],
+                    serde_json::json!(["space_warp"]),
+                ))
+                .unwrap();
+            state
+        };
+        let mut delete_count = station_fleet_command(
+            11,
+            "station-ils",
+            "stationWarpers",
+            1,
+            "tray",
+            "space_warper",
+            9,
+        );
+        delete_count.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete_count.changed_entities[0].changes[0].value = None;
+        let mut mixed = station_fleet_command(
+            11,
+            "station-ils",
+            "stationWarpers",
+            1,
+            "tray",
+            "space_warper",
+            9,
+        );
+        mixed.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationWarpEnabled".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(false)),
+        });
+        let commands = [
+            station_fleet_command(
+                11,
+                "missing",
+                "stationWarpers",
+                1,
+                "tray",
+                "space_warper",
+                9,
+            ),
+            station_fleet_command(
+                11,
+                "station-pls",
+                "stationWarpers",
+                1,
+                "tray",
+                "space_warper",
+                9,
+            ),
+            station_fleet_command(
+                11,
+                "station-locked",
+                "stationWarpers",
+                1,
+                "tray",
+                "space_warper",
+                9,
+            ),
+            station_fleet_command(
+                11,
+                "station-ils",
+                "stationWarpers",
+                51,
+                "tray",
+                "space_warper",
+                0,
+            ),
+            station_fleet_command(
+                11,
+                "station-ils",
+                "stationWarpers",
+                20,
+                "tray",
+                "space_warper",
+                0,
+            ),
+            station_fleet_command(
+                11,
+                "station-ils",
+                "stationWarpers",
+                1,
+                "tray",
+                "space_warper",
+                8,
+            ),
+            station_fleet_command(
+                11,
+                "station-ils",
+                "stationWarpers",
+                0,
+                "tray",
+                "space_warper",
+                10,
+            ),
+            delete_count,
+            mixed,
+        ];
+        for command in commands {
+            let mut state = unlocked_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 11);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

@@ -3931,6 +3931,90 @@ fn validate_player_pause_command(
     Ok(())
 }
 
+fn validate_dyson_launch_configuration_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority Dyson launch command shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    if change.operation != "set" {
+        bail!("native player-authority Dyson launch command operation is invalid")
+    }
+    let value = change
+        .value
+        .as_ref()
+        .ok_or_else(|| anyhow!("native player-authority Dyson launch command has no value"))?;
+    let engineering = state
+        .base_value()
+        .get("dysonEngineering")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson engineering state is invalid"))?;
+
+    match change.path.as_slice() {
+        [PathSegment::Key(root), PathSegment::Key(field)]
+            if root == "dysonEngineering" && field == "launchMode" =>
+        {
+            let current = engineering
+                .get("launchMode")
+                .and_then(Value::as_str)
+                .filter(|mode| matches!(*mode, "balanced" | "swarm" | "sphere"))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority current Dyson launch mode is invalid")
+                })?;
+            let target = value
+                .as_str()
+                .filter(|mode| matches!(*mode, "balanced" | "swarm" | "sphere"))
+                .ok_or_else(|| anyhow!("native player-authority Dyson launch mode is invalid"))?;
+            if target == current {
+                bail!("native player-authority Dyson launch mode is unchanged")
+            }
+        }
+        [PathSegment::Key(root), PathSegment::Key(field)]
+            if root == "dysonEngineering" && field == "launchThrottle" =>
+        {
+            let valid_throttle = |value: f64| matches!(value, 0.25 | 0.5 | 0.75 | 1.0);
+            let current = finite_json_number(
+                engineering.get("launchThrottle"),
+                "current Dyson launch throttle",
+            )?;
+            let target = finite_json_number(Some(value), "Dyson launch throttle")?;
+            if !valid_throttle(current) || !valid_throttle(target) {
+                bail!("native player-authority Dyson launch throttle is invalid")
+            }
+            if target == current {
+                bail!("native player-authority Dyson launch throttle is unchanged")
+            }
+        }
+        [PathSegment::Key(root), PathSegment::Key(field)]
+            if root == "dysonEngineering" && field == "launchEnabled" =>
+        {
+            let current = engineering
+                .get("launchEnabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority current Dyson launch enabled state is invalid")
+                })?;
+            let target = value.as_bool().ok_or_else(|| {
+                anyhow!("native player-authority Dyson launch enabled state is invalid")
+            })?;
+            if target == current {
+                bail!("native player-authority Dyson launch enabled state is unchanged")
+            }
+        }
+        _ => bail!("native player-authority Dyson launch patch path is not canonical"),
+    }
+    Ok(())
+}
+
 fn validate_recipe_focus_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -4774,6 +4858,11 @@ impl CoreState {
             return validate_time_warp_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "dysonEngineering")
+        }) {
+            return validate_dyson_launch_configuration_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "activePlanetId")
         }) {
             return validate_active_planet_command(self, command);
@@ -5449,6 +5538,9 @@ mod tests {
                 "giant": { "generationKw": 0, "demandKw": 0, "powerFactor": 1 }
             },
             "dysonEngineering": {
+                "launchMode": "balanced",
+                "launchThrottle": 1,
+                "launchEnabled": true,
                 "activeOrbitBySystem": { "helios": "orbit-home-old", "sigma": "orbit-foreign" },
                 "orbitsBySystem": {
                     "helios": [{ "id": "orbit-home-old" }, { "id": "orbit-home-new" }],
@@ -6586,6 +6678,19 @@ mod tests {
                 value: Some(value.clone()),
             })
             .collect();
+        command
+    }
+
+    fn dyson_launch_command(revision: u64, field: &str, value: Value) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: ["dysonEngineering", field]
+                .into_iter()
+                .map(|segment| PathSegment::Key(segment.to_owned()))
+                .collect(),
+            operation: "set".to_owned(),
+            value: Some(value),
+        }];
         command
     }
 
@@ -8573,6 +8678,106 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("metrics are missing"));
         assert_eq!(missing_metrics.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_only_canonical_dyson_launch_controls() {
+        let mut state = player_command_state();
+
+        let mode = dyson_launch_command(state.revision, "launchMode", Value::from("sphere"));
+        let applied = state.apply_player_authority_command(&mode).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert!(applied.changed_entity_ids.is_empty());
+        assert!(applied.changed_belt_ids.is_empty());
+        assert!(applied.topology_dirty);
+        assert_eq!(
+            state.base_value()["dysonEngineering"]["launchMode"],
+            "sphere"
+        );
+
+        state
+            .apply_player_authority_command(&dyson_launch_command(
+                state.revision,
+                "launchThrottle",
+                Value::from(0.25),
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&dyson_launch_command(
+                state.revision,
+                "launchEnabled",
+                Value::from(false),
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["dysonEngineering"]["launchThrottle"],
+            0.25
+        );
+        assert_eq!(
+            state.base_value()["dysonEngineering"]["launchEnabled"],
+            false
+        );
+        assert_eq!(state.revision, 12);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&mode).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_dyson_launch_controls_fail_closed_without_mutation() {
+        let mut delete_mode = dyson_launch_command(9, "launchMode", Value::from("sphere"));
+        delete_mode.top_level_changes[0].operation = "delete".to_owned();
+        delete_mode.top_level_changes[0].value = None;
+        let mut mixed = dyson_launch_command(9, "launchMode", Value::from("sphere"));
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut entity_mixed = dyson_launch_command(9, "launchEnabled", Value::from(false));
+        entity_mixed.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("interactionLocked".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(true)),
+            }],
+        }];
+        let commands = [
+            dyson_launch_command(9, "launchMode", Value::from("balanced")),
+            dyson_launch_command(9, "launchMode", Value::from("unlimited")),
+            dyson_launch_command(9, "launchThrottle", Value::from(0.9)),
+            dyson_launch_command(9, "launchThrottle", Value::from(1)),
+            dyson_launch_command(9, "launchEnabled", Value::from("false")),
+            dyson_launch_command(9, "launchEnergySpentMj", Value::from(0)),
+            delete_mode,
+            mixed,
+            entity_mixed,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = player_command_state();
+        malformed.base_value_mut()["dysonEngineering"]["launchThrottle"] = Value::from(0.9);
+        let before = malformed.canonical_sha256().unwrap();
+        assert!(
+            malformed
+                .apply_player_authority_command(&dyson_launch_command(
+                    malformed.revision,
+                    "launchThrottle",
+                    Value::from(0.5),
+                ))
+                .is_err()
+        );
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 
     #[test]

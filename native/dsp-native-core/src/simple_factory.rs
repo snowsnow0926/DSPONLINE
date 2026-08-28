@@ -4432,7 +4432,7 @@ pub(crate) struct PreparedFactoryAdvance {
     pub base: Map<String, Value>,
     pub entities: Vec<Value>,
     pub belt_commit: crate::belts::BeltCommitBatch,
-    pub belt_flow: crate::belts::BeltFlowAggregate,
+    pub belt_flow: crate::belts::PreparedBeltFlow,
     pub belt_scheduler: crate::belts::BeltSchedulerDiagnostics,
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
@@ -4653,7 +4653,9 @@ pub(crate) fn prepare_advance(
     }
     profile_mark!("simulate-steps");
     let belt_activity = belt_runtime.activity_snapshot(&belt_routes);
-    let (belt_commit, belt_flow, belt_scheduler) = belt_runtime.into_patches(state)?;
+    let belt_flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
+    let (belt_commit, belt_flow, belt_scheduler) =
+        belt_runtime.into_patches(state, belt_flow_requirement)?;
     profile_mark!("belt-runtime-write-back");
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-after");

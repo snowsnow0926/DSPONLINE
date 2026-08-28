@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::belts::BeltFlowAggregate;
+use crate::belts::{BeltFlowRequirement, PreparedBeltFlow};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -20,6 +20,13 @@ const TIERED_HISTORY_RETENTION_SECONDS: f64 = 24.0 * TIERED_HOUR_SECONDS;
 const TIERED_HISTORY_SIDECAR_FORMAT_VERSION: u16 = 1;
 const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
 
+#[derive(Debug, Clone, Copy)]
+struct ProductionHistoryBoundary {
+    elapsed: f64,
+    duration: f64,
+    refresh: bool,
+}
+
 type RateAccumulator = HashMap<String, f64>;
 type PlanetRateAccumulator = HashMap<String, RateAccumulator>;
 
@@ -32,6 +39,40 @@ fn finite_number(value: Option<&Value>) -> Option<f64> {
     value
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
+}
+
+fn production_history_boundary(
+    base: &Map<String, Value>,
+) -> anyhow::Result<Option<ProductionHistoryBoundary>> {
+    let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
+    let recorded = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
+    if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
+        return Ok(None);
+    }
+    let duration = SAMPLE_SECONDS.max(elapsed - recorded);
+    let history = base
+        .get("productionHistory")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native production history is missing"))?;
+    let previous_boundary = ((elapsed - duration).max(0.0) / 10.0).floor();
+    let current_boundary = (elapsed.max(0.0) / 10.0).floor();
+    Ok(Some(ProductionHistoryBoundary {
+        elapsed,
+        duration,
+        refresh: history.is_empty() || duration >= 10.0 || previous_boundary != current_boundary,
+    }))
+}
+
+pub(crate) fn belt_flow_requirement(
+    base: &Map<String, Value>,
+) -> anyhow::Result<BeltFlowRequirement> {
+    Ok(
+        if production_history_boundary(base)?.is_some_and(|boundary| boundary.refresh) {
+            BeltFlowRequirement::ExactOriginalOrder
+        } else {
+            BeltFlowRequirement::NotRequired
+        },
+    )
 }
 
 fn sample_duration(sample: &Value) -> f64 {
@@ -721,7 +762,7 @@ impl CoreState {
         &self,
         base: &mut Map<String, Value>,
         entities: &[Value],
-        prepared_belt_flow: Option<BeltFlowAggregate>,
+        prepared_belt_flow: Option<PreparedBeltFlow>,
     ) -> anyhow::Result<()> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
@@ -751,21 +792,17 @@ impl CoreState {
         // Production history is sampled, not recomputed every simulation
         // second. Check the sample clock before building any whole-factory
         // aggregates so the common no-sample path is O(1).
-        let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
-        let recorded = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
-        if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
+        let Some(boundary) = production_history_boundary(base)? else {
             return Ok(());
-        }
-        let duration = SAMPLE_SECONDS.max(elapsed - recorded);
+        };
+        let elapsed = boundary.elapsed;
+        let duration = boundary.duration;
         let history = base
             .get("productionHistory")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("native production history is missing"))?;
         let previous = history.last();
-        let previous_boundary = ((elapsed - duration).max(0.0) / 10.0).floor();
-        let current_boundary = (elapsed.max(0.0) / 10.0).floor();
-        let refresh =
-            previous.is_none() || duration >= 10.0 || previous_boundary != current_boundary;
+        let refresh = boundary.refresh;
         let mut ordered_planets = self.catalog.planets.iter().collect::<Vec<_>>();
         ordered_planets.sort_by(|left, right| {
             left.simulation_order
@@ -780,10 +817,12 @@ impl CoreState {
         // refresh boundary. On the intervening samples the previous value is
         // copied below, so scanning every belt here cannot affect the sample.
         let (belt_capacity, belt_flow) = if refresh {
-            let aggregate = if let Some(aggregate) = prepared_belt_flow {
-                aggregate
-            } else {
-                crate::belts::aggregate_flow_from_state(self)?
+            let aggregate = match prepared_belt_flow {
+                Some(PreparedBeltFlow::Exact(aggregate)) => aggregate,
+                Some(PreparedBeltFlow::NotRequired) => {
+                    bail!("native prepared belt flow was skipped at a required boundary")
+                }
+                None => crate::belts::aggregate_flow_from_state(self)?,
             };
             (aggregate.capacity, aggregate.flow)
         } else {
@@ -1288,6 +1327,14 @@ mod tests {
         history.iter().map(sample_duration).sum()
     }
 
+    fn flow_boundary_base(elapsed: f64, recorded: f64, history: Vec<Value>) -> Map<String, Value> {
+        Map::from_iter([
+            ("elapsedSeconds".to_owned(), Value::from(elapsed)),
+            ("historyRecordedAt".to_owned(), Value::from(recorded)),
+            ("productionHistory".to_owned(), Value::Array(history)),
+        ])
+    }
+
     fn reference_add_rate(target: &mut BTreeMap<String, f64>, item: &str, amount: f64) {
         target.insert(
             item.to_owned(),
@@ -1378,6 +1425,72 @@ mod tests {
             expected["negative_zero"].to_bits()
         );
         assert_eq!(actual["negative_zero"].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn belt_flow_requirement_matches_sample_refresh_boundaries_and_segments() {
+        let prior = vec![history_sample(1.0, 1.0, 1.0)];
+        let requirement = |elapsed, recorded, history| {
+            belt_flow_requirement(&flow_boundary_base(elapsed, recorded, history)).unwrap()
+        };
+
+        assert_eq!(
+            requirement(0.9998, 0.0, Vec::new()),
+            BeltFlowRequirement::NotRequired
+        );
+        assert_eq!(
+            requirement(0.9999, 0.0, Vec::new()),
+            BeltFlowRequirement::ExactOriginalOrder
+        );
+        assert_eq!(
+            requirement(2.0, 1.0, prior.clone()),
+            BeltFlowRequirement::NotRequired
+        );
+
+        // Segmented one-second revisions skip 8->9, refresh exactly at the
+        // 9->10 diagnostics boundary, then skip 10->11 again.
+        assert_eq!(
+            requirement(9.0, 8.0, prior.clone()),
+            BeltFlowRequirement::NotRequired
+        );
+        assert_eq!(
+            requirement(10.0, 9.0, prior.clone()),
+            BeltFlowRequirement::ExactOriginalOrder
+        );
+        assert_eq!(
+            requirement(11.0, 10.0, prior.clone()),
+            BeltFlowRequirement::NotRequired
+        );
+        // An unsegmented ten-second sample refreshes by duration even when
+        // both endpoints would otherwise lie in adjacent bucket math.
+        assert_eq!(
+            requirement(11.0, 1.0, prior),
+            BeltFlowRequirement::ExactOriginalOrder
+        );
+    }
+
+    #[test]
+    fn belt_flow_requirement_keeps_negative_zero_and_early_return_validation() {
+        let negative_zero = flow_boundary_base(-0.0, -0.0, Vec::new());
+        let before = serde_json::to_vec(&negative_zero).unwrap();
+        assert_eq!(
+            belt_flow_requirement(&negative_zero).unwrap(),
+            BeltFlowRequirement::NotRequired
+        );
+        assert_eq!(serde_json::to_vec(&negative_zero).unwrap(), before);
+        assert_eq!(
+            negative_zero["elapsedSeconds"].as_f64().unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        let mut malformed_before_sample = flow_boundary_base(0.5, 0.0, Vec::new());
+        malformed_before_sample.insert("productionHistory".to_owned(), Value::Null);
+        assert_eq!(
+            belt_flow_requirement(&malformed_before_sample).unwrap(),
+            BeltFlowRequirement::NotRequired
+        );
+        malformed_before_sample.insert("elapsedSeconds".to_owned(), Value::from(1.0));
+        assert!(belt_flow_requirement(&malformed_before_sample).is_err());
     }
 
     #[test]

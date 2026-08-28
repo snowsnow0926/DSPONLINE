@@ -130,7 +130,9 @@ impl BeltCommitBatch {
         dynamics: BeltDynamicColumns,
     ) -> anyhow::Result<Self> {
         let runtime = BeltRuntime::from_dynamics_for_test(state, dynamics)?;
-        runtime.into_patches(state).map(|(batch, _, _)| batch)
+        runtime
+            .into_patches(state, BeltFlowRequirement::ExactOriginalOrder)
+            .map(|(batch, _, _)| batch)
     }
 
     #[cfg(test)]
@@ -165,6 +167,21 @@ impl BeltCommitBatch {
 pub(crate) struct BeltFlowAggregate {
     pub capacity: f64,
     pub flow: f64,
+}
+
+/// Whether this revision's production-history boundary will consume the
+/// logistics aggregate. Skipped revisions must not perform the O(B) float
+/// fold; exact revisions retain the historical persisted-row order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BeltFlowRequirement {
+    NotRequired,
+    ExactOriginalOrder,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PreparedBeltFlow {
+    NotRequired,
+    Exact(BeltFlowAggregate),
 }
 
 #[derive(Debug, Default)]
@@ -841,15 +858,17 @@ impl BeltRuntime {
     pub(crate) fn into_patches(
         self,
         state: &CoreState,
-    ) -> anyhow::Result<(BeltCommitBatch, BeltFlowAggregate, BeltSchedulerDiagnostics)> {
-        self.into_patches_with_runtime(state, deterministic_runtime())
+        flow_requirement: BeltFlowRequirement,
+    ) -> anyhow::Result<(BeltCommitBatch, PreparedBeltFlow, BeltSchedulerDiagnostics)> {
+        self.into_patches_with_runtime(state, flow_requirement, deterministic_runtime())
     }
 
     fn into_patches_with_runtime(
         mut self,
         state: &CoreState,
+        flow_requirement: BeltFlowRequirement,
         runtime: &DeterministicRuntime,
-    ) -> anyhow::Result<(BeltCommitBatch, BeltFlowAggregate, BeltSchedulerDiagnostics)> {
+    ) -> anyhow::Result<(BeltCommitBatch, PreparedBeltFlow, BeltSchedulerDiagnostics)> {
         let belt_count = state.validate_belt_runtime_topology()?;
         if self
             .source
@@ -870,15 +889,24 @@ impl BeltRuntime {
             .seal(belt_count)?
             .unseal()?;
 
-        // Keep the historical aggregate in exact persisted row order. This
-        // intentionally remains O(B) until the aggregate itself has a closed
-        // incremental proof; the touched evidence below removes the separate
-        // sparse write-back rediscovery scan without changing float order.
-        let mut flow = 0.0;
-        for last_flow in &self.last_flow {
-            flow += last_flow.max(0.0);
-        }
-        self.diagnostics.write_back_flow_checks = belt_count;
+        // Production history consumes this aggregate only on its 10-second
+        // diagnostics refresh boundary. Never replace the historical fold
+        // with an incrementally maintained float: original row order is part
+        // of JavaScript bitwise compatibility whenever the value is observed.
+        let prepared_flow = match flow_requirement {
+            BeltFlowRequirement::NotRequired => PreparedBeltFlow::NotRequired,
+            BeltFlowRequirement::ExactOriginalOrder => {
+                let mut flow = 0.0;
+                for last_flow in &self.last_flow {
+                    flow += last_flow.max(0.0);
+                }
+                self.diagnostics.write_back_flow_checks = belt_count;
+                PreparedBeltFlow::Exact(BeltFlowAggregate {
+                    capacity: self.belt_capacity,
+                    flow,
+                })
+            }
+        };
 
         let mut changed_count = 0_usize;
         let mut number_mask = state.belt_dynamics.number_mask.clone();
@@ -972,7 +1000,9 @@ impl BeltRuntime {
                 patches
             }
         };
-        if !self.belt_capacity.is_finite() || !flow.is_finite() {
+        if !self.belt_capacity.is_finite()
+            || matches!(prepared_flow, PreparedBeltFlow::Exact(aggregate) if !aggregate.flow.is_finite())
+        {
             bail!("native belt aggregate is non-finite");
         }
         self.diagnostics.changed_belt_records = changed_count;
@@ -1008,14 +1038,7 @@ impl BeltRuntime {
             .take()
             .ok_or_else(|| anyhow!("native belt runtime source proof is missing"))?;
         let batch = BeltCommitBatch::seal(source, patches, dynamics);
-        Ok((
-            batch,
-            BeltFlowAggregate {
-                capacity: self.belt_capacity,
-                flow,
-            },
-            self.diagnostics,
-        ))
+        Ok((batch, prepared_flow, self.diagnostics))
     }
 
     #[cfg(test)]
@@ -1023,8 +1046,13 @@ impl BeltRuntime {
         self,
         state: &CoreState,
         workers: usize,
-    ) -> anyhow::Result<(BeltCommitBatch, BeltFlowAggregate, BeltSchedulerDiagnostics)> {
-        self.into_patches_with_runtime(state, &DeterministicRuntime::for_test(workers))
+        flow_requirement: BeltFlowRequirement,
+    ) -> anyhow::Result<(BeltCommitBatch, PreparedBeltFlow, BeltSchedulerDiagnostics)> {
+        self.into_patches_with_runtime(
+            state,
+            flow_requirement,
+            &DeterministicRuntime::for_test(workers),
+        )
     }
 }
 

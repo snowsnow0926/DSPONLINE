@@ -7418,7 +7418,7 @@ mod tests {
                     "progress":if index == 17 { -0.0 } else { 0.0 },
                     "totalTransferred":index,
                     "congestion":0,
-                    "lastFlow":index as f64 / 10.0,
+                    "lastFlow":if index == 17 { -0.0 } else { index as f64 / 10.0 },
                     "modPayload":{"opaque":format!("模组-{index}"),"raw":[index,255,256]}
                 })
             })
@@ -7429,13 +7429,33 @@ mod tests {
                 .unwrap();
         let untouched_raw = state.belt_raw[17].clone();
 
+        let skipped = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        let (skipped_batch, skipped_flow, skipped_diagnostics) = skipped
+            .into_patches(&state, crate::belts::BeltFlowRequirement::NotRequired)
+            .unwrap();
+        assert_eq!(skipped_batch.patch_count(), 0);
+        assert!(matches!(
+            skipped_flow,
+            crate::belts::PreparedBeltFlow::NotRequired
+        ));
+        assert_eq!(skipped_diagnostics.write_back_flow_checks, 0);
+        assert_eq!(skipped_diagnostics.write_back_evidence_checks, 0);
+
         let unchanged = crate::belts::BeltRuntime::from_dynamics_for_test(
             &state,
             state.belt_dynamics.0.as_ref().clone(),
         )
         .unwrap();
-        let (unchanged_batch, unchanged_flow, unchanged_diagnostics) =
-            unchanged.into_patches(&state).unwrap();
+        let (unchanged_batch, unchanged_flow, unchanged_diagnostics) = unchanged
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap();
         assert_eq!(unchanged_batch.patch_count(), 0);
         assert_eq!(unchanged_diagnostics.write_back_flow_checks, 300);
         assert_eq!(unchanged_diagnostics.write_back_evidence_checks, 0);
@@ -7444,6 +7464,9 @@ mod tests {
             .last_flow
             .iter()
             .fold(0.0, |sum, value| sum + value.max(0.0));
+        let crate::belts::PreparedBeltFlow::Exact(unchanged_flow) = unchanged_flow else {
+            panic!("exact belt flow was not prepared");
+        };
         assert_eq!(
             unchanged_flow.flow.to_bits(),
             expected_unchanged_flow.to_bits()
@@ -7460,12 +7483,20 @@ mod tests {
             .iter()
             .fold(0.0, |sum, value| sum + value.max(0.0));
         let runtime = crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
-        let (batch, aggregate, diagnostics) = runtime.into_patches(&state).unwrap();
+        let (batch, aggregate, diagnostics) = runtime
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap();
         assert_eq!(batch.patch_indices(), [1, 255, 256]);
         assert_eq!(diagnostics.changed_belt_records, 3);
         assert_eq!(diagnostics.write_back_patch_records, 3);
         assert_eq!(diagnostics.write_back_flow_checks, 300);
         assert_eq!(diagnostics.write_back_evidence_checks, 3);
+        let crate::belts::PreparedBeltFlow::Exact(aggregate) = aggregate else {
+            panic!("exact belt flow was not prepared");
+        };
         assert_eq!(aggregate.flow.to_bits(), expected_flow.to_bits());
 
         let mut committed = state.clone();
@@ -7501,6 +7532,13 @@ mod tests {
                 .to_bits(),
             (-0.0_f64).to_bits()
         );
+        assert_eq!(
+            committed.parse_belt(17).unwrap()["lastFlow"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
     }
 
     #[test]
@@ -7530,7 +7568,7 @@ mod tests {
             CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
                 .unwrap();
         let changed_count = belt_count / 3 + 1;
-        let run = |workers| {
+        let run = |workers, flow_requirement| {
             let mut state = source.clone();
             let mut dynamics = state.belt_dynamics.0.as_ref().clone();
             for index in 0..changed_count {
@@ -7542,12 +7580,11 @@ mod tests {
             let runtime =
                 crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
             let (batch, aggregate, diagnostics) = runtime
-                .into_patches_with_worker_count_for_test(&state, workers)
+                .into_patches_with_worker_count_for_test(&state, workers, flow_requirement)
                 .unwrap();
             assert_eq!(batch.patch_count(), belt_count);
             assert_eq!(diagnostics.changed_belt_records, changed_count);
             assert_eq!(diagnostics.write_back_evidence_checks, changed_count);
-            assert_eq!(diagnostics.write_back_flow_checks, belt_count);
             state
                 .commit_simulated_state(
                     state.base_value().clone(),
@@ -7557,20 +7594,76 @@ mod tests {
                     true,
                 )
                 .unwrap();
+            let aggregate_bits = match aggregate {
+                crate::belts::PreparedBeltFlow::Exact(aggregate) => {
+                    Some((aggregate.capacity.to_bits(), aggregate.flow.to_bits()))
+                }
+                crate::belts::PreparedBeltFlow::NotRequired => None,
+            };
             (
                 state.canonical_sha256().unwrap(),
-                aggregate.flow.to_bits(),
+                aggregate_bits,
                 diagnostics.write_back_workers,
+                diagnostics.write_back_flow_checks,
             )
         };
-        let expected = run(1);
+        let expected = run(1, crate::belts::BeltFlowRequirement::ExactOriginalOrder);
         assert_eq!(expected.2, 1);
+        assert!(expected.1.is_some());
+        assert_eq!(expected.3, belt_count);
         for workers in [2, 4, 8] {
-            let actual = run(workers);
+            let actual = run(
+                workers,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            );
             assert_eq!(actual.0, expected.0, "workers={workers}");
             assert_eq!(actual.1, expected.1, "workers={workers}");
             assert_eq!(actual.2, workers, "workers={workers}");
+            assert_eq!(actual.3, belt_count, "workers={workers}");
         }
+
+        let skipped = run(1, crate::belts::BeltFlowRequirement::NotRequired);
+        assert_eq!(skipped.0, expected.0);
+        assert_eq!(skipped.1, None);
+        assert_eq!(skipped.3, 0);
+        for workers in [2, 4, 8] {
+            let actual = run(workers, crate::belts::BeltFlowRequirement::NotRequired);
+            assert_eq!(actual.0, skipped.0, "skipped workers={workers}");
+            assert_eq!(actual.1, None, "skipped workers={workers}");
+            assert_eq!(actual.2, workers, "skipped workers={workers}");
+            assert_eq!(actual.3, 0, "skipped workers={workers}");
+        }
+    }
+
+    #[test]
+    fn required_history_boundary_rejects_an_explicitly_skipped_belt_flow_atomically() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let state_hash = state.canonical_sha256().unwrap();
+        let mut base = state.base_value().clone();
+        base.insert("elapsedSeconds".to_owned(), Value::from(10.0));
+        base.insert("historyRecordedAt".to_owned(), Value::from(9.0));
+        base.insert(
+            "productionHistory".to_owned(),
+            Value::Array(vec![json!({"elapsedSeconds":9})]),
+        );
+        let base_before = serde_json::to_vec(&base).unwrap();
+        let entities = state.parse_entities_parallel().unwrap();
+
+        let error = state
+            .record_production_history_with_records(
+                &mut base,
+                &entities,
+                Some(crate::belts::PreparedBeltFlow::NotRequired),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("belt flow was skipped"));
+        assert_eq!(serde_json::to_vec(&base).unwrap(), base_before);
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
     }
 
     #[test]
@@ -7587,7 +7680,14 @@ mod tests {
         )
         .unwrap();
         state.belt_raw = state.belt_raw.0.as_ref().clone().into();
-        assert!(runtime.into_patches(&state).is_err());
+        assert!(
+            runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .is_err()
+        );
 
         let belt_commit = crate::belts::BeltCommitBatch::unchanged_for_test(&state);
         state.belts = state.belts.0.as_ref().clone().into();
@@ -7621,7 +7721,14 @@ mod tests {
         runtime.clear_total_dirty_for_test(0);
         let hash_before = state.canonical_sha256().unwrap();
         let dirty_before = format!("{:?}", state.save_dirty);
-        assert!(runtime.into_patches(&state).is_err());
+        assert!(
+            runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .is_err()
+        );
         assert_eq!(state.revision, 7);
         assert_eq!(state.canonical_sha256().unwrap(), hash_before);
         assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
@@ -7682,7 +7789,12 @@ mod tests {
             )
             .unwrap();
             runtime.truncate_column_for_test(column);
-            let error = runtime.into_patches(&state).unwrap_err();
+            let error = runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .unwrap_err();
             assert!(error.to_string().contains("topology"), "column={column}");
         }
     }

@@ -2156,6 +2156,11 @@ pub(crate) struct FactoryTopology {
     pub orbital_cargo_terminal_indices: Vec<usize>,
     pub galactic_material_exporter_indices: Vec<usize>,
     pub space_station_launcher_indices: Vec<usize>,
+    /// Stable persisted-row order for every ray receiver. Runtime recipe,
+    /// technology, output-capacity, and power eligibility still belong to the
+    /// exact Dyson probe; this immutable index only removes the O(all
+    /// non-stations) discovery scan from every simulation revision.
+    pub ray_receiver_indices: Vec<usize>,
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
     pub ordinary_machine_indices: Vec<usize>,
@@ -2185,6 +2190,7 @@ impl FactoryTopology {
         self.orbital_cargo_terminal_indices.shrink_to_fit();
         self.galactic_material_exporter_indices.shrink_to_fit();
         self.space_station_launcher_indices.shrink_to_fit();
+        self.ray_receiver_indices.shrink_to_fit();
         self.power_source_indices.shrink_to_fit();
         self.vein_indices.shrink_to_fit();
         self.ordinary_machine_indices.shrink_to_fit();
@@ -2215,6 +2221,7 @@ impl FactoryTopology {
             + self.orbital_cargo_terminal_indices.capacity()
             + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
+            + self.ray_receiver_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
@@ -3426,6 +3433,9 @@ impl CoreState {
             }
             if building == "space_station_construction_launcher" {
                 factory_topology.space_station_launcher_indices.push(index);
+            }
+            if kind == "machine" && building == "ray_receiver" {
+                factory_topology.ray_receiver_indices.push(index);
             }
             if kind == "power"
                 || (kind == "machine" && building == "ray_receiver" && recipe == "ray_power")
@@ -5801,6 +5811,64 @@ mod tests {
                     .as_ref()
                     .map(|directory| directory.estimated_bytes())
                     .unwrap_or(0)
+        );
+    }
+
+    #[test]
+    fn ray_receiver_topology_index_is_compact_and_counted_in_memory_diagnostics() {
+        let receiver_rows = [1_usize, 4];
+        let entities = (0..6)
+            .map(|index| {
+                if receiver_rows.contains(&index) {
+                    json!({
+                        "id": format!("receiver-{index}"),
+                        "kind": "machine",
+                        "planetId": "home",
+                        "buildingId": "ray_receiver",
+                        "recipeId": if index == 1 { "ray_power" } else { "critical_photon" },
+                        "machineCount": 1,
+                        "inputs": {},
+                        "outputs": {"critical_photon": 0},
+                    })
+                } else {
+                    json!({
+                        "id": format!("vein-{index}"),
+                        "kind": "vein",
+                        "planetId": "home",
+                        "resourceId": "iron_ore",
+                        "minerCount": 1,
+                        "inputs": {},
+                        "outputs": {"iron_ore": 1},
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        assert_eq!(state.factory_topology.ray_receiver_indices, receiver_rows);
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices.capacity(),
+            receiver_rows.len(),
+            "the immutable session index must not retain geometric growth slack"
+        );
+        let indexed_bytes = (receiver_rows.len() * size_of::<usize>()) as u64;
+        let mut topology_without_receivers = (*state.factory_topology).clone();
+        topology_without_receivers.ray_receiver_indices = Vec::new();
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            topology_without_receivers.estimated_bytes() + indexed_bytes
+        );
+        assert!(
+            state.memory_estimate().topology_index_bytes
+                >= state.factory_topology.estimated_bytes(),
+            "public memory diagnostics must include the dedicated receiver index"
         );
     }
 

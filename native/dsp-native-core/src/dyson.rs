@@ -835,25 +835,6 @@ fn ray_receiver_runnable(
     output_capacity(state, base, entity) - current + EPSILON >= 1.0
 }
 
-fn ray_receiver_indices(state: &CoreState) -> Vec<usize> {
-    let Some(machine_kind) = state.symbols.lookup("machine") else {
-        return Vec::new();
-    };
-    let Some(ray_receiver_building) = state.symbols.lookup("ray_receiver") else {
-        return Vec::new();
-    };
-    state
-        .factory_topology
-        .non_station_indices
-        .iter()
-        .copied()
-        .filter(|&entity_index| {
-            state.entities.kinds[entity_index] == machine_kind
-                && state.entities.buildings[entity_index] == ray_receiver_building
-        })
-        .collect()
-}
-
 fn collect_ordered_receiver_probes_with_runtime<R, F>(
     runtime: &DeterministicRuntime,
     entity_indices: &[usize],
@@ -909,12 +890,12 @@ fn calculate_reception_with_runtime(
 ) -> anyhow::Result<Reception> {
     let dyson = load(base)?;
     let rated = receiver_capacity(base);
-    // FactoryTopology does not yet own a dedicated receiver index. Restrict
-    // the one required discovery pass to compact SoA columns, then retain its
-    // stable entity order so settlement never scans the JSON entity array.
-    let receiver_indices = ray_receiver_indices(state);
+    // The immutable topology owns the persisted-order receiver rows. Probe
+    // only those R rows while retaining all exact runtime eligibility checks;
+    // record commands rebuild the topology before another admitted advance.
+    let receiver_indices = &state.factory_topology.ray_receiver_indices;
     let receivers =
-        collect_ordered_receiver_probes_with_runtime(runtime, &receiver_indices, |entity_index| {
+        collect_ordered_receiver_probes_with_runtime(runtime, receiver_indices, |entity_index| {
             probe_receiver_reception(state, base, entities, entity_index)
         })?
         .into_iter()
@@ -930,7 +911,7 @@ fn calculate_reception_with_runtime(
         *capacity_by_system.entry(system_id.clone()).or_default() += rated * receiver.machine_count;
     }
     let mut result = Reception {
-        receiver_indices,
+        receiver_indices: receiver_indices.clone(),
         ..Reception::default()
     };
     let mut receiver_load = 0.0;
@@ -1381,7 +1362,7 @@ mod tests {
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
     use crate::state::CoreCheckpointIdentity;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
     fn fixture_checksum(bytes: &[u8]) -> String {
         let mut hash = 0x811c9dc5_u32;
@@ -1526,10 +1507,10 @@ mod tests {
         let mut entity = json!({
             "id": format!("mod:receiver/{index:05}/Ω🚀"),
             "kind": "machine",
-            "planetId": if index % 2 == 0 { "home" } else { "ice" },
+            "planetId": if index.is_multiple_of(2) { "home" } else { "ice" },
             "powerGridId": "grid-a",
             "buildingId": "ray_receiver",
-            "recipeId": if index % 3 == 0 { "ray_power" } else { "critical_photon" },
+            "recipeId": if index.is_multiple_of(3) { "ray_power" } else { "critical_photon" },
             "machineCount": 1 + index % 4,
             "inputs": {},
             "outputs": { "critical_photon": index % 9 },
@@ -1554,6 +1535,47 @@ mod tests {
 
     fn receiver_matrix(count: usize) -> Vec<Value> {
         (0..count).map(receiver_entity).collect()
+    }
+
+    fn non_receiver_entity(index: usize) -> Value {
+        json!({
+            "id": format!("mod:vein/{index:05}/非接收器"),
+            "kind": "vein",
+            "planetId": if index.is_multiple_of(2) { "home" } else { "ice" },
+            "powerGridId": "grid-a",
+            "resourceId": "critical_photon",
+            "minerCount": 1,
+            "inputs": {},
+            "outputs": { "critical_photon": index % 11 },
+            "mod:vein/opaque": {
+                "index": index,
+                "signedZero": -0.0,
+                "text": "必须保持原样"
+            }
+        })
+    }
+
+    fn sparse_receiver_matrix(non_receiver_count: usize) -> (Vec<Value>, Vec<usize>) {
+        let total = non_receiver_count + 7;
+        let receiver_indices = vec![
+            0,
+            17,
+            PARALLEL_MIN_ITEMS - 1,
+            PARALLEL_MIN_ITEMS,
+            non_receiver_count / 2,
+            total - 2,
+            total - 1,
+        ];
+        let entities = (0..total)
+            .map(|index| {
+                if receiver_indices.binary_search(&index).is_ok() {
+                    receiver_entity(index)
+                } else {
+                    non_receiver_entity(index)
+                }
+            })
+            .collect();
+        (entities, receiver_indices)
     }
 
     fn fixture_state(entities: &[Value]) -> CoreState {
@@ -1936,6 +1958,128 @@ mod tests {
     }
 
     #[test]
+    fn sparse_receiver_topology_probes_only_receivers_and_matches_serial_oracle() {
+        let (source, expected_receiver_indices) =
+            sparse_receiver_matrix(PARALLEL_MIN_ITEMS * 4 + 37);
+        let state = fixture_state(&source);
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices,
+            expected_receiver_indices
+        );
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices.capacity(),
+            expected_receiver_indices.len(),
+            "receiver topology capacity should be trimmed after load"
+        );
+        assert!(
+            state.factory_topology.non_station_indices.len()
+                > state.factory_topology.ray_receiver_indices.len() * 2_000
+        );
+
+        for worker_count in [1, 2, 4, 8] {
+            let probe_count = AtomicUsize::new(0);
+            let observed_indices = collect_ordered_receiver_probes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state.factory_topology.ray_receiver_indices,
+                |entity_index| {
+                    probe_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(entity_index)
+                },
+            )
+            .unwrap();
+            assert_eq!(observed_indices, expected_receiver_indices);
+            assert_eq!(
+                probe_count.load(AtomicOrdering::SeqCst),
+                expected_receiver_indices.len(),
+                "discovery work must be O(receivers), worker_count={worker_count}"
+            );
+        }
+
+        let state_hash = state.canonical_sha256().unwrap();
+        let legacy = run_legacy_receiver_matrix(&state, &source);
+        let baseline = run_receiver_matrix(&state, &source, 1);
+        let baseline_bytes = serde_json::to_vec(&(&baseline.0, &baseline.1)).unwrap();
+        let baseline_hash = fixture_checksum(&baseline_bytes);
+        assert_eq!(baseline_hash, "8a1a308f");
+        assert_eq!(
+            baseline_bytes,
+            serde_json::to_vec(&(&legacy.0, &legacy.1)).unwrap()
+        );
+        assert_eq!(
+            baseline.2.allocation_by_entity,
+            legacy.2.allocation_by_entity
+        );
+        assert_eq!(
+            baseline.2.efficiency_by_entity,
+            legacy.2.efficiency_by_entity
+        );
+        assert_eq!(baseline.2.ray_power_by_entity, legacy.2.ray_power_by_entity);
+        assert_eq!(baseline.2.receiver_load_kw, legacy.2.receiver_load_kw);
+        assert_eq!(baseline.2.receiver_indices, expected_receiver_indices);
+
+        for worker_count in [2, 4, 8] {
+            let observed = run_receiver_matrix(&state, &source, worker_count);
+            let observed_bytes = serde_json::to_vec(&(&observed.0, &observed.1)).unwrap();
+            assert_eq!(fixture_checksum(&observed_bytes), baseline_hash);
+            assert_eq!(observed_bytes, baseline_bytes);
+            assert_eq!(
+                observed.2.allocation_by_entity,
+                baseline.2.allocation_by_entity
+            );
+            assert_eq!(
+                observed.2.efficiency_by_entity,
+                baseline.2.efficiency_by_entity
+            );
+            assert_eq!(
+                observed.2.ray_power_by_entity,
+                baseline.2.ray_power_by_entity
+            );
+            assert_eq!(observed.2.receiver_load_kw, baseline.2.receiver_load_kw);
+            assert_eq!(observed.2.receiver_indices, baseline.2.receiver_indices);
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+    }
+
+    #[test]
+    fn indexed_receiver_still_applies_runtime_semantic_filtering() {
+        let source = receiver_matrix(6);
+        let state = fixture_state(&source);
+        let stale_index = state.factory_topology.ray_receiver_indices[5];
+        let mut runtime_entities = source.clone();
+        runtime_entities[stale_index]["kind"] = Value::from("vein");
+        runtime_entities[stale_index]["buildingId"] = Value::Null;
+        let untouched = serde_json::to_vec(&runtime_entities[stale_index]).unwrap();
+        let mut base = fixture_base();
+        let reception = calculate_reception_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base.as_object_mut().unwrap(),
+            &runtime_entities,
+        )
+        .unwrap();
+        assert_eq!(reception.receiver_indices, (0..6).collect::<Vec<_>>());
+        assert!(
+            !reception
+                .allocation_by_entity
+                .contains_key("mod:receiver/00005/Ω🚀")
+        );
+        run_ray_receivers_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut runtime_entities,
+            1.75,
+            &crate::belts::OutputCredits::default(),
+            &reception,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&runtime_entities[stale_index]).unwrap(),
+            untouched
+        );
+    }
+
+    #[test]
     fn locked_receiver_resets_progress_without_producing_or_losing_mod_data() {
         let mut source = vec![receiver_entity(5)];
         source[0]["recipeId"] = Value::from("critical_photon");
@@ -1985,7 +2129,7 @@ mod tests {
         let state = fixture_state(&source);
         let state_hash = state.canonical_sha256().unwrap();
         let source_bytes = serde_json::to_vec(&source).unwrap();
-        let receiver_indices = ray_receiver_indices(&state);
+        let receiver_indices = state.factory_topology.ray_receiver_indices.clone();
         for worker_count in [1, 2, 4, 8] {
             let mut base = fixture_base();
             let base_bytes = serde_json::to_vec(&base).unwrap();

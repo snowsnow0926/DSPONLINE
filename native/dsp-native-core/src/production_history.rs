@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::belts::{BeltFlowRequirement, PreparedBeltFlow};
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -764,6 +765,21 @@ impl CoreState {
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
     ) -> anyhow::Result<()> {
+        self.record_production_history_with_records_and_runtime(
+            base,
+            entities,
+            prepared_belt_flow,
+            deterministic_runtime(),
+        )
+    }
+
+    fn record_production_history_with_records_and_runtime(
+        &self,
+        base: &mut Map<String, Value>,
+        entities: &[Value],
+        prepared_belt_flow: Option<PreparedBeltFlow>,
+        runtime: &DeterministicRuntime,
+    ) -> anyhow::Result<()> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -995,36 +1011,39 @@ impl CoreState {
             // planet/grid into usize::MAX and could make an unrelated custom
             // grid appear powered. Borrowed string pairs avoid allocations
             // without changing identity or the missing-field defaults.
-            let mut power_source_grids =
-                HashSet::with_capacity(self.factory_topology.power_source_indices.len());
-            for (index, value) in entities.iter().enumerate() {
-                let kind = self
-                    .symbols
-                    .resolve(self.entities.kinds[index])
-                    .unwrap_or_default();
-                let building_id = self
-                    .symbols
-                    .resolve(self.entities.buildings[index])
-                    .unwrap_or_default();
-                let recipe_id = self
-                    .symbols
-                    .resolve(self.entities.recipes[index])
-                    .unwrap_or_default();
-                if kind != "power" && !(building_id == "ray_receiver" && recipe_id == "ray_power") {
-                    continue;
-                }
-                let Some(entity) = value.as_object() else {
-                    continue;
-                };
-                let planet_id = self
-                    .symbols
-                    .resolve(self.entities.planets[index])
-                    .unwrap_or_default();
-                let grid_id = entity
-                    .get("powerGridId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("grid-a");
-                power_source_grids.insert((planet_id, grid_id));
+            let power_source_probes =
+                runtime.indexed_map(entities, |index, value| -> Option<(u32, String)> {
+                    let kind = self
+                        .symbols
+                        .resolve(self.entities.kinds[index])
+                        .unwrap_or_default();
+                    let building_id = self
+                        .symbols
+                        .resolve(self.entities.buildings[index])
+                        .unwrap_or_default();
+                    let recipe_id = self
+                        .symbols
+                        .resolve(self.entities.recipes[index])
+                        .unwrap_or_default();
+                    if kind != "power"
+                        && !(building_id == "ray_receiver" && recipe_id == "ray_power")
+                    {
+                        return None;
+                    }
+                    let entity = value.as_object()?;
+                    let grid_id = entity
+                        .get("powerGridId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("grid-a");
+                    Some((self.entities.planets[index], grid_id.to_owned()))
+                });
+            let mut power_source_grids = HashMap::<u32, HashSet<String>>::with_capacity(
+                self.factory_topology.power_source_indices.len(),
+            );
+            // Replaying the indexed probe vector preserves the historical
+            // first-seen order even though membership is queried as a set.
+            for (planet, grid) in power_source_probes.into_iter().flatten() {
+                power_source_grids.entry(planet).or_default().insert(grid);
             }
 
             let mining_output_capacity = self
@@ -1045,13 +1064,8 @@ impl CoreState {
                 .get("water_pump")
                 .map(|building| building.output_capacity)
                 .unwrap_or(0.0);
-            let mut building_cache =
-                HashMap::<u32, Option<&crate::catalog::BuildingDefinition>>::new();
-            let mut blocked = 0.0;
-            for (index, value) in entities.iter().enumerate() {
-                let Some(entity) = value.as_object() else {
-                    continue;
-                };
+            let blocked_probes = runtime.indexed_map(entities, |index, value| {
+                let entity = value.as_object()?;
                 let kind = self
                     .symbols
                     .resolve(self.entities.kinds[index])
@@ -1061,7 +1075,7 @@ impl CoreState {
                 } else if kind == "vein" && self.entities.miner_counts[index] > 0.0 {
                     self.entities.miner_counts[index]
                 } else {
-                    continue;
+                    return None;
                 };
                 let is_blocked = if kind == "machine" {
                     let building_id = self
@@ -1079,19 +1093,14 @@ impl CoreState {
                     } else if building_id == "galactic_material_exporter" {
                         crate::galactic_exports::operating_blocked(entity)
                     } else {
-                        let recipe_symbol = self.entities.recipes[index];
-                        let recipe = *recipe_cache.entry(recipe_symbol).or_insert_with(|| {
-                            self.symbols
-                                .resolve(recipe_symbol)
-                                .and_then(|id| self.catalog.recipes.get(id))
-                        });
-                        let building_symbol = self.entities.buildings[index];
-                        let building =
-                            *building_cache.entry(building_symbol).or_insert_with(|| {
-                                self.symbols
-                                    .resolve(building_symbol)
-                                    .and_then(|id| self.catalog.buildings.get(id))
-                            });
+                        let recipe = self
+                            .symbols
+                            .resolve(self.entities.recipes[index])
+                            .and_then(|id| self.catalog.recipes.get(id));
+                        let building = self
+                            .symbols
+                            .resolve(self.entities.buildings[index])
+                            .and_then(|id| self.catalog.buildings.get(id));
                         match (recipe, building) {
                             (Some(recipe), Some(building)) => {
                                 if recipe
@@ -1157,16 +1166,18 @@ impl CoreState {
                                         if missing_input {
                                             true
                                         } else {
+                                            let planet_symbol = self.entities.planets[index];
                                             let planet_id = self
                                                 .symbols
-                                                .resolve(self.entities.planets[index])
+                                                .resolve(planet_symbol)
                                                 .unwrap_or_default();
                                             let grid_id = entity
                                                 .get("powerGridId")
                                                 .and_then(Value::as_str)
                                                 .unwrap_or("grid-a");
                                             let power = if !power_source_grids
-                                                .contains(&(planet_id, grid_id))
+                                                .get(&planet_symbol)
+                                                .is_some_and(|grids| grids.contains(grid_id))
                                             {
                                                 0.0
                                             } else if let Some(power) =
@@ -1259,6 +1270,12 @@ impl CoreState {
                         output >= capacity - EPSILON || power <= EPSILON
                     }
                 };
+                Some((count, is_blocked))
+            });
+            // Float additions intentionally remain in persisted entity order;
+            // workers only perform independent read-only classification.
+            let mut blocked = 0.0;
+            for (count, is_blocked) in blocked_probes.into_iter().flatten() {
                 if is_blocked {
                     blocked += count;
                 }
@@ -1303,6 +1320,251 @@ impl CoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
+        PlanetDefinition, RecipeDefinition, RuntimeCatalog,
+    };
+    use crate::state::CoreCheckpointIdentity;
+    use serde_json::json;
+
+    fn fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn history_fixture_building(id: &str, kind: &str, generation_kw: f64) -> BuildingDefinition {
+        BuildingDefinition {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            speed: 1.0,
+            input_capacity: 100.0,
+            output_capacity: 100.0,
+            power_demand_kw: if kind == "machine" { 1.0 } else { 0.0 },
+            power_generation_kw: generation_kw,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: (kind == "machine").then(|| "smelting".to_owned()),
+            accepts: None,
+        }
+    }
+
+    fn history_fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "history-parallel-v1".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "home".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: ["iron_ore", "iron_ingot"]
+                    .into_iter()
+                    .map(|id| ItemDefinition {
+                        id: id.to_owned(),
+                        name: id.to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    })
+                    .collect(),
+                buildings: vec![
+                    history_fixture_building("arc_smelter", "machine", 0.0),
+                    history_fixture_building("solar_panel", "power", 1_000.0),
+                ],
+                recipes: vec![RecipeDefinition {
+                    id: "iron_ingot".to_owned(),
+                    name: "iron_ingot".to_owned(),
+                    building_id: "arc_smelter".to_owned(),
+                    duration: 1.0,
+                    required_tech_id: None,
+                    recursive_priority: 0.0,
+                    recursive_manufacturing: false,
+                    inputs: vec![ItemAmount {
+                        item_id: "iron_ore".to_owned(),
+                        amount: 1.0,
+                    }],
+                    outputs: vec![ItemAmount {
+                        item_id: "iron_ingot".to_owned(),
+                        amount: 1.0,
+                    }],
+                }],
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "history-parallel-v1",
+        )
+        .unwrap()
+    }
+
+    fn history_parallel_fixture() -> (CoreState, Map<String, Value>, Vec<Value>, f64) {
+        let mut entities = Vec::with_capacity(4_097);
+        entities.push(json!({
+            "id": "power",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "solar_panel",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 1,
+            "productionRate": 0,
+            "routingCursor": 0
+        }));
+        let mut expected_blocked = 0.0;
+        for index in 0..4_096 {
+            let count = 1.0 + (index % 3) as f64;
+            let power_factor = if index % 2 == 0 { 0.0 } else { 1.0 };
+            if power_factor == 0.0 {
+                expected_blocked += count;
+            }
+            entities.push(json!({
+                "id": format!("machine-{index:05}"),
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "arc_smelter",
+                "recipeId": "iron_ingot",
+                "machineCount": count,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 100 },
+                "outputs": { "iron_ingot": 0 },
+                "progress": 0.25,
+                "utilization": power_factor,
+                "productionRate": 0.01 + index as f64 / 10_000.0,
+                "powerFactor": power_factor,
+                "routingCursor": 0,
+                "proliferatorBonusProgress": {}
+            }));
+        }
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 10,
+            "historyRecordedAt": 0,
+            "productionHistory": [],
+            "paused": false,
+            "settings": {
+                "difficulty": "standard",
+                "productionBufferLimit": 1_000_000,
+                "resourceMode": "infinite"
+            },
+            "research": {
+                "completedTechIds": [],
+                "selectedTechId": null,
+                "progressByTech": {}
+            },
+            "endgame": { "infiniteResearch": { "vein_utilization": { "level": 0 } } },
+            "powerGridMetrics": { "home": { "grid-a": {
+                "generationKw": 1_000,
+                "demandKw": 4_096,
+                "deliveredKw": 2_048,
+                "powerFactor": 0.5
+            } } },
+            "planetTrays": { "home": {} },
+            "galaxy": { "profiles": { "home": { "oceanType": "none" } } },
+            "totalProduced": {}
+        });
+        let base_bytes = serde_json::to_vec(&base).unwrap();
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let belt_bytes = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base_bytes, 0, 1),
+            (
+                "entities:00000000",
+                "entities",
+                &entity_bytes,
+                0,
+                entities.len(),
+            ),
+            ("belts:00000000", "belts", &belt_bytes, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base_bytes.len() + entity_bytes.len() + belt_bytes.len(),
+            "entityCount": entities.len(),
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base_bytes,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entity_bytes,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belt_bytes,
+            ),
+        ]);
+        let state = CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "history-parallel-v1".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            history_fixture_catalog(),
+        )
+        .unwrap();
+        (
+            state,
+            base.as_object().unwrap().clone(),
+            entities,
+            expected_blocked,
+        )
+    }
 
     fn history_sample(elapsed_seconds: f64, rate: f64, duration: f64) -> Value {
         serde_json::json!({
@@ -1388,6 +1650,40 @@ mod tests {
         for (planet, expected_rates) in expected {
             let actual_rates = actual.get(planet).expect("actual planet is present");
             assert_rate_bits_equal(actual_rates, expected_rates);
+        }
+    }
+
+    #[test]
+    fn blocked_history_probes_preserve_exact_bytes_at_one_two_four_and_eight_workers() {
+        let (state, base, entities, expected_blocked) = history_parallel_fixture();
+        let mut encoded = Vec::new();
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            let mut candidate = base.clone();
+            state
+                .record_production_history_with_records_and_runtime(
+                    &mut candidate,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    &runtime,
+                )
+                .unwrap();
+            let sample = candidate
+                .get("productionHistory")
+                .and_then(Value::as_array)
+                .and_then(|history| history.last())
+                .expect("history sample");
+            assert_eq!(
+                finite_number(sample.get("blockedMachines")),
+                Some(expected_blocked),
+                "worker count {workers}",
+            );
+            encoded.push(serde_json::to_vec(&candidate).unwrap());
+        }
+        for candidate in &encoded[1..] {
+            assert_eq!(candidate, &encoded[0]);
         }
     }
 

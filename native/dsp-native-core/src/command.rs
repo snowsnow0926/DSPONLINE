@@ -1,13 +1,18 @@
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use crate::state::CoreState;
 
 const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
+const MAX_PLAYER_BELT_LANES: u64 = 4_096;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
+const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
 /// FNV-1a fingerprint produced by `createContentPackRegistry()` with no packs.
 /// The current CORE catalog omits the optional MOD `stackLimit`, so positive
 /// stack changes are only provable when no content pack can have overridden a
@@ -1300,12 +1305,46 @@ fn validate_player_position_command(
     Ok(())
 }
 
-fn validate_belt_priority_command(
+fn player_belt_value(state: &CoreState, belt_id: &str) -> anyhow::Result<Value> {
+    let belt_index = *state
+        .belt_index
+        .get(belt_id)
+        .ok_or_else(|| anyhow!("native player-authority belt target is missing"))?;
+    let belt = state.parse_belt(belt_index)?;
+    if !belt.is_object() {
+        bail!("native player-authority belt target is invalid")
+    }
+    Ok(belt)
+}
+
+fn builtin_belt_construction_id(state: &CoreState, tier: u8) -> anyhow::Result<&'static str> {
+    // The current catalog snapshot carries a belt tier and speed but not the
+    // matching construction ID.  Built-in tiers are stable and can therefore
+    // prove their debit/refund.  A content pack may register an arbitrary ID
+    // for tier 4+, so inventory-affecting belt commands remain fail-closed
+    // until that ID is added to an internal catalog revision.
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT {
+        bail!("native player-authority belt construction mapping is not provable")
+    }
+    let construction_id = match tier {
+        1 => "conveyor_belt_mk1",
+        2 => "conveyor_belt_mk2",
+        3 => "conveyor_belt_mk3",
+        _ => bail!("native player-authority belt tier construction is not covered"),
+    };
+    if !state.catalog.belt_speeds.contains_key(&tier)
+        || !state.catalog.constructions.contains_key(construction_id)
+    {
+        bail!("native player-authority belt construction is not in the catalog")
+    }
+    Ok(construction_id)
+}
+
+fn validate_belt_configuration_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
-    if command.changed_belts.len() != 1
-        || command.changed_belts[0].changes.len() != 1
+    if command.changed_belts.is_empty()
         || !command.top_level_changes.is_empty()
         || !command.changed_entities.is_empty()
         || !command.added_entities.is_empty()
@@ -1313,25 +1352,247 @@ fn validate_belt_priority_command(
         || !command.added_belts.is_empty()
         || !command.removed_belt_ids.is_empty()
     {
-        bail!("native player-authority belt priority command shape is invalid")
+        bail!("native player-authority belt configuration command shape is invalid")
+    }
+    let mut belt_ids = HashSet::new();
+    for record in &command.changed_belts {
+        if !belt_ids.insert(record.id.as_str())
+            || record.changes.is_empty()
+            || record.changes.len() > 6
+        {
+            bail!("native player-authority belt configuration target set is invalid")
+        }
+        let belt = player_belt_value(state, &record.id)?;
+        let object = belt
+            .as_object()
+            .expect("player_belt_value validated the object");
+        let mut fields = HashSet::new();
+        let mut effective_route_mode = object
+            .get("routeMode")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| BELT_ROUTE_MODES.contains(value))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority current belt route mode is invalid")
+                    })
+            })
+            .transpose()?
+            .unwrap_or("auto");
+        let mut route_offset_changed = false;
+        let mut stack_size_changed = false;
+        let mut progress_reset = false;
+        for change in &record.changes {
+            let [PathSegment::Key(field)] = change.path.as_slice() else {
+                bail!("native player-authority belt configuration path is invalid")
+            };
+            if !fields.insert(field.as_str()) || change.operation != "set" {
+                bail!("native player-authority belt configuration patch is duplicated or invalid")
+            }
+            let target = change.value.as_ref().ok_or_else(|| {
+                anyhow!("native player-authority belt configuration set has no value")
+            })?;
+            if object.get(field) == Some(target) {
+                bail!("native player-authority belt configuration command is unchanged")
+            }
+            match field.as_str() {
+                "priority" => {
+                    object
+                        .get("priority")
+                        .and_then(Value::as_u64)
+                        .filter(|value| *value <= 2)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority current belt priority is invalid")
+                        })?;
+                    target.as_u64().filter(|value| *value <= 2).ok_or_else(|| {
+                        anyhow!("native player-authority belt priority target is invalid")
+                    })?;
+                }
+                "monitorEnabled" => {
+                    target.as_bool().ok_or_else(|| {
+                        anyhow!("native player-authority belt monitor target is invalid")
+                    })?;
+                }
+                "routeMode" => {
+                    effective_route_mode = target
+                        .as_str()
+                        .filter(|value| BELT_ROUTE_MODES.contains(value))
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority belt route mode is invalid")
+                        })?;
+                }
+                "routeOffsetY" => {
+                    target
+                        .as_i64()
+                        .filter(|value| (-600..=600).contains(value))
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority belt route offset is invalid")
+                        })?;
+                    route_offset_changed = true;
+                }
+                "stackSize" => {
+                    let stack_size = target
+                        .as_u64()
+                        .filter(|value| matches!(*value, 1 | 2 | 4))
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority belt stack size is invalid")
+                        })?;
+                    if stack_size == 2 && !technology_is_completed(state, "high_speed_logistics")
+                        || stack_size == 4
+                            && !technology_is_completed(state, "super_magnetic_logistics")
+                    {
+                        bail!("native player-authority belt stack technology is locked")
+                    }
+                    stack_size_changed = true;
+                }
+                "progress" => {
+                    if target.as_f64() != Some(0.0) {
+                        bail!("native player-authority belt progress reset is invalid")
+                    }
+                    progress_reset = true;
+                }
+                _ => bail!("native player-authority belt configuration field is not typed"),
+            }
+        }
+        if route_offset_changed && effective_route_mode != "manual" {
+            bail!("native player-authority belt route offset requires manual routing")
+        }
+        if progress_reset && !stack_size_changed {
+            bail!("native player-authority belt progress may only reset with a stack change")
+        }
+    }
+    Ok(())
+}
+
+fn validate_belt_lane_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_belts.len() != 1
+        || command.changed_belts[0].changes.len() != 1
+        || command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority belt lane command shape is invalid")
     }
     let record = &command.changed_belts[0];
-    let belt_index = *state
-        .belt_index
-        .get(&record.id)
-        .ok_or_else(|| anyhow!("native player-authority belt priority target is missing"))?;
-    let belt = state.parse_belt(belt_index)?;
-    let current = belt
-        .get("priority")
-        .and_then(Value::as_u64)
-        .filter(|priority| *priority <= 2)
-        .ok_or_else(|| anyhow!("native player-authority current belt priority is invalid"))?;
-    let target = require_exact_set_patch(&record.changes, &["priority"])?
+    let belt = player_belt_value(state, &record.id)?;
+    let object = belt
+        .as_object()
+        .expect("player_belt_value validated the object");
+    let current = safe_json_integer(object.get("lanes"), "current belt lanes")?;
+    if current == 0 {
+        bail!("native player-authority current belt lanes are empty")
+    }
+    let target = safe_json_integer(
+        Some(require_exact_set_patch(&record.changes, &["lanes"])?),
+        "belt lane target",
+    )?;
+    if target == 0 || target == current {
+        bail!("native player-authority belt lane target is empty or unchanged")
+    }
+    // Migrated saves may retain a historical count above the current limit.
+    // They can be reduced, but a player cannot maintain or increase an
+    // over-limit line through this command.
+    if target > MAX_PLAYER_BELT_LANES && target >= current {
+        bail!("native player-authority belt lane target exceeds its limit")
+    }
+    let tier = safe_json_integer(object.get("tier"), "belt tier")?
+        .try_into()
+        .map_err(|_| anyhow!("native player-authority belt tier is invalid"))?;
+    let construction_id = builtin_belt_construction_id(state, tier)?;
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    let available = normalized_construction_inventory(construction.get(construction_id))?;
+    let expected = if target > current {
+        available.checked_sub(target - current).ok_or_else(|| {
+            anyhow!("native player-authority belt construction stock is insufficient")
+        })?
+    } else {
+        available
+            .checked_add(current - target)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority belt construction refund overflows"))?
+    };
+    if require_exact_set_patch(
+        &command.top_level_changes,
+        &["construction", construction_id],
+    )?
+    .as_u64()
+        != Some(expected)
+    {
+        bail!("native player-authority belt lane inventory adjustment is invalid")
+    }
+    Ok(())
+}
+
+fn validate_belt_removal_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.removed_belt_ids.is_empty()
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+    {
+        bail!("native player-authority belt removal shape is invalid")
+    }
+    let mut belt_ids = HashSet::new();
+    let mut refunds = BTreeMap::<&'static str, u64>::new();
+    for belt_id in &command.removed_belt_ids {
+        if !belt_ids.insert(belt_id.as_str()) {
+            bail!("native player-authority belt removal target is repeated")
+        }
+        let belt = player_belt_value(state, belt_id)?;
+        let object = belt
+            .as_object()
+            .expect("player_belt_value validated the object");
+        let lanes = safe_json_integer(object.get("lanes"), "removed belt lanes")?;
+        if lanes == 0 {
+            bail!("native player-authority removed belt lanes are empty")
+        }
+        let tier = safe_json_integer(object.get("tier"), "removed belt tier")?
+            .try_into()
+            .map_err(|_| anyhow!("native player-authority removed belt tier is invalid"))?;
+        let construction_id = builtin_belt_construction_id(state, tier)?;
+        let total = refunds.entry(construction_id).or_default();
+        *total = total
+            .checked_add(lanes)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority belt refund total overflows"))?;
+    }
+    if command.top_level_changes.len() != refunds.len() {
+        bail!("native player-authority belt removal inventory shape is invalid")
+    }
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    for (construction_id, refund) in refunds {
+        let previous = normalized_construction_inventory(construction.get(construction_id))?;
+        let expected = previous
+            .checked_add(refund)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority belt construction refund overflows"))?;
+        if require_exact_set_patch(
+            &command.top_level_changes,
+            &["construction", construction_id],
+        )?
         .as_u64()
-        .filter(|priority| *priority <= 2)
-        .ok_or_else(|| anyhow!("native player-authority belt priority target is invalid"))?;
-    if target == current {
-        bail!("native player-authority belt priority command is unchanged")
+            != Some(expected)
+        {
+            bail!("native player-authority belt removal refund is invalid")
+        }
     }
     Ok(())
 }
@@ -1504,13 +1765,19 @@ impl CoreState {
         }) {
             return validate_planet_viewport_command(self, command);
         }
+        if !command.removed_belt_ids.is_empty() {
+            return validate_belt_removal_command(self, command);
+        }
         if command.changed_belts.iter().any(|record| {
             record
                 .changes
                 .iter()
-                .any(|change| path_matches(&change.path, &["priority"]))
+                .any(|change| path_matches(&change.path, &["lanes"]))
         }) {
-            return validate_belt_priority_command(self, command);
+            return validate_belt_lane_command(self, command);
+        }
+        if !command.changed_belts.is_empty() {
+            return validate_belt_configuration_command(self, command);
         }
         if !command.top_level_changes.is_empty() {
             return validate_player_pause_command(self, command);
@@ -1992,6 +2259,11 @@ mod tests {
                 {
                     "id": "em_rail_ejector", "outputAmount": 1,
                     "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                },
+                {
+                    "id": "conveyor_belt_mk1", "outputAmount": 3,
+                    "requiredTechId": "basic_logistics",
+                    "costs": [{ "itemId": "iron_ingot", "amount": 2 }]
                 }
             ],
             "belts": [{ "tier": 1, "speed": 6 }]
@@ -2043,6 +2315,9 @@ mod tests {
             "sorterTier": 1,
             "progress": 0,
             "priority": 1,
+            "stackSize": 1,
+            "monitorEnabled": false,
+            "routeMode": "auto",
             "lastFlow": 0,
             "modPayload": { "owner": "pack:test", "revision": 7 }
         })
@@ -2067,7 +2342,7 @@ mod tests {
                 "ashen": { "x": 510, "y": 250, "zoom": 0.84 },
                 "giant": { "x": 510, "y": 250, "zoom": 0.84 }
             },
-            "construction": { "arc_smelter": 4, "em_rail_ejector": 0 },
+            "construction": { "arc_smelter": 4, "em_rail_ejector": 0, "conveyor_belt_mk1": 5 },
             "constructionQueue": [],
             "blueprintVersions": [],
             "totalProduced": { "iron_ingot": 10 },
@@ -2256,6 +2531,64 @@ mod tests {
                 value: Some(priority),
             }],
         }];
+        command
+    }
+
+    fn belt_lane_command(
+        revision: u64,
+        lanes: Value,
+        construction: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("construction".to_owned()),
+                PathSegment::Key("conveyor_belt_mk1".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(construction),
+        }];
+        command.changed_belts = vec![RecordPatch {
+            id: "belt-priority".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("lanes".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(lanes),
+            }],
+        }];
+        command
+    }
+
+    fn belt_configuration_command(
+        revision: u64,
+        changes: &[(&str, Value)],
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_belts = vec![RecordPatch {
+            id: "belt-priority".to_owned(),
+            changes: changes
+                .iter()
+                .map(|(field, value)| ValuePatch {
+                    path: vec![PathSegment::Key((*field).to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(value.clone()),
+                })
+                .collect(),
+        }];
+        command
+    }
+
+    fn belt_removal_command(revision: u64, construction: Value) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("construction".to_owned()),
+                PathSegment::Key("conveyor_belt_mk1".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(construction),
+        }];
+        command.removed_belt_ids = vec!["belt-priority".to_owned()];
         command
     }
 
@@ -2741,6 +3074,129 @@ mod tests {
         assert!(format!("{error:#}").contains("current belt priority"));
         assert_eq!(missing_current.revision, 10);
         assert_eq!(missing_current.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_adjusts_belt_lanes_with_exact_inventory_accounting() {
+        let mut state = player_command_state();
+        let increase = belt_lane_command(state.revision, Value::from(3), Value::from(3));
+        let increased = state.apply_player_authority_command(&increase).unwrap();
+        assert_eq!(increased.changed_belt_ids, ["belt-priority"]);
+        assert!(increased.topology_dirty);
+        assert_eq!(state.parse_belt(0).unwrap()["lanes"], 3);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 3);
+
+        let decrease = belt_lane_command(state.revision, Value::from(1), Value::from(5));
+        let decreased = state.apply_player_authority_command(&decrease).unwrap();
+        assert_eq!(decreased.changed_belt_ids, ["belt-priority"]);
+        assert!(decreased.topology_dirty);
+        assert_eq!(state.parse_belt(0).unwrap()["lanes"], 1);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 5);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        assert!(state.apply_player_authority_command(&decrease).is_err());
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_removes_belt_with_exact_refund() {
+        let mut state = player_command_state();
+        let command = belt_removal_command(state.revision, Value::from(6));
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.changed_belt_ids, ["belt-priority"]);
+        assert!(applied.topology_dirty);
+        assert!(state.belt_index.is_empty());
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 6);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        assert!(state.apply_player_authority_command(&command).is_err());
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_applies_bounded_belt_configuration_without_touching_mod_fields() {
+        let mut state = player_command_state();
+        state.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["high_speed_logistics", "super_magnetic_logistics"]);
+        let command = belt_configuration_command(
+            state.revision,
+            &[
+                ("priority", Value::from(2)),
+                ("monitorEnabled", Value::from(true)),
+                ("routeMode", Value::from("manual")),
+                ("routeOffsetY", Value::from(42)),
+                ("stackSize", Value::from(4)),
+            ],
+        );
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.changed_belt_ids, ["belt-priority"]);
+        assert!(applied.topology_dirty);
+        let belt = state.parse_belt(0).unwrap();
+        assert_eq!(belt["priority"], 2);
+        assert_eq!(belt["monitorEnabled"], true);
+        assert_eq!(belt["routeMode"], "manual");
+        assert_eq!(belt["routeOffsetY"], 42);
+        assert_eq!(belt["stackSize"], 4);
+        assert_eq!(
+            belt["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 7 })
+        );
+
+        let monitor_only =
+            belt_configuration_command(state.revision, &[("monitorEnabled", Value::from(false))]);
+        let monitored = state.apply_player_authority_command(&monitor_only).unwrap();
+        assert!(!monitored.topology_dirty);
+    }
+
+    #[test]
+    fn player_authority_belt_inventory_and_configuration_fail_closed_without_mutation() {
+        let mut delete_lane = belt_lane_command(9, Value::from(2), Value::from(4));
+        delete_lane.changed_belts[0].changes[0].operation = "delete".to_owned();
+        delete_lane.changed_belts[0].changes[0].value = None;
+        let mut lane_with_extra = belt_lane_command(9, Value::from(2), Value::from(4));
+        lane_with_extra.changed_belts[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("priority".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(2)),
+        });
+        let mut duplicate_removal = belt_removal_command(9, Value::from(7));
+        duplicate_removal
+            .removed_belt_ids
+            .push("belt-priority".to_owned());
+        let commands = [
+            belt_lane_command(9, Value::from(2), Value::from(5)),
+            belt_lane_command(9, Value::from(0), Value::from(6)),
+            belt_lane_command(9, Value::from(4_097), Value::from(0)),
+            belt_lane_command(9, Value::from(2.0), Value::from(4)),
+            delete_lane,
+            lane_with_extra,
+            belt_removal_command(9, Value::from(5)),
+            duplicate_removal,
+            belt_configuration_command(9, &[("routeMode", Value::from("supply"))]),
+            belt_configuration_command(9, &[("routeOffsetY", Value::from(42))]),
+            belt_configuration_command(9, &[("routeOffsetY", Value::from(601))]),
+            belt_configuration_command(9, &[("stackSize", Value::from(2))]),
+            belt_configuration_command(9, &[("progress", Value::from(0))]),
+            belt_configuration_command(9, &[("monitorEnabled", Value::from("yes"))]),
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut modded = player_command_state_for_registry("modded-belt-inventory-test");
+        for command in [
+            belt_lane_command(9, Value::from(2), Value::from(4)),
+            belt_removal_command(9, Value::from(6)),
+        ] {
+            let before = modded.canonical_sha256().unwrap();
+            assert!(modded.apply_player_authority_command(&command).is_err());
+            assert_eq!(modded.revision, 9);
+            assert_eq!(modded.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

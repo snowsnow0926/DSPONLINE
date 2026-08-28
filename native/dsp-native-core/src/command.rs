@@ -238,6 +238,22 @@ fn command_requires_production_history_rebuild(command: &SimulationCommandPatch)
 }
 
 fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
+    if matches!(
+        change.path.as_slice(),
+        [PathSegment::Key(root), PathSegment::Key(field)]
+            if root == "recipeFocus" && matches!(field.as_str(), "itemId" | "mode")
+    ) || matches!(
+        change.path.as_slice(),
+        [
+            PathSegment::Key(root),
+            PathSegment::Key(position),
+            PathSegment::Key(axis),
+        ] if root == "recipeFocus"
+            && position == "position"
+            && matches!(axis.as_str(), "x" | "y")
+    ) {
+        return true;
+    }
     matches!(
         change.path.first(),
         Some(PathSegment::Key(key)) if matches!(
@@ -959,6 +975,153 @@ fn validate_player_pause_command(
     Ok(())
 }
 
+fn validate_recipe_focus_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.is_empty()
+        || command.top_level_changes.len() > 2
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority recipe focus command shape is invalid")
+    }
+    let focus = state
+        .base_value()
+        .get("recipeFocus")
+        .and_then(Value::as_object)
+        .filter(|focus| {
+            focus.len() == 3
+                && focus.contains_key("itemId")
+                && focus.contains_key("mode")
+                && focus.contains_key("position")
+        })
+        .ok_or_else(|| anyhow!("native player-authority recipe focus state is invalid"))?;
+    let current_item = match focus.get("itemId") {
+        Some(Value::Null) => None,
+        Some(Value::String(item_id)) if state.catalog.items.contains_key(item_id) => {
+            Some(item_id.as_str())
+        }
+        _ => bail!("native player-authority current recipe focus item is invalid"),
+    };
+    let current_mode = focus
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "two-level" | "full"))
+        .ok_or_else(|| anyhow!("native player-authority current recipe focus mode is invalid"))?;
+    let current_position = focus
+        .get("position")
+        .and_then(Value::as_object)
+        .filter(|position| {
+            position.len() == 2 && position.contains_key("x") && position.contains_key("y")
+        })
+        .ok_or_else(|| {
+            anyhow!("native player-authority current recipe focus position is invalid")
+        })?;
+    let current_x = safe_json_integer(current_position.get("x"), "recipe focus X position")?;
+    let current_y = safe_json_integer(current_position.get("y"), "recipe focus Y position")?;
+    if current_x < 8 || current_y < 8 {
+        bail!("native player-authority current recipe focus position is below the UI boundary")
+    }
+
+    if command.top_level_changes.len() == 1 {
+        let change = &command.top_level_changes[0];
+        if change.operation != "set" {
+            bail!("native player-authority recipe focus patch operation is invalid")
+        }
+        let value = change
+            .value
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority recipe focus set has no value"))?;
+        match change.path.as_slice() {
+            [PathSegment::Key(root), PathSegment::Key(field)]
+                if root == "recipeFocus" && field == "itemId" =>
+            {
+                let target = match value {
+                    Value::Null => None,
+                    Value::String(item_id) if state.catalog.items.contains_key(item_id) => {
+                        Some(item_id.as_str())
+                    }
+                    _ => bail!("native player-authority recipe focus item is invalid"),
+                };
+                if target == current_item {
+                    bail!("native player-authority recipe focus item is unchanged")
+                }
+                return Ok(());
+            }
+            [PathSegment::Key(root), PathSegment::Key(field)]
+                if root == "recipeFocus" && field == "mode" =>
+            {
+                let target = value
+                    .as_str()
+                    .filter(|mode| matches!(*mode, "two-level" | "full"))
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority recipe focus mode is invalid")
+                    })?;
+                if target == current_mode {
+                    bail!("native player-authority recipe focus mode is unchanged")
+                }
+                return Ok(());
+            }
+            [
+                PathSegment::Key(root),
+                PathSegment::Key(position),
+                PathSegment::Key(axis),
+            ] if root == "recipeFocus"
+                && position == "position"
+                && matches!(axis.as_str(), "x" | "y") =>
+            {
+                let target = safe_json_integer(Some(value), "recipe focus position")?;
+                let current = if axis == "x" { current_x } else { current_y };
+                if target < 8 {
+                    bail!("native player-authority recipe focus position is below the UI boundary")
+                }
+                if target == current {
+                    bail!("native player-authority recipe focus position is unchanged")
+                }
+                return Ok(());
+            }
+            _ => bail!("native player-authority recipe focus patch path is not canonical"),
+        }
+    }
+
+    let mut axes = HashSet::new();
+    for change in &command.top_level_changes {
+        let axis = match change.path.as_slice() {
+            [
+                PathSegment::Key(root),
+                PathSegment::Key(position),
+                PathSegment::Key(axis),
+            ] if root == "recipeFocus"
+                && position == "position"
+                && matches!(axis.as_str(), "x" | "y") =>
+            {
+                axis.as_str()
+            }
+            _ => bail!("native player-authority recipe focus multi-patch is not a position drag"),
+        };
+        if !axes.insert(axis) || change.operation != "set" {
+            bail!("native player-authority recipe focus position axis is repeated or invalid")
+        }
+        let target = safe_json_integer(change.value.as_ref(), "recipe focus position")?;
+        let current = if axis == "x" { current_x } else { current_y };
+        if target < 8 {
+            bail!("native player-authority recipe focus position is below the UI boundary")
+        }
+        if target == current {
+            bail!("native player-authority recipe focus position contains an unchanged axis")
+        }
+    }
+    if axes.len() != 2 {
+        bail!("native player-authority recipe focus position drag is incomplete")
+    }
+    Ok(())
+}
+
 fn validate_player_position_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -1186,6 +1349,11 @@ impl CoreState {
             })
         {
             return validate_player_position_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
+            matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
+        }) {
+            return validate_recipe_focus_command(self, command);
         }
         if !command.top_level_changes.is_empty() {
             return validate_player_pause_command(self, command);
@@ -1463,6 +1631,12 @@ mod tests {
         assert!(!command_requires_production_history_rebuild(
             &command_for_path(vec![PathSegment::Key("metrics".to_owned())])
         ));
+        assert!(!command_requires_production_history_rebuild(
+            &command_for_path(vec![
+                PathSegment::Key("recipeFocus".to_owned()),
+                PathSegment::Key("itemId".to_owned()),
+            ])
+        ));
         assert!(command_requires_production_history_rebuild(
             &command_for_path(vec![PathSegment::Key("futureUnknownField".to_owned())])
         ));
@@ -1486,6 +1660,23 @@ mod tests {
         let unknown = command_for_path(vec![PathSegment::Key("futureTopology".to_owned())]);
         assert!(
             unknown
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let recipe_focus_leaf = command_for_path(vec![
+            PathSegment::Key("recipeFocus".to_owned()),
+            PathSegment::Key("itemId".to_owned()),
+        ]);
+        assert!(
+            !recipe_focus_leaf
+                .deterministic_apply_result(1, 2)
+                .unwrap()
+                .topology_dirty
+        );
+        let whole_recipe_focus = command_for_path(vec![PathSegment::Key("recipeFocus".to_owned())]);
+        assert!(
+            whole_recipe_focus
                 .deterministic_apply_result(1, 2)
                 .unwrap()
                 .topology_dirty
@@ -1646,6 +1837,11 @@ mod tests {
             "elapsedSeconds": 100,
             "paused": false,
             "nextId": 9,
+            "recipeFocus": {
+                "itemId": null,
+                "mode": "two-level",
+                "position": { "x": 24, "y": 72 }
+            },
             "construction": { "arc_smelter": 4, "em_rail_ejector": 0 },
             "constructionQueue": [],
             "blueprintVersions": [],
@@ -1770,6 +1966,37 @@ mod tests {
         command
     }
 
+    fn recipe_focus_leaf_command(
+        revision: u64,
+        path: &[&str],
+        value: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: path
+                .iter()
+                .map(|segment| PathSegment::Key((*segment).to_owned()))
+                .collect(),
+            operation: "set".to_owned(),
+            value: Some(value),
+        }];
+        command
+    }
+
+    fn recipe_focus_position_command(revision: u64, x: u64, y: u64) -> SimulationCommandPatch {
+        let mut command =
+            recipe_focus_leaf_command(revision, &["recipeFocus", "position", "x"], Value::from(x));
+        command.top_level_changes.push(ValuePatch {
+            path: ["recipeFocus", "position", "y"]
+                .into_iter()
+                .map(|segment| PathSegment::Key(segment.to_owned()))
+                .collect(),
+            operation: "set".to_owned(),
+            value: Some(Value::from(y)),
+        });
+        command
+    }
+
     #[test]
     fn player_authority_places_one_canonical_catalog_building_atomically() {
         let mut state = player_command_state();
@@ -1830,6 +2057,123 @@ mod tests {
         assert!(format!("{error:#}").contains("stack limit is not provable"));
         assert_eq!(modded.revision, 9);
         assert_eq!(modded.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_only_canonical_recipe_focus_leaf_commands() {
+        let mut state = player_command_state();
+        let pin = recipe_focus_leaf_command(
+            state.revision,
+            &["recipeFocus", "itemId"],
+            Value::from("iron_ingot"),
+        );
+        let pinned = state.apply_player_authority_command(&pin).unwrap();
+        assert!(pinned.changed_entity_ids.is_empty());
+        assert!(pinned.changed_belt_ids.is_empty());
+        assert!(!pinned.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["itemId"], "iron_ingot");
+
+        let mode = recipe_focus_leaf_command(
+            state.revision,
+            &["recipeFocus", "mode"],
+            Value::from("full"),
+        );
+        let mode_result = state.apply_player_authority_command(&mode).unwrap();
+        assert!(!mode_result.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["mode"], "full");
+
+        let compact_mode = recipe_focus_leaf_command(
+            state.revision,
+            &["recipeFocus", "mode"],
+            Value::from("two-level"),
+        );
+        let compact_mode_result = state.apply_player_authority_command(&compact_mode).unwrap();
+        assert!(!compact_mode_result.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["mode"], "two-level");
+
+        let position = recipe_focus_position_command(state.revision, 40, 96);
+        let position_result = state.apply_player_authority_command(&position).unwrap();
+        assert!(!position_result.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["position"]["x"], 40);
+        assert_eq!(state.base_value()["recipeFocus"]["position"]["y"], 96);
+
+        let one_axis_position = recipe_focus_leaf_command(
+            state.revision,
+            &["recipeFocus", "position", "x"],
+            Value::from(48),
+        );
+        let one_axis_position_result = state
+            .apply_player_authority_command(&one_axis_position)
+            .unwrap();
+        assert!(!one_axis_position_result.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["position"]["x"], 48);
+        assert_eq!(state.base_value()["recipeFocus"]["position"]["y"], 96);
+
+        let clear =
+            recipe_focus_leaf_command(state.revision, &["recipeFocus", "itemId"], Value::Null);
+        let clear_result = state.apply_player_authority_command(&clear).unwrap();
+        assert!(!clear_result.topology_dirty);
+        assert_eq!(state.base_value()["recipeFocus"]["itemId"], Value::Null);
+        assert_eq!(state.revision, 15);
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let retry_error = state.apply_player_authority_command(&clear).unwrap_err();
+        assert!(format!("{retry_error:#}").contains("base revision is not current"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_recipe_focus_rejects_unknown_whole_mixed_or_unsafe_patches() {
+        let whole_focus = recipe_focus_leaf_command(
+            9,
+            &["recipeFocus"],
+            serde_json::json!({
+                "itemId": "iron_ingot",
+                "mode": "two-level",
+                "position": { "x": 24, "y": 72 }
+            }),
+        );
+        let mut delete_item =
+            recipe_focus_leaf_command(9, &["recipeFocus", "itemId"], Value::from("iron_ingot"));
+        delete_item.top_level_changes[0].operation = "delete".to_owned();
+        delete_item.top_level_changes[0].value = None;
+        let mut mixed =
+            recipe_focus_leaf_command(9, &["recipeFocus", "itemId"], Value::from("iron_ingot"));
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(false)),
+        });
+        let drag_with_unchanged_axis = recipe_focus_position_command(9, 40, 72);
+        let unsafe_position = recipe_focus_leaf_command(
+            9,
+            &["recipeFocus", "position", "x"],
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+        );
+        let whole_position = recipe_focus_leaf_command(
+            9,
+            &["recipeFocus", "position"],
+            serde_json::json!({ "x": 40, "y": 96 }),
+        );
+        let commands = [
+            recipe_focus_leaf_command(9, &["recipeFocus", "itemId"], Value::from("missing_item")),
+            recipe_focus_leaf_command(9, &["recipeFocus", "mode"], Value::from("expanded")),
+            recipe_focus_leaf_command(9, &["recipeFocus", "position", "x"], Value::from(7)),
+            recipe_focus_leaf_command(9, &["recipeFocus", "itemId"], Value::Null),
+            whole_focus,
+            whole_position,
+            delete_item,
+            mixed,
+            unsafe_position,
+            drag_with_unchanged_axis,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

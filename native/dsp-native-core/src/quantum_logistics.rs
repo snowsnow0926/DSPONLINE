@@ -23,6 +23,7 @@ const ITEM_CAPACITY_MAX: u64 = 10_000_000_000;
 #[cfg(test)]
 thread_local! {
     static REQUEST_ORDER_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+    static RUNTIME_FLOW_PARSE_ROWS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +44,22 @@ impl BoundaryFlow {
     /// interpret that empty flow as station inventory movement.
     pub(crate) fn has_downloads(&self) -> bool {
         self.downloaded.values().any(|amount| !amount.is_zero())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        [&self.uploaded, &self.downloaded]
+            .into_iter()
+            .flat_map(|record| record.iter())
+            .map(|(item_id, amount)| {
+                // BTreeMap node links/color plus the owned key/value. This is
+                // a conservative runtime diagnostic, not a persisted byte
+                // contract; shared Arc headers are counted by the owner.
+                size_of::<(String, BigUint)>()
+                    + size_of::<usize>() * 4
+                    + item_id.capacity()
+                    + amount.bits().div_ceil(8) as usize
+            })
+            .sum()
     }
 }
 
@@ -327,7 +344,7 @@ struct Network {
     item_capacities: BTreeMap<String, BigUint>,
     routing_cursors: BTreeMap<String, u64>,
     upload_routing_cursors: BTreeMap<String, u64>,
-    runtime_flow: Option<BoundaryFlow>,
+    runtime_flow: Option<Arc<BoundaryFlow>>,
     /// The v47 JSON record was already in the exact shape emitted by the
     /// legacy full writer. Only that shape is eligible for in-place patches;
     /// legacy, malformed and extension-shaped records keep the old rewrite.
@@ -357,6 +374,10 @@ struct NetworkSparseProof {
     routing_cursor_rows: usize,
     upload_routing_cursor_rows: usize,
     zero_inventory: HashSet<String>,
+    /// Exact flow owned by the same runtime directory revision. Sparse
+    /// boundaries share this immutable snapshot instead of reparsing and
+    /// reallocating every dormant uploaded/downloaded item on every pass.
+    runtime_flow: Option<Arc<BoundaryFlow>>,
 }
 
 impl NetworkSparseProof {
@@ -381,6 +402,7 @@ impl NetworkSparseProof {
                 .iter()
                 .filter_map(|(item_id, amount)| amount.is_zero().then_some(item_id.clone()))
                 .collect(),
+            runtime_flow: network.runtime_flow.clone(),
         })
     }
 
@@ -395,6 +417,7 @@ impl NetworkSparseProof {
                 .iter()
                 .filter_map(|(item_id, amount)| amount.is_zero().then_some(item_id.clone()))
                 .collect(),
+            runtime_flow: network.runtime_flow.clone(),
         })
     }
 }
@@ -666,7 +689,7 @@ impl Network {
     }
 
     fn set_runtime_flow(&mut self, flow: BoundaryFlow) {
-        self.runtime_flow = Some(flow);
+        self.runtime_flow = Some(Arc::new(flow));
         self.runtime_flow_dirty = true;
     }
 }
@@ -845,6 +868,19 @@ fn parse_cursor_record(value: Option<&Value>) -> BTreeMap<String, u64> {
 
 fn parse_flow(value: Option<&Value>) -> Option<BoundaryFlow> {
     let flow = value?.as_object()?;
+    #[cfg(test)]
+    RUNTIME_FLOW_PARSE_ROWS.with(|counter| {
+        let rows = flow
+            .get("uploaded")
+            .and_then(Value::as_object)
+            .map_or(0, Map::len)
+            .saturating_add(
+                flow.get("downloaded")
+                    .and_then(Value::as_object)
+                    .map_or(0, Map::len),
+            );
+        counter.set(counter.get().saturating_add(rows));
+    });
     Some(BoundaryFlow {
         boundary_second: finite_number(flow.get("boundarySecond")),
         uploaded: parse_quantity_record(flow.get("uploaded"), false),
@@ -853,6 +889,15 @@ fn parse_flow(value: Option<&Value>) -> Option<BoundaryFlow> {
         global_download_per_minute: finite_number(flow.get("globalDownloadPerMinute")),
         quantum_tower_stacks: finite_number(flow.get("quantumTowerStacks")),
         quantum_collector_stacks: finite_number(flow.get("quantumCollectorStacks")),
+    })
+}
+
+#[cfg(test)]
+fn take_runtime_flow_parse_rows() -> usize {
+    RUNTIME_FLOW_PARSE_ROWS.with(|counter| {
+        let rows = counter.get();
+        counter.set(0);
+        rows
     })
 }
 
@@ -942,7 +987,7 @@ fn canonical_network_record_matches(raw: &Map<String, Value>, network: &Network)
             raw.get("uploadRoutingCursors"),
             &network.upload_routing_cursors,
         )
-        && match (&network.runtime_flow, raw.get("runtimeFlow")) {
+        && match (network.runtime_flow.as_deref(), raw.get("runtimeFlow")) {
             (None, None) => true,
             (Some(flow), raw_flow) => canonical_flow_matches(raw_flow, flow),
             _ => false,
@@ -1021,7 +1066,7 @@ fn canonical_selected_cursor_record(
 fn sparse_network_header(
     raw: &Map<String, Value>,
     proof: &NetworkSparseProof,
-) -> Option<(bool, Option<BoundaryFlow>)> {
+) -> Option<(bool, Option<Arc<BoundaryFlow>>)> {
     let inventory = raw.get("inventory")?.as_object()?;
     let item_capacities = raw.get("itemCapacities")?.as_object()?;
     let routing_cursors = raw.get("routingCursors")?.as_object()?;
@@ -1034,14 +1079,35 @@ fn sparse_network_header(
         return None;
     }
     let enabled = raw.get("enabled")?.as_bool()?;
-    let runtime_flow = match raw.get("runtimeFlow") {
-        Some(raw_flow) => {
-            let flow = parse_flow(Some(raw_flow))?;
-            Some(canonical_flow_matches(Some(raw_flow), &flow).then_some(flow)?)
+    let runtime_flow = match (raw.get("runtimeFlow"), proof.runtime_flow.as_ref()) {
+        (Some(raw_flow), Some(flow)) if cached_runtime_flow_shape_matches(raw_flow, flow) => {
+            Some(Arc::clone(flow))
         }
-        None => None,
+        (None, None) => None,
+        _ => return None,
     };
     (raw.len() == 5 + usize::from(runtime_flow.is_some())).then_some((enabled, runtime_flow))
+}
+
+fn cached_runtime_flow_shape_matches(raw: &Value, cached: &BoundaryFlow) -> bool {
+    let Some(raw) = raw.as_object() else {
+        return false;
+    };
+    let scalar_matches = |key: &str, expected: f64| canonical_f64_matches(raw.get(key), expected);
+    raw.len() == 7
+        && raw
+            .get("uploaded")
+            .and_then(Value::as_object)
+            .is_some_and(|values| values.len() == cached.uploaded.len())
+        && raw
+            .get("downloaded")
+            .and_then(Value::as_object)
+            .is_some_and(|values| values.len() == cached.downloaded.len())
+        && scalar_matches("boundarySecond", cached.boundary_second)
+        && scalar_matches("globalUploadPerMinute", cached.global_upload_per_minute)
+        && scalar_matches("globalDownloadPerMinute", cached.global_download_per_minute)
+        && scalar_matches("quantumTowerStacks", cached.quantum_tower_stacks)
+        && scalar_matches("quantumCollectorStacks", cached.quantum_collector_stacks)
 }
 
 fn parse_sparse_network(
@@ -1150,7 +1216,7 @@ fn parse_network(base: &Map<String, Value>) -> anyhow::Result<Network> {
     let inventory = parse_quantity_record(raw.get("inventory"), false);
     let routing_cursors = parse_cursor_record(raw.get("routingCursors"));
     let upload_routing_cursors = parse_cursor_record(raw.get("uploadRoutingCursors"));
-    let runtime_flow = parse_flow(raw.get("runtimeFlow"));
+    let runtime_flow = parse_flow(raw.get("runtimeFlow")).map(Arc::new);
     let mutable_record_rows = inventory
         .len()
         .saturating_add(routing_cursors.len())
@@ -1326,7 +1392,13 @@ fn write_network_with_scan(
     // Preserve the full writer's failure atomicity: serialize every fallible
     // value before borrowing and patching the authoritative base record.
     let runtime_flow_patch = if network.runtime_flow_dirty {
-        Some(network.runtime_flow.as_ref().map(flow_value).transpose()?)
+        Some(
+            network
+                .runtime_flow
+                .as_deref()
+                .map(flow_value)
+                .transpose()?,
+        )
     } else {
         None
     };
@@ -1381,7 +1453,10 @@ fn update_network_sparse_proof_after_write(
         directory.network_sparse_proof = NetworkSparseProof::from_complete_write(network);
         return;
     }
-    let Some(mut proof) = directory.network_sparse_proof.clone() else {
+    // Move the proof out while updating it. Cloning here made every sparse
+    // write O(number of historically zero inventory keys), even when only one
+    // active item changed.
+    let Some(mut proof) = directory.network_sparse_proof.take() else {
         return;
     };
     let Some(raw) = base
@@ -1424,6 +1499,7 @@ fn update_network_sparse_proof_after_write(
             proof.zero_inventory.remove(item_id);
         }
     }
+    proof.runtime_flow = network.runtime_flow.clone();
     directory.network_sparse_proof = sparse_network_header(raw, &proof).map(|_| proof);
 }
 
@@ -2485,6 +2561,11 @@ impl QuantumLogisticsDirectory {
                         .iter()
                         .map(String::capacity)
                         .sum::<usize>()
+                    + proof
+                        .runtime_flow
+                        .as_deref()
+                        .map(BoundaryFlow::estimated_bytes)
+                        .unwrap_or(0)
             })
             .unwrap_or(0);
         (self.endpoint_indices.capacity() * size_of::<usize>()
@@ -3129,6 +3210,7 @@ fn record_immediate_upload(
         network.set_runtime_flow(create_flow_with_bandwidth(network, boundary, bandwidth));
     }
     if let Some(flow) = &mut network.runtime_flow {
+        let flow = Arc::make_mut(flow);
         add_flow(&mut flow.uploaded, item_id, amount);
         network.runtime_flow_dirty = true;
     }
@@ -3986,7 +4068,7 @@ pub(crate) fn settle_uploads(
             create_flow(base, entities, &network, boundary_second)
         }
     });
-    synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_ref());
+    synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_deref());
     flow.global_upload_per_minute = bandwidth.per_minute;
     flow.global_download_per_minute = bandwidth.per_minute;
     flow.quantum_tower_stacks = bandwidth.tower_stacks;
@@ -4919,6 +5001,38 @@ mod tests {
             .and_then(Value::as_object_mut)
             .expect("quantum test inventory")
             .insert(item_id.to_owned(), Value::from(amount));
+    }
+
+    fn set_test_runtime_flow(base: &mut Map<String, Value>, boundary_second: f64, rows: usize) {
+        let uploaded = (0..rows)
+            .map(|index| {
+                (
+                    format!("dormant-upload-{index:05}"),
+                    BigUint::from(index + 1),
+                )
+            })
+            .collect();
+        let downloaded = (0..rows)
+            .map(|index| {
+                (
+                    format!("dormant-download-{index:05}"),
+                    BigUint::from(index + 1),
+                )
+            })
+            .collect();
+        let flow = BoundaryFlow {
+            boundary_second,
+            uploaded,
+            downloaded,
+            global_upload_per_minute: 5_000.0,
+            global_download_per_minute: 5_000.0,
+            quantum_tower_stacks: 1.0,
+            quantum_collector_stacks: 0.0,
+        };
+        base.get_mut("quantumLogisticsNetwork")
+            .and_then(Value::as_object_mut)
+            .expect("quantum test network")
+            .insert("runtimeFlow".to_owned(), flow_value(&flow).unwrap());
     }
 
     fn quantum_oracle_bytes(base: &Map<String, Value>, entities: &[Value]) -> Vec<u8> {
@@ -6131,6 +6245,153 @@ mod tests {
                 quantum_oracle_bytes(&active_base, &active_entities),
                 quantum_oracle_bytes(&oracle_base, &oracle_entities),
                 "sparse network parse/full oracle at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_boundaries_share_dormant_runtime_flow_without_reparse_at_1_5_and_60_seconds() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let source = (0..16)
+                .map(|index| {
+                    quantum_station(
+                        format!("demand-{index:02}"),
+                        "iron_ore",
+                        "demand",
+                        0.0,
+                        if index == 0 { 0.0 } else { 1_000_000.0 },
+                        vec![],
+                    )
+                })
+                .collect::<Vec<_>>();
+            let state = crate::simple_factory::tests::fixture_state(&source);
+            let mut active_base = active_quantum_base(0);
+            set_test_network_item(&mut active_base, "iron_ore", "10000");
+            for index in 0..128 {
+                set_test_network_item(
+                    &mut active_base,
+                    &format!("dormant-{index:03}"),
+                    &(index + 1).to_string(),
+                );
+            }
+            set_test_runtime_flow(&mut active_base, seconds - 1.0, 1_024);
+            let mut oracle_base = active_base.clone();
+            let mut active_entities = source.clone();
+            let mut oracle_entities = source;
+            let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+            let complete = parse_network(&active_base).expect("canonical flow proof");
+            directory.network_sparse_proof = NetworkSparseProof::from_complete(&complete);
+            directory.download_all_pending = false;
+            directory.construction_download_all_pending = false;
+            directory.pending_download.insert(0);
+            let credits = crate::belts::OutputCredits::default();
+            let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+
+            take_runtime_flow_parse_rows();
+            let (_, scan) = settle_active_downloads(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &credits,
+                seconds,
+                seconds,
+                &mut directory,
+                &route_ledger,
+            )
+            .expect("sparse cached-flow download");
+            let sparse_parse_rows = take_runtime_flow_parse_rows();
+            settle_downloads(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &credits,
+                seconds,
+                seconds,
+            )
+            .expect("full cached-flow oracle");
+            let oracle_parse_rows = take_runtime_flow_parse_rows();
+
+            assert!(!scan.network_parse_full_scan_fallback, "{seconds}s");
+            assert_eq!(sparse_parse_rows, 0, "{seconds}s");
+            assert_eq!(oracle_parse_rows, 2_048, "{seconds}s");
+            assert_eq!(
+                quantum_oracle_bytes(&active_base, &active_entities),
+                quantum_oracle_bytes(&oracle_base, &oracle_entities),
+                "cached runtime flow/full oracle at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_flow_shape_or_scalar_drift_reenters_the_full_oracle() {
+        for mutate in [
+            |base: &mut Map<String, Value>| {
+                base["quantumLogisticsNetwork"]["runtimeFlow"]["uploaded"]
+                    .as_object_mut()
+                    .expect("uploaded flow")
+                    .insert("shape-drift".to_owned(), Value::from("1"));
+            },
+            |base: &mut Map<String, Value>| {
+                base["quantumLogisticsNetwork"]["runtimeFlow"]["boundarySecond"] =
+                    Value::from(999.0);
+            },
+        ] {
+            let source = vec![quantum_station(
+                "demand",
+                "iron_ore",
+                "demand",
+                0.0,
+                0.0,
+                vec![],
+            )];
+            let state = crate::simple_factory::tests::fixture_state(&source);
+            let mut active_base = active_quantum_base(0);
+            set_test_network_item(&mut active_base, "iron_ore", "10000");
+            for index in 0..128 {
+                set_test_network_item(
+                    &mut active_base,
+                    &format!("dormant-{index:03}"),
+                    &(index + 1).to_string(),
+                );
+            }
+            set_test_runtime_flow(&mut active_base, 4.0, 64);
+            let mut active_entities = source.clone();
+            let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+            let complete = parse_network(&active_base).expect("canonical flow proof");
+            directory.network_sparse_proof = NetworkSparseProof::from_complete(&complete);
+            directory.download_all_pending = false;
+            directory.construction_download_all_pending = false;
+            directory.pending_download.insert(0);
+            mutate(&mut active_base);
+            let mut oracle_base = active_base.clone();
+            let mut oracle_entities = source.clone();
+            let credits = crate::belts::OutputCredits::default();
+            let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+
+            let (_, scan) = settle_active_downloads(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &credits,
+                5.0,
+                5.0,
+                &mut directory,
+                &route_ledger,
+            )
+            .expect("runtime flow drift fallback");
+            settle_downloads(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &credits,
+                5.0,
+                5.0,
+            )
+            .expect("runtime flow drift oracle");
+            assert!(scan.network_parse_full_scan_fallback);
+            assert_eq!(
+                quantum_oracle_bytes(&active_base, &active_entities),
+                quantum_oracle_bytes(&oracle_base, &oracle_entities)
             );
         }
     }

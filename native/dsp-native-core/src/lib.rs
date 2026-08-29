@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod command;
 mod command_palette;
 mod construction;
+mod construction_belt_lane_context;
 mod construction_belt_placement_context;
 mod construction_belt_removal_context;
 mod construction_inventory;

@@ -1100,6 +1100,16 @@ function nativeConstructionBeltRemovalContextResultContext(request) {
   };
 }
 
+function nativeConstructionBeltLaneContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    beltId: request?.beltId,
+    targetLanes: request?.targetLanes,
+  };
+}
+
 function nativeConstructionRemovalContextResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1894,6 +1904,24 @@ ipcMain.handle("desktop:native-core-construction-belt-removal-context", async (e
   });
 });
 
+ipcMain.handle("desktop:native-core-construction-belt-lane-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionBeltLaneContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生传送带并联调整上下文请求失败，请重试",
+    resultContext: nativeConstructionBeltLaneContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-belt-lane-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionBeltLaneContext(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-construction-removal-context", async (event, request) => {
   return runRendererNativeOperation("coreConstructionRemovalContext", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2082,7 +2110,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -2109,6 +2137,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.constructionPlacementContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-belt-placement-context-v1") {
       rawResult = await nativeCoreSessions.constructionBeltPlacementContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-belt-lane-context-v1") {
+      rawResult = await nativeCoreSessions.constructionBeltLaneContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-belt-removal-context-v1") {
       rawResult = await nativeCoreSessions.constructionBeltRemovalContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-removal-context-v1") {
@@ -2149,6 +2179,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? "coreConstructionPlacementContext"
                 : request.projectionType === "construction-belt-placement-context-v1"
                   ? "coreConstructionBeltPlacementContext"
+                : request.projectionType === "construction-belt-lane-context-v1"
+                  ? "coreConstructionBeltLaneContext"
                 : request.projectionType === "construction-belt-removal-context-v1"
                   ? "coreConstructionBeltRemovalContext"
                 : request.projectionType === "construction-removal-context-v1"
@@ -2187,6 +2219,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? nativeConstructionPlacementContextResultContext(normalizedRequest)
                 : request.projectionType === "construction-belt-placement-context-v1"
                   ? nativeConstructionBeltPlacementContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-belt-lane-context-v1"
+                  ? nativeConstructionBeltLaneContextResultContext(normalizedRequest)
                 : request.projectionType === "construction-belt-removal-context-v1"
                   ? nativeConstructionBeltRemovalContextResultContext(normalizedRequest)
                 : request.projectionType === "construction-removal-context-v1"

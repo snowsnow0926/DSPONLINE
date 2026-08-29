@@ -50,7 +50,7 @@ describe("NativeFactoryInspectorPanel", () => {
   it("renders opaque MOD rows and routes the guarded whole-building action", () => {
     const remove = vi.fn();
     const stack = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onRemoveEntity={remove} onStackCountChange={stack} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onRemoveEntity={remove} onStackCountChange={stack} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -64,13 +64,14 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
   });
 
   it("routes one ordinary belt priority action and disables the current value", () => {
     const priority = vi.fn();
+    const lanes = vi.fn();
     const removeBelt = vi.fn();
     const selectedBelt = {
       beltId: "MOD-线路/β",
@@ -99,6 +100,7 @@ describe("NativeFactoryInspectorPanel", () => {
       pending={false}
       onRemoveEntity={vi.fn()}
       onStackCountChange={vi.fn()}
+      onBeltLaneCountChange={lanes}
       onBeltPriorityChange={priority}
       onRemoveBelt={removeBelt}
     />));
@@ -107,6 +109,12 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(buttons[1].disabled).toBe(true);
     act(() => buttons[2].click());
     expect(priority).toHaveBeenCalledWith("MOD-线路/β", 2);
+    const laneButtons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-belt-lanes] button")];
+    expect(laneButtons).toHaveLength(2);
+    act(() => laneButtons[0].click());
+    act(() => laneButtons[1].click());
+    expect(lanes).toHaveBeenNthCalledWith(1, "MOD-线路/β", 1);
+    expect(lanes).toHaveBeenNthCalledWith(2, "MOD-线路/β", 3);
     const remove = host.querySelector<HTMLButtonElement>("[data-native-belt-removal] button")!;
     act(() => remove.click());
     expect(removeBelt).toHaveBeenCalledWith("MOD-线路/β");

@@ -329,6 +329,8 @@ export interface DesktopBridge {
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   /** Same-revision Rust-derived exact single ordinary-belt template and construction debit. */
   getNativeCoreConstructionBeltPlacementContext?: (request: DesktopNativeCoreConstructionBeltPlacementContextRequest) => Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
+  /** Same-revision Rust-derived exact ordinary-belt lane adjustment and material delta. */
+  getNativeCoreConstructionBeltLaneContext?: (request: DesktopNativeCoreConstructionBeltLaneContextRequest) => Promise<DesktopNativeCoreConstructionBeltLaneContextResult>;
   /** Same-revision Rust-derived exact single ordinary-belt removal and construction refund. */
   getNativeCoreConstructionBeltRemovalContext?: (request: DesktopNativeCoreConstructionBeltRemovalContextRequest) => Promise<DesktopNativeCoreConstructionBeltRemovalContextResult>;
   /** Same-revision Rust-derived complete ordinary-building recycling eligibility and exact refund. */
@@ -1171,6 +1173,69 @@ export interface DesktopNativeCoreConstructionBeltRemovalContextRequest extends 
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   beltId: string;
+}
+
+export interface DesktopNativeCoreConstructionBeltLaneContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  beltId: string;
+  targetLanes: number;
+}
+
+export type DesktopNativeCoreConstructionBeltLaneUnsupportedReason =
+  | "invalid-target-lanes"
+  | "unsupported-active-planet"
+  | "belt-not-found"
+  | "invalid-belt"
+  | "not-active-planet"
+  | "unsupported-item"
+  | "unsupported-belt-domain"
+  | "unsupported-belt-tier"
+  | "missing-construction-definition"
+  | "unchanged-lanes"
+  | "target-lanes-exceed-limit"
+  | "source-not-found"
+  | "target-not-found"
+  | "unsupported-source-domain"
+  | "unsupported-target-domain"
+  | "invalid-construction-inventory"
+  | "insufficient-construction"
+  | "refund-overflow";
+
+export interface DesktopNativeCoreConstructionBeltLaneContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-belt-lane-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    beltId: string;
+    targetLanes: number;
+  };
+  activePlanetId: string;
+  beltId: string;
+  planetId: string | null;
+  sourceId: string | null;
+  targetId: string | null;
+  itemId: string | null;
+  tier: 1 | 2 | 3 | null;
+  currentLanes: number | null;
+  targetLanes: number;
+  constructionId: "conveyor_belt_mk1" | "conveyor_belt_mk2" | "conveyor_belt_mk3" | null;
+  currentConstruction: number | null;
+  laneDelta: number | null;
+  constructionAfterAdjustment: number | null;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionBeltLaneUnsupportedReason | null;
+  };
+  limits: {
+    maxPlayerLanes: 4096;
+    projectionBytes: 1048576;
+  };
 }
 
 export type DesktopNativeCoreConstructionBeltRemovalUnsupportedReason =
@@ -2247,6 +2312,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-belt-lane-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionBeltLaneContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "construction-belt-removal-context-v1";
       payload: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">;
     }
@@ -2311,7 +2381,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

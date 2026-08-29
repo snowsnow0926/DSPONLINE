@@ -2792,6 +2792,23 @@ impl CoreRegistry {
             )
     }
 
+    pub fn construction_belt_lane_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        belt_id: &str,
+        target_lanes: u64,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .construction_belt_lane_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                belt_id,
+                target_lanes,
+            )
+    }
+
     pub fn construction_removal_context(
         &self,
         session_id: &str,
@@ -5125,6 +5142,41 @@ mod tests {
         }
     }
 
+    fn ordinary_belt_lane_command(
+        projection: &Value,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let base_revision = projection["revision"].as_u64().unwrap();
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["construction", projection["constructionId"]],
+                    "operation": "set",
+                    "value": projection["constructionAfterAdjustment"]
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [{
+                    "id": projection["beltId"],
+                    "changes": [{
+                        "path": ["lanes"],
+                        "operation": "set",
+                        "value": projection["targetLanes"]
+                    }]
+                }],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn exact_pending_lease() -> ExactRealtimeLease {
         let checkpoint = ExactRealtimeCheckpoint {
             generation: 1,
@@ -6022,6 +6074,143 @@ mod tests {
         let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
         assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
         assert_eq!(reloaded_summary.belt_count, 0);
+    }
+
+    #[test]
+    fn typed_ordinary_belt_lane_context_is_read_only_durable_and_reloadable() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let target = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_building_placement_command(
+                    entry_checkpoint.revision,
+                    "belt-lane-target-placement",
+                ),
+            )
+            .unwrap();
+        let placement = registry
+            .construction_belt_placement_context(
+                &session_id,
+                target.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "vein",
+                "entity_9",
+                "iron_ore",
+                1,
+                3,
+            )
+            .unwrap();
+        let belt = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_belt_placement_command(&placement, "belt-lane-prerequisite"),
+            )
+            .unwrap();
+        let belt_hash = belt.summary.canonical_sha256.clone();
+        let belt_checkpoint =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let projection = registry
+            .construction_belt_lane_context(
+                &session_id,
+                belt.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "belt_10",
+                2,
+            )
+            .unwrap();
+        assert_eq!(projection["support"]["supported"], true);
+        assert_eq!(projection["currentLanes"], 3);
+        assert_eq!(projection["targetLanes"], 2);
+        assert_eq!(projection["constructionId"], "conveyor_belt_mk1");
+        assert_eq!(projection["currentConstruction"], 1);
+        assert_eq!(projection["constructionAfterAdjustment"], 2);
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            belt_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            belt_checkpoint
+        );
+
+        let request = || ordinary_belt_lane_command(&projection, "ordinary-belt-lane-adjustment");
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            belt_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            belt_checkpoint
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("typed belt lane adjustment must recover from its durable stage");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("ordinary-belt-lane-adjustment")
+        );
+        assert_eq!(recovered.revision, belt.revision + 1);
+        assert!(recovered.changed_entity_ids.is_empty());
+        assert_eq!(recovered.changed_belt_ids, ["belt_10"]);
+        assert!(recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "ordinary-belt-lane-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let exported = std::fs::read(
+            root.path()
+                .join("exports/ordinary-belt-lane-recovered.json"),
+        )
+        .unwrap();
+        let envelope: Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(envelope["state"]["nextId"], 11);
+        assert_eq!(envelope["state"]["construction"]["conveyor_belt_mk1"], 2);
+        assert_eq!(envelope["state"]["belts"][0]["lanes"], 2);
+
+        let reload_root = tempdir().unwrap();
+        let mut reload_store = SaveStore::open(reload_root.path()).unwrap();
+        let mut reload_registry = CoreRegistry::default();
+        let reloaded = reload_registry
+            .import_v47(
+                &mut reload_store,
+                Cursor::new(exported.clone()),
+                exported.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
+        assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
+        assert_eq!(reloaded_summary.belt_count, 1);
     }
 
     #[test]

@@ -9,7 +9,6 @@ use std::{
 use crate::state::CoreState;
 
 const MAX_PLAYER_BUILDING_STACK: u64 = 100_000_000;
-const MAX_PLAYER_BELT_LANES: u64 = 4_096;
 const PLAYER_STATION_SLOT_COUNT: usize = 5;
 const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
 const PLAYER_STATION_DRONES_PER_BUILDING: u64 = 50;
@@ -5672,69 +5671,7 @@ fn validate_belt_lane_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
-    if command.changed_belts.len() != 1
-        || command.changed_belts[0].changes.len() != 1
-        || command.top_level_changes.len() != 1
-        || !command.changed_entities.is_empty()
-        || !command.added_entities.is_empty()
-        || !command.removed_entity_ids.is_empty()
-        || !command.added_belts.is_empty()
-        || !command.removed_belt_ids.is_empty()
-    {
-        bail!("native player-authority belt lane command shape is invalid")
-    }
-    let record = &command.changed_belts[0];
-    let belt = player_belt_value(state, &record.id)?;
-    let object = belt
-        .as_object()
-        .expect("player_belt_value validated the object");
-    let current = safe_json_integer(object.get("lanes"), "current belt lanes")?;
-    if current == 0 {
-        bail!("native player-authority current belt lanes are empty")
-    }
-    let target = safe_json_integer(
-        Some(require_exact_set_patch(&record.changes, &["lanes"])?),
-        "belt lane target",
-    )?;
-    if target == 0 || target == current {
-        bail!("native player-authority belt lane target is empty or unchanged")
-    }
-    // Migrated saves may retain a historical count above the current limit.
-    // They can be reduced, but a player cannot maintain or increase an
-    // over-limit line through this command.
-    if target > MAX_PLAYER_BELT_LANES && target >= current {
-        bail!("native player-authority belt lane target exceeds its limit")
-    }
-    let tier = safe_json_integer(object.get("tier"), "belt tier")?
-        .try_into()
-        .map_err(|_| anyhow!("native player-authority belt tier is invalid"))?;
-    let construction_id = builtin_belt_construction_id(state, tier)?;
-    let construction = state
-        .base_value()
-        .get("construction")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
-    let available = normalized_construction_inventory(construction.get(construction_id))?;
-    let expected = if target > current {
-        available.checked_sub(target - current).ok_or_else(|| {
-            anyhow!("native player-authority belt construction stock is insufficient")
-        })?
-    } else {
-        available
-            .checked_add(current - target)
-            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-            .ok_or_else(|| anyhow!("native player-authority belt construction refund overflows"))?
-    };
-    if require_exact_set_patch(
-        &command.top_level_changes,
-        &["construction", construction_id],
-    )?
-    .as_u64()
-        != Some(expected)
-    {
-        bail!("native player-authority belt lane inventory adjustment is invalid")
-    }
-    Ok(())
+    crate::construction_belt_lane_context::validate_command(state, command)
 }
 
 fn validate_belt_removal_command(
@@ -11220,24 +11157,19 @@ mod tests {
         }
 
         let mut modded = player_command_state_for_registry("modded-belt-inventory-test");
-        let before = modded.canonical_sha256().unwrap();
-        assert!(
-            modded
-                .apply_player_authority_command(&belt_lane_command(
-                    9,
-                    Value::from(2),
-                    Value::from(4),
-                ))
-                .is_err()
-        );
-        assert_eq!(modded.revision, 9);
-        assert_eq!(modded.canonical_sha256().unwrap(), before);
+        let adjusted = modded
+            .apply_player_authority_command(&belt_lane_command(9, Value::from(2), Value::from(4)))
+            .unwrap();
+        assert_eq!(adjusted.changed_belt_ids, ["belt-priority"]);
+        assert_eq!(modded.revision, 10);
+        assert_eq!(modded.parse_belt(0).unwrap()["lanes"], 2);
+        assert_eq!(modded.base_value()["construction"]["conveyor_belt_mk1"], 4);
 
         // A custom registry may retain ordinary opaque endpoints while using a
         // built-in belt tier. The removal capability proves that exact belt
         // and refund instead of rejecting the registry fingerprint wholesale.
         let removed = modded
-            .apply_player_authority_command(&belt_removal_command(9, Value::from(6)))
+            .apply_player_authority_command(&belt_removal_command(10, Value::from(6)))
             .unwrap();
         assert_eq!(removed.changed_belt_ids, ["belt-priority"]);
         assert_eq!(modded.base_value()["construction"]["conveyor_belt_mk1"], 6);

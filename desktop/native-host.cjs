@@ -35,6 +35,8 @@ const NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY =
   "native-core-construction-placement-context-v1";
 const NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY =
   "native-core-construction-belt-placement-context-v1";
+const NATIVE_CONSTRUCTION_BELT_LANE_CONTEXT_CAPABILITY =
+  "native-core-construction-belt-lane-context-v1";
 const NATIVE_CONSTRUCTION_BELT_REMOVAL_CONTEXT_CAPABILITY =
   "native-core-construction-belt-removal-context-v1";
 const NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY =
@@ -78,7 +80,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1157,6 +1159,27 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  constructionBeltLaneContext(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "beltId", "targetLanes",
+    ], "native construction belt lane context request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !validConstructionPlacementId(request.beltId) ||
+      !Number.isSafeInteger(request.targetLanes) || request.targetLanes < 0) {
+      throw new TypeError("native construction belt lane context request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreConstructionBeltLaneContext",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      beltId: request.beltId,
+      targetLanes: request.targetLanes,
+    });
+  }
+
   constructionRemovalContext(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     exactObjectKeys(request, [
@@ -2082,6 +2105,7 @@ module.exports = {
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY,
+  NATIVE_CONSTRUCTION_BELT_LANE_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_REMOVAL_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY,

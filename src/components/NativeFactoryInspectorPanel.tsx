@@ -15,6 +15,7 @@ interface NativeFactoryInspectorPanelProps {
   pending: boolean;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
+  onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
 }
@@ -95,9 +96,10 @@ function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChan
   </>;
 }
 
-function NativeBeltSummary({ belt, pending, onPriorityChange, onRemove }: {
+function NativeBeltSummary({ belt, pending, onLaneCountChange, onPriorityChange, onRemove }: {
   belt: SelectedBeltReadModel;
   pending: boolean;
+  onLaneCountChange: (beltId: string, targetLanes: number) => void;
   onPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemove: (beltId: string) => void;
 }) {
@@ -114,6 +116,24 @@ function NativeBeltSummary({ belt, pending, onPriorityChange, onRemove }: {
         <div><dt>拥堵</dt><dd>{belt.congestion === null ? "-" : `${Math.round(belt.congestion * 100)}%`}</dd></div>
       </dl>
       <p className="native-factory-inspector__route">{belt.sourceEntityId} → {belt.targetEntityId}</p>
+    </section>
+    <section className="native-inspector-safe-actions" data-native-belt-lanes="ordinary-single-v1">
+      <strong>Rust 并联线路</strong>
+      <p>每次只增减一条并联线路。Rust 会用最新 revision 核对端点、等级、当前数量和施工托盘，再原子扣除或返还同级传送带。</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生并联线路调整">
+        <button
+          type="button"
+          disabled={pending || belt.lanes <= 1}
+          onClick={() => onLaneCountChange(belt.beltId, belt.lanes - 1)}
+          aria-label="减少一条并联线路"
+        ><Minus size={14} />减少到 ×{Math.max(1, belt.lanes - 1)}</button>
+        <button
+          type="button"
+          disabled={pending || !Number.isSafeInteger(belt.lanes) || belt.lanes >= 4096}
+          onClick={() => onLaneCountChange(belt.beltId, belt.lanes + 1)}
+          aria-label="增加一条并联线路"
+        ><Plus size={14} />增加到 ×{belt.lanes + 1}</button>
+      </div>
     </section>
     <section className="native-inspector-safe-actions" data-native-belt-priority="ordinary-single-v1">
       <strong>Rust 线路优先级</strong>
@@ -148,6 +168,7 @@ export function NativeFactoryInspectorPanel({
   pending,
   onRemoveEntity,
   onStackCountChange,
+  onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
 }: NativeFactoryInspectorPanelProps) {
@@ -171,7 +192,7 @@ export function NativeFactoryInspectorPanel({
   } else if (inspector.entity && !inspector.belt) {
     content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
   } else if (inspector.belt && !inspector.entity) {
-    content = <NativeBeltSummary belt={inspector.belt} pending={pending} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;
+    content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;
   } else {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>请选择一个建筑或传送带</strong><p>这里只显示同 revision 的 Rust 小型投影。</p></section>;
   }

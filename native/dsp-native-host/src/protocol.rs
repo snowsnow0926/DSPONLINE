@@ -228,6 +228,13 @@ pub enum ControlRequest {
         tier: u8,
         lanes: u64,
     },
+    CoreConstructionBeltLaneContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        belt_id: String,
+        target_lanes: u64,
+    },
     CoreConstructionBeltRemovalContext {
         session_id: String,
         expected_revision: u64,
@@ -947,6 +954,35 @@ mod tests {
                 assert_eq!(belt_id, "MOD/线路-一");
             }
             _ => panic!("construction belt removal context decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn construction_belt_lane_context_protocol_preserves_exact_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionBeltLaneContext",
+            "sessionId": "core-belt-lanes",
+            "expectedRevision": 49,
+            "expectedRegistryFingerprint": "builtin:test",
+            "beltId": "MOD/线路-一",
+            "targetLanes": 4096
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreConstructionBeltLaneContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                belt_id,
+                target_lanes,
+            } => {
+                assert_eq!(session_id, "core-belt-lanes");
+                assert_eq!(expected_revision, 49);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(belt_id, "MOD/线路-一");
+                assert_eq!(target_lanes, 4096);
+            }
+            _ => panic!("construction belt lane context decoded as the wrong variant"),
         }
     }
 

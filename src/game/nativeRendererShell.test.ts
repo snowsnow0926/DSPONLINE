@@ -72,4 +72,14 @@ describe("native renderer shell", () => {
     expect(largeBytes).toBe(smallBytes);
     expect(largeBytes).toBeLessThan(100_000);
   });
+
+  it("fails closed outside the exact normal v47 handoff boundary", () => {
+    const speedrun = createInitialState();
+    speedrun.mode = "speedrun";
+    expect(() => createNativeRendererShellState(speedrun)).toThrow(/normal GameState v47/);
+
+    const legacy = createInitialState();
+    legacy.version = 46;
+    expect(() => createNativeRendererShellState(legacy)).toThrow(/normal GameState v47/);
+  });
 });

@@ -8,6 +8,9 @@ import type { GameState } from "./types";
  * projections and persistence is fenced in main before this object is used.
  */
 export function createNativeRendererShellState(source: GameState): GameState {
+  if (source.version !== 47 || source.mode !== "normal") {
+    throw new TypeError("native renderer shell requires a normal GameState v47 authority handoff");
+  }
   const shell = createInitialState(source.galaxy.seed, false);
   const emptyPlanetTrays = Object.fromEntries(
     Object.keys(shell.planetTrays).map((planetId) => [planetId, {}]),

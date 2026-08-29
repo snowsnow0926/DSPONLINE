@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -10,6 +10,7 @@ use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const CONSTRUCTION_RECEIPT_HISTORY_LIMIT: usize = 64;
 
 #[derive(Debug, Clone)]
 enum Step {
@@ -61,6 +62,94 @@ pub(crate) struct ConstructionActiveScan {
 pub(crate) struct ConstructionRunOutcome {
     pub quantum_wake: ConstructionQuantumWake,
     pub scan: ConstructionActiveScan,
+    pub receipt: ConstructionRunReceipt,
+}
+
+/// Private evidence emitted by the construction stage itself. It is held only
+/// in the prepared runtime and is never serialized, hashed, or exposed through
+/// the native Host protocol. `BTreeMap` keeps the fold independent from HashMap
+/// iteration order while the exact stage remains free to use its existing data
+/// structures.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConstructionRunReceipt {
+    pub outputs: BTreeMap<String, i128>,
+    pub crafted: i128,
+    proof_invalid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionedConstructionRunReceipt {
+    base_revision: u64,
+    receipt: ConstructionRunReceipt,
+}
+
+impl ConstructionRunReceipt {
+    fn record_completion(&mut self, output_id: Option<&str>, amount: f64) {
+        if !nonnegative_safe_integer(amount) || amount < 1.0 {
+            self.proof_invalid = true;
+            return;
+        }
+        let amount = amount as i128;
+        let Some(crafted) = self.crafted.checked_add(amount) else {
+            self.proof_invalid = true;
+            return;
+        };
+        let next_output = output_id.and_then(|item_id| {
+            self.outputs
+                .get(item_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(amount)
+                .map(|total| (item_id.to_owned(), total))
+        });
+        if output_id.is_some() && next_output.is_none() {
+            self.proof_invalid = true;
+            return;
+        }
+        self.crafted = crafted;
+        if let Some((item_id, total)) = next_output {
+            self.outputs.insert(item_id, total);
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        if self.proof_invalid || other.proof_invalid {
+            self.proof_invalid = true;
+            return;
+        }
+        let Some(crafted) = self.crafted.checked_add(other.crafted) else {
+            self.proof_invalid = true;
+            return;
+        };
+        let mut outputs = self.outputs.clone();
+        for (item_id, amount) in &other.outputs {
+            let Some(total) = outputs
+                .get(item_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*amount)
+            else {
+                self.proof_invalid = true;
+                return;
+            };
+            outputs.insert(item_id.clone(), total);
+        }
+        self.crafted = crafted;
+        self.outputs = outputs;
+    }
+
+    fn proof_eligible(&self) -> bool {
+        !self.proof_invalid
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(outputs: BTreeMap<String, i128>, crafted: i128) -> Self {
+        Self {
+            outputs,
+            crafted,
+            proof_invalid: false,
+        }
+    }
 }
 
 /// One exact aggregate of construction-center demand for a single
@@ -154,9 +243,81 @@ pub(crate) struct ConstructionRuntime {
     fallback_full_scan: bool,
     aggregated_power_factors: bool,
     provably_unpowered: Option<bool>,
+    /// At most one entry per exact CoreState revision. Multiple simulation
+    /// steps within the same advance merge into the same row. This private
+    /// history lets pure-idle prove a bounded exact prefix that was split over
+    /// several calls without adding anything to GameState v47.
+    receipt_history: VecDeque<VersionedConstructionRunReceipt>,
 }
 
 impl ConstructionRuntime {
+    fn record_run_receipt(&mut self, base_revision: u64, receipt: &ConstructionRunReceipt) {
+        if self
+            .receipt_history
+            .back()
+            .is_some_and(|entry| entry.base_revision == base_revision)
+        {
+            self.receipt_history
+                .back_mut()
+                .expect("checked construction receipt history tail")
+                .receipt
+                .merge(receipt);
+            return;
+        }
+
+        let contiguous = self
+            .receipt_history
+            .back()
+            .is_none_or(|entry| entry.base_revision.checked_add(1) == Some(base_revision));
+        if !contiguous {
+            self.receipt_history.clear();
+        }
+        self.receipt_history
+            .push_back(VersionedConstructionRunReceipt {
+                base_revision,
+                receipt: receipt.clone(),
+            });
+        while self.receipt_history.len() > CONSTRUCTION_RECEIPT_HISTORY_LIMIT {
+            self.receipt_history.pop_front();
+        }
+    }
+
+    /// Merge only a contiguous series of exact-stage receipts. Missing,
+    /// reordered, overflowed, or MOD-fractional rows fail closed and cannot be
+    /// used as construction authority by pure-idle settlement.
+    pub(crate) fn receipt_between(
+        &self,
+        base_revision: u64,
+        result_revision: u64,
+    ) -> Option<ConstructionRunReceipt> {
+        if base_revision == result_revision {
+            return Some(ConstructionRunReceipt::default());
+        }
+        if base_revision > result_revision {
+            return None;
+        }
+        let mut expected_revision = base_revision;
+        let mut merged = ConstructionRunReceipt::default();
+        for entry in self
+            .receipt_history
+            .iter()
+            .filter(|entry| entry.base_revision >= base_revision)
+        {
+            if entry.base_revision != expected_revision || !entry.receipt.proof_eligible() {
+                return None;
+            }
+            merged.merge(&entry.receipt);
+            if !merged.proof_eligible() {
+                return None;
+            }
+            expected_revision = expected_revision.checked_add(1)?;
+            if expected_revision == result_revision {
+                return Some(merged);
+            }
+        }
+        None
+    }
+
     pub(crate) fn build(state: &CoreState, base: &Map<String, Value>, entities: &[Value]) -> Self {
         let planet_count = state.catalog.planets.len();
         let targets = crate::construction_planner::targets(state);
@@ -211,6 +372,7 @@ impl ConstructionRuntime {
                     .is_empty(),
             aggregated_power_factors: false,
             provably_unpowered: None,
+            receipt_history: VecDeque::new(),
         };
         let construction_power_demand_kw = state
             .catalog
@@ -1013,6 +1175,18 @@ impl ConstructionRuntime {
                     + signature.active_targets.capacity() * size_of::<bool>()
             })
             .unwrap_or(0);
+        let receipt_history_bytes = self.receipt_history.capacity()
+            * size_of::<VersionedConstructionRunReceipt>()
+            + self
+                .receipt_history
+                .iter()
+                .map(|entry| {
+                    let outputs = &entry.receipt.outputs;
+                    outputs.keys().map(String::capacity).sum::<usize>()
+                        + outputs.len() * (size_of::<(String, i128)>() + size_of::<usize>() * 4)
+                        + usize::from(!outputs.is_empty()) * size_of::<usize>() * 16
+                })
+                .sum::<usize>();
         (runtime_allocation
             + self.center_indices.capacity() * size_of::<usize>()
             + self.row_by_entity.capacity() * size_of::<(u32, u32)>()
@@ -1041,7 +1215,8 @@ impl ConstructionRuntime {
             + pending_tree_bytes
             + inventory_entry_buffers
             + inventory_text_bytes
-            + dependency_bytes) as u64
+            + dependency_bytes
+            + receipt_history_bytes) as u64
     }
 
     #[cfg(test)]
@@ -2918,10 +3093,13 @@ pub(crate) fn run_centers(
 ) -> anyhow::Result<ConstructionRunOutcome> {
     let (selected_center_indices, scan) =
         runtime.selected_rows(state, base, entities, power_factors, center_indices);
+    let mut receipt = ConstructionRunReceipt::default();
     if selected_center_indices.is_empty() {
+        runtime.record_run_receipt(state.revision, &receipt);
         return Ok(ConstructionRunOutcome {
             quantum_wake: ConstructionQuantumWake::default(),
             scan,
+            receipt,
         });
     }
     let mut automation = base
@@ -3052,6 +3230,11 @@ pub(crate) fn run_centers(
                     wake_centers.insert(entity_index);
                     remaining_work = (remaining_work - used_work).max(0.0);
                     completed += batch_completed;
+                    receipt.record_completion(
+                        (!matches!(target.id.as_str(), "logistics_drone" | "logistics_vessel"))
+                            .then_some(target.id.as_str()),
+                        batch_completed,
+                    );
                     worked = true;
                     set_number(center, "progress", 0.0)?;
                     continue;
@@ -3148,14 +3331,17 @@ pub(crate) fn run_centers(
             }
             wake_centers.insert(entity_index);
             if let Step::Building { construction_id } = &step {
-                completed += state
+                let output_amount = state
                     .catalog
                     .constructions
                     .get(construction_id)
                     .map(|definition| definition.output_amount)
                     .unwrap_or(0.0);
+                completed += output_amount;
+                receipt.record_completion(Some(construction_id), output_amount);
             } else if let Step::Fleet { amount, .. } = &step {
                 completed += amount;
+                receipt.record_completion(None, *amount);
             }
             set_number(current_job, "stepIndex", step_index as f64 + 1.0)?;
             set_number(current_job, "elapsedSeconds", 0.0)?;
@@ -3213,11 +3399,13 @@ pub(crate) fn run_centers(
         Value::Object(automation),
     );
     runtime.commit_dependencies(state, base);
+    runtime.record_run_receipt(state.revision, &receipt);
     Ok(ConstructionRunOutcome {
         quantum_wake: ConstructionQuantumWake {
             center_indices: wake_centers.into_iter().collect(),
         },
         scan,
+        receipt,
     })
 }
 
@@ -3949,6 +4137,7 @@ mod tests {
                 &mut oracle_runtime,
                 5.0,
             );
+            assert_eq!(active.receipt, oracle.receipt);
             selected.push(active.scan.selected_rows);
             assert_eq!(oracle.scan.selected_rows, 4);
             assert!(oracle.scan.directory_fallback);
@@ -3963,6 +4152,76 @@ mod tests {
         assert_eq!(
             inventory_amount(active_base["construction"].as_object().unwrap(), "widget"),
             1.0
+        );
+    }
+
+    #[test]
+    fn construction_run_receipt_is_stable_and_revision_bounded() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 3, 3, false);
+        let outcome =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(outcome.receipt.crafted, 3);
+        assert_eq!(
+            outcome.receipt.outputs,
+            BTreeMap::from([("widget".to_owned(), 3)])
+        );
+        assert_eq!(
+            runtime.receipt_between(state.revision, state.revision + 1),
+            Some(outcome.receipt.clone())
+        );
+        assert_eq!(
+            runtime.receipt_between(state.revision + 1, state.revision + 2),
+            None
+        );
+
+        let mut stable = ConstructionRunReceipt::default();
+        stable.record_completion(Some("z-output"), 1.0);
+        stable.record_completion(Some("a-output"), 2.0);
+        stable.record_completion(Some("z-output"), 3.0);
+        assert_eq!(
+            stable.outputs.into_iter().collect::<Vec<_>>(),
+            vec![("a-output".to_owned(), 2), ("z-output".to_owned(), 4)]
+        );
+
+        let mut bounded = ConstructionRuntime::build(&state, &base, &entities);
+        for offset in 0..=CONSTRUCTION_RECEIPT_HISTORY_LIMIT {
+            let mut row = ConstructionRunReceipt::default();
+            row.record_completion(Some("widget"), 1.0);
+            bounded.record_run_receipt(state.revision + offset as u64, &row);
+        }
+        assert_eq!(
+            bounded.receipt_between(
+                state.revision,
+                state.revision + CONSTRUCTION_RECEIPT_HISTORY_LIMIT as u64 + 1,
+            ),
+            None,
+            "an evicted revision must fail closed",
+        );
+        assert_eq!(
+            bounded
+                .receipt_between(
+                    state.revision + 1,
+                    state.revision + CONSTRUCTION_RECEIPT_HISTORY_LIMIT as u64 + 1,
+                )
+                .expect("retained construction receipt window")
+                .crafted,
+            CONSTRUCTION_RECEIPT_HISTORY_LIMIT as i128,
+        );
+
+        let mut fractional = ConstructionRunReceipt::default();
+        fractional.record_completion(Some("mod:fractional-widget"), 0.5);
+        bounded.record_run_receipt(
+            state.revision + CONSTRUCTION_RECEIPT_HISTORY_LIMIT as u64 + 1,
+            &fractional,
+        );
+        assert_eq!(
+            bounded.receipt_between(
+                state.revision + CONSTRUCTION_RECEIPT_HISTORY_LIMIT as u64 + 1,
+                state.revision + CONSTRUCTION_RECEIPT_HISTORY_LIMIT as u64 + 2,
+            ),
+            None,
+            "fractional MOD output cannot become settlement authority",
         );
     }
 
@@ -4620,13 +4879,25 @@ mod tests {
         state
             .write_v47_envelope(42, &mut before)
             .expect("serialize before construction runtime replacement");
-        let runtime = ConstructionRuntime::build(&state, state.base_value(), &entities);
+        let canonical_before = state
+            .canonical_sha256()
+            .expect("canonical hash before construction runtime replacement");
+        let mut runtime = ConstructionRuntime::build(&state, state.base_value(), &entities);
+        let mut receipt = ConstructionRunReceipt::default();
+        receipt.record_completion(Some("runtime-only-widget"), 2.0);
+        runtime.record_run_receipt(state.revision, &receipt);
         state.install_prepared_construction_runtime(Arc::new(runtime));
         let mut after = Vec::new();
         state
             .write_v47_envelope(42, &mut after)
             .expect("serialize after construction runtime replacement");
         assert_eq!(after, before);
+        assert_eq!(
+            state
+                .canonical_sha256()
+                .expect("canonical hash after construction runtime replacement"),
+            canonical_before
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value};
 
+use crate::construction::ConstructionRunReceipt;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
@@ -100,6 +101,7 @@ struct FiniteVeinProofSnapshot {
 /// owns only compact per-item counters; entity rows are decoded one at a time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SettlementProofSnapshot {
+    revision: u64,
     owned: MaterialTotals,
     produced: MaterialTotals,
     consumed: MaterialTotals,
@@ -108,6 +110,9 @@ struct SettlementProofSnapshot {
     construction_fleet_wip: MaterialTotals,
     portable_fleet: MaterialTotals,
     construction_crafted: i128,
+    /// Private proof for the exact revision interval ending at `revision`.
+    /// Baselines and serialized/reloaded states deliberately carry `None`.
+    construction_receipt: Option<ConstructionRunReceipt>,
     dyson: DysonTerminalSnapshot,
     research: ResearchProofSnapshot,
     finite_veins: BTreeMap<String, FiniteVeinProofSnapshot>,
@@ -278,12 +283,6 @@ struct ConstructionConversionLedger {
     available_inputs: MaterialTotals,
     produced: MaterialTotals,
     fleet_wip_consumed: MaterialTotals,
-    crafted: i128,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ConstructionRecipeReceipt {
-    outputs: MaterialTotals,
     crafted: i128,
 }
 
@@ -1283,6 +1282,7 @@ fn capture_settlement_snapshot_with_runtime(
 ) -> anyhow::Result<SettlementProofSnapshot> {
     let base = state.base_value();
     let mut snapshot = SettlementProofSnapshot {
+        revision: state.revision,
         granted: capture_cumulative_grants(state)?,
         construction_crafted: proof_counter(
             base.get("constructionAutomation")
@@ -1646,6 +1646,20 @@ fn capture_settlement_snapshot_with_runtime(
     Ok(snapshot)
 }
 
+/// Capture a boundary reached only through native exact advancement and bind
+/// it to the construction stage's private revision receipts. A normal save,
+/// reload, or caller-created candidate has no way to synthesize this field.
+fn capture_exact_settlement_snapshot(
+    state: &CoreState,
+    base_revision: u64,
+) -> anyhow::Result<SettlementProofSnapshot> {
+    let mut snapshot = capture_settlement_snapshot(state)?;
+    snapshot.construction_receipt = state
+        .prepared_construction_runtime()
+        .and_then(|runtime| runtime.receipt_between(base_revision, state.revision));
+    Ok(snapshot)
+}
+
 fn material_delta(before: &MaterialTotals, after: &MaterialTotals, item_id: &str) -> i128 {
     after.get(item_id).copied().unwrap_or(0) - before.get(item_id).copied().unwrap_or(0)
 }
@@ -1964,16 +1978,14 @@ fn fleet_recipe_proof<'a>(
 /// engine-owned exact transition closes this vector; arbitrary serialized
 /// candidates and coincidental material deltas cannot mint that receipt.
 ///
-/// Unlike the TypeScript construction-only macro, today's native exact prefix
-/// interleaves ordinary factory work and construction. Its internal proof can
-/// therefore close the interval's item vector but cannot attribute a same-item
-/// loss to one particular construction center. That residual trust is bounded
-/// to `CoreState::advance_exact`: until `construction::run_centers` emits its
-/// own receipt, the untrusted candidate path below must remain receipt-free.
+/// The native exact prefix interleaves ordinary factory work and construction,
+/// so aggregate deltas alone cannot attribute a same-item loss to a particular
+/// center. `construction::run_centers` now emits a runtime-only receipt for the
+/// exact revision interval; serialized candidates remain receipt-free.
 fn validate_construction_recipe_conversion(
     ledger: &ConstructionConversionLedger,
     catalog: &crate::catalog::RuntimeCatalog,
-    receipt: Option<&ConstructionRecipeReceipt>,
+    receipt: Option<&ConstructionRunReceipt>,
     trusted_internal_stage: bool,
 ) -> Result<(), String> {
     let mut required_inputs = MaterialTotals::new();
@@ -2193,7 +2205,7 @@ fn validate_settlement_proof(
     before: &SettlementProofSnapshot,
     after: &SettlementProofSnapshot,
     catalog: &crate::catalog::RuntimeCatalog,
-    construction_receipt: Option<&ConstructionRecipeReceipt>,
+    construction_receipt: Option<&ConstructionRunReceipt>,
 ) -> Result<(), String> {
     let construction = capture_construction_conversion_ledger(before, after)?;
     let finite_extraction = validate_finite_vein_depletion(before, after)?;
@@ -2393,12 +2405,11 @@ fn validate_internal_exact_snapshots(
     catalog: &crate::catalog::RuntimeCatalog,
 ) -> Result<(), String> {
     let construction = capture_construction_conversion_ledger(before, after)?;
+    // Keep the catalog/input-vector check as defense in depth, but do not mint
+    // authority from the observed delta. The second gate accepts construction
+    // output only when run_centers supplied the private revision receipt.
     validate_construction_recipe_conversion(&construction, catalog, None, true)?;
-    let receipt = ConstructionRecipeReceipt {
-        outputs: construction.transformations.clone(),
-        crafted: construction.crafted,
-    };
-    validate_settlement_proof(before, after, catalog, Some(&receipt))
+    validate_settlement_proof(before, after, catalog, after.construction_receipt.as_ref())
 }
 
 fn checked_material_delta(
@@ -4269,6 +4280,7 @@ fn exact_three_window_probe(
             .map_err(|error| format!("probe baseline snapshot failed: {error:#}"))?,
     ];
     for _ in 0..3 {
+        let exact_base_revision = probe.revision;
         let mut result = probe
             .advance_exact(&exact_request(
                 probe.revision,
@@ -4282,7 +4294,7 @@ fn exact_three_window_probe(
                 .take()
                 .unwrap_or_else(|| "probe exact window is unsupported".to_owned()));
         }
-        let after = capture_settlement_snapshot(&probe)
+        let after = capture_exact_settlement_snapshot(&probe, exact_base_revision)
             .map_err(|error| format!("probe settlement snapshot failed: {error:#}"))?;
         validate_internal_exact_snapshots(
             snapshots.last().expect("probe always has a baseline"),
@@ -5137,7 +5149,7 @@ fn prove_internal_exact_settlement_candidate(
     before: &SettlementProofSnapshot,
     candidate: CoreState,
 ) -> Result<CoreState, String> {
-    let after = capture_settlement_snapshot(&candidate)
+    let after = capture_exact_settlement_snapshot(&candidate, before.revision)
         .map_err(|error| format!("candidate snapshot invalid: {error:#}"))?;
     validate_internal_exact_snapshots(before, &after, &candidate.catalog)?;
     Ok(candidate)
@@ -5273,6 +5285,7 @@ fn advance_bounded(
             } else {
                 exact_wall_seconds
             };
+            let exact_base_revision = candidate.revision;
             let mut exact = candidate.advance_exact(&exact_request(
                 candidate.revision,
                 slice_seconds,
@@ -5301,7 +5314,15 @@ fn advance_bounded(
                         <= EPSILON;
                 let boundary = boundary.max(0.0) as usize;
                 if at_boundary && (1..=3).contains(&boundary) {
-                    let snapshot = match capture_settlement_snapshot(&candidate) {
+                    let receipt_base_revision = macro_runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.calibration_snapshots.last())
+                        .map(|snapshot| snapshot.revision)
+                        .unwrap_or(exact_base_revision);
+                    let snapshot = match capture_exact_settlement_snapshot(
+                        &candidate,
+                        receipt_base_revision,
+                    ) {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
                             return unsupported(
@@ -7258,6 +7279,93 @@ mod tests {
             json!(1.0)
         );
         assert_eq!(state.base_value()["tray"]["iron_ore"], json!(9.0));
+
+        let receipt = state
+            .prepared_construction_runtime()
+            .and_then(|runtime| runtime.receipt_between(revision, state.revision))
+            .expect("exact construction prefix emits a private receipt");
+        assert_eq!(receipt.crafted, 1);
+        assert_eq!(
+            receipt.outputs,
+            BTreeMap::from([("test_building".to_owned(), 1)])
+        );
+
+        let canonical_with_receipt = state.canonical_sha256().unwrap();
+        let materialized_with_receipt = state.materialize().unwrap();
+        let entities = state.parse_entities_parallel().unwrap();
+        let rebuilt =
+            crate::construction::ConstructionRuntime::build(&state, state.base_value(), &entities);
+        state.install_prepared_construction_runtime(Arc::new(rebuilt));
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_with_receipt);
+        assert_eq!(state.materialize().unwrap(), materialized_with_receipt);
+        assert_eq!(
+            state
+                .prepared_construction_runtime()
+                .and_then(|runtime| runtime.receipt_between(revision, state.revision)),
+            None,
+            "rebuilding private runtime deliberately discards receipt history",
+        );
+    }
+
+    #[test]
+    fn construction_receipt_is_deterministic_for_one_five_and_sixty_second_segments() {
+        fn run_exact_segments(segments: &[f64]) -> (CoreState, ConstructionRunReceipt) {
+            let mut state = construction_powered_fixture();
+            let base_revision = state.revision;
+            for &seconds in segments {
+                let revision = state.revision;
+                let result = state
+                    .advance_exact(&exact_request(revision, seconds, seconds / 15.0))
+                    .unwrap();
+                assert!(result.supported, "unexpected reason: {:?}", result.reason);
+            }
+            let receipt = state
+                .prepared_construction_runtime()
+                .and_then(|runtime| runtime.receipt_between(base_revision, state.revision))
+                .expect("segmented exact construction receipt remains contiguous");
+            (state, receipt)
+        }
+
+        let (one_window, one_receipt) = run_exact_segments(&[60.0]);
+        let (five_second_windows, five_receipt) = run_exact_segments(&[5.0; 12]);
+        let (one_second_windows, one_second_receipt) = run_exact_segments(&[1.0; 60]);
+        let (one_window_again, one_receipt_again) = run_exact_segments(&[60.0]);
+        let (five_second_windows_again, five_receipt_again) = run_exact_segments(&[5.0; 12]);
+        let (one_second_windows_again, one_second_receipt_again) = run_exact_segments(&[1.0; 60]);
+
+        // Construction's proof evidence is an interval aggregate, so it is
+        // identical whether exact advancement arrives in one, five, or sixty
+        // second calls. Each established exact call shape is also byte- and
+        // hash-deterministic when replayed with the same segmentation.
+        assert_eq!(five_receipt, one_receipt);
+        assert_eq!(one_second_receipt, one_receipt);
+        assert_eq!(one_receipt_again, one_receipt);
+        assert_eq!(five_receipt_again, five_receipt);
+        assert_eq!(one_second_receipt_again, one_second_receipt);
+        assert_eq!(
+            one_window_again.materialize().unwrap(),
+            one_window.materialize().unwrap(),
+        );
+        assert_eq!(
+            five_second_windows_again.materialize().unwrap(),
+            five_second_windows.materialize().unwrap(),
+        );
+        assert_eq!(
+            one_second_windows_again.materialize().unwrap(),
+            one_second_windows.materialize().unwrap(),
+        );
+        assert_eq!(
+            one_window_again.canonical_sha256().unwrap(),
+            one_window.canonical_sha256().unwrap(),
+        );
+        assert_eq!(
+            five_second_windows_again.canonical_sha256().unwrap(),
+            five_second_windows.canonical_sha256().unwrap(),
+        );
+        assert_eq!(
+            one_second_windows_again.canonical_sha256().unwrap(),
+            one_second_windows.canonical_sha256().unwrap(),
+        );
     }
 
     #[test]
@@ -7325,6 +7433,79 @@ mod tests {
     }
 
     #[test]
+    fn forged_internal_construction_candidate_is_rejected_without_mutating_source() {
+        let live = construction_powered_fixture();
+        let before = capture_settlement_snapshot(&live).unwrap();
+        let source_revision = live.revision;
+        let source_hash = live.canonical_sha256().unwrap();
+        let source_bytes = live.materialize().unwrap();
+
+        let mut forged = live.clone();
+        forged.base_value_mut()["tray"]["iron_ore"] = json!(9);
+        forged.base_value_mut()["planetTrays"]["home"]["iron_ore"] = json!(9);
+        forged.base_value_mut()["construction"]["test_building"] = json!(1);
+        forged.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
+        let failure = prove_internal_exact_settlement_candidate(&before, forged).unwrap_err();
+        assert!(
+            failure.contains("stage receipt"),
+            "unexpected failure: {failure}"
+        );
+
+        assert_eq!(live.revision, source_revision);
+        assert_eq!(live.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(live.materialize().unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn cancelled_exact_candidate_receipt_is_cow_isolated_from_source() {
+        let source = construction_powered_fixture();
+        let before = capture_settlement_snapshot(&source).unwrap();
+        let source_revision = source.revision;
+        let source_hash = source.canonical_sha256().unwrap();
+        let source_bytes = source.materialize().unwrap();
+
+        let mut cancelled = source.clone();
+        let result = cancelled
+            .advance_exact(&exact_request(source_revision, 6.0, 0.4))
+            .unwrap();
+        assert!(result.supported, "unexpected reason: {:?}", result.reason);
+        assert!(
+            cancelled
+                .prepared_construction_runtime()
+                .and_then(|runtime| runtime.receipt_between(source_revision, cancelled.revision))
+                .is_some(),
+            "the disposable candidate itself owns its exact receipt",
+        );
+        assert_eq!(
+            source
+                .prepared_construction_runtime()
+                .and_then(|runtime| runtime.receipt_between(source_revision, cancelled.revision)),
+            None,
+            "Arc::make_mut must not publish a cancelled candidate's receipt",
+        );
+
+        // Matching the cancelled candidate's revision is insufficient: a new
+        // candidate cloned from the unchanged source has no private interval
+        // receipt and therefore cannot borrow the discarded authority.
+        let mut forged_same_revision = source.clone();
+        forged_same_revision.revision = cancelled.revision;
+        forged_same_revision.base_value_mut()["tray"]["iron_ore"] = json!(9);
+        forged_same_revision.base_value_mut()["planetTrays"]["home"]["iron_ore"] = json!(9);
+        forged_same_revision.base_value_mut()["construction"]["test_building"] = json!(1);
+        forged_same_revision.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
+        let failure =
+            prove_internal_exact_settlement_candidate(&before, forged_same_revision).unwrap_err();
+        assert!(
+            failure.contains("construction recipe input receipt is missing"),
+            "unexpected failure: {failure}",
+        );
+
+        assert_eq!(source.revision, source_revision);
+        assert_eq!(source.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(source.materialize().unwrap(), source_bytes);
+    }
+
+    #[test]
     fn internal_construction_receipt_deducts_audited_same_window_rewards() {
         let live = construction_powered_fixture();
         let before = capture_settlement_snapshot(&live).unwrap();
@@ -7336,19 +7517,12 @@ mod tests {
         candidate.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
         candidate.base_value_mut()["campaign"]["rewardedTaskIds"] = json!(["mine_first_ore"]);
 
-        let candidate = prove_internal_exact_settlement_candidate(&before, candidate).unwrap();
-        assert_eq!(
-            candidate.base_value()["construction"]["test_building"],
-            json!(1)
-        );
-        assert_eq!(
-            candidate.base_value()["construction"]["conveyor_belt_mk1"],
-            json!(2)
-        );
-        assert_eq!(
-            candidate.base_value()["constructionAutomation"]["totalCrafted"],
-            json!(1)
-        );
+        let mut after = capture_settlement_snapshot(&candidate).unwrap();
+        after.construction_receipt = Some(ConstructionRunReceipt::for_test(
+            BTreeMap::from([("test_building".to_owned(), 1)]),
+            1,
+        ));
+        validate_internal_exact_snapshots(&before, &after, &candidate.catalog).unwrap();
     }
 
     #[test]
@@ -7363,7 +7537,12 @@ mod tests {
         candidate.base_value_mut()["construction"]["test_building"] = json!(1);
         candidate.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
 
-        assert!(prove_internal_exact_settlement_candidate(&before, candidate).is_ok());
+        let mut after = capture_settlement_snapshot(&candidate).unwrap();
+        after.construction_receipt = Some(ConstructionRunReceipt::for_test(
+            BTreeMap::from([("test_building".to_owned(), 1)]),
+            1,
+        ));
+        assert!(validate_internal_exact_snapshots(&before, &after, &candidate.catalog).is_ok());
     }
 
     #[test]
@@ -7382,7 +7561,9 @@ mod tests {
         candidate.base_value_mut()["constructionAutomation"]["jobs"] = json!({});
         candidate.base_value_mut()["portableFleet"]["logistics_vessel"] = json!(1);
         candidate.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
-        assert!(prove_internal_exact_settlement_candidate(&before, candidate).is_ok());
+        let mut after = capture_settlement_snapshot(&candidate).unwrap();
+        after.construction_receipt = Some(ConstructionRunReceipt::for_test(BTreeMap::new(), 1));
+        assert!(validate_internal_exact_snapshots(&before, &after, &candidate.catalog).is_ok());
 
         // WIP disappearing without the corresponding portable-fleet receipt
         // is not a construction completion source, even on the trusted exact
@@ -7390,7 +7571,10 @@ mod tests {
         let mut vanished = live.clone();
         vanished.base_value_mut()["constructionAutomation"]["jobs"] = json!({});
         vanished.base_value_mut()["constructionAutomation"]["totalCrafted"] = json!(1);
-        let failure = prove_internal_exact_settlement_candidate(&before, vanished).unwrap_err();
+        let mut after = capture_settlement_snapshot(&vanished).unwrap();
+        after.construction_receipt = Some(ConstructionRunReceipt::for_test(BTreeMap::new(), 1));
+        let failure =
+            validate_internal_exact_snapshots(&before, &after, &vanished.catalog).unwrap_err();
         assert!(failure.contains("construction recipe input cannot prove"));
 
         // The same serialized before/after transfer remains untrusted without
@@ -8617,10 +8801,15 @@ mod tests {
         )
         .unwrap();
         assert!(result.supported, "reason={:?}", result.reason);
-        assert_eq!(
-            capture_settlement_snapshot(&macro_prefix).unwrap(),
-            capture_settlement_snapshot(&exact).unwrap()
-        );
+        let mut macro_snapshot = capture_settlement_snapshot(&macro_prefix).unwrap();
+        let mut exact_snapshot = capture_settlement_snapshot(&exact).unwrap();
+        // Revision and the private receipt are execution evidence, not part of
+        // the persisted material equivalence asserted by this regression.
+        macro_snapshot.revision = 0;
+        exact_snapshot.revision = 0;
+        macro_snapshot.construction_receipt = None;
+        exact_snapshot.construction_receipt = None;
+        assert_eq!(macro_snapshot, exact_snapshot);
         let macro_state = macro_prefix.materialize().unwrap();
         let exact_state = exact.materialize().unwrap();
         for field in [

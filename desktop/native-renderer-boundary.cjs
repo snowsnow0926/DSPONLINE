@@ -416,6 +416,34 @@ function normalizeConstructionPlacementContext(value, label) {
   };
 }
 
+function normalizeConstructionBeltPlacementContext(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "sourceId", "targetId",
+      "itemId", "tier", "lanes",
+    ],
+    label,
+  );
+  const tier = safeInteger(source.tier, `${label} tier`, 1);
+  const lanes = safeInteger(source.lanes, `${label} lanes`);
+  if (tier > 255) throw protocolError(`${label} tier`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    sourceId: factoryInventoryId(source.sourceId, `${label} source ID`),
+    targetId: factoryInventoryId(source.targetId, `${label} target ID`),
+    itemId: factoryInventoryId(source.itemId, `${label} item ID`),
+    tier,
+    lanes,
+  };
+}
+
 function normalizeConstructionRemovalContext(value, label) {
   const source = exactObject(
     value,
@@ -2269,6 +2297,234 @@ function normalizeCoreConstructionPlacementContext(value, context) {
     available,
     appendEntityIndex,
     nextEntityId,
+    support: { supported, reason },
+    placement,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreConstructionBeltPlacementContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "constructionId", "available",
+    "appendBeltIndex", "nextBeltId", "support", "placement", "limits",
+  ], "native construction belt placement context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "construction-belt-placement-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native construction belt placement identity");
+  }
+  requireProjectionByteBudget(source, "native construction belt placement context");
+  const projectionContext = normalizeConstructionBeltPlacementContext(
+    context,
+    "native construction belt placement request context",
+  );
+  const revision = safeInteger(source.revision, "native construction belt placement revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction belt placement registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction belt placement revision binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "sourceId", "targetId", "itemId", "tier", "lanes",
+  ], "native construction belt placement request echo");
+  const echoed = {
+    expectedRevision: safeInteger(
+      requestSource.expectedRevision,
+      "native construction belt placement echoed revision",
+    ),
+    expectedRegistryFingerprint: logicalId(
+      requestSource.expectedRegistryFingerprint,
+      "native construction belt placement echoed registry",
+      256,
+    ),
+    sourceId: factoryInventoryId(requestSource.sourceId, "native construction belt placement echoed source"),
+    targetId: factoryInventoryId(requestSource.targetId, "native construction belt placement echoed target"),
+    itemId: factoryInventoryId(requestSource.itemId, "native construction belt placement echoed item"),
+    tier: safeInteger(requestSource.tier, "native construction belt placement echoed tier", 1),
+    lanes: safeInteger(requestSource.lanes, "native construction belt placement echoed lanes"),
+  };
+  for (const key of Object.keys(echoed)) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native construction belt placement request binding");
+    }
+  }
+  const activePlanetId = factoryInventoryId(
+    source.activePlanetId,
+    "native construction belt placement active planet",
+  );
+  const nullableInteger = (value, label) => value === null ? null : safeInteger(value, label);
+  const nullableId = (value, label) => value === null ? null : factoryInventoryId(value, label);
+  const constructionId = nullableId(
+    source.constructionId,
+    "native construction belt placement construction ID",
+  );
+  const available = nullableInteger(
+    source.available,
+    "native construction belt placement available",
+  );
+  const appendBeltIndex = nullableInteger(
+    source.appendBeltIndex,
+    "native construction belt placement append index",
+  );
+  const nextBeltId = nullableId(
+    source.nextBeltId,
+    "native construction belt placement next belt ID",
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native construction belt placement support",
+  );
+  const supported = boolean(
+    supportSource.supported,
+    "native construction belt placement support flag",
+  );
+  const reasons = [
+    "unsupported-active-planet", "invalid-lanes", "unsupported-belt-tier",
+    "missing-construction-definition", "technology-locked", "unknown-item",
+    "insufficient-inventory", "same-endpoint", "source-not-found", "target-not-found",
+    "not-active-planet", "interaction-locked", "unsupported-source-domain",
+    "unsupported-target-domain", "source-not-configured", "target-not-configured",
+    "matching-route-exists", "next-id-exhausted", "next-id-collision",
+    "invalid-default-settings",
+  ];
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        reasons,
+        "native construction belt placement unsupported reason",
+      );
+  if (supported !== (reason === null)) {
+    throw protocolError("native construction belt placement support binding");
+  }
+
+  let placement = null;
+  if (supported) {
+    const expectedConstructionId = {
+      1: "conveyor_belt_mk1",
+      2: "conveyor_belt_mk2",
+      3: "conveyor_belt_mk3",
+    }[projectionContext.tier];
+    if (!expectedConstructionId || constructionId !== expectedConstructionId ||
+        available === null || available < projectionContext.lanes ||
+        appendBeltIndex === null || nextBeltId === null) {
+      throw protocolError("native construction belt placement material identity");
+    }
+    const nextIdMatch = /^belt_(0|[1-9]\d*)$/.exec(nextBeltId);
+    const nextId = nextIdMatch ? Number(nextIdMatch[1]) : Number.NaN;
+    if (!Number.isSafeInteger(nextId) || nextId === Number.MAX_SAFE_INTEGER) {
+      throw protocolError("native construction belt placement next belt ID");
+    }
+    const placementSource = exactObject(
+      source.placement,
+      ["remainingConstruction", "nextIdAfterPlacement", "beltTemplate"],
+      "native construction belt placement command context",
+    );
+    const remainingConstruction = safeInteger(
+      placementSource.remainingConstruction,
+      "native construction belt placement remaining inventory",
+    );
+    const nextIdAfterPlacement = safeInteger(
+      placementSource.nextIdAfterPlacement,
+      "native construction belt placement next ID after placement",
+    );
+    if (remainingConstruction !== available - projectionContext.lanes ||
+        nextIdAfterPlacement !== nextId + 1) {
+      throw protocolError("native construction belt placement debit binding");
+    }
+    const beltSource = exactObject(placementSource.beltTemplate, [
+      "id", "planetId", "source", "target", "itemId", "lanes", "tier", "sorterTier",
+      "progress", "priority", "stackSize", "monitorEnabled", "totalTransferred",
+      "congestion", "lastFlow", "routeMode",
+    ], "native construction belt placement template");
+    const tier = safeInteger(beltSource.tier, "native construction belt placement template tier", 1);
+    const sorterTier = safeInteger(
+      beltSource.sorterTier,
+      "native construction belt placement template sorter tier",
+      1,
+    );
+    const stackSize = safeInteger(
+      beltSource.stackSize,
+      "native construction belt placement template stack size",
+      1,
+    );
+    const routeMode = oneOf(
+      beltSource.routeMode,
+      ["auto", "bezier", "upper", "lower"],
+      "native construction belt placement template route mode",
+    );
+    if (factoryInventoryId(beltSource.id, "native construction belt placement template ID") !== nextBeltId ||
+        factoryInventoryId(beltSource.planetId, "native construction belt placement template planet") !== activePlanetId ||
+        factoryInventoryId(beltSource.source, "native construction belt placement template source") !== projectionContext.sourceId ||
+        factoryInventoryId(beltSource.target, "native construction belt placement template target") !== projectionContext.targetId ||
+        factoryInventoryId(beltSource.itemId, "native construction belt placement template item") !== projectionContext.itemId ||
+        safeInteger(beltSource.lanes, "native construction belt placement template lanes", 1) !== projectionContext.lanes ||
+        tier !== projectionContext.tier || sorterTier !== Math.min(3, tier) ||
+        ![1, 2, 4].includes(stackSize) || beltSource.progress !== 0 || beltSource.priority !== 1 ||
+        beltSource.monitorEnabled !== false || beltSource.totalTransferred !== 0 ||
+        beltSource.congestion !== 0 || beltSource.lastFlow !== 0) {
+      throw protocolError("native construction belt placement template binding");
+    }
+    placement = {
+      remainingConstruction,
+      nextIdAfterPlacement,
+      beltTemplate: {
+        id: nextBeltId,
+        planetId: activePlanetId,
+        source: projectionContext.sourceId,
+        target: projectionContext.targetId,
+        itemId: projectionContext.itemId,
+        lanes: projectionContext.lanes,
+        tier,
+        sorterTier,
+        progress: 0,
+        priority: 1,
+        stackSize,
+        monitorEnabled: false,
+        totalTransferred: 0,
+        congestion: 0,
+        lastFlow: 0,
+        routeMode,
+      },
+    };
+  } else if (source.placement !== null) {
+    throw protocolError("native construction belt placement unsupported payload");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native construction belt placement limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction belt placement limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-belt-placement-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      sourceId: projectionContext.sourceId,
+      targetId: projectionContext.targetId,
+      itemId: projectionContext.itemId,
+      tier: projectionContext.tier,
+      lanes: projectionContext.lanes,
+    },
+    activePlanetId,
+    constructionId,
+    available,
+    appendBeltIndex,
+    nextBeltId,
     support: { supported, reason },
     placement,
     limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
@@ -5595,6 +5851,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
+  coreConstructionBeltPlacementContext: normalizeCoreConstructionBeltPlacementContext,
   coreConstructionRemovalContext: normalizeCoreConstructionRemovalContext,
   coreConstructionStackContext: normalizeCoreConstructionStackContext,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,

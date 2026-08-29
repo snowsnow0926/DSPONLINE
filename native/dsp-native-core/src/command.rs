@@ -5927,6 +5927,9 @@ impl CoreState {
         if !command.added_entities.is_empty() {
             return validate_ordinary_building_placement(self, command);
         }
+        if !command.added_belts.is_empty() {
+            return crate::construction_belt_placement_context::validate_command(self, command);
+        }
         if !command.removed_entity_ids.is_empty() {
             return validate_ordinary_building_removal(self, command);
         }

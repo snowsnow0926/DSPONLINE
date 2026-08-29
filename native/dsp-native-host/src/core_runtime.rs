@@ -2751,6 +2751,32 @@ impl CoreRegistry {
             )
     }
 
+    // Keep the internal Host forwarding call field-for-field identical to the
+    // bounded protocol variant; no loosely typed options object crosses it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construction_belt_placement_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        source_id: &str,
+        target_id: &str,
+        item_id: &str,
+        tier: u8,
+        lanes: u64,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .construction_belt_placement_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                source_id,
+                target_id,
+                item_id,
+                tier,
+                lanes,
+            )
+    }
+
     pub fn construction_removal_context(
         &self,
         session_id: &str,
@@ -4116,11 +4142,18 @@ mod tests {
                 "inputs": [{ "itemId": "iron_ore", "amount": 1 }],
                 "outputs": [{ "itemId": "iron_ingot", "amount": 1 }]
             }],
-            "constructions": [{
-                "id": "arc_smelter",
-                "outputAmount": 1,
-                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
-            }],
+            "constructions": [
+                {
+                    "id": "arc_smelter",
+                    "outputAmount": 1,
+                    "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                },
+                {
+                    "id": "conveyor_belt_mk1",
+                    "outputAmount": 3,
+                    "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+                }
+            ],
             "belts": [{ "tier": 1, "speed": 6 }],
             "proliferators": [],
             "technologies": [],
@@ -4283,7 +4316,9 @@ mod tests {
                 "productionBufferLimit": 1000000,
                 "logisticsBufferLimit": 1000000,
                 "beltBufferLimit": 100000000,
-                "proliferatorBufferLimit": 600
+                "proliferatorBufferLimit": 600,
+                "defaultBeltStackSize": 1,
+                "defaultBeltRouteMode": "auto"
             }),
         );
         for (key, value) in [
@@ -4295,7 +4330,7 @@ mod tests {
             ),
             (
                 "construction",
-                json!({ "mining_machine": 0, "conveyor_belt_mk1": 0, "arc_smelter": 2 }),
+                json!({ "mining_machine": 0, "conveyor_belt_mk1": 4, "arc_smelter": 2 }),
             ),
             ("planetMetrics", json!({ "home": {} })),
             ("powerGridMetrics", json!({ "home": {} })),
@@ -5009,6 +5044,44 @@ mod tests {
         }
     }
 
+    fn ordinary_belt_placement_command(
+        projection: &Value,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let base_revision = projection["revision"].as_u64().unwrap();
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [
+                    {
+                        "path": ["construction", projection["constructionId"]],
+                        "operation": "set",
+                        "value": projection["placement"]["remainingConstruction"]
+                    },
+                    {
+                        "path": ["nextId"],
+                        "operation": "set",
+                        "value": projection["placement"]["nextIdAfterPlacement"]
+                    }
+                ],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [{
+                    "index": projection["appendBeltIndex"],
+                    "value": projection["placement"]["beltTemplate"]
+                }],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn exact_pending_lease() -> ExactRealtimeLease {
         let checkpoint = ExactRealtimeCheckpoint {
             generation: 1,
@@ -5652,6 +5725,126 @@ mod tests {
         let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
         assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
         assert_eq!(reloaded_summary.entity_count, 2);
+    }
+
+    #[test]
+    fn typed_ordinary_belt_placement_context_is_read_only_durable_and_reloadable() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let placed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                ordinary_building_placement_command(
+                    entry_checkpoint.revision,
+                    "belt-target-placement",
+                ),
+            )
+            .unwrap();
+        let placed_hash = placed.summary.canonical_sha256.clone();
+        let placed_checkpoint =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+        let projection = registry
+            .construction_belt_placement_context(
+                &session_id,
+                placed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "vein",
+                "entity_9",
+                "iron_ore",
+                1,
+                3,
+            )
+            .unwrap();
+        assert_eq!(projection["support"]["supported"], true);
+        assert_eq!(projection["placement"]["beltTemplate"]["id"], "belt_10");
+        assert_eq!(projection["placement"]["remainingConstruction"], 1);
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            placed_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            placed_checkpoint
+        );
+        let request = || ordinary_belt_placement_command(&projection, "ordinary-belt-placement");
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            placed_hash
+        );
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            placed_checkpoint
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("typed belt placement must recover from its durable stage");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("ordinary-belt-placement")
+        );
+        assert_eq!(recovered.revision, placed.revision + 1);
+        assert!(recovered.changed_entity_ids.is_empty());
+        assert_eq!(recovered.changed_belt_ids, ["belt_10"]);
+        assert!(recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "ordinary-belt-placement-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let exported = std::fs::read(
+            root.path()
+                .join("exports/ordinary-belt-placement-recovered.json"),
+        )
+        .unwrap();
+        let envelope: Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(envelope["state"]["nextId"], 11);
+        assert_eq!(envelope["state"]["construction"]["conveyor_belt_mk1"], 1);
+        assert_eq!(
+            envelope["state"]["belts"][0],
+            projection["placement"]["beltTemplate"]
+        );
+
+        let reload_root = tempdir().unwrap();
+        let mut reload_store = SaveStore::open(reload_root.path()).unwrap();
+        let mut reload_registry = CoreRegistry::default();
+        let reloaded = reload_registry
+            .import_v47(
+                &mut reload_store,
+                Cursor::new(exported.clone()),
+                exported.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let reloaded_summary = reload_registry.status(&reloaded.session_id).unwrap();
+        assert_eq!(reloaded_summary.canonical_sha256, recovered_hash);
+        assert_eq!(reloaded_summary.belt_count, 1);
     }
 
     #[test]

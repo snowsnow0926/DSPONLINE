@@ -327,6 +327,8 @@ export interface DesktopBridge {
   getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
   /** Same-revision Rust-derived ordinary single-building template; the renderer may add only a finite position. */
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
+  /** Same-revision Rust-derived exact single ordinary-belt template and construction debit. */
+  getNativeCoreConstructionBeltPlacementContext?: (request: DesktopNativeCoreConstructionBeltPlacementContextRequest) => Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
   /** Same-revision Rust-derived complete ordinary-building recycling eligibility and exact refund. */
   getNativeCoreConstructionRemovalContext?: (request: DesktopNativeCoreConstructionRemovalContextRequest) => Promise<DesktopNativeCoreConstructionRemovalContextResult>;
   /** Same-revision Rust-derived ordinary-building stack target and exact material adjustment. */
@@ -1073,6 +1075,90 @@ export interface DesktopNativeCoreConstructionPlacementContextResult {
     remainingConstruction: number;
     nextIdAfterPlacement: number;
     entityTemplate: Record<string, unknown>;
+  };
+  limits: {
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionBeltPlacementContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  sourceId: string;
+  targetId: string;
+  itemId: string;
+  tier: number;
+  lanes: number;
+}
+
+export type DesktopNativeCoreConstructionBeltPlacementUnsupportedReason =
+  | "unsupported-active-planet"
+  | "invalid-lanes"
+  | "unsupported-belt-tier"
+  | "missing-construction-definition"
+  | "technology-locked"
+  | "unknown-item"
+  | "insufficient-inventory"
+  | "same-endpoint"
+  | "source-not-found"
+  | "target-not-found"
+  | "not-active-planet"
+  | "interaction-locked"
+  | "unsupported-source-domain"
+  | "unsupported-target-domain"
+  | "source-not-configured"
+  | "target-not-configured"
+  | "matching-route-exists"
+  | "next-id-exhausted"
+  | "next-id-collision"
+  | "invalid-default-settings";
+
+export interface DesktopNativeCoreConstructionBeltPlacementContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-belt-placement-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    sourceId: string;
+    targetId: string;
+    itemId: string;
+    tier: number;
+    lanes: number;
+  };
+  activePlanetId: string;
+  constructionId: "conveyor_belt_mk1" | "conveyor_belt_mk2" | "conveyor_belt_mk3" | null;
+  available: number | null;
+  appendBeltIndex: number | null;
+  nextBeltId: string | null;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionBeltPlacementUnsupportedReason | null;
+  };
+  placement: null | {
+    remainingConstruction: number;
+    nextIdAfterPlacement: number;
+    beltTemplate: {
+      id: string;
+      planetId: string;
+      source: string;
+      target: string;
+      itemId: string;
+      lanes: number;
+      tier: 1 | 2 | 3;
+      sorterTier: 1 | 2 | 3;
+      progress: 0;
+      priority: 1;
+      stackSize: 1 | 2 | 4;
+      monitorEnabled: false;
+      totalTransferred: 0;
+      congestion: 0;
+      lastFlow: 0;
+      routeMode: "auto" | "bezier" | "upper" | "lower";
+    };
   };
   limits: {
     projectionBytes: 1048576;
@@ -2102,6 +2188,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-belt-placement-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "construction-removal-context-v1";
       payload: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">;
     }
@@ -2161,7 +2252,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

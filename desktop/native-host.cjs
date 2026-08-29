@@ -33,6 +33,8 @@ const NATIVE_FACTORY_INVENTORY_CAPABILITY = "native-core-factory-inventory-v1";
 const NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY = "native-core-construction-inventory-v1";
 const NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY =
   "native-core-construction-placement-context-v1";
+const NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY =
+  "native-core-construction-belt-placement-context-v1";
 const NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY =
   "native-core-construction-removal-context-v1";
 const NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY =
@@ -74,7 +76,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1106,6 +1108,34 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  constructionBeltPlacementContext(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "sourceId", "targetId",
+      "itemId", "tier", "lanes",
+    ], "native construction belt placement context request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !validConstructionPlacementId(request.sourceId) ||
+      !validConstructionPlacementId(request.targetId) ||
+      !validConstructionPlacementId(request.itemId) ||
+      !Number.isSafeInteger(request.tier) || request.tier < 1 || request.tier > 255 ||
+      !Number.isSafeInteger(request.lanes) || request.lanes < 0) {
+      throw new TypeError("native construction belt placement context request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreConstructionBeltPlacementContext",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      sourceId: request.sourceId,
+      targetId: request.targetId,
+      itemId: request.itemId,
+      tier: request.tier,
+      lanes: request.lanes,
+    });
+  }
+
   constructionRemovalContext(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     exactObjectKeys(request, [
@@ -2030,6 +2060,7 @@ module.exports = {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
+  NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY,

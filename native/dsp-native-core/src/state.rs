@@ -3985,6 +3985,20 @@ impl CoreState {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
     }
 
+    /// Immutable persisted-order belt rows incident to one entity. Command
+    /// eligibility uses this adjacency instead of scanning every belt.
+    pub(crate) fn incident_belt_indices(
+        &self,
+        entity_index: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.factory_topology
+            .entity_belt_adjacency
+            .incident(entity_index)
+            .iter()
+            .copied()
+            .map(expand_topology_index)
+    }
+
     pub(crate) fn belt_raw_record(&self, index: usize) -> &RawRecord {
         &self.belt_raw[index]
     }

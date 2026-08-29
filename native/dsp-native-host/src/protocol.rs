@@ -218,6 +218,16 @@ pub enum ControlRequest {
         expected_registry_fingerprint: String,
         building_id: String,
     },
+    CoreConstructionBeltPlacementContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        source_id: String,
+        target_id: String,
+        item_id: String,
+        tier: u8,
+        lanes: u64,
+    },
     CoreConstructionRemovalContext {
         session_id: String,
         expected_revision: u64,
@@ -867,6 +877,44 @@ mod tests {
                 assert_eq!(building_id, "MOD/custom-machine");
             }
             _ => panic!("construction placement context decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn construction_belt_placement_context_protocol_preserves_exact_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionBeltPlacementContext",
+            "sessionId": "core-belt-placement",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "sourceId": "MOD/source",
+            "targetId": "MOD/target",
+            "itemId": "MOD/item-alpha",
+            "tier": 3,
+            "lanes": 4096
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreConstructionBeltPlacementContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                source_id,
+                target_id,
+                item_id,
+                tier,
+                lanes,
+            } => {
+                assert_eq!(session_id, "core-belt-placement");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(source_id, "MOD/source");
+                assert_eq!(target_id, "MOD/target");
+                assert_eq!(item_id, "MOD/item-alpha");
+                assert_eq!(tier, 3);
+                assert_eq!(lanes, 4096);
+            }
+            _ => panic!("construction belt placement context decoded as the wrong variant"),
         }
     }
 

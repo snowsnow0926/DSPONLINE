@@ -1419,7 +1419,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 46);
+  assert.equal(mainChannels.length, 48);
   assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));
@@ -1432,8 +1432,12 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-core-construction-inventory"));
   assert.ok(mainChannels.includes("desktop:native-core-construction-placement-context"));
   assert.ok(preloadChannels.includes("desktop:native-core-construction-placement-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-belt-placement-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-belt-placement-context"));
   assert.ok(mainChannels.includes("desktop:native-core-construction-removal-context"));
   assert.ok(preloadChannels.includes("desktop:native-core-construction-removal-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-stack-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-stack-context"));
   assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));

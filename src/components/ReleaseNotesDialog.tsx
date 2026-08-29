@@ -1,7 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, CloudUpload, Database, Gauge, History, Info, Link2, LockKeyhole, MessageCircle, ShieldCheck, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
-import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotes123, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
+import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotes123, getReleaseNotes124, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
@@ -17,6 +17,7 @@ const RELEASE_NOTES_1_2_0 = getReleaseNotes120("zh-CN");
 const RELEASE_NOTES_1_2_1 = getReleaseNotes121("zh-CN");
 const RELEASE_NOTES_1_2_2 = getReleaseNotes122("zh-CN");
 const RELEASE_NOTES_1_2_3 = getReleaseNotes123("zh-CN");
+const RELEASE_NOTES_1_2_4 = getReleaseNotes124("zh-CN");
 const RELEASE_NOTES_1_0_39 = getReleaseNotes1039("zh-CN");
 const RELEASE_NOTES_1_0_41 = getReleaseNotes1041("zh-CN");
 const RELEASE_NOTES_1_0_42 = getReleaseNotes1042("zh-CN");
@@ -78,6 +79,12 @@ const RELEASE_NOTES_1_0_38 = {
 } as const;
 
 const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
+  "v125-conservative-continuity": ShieldCheck,
+  "v125-replication-construction": Gauge,
+  "v125-worker-auto-resume": History,
+  "v125-no-automatic-rollback": LockKeyhole,
+  "v125-blueprint-detail-layout": Check,
+  "v125-compatibility-boundary": Database,
   "construction-offline-timewarp": Gauge,
   "pure-idle-rate-replication": History,
   "windows-native-stable-integration": Database,
@@ -181,6 +188,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_2_4,
   RELEASE_NOTES_1_2_3,
   RELEASE_NOTES_1_2_2,
   RELEASE_NOTES_1_2_1,

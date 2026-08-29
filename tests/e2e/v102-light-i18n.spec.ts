@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-28-v1.2.4";
+const RELEASE_NOTE_ID = "2026-08-30-v1.2.5";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -112,7 +112,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await page.goto("/?menu=1&lang=en");
   const dialog = page.getByRole("dialog", { name: "Large Saves, Tab Takeover, and Content Pack Compatibility" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.4");
+  await expect(dialog).toContainText("1.2.5");
   await expect(dialog).toContainText("Compressed saves above 96 MiB can upload");
   await expect(dialog).toContainText("The current tab can explicitly take authority");
   await expect(dialog).toContainText("Dark Fog buildings can reuse generic recipes");

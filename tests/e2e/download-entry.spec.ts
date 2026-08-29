@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("web main menu exposes the Shanghai client download entry", async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-28-v1.2.4"));
+  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-30-v1.2.5"));
   await page.goto("/");
   const download = page.getByRole("link", { name: /客户端下载/ });
   await expect(download).toBeVisible();

@@ -1,6 +1,6 @@
 # 内容包 Mod 编写指南
 
-> 适用基线：DSP极简网络 `1.2.4` 开发候选（尚未发布），内容包格式 `formatVersion: 2`（继续兼容 v1）。
+> 适用基线：DSP极简网络 `1.2.5` 发布候选（尚未部署），内容包格式 `formatVersion: 2`（继续兼容 v1）。
 >
 > 本项目把 Mod 称为“内容包”。格式与行为的最终依据是 [`src/game/mods.ts`](../src/game/mods.ts) 和 [`src/game/contentPacks.ts`](../src/game/contentPacks.ts)；内容包只能使用经过校验的声明式 JSON，不能执行 JavaScript。
 

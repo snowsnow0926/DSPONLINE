@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { migrateGame, serializeEnvelope } from "../../src/game/storage";
 
-const RELEASE_NOTE_ID = "2026-08-28-v1.2.4";
+const RELEASE_NOTE_ID = "2026-08-30-v1.2.5";
 
 function createV105LegacyState() {
   const base = {

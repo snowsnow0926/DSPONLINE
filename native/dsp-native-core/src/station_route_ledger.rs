@@ -34,6 +34,11 @@ pub(crate) struct StationRouteLedger {
     interstellar_reserved: HashMap<usize, HashMap<String, f64>>,
     local_in_flight: HashMap<usize, HashMap<String, f64>>,
     interstellar_in_flight: HashMap<usize, HashMap<String, f64>>,
+    /// Exact permissive legacy quantum views. Unlike logistics dispatch,
+    /// quantum buffer settlement counts every route shape and floors only
+    /// after summing raw cargo, including opaque/MOD scopes.
+    quantum_reserved_outgoing: HashMap<usize, HashMap<String, f64>>,
+    quantum_in_flight: HashMap<usize, HashMap<String, f64>>,
     local_active_vehicle_load: HashMap<usize, f64>,
     interstellar_active_vehicle_load: HashMap<usize, f64>,
     active_progress: HashMap<usize, f64>,
@@ -174,6 +179,23 @@ impl StationRouteLedger {
                 let supply = string_at(route, "peerId")
                     .and_then(|id| state.entity_index.get(id))
                     .copied();
+                let raw_cargo = finite_number(route.get("cargo"));
+                if let Some(item_id) = string_at(route, "itemId") {
+                    add_item(
+                        &mut ledger.quantum_in_flight,
+                        demand_index,
+                        item_id,
+                        raw_cargo,
+                    );
+                    if let Some(supply) = supply {
+                        add_item(
+                            &mut ledger.quantum_reserved_outgoing,
+                            supply,
+                            item_id,
+                            raw_cargo,
+                        );
+                    }
+                }
                 active_stations.clear();
                 active_stations.push(demand_index);
                 if owner != demand_index {
@@ -334,6 +356,14 @@ impl StationRouteLedger {
         item_amount(&self.interstellar_reserved, station_index, item_id)
     }
 
+    pub(crate) fn quantum_reserved_outgoing(&self, station_index: usize, item_id: &str) -> f64 {
+        item_amount(&self.quantum_reserved_outgoing, station_index, item_id)
+    }
+
+    pub(crate) fn quantum_in_flight(&self, station_index: usize, item_id: &str) -> f64 {
+        item_amount(&self.quantum_in_flight, station_index, item_id)
+    }
+
     pub(crate) fn interstellar_active_vehicle_load(&self, station_index: usize) -> f64 {
         self.interstellar_active_vehicle_load
             .get(&station_index)
@@ -368,6 +398,13 @@ impl StationRouteLedger {
             item_id,
             cargo,
         );
+        add_item(
+            &mut self.quantum_reserved_outgoing,
+            supply_index,
+            item_id,
+            cargo,
+        );
+        add_item(&mut self.quantum_in_flight, demand_index, item_id, cargo);
         let mut active_stations = Vec::with_capacity(3);
         for station_index in [demand_index, supply_index, owner_index] {
             if !active_stations.contains(&station_index) {
@@ -416,6 +453,13 @@ impl StationRouteLedger {
             item_id,
             cargo,
         );
+        add_item(
+            &mut self.quantum_reserved_outgoing,
+            supply_index,
+            item_id,
+            cargo,
+        );
+        add_item(&mut self.quantum_in_flight, demand_index, item_id, cargo);
         let visible_to_local = self.local_station_ranks.contains_key(&demand_index);
         if visible_to_local {
             add_item(&mut self.local_reserved, supply_index, item_id, cargo);

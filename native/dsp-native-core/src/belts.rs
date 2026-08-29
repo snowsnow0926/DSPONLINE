@@ -194,6 +194,10 @@ pub(crate) struct OutputCredits {
     /// factory-sized fill on every exact second when only a small active
     /// frontier can consume reserved belt capacity.
     by_group: HashMap<u32, f64>,
+    /// Stable compact source/item keys for positive credits. Quantum demand
+    /// wake-up can therefore consume only this active frontier without
+    /// reversing the full prepared group map at every five-second boundary.
+    active_source_items: Vec<(u32, u32)>,
 }
 
 impl OutputCredits {
@@ -207,6 +211,10 @@ impl OutputCredits {
             .and_then(|group_index| self.by_group.get(group_index))
             .copied()
             .unwrap_or(0.0)
+    }
+
+    pub(crate) fn active_source_items(&self) -> &[(u32, u32)] {
+        &self.active_source_items
     }
 }
 
@@ -3220,12 +3228,13 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn transfer(
+pub(crate) fn transfer_with_bandwidth(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     belt_runtime: &mut BeltRuntime,
     prepared_routes: &PreparedRoutes,
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
     seconds: f64,
     defer_source_depletion_reset: bool,
     reservation: Option<&BeltStepReservation>,
@@ -3238,7 +3247,6 @@ pub(crate) fn transfer(
     }
     let mut profiler = BeltTransferProfiler::new();
     let routes = &prepared_routes.routes;
-    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     let mut quantum_session = None;
     let belt_limit = normalized_buffer_limit(
         base.get("settings")
@@ -3742,6 +3750,7 @@ pub(crate) fn reserve(
         output_credits: OutputCredits {
             group_by_key: Arc::clone(&prepared_routes.group_by_key),
             by_group: HashMap::new(),
+            active_source_items: Vec::new(),
         },
     };
     let mut quantum_session = None;
@@ -3816,6 +3825,18 @@ pub(crate) fn reserve(
         *credit = (*credit + reserved).min(belt_limit);
     }
     belt_runtime.diagnostics.reservation_allowance_entries = result.allowance_by_belt.len();
+    let mut credited_group_indices = result
+        .output_credits
+        .by_group
+        .iter()
+        .filter_map(|(&group_index, &credit)| (credit > EPSILON).then_some(group_index))
+        .collect::<Vec<_>>();
+    credited_group_indices.sort_unstable();
+    result.output_credits.active_source_items = credited_group_indices
+        .into_iter()
+        .filter_map(|group_index| prepared_routes.groups.get(group_index as usize))
+        .map(|group| (group.source_index, group.item_symbol))
+        .collect();
     belt_runtime.diagnostics.reservation_credit_entries = result.output_credits.by_group.len();
     selection.recycle_into(
         &mut belt_runtime.workspace.selected_group_indices,
@@ -5229,6 +5250,7 @@ mod tests {
         let credits = OutputCredits {
             group_by_key: Arc::new(HashMap::from([((7, 11), 1)])),
             by_group: HashMap::from([(1, 42.0)]),
+            active_source_items: vec![(7, 11)],
         };
 
         assert_eq!(credits.get(7, 11), 42.0);

@@ -2319,6 +2319,10 @@ pub(crate) struct FactoryTopology {
     /// than assuming that the canonical station shape is exhaustive.
     pub orbital_collector_full_scan_required: bool,
     pub quantum_endpoint_indices: Vec<usize>,
+    /// A built-in quantum building carried by a non-station/MOD row is outside
+    /// the exact endpoint directory. Preserve the permissive legacy scan for
+    /// that topology instead of claiming the canonical index is exhaustive.
+    pub quantum_endpoint_full_scan_required: bool,
     pub construction_center_indices: Vec<usize>,
     pub time_warp_indices: Vec<usize>,
     pub logistics_buffer_indices: Vec<usize>,
@@ -2458,6 +2462,10 @@ pub struct CoreState {
     /// route graph. It is installed only after a successful revision commit.
     prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
+    /// Runtime-only static quantum endpoint/slot directory plus active wake
+    /// queues. Installed only after the complete simulation candidate commits.
+    prepared_quantum_logistics_directory:
+        Option<Arc<crate::quantum_logistics::QuantumLogisticsDirectory>>,
     /// Immutable traditional interstellar peer/reverse-wake graph. It is
     /// shared across committed revisions and rebuilt only when record
     /// topology, station mode, research, or exploration membership changes.
@@ -3114,6 +3122,7 @@ impl CoreState {
             prepared_belt_routes: None,
             prepared_belt_activity: None,
             prepared_local_peer_directory: None,
+            prepared_quantum_logistics_directory: None,
             prepared_interstellar_peer_directory: None,
             prepared_interstellar_route_activity: None,
             save_dirty,
@@ -3141,6 +3150,12 @@ impl CoreState {
                     &parsed_entities,
                     &state.factory_topology.station_indices,
                 )?));
+            state.prepared_quantum_logistics_directory = Some(Arc::new(
+                crate::quantum_logistics::QuantumLogisticsDirectory::build(
+                    &state,
+                    &parsed_entities,
+                ),
+            ));
             state.prepared_interstellar_peer_directory = Some(Arc::new(
                 crate::interstellar_logistics::InterstellarPeerDirectory::build(
                     &state,
@@ -3488,6 +3503,7 @@ impl CoreState {
         self.factory_static_admission_reason = None;
         self.prepared_belt_routes = None;
         self.prepared_belt_activity = None;
+        self.prepared_quantum_logistics_directory = None;
         // Non-pause top-level commands can change research, exploration,
         // routing settings, or tray-backed warper availability. Re-admit the
         // complete interstellar reverse graph and demand wake queue rather
@@ -3529,6 +3545,19 @@ impl CoreState {
         directory: Arc<crate::local_logistics::LocalPeerDirectory>,
     ) {
         self.prepared_local_peer_directory = Some(directory);
+    }
+
+    pub(crate) fn prepared_quantum_logistics_directory(
+        &self,
+    ) -> Option<Arc<crate::quantum_logistics::QuantumLogisticsDirectory>> {
+        self.prepared_quantum_logistics_directory.clone()
+    }
+
+    pub(crate) fn install_prepared_quantum_logistics_directory(
+        &mut self,
+        directory: Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
+    ) {
+        self.prepared_quantum_logistics_directory = Some(directory);
     }
 
     pub(crate) fn prepared_interstellar_route_activity(
@@ -3654,6 +3683,13 @@ impl CoreState {
             if building == "orbital_collector" {
                 factory_topology.orbital_collector_indices.push(index);
                 factory_topology.orbital_collector_full_scan_required |= kind != "station";
+            }
+            if matches!(
+                building,
+                "interstellar_logistics_station" | "orbital_collector"
+            ) && kind != "station"
+            {
+                factory_topology.quantum_endpoint_full_scan_required = true;
             }
             if kind == "station" {
                 factory_topology.station_indices.push(index);
@@ -3839,6 +3875,7 @@ impl CoreState {
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
+        self.prepared_quantum_logistics_directory = None;
         self.prepared_interstellar_peer_directory = None;
         self.prepared_interstellar_route_activity = None;
         Ok(())
@@ -5511,6 +5548,11 @@ impl CoreState {
                 .map(|directory| directory.estimated_bytes())
                 .unwrap_or(0)
             + self
+                .prepared_quantum_logistics_directory
+                .as_ref()
+                .map(|directory| directory.estimated_bytes())
+                .unwrap_or(0)
+            + self
                 .prepared_interstellar_peer_directory
                 .as_ref()
                 .map(|directory| directory.estimated_bytes())
@@ -6422,6 +6464,11 @@ mod tests {
                     .unwrap_or(0)
                 + state
                     .prepared_local_peer_directory
+                    .as_ref()
+                    .map(|directory| directory.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_quantum_logistics_directory
                     .as_ref()
                     .map(|directory| directory.estimated_bytes())
                     .unwrap_or(0)

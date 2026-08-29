@@ -1562,7 +1562,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 | --- | ---: | --- | --- |
 | Rust 唯一玩家可见权威 | 约 65% | main-owned 连续时钟、durable 命令回执和启动恢复、同 revision 投影、接管前完整覆盖门禁；普通闭合配方、科研、火箭和太阳帆的部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
 | 完整薄 UI | 约 58% | 主画布、minimap、运行状态、星球导航、施工摘要/队列、选择工具栏、桌面/移动 inspector、多选与连接预览均可消费同 revision 有界 Rust 投影 | 科研、配方、星图、戴森、运营、银河、空间站等大工作区仍以完整 GameState 为主要输入；不是完整薄 renderer |
-| 真正 `O(active)` 物流 | 约 85% | 线路活动调度、本地活动线路/缓冲唤醒、星际 peer directory、跨 revision active demand queue 与反向唤醒；本地/星际 ready 及 dispatch 外层现保留独立候选，并按库存、容量、电力、warper、路线、量子、技术和拓扑事件反向唤醒；warper refill、station power、活动 route-ledger 与拥堵更新均有 75% 稠密稳定退化和 MOD/失配失败关闭；轨道采集器复用不可变拓扑索引 | 量子 flush/download、运行带宽和全局路线预留提取等阶段仍有 `O(E/R)` 扫描；构建/拓扑重编、75% 高扇出及 fail-closed 路径会有意全扫，故整体物流仍不是完整 `O(active)` |
+| 真正 `O(active)` 物流 | 约 85% | 线路活动调度、本地活动线路/缓冲唤醒、星际 peer directory、跨 revision active demand queue 与反向唤醒；本地/星际 ready 及 dispatch 外层现保留独立候选，并按库存、容量、电力、warper、路线、量子、技术和拓扑事件反向唤醒；warper refill、station power、活动 route-ledger、拥堵更新和量子普通 flush/休眠 download 均有 75% 稠密稳定退化和 MOD/失配失败关闭；量子运行带宽与 all-scope raw-cargo 预留/在途账本复用持久目录和共享 route ledger | 五秒上传预算仍检查全部上传计划和活动采集器；施工量子需求、模式过渡、构建/拓扑重编、75% 高扇出及 fail-closed 路径会有意全扫；正容量下载端点是语义活动集合，稠密时不可休眠，故整体物流仍不是完整 `O(active)` |
 | 全领域确定性原生并行 | 约 55% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、量子、施工、轨道终端、射线接收器、银河出口、任务指标和历史诊断等只读探针 | 共享状态的固定顺序提交、生产历史浮点累加、无采样任务扫描、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU/Windows 版本的 24 小时矩阵 |
 | 整体代码目标 | 约 72% | 上述切片已提交且有局部/完整回归 | 不能等同发布成熟度 |
 | 可放心发布成熟度 | 约 48% | 本机类型、单元、native 边界、Rust core 和 build 门禁通过 | 完整 E2E/server 本 HEAD 新鲜矩阵、真实大档全进程 A/B、24 小时、多硬件、Defender/磁盘故障、签名和灰度均未完成 |
@@ -1578,6 +1578,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 7. `f167366` 在生产历史采样顺序扫描中顺带生成 campaign 只读指标，避免同一采样秒再次扫描全部实体和线路等级。4,097 实体合成夹具中该后处理提交为约 `51 µs`，对照回退约 `1,399 µs`；只代表这一小段，不外推整次模拟。
 8. 本轮把本地/星际 ready 外层改为跨 revision 保留的 ready 集合与反向待处理队列；星际派遣与 readiness 分队列，保证 readiness 之后的量子、皮带和 warper 写入不会被同一步派遣探测提前排空。构建期完整校验 key/rank/order，活动拓扑每个缓存只校验一次；稳态候选达到 75%、遇到 opaque/MOD、非法 pending 或目录失配时按稳定全序失败关闭。1/5/60 秒字节 oracle 只覆盖 readiness/功率/派遣/线路推进切片，不冒充完整 `simulate_step` 五秒量子边界证明。
 9. 本轮继续把本地 dispatch 的旧全站外层改为 revision 私有需求队列：需求侧容量/载具变化直接唤醒自身，供应侧库存/载具/路线变化按本地 `(planet, item)` 反向目录展开，ready 候选和功率恢复边分别补入同一稳定实体顺序。缓存只在整批派遣成功后提交；候选达到全部本地站 75%、opaque/MOD 路线、非法 pending 或构建期精确 key/rank/order 失配时仍走旧完整站序。逐秒 dispatch + local route 专项在 1/5/60 秒与 full-station oracle 字节严格一致；该证据不包含完整 `simulate_step` 的量子五秒边界，也不证明剩余量子/全局预留阶段为 `O(active)`。
+10. 本轮为量子物流建立 revision 私有 `QuantumLogisticsDirectory`。塔/采集器堆叠、上传/下载 slot 与 station/item 反向键只在打开、科技/玩家命令或拓扑变化时重编；普通 flush 使用持久 pending 集合，容量为零的下载计划休眠，库存/容量、belt credit、本地/星际路线写回、量子库存释放和模式/拓扑变化精确唤醒。共享 `StationRouteLedger` 同一次路线解析生成量子专用 raw-cargo/all-scope 预留与在途视图，保持未知 scope、小数 cargo“累加后取整”的旧语义。正容量需求即使仓库无货也保持活动，以保留共享带宽公平性；75% 稠密、非 ASCII/MOD slot、精确 key/rank/slot 或拓扑失配按稳定全序失败关闭。普通步与五秒边界只把实际库存写入站反向唤醒，不再无条件唤醒全部量子端点。Rust full-scan oracle 逐秒覆盖 1～60 秒并校验每个五秒下载边界，完整 JS↔Rust 差分覆盖 1/4/5/10/60/600 秒；本阶段仍串行提交，线程数不参与量子分配顺序。
 
 ### 24.3 本 HEAD 新鲜验证
 
@@ -1599,6 +1600,6 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
 2. 把科研、配方、星图、戴森、运营、银河和空间站工作区逐个替换为有界同 revision 投影；完成前 renderer 仍不是完整薄 UI。
-3. 继续收敛量子 flush/download、运行带宽与全局路线预留提取的 `O(E/R)` 扫描；本地/星际 dispatch、ready、station power、warper、congestion、route-ledger 与轨道采集器已有稀疏路径。后续继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把高扇出自然稠密或 fail-closed 场景包装成稀疏收益。
+3. 继续收敛五秒量子上传预算对全部上传计划/活动采集器的扫描，以及施工量子需求和模式过渡等跨域边界；运行带宽、独立路线预留/在途提取、普通 flush 与容量为零的 download 外层已转为持久目录/活动集合。后续继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把正容量需求、高扇出自然稠密或 fail-closed 场景包装成稀疏收益。
 4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
 5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。

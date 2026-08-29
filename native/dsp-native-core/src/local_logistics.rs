@@ -2217,12 +2217,12 @@ fn advance_routes_for_indices(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
     seconds: f64,
     powers: &HashMap<usize, f64>,
     route_scan_indices: &[usize],
 ) -> anyhow::Result<LocalRouteAdvanceOutcome> {
     let indexes = &state.entity_index;
-    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     let mut activity_updates = Vec::with_capacity(route_scan_indices.len());
     let mut changed_station_indices = Vec::new();
     for &demand_index in route_scan_indices {
@@ -2368,6 +2368,7 @@ fn advance_routes_for_indices(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn advance_routes(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -2376,12 +2377,41 @@ pub(crate) fn advance_routes(
     powers: &HashMap<usize, f64>,
     directory: &mut LocalPeerDirectory,
 ) -> anyhow::Result<Vec<usize>> {
+    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
+    advance_routes_with_bandwidth(
+        state,
+        base,
+        entities,
+        quantum_bandwidth,
+        seconds,
+        powers,
+        directory,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn advance_routes_with_bandwidth(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<Vec<usize>> {
     if !directory.has_local_routes() {
         return Ok(Vec::new());
     }
     let (route_scan_indices, _dense_fallback) = directory.route_scan_indices();
-    let outcome =
-        advance_routes_for_indices(state, base, entities, seconds, powers, &route_scan_indices)?;
+    let outcome = advance_routes_for_indices(
+        state,
+        base,
+        entities,
+        quantum_bandwidth,
+        seconds,
+        powers,
+        &route_scan_indices,
+    )?;
     // A quantum-supply demand can retain completed local cargo in its station
     // input buffer. Derive that wake only from the successfully mutated
     // demand rows; ordinary route completions add outputs and remain dormant.
@@ -4192,10 +4222,13 @@ mod tests {
         };
         if force_full_scan {
             let full_indices = directory.station_indices.to_vec();
+            let quantum_bandwidth =
+                crate::quantum_logistics::runtime_bandwidth(base.as_object().unwrap(), &entities);
             let outcome = advance_routes_for_indices(
                 state,
                 base.as_object_mut().unwrap(),
                 &mut entities,
+                quantum_bandwidth,
                 seconds,
                 &route_powers(source.len(), 1.0),
                 &full_indices,

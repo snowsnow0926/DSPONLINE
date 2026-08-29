@@ -16,6 +16,8 @@ const PLAYER_STATION_DRONES_PER_BUILDING: u64 = 50;
 const PLAYER_STATION_VESSELS_PER_BUILDING: u64 = 10;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
+const PLAYER_QUANTUM_CAPACITY_MIN: &str = "10000";
+const PLAYER_QUANTUM_CAPACITY_MAX: &str = "10000000000";
 const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
 /// FNV-1a fingerprint produced by `createContentPackRegistry()` with no packs.
 /// The current CORE catalog omits the optional MOD `stackLimit`, so positive
@@ -3931,6 +3933,81 @@ fn validate_player_pause_command(
     Ok(())
 }
 
+fn canonical_player_quantum_capacity<'a>(
+    value: Option<&'a Value>,
+    label: &str,
+) -> anyhow::Result<&'a str> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority {label} is not a decimal string"))?;
+    if value.is_empty()
+        || value.len() > PLAYER_QUANTUM_CAPACITY_MAX.len()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.len() > 1 && value.starts_with('0')
+    {
+        bail!("native player-authority {label} is not canonical")
+    }
+    let at_least_min = value.len() > PLAYER_QUANTUM_CAPACITY_MIN.len()
+        || value.len() == PLAYER_QUANTUM_CAPACITY_MIN.len() && value >= PLAYER_QUANTUM_CAPACITY_MIN;
+    let at_most_max = value.len() < PLAYER_QUANTUM_CAPACITY_MAX.len()
+        || value.len() == PLAYER_QUANTUM_CAPACITY_MAX.len() && value <= PLAYER_QUANTUM_CAPACITY_MAX;
+    if !at_least_min || !at_most_max {
+        bail!("native player-authority {label} is outside the allowed range")
+    }
+    Ok(value)
+}
+
+fn validate_quantum_item_capacity_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority quantum capacity command shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    let [
+        PathSegment::Key(root),
+        PathSegment::Key(directory),
+        PathSegment::Key(item_id),
+    ] = change.path.as_slice()
+    else {
+        bail!("native player-authority quantum capacity path is invalid")
+    };
+    if root != "quantumLogisticsNetwork" || directory != "itemCapacities" {
+        bail!("native player-authority quantum capacity path is invalid")
+    }
+    if change.operation != "set" {
+        bail!("native player-authority quantum capacity operation is invalid")
+    }
+    if !state.catalog.items.contains_key(item_id) {
+        bail!("native player-authority quantum capacity item is unknown")
+    }
+    let target =
+        canonical_player_quantum_capacity(change.value.as_ref(), "quantum capacity target")?;
+    let capacities = state
+        .base_value()
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .and_then(|network| network.get("itemCapacities"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority quantum capacity state is invalid"))?;
+    let current = match capacities.get(item_id) {
+        Some(value) => canonical_player_quantum_capacity(Some(value), "current quantum capacity")?,
+        None => PLAYER_QUANTUM_CAPACITY_MAX,
+    };
+    if current == target {
+        bail!("native player-authority quantum capacity target is unchanged")
+    }
+    Ok(())
+}
+
 fn validate_dyson_launch_configuration_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -5142,6 +5219,14 @@ impl CoreState {
             return validate_player_position_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(
+                change.path.first(),
+                Some(PathSegment::Key(root)) if root == "quantumLogisticsNetwork"
+            )
+        }) {
+            return validate_quantum_item_capacity_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "timeWarp")
         }) {
             return validate_time_warp_command(self, command);
@@ -5909,6 +5994,33 @@ mod tests {
 
     fn player_command_state() -> CoreState {
         player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn player_quantum_capacity_state() -> CoreState {
+        let mut state = player_command_state();
+        state.base_value_mut().insert(
+            "quantumLogisticsNetwork".to_owned(),
+            serde_json::json!({
+                "enabled": true,
+                "inventory": { "iron_ore": "25000" },
+                "itemCapacities": { "iron_ore": "100000" },
+                "routingCursors": {},
+                "uploadRoutingCursors": {}
+            }),
+        );
+        state
+    }
+
+    fn quantum_capacity_command(
+        revision: u64,
+        item_id: &str,
+        target: Value,
+    ) -> SimulationCommandPatch {
+        top_level_leaf_command(
+            revision,
+            &["quantumLogisticsNetwork", "itemCapacities", item_id],
+            target,
+        )
     }
 
     fn player_entity_configuration_state() -> CoreState {
@@ -10088,5 +10200,109 @@ mod tests {
         let before = rejected.canonical_sha256().unwrap();
         assert!(rejected.apply_player_authority_command(&target).is_err());
         assert_eq!(rejected.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_applies_only_known_canonical_quantum_capacity_leaf() {
+        let mut state = player_quantum_capacity_state();
+        let command = quantum_capacity_command(state.revision, "iron_ore", Value::from("1000000"));
+        let result = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(result.previous_revision, 9);
+        assert_eq!(result.revision, 10);
+        // Capacity changes alter quantum scheduling horizons. Keep the
+        // renderer receipt dirty so every consumer reloads the authoritative
+        // projection instead of predicting the new derived logistics state.
+        assert!(result.topology_dirty);
+        assert_eq!(
+            state.base_value()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"],
+            "1000000"
+        );
+
+        let mut defaulted = player_quantum_capacity_state();
+        defaulted.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]
+            .as_object_mut()
+            .unwrap()
+            .remove("iron_ore");
+        let command = quantum_capacity_command(
+            defaulted.revision,
+            "iron_ore",
+            Value::from(PLAYER_QUANTUM_CAPACITY_MIN),
+        );
+        defaulted.apply_player_authority_command(&command).unwrap();
+        assert_eq!(
+            defaulted.base_value()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"],
+            PLAYER_QUANTUM_CAPACITY_MIN
+        );
+    }
+
+    #[test]
+    fn player_authority_quantum_capacity_rejects_stale_unknown_mixed_or_malformed_atomically() {
+        let base = player_quantum_capacity_state();
+        let revision = base.revision;
+        let stale = quantum_capacity_command(revision - 1, "iron_ore", Value::from("1000000"));
+        let unchanged = quantum_capacity_command(revision, "iron_ore", Value::from("100000"));
+        let unknown =
+            quantum_capacity_command(revision, "missing_mod_item", Value::from("1000000"));
+        let mut deleted = quantum_capacity_command(revision, "iron_ore", Value::from("1000000"));
+        deleted.top_level_changes[0].operation = "delete".to_owned();
+        deleted.top_level_changes[0].value = None;
+        let mut whole_object =
+            quantum_capacity_command(revision, "iron_ore", Value::from("1000000"));
+        whole_object.top_level_changes[0].path.pop();
+        let mut mixed = quantum_capacity_command(revision, "iron_ore", Value::from("1000000"));
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(false)),
+        });
+        let mut mixed_entity =
+            quantum_capacity_command(revision, "iron_ore", Value::from("1000000"));
+        mixed_entity.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("progress".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0)),
+            }],
+        });
+        let commands = [
+            stale,
+            unchanged,
+            unknown,
+            deleted,
+            whole_object,
+            mixed,
+            mixed_entity,
+            quantum_capacity_command(revision, "iron_ore", Value::from("010000")),
+            quantum_capacity_command(revision, "iron_ore", Value::from("9999")),
+            quantum_capacity_command(revision, "iron_ore", Value::from("10000000001")),
+            quantum_capacity_command(revision, "iron_ore", Value::from("-1")),
+            quantum_capacity_command(revision, "iron_ore", Value::from("1e6")),
+            quantum_capacity_command(revision, "iron_ore", Value::from(1_000_000)),
+            quantum_capacity_command(revision, "iron_ore", Value::Null),
+        ];
+        for command in commands {
+            let mut state = player_quantum_capacity_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed_current = player_quantum_capacity_state();
+        malformed_current.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"] =
+            Value::from(100_000);
+        let before = malformed_current.canonical_sha256().unwrap();
+        let command = quantum_capacity_command(
+            malformed_current.revision,
+            "iron_ore",
+            Value::from("1000000"),
+        );
+        assert!(
+            malformed_current
+                .apply_player_authority_command(&command)
+                .is_err()
+        );
+        assert_eq!(malformed_current.canonical_sha256().unwrap(), before);
     }
 }

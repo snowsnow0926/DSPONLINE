@@ -3547,6 +3547,9 @@ fn simulate_step(
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    quantum_logistics_directory: &mut std::sync::Arc<
+        crate::quantum_logistics::QuantumLogisticsDirectory,
+    >,
     interstellar_peer_directory: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarPeerDirectory,
     >,
@@ -3584,17 +3587,25 @@ fn simulate_step(
     // simulation call. A tower that completes attachment at a boundary is
     // intentionally absent from uploads until the next call refreshes that
     // lookup, even when this call crosses more than one boundary.
-    let indexed_quantum_endpoint_indices = state
-        .factory_topology
-        .quantum_endpoint_indices
-        .iter()
-        .copied()
-        .filter(|&index| {
-            entities[index]
-                .as_object()
-                .is_some_and(|entity| string_at(entity, "quantumMode") == Some("quantum"))
-        })
-        .collect::<Vec<_>>();
+    let quantum_step_runtime = std::sync::Arc::make_mut(quantum_logistics_directory);
+    let indexed_quantum_endpoint_indices = quantum_step_runtime
+        .endpoint_indices(state, entities)
+        .map(<[usize]>::to_vec)
+        .unwrap_or_else(|| {
+            state
+                .factory_topology
+                .quantum_endpoint_indices
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    entities[index]
+                        .as_object()
+                        .is_some_and(|entity| string_at(entity, "quantumMode") == Some("quantum"))
+                })
+                .collect()
+        });
+    let quantum_runtime_bandwidth =
+        quantum_step_runtime.legacy_runtime_bandwidth(state, base, entities);
     profile_mark!("static-step-indexes");
     let time_warp_controller = prepare_time_warp(state, base, entities)?;
     crate::global_progress::advance_exploration(state, base, seconds)?;
@@ -3646,27 +3657,57 @@ fn simulate_step(
         &buffer_changed_station_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    quantum_step_runtime.wake_from_stations(&buffer_changed_station_indices);
     profile_mark!("local-logistics-buffers");
-    crate::quantum_logistics::flush_supply_buffers(base, entities)?;
+    // Readiness, quantum reservations and downloads share one exact pre-
+    // dispatch route snapshot. No route mutation occurs before dispatch, so
+    // constructing it here removes two independent O(R) quantum scans.
+    let mut step_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+        state,
+        entities,
+        local_step_runtime,
+        interstellar_route_activity.as_ref(),
+    );
+    let quantum_flush_scan = crate::quantum_logistics::flush_active_supply_buffers(
+        state,
+        base,
+        entities,
+        quantum_step_runtime,
+        &step_route_ledger,
+        quantum_runtime_bandwidth,
+        false,
+    )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tquantum-flush-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+            quantum_flush_scan.selected_rows,
+            quantum_flush_scan.total_rows,
+            quantum_flush_scan.dense_fallback,
+            quantum_flush_scan.directory_fallback,
+        );
+    }
+    let quantum_flush_changed_station_indices =
+        quantum_step_runtime.take_inventory_written_station_indices();
     // Quantum upload can consume a remote-supply output while freeing the
     // same station's local-demand capacity. Wake both reverse graphs from the
-    // stable endpoint index; the readiness probes still decide whether the
-    // scalar inventory change made either side active.
-    local_step_runtime.wake_ready_from_changed_stations(&indexed_quantum_endpoint_indices);
+    // exact changed endpoint set; the readiness probes still decide whether
+    // the scalar inventory change made either side active.
+    local_step_runtime.wake_ready_from_changed_stations(&quantum_flush_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
-        &indexed_quantum_endpoint_indices,
+        &quantum_flush_changed_station_indices,
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     profile_mark!("quantum-supply-buffers");
     profile_mark!("belt-route-index");
     let mut belt_changed_entity_indices = Vec::new();
-    crate::belts::transfer(
+    crate::belts::transfer_with_bandwidth(
         state,
         base,
         entities,
         belt_runtime,
         belt_routes,
+        quantum_runtime_bandwidth,
         seconds,
         true,
         None,
@@ -3688,6 +3729,7 @@ fn simulate_step(
         &belt_changed_entity_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    quantum_step_runtime.wake_from_stations(&belt_changed_entity_indices);
     profile_mark!("belt-input-transfer");
     let belt_reservation = crate::belts::reserve(state, base, entities, belt_runtime, belt_routes)?;
     profile_mark!("belt-reservation");
@@ -3754,15 +3796,9 @@ fn simulate_step(
     profile_mark!("power-source-index");
 
     // Local and interstellar readiness consume the same immutable route
-    // snapshot. The active queues preserve persisted row order; a dense set
-    // falls back to the complete station ledger without changing dispatch
-    // fairness or command authority.
-    let mut step_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
-        state,
-        entities,
-        local_step_runtime,
-        interstellar_route_activity.as_ref(),
-    );
+    // snapshot already used by the quantum pre-flush. The active queues
+    // preserve persisted row order; a dense set falls back to the complete
+    // station ledger without changing dispatch fairness or command authority.
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -4581,36 +4617,53 @@ fn simulate_step(
     profile_mark!("planet-metrics-probe");
 
     let quantum_flow = if crossed_quantum_boundary {
-        crate::quantum_logistics::settle_downloads(
+        let (flow, scan) = crate::quantum_logistics::settle_active_downloads(
             state,
             base,
             entities,
             &belt_reservation.output_credits,
             first_quantum_boundary as f64 * 5.0,
             5.0,
-        )?
+            quantum_step_runtime,
+            &step_route_ledger,
+        )?;
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tquantum-download-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+                scan.selected_rows, scan.total_rows, scan.dense_fallback, scan.directory_fallback,
+            );
+        }
+        flow
     } else {
         None
     };
     let mut late_logistics_changed_entity_indices = Vec::new();
-    if quantum_boundary_changed_station_inventory(quantum_flow.as_ref()) {
-        // Quantum downloads can add warpers directly to an ILS output at the
-        // five-second boundary. The endpoint index is already stable and
-        // bounded, so wake only those candidates.
-        crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
-            &indexed_quantum_endpoint_indices,
-            std::sync::Arc::make_mut(interstellar_route_activity),
-        );
-        late_logistics_changed_entity_indices.extend_from_slice(&indexed_quantum_endpoint_indices);
+    if quantum_boundary_changed_station_inventory(quantum_flow.as_ref())
+        && let Some(flow) = quantum_flow.as_ref()
+    {
+        quantum_step_runtime.wake_flush_from_downloads(flow);
     }
+    let quantum_download_changed_station_indices =
+        quantum_step_runtime.take_inventory_written_station_indices();
+    crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
+        &quantum_download_changed_station_indices,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    late_logistics_changed_entity_indices.extend(quantum_download_changed_station_indices);
     profile_mark!("quantum-download");
 
-    crate::belts::transfer(
+    // Research can finish between the input and output logistics barriers.
+    // Re-read the live level through the O(1) directory cache so an immediate
+    // upload created after that boundary uses JavaScript's current multiplier.
+    let post_research_quantum_runtime_bandwidth =
+        quantum_step_runtime.legacy_runtime_bandwidth(state, base, entities);
+    crate::belts::transfer_with_bandwidth(
         state,
         base,
         entities,
         belt_runtime,
         belt_routes,
+        post_research_quantum_runtime_bandwidth,
         0.0,
         false,
         Some(&belt_reservation),
@@ -4636,6 +4689,7 @@ fn simulate_step(
         &belt_changed_entity_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    quantum_step_runtime.wake_from_stations(&belt_changed_entity_indices);
     drain_material_delivery_hubs(
         state,
         base,
@@ -4776,16 +4830,20 @@ fn simulate_step(
             interstellar_dispatch_scan.directory_fallback,
         );
     }
+    let dispatch_route_station_indices = step_route_ledger.active_station_indices();
+    quantum_step_runtime.wake_from_stations(&dispatch_route_station_indices);
     drop(step_route_ledger);
     profile_mark!("interstellar-dispatch");
-    let local_route_changed_station_indices = crate::local_logistics::advance_routes(
-        state,
-        base,
-        entities,
-        seconds,
-        &station_powers,
-        local_step_runtime,
-    )?;
+    let local_route_changed_station_indices =
+        crate::local_logistics::advance_routes_with_bandwidth(
+            state,
+            base,
+            entities,
+            post_research_quantum_runtime_bandwidth,
+            seconds,
+            &station_powers,
+            local_step_runtime,
+        )?;
     profile_mark!("local-route-advance");
     let remote_route_changed_station_indices = crate::interstellar_logistics::advance_routes(
         state,
@@ -4814,6 +4872,8 @@ fn simulate_step(
     );
     local_step_runtime.wake_ready_from_changed_stations(&local_route_changed_station_indices);
     local_step_runtime.wake_ready_from_changed_stations(&remote_route_changed_station_indices);
+    quantum_step_runtime.wake_from_stations(&local_route_changed_station_indices);
+    quantum_step_runtime.wake_from_stations(&remote_route_changed_station_indices);
     profile_mark!("interstellar-route-advance");
     // Route advance can complete the final flight and release an output
     // reservation. Rebuild the already-required congestion ledger once here
@@ -4848,6 +4908,7 @@ fn simulate_step(
         interstellar_step_runtime,
     );
     local_step_runtime.wake_ready_from_changed_stations(&post_route_warper_changed_station_indices);
+    quantum_step_runtime.wake_from_stations(&post_route_warper_changed_station_indices);
     if profile_enabled {
         let scan = congestion_route_ledger.scan();
         eprintln!(
@@ -4890,13 +4951,14 @@ fn simulate_step(
     let mut next_runtime_reset_station_indices = congestion_route_ledger.active_station_indices();
     next_runtime_reset_station_indices.extend_from_slice(&local_route_changed_station_indices);
     next_runtime_reset_station_indices.extend_from_slice(&remote_route_changed_station_indices);
+    next_runtime_reset_station_indices
+        .extend(quantum_step_runtime.take_runtime_written_station_indices());
     // Orbital collectors are productive station rows even without a route;
     // they write utilization/rate directly and therefore remain an explicit
     // active dependency rather than being hidden behind the route ledger.
     next_runtime_reset_station_indices
         .extend_from_slice(&state.factory_topology.orbital_collector_indices);
     local_step_runtime.replace_runtime_reset_station_indices(next_runtime_reset_station_indices);
-    drop(congestion_route_ledger);
     profile_mark!("interstellar-congestion");
     let exporter_powers = state
         .factory_topology
@@ -5014,23 +5076,39 @@ fn simulate_step(
                 entities,
                 boundary as f64 * crate::system_space_station::boundary_seconds(),
             )?;
-            crate::quantum_logistics::settle_uploads(
+            let quantum_upload_flush_scan = crate::quantum_logistics::settle_uploads(
+                state,
                 base,
                 entities,
                 boundary as f64 * 5.0,
                 quantum_flow.clone(),
                 5.0,
                 &indexed_quantum_endpoint_indices,
+                quantum_step_runtime,
+                &congestion_route_ledger,
+                post_research_quantum_runtime_bandwidth,
             )?;
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tquantum-upload-flush-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+                    quantum_upload_flush_scan.selected_rows,
+                    quantum_upload_flush_scan.total_rows,
+                    quantum_upload_flush_scan.dense_fallback,
+                    quantum_upload_flush_scan.directory_fallback,
+                );
+            }
         }
-        local_step_runtime.wake_ready_from_changed_stations(&indexed_quantum_endpoint_indices);
+        let quantum_boundary_changed_station_indices =
+            quantum_step_runtime.take_inventory_written_station_indices();
+        local_step_runtime
+            .wake_ready_from_changed_stations(&quantum_boundary_changed_station_indices);
         crate::interstellar_logistics::wake_dispatch_from_changed_stations(
-            &indexed_quantum_endpoint_indices,
+            &quantum_boundary_changed_station_indices,
             interstellar_peer_directory,
             std::sync::Arc::make_mut(interstellar_route_activity),
         );
         crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
-            &indexed_quantum_endpoint_indices,
+            &quantum_boundary_changed_station_indices,
             std::sync::Arc::make_mut(interstellar_route_activity),
         );
         // Elevator and quantum attachment transitions can change traditional
@@ -5055,6 +5133,10 @@ fn simulate_step(
             interstellar_peer_directory,
             interstellar_route_activity,
         );
+        if station_mode_topology_changed {
+            *quantum_step_runtime =
+                crate::quantum_logistics::QuantumLogisticsDirectory::build(state, entities);
+        }
     }
     profile_mark!("local-directory-boundary-refresh");
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
@@ -5088,6 +5170,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    pub quantum_logistics_directory:
+        std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
     pub interstellar_peer_directory:
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
@@ -5157,6 +5241,14 @@ pub(crate) fn prepare_advance(
             &state.factory_topology.station_indices,
         )?)
     };
+    let mut quantum_logistics_directory =
+        if let Some(directory) = state.prepared_quantum_logistics_directory() {
+            directory
+        } else {
+            std::sync::Arc::new(crate::quantum_logistics::QuantumLogisticsDirectory::build(
+                state, &entities,
+            ))
+        };
     let mut interstellar_route_activity =
         if let Some(activity) = state.prepared_interstellar_route_activity() {
             activity
@@ -5283,6 +5375,7 @@ pub(crate) fn prepare_advance(
             &mut belt_runtime,
             &belt_routes,
             &mut local_peer_directory,
+            &mut quantum_logistics_directory,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
@@ -5371,13 +5464,14 @@ pub(crate) fn prepare_advance(
         belt_routes,
         belt_activity,
         local_peer_directory,
+        quantum_logistics_directory,
         interstellar_peer_directory,
         interstellar_route_activity,
     })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::catalog::{
         BeltDefinition, CatalogSnapshot, ItemAmount, ItemDefinition, PlanetDefinition,
@@ -5487,6 +5581,8 @@ mod tests {
                     "em_rail_ejector",
                     "vertical_launching_silo",
                     "mining_machine",
+                    "interstellar_logistics_station",
+                    "orbital_collector",
                 ]
                 .into_iter()
                 .map(fixture_building)
@@ -5600,7 +5696,7 @@ mod tests {
         })
     }
 
-    fn fixture_state(entities: &[Value]) -> CoreState {
+    pub(crate) fn fixture_state(entities: &[Value]) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&fixture_base()).unwrap();
         let entities = serde_json::to_vec(entities).unwrap();

@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::mem::size_of;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use num_bigint::BigUint;
@@ -6,7 +8,7 @@ use num_traits::{ToPrimitive, Zero};
 use serde_json::{Map, Number, Value};
 
 use crate::deterministic_runtime::DeterministicRuntime;
-use crate::state::CoreState;
+use crate::state::{CoreState, FactoryTopology};
 
 const SETTLEMENT_SECONDS: f64 = 5.0;
 const UNIT_CAP_PER_MINUTE: f64 = 5_000.0;
@@ -43,6 +45,106 @@ pub(crate) struct RuntimeBandwidth {
     collector_stacks: f64,
 }
 
+const QUANTUM_ACTIVE_DENSE_NUMERATOR: usize = 3;
+const QUANTUM_ACTIVE_DENSE_DENOMINATOR: usize = 4;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QuantumActiveScan {
+    pub selected_rows: usize,
+    pub total_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QuantumEndpointSignature {
+    entity_index: usize,
+    entity_id: String,
+    collector: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QuantumSlotPlan {
+    entity_index: usize,
+    entity_id: String,
+    item_id: String,
+    key: String,
+    /// JavaScript's direct flush helper resolves the first matching supply
+    /// slot even though the boundary request keeps the highest-priority slot.
+    /// Preserve both views when a MOD save contains duplicate item slots.
+    flush_slot: Slot,
+    slot: Slot,
+}
+
+/// Runtime-only counterpart of the JavaScript `SimulationLookupContext`
+/// quantum columns. Static endpoint/slot membership is tied to one immutable
+/// factory topology. Dynamic pending sets survive successful revisions and
+/// are woken by exact station/item reverse dependencies.
+///
+/// The directory is never serialized and never participates in the public
+/// save hash. A command or topology rebuild discards it; a failed candidate
+/// mutates only an `Arc::make_mut` clone which is never installed.
+#[derive(Debug, Clone)]
+pub(crate) struct QuantumLogisticsDirectory {
+    topology: Arc<FactoryTopology>,
+    entity_count: usize,
+    endpoints: Vec<QuantumEndpointSignature>,
+    endpoint_indices: Vec<usize>,
+    collector_indices: Vec<usize>,
+    upload_plans: Vec<QuantumSlotPlan>,
+    download_plans: Vec<QuantumSlotPlan>,
+    upload_by_station: HashMap<usize, Vec<usize>>,
+    upload_by_item: HashMap<String, Vec<usize>>,
+    download_by_station: HashMap<usize, Vec<usize>>,
+    download_by_station_item: HashMap<(usize, String), Vec<usize>>,
+    pending_flush: BTreeSet<usize>,
+    pending_download: BTreeSet<usize>,
+    runtime_written_station_indices: BTreeSet<usize>,
+    inventory_written_station_indices: BTreeSet<usize>,
+    flush_all_pending: bool,
+    download_all_pending: bool,
+    tower_stack_terms: Vec<f64>,
+    tower_stacks: f64,
+    collector_stacks: f64,
+    cached_legacy_level_bits: Option<u64>,
+    cached_legacy_bandwidth: RuntimeBandwidth,
+    fallback_full_scan: bool,
+}
+
+impl Default for QuantumLogisticsDirectory {
+    fn default() -> Self {
+        Self {
+            topology: Arc::new(FactoryTopology::default()),
+            entity_count: 0,
+            endpoints: Vec::new(),
+            endpoint_indices: Vec::new(),
+            collector_indices: Vec::new(),
+            upload_plans: Vec::new(),
+            download_plans: Vec::new(),
+            upload_by_station: HashMap::new(),
+            upload_by_item: HashMap::new(),
+            download_by_station: HashMap::new(),
+            download_by_station_item: HashMap::new(),
+            pending_flush: BTreeSet::new(),
+            pending_download: BTreeSet::new(),
+            runtime_written_station_indices: BTreeSet::new(),
+            inventory_written_station_indices: BTreeSet::new(),
+            flush_all_pending: true,
+            download_all_pending: true,
+            tower_stack_terms: Vec::new(),
+            tower_stacks: 0.0,
+            collector_stacks: 0.0,
+            cached_legacy_level_bits: None,
+            cached_legacy_bandwidth: RuntimeBandwidth {
+                per_minute: 0.0,
+                tower_stacks: 0.0,
+                collector_stacks: 0.0,
+            },
+            fallback_full_scan: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Network {
     enabled: bool,
@@ -59,7 +161,7 @@ pub(crate) struct SupplyDepositSession {
     write_required: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Slot {
     item_id: Option<String>,
     remote_mode: String,
@@ -520,6 +622,519 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             })
         })
         .collect()
+}
+
+fn upsert_slot_plan(
+    plans: &mut Vec<QuantumSlotPlan>,
+    positions: &mut HashMap<String, usize>,
+    plan: QuantumSlotPlan,
+) {
+    if let Some(&position) = positions.get(&plan.key) {
+        if plan.slot.priority > plans[position].slot.priority {
+            plans[position].slot = plan.slot;
+        }
+    } else {
+        positions.insert(plan.key.clone(), plans.len());
+        plans.push(plan);
+    }
+}
+
+impl QuantumLogisticsDirectory {
+    pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
+        let mut directory = Self {
+            topology: Arc::clone(&state.factory_topology),
+            entity_count: entities.len(),
+            fallback_full_scan: state.factory_topology.quantum_endpoint_full_scan_required,
+            ..Self::default()
+        };
+        let mut upload_positions = HashMap::new();
+        let mut download_positions = HashMap::new();
+        let mut previous_index = None;
+        for &entity_index in &state.factory_topology.quantum_endpoint_indices {
+            if previous_index.is_some_and(|previous| previous >= entity_index) {
+                directory.fallback_full_scan = true;
+                continue;
+            }
+            previous_index = Some(entity_index);
+            let Some(endpoint) = entities.get(entity_index).and_then(Value::as_object) else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
+            if string_at(endpoint, "kind") != Some("station")
+                || !matches!(
+                    string_at(endpoint, "buildingId"),
+                    Some("interstellar_logistics_station" | "orbital_collector")
+                )
+            {
+                directory.fallback_full_scan = true;
+                continue;
+            }
+            if !is_quantum_station(endpoint) && !is_quantum_collector(endpoint) {
+                continue;
+            }
+            let Some(entity_id) = string_at(endpoint, "id").filter(|id| !id.is_empty()) else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
+            if !entity_id.is_ascii() {
+                directory.fallback_full_scan = true;
+            }
+            let collector = is_quantum_collector(endpoint);
+            directory.endpoints.push(QuantumEndpointSignature {
+                entity_index,
+                entity_id: entity_id.to_owned(),
+                collector,
+            });
+            directory.endpoint_indices.push(entity_index);
+            let stacks = finite_number(endpoint.get("machineCount")).floor().max(0.0);
+            if collector {
+                directory.collector_indices.push(entity_index);
+                directory.collector_stacks += stacks;
+                continue;
+            }
+            directory.tower_stack_terms.push(stacks);
+            directory.tower_stacks += stacks;
+            let Ok(endpoint_slots) = slots(endpoint) else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
+            for slot in endpoint_slots {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                let positions = match slot.remote_mode.as_str() {
+                    "supply" => &mut upload_positions,
+                    "demand" => &mut download_positions,
+                    _ => continue,
+                };
+                let key = format!("{entity_id}:{item_id}");
+                if !item_id.is_ascii()
+                    || item_id.contains(':')
+                    || !state.catalog.items.contains_key(item_id)
+                    || positions.contains_key(&key)
+                {
+                    directory.fallback_full_scan = true;
+                }
+                let plans = if slot.remote_mode == "supply" {
+                    &mut directory.upload_plans
+                } else {
+                    &mut directory.download_plans
+                };
+                upsert_slot_plan(
+                    plans,
+                    positions,
+                    QuantumSlotPlan {
+                        entity_index,
+                        entity_id: entity_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                        key,
+                        flush_slot: slot.clone(),
+                        slot,
+                    },
+                );
+            }
+        }
+        for (plan_index, plan) in directory.upload_plans.iter().enumerate() {
+            directory
+                .upload_by_station
+                .entry(plan.entity_index)
+                .or_default()
+                .push(plan_index);
+            directory
+                .upload_by_item
+                .entry(plan.item_id.clone())
+                .or_default()
+                .push(plan_index);
+        }
+        for (plan_index, plan) in directory.download_plans.iter().enumerate() {
+            directory
+                .download_by_station
+                .entry(plan.entity_index)
+                .or_default()
+                .push(plan_index);
+            directory
+                .download_by_station_item
+                .entry((plan.entity_index, plan.item_id.clone()))
+                .or_default()
+                .push(plan_index);
+        }
+        directory.cached_legacy_bandwidth = RuntimeBandwidth {
+            per_minute: 0.0,
+            tower_stacks: directory.tower_stacks,
+            collector_stacks: directory.collector_stacks,
+        };
+        directory
+    }
+
+    fn topology_matches(&self, state: &CoreState, entities: &[Value]) -> bool {
+        Arc::ptr_eq(&self.topology, &state.factory_topology) && self.entity_count == entities.len()
+    }
+
+    fn plan_matches(entities: &[Value], plan: &QuantumSlotPlan, frozen_mode: bool) -> bool {
+        let Some(endpoint) = entities
+            .get(plan.entity_index)
+            .and_then(Value::as_object)
+            .filter(|endpoint| {
+                string_at(endpoint, "id") == Some(plan.entity_id.as_str())
+                    && (is_quantum_station(endpoint)
+                        || (frozen_mode
+                            && string_at(endpoint, "kind") == Some("station")
+                            && string_at(endpoint, "buildingId")
+                                == Some("interstellar_logistics_station")))
+            })
+        else {
+            return false;
+        };
+        let Ok(endpoint_slots) = slots(endpoint) else {
+            return false;
+        };
+        let mut selected = None::<Slot>;
+        for slot in endpoint_slots {
+            if slot.item_id.as_deref() != Some(plan.item_id.as_str())
+                || slot.remote_mode != plan.slot.remote_mode
+            {
+                continue;
+            }
+            if selected
+                .as_ref()
+                .is_none_or(|existing| slot.priority > existing.priority)
+            {
+                selected = Some(slot);
+            }
+        }
+        let highest_matches = selected.as_ref() == Some(&plan.slot);
+        if !highest_matches {
+            return false;
+        }
+        if plan.slot.remote_mode != "supply" {
+            return true;
+        }
+        slots(endpoint).is_ok_and(|slots| {
+            slots
+                .into_iter()
+                .find(|slot| {
+                    slot.item_id.as_deref() == Some(plan.item_id.as_str())
+                        && slot.remote_mode == "supply"
+                })
+                .as_ref()
+                == Some(&plan.flush_slot)
+        })
+    }
+
+    fn selected_plan_indices(
+        &self,
+        total_rows: usize,
+        all_pending: bool,
+        pending: &BTreeSet<usize>,
+        directory_compatible: bool,
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        if self.fallback_full_scan || !directory_compatible {
+            return (
+                None,
+                QuantumActiveScan {
+                    selected_rows: self.entity_count,
+                    total_rows: self.entity_count,
+                    dense_fallback: true,
+                    directory_fallback: true,
+                },
+            );
+        }
+        let pending_rows = if all_pending {
+            total_rows
+        } else {
+            pending.len()
+        };
+        let dense_fallback = pending_rows > 0
+            && pending_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_DENOMINATOR)
+                >= total_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_NUMERATOR);
+        let selected = if all_pending || dense_fallback {
+            (0..total_rows).collect::<Vec<_>>()
+        } else {
+            pending.iter().copied().collect::<Vec<_>>()
+        };
+        let selected_rows = selected.len();
+        (
+            Some(selected),
+            QuantumActiveScan {
+                selected_rows,
+                total_rows,
+                dense_fallback,
+                directory_fallback: false,
+            },
+        )
+    }
+
+    fn selected_flush_plans(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        frozen_mode: bool,
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        let (selected, mut scan) = self.selected_plan_indices(
+            self.upload_plans.len(),
+            self.flush_all_pending,
+            &self.pending_flush,
+            self.topology_matches(state, entities),
+        );
+        if selected.as_ref().is_some_and(|indices| {
+            indices
+                .iter()
+                .any(|&index| !Self::plan_matches(entities, &self.upload_plans[index], frozen_mode))
+        }) {
+            scan.selected_rows = self.entity_count;
+            scan.total_rows = self.entity_count;
+            scan.dense_fallback = true;
+            scan.directory_fallback = true;
+            return (None, scan);
+        }
+        (selected, scan)
+    }
+
+    fn selected_download_plans(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        let (selected, mut scan) = self.selected_plan_indices(
+            self.download_plans.len(),
+            self.download_all_pending,
+            &self.pending_download,
+            self.topology_matches(state, entities),
+        );
+        if selected.as_ref().is_some_and(|indices| {
+            indices
+                .iter()
+                .any(|&index| !Self::plan_matches(entities, &self.download_plans[index], false))
+        }) {
+            scan.selected_rows = self.entity_count;
+            scan.total_rows = self.entity_count;
+            scan.dense_fallback = true;
+            scan.directory_fallback = true;
+            return (None, scan);
+        }
+        (selected, scan)
+    }
+
+    pub(crate) fn endpoint_indices<'a>(
+        &'a self,
+        state: &CoreState,
+        entities: &[Value],
+    ) -> Option<&'a [usize]> {
+        (!self.fallback_full_scan && self.topology_matches(state, entities))
+            .then_some(self.endpoint_indices.as_slice())
+    }
+
+    fn can_use_index(&self, state: &CoreState, entities: &[Value]) -> bool {
+        !self.fallback_full_scan && self.topology_matches(state, entities)
+    }
+
+    fn upload_index_matches(&self, entities: &[Value]) -> bool {
+        self.upload_plans
+            .iter()
+            .all(|plan| Self::plan_matches(entities, plan, true))
+            && self
+                .endpoints
+                .iter()
+                .filter(|signature| signature.collector)
+                .all(|signature| {
+                    entities
+                        .get(signature.entity_index)
+                        .and_then(Value::as_object)
+                        .is_some_and(|endpoint| {
+                            string_at(endpoint, "id") == Some(signature.entity_id.as_str())
+                                && is_quantum_collector(endpoint)
+                        })
+                })
+    }
+
+    pub(crate) fn wake_from_stations(&mut self, station_indices: &[usize]) {
+        if !self.flush_all_pending {
+            for station_index in station_indices {
+                if let Some(plan_indices) = self.upload_by_station.get(station_index) {
+                    self.pending_flush.extend(plan_indices.iter().copied());
+                }
+            }
+        }
+        if !self.download_all_pending {
+            for station_index in station_indices {
+                if let Some(plan_indices) = self.download_by_station.get(station_index) {
+                    self.pending_download.extend(plan_indices.iter().copied());
+                }
+            }
+        }
+    }
+
+    fn wake_download_credits(&mut self, state: &CoreState, credits: &crate::belts::OutputCredits) {
+        if self.download_all_pending {
+            return;
+        }
+        for &(source_index, item_symbol) in credits.active_source_items() {
+            let source_index = source_index as usize;
+            let Some(item_id) = state.symbols.resolve(item_symbol) else {
+                self.download_all_pending = true;
+                self.pending_download.clear();
+                return;
+            };
+            if let Some(plan_indices) = self
+                .download_by_station_item
+                .get(&(source_index, item_id.to_owned()))
+            {
+                self.pending_download.extend(plan_indices.iter().copied());
+            }
+        }
+    }
+
+    pub(crate) fn wake_flush_items<'a>(&mut self, item_ids: impl Iterator<Item = &'a String>) {
+        if self.flush_all_pending {
+            return;
+        }
+        for item_id in item_ids {
+            if let Some(plan_indices) = self.upload_by_item.get(item_id) {
+                self.pending_flush.extend(plan_indices.iter().copied());
+            }
+        }
+    }
+
+    pub(crate) fn wake_flush_from_downloads(&mut self, flow: &BoundaryFlow) {
+        self.wake_flush_items(flow.downloaded.keys());
+    }
+
+    fn commit_flush(&mut self, selected: &[usize]) {
+        if self.flush_all_pending {
+            self.flush_all_pending = false;
+            self.pending_flush.clear();
+            return;
+        }
+        for index in selected {
+            self.pending_flush.remove(index);
+        }
+    }
+
+    fn commit_download(&mut self, selected: &[usize], retain: BTreeSet<usize>) {
+        if self.download_all_pending {
+            self.download_all_pending = false;
+            self.pending_download.clear();
+        } else {
+            for index in selected {
+                self.pending_download.remove(index);
+            }
+        }
+        self.pending_download.extend(retain);
+    }
+
+    fn mark_download_runtime_written(&mut self, entity_index: usize) {
+        self.runtime_written_station_indices.insert(entity_index);
+        self.inventory_written_station_indices.insert(entity_index);
+    }
+
+    fn mark_fallback_download_runtime_rows(&mut self) {
+        let indices = self
+            .download_plans
+            .iter()
+            .map(|plan| plan.entity_index)
+            .collect::<Vec<_>>();
+        self.runtime_written_station_indices
+            .extend(indices.iter().copied());
+        self.inventory_written_station_indices.extend(indices);
+    }
+
+    fn mark_inventory_written(&mut self, entity_index: usize) {
+        self.inventory_written_station_indices.insert(entity_index);
+    }
+
+    fn mark_fallback_flush_runtime_rows(&mut self) {
+        self.inventory_written_station_indices
+            .extend(self.upload_plans.iter().map(|plan| plan.entity_index));
+    }
+
+    pub(crate) fn take_runtime_written_station_indices(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.runtime_written_station_indices)
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn take_inventory_written_station_indices(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.inventory_written_station_indices)
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn legacy_runtime_bandwidth(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entities: &[Value],
+    ) -> RuntimeBandwidth {
+        if self.fallback_full_scan || !self.topology_matches(state, entities) {
+            return runtime_bandwidth(base, entities);
+        }
+        let level = logistics_level(base);
+        let level_bits = level.to_bits();
+        if self.cached_legacy_level_bits != Some(level_bits) {
+            let multiplier_base = 1.0 + 0.05 * level;
+            let multiplier = multiplier_base * multiplier_base;
+            let mut per_minute = 0.0;
+            for stacks in &self.tower_stack_terms {
+                per_minute += UNIT_CAP_PER_MINUTE * multiplier * stacks;
+            }
+            self.cached_legacy_bandwidth = RuntimeBandwidth {
+                per_minute,
+                tower_stacks: self.tower_stacks,
+                collector_stacks: self.collector_stacks,
+            };
+            self.cached_legacy_level_bits = Some(level_bits);
+        }
+        self.cached_legacy_bandwidth
+    }
+
+    fn indexed_runtime_bandwidth(&self, base: &Map<String, Value>) -> RuntimeBandwidth {
+        let level = logistics_level(base);
+        let multiplier_base = 1.0 + 0.05 * level;
+        let multiplier = multiplier_base * multiplier_base;
+        RuntimeBandwidth {
+            per_minute: UNIT_CAP_PER_MINUTE * multiplier * self.tower_stacks,
+            tower_stacks: self.tower_stacks,
+            collector_stacks: self.collector_stacks,
+        }
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let string_bytes = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.entity_id.capacity())
+            .chain(self.upload_plans.iter().flat_map(|plan| {
+                [
+                    plan.entity_id.capacity(),
+                    plan.item_id.capacity(),
+                    plan.key.capacity(),
+                    plan.flush_slot.remote_mode.capacity(),
+                    plan.slot.remote_mode.capacity(),
+                ]
+            }))
+            .chain(self.download_plans.iter().flat_map(|plan| {
+                [
+                    plan.entity_id.capacity(),
+                    plan.item_id.capacity(),
+                    plan.key.capacity(),
+                    plan.flush_slot.remote_mode.capacity(),
+                    plan.slot.remote_mode.capacity(),
+                ]
+            }))
+            .sum::<usize>();
+        (self.endpoints.capacity() * size_of::<QuantumEndpointSignature>()
+            + self.endpoint_indices.capacity() * size_of::<usize>()
+            + self.collector_indices.capacity() * size_of::<usize>()
+            + self.upload_plans.capacity() * size_of::<QuantumSlotPlan>()
+            + self.download_plans.capacity() * size_of::<QuantumSlotPlan>()
+            + self.tower_stack_terms.capacity() * size_of::<f64>()
+            + (self.pending_flush.len()
+                + self.pending_download.len()
+                + self.runtime_written_station_indices.len()
+                + self.inventory_written_station_indices.len())
+                * size_of::<usize>()
+            + string_bytes) as u64
+    }
 }
 
 fn normalized_buffer_limit(base: &Map<String, Value>) -> f64 {
@@ -1029,13 +1644,6 @@ fn record_immediate_upload(
     }
 }
 
-pub(crate) fn flush_supply_buffers(
-    base: &mut Map<String, Value>,
-    entities: &mut [Value],
-) -> anyhow::Result<()> {
-    flush_supply_buffers_for_index(base, entities, None)
-}
-
 fn flush_supply_buffers_for_index(
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -1046,13 +1654,10 @@ fn flush_supply_buffers_for_index(
         return Ok(());
     }
     let reserved = reserved_outgoing(entities);
-    let (per_minute, tower_stacks, collector_stacks) =
-        bandwidth_for_index(base, entities, indexed_endpoint_indices);
-    let runtime_bandwidth = RuntimeBandwidth {
-        per_minute,
-        tower_stacks,
-        collector_stacks,
-    };
+    // `recordImmediateQuantumUpload` creates its flow without the JavaScript
+    // lookup, so its observable IEEE-754 addition is the persisted entity-
+    // order legacy sum even when the buffer rows themselves are indexed.
+    let runtime_bandwidth = runtime_bandwidth(base, entities);
     let mut normalized_for_deposit = false;
     let endpoint_indices = indexed_endpoint_indices
         .map(|indices| indices.to_vec())
@@ -1118,6 +1723,86 @@ fn flush_supply_buffers_for_index(
         }
     }
     write_network(base, &network)
+}
+
+pub(crate) fn flush_active_supply_buffers(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut QuantumLogisticsDirectory,
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+    runtime_bandwidth: RuntimeBandwidth,
+    frozen_mode: bool,
+) -> anyhow::Result<QuantumActiveScan> {
+    let mut network = parse_network(base)?;
+    if !network.enabled {
+        return Ok(QuantumActiveScan {
+            total_rows: directory.upload_plans.len(),
+            ..QuantumActiveScan::default()
+        });
+    }
+    let (selected, scan) = directory.selected_flush_plans(state, entities, frozen_mode);
+    let Some(selected) = selected else {
+        flush_supply_buffers_for_index(base, entities, None)?;
+        directory.mark_fallback_flush_runtime_rows();
+        return Ok(scan);
+    };
+    let mut normalized_for_deposit = false;
+    for &plan_index in &selected {
+        let plan = &directory.upload_plans[plan_index];
+        let station = entities[plan.entity_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native quantum station is invalid"))?;
+        let input = item_amount(station, "inputs", &plan.item_id)
+            .floor()
+            .max(0.0);
+        let output = item_amount(station, "outputs", &plan.item_id)
+            .floor()
+            .max(0.0);
+        let outgoing = route_ledger
+            .quantum_reserved_outgoing(plan.entity_index, &plan.item_id)
+            .floor()
+            .max(0.0);
+        let from_output_available = (output - plan.flush_slot.min_stock - outgoing).max(0.0);
+        let from_input_available = (input - (plan.flush_slot.min_stock - output).max(0.0)).max(0.0);
+        let requested = floor_u64(from_output_available + from_input_available);
+        if requested < 1 {
+            continue;
+        }
+        if !normalized_for_deposit {
+            network.inventory.retain(|_, amount| !amount.is_zero());
+            normalized_for_deposit = true;
+        }
+        let accepted = deposit(&mut network, &plan.item_id, &BigUint::from(requested));
+        let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
+        if accepted_number < 1.0 {
+            continue;
+        }
+        let from_output = from_output_available.min(accepted_number);
+        if from_output > 0.0 {
+            set_item_amount(station, "outputs", &plan.item_id, output - from_output)?;
+        }
+        let remaining = accepted_number - from_output;
+        if remaining > 0.0 {
+            set_item_amount(
+                station,
+                "inputs",
+                &plan.item_id,
+                (input - remaining).max(0.0),
+            )?;
+        }
+        record_immediate_upload(
+            base,
+            runtime_bandwidth,
+            &mut network,
+            &plan.item_id,
+            &accepted,
+        );
+        directory.mark_inventory_written(plan.entity_index);
+    }
+    write_network(base, &network)?;
+    directory.commit_flush(&selected);
+    Ok(scan)
 }
 
 pub(crate) fn receive_supply_material(
@@ -1325,43 +2010,210 @@ pub(crate) fn settle_downloads(
     Ok(Some(flow))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settle_active_downloads(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    credits: &crate::belts::OutputCredits,
+    boundary_second: f64,
+    seconds: f64,
+    directory: &mut QuantumLogisticsDirectory,
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> anyhow::Result<(Option<BoundaryFlow>, QuantumActiveScan)> {
+    let mut network = parse_network(base)?;
+    if !network.enabled {
+        return Ok((
+            None,
+            QuantumActiveScan {
+                total_rows: directory.download_plans.len(),
+                ..QuantumActiveScan::default()
+            },
+        ));
+    }
+    directory.wake_download_credits(state, credits);
+    let (selected, scan) = directory.selected_download_plans(state, entities);
+    let Some(selected) = selected else {
+        let flow = settle_downloads(state, base, entities, credits, boundary_second, seconds)?;
+        directory.mark_fallback_download_runtime_rows();
+        return Ok((flow, scan));
+    };
+    let bandwidth = directory.indexed_runtime_bandwidth(base);
+    let mut flow = create_flow_with_bandwidth(&network, boundary_second, bandwidth);
+    let mut requests = Vec::new();
+    let mut request_positions = HashMap::new();
+    let mut retain = BTreeSet::new();
+    for &plan_index in &selected {
+        let plan = &directory.download_plans[plan_index];
+        let station = entities[plan.entity_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+        let current = item_amount(station, "outputs", &plan.item_id)
+            .floor()
+            .max(0.0);
+        let local_capacity = station_capacity(state, base, station, &plan.slot)?
+            .floor()
+            .max(0.0);
+        let incoming = route_ledger
+            .quantum_in_flight(plan.entity_index, &plan.item_id)
+            .max(0.0);
+        let local_free = (local_capacity - current - incoming).max(0.0);
+        let direct_through = if current <= local_capacity {
+            crate::belts::output_credit(state, credits, &plan.entity_id, &plan.item_id)
+        } else {
+            0.0
+        };
+        let capacity = floor_u64((local_free + direct_through).min(MAX_SAFE_INTEGER as f64));
+        if capacity < 1 {
+            continue;
+        }
+        // A positive-capacity request remains semantically active even when
+        // its item has zero inventory: JavaScript first allocates the global
+        // bandwidth and only then applies the per-item inventory budget.
+        retain.insert(plan_index);
+        upsert_request_in_stable_order(
+            &mut requests,
+            &mut request_positions,
+            Request {
+                key: plan.key.clone(),
+                entity_index: plan.entity_index,
+                item_id: plan.item_id.clone(),
+                amount: BigUint::from(capacity),
+                priority: plan.slot.priority,
+            },
+        );
+    }
+    let construction_demands = crate::construction::quantum_demands(state, base, entities)?
+        .into_iter()
+        .map(|demand| (demand.key.clone(), demand))
+        .collect::<BTreeMap<_, _>>();
+    for demand in construction_demands.values() {
+        upsert_request_in_stable_order(
+            &mut requests,
+            &mut request_positions,
+            Request {
+                key: demand.key.clone(),
+                entity_index: usize::MAX,
+                item_id: demand.item_id.clone(),
+                amount: BigUint::from(demand.amount),
+                priority: 1,
+            },
+        );
+    }
+    let mut allocation_requests = requests.clone();
+    sorted_requests(&mut allocation_requests);
+    let delivered = settle_outputs(
+        &mut network,
+        &allocation_requests,
+        &boundary_capacity(flow.global_download_per_minute, seconds),
+    );
+    for request in &requests {
+        let amount = delivered.get(&request.key).cloned().unwrap_or_default();
+        let amount_number = amount.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
+        if amount_number < 1.0 {
+            continue;
+        }
+        if let Some(demand) = construction_demands.get(&request.key) {
+            let applied = crate::construction::apply_quantum_delivery(
+                base,
+                demand,
+                amount.to_u64().unwrap_or(MAX_SAFE_INTEGER),
+            )?;
+            if applied > 0 {
+                add_flow(
+                    &mut flow.downloaded,
+                    &request.item_id,
+                    &BigUint::from(applied),
+                );
+            }
+            continue;
+        }
+        let station = entities[request.entity_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native quantum demand is invalid"))?;
+        apply_quantum_download_to_station(station, &request.item_id, amount_number, seconds)?;
+        directory.mark_download_runtime_written(request.entity_index);
+        add_flow(&mut flow.downloaded, &request.item_id, &amount);
+    }
+    network.runtime_flow = Some(flow.clone());
+    write_network(base, &network)?;
+    directory.commit_download(&selected, retain);
+    Ok((Some(flow), scan))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn settle_uploads(
+    state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     boundary_second: f64,
     previous_flow: Option<BoundaryFlow>,
     seconds: f64,
     indexed_endpoint_indices: &[usize],
-) -> anyhow::Result<()> {
+    directory: &mut QuantumLogisticsDirectory,
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+    runtime_bandwidth: RuntimeBandwidth,
+) -> anyhow::Result<QuantumActiveScan> {
     let mut network = parse_network(base)?;
     if !network.enabled {
-        return Ok(());
+        return Ok(QuantumActiveScan::default());
+    }
+    // This boundary already visits every upload plan and collector to build
+    // the shared budget. Fold exact frozen-lookup validation into that same
+    // O(upload) phase, then latch the legacy path if an impossible internal
+    // membership/key/rank mismatch is observed. Ordinary per-second steps do
+    // not rescan all endpoints merely to guard an immutable Arc-bound cache.
+    if directory.can_use_index(state, entities) && !directory.upload_index_matches(entities) {
+        directory.fallback_full_scan = true;
     }
     let existing_flow = network.runtime_flow.clone();
     let mut flow = previous_flow
         .clone()
         .unwrap_or_else(|| create_flow(base, entities, &network, boundary_second));
     synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_ref());
-    let (per_minute, tower_stacks, collector_stacks) =
-        bandwidth_for_index(base, entities, Some(indexed_endpoint_indices));
-    flow.global_upload_per_minute = per_minute;
-    flow.global_download_per_minute = per_minute;
-    flow.quantum_tower_stacks = tower_stacks;
-    flow.quantum_collector_stacks = collector_stacks;
+    let bandwidth = if directory.can_use_index(state, entities) {
+        directory.indexed_runtime_bandwidth(base)
+    } else {
+        let (per_minute, tower_stacks, collector_stacks) =
+            bandwidth_for_index(base, entities, Some(indexed_endpoint_indices));
+        RuntimeBandwidth {
+            per_minute,
+            tower_stacks,
+            collector_stacks,
+        }
+    };
+    flow.global_upload_per_minute = bandwidth.per_minute;
+    flow.global_download_per_minute = bandwidth.per_minute;
+    flow.quantum_tower_stacks = bandwidth.tower_stacks;
+    flow.quantum_collector_stacks = bandwidth.collector_stacks;
     network.runtime_flow = Some(flow.clone());
     write_network(base, &network)?;
 
-    flush_supply_buffers_for_index(base, entities, Some(indexed_endpoint_indices))?;
+    let flush_scan = flush_active_supply_buffers(
+        state,
+        base,
+        entities,
+        directory,
+        route_ledger,
+        runtime_bandwidth,
+        true,
+    )?;
     network = parse_network(base)?;
 
-    let reserved = reserved_outgoing(entities);
+    let use_index = directory.can_use_index(state, entities);
+    let reserved = (!use_index).then(|| reserved_outgoing(entities));
     let mut requests = Vec::new();
     let mut request_positions = HashMap::new();
-    for &entity_index in indexed_endpoint_indices {
+    let collector_indices = if use_index {
+        directory.collector_indices.as_slice()
+    } else {
+        indexed_endpoint_indices
+    };
+    for &entity_index in collector_indices {
         let endpoint = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !is_quantum_collector(endpoint) {
+        if !use_index && !is_quantum_collector(endpoint) {
             continue;
         }
         let Some(item_id) = string_at(endpoint, "storedItemId") else {
@@ -1386,43 +2238,75 @@ pub(crate) fn settle_uploads(
             );
         }
     }
-    for &entity_index in indexed_endpoint_indices {
-        let endpoint = entities[entity_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !is_quantum_station(endpoint) {
-            continue;
-        }
-        let station_id = string_at(endpoint, "id").unwrap_or_default();
-        for slot in slots(endpoint)? {
-            let Some(item_id) = slot.item_id.as_deref() else {
-                continue;
-            };
-            if slot.remote_mode != "supply" {
-                continue;
-            }
-            let outgoing = reserved
-                .get(&(station_id.to_owned(), item_id.to_owned()))
-                .copied()
-                .unwrap_or(0.0);
+    if use_index {
+        for plan in &directory.upload_plans {
+            let endpoint = entities[plan.entity_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+            let outgoing = route_ledger.quantum_reserved_outgoing(plan.entity_index, &plan.item_id);
             let available = floor_u64(
-                (item_amount(endpoint, "outputs", item_id) - slot.min_stock - outgoing).max(0.0),
+                (item_amount(endpoint, "outputs", &plan.item_id) - plan.slot.min_stock - outgoing)
+                    .max(0.0),
             );
             if available < 1 {
                 continue;
             }
-            let key = format!("{station_id}:{item_id}");
             upsert_request_in_stable_order(
                 &mut requests,
                 &mut request_positions,
                 Request {
-                    key,
-                    entity_index,
-                    item_id: item_id.to_owned(),
+                    key: plan.key.clone(),
+                    entity_index: plan.entity_index,
+                    item_id: plan.item_id.clone(),
                     amount: BigUint::from(available),
-                    priority: slot.priority,
+                    priority: plan.slot.priority,
                 },
             );
+        }
+    } else {
+        for &entity_index in indexed_endpoint_indices {
+            let endpoint = entities[entity_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+            if !is_quantum_station(endpoint) {
+                continue;
+            }
+            let station_id = string_at(endpoint, "id").unwrap_or_default();
+            for slot in slots(endpoint)? {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.remote_mode != "supply" {
+                    continue;
+                }
+                let outgoing = reserved
+                    .as_ref()
+                    .and_then(|reserved| {
+                        reserved
+                            .get(&(station_id.to_owned(), item_id.to_owned()))
+                            .copied()
+                    })
+                    .unwrap_or(0.0);
+                let available = floor_u64(
+                    (item_amount(endpoint, "outputs", item_id) - slot.min_stock - outgoing)
+                        .max(0.0),
+                );
+                if available < 1 {
+                    continue;
+                }
+                let key = format!("{station_id}:{item_id}");
+                upsert_request_in_stable_order(
+                    &mut requests,
+                    &mut request_positions,
+                    Request {
+                        key,
+                        entity_index,
+                        item_id: item_id.to_owned(),
+                        amount: BigUint::from(available),
+                        priority: slot.priority,
+                    },
+                );
+            }
         }
     }
     let mut allocation_requests = requests.clone();
@@ -1451,10 +2335,12 @@ pub(crate) fn settle_uploads(
             (current - amount_number).max(0.0),
         )?;
         set_number(endpoint, "stationLastTransfer", amount_number)?;
+        directory.mark_inventory_written(request.entity_index);
         add_flow(&mut flow.uploaded, &request.item_id, &amount);
     }
     network.runtime_flow = Some(flow);
-    write_network(base, &network)
+    write_network(base, &network)?;
+    Ok(flush_scan)
 }
 
 fn completed_tech(base: &Map<String, Value>, id: &str) -> bool {
@@ -1860,6 +2746,99 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    fn active_quantum_base(level: u64) -> Map<String, Value> {
+        serde_json::json!({
+            "elapsedSeconds": 0,
+            "settings": { "logisticsBufferLimit": 1_000_000 },
+            "research": { "completedTechIds": ["quantum_logistics_network"] },
+            "endgame": {
+                "infiniteResearch": {
+                    "galactic_logistics": { "level": level }
+                }
+            },
+            "constructionAutomation": {
+                "enabled": false,
+                "quantumSourceEnabled": false
+            },
+            "quantumLogisticsNetwork": {
+                "enabled": true,
+                "inventory": {},
+                "itemCapacities": {
+                    "iron_ore": "10000",
+                    "iron_ingot": "10000"
+                },
+                "routingCursors": {},
+                "uploadRoutingCursors": {}
+            }
+        })
+        .as_object()
+        .expect("quantum test base")
+        .clone()
+    }
+
+    fn quantum_station(
+        id: impl Into<String>,
+        item_id: &str,
+        remote_mode: &str,
+        input: f64,
+        output: f64,
+        routes: Vec<Value>,
+    ) -> Value {
+        let id = id.into();
+        serde_json::json!({
+            "id": id,
+            "kind": "station",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "interstellar_logistics_station",
+            "machineCount": 1,
+            "stationTier": 2,
+            "quantumMode": "quantum",
+            "stationSlots": [{
+                "itemId": item_id,
+                "localMode": "storage",
+                "remoteMode": remote_mode,
+                "minStock": 0,
+                "maxStock": 0,
+                "priority": 1
+            }],
+            "inputs": { (item_id): input },
+            "outputs": { (item_id): output },
+            "stationRoutes": routes,
+            "stationLastTransfer": 0,
+            "productionRate": 0,
+            "utilization": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn set_test_item(entity: &mut Value, record: &str, item_id: &str, amount: f64) {
+        set_item_amount(
+            entity.as_object_mut().expect("quantum test station"),
+            record,
+            item_id,
+            amount,
+        )
+        .unwrap();
+    }
+
+    fn set_test_network_item(base: &mut Map<String, Value>, item_id: &str, amount: &str) {
+        base.get_mut("quantumLogisticsNetwork")
+            .and_then(Value::as_object_mut)
+            .and_then(|network| network.get_mut("inventory"))
+            .and_then(Value::as_object_mut)
+            .expect("quantum test inventory")
+            .insert(item_id.to_owned(), Value::from(amount));
+    }
+
+    fn quantum_oracle_bytes(base: &Map<String, Value>, entities: &[Value]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "base": base,
+            "entities": entities,
+        }))
+        .unwrap()
+    }
+
     fn legacy_settle_outputs(
         network: &mut Network,
         requests: &[Request],
@@ -2184,6 +3163,327 @@ mod tests {
             ..BoundaryFlow::default()
         };
         assert!(delivered.has_downloads());
+    }
+
+    #[test]
+    fn cached_bandwidth_preserves_both_legacy_and_indexed_ieee_order() {
+        let mut first = quantum_station("tower-a", "iron_ore", "supply", 0.0, 0.0, vec![]);
+        first
+            .as_object_mut()
+            .unwrap()
+            .insert("machineCount".to_owned(), Value::from(1));
+        let mut second = quantum_station("tower-b", "iron_ore", "demand", 0.0, 0.0, vec![]);
+        second
+            .as_object_mut()
+            .unwrap()
+            .insert("machineCount".to_owned(), Value::from(13));
+        let entities = vec![first, second];
+        let state = crate::simple_factory::tests::fixture_state(&entities);
+        let mut base = active_quantum_base(100_000_000);
+        let mut directory = QuantumLogisticsDirectory::build(&state, &entities);
+
+        let full_legacy = runtime_bandwidth(&base, &entities);
+        let cached_legacy = directory.legacy_runtime_bandwidth(&state, &base, &entities);
+        assert_eq!(
+            cached_legacy.per_minute.to_bits(),
+            full_legacy.per_minute.to_bits()
+        );
+        assert_eq!(cached_legacy.tower_stacks.to_bits(), 14.0_f64.to_bits());
+
+        let indexed = directory.indexed_runtime_bandwidth(&base);
+        let (indexed_per_minute, indexed_towers, indexed_collectors) =
+            bandwidth_for_index(&base, &entities, Some(&directory.endpoint_indices));
+        assert_eq!(indexed.per_minute.to_bits(), indexed_per_minute.to_bits());
+        assert_eq!(indexed.tower_stacks.to_bits(), indexed_towers.to_bits());
+        assert_eq!(
+            indexed.collector_stacks.to_bits(),
+            indexed_collectors.to_bits()
+        );
+        assert_ne!(
+            cached_legacy.per_minute.to_bits(),
+            indexed.per_minute.to_bits(),
+            "the fixture must exercise JavaScript's observable addition-order split"
+        );
+
+        base["endgame"]["infiniteResearch"]["galactic_logistics"]["level"] =
+            Value::from(100_000_001_u64);
+        let refreshed = directory.legacy_runtime_bandwidth(&state, &base, &entities);
+        let refreshed_full = runtime_bandwidth(&base, &entities);
+        assert_eq!(
+            refreshed.per_minute.to_bits(),
+            refreshed_full.per_minute.to_bits(),
+            "a live logistics-level boundary must invalidate the scalar cache"
+        );
+        assert_ne!(
+            refreshed.per_minute.to_bits(),
+            cached_legacy.per_minute.to_bits()
+        );
+    }
+
+    #[test]
+    fn active_quantum_1_to_60_seconds_match_full_scan_bytes() {
+        let mut source = Vec::new();
+        for index in 0..4 {
+            source.push(quantum_station(
+                format!("supply-{index}"),
+                if index == 3 { "iron_ingot" } else { "iron_ore" },
+                "supply",
+                if index == 0 {
+                    17.0
+                } else if index == 3 {
+                    40.0
+                } else {
+                    0.0
+                },
+                if index == 0 { 43.0 } else { 0.0 },
+                vec![],
+            ));
+        }
+        for index in 0..4 {
+            source.push(quantum_station(
+                format!("demand-{index}"),
+                "iron_ingot",
+                "demand",
+                0.0,
+                if index == 0 { 0.0 } else { 100.0 },
+                vec![],
+            ));
+        }
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        set_test_network_item(&mut active_base, "iron_ingot", "10000");
+        let mut full_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut full_entities = source;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+        let credits = crate::belts::OutputCredits::default();
+        let mut saw_sparse_flush = false;
+        let mut saw_sparse_download = false;
+
+        for second in 1_u64..=60 {
+            active_base.insert("elapsedSeconds".to_owned(), Value::from(second - 1));
+            full_base.insert("elapsedSeconds".to_owned(), Value::from(second - 1));
+            if second == 3 {
+                set_test_item(&mut active_entities[1], "inputs", "iron_ore", 19.0);
+                set_test_item(&mut full_entities[1], "inputs", "iron_ore", 19.0);
+                directory.wake_from_stations(&[1]);
+            }
+            if second == 35 {
+                set_test_item(&mut active_entities[5], "outputs", "iron_ingot", 0.0);
+                set_test_item(&mut full_entities[5], "outputs", "iron_ingot", 0.0);
+                directory.wake_from_stations(&[5]);
+                set_test_network_item(&mut active_base, "iron_ingot", "31");
+                set_test_network_item(&mut full_base, "iron_ingot", "31");
+            }
+
+            let bandwidth =
+                directory.legacy_runtime_bandwidth(&state, &active_base, &active_entities);
+            let flush_scan = flush_active_supply_buffers(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &mut directory,
+                &route_ledger,
+                bandwidth,
+                false,
+            )
+            .unwrap();
+            flush_supply_buffers_for_index(&mut full_base, &mut full_entities, None).unwrap();
+            assert_eq!(
+                quantum_oracle_bytes(&active_base, &active_entities),
+                quantum_oracle_bytes(&full_base, &full_entities),
+                "flush second {second}"
+            );
+            if second == 2 {
+                assert_eq!(
+                    flush_scan.selected_rows, 0,
+                    "quiescent flush must stay O(0)"
+                );
+            } else if matches!(second, 3 | 6) {
+                assert_eq!(
+                    flush_scan.selected_rows, 1,
+                    "one station/item wake must visit one upload plan at second {second}"
+                );
+            }
+            saw_sparse_flush |= flush_scan.selected_rows < flush_scan.total_rows;
+            let _ = directory.take_inventory_written_station_indices();
+
+            if second.is_multiple_of(5) {
+                let (flow, download_scan) = settle_active_downloads(
+                    &state,
+                    &mut active_base,
+                    &mut active_entities,
+                    &credits,
+                    second as f64,
+                    5.0,
+                    &mut directory,
+                    &route_ledger,
+                )
+                .unwrap();
+                settle_downloads(
+                    &state,
+                    &mut full_base,
+                    &mut full_entities,
+                    &credits,
+                    second as f64,
+                    5.0,
+                )
+                .unwrap();
+                assert_eq!(
+                    quantum_oracle_bytes(&active_base, &active_entities),
+                    quantum_oracle_bytes(&full_base, &full_entities),
+                    "download boundary {second}"
+                );
+                saw_sparse_download |= download_scan.selected_rows < download_scan.total_rows;
+                if let Some(flow) = flow.as_ref() {
+                    directory.wake_flush_from_downloads(flow);
+                }
+                let _ = directory.take_inventory_written_station_indices();
+                let _ = directory.take_runtime_written_station_indices();
+            }
+            active_base.insert("elapsedSeconds".to_owned(), Value::from(second));
+            full_base.insert("elapsedSeconds".to_owned(), Value::from(second));
+        }
+        assert!(saw_sparse_flush);
+        assert!(saw_sparse_download);
+    }
+
+    #[test]
+    fn opaque_fractional_routes_match_permissive_full_scan_reservations() {
+        let routes = vec![
+            serde_json::json!({
+                "id": "opaque-a",
+                "scope": "mod:wormhole",
+                "peerId": "supply",
+                "itemId": "iron_ore",
+                "cargo": 0.6,
+                "vehicleCount": 1,
+                "progress": 0.25
+            }),
+            serde_json::json!({
+                "id": "opaque-b",
+                "peerId": "supply",
+                "itemId": "iron_ore",
+                "cargo": 0.6,
+                "vehicleCount": 1,
+                "progress": 0.5
+            }),
+        ];
+        let source = vec![
+            quantum_station("supply", "iron_ore", "supply", 0.0, 10.0, vec![]),
+            quantum_station("demand", "iron_ore", "demand", 0.0, 0.0, routes),
+        ];
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let local_directory = crate::local_logistics::LocalPeerDirectory::default();
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(&source);
+        assert_eq!(remote_activity.opaque_route_demand_indices(), &[1]);
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+            &state,
+            &source,
+            &local_directory,
+            &remote_activity,
+        );
+        assert_eq!(
+            route_ledger
+                .quantum_reserved_outgoing(0, "iron_ore")
+                .to_bits(),
+            1.2_f64.to_bits()
+        );
+        assert_eq!(
+            route_ledger.quantum_in_flight(1, "iron_ore").to_bits(),
+            1.2_f64.to_bits()
+        );
+        assert_eq!(route_ledger.interstellar_reserved(0, "iron_ore"), 0.0);
+
+        let mut active_base = active_quantum_base(0);
+        let mut full_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut full_entities = source;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let bandwidth = directory.legacy_runtime_bandwidth(&state, &active_base, &active_entities);
+        flush_active_supply_buffers(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut directory,
+            &route_ledger,
+            bandwidth,
+            false,
+        )
+        .unwrap();
+        flush_supply_buffers_for_index(&mut full_base, &mut full_entities, None).unwrap();
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&full_base, &full_entities)
+        );
+
+        let credits = crate::belts::OutputCredits::default();
+        settle_active_downloads(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &credits,
+            5.0,
+            5.0,
+            &mut directory,
+            &route_ledger,
+        )
+        .unwrap();
+        settle_downloads(
+            &state,
+            &mut full_base,
+            &mut full_entities,
+            &credits,
+            5.0,
+            5.0,
+        )
+        .unwrap();
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&full_base, &full_entities)
+        );
+    }
+
+    #[test]
+    fn directory_density_mod_and_exact_plan_mismatch_fail_closed() {
+        let source = (0..4)
+            .map(|index| {
+                quantum_station(
+                    format!("supply-{index}"),
+                    "iron_ore",
+                    "supply",
+                    0.0,
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut directory = QuantumLogisticsDirectory::build(&state, &source);
+        directory.flush_all_pending = false;
+        directory.pending_flush.extend([0, 1, 2]);
+        let (selected, scan) = directory.selected_flush_plans(&state, &source, false);
+        assert_eq!(selected.unwrap(), vec![0, 1, 2, 3]);
+        assert!(scan.dense_fallback);
+        assert!(!scan.directory_fallback);
+
+        directory.pending_flush.clear();
+        directory.pending_flush.insert(0);
+        let mut mismatched = source.clone();
+        mismatched[0]["stationSlots"][0]["priority"] = Value::from(7);
+        let (selected, scan) = directory.selected_flush_plans(&state, &mismatched, false);
+        assert!(selected.is_none());
+        assert!(scan.directory_fallback);
+        assert!(!directory.upload_index_matches(&mismatched));
+
+        let mut mod_source = source;
+        mod_source[0]["stationSlots"][0]["itemId"] = Value::from("mod:量子矿石/Ω");
+        let mod_state = crate::simple_factory::tests::fixture_state(&mod_source);
+        let mod_directory = QuantumLogisticsDirectory::build(&mod_state, &mod_source);
+        let (selected, scan) = mod_directory.selected_flush_plans(&mod_state, &mod_source, false);
+        assert!(selected.is_none());
+        assert!(scan.directory_fallback);
     }
 
     #[test]

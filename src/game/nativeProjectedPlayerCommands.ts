@@ -12,7 +12,7 @@ import {
   type SimulationCommandPatch,
   type SimulationValuePatch,
 } from "./simulationRuntimeProtocol";
-import type { LogisticsPriority, PlanetIndustryRole } from "./types";
+import type { LogisticsPriority, PlanetIndustryRole, StationMinimumLoad } from "./types";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_LOGICAL_ID_BYTES = 256;
@@ -40,6 +40,15 @@ export interface NativeProjectedStationPriorityCommandInput {
   readonly slotIndex: number;
   readonly currentPriority: LogisticsPriority;
   readonly targetPriority: LogisticsPriority;
+}
+
+export interface NativeProjectedStationMinimumLoadCommandInput {
+  readonly baseRevision: number;
+  readonly stationId: string;
+  readonly slotIndex: number;
+  readonly currentMinimumLoad: StationMinimumLoad;
+  readonly targetMinimumLoad: StationMinimumLoad;
+  readonly primarySlot: boolean;
 }
 
 export interface NativeProjectedStationLimitsCommandInput {
@@ -107,6 +116,12 @@ function emptyCommand(baseRevision: number): SimulationCommandPatch {
 function validatePriority(value: LogisticsPriority): void {
   if (value !== 0 && value !== 1 && value !== 2) {
     throw new TypeError("原生投影命令物流优先级无效");
+  }
+}
+
+function validateMinimumLoad(value: StationMinimumLoad): void {
+  if (value !== 0.1 && value !== 0.25 && value !== 0.5 && value !== 1) {
+    throw new TypeError("原生投影命令最低装载率无效");
   }
 }
 
@@ -260,6 +275,40 @@ export function createNativeProjectedStationPriorityCommand(
       value: input.targetPriority,
     }],
   });
+  return command;
+}
+
+/**
+ * Builds the exact station-slot minimum-load mutation. The legacy mirror leaf
+ * is included only for the primary configured slot, matching the web command
+ * and Rust's atomic station validator without consulting stale GameState.
+ */
+export function createNativeProjectedStationMinimumLoadCommand(
+  input: NativeProjectedStationMinimumLoadCommandInput,
+): SimulationCommandPatch | null {
+  validateBaseRevision(input.baseRevision);
+  validateLogicalId(input.stationId, "原生投影命令物流站 ID");
+  validateSlotIndex(input.slotIndex);
+  validateMinimumLoad(input.currentMinimumLoad);
+  validateMinimumLoad(input.targetMinimumLoad);
+  if (typeof input.primarySlot !== "boolean") {
+    throw new TypeError("原生投影命令主物流槽标记无效");
+  }
+  if (input.currentMinimumLoad === input.targetMinimumLoad) return null;
+  const changes: SimulationValuePatch[] = [{
+    path: ["stationSlots", input.slotIndex, "minimumLoad"],
+    operation: "set",
+    value: input.targetMinimumLoad,
+  }];
+  if (input.primarySlot) {
+    changes.push({
+      path: ["stationMinimumLoad"],
+      operation: "set",
+      value: input.targetMinimumLoad,
+    });
+  }
+  const command = emptyCommand(input.baseRevision);
+  command.changedEntities.push({ id: input.stationId, changes });
   return command;
 }
 

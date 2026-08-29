@@ -4,6 +4,7 @@ import {
   createNativeProjectedInteractionLockCommandFromReadModels,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
+  createNativeProjectedStationMinimumLoadCommand,
   createNativeProjectedStationPriorityCommand,
   type NativeProjectedInteractionLockCommandInput,
 } from "./nativeProjectedPlayerCommands";
@@ -130,6 +131,38 @@ describe("native projected player command builders", () => {
     expectEmptyDomains(raise);
   });
 
+  it("builds minimum-load commands with the legacy mirror only for the projected primary slot", () => {
+    const primary = createNativeProjectedStationMinimumLoadCommand({
+      baseRevision: 92,
+      stationId: "station-primary",
+      slotIndex: 1,
+      currentMinimumLoad: 0.5,
+      targetMinimumLoad: 0.1,
+      primarySlot: true,
+    })!;
+    expect(primary.changedEntities).toEqual([{
+      id: "station-primary",
+      changes: [
+        { path: ["stationSlots", 1, "minimumLoad"], operation: "set", value: 0.1 },
+        { path: ["stationMinimumLoad"], operation: "set", value: 0.1 },
+      ],
+    }]);
+
+    const secondary = createNativeProjectedStationMinimumLoadCommand({
+      baseRevision: 93,
+      stationId: "station-secondary",
+      slotIndex: 3,
+      currentMinimumLoad: 0.25,
+      targetMinimumLoad: 1,
+      primarySlot: false,
+    })!;
+    expect(secondary.changedEntities[0].changes).toEqual([
+      { path: ["stationSlots", 3, "minimumLoad"], operation: "set", value: 1 },
+    ]);
+    expectEmptyDomains(primary);
+    expectEmptyDomains(secondary);
+  });
+
   it("replays legacy limit clamping and emits the paired minimum when maximum drops", () => {
     const lowerMaximum = createNativeProjectedStationLimitsCommand({
       baseRevision: 12,
@@ -180,6 +213,14 @@ describe("native projected player command builders", () => {
       slotIndex: 0,
       currentPriority: 1,
       targetPriority: 1,
+    })).toBeNull();
+    expect(createNativeProjectedStationMinimumLoadCommand({
+      baseRevision: 7,
+      stationId: "station-a",
+      slotIndex: 0,
+      currentMinimumLoad: 0.5,
+      targetMinimumLoad: 0.5,
+      primarySlot: true,
     })).toBeNull();
     expect(createNativeProjectedPlanetRoleCommand({
       baseRevision: 7,

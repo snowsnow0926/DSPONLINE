@@ -1961,6 +1961,7 @@ fn build_route_snapshot(
         "targetBuildingId": target.building_id,
         "targetBuildingLabel": route_building_label(&target.building_id),
         "targetSlotIndex": target_slot_index,
+        "targetSlotIsPrimary": target.slots.iter().position(|slot| slot.item_id.is_some()) == Some(target_slot_index),
         "targetPlanetId": target_planet.id,
         "targetPlanetLabel": target_planet_label,
         "targetPlanetLabelTruncated": target_planet_label_truncated,
@@ -4446,6 +4447,7 @@ mod tests {
         assert_eq!(route["sourcePlanetId"], "source-world");
         assert_eq!(route["targetStationId"], "station-target");
         assert_eq!(route["targetSlotIndex"], 0);
+        assert_eq!(route["targetSlotIsPrimary"], true);
         assert_eq!(route["targetPlanetId"], "target-world");
         assert!(
             route["sourceStationLabel"]

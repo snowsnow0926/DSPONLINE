@@ -513,6 +513,7 @@ import {
   createNativeProjectedInteractionLockCommandFromReadModels,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
+  createNativeProjectedStationMinimumLoadCommand,
   createNativeProjectedStationPriorityCommand,
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
@@ -19148,6 +19149,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
             onNativeStationPriorityChange={(projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
+            onNativeStationMinimumLoadChange={(projectedRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedStationMinimumLoadCommand({ baseRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot }))}
             onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onFocusStation={focusStellarStation}

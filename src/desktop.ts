@@ -1897,6 +1897,7 @@ export interface DesktopNativeCoreStellarIndustryRouteRow {
   targetBuildingId: string;
   targetBuildingLabel: string;
   targetSlotIndex: number;
+  targetSlotIsPrimary: boolean;
   targetPlanetId: string;
   targetPlanetLabel: string;
   targetPlanetLabelTruncated: boolean;

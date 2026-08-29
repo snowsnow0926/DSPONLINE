@@ -84,6 +84,7 @@ const ROUTE = {
   targetStationLabel: "原生需求站",
   targetBuildingLabel: "星际物流站",
   targetSlotIndex: 1,
+  targetSlotIsPrimary: true,
   targetPlanetId: "home",
   distanceLy: 4.2,
   routePathLabel: "供应站 → 需求站",
@@ -444,6 +445,7 @@ describe("NativeIndustryConsole", () => {
     const onStationLimitsChange = vi.fn();
     const onNativeRoleChange = vi.fn(() => true);
     const onNativeStationPriorityChange = vi.fn(() => true);
+    const onNativeStationMinimumLoadChange = vi.fn(() => true);
     const onNativeStationLimitsChange = vi.fn(() => true);
     const props = renderWorkspace({
       game,
@@ -451,6 +453,7 @@ describe("NativeIndustryConsole", () => {
       nativeAuthorityRequired: true,
       onNativeRoleChange,
       onNativeStationPriorityChange,
+      onNativeStationMinimumLoadChange,
       onNativeStationLimitsChange,
       onRoleChange,
       onStationPriorityChange,
@@ -466,13 +469,11 @@ describe("NativeIndustryConsole", () => {
     const sourceLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线出口保底库存']")!;
     const targetLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线进口库存上限']")!;
     expect(host.textContent).toContain("权威命令");
-    expect(host.textContent).toContain("装载率暂只读");
-    for (const control of [role, priority, sourceLimit, targetLimit]) {
+    expect(host.textContent).toContain("投影绑定");
+    for (const control of [role, priority, minimumLoad, sourceLimit, targetLimit]) {
       expect(control.disabled).toBe(false);
       expect(control.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
     }
-    expect(minimumLoad.disabled).toBe(true);
-    expect(minimumLoad.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
     expect(travel.disabled).toBe(true);
     expect(travel.title).toContain("行星切换命令尚未接入");
 
@@ -488,6 +489,7 @@ describe("NativeIndustryConsole", () => {
     });
 
     expect(onNativeStationPriorityChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 2, 0);
+    expect(onNativeStationMinimumLoadChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 0.5, 0.1, true);
     expect(onNativeRoleChange).toHaveBeenCalledWith(9, "home", "manufacturing", "mining");
     expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, SOURCE_STATION.stationId, 0, 50, 500, 0, 500);
     expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 10, 200, 10, 0);

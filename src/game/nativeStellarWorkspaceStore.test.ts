@@ -216,6 +216,7 @@ function routeRow(index: number): DesktopNativeCoreStellarIndustryRouteRow {
     targetBuildingId: "interstellar_logistics_station",
     targetBuildingLabel: "Interstellar station",
     targetSlotIndex: 0,
+    targetSlotIsPrimary: true,
     targetPlanetId: `planet-${index}`,
     targetPlanetLabel: `Planet ${index}`,
     targetPlanetLabelTruncated: false,

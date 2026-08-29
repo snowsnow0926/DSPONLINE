@@ -369,6 +369,7 @@ function routeRow() {
     targetBuildingId: "interstellar_logistics_station",
     targetBuildingLabel: "星际站",
     targetSlotIndex: 0,
+    targetSlotIsPrimary: true,
     targetPlanetId: "home",
     targetPlanetLabel: "Home",
     targetPlanetLabelTruncated: false,

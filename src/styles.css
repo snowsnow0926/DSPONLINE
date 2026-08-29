@@ -14039,6 +14039,18 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   font-size: 10px;
 }
 
+.native-statistics-workspace button.statistics-row {
+  width: 100%;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
 .statistics-row:hover {
   background: #111815;
 }

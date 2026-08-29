@@ -466,6 +466,10 @@ import {
   readVerifiedNativeConstructionBeltPlacementContext,
 } from "./game/nativeConstructionBeltPlacement";
 import {
+  createNativeProjectedOrdinaryBeltRemovalCommand,
+  readVerifiedNativeConstructionBeltRemovalContext,
+} from "./game/nativeConstructionBeltRemoval";
+import {
   createNativeProjectedOrdinaryBuildingStackCommand,
   readVerifiedNativeConstructionStackContext,
   type NativeConstructionStackSupportReason,
@@ -1132,6 +1136,25 @@ function nativeBeltPlacementBlockedMessage(reason: string): string {
     case "next-id-collision": return "线路 ID 无法安全分配；请导出备份并联系存档救援";
     case "invalid-default-settings": return "传送带默认设置无法由 Rust 安全确认；本次线路未建立";
     default: return "Rust 暂不支持这条线路；存档和施工库存均未改变";
+  }
+}
+
+function nativeBeltRemovalBlockedMessage(reason: string): string {
+  switch (reason) {
+    case "unsupported-active-planet": return "当前行星不支持普通传送带回收";
+    case "belt-not-found": return "这条传送带已经不存在；本次回收未执行";
+    case "invalid-belt": return "传送带记录不完整；本次回收未执行";
+    case "not-active-planet": return "传送带已不在当前行星；本次回收未执行";
+    case "unsupported-belt-domain": return "特殊端口线路需要专用回收流程；本次回收未执行";
+    case "unsupported-belt-tier": return "当前只支持回收内置 Mk.I、Mk.II、Mk.III 传送带";
+    case "missing-construction-definition": return "Rust 内容目录无法证明这一级传送带的返还";
+    case "source-not-found":
+    case "target-not-found": return "线路端点已经变化；本次回收未执行";
+    case "unsupported-source-domain":
+    case "unsupported-target-domain": return "线路连接特殊物流系统，当前安全回收保持关闭";
+    case "invalid-construction-inventory": return "施工托盘记录无效；本次回收未执行";
+    case "refund-overflow": return "返还后数量会超过安全上限；请先导出备份";
+    default: return "Rust 暂不支持回收这条线路；存档和施工库存均未改变";
   }
 }
 
@@ -16181,6 +16204,92 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     factoryInspectorSummaryReadModel,
     playTone,
   ]);
+  const removeNativeOrdinaryBelt = useCallback(async (beltId: string): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeRemovalContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次拆线未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.belt
+      : null;
+    if (!projected || projected.beltId !== beltId || factoryInspectorSummaryReadModel.entity !== null ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) {
+      setNotice("没有取得当前线路的同 revision Rust 摘要；本次拆线未提交");
+      return;
+    }
+    const tierName = projected.tier === 3 ? "III" : projected.tier === 2 ? "II" : "I";
+    const confirmed = await gameDialog.confirm(
+      `确认让 Rust 安全回收这条 Mk.${tierName} 线路（并联 ×${projected.lanes}）？Rust 会重新核对端点、等级、数量和施工托盘，再一次性返还材料。`,
+      { danger: true, confirmLabel: "确认安全拆线" },
+    );
+    if (!confirmed || !nativePlayerAuthorityOwnsRuntimeRef.current ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) return;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生线路摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeRemovalRequestGenerationRef.current + 1;
+    nativeRemovalRequestGenerationRef.current = generation;
+    nativeRemovalContextPendingRef.current = true;
+    setNativeRemovalContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionBeltRemovalContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, { beltId });
+      if (nativeRemovalRequestGenerationRef.current !== generation ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 拆线凭证；存档和施工库存均未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeBeltRemovalBlockedMessage(context.support.reason ?? "unsupported-belt-domain"));
+        return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId || context.planetId !== projected.planetId ||
+          context.beltId !== projected.beltId || context.sourceId !== projected.sourceEntityId ||
+          context.targetId !== projected.targetEntityId || context.tier !== projected.tier ||
+          context.lanes !== projected.lanes || selectedEntityIdsRef.current.length !== 0 ||
+          selectedBeltIdsRef.current.length !== 1 || selectedBeltIdsRef.current[0] !== beltId ||
+          selectedBeltIdRef.current !== beltId) {
+        setNotice("线路、端点、数量或行星在确认期间已经变化；存档未改变，请等待投影刷新");
+        return;
+      }
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBeltRemovalCommand(context)
+          : null,
+        () => {
+          selectedBeltIdRef.current = null;
+          selectedBeltIdsRef.current = [];
+          setSelectedBeltId(null);
+          setSelectedBeltIds([]);
+          setNotice(`已由 Rust 回收 Mk.${tierName} 线路 ×${projected.lanes}，材料已返还施工托盘`);
+          playTone("remove");
+        },
+      );
+    } finally {
+      if (nativeRemovalRequestGenerationRef.current === generation) {
+        nativeRemovalContextPendingRef.current = false;
+        setNativeRemovalContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
   const changeNativeOrdinaryBeltPriority = useCallback((
     beltId: string,
     targetPriority: 0 | 1 | 2,
@@ -17965,6 +18074,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
+          onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}
         /> : <StableInspectorPanel
           game={panelGame}
           readOnly={false}

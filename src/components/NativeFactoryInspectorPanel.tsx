@@ -16,6 +16,7 @@ interface NativeFactoryInspectorPanelProps {
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
+  onRemoveBelt: (beltId: string) => void;
 }
 
 const constructionNames = new Map<string, string>(
@@ -94,10 +95,11 @@ function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChan
   </>;
 }
 
-function NativeBeltSummary({ belt, pending, onPriorityChange }: {
+function NativeBeltSummary({ belt, pending, onPriorityChange, onRemove }: {
   belt: SelectedBeltReadModel;
   pending: boolean;
   onPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
+  onRemove: (beltId: string) => void;
 }) {
   return <>
     <section className="inspector-content native-factory-inspector__belt" aria-label="Windows 原生传送带摘要">
@@ -126,6 +128,16 @@ function NativeBeltSummary({ belt, pending, onPriorityChange }: {
         >{priority === 0 ? "低" : priority === 1 ? "标准" : "高"}</button>)}
       </div>
     </section>
+    <section className="native-inspector-safe-actions" data-native-belt-removal="ordinary-single-v1">
+      <strong>Rust 安全拆线</strong>
+      <p>每次只回收一条内置 Mk.I–III 普通线路，并按实际并联数量原子返还施工托盘。</p>
+      <button
+        className="danger"
+        type="button"
+        disabled={pending}
+        onClick={() => onRemove(belt.beltId)}
+      ><Trash2 size={14} />{pending ? "正在向 Rust 确认" : "安全回收这条线路"}</button>
+    </section>
   </>;
 }
 
@@ -137,6 +149,7 @@ export function NativeFactoryInspectorPanel({
   onRemoveEntity,
   onStackCountChange,
   onBeltPriorityChange,
+  onRemoveBelt,
 }: NativeFactoryInspectorPanelProps) {
   const ready = inspector.schema === "factory-read-model-v1" &&
     inspector.source === "native-core" && Number.isSafeInteger(inspector.revision) &&
@@ -158,7 +171,7 @@ export function NativeFactoryInspectorPanel({
   } else if (inspector.entity && !inspector.belt) {
     content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
   } else if (inspector.belt && !inspector.entity) {
-    content = <NativeBeltSummary belt={inspector.belt} pending={pending} onPriorityChange={onBeltPriorityChange} />;
+    content = <NativeBeltSummary belt={inspector.belt} pending={pending} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;
   } else {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>请选择一个建筑或传送带</strong><p>这里只显示同 revision 的 Rust 小型投影。</p></section>;
   }

@@ -16,6 +16,8 @@ describe("native stellar workspace App integration", () => {
     expect(app).not.toMatch(/const nativeStarMapOverviewProjection = useMemo/);
     expect(app).not.toMatch(/const nativeStellarIndustryProjection = useMemo/);
     expect(app).toMatch(/selectNativePlayerAuthorityStellarQuantumReadModel\([\s\S]*?nativeStellarWorkspaceSnapshot,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
+    expect(app).toMatch(/selectNativeStarMapCatalogFrame\(nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity\)/);
+    expect(app).toMatch(/createNativePlayerAuthorityStarMapCatalogSource\(desktopBridge, nativeStellarProjectionIdentity\)/);
   });
 
   it("refreshes overview independently and makes scope, filter, and query latest-only through the store", () => {
@@ -27,16 +29,19 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/routeFilter: "issues"/);
     expect(workspace).toMatch(/query: clampNativeRouteQuery\(query\)/);
     expect(app).toMatch(/refreshQuantum\([\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
+    expect(app).toMatch(/nativeStarMapCatalogStore\.refresh\([\s\S]*?nativeStarMapCatalogSource,[\s\S]*?nativeStellarProjectionIdentity/);
   });
 
   it("passes only the selector-checked read model and fails closed for player authority", () => {
     expect(app).toMatch(/nativeReadModel=\{nativeStarMapWorkspaceReadModel\}/);
     expect(app).toMatch(/nativeReadStatus=\{nativeStarMapWorkspaceReadStatus\}/);
     expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
+    expect(app).toMatch(/nativeMapCatalogFrame=\{nativeStarMapCatalogFrame\}/);
+    expect(app).toMatch(/nativeMapCatalogStatus=\{nativeStarMapCatalogStatus\}/);
     expect(app).toMatch(/industryReadRequest=\{starMapIndustryReadRequest\}/);
     expect(workspace).toMatch(/nativeAuthorityRequired\s*\? <NativeIndustryConsole/);
-    expect(workspace).toMatch(/当前不会显示或使用 JavaScript 存档数据/);
-    expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapUnavailableBoundary/);
+    expect(workspace).toMatch(/当前不会读取或显示 JavaScript 存档中的旧星图数据/);
+    expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapCatalogConsole/);
     expect(app).toMatch(/nativeQuantumReadModel=\{nativeStellarQuantumReadModel\}/);
     expect(app).toMatch(/nativeQuantumReadStatus=\{nativeStellarQuantumReadStatus\}/);
     expect(app).toMatch(/onNativeQuantumItemCapacityChange=\{[\s\S]*?commitNativeProjectedCommand[\s\S]*?createNativeProjectedQuantumItemCapacityCommand/);
@@ -48,6 +53,11 @@ describe("native stellar workspace App integration", () => {
       workspace.indexOf("export function StarMapWorkspace"),
     );
     expect(nativeQuantum).not.toMatch(/\bgame\b|quantumLogisticsNetwork|getQuantumBandwidthSummary/);
+    const nativeMap = workspace.slice(
+      workspace.indexOf("export function NativeStarMapCatalogConsole"),
+      workspace.indexOf("export function StarMapWorkspace"),
+    );
+    expect(nativeMap).not.toMatch(/\bgame\b|getPlanetIndustrialProfile|isPlanetColonized|canColonizePlanet|canExploreStarSystem/);
   });
 
   it("renders native routes and indexes without reconstructing authority routes from GameState", () => {

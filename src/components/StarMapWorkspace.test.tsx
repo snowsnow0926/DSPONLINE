@@ -5,12 +5,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialState } from "../game/engine";
 import type { NativeStarMapWorkspaceReadModel, NativeStellarQuantumReadModel } from "../game/nativeStellarWorkspaceStore";
+import type { NativeStarMapCatalogFrame } from "../game/nativeStarMapCatalogStore";
 import type { GameState, PlanetIndustryRole } from "../game/types";
 import { AppLocaleProvider } from "../i18n/locale";
 import { clearStableTextDraft } from "./CompositionSafeInput";
 import {
   NativeIndustryConsole,
   NativeQuantumInventoryConsole,
+  NativeStarMapCatalogConsole,
   StarMapWorkspace,
   type StarMapIndustryReadRequest,
   type StarMapNativeReadStatus,
@@ -195,6 +197,97 @@ const QUANTUM_READ_MODEL: NativeStellarQuantumReadModel = Object.freeze({
   collectorRowsById: new Map([[QUANTUM_COLLECTOR.collectorId, QUANTUM_COLLECTOR]]),
   collectorRowsBySystemId: new Map([[QUANTUM_COLLECTOR.systemId, Object.freeze([QUANTUM_COLLECTOR])]]),
 });
+
+const CATALOG_SYSTEM = Object.freeze({
+  systemId: "helios",
+  displayName: "原生太阳系",
+  displayNameTruncated: false,
+  starClassId: "g",
+  starTypeName: "G 型主序星",
+  starTypeNameTruncated: false,
+  positionX: 0,
+  positionY: 0,
+  distanceFromOriginLy: 0,
+  luminosity: 1,
+  massMultiplier: 1,
+  radiusMultiplier: 1,
+  active: true,
+  discovered: true,
+  missionActive: false,
+  missionElapsedSeconds: 0,
+  missionDurationSeconds: 0,
+  surveyProgress: 1,
+  firstPlanetId: "home",
+  planetCount: 1,
+  colonizedPlanetCount: 1,
+}) as NativeStarMapCatalogFrame["systems"][number];
+
+const CATALOG_PLANET = Object.freeze({
+  planetId: "home",
+  displayName: "原生蓝色家园",
+  displayNameTruncated: false,
+  systemId: "helios",
+  systemDisplayName: "原生太阳系",
+  systemDisplayNameTruncated: false,
+  kind: "terrestrial",
+  orbitIndex: 0,
+  simulationOrder: 0,
+  systemPositionX: 0,
+  systemPositionY: 0,
+  active: true,
+  discovered: true,
+  colonized: true,
+  industryRole: "manufacturing",
+  entityCount: 4,
+  deviceCount: 3,
+  beltCount: 2,
+  metadata: {
+    note: "原生备注",
+    noteTruncated: false,
+    tags: { totalCount: 1, truncated: false, rows: ["科研"] },
+  },
+  profile: {
+    climateName: "海洋生态",
+    climateNameTruncated: false,
+    oceanType: "water",
+    specialization: "balanced",
+    specializationName: "综合工业",
+    specializationNameTruncated: false,
+    tidalLocked: false,
+    sulfuricOcean: false,
+    windMultiplier: 1,
+    solarMultiplier: 1,
+    geothermalMultiplier: 1,
+    miningMultiplier: 1,
+    orbitalYieldMultiplier: 1,
+    reserveScale: 1,
+    travelTimeMultiplier: 1,
+    productionSpeedMultiplier: 1,
+    surveyDurationSeconds: 30,
+    resourceIds: { totalCount: 1, truncated: false, rows: ["iron_ore"] },
+    rareResourceIds: { totalCount: 0, truncated: false, rows: [] },
+    orbitalYields: { totalCount: 0, truncated: false, rows: [] },
+  },
+}) as NativeStarMapCatalogFrame["planets"][number];
+
+const STAR_MAP_CATALOG_FRAME = Object.freeze({
+  source: "native-core",
+  sourceMode: "player-authority",
+  sessionId: "authority-session",
+  revision: 9,
+  registryFingerprint: "registry-fingerprint",
+  activePlanetId: "home",
+  activeSystemId: "helios",
+  galaxySeed: 42,
+  summary: { systemCount: 1, unlockedSystemCount: 1, planetCount: 1, colonizedPlanetCount: 1 },
+  metadataTruncated: false,
+  projection: {} as NativeStarMapCatalogFrame["projection"],
+  systems: Object.freeze([CATALOG_SYSTEM]),
+  planets: Object.freeze([CATALOG_PLANET]),
+  systemRowsById: new Map([[CATALOG_SYSTEM.systemId, CATALOG_SYSTEM]]),
+  planetRowsById: new Map([[CATALOG_PLANET.planetId, CATALOG_PLANET]]),
+  planetRowsBySystemId: new Map([[CATALOG_SYSTEM.systemId, Object.freeze([CATALOG_PLANET])]]),
+}) as NativeStarMapCatalogFrame;
 
 let host: HTMLDivElement;
 let root: Root;
@@ -476,8 +569,41 @@ describe("NativeQuantumInventoryConsole", () => {
   });
 });
 
+describe("NativeStarMapCatalogConsole", () => {
+  it("renders searchable systems, planets, metadata, resources, and traits from the native frame", () => {
+    const onQueryChange = vi.fn();
+    act(() => root.render(<AppLocaleProvider><NativeStarMapCatalogConsole
+      frame={STAR_MAP_CATALOG_FRAME}
+      status="ready"
+      query=""
+      onQueryChange={onQueryChange}
+    /></AppLocaleProvider>));
+
+    expect(host.textContent).toContain("原生太阳系");
+    expect(host.textContent).toContain("原生蓝色家园");
+    expect(host.textContent).toContain("原生备注");
+    expect(host.textContent).toContain("#科研");
+    expect(host.textContent).toContain("铁矿石");
+    expect(host.textContent).toContain("星图资料只读");
+    expect(host.querySelector("[data-native-star-map-catalog-status='ready']")).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>(".star-planet-list > button")?.disabled).toBe(true);
+  });
+
+  it("fails closed without a complete same-revision catalog frame", () => {
+    act(() => root.render(<AppLocaleProvider><NativeStarMapCatalogConsole
+      frame={null}
+      status="loading"
+      query=""
+      onQueryChange={vi.fn()}
+    /></AppLocaleProvider>));
+    expect(host.textContent).toContain("正在同步原生权威星图目录");
+    expect(host.querySelector("[data-native-star-map-catalog-status='loading']")).not.toBeNull();
+    expect(host.querySelector(".star-system-card")).toBeNull();
+  });
+});
+
 describe("StarMapWorkspace authority boundaries", () => {
-  it("fails closed when a scoped industry model returns to the map", () => {
+  it("fails closed without a catalog even when a scoped industry model exists", () => {
     renderWorkspace({
       game: playerAuthorityPoisonGame(),
       nativeReadModel: READ_MODEL,
@@ -485,15 +611,32 @@ describe("StarMapWorkspace authority boundaries", () => {
       industryReadRequest: { systemId: "helios", planetId: "home", routeFilter: "issues", query: "铁" },
     });
 
-    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    expect(host.textContent).toContain("原生权威星图目录暂不可用");
     clickButton("星际工业");
     expect(host.textContent).toContain("原生铁矿航线");
     clickButton("星图探索");
 
-    expect(host.textContent).toContain("为避免把当前筛选范围外的行星缺失解释成未殖民或 0");
+    expect(host.textContent).toContain("不会读取或显示 JavaScript 存档中的旧星图数据");
     expect(host.querySelector(".star-system-card")).toBeNull();
     expect(host.querySelector(".star-planet-list")).toBeNull();
     expect(host.querySelector("[aria-label='搜索星球资料']")).toBeNull();
+    expect(host.querySelector(".stellar-metadata-manager")).toBeNull();
+    expect(host.querySelector("[aria-label='星图批量物流操作']")).toBeNull();
+  });
+
+  it("uses the independent native catalog instead of scoped industry rows", () => {
+    renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeMapCatalogFrame: STAR_MAP_CATALOG_FRAME,
+      nativeAuthorityRequired: true,
+      industryReadRequest: { systemId: "helios", planetId: "home", routeFilter: "issues", query: "铁" },
+    });
+
+    expect(host.textContent).toContain("原生太阳系");
+    expect(host.textContent).toContain("原生蓝色家园");
+    expect(host.textContent).toContain("已勘探 1/1");
+    expect(host.querySelector("[aria-label='搜索原生星球资料']")).not.toBeNull();
     expect(host.querySelector(".stellar-metadata-manager")).toBeNull();
     expect(host.querySelector("[aria-label='星图批量物流操作']")).toBeNull();
   });
@@ -540,14 +683,14 @@ describe("StarMapWorkspace authority boundaries", () => {
       mobile: true,
     });
 
-    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    expect(host.textContent).toContain("原生权威星图目录暂不可用");
     clickButton("星际工业");
     expect(host.textContent).toContain("原生铁矿航线");
     clickButton("量子库存");
     expect(host.textContent).toContain("原生权威量子库存暂不可用");
 
     act(() => root.render(<AppLocaleProvider><StarMapWorkspace {...props} mobileSubview="planet:frost" /></AppLocaleProvider>));
-    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    expect(host.textContent).toContain("原生权威星图目录暂不可用");
     expect(host.querySelector(".mobile-planet-detail")).toBeNull();
     expect(host.querySelector(".mobile-star-system-detail")).toBeNull();
   });
@@ -558,7 +701,7 @@ describe("StarMapWorkspace authority boundaries", () => {
 
     expect(host.querySelector("[aria-label='搜索星球资料']")).not.toBeNull();
     expect(host.querySelector(".stellar-metadata-manager")).not.toBeNull();
-    expect(host.textContent).not.toContain("原生权威星图探索暂不可用");
+    expect(host.textContent).not.toContain("原生权威星图目录暂不可用");
     clickButton("量子库存");
     expect(host.querySelector(".quantum-inventory-console")).not.toBeNull();
     expect(host.querySelector("[aria-label='搜索量子库存物品']")).not.toBeNull();

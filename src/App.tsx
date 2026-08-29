@@ -409,6 +409,11 @@ import {
   type NativeStellarIndustrySelector,
 } from "./game/nativeStellarWorkspaceStore";
 import {
+  NativeStarMapCatalogStore,
+  createNativePlayerAuthorityStarMapCatalogSource,
+  selectNativeStarMapCatalogFrame,
+} from "./game/nativeStarMapCatalogStore";
+import {
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
@@ -2157,6 +2162,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeStellarWorkspaceStore.getSnapshot,
     nativeStellarWorkspaceStore.getSnapshot,
   );
+  const nativeStarMapCatalogStoreRef = useRef<NativeStarMapCatalogStore | null>(null);
+  if (nativeStarMapCatalogStoreRef.current === null) {
+    nativeStarMapCatalogStoreRef.current = new NativeStarMapCatalogStore();
+  }
+  const nativeStarMapCatalogStore = nativeStarMapCatalogStoreRef.current;
+  const nativeStarMapCatalogSnapshot = useSyncExternalStore(
+    nativeStarMapCatalogStore.subscribe,
+    nativeStarMapCatalogStore.getSnapshot,
+    nativeStarMapCatalogStore.getSnapshot,
+  );
   const nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>(() => ({
     ...starMapIndustryReadRequest,
     planetCursor: 0,
@@ -2187,6 +2202,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const nativeStellarProjectionSource = useMemo(() => nativeStellarProjectionIdentity
     ? createNativePlayerAuthorityStellarProjectionSource(desktopBridge, nativeStellarProjectionIdentity)
     : null, [desktopBridge, nativeStellarProjectionIdentity]);
+  const nativeStarMapCatalogSource = useMemo(() => nativeStellarProjectionIdentity
+    ? createNativePlayerAuthorityStarMapCatalogSource(desktopBridge, nativeStellarProjectionIdentity)
+    : null, [desktopBridge, nativeStellarProjectionIdentity]);
+  const nativeStarMapCatalogFrame = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativeStarMapCatalogFrame(nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity)
+    : null, [nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity]);
+  const nativeStarMapCatalogStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStarMapCatalogFrame
+    ? "ready"
+    : !nativeStellarProjectionIdentity || !nativeStarMapCatalogSource ||
+        nativeStarMapCatalogSnapshot.status === "unavailable"
+      ? "unavailable"
+      : "loading";
   const nativeStarMapWorkspaceReadModel = useMemo(() => nativeStellarProjectionIdentity
     ? selectNativeStarMapWorkspaceReadModel(
         nativeStellarWorkspaceSnapshot,
@@ -2757,6 +2785,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recipeWorkspaceRegistryFingerprint,
     recipeWorkspaceSelector,
     recipesOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStarMapCatalogSource) {
+      nativeStarMapCatalogStore.clear();
+      return;
+    }
+    void nativeStarMapCatalogStore.refresh(
+      nativeStarMapCatalogSource,
+      nativeStellarProjectionIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStarMapCatalogSource,
+    nativeStarMapCatalogStore,
+    nativeStellarProjectionIdentity,
+    starMapOpen,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
@@ -14955,6 +15000,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           <StarMapWorkspace
             open
             game={game}
+            nativeMapCatalogFrame={nativeStarMapCatalogFrame}
+            nativeMapCatalogStatus={nativeStarMapCatalogStatus}
             nativeReadModel={nativeStarMapWorkspaceReadModel}
             nativeReadStatus={nativeStarMapWorkspaceReadStatus}
             nativeQuantumReadModel={nativeStellarQuantumReadModel}

@@ -82,7 +82,9 @@ describe("main-owned authority clock App wiring", () => {
     );
     expect(stellarBinding).toMatch(/nativePlayerAuthorityActiveFrame\?\.sessionId[\s\S]*?: null/);
     expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?createNativePlayerAuthorityStellarProjectionSource[\s\S]*?: null/);
+    expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?createNativePlayerAuthorityStarMapCatalogSource[\s\S]*?: null/);
     expect(refreshEffects).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStellarProjectionSource\) return/);
+    expect(refreshEffects).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStarMapCatalogSource\)[\s\S]*?nativeStarMapCatalogStore\.clear\(\)/);
 
     const simulationLoop = app.slice(
       app.indexOf("let previous = performance.now();"),

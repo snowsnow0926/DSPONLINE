@@ -450,6 +450,11 @@ import {
   selectNativeConstructionInventoryFrame,
 } from "./game/nativeConstructionInventoryStore";
 import {
+  createNativeProjectedOrdinaryBuildingPlacementCommand,
+  readVerifiedNativeConstructionPlacementContext,
+  type NativeConstructionPlacementSupportReason,
+} from "./game/nativeConstructionPlacement";
+import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
 } from "./game/nativeTechnologyWorkspaceStore";
@@ -1042,6 +1047,19 @@ const FLOW_GRID = 20;
 const FACTORY_FLOW_SNAP_GRID: SnapGrid = [FLOW_GRID, FLOW_GRID];
 const HISTORY_LIMIT = 40;
 
+function nativePlacementBlockedMessage(reason: NativeConstructionPlacementSupportReason): string {
+  switch (reason) {
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次放置未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工定义；本次放置未执行";
+    case "technology-locked": return "建造科技尚未解锁；本次放置未执行";
+    case "unsupported-building-kind": return "该条目不是普通建筑；请使用对应的专用建造功能";
+    case "unsupported-building-domain": return "这个建筑会同时修改其他系统，原生安全命令尚未覆盖";
+    case "unsupported-active-planet": return "当前行星不允许放置这种普通建筑";
+    case "inventory-empty": return "施工库存已经用完；本次放置未执行";
+    case "next-id-exhausted": return "建筑 ID 已达到安全上限；请导出备份并联系存档救援";
+  }
+}
+
 function pureIdleProgressLabel(progress: PureIdleMacroProgress): string {
   if (progress.phase === "preparing-power") return "正在准备权威供电快照";
   if (progress.phase === "calibrating") return "正在执行有界精确校准";
@@ -1602,6 +1620,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [productionLineFocus, setProductionLineFocus] = useState<(ProductionLineLocation & { itemId: ItemId; activeIndex: number }) | null>(null);
   const [copiedBeltConfigurationId, setCopiedBeltConfigurationId] = useState<string | null>(null);
   const [placement, setPlacement] = useState<BuildingId | null>(null);
+  const [nativePlacementBuildingId, setNativePlacementBuildingId] = useState<string | null>(null);
+  const [nativePlacementContextPending, setNativePlacementContextPending] = useState(false);
+  const nativePlacementContextPendingRef = useRef(false);
+  const nativePlacementIntentRef = useRef({ buildingId: null as string | null, generation: 0 });
   const [beltTier, setBeltTier] = useState<BeltTier>(1);
   const [beltTierMode, setBeltTierMode] = useState<BeltTierMode>("auto");
   const [placementCount, setPlacementCount] = useState<PlacementCount>(1);
@@ -1753,7 +1775,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const panelGame = useThrottledRuntimeShellGame(game,
     operationsOpen || mobilePanel !== null ||
     selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
-    placement !== null || blueprintPlacementId !== null || connectionDraft !== null,
+    placement !== null || nativePlacementBuildingId !== null || blueprintPlacementId !== null || connectionDraft !== null,
   );
   useLayoutEffect(() => {
     recordActiveRuntimeTransitionPhase("react-layout-commit", {
@@ -1824,11 +1846,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const runtimeUiRequiresEveryProjectionRef = useRef(false);
   runtimeUiNeedsImmediateGameRef.current = game.paused || operationsOpen || mobilePanel !== null ||
     selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
-    placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
+    placement !== null || nativePlacementBuildingId !== null || blueprintPlacementId !== null || connectionDraft !== null;
   // An open dock can consume the existing trailing summary. Only an active
   // entity/belt interaction must observe every large record projection.
   runtimeUiRequiresEveryProjectionRef.current = selectedEntityIds.length > 0 || selectedBeltId !== null ||
-    selectedBeltIds.length > 0 || placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
+    selectedBeltIds.length > 0 || placement !== null || nativePlacementBuildingId !== null ||
+    blueprintPlacementId !== null || connectionDraft !== null;
   const pendingRuntimeGamePublicationRef = useRef<GameState | null>(null);
   const pendingRuntimeGamePublicationTimerRef = useRef<number | null>(null);
   const runtimeGamePublicationInFlightRef = useRef<GameState | null>(null);
@@ -2463,6 +2486,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const nativeConstructionInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeConstructionInventoryFrame(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity]);
+  const nativePlacementLabel = useMemo(() => nativePlacementBuildingId
+    ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
+    : null, [nativePlacementBuildingId]);
   const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
   if (nativeStellarWorkspaceStoreRef.current === null) {
     nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
@@ -3874,12 +3900,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     getEffectiveSimulationMultiplier(game),
     game.settings.simulationSpeed,
   );
-  const activeMobileCanvasMode: MobileCanvasMode = placement
+  const activeMobileCanvasMode: MobileCanvasMode = placement || nativePlacementBuildingId
     ? "place"
     : connectionDraft || clickConnectionPreview
       ? "connect"
       : mobileCanvasMode;
-  const pointerOverlayActive = Boolean(placement || blueprintPlacementId || connectionDraft || clickConnectionPreview || game.cargo || connectionHint);
+  const canvasPointerCargo = nativePlayerAuthorityOwnsRuntime ? null : game.cargo;
+  const pointerOverlayActive = Boolean(placement || nativePlacementBuildingId || blueprintPlacementId || connectionDraft || clickConnectionPreview || canvasPointerCargo || connectionHint);
   const closeAllWorkspaces = useCallback(() => {
     authorityWorkspaceSyncIdRef.current += 1;
     setAuthorityWorkspaceSync(null);
@@ -4356,6 +4383,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setCtrlHeld(false);
       continuousPlacementRef.current = null;
       if (placement) setPlacement(null);
+      if (nativePlacementBuildingId) {
+        nativePlacementIntentRef.current = {
+          buildingId: null,
+          generation: nativePlacementIntentRef.current.generation + 1,
+        };
+        nativePlacementContextPendingRef.current = false;
+        setNativePlacementContextPending(false);
+        setNativePlacementBuildingId(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
@@ -4365,7 +4401,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       window.removeEventListener("keyup", onKey);
       window.removeEventListener("blur", onBlur);
     };
-  }, [placement]);
+  }, [nativePlacementBuildingId, placement]);
   useEffect(() => {
     if (!loaded.recovery || loaded.recovery.source === "primary") return;
     setNotice(loaded.recovery.issues[0] ?? "已从备用存档恢复");
@@ -8092,6 +8128,148 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       createNativeProjectedTrayItemLimitCommand(frame, value));
   }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
 
+  const cancelNativeBuildingPlacement = useCallback((): void => {
+    nativePlacementIntentRef.current = {
+      buildingId: null,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    setNativePlacementBuildingId(null);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+  }, []);
+
+  const selectNativeBuildingPlacement = useCallback((buildingId: string | null): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    if (buildingId !== null) {
+      const row = nativeConstructionInventoryFrame?.rowsByBuildingId.get(buildingId);
+      if (!row || row.amount < 1) {
+        setNotice("当前 Rust 施工库存中没有这个条目；本次放置未开始");
+        return;
+      }
+    }
+    nativePlacementIntentRef.current = {
+      buildingId,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    setNativePlacementBuildingId(buildingId);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    if (buildingId) setNotice("请在空白画布选择落点；Rust 会按当前 revision 重新检查后再建造");
+  }, [flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+
+  const placeNativeOrdinaryBuildingAt = useCallback(async (
+    buildingId: string,
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ): Promise<void> => {
+    const identity = nativeFactoryInventoryIdentity;
+    const intent = nativePlacementIntentRef.current;
+    if (!identity || intent.buildingId !== buildingId || nativePlacementContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次落点未提交");
+      return;
+    }
+    nativePlacementContextPendingRef.current = true;
+    setNativePlacementContextPending(true);
+    const generation = intent.generation;
+    const context = await readVerifiedNativeConstructionPlacementContext(
+      desktopBridge,
+      identity,
+      buildingId,
+    );
+    const currentIntent = nativePlacementIntentRef.current;
+    if (currentIntent.generation !== generation || currentIntent.buildingId !== buildingId) return;
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    if (!context) {
+      setNotice("没有取得同一 revision 的 Rust 建造凭证；存档未改变，请重新落点");
+      return;
+    }
+    if (!context.support.supported || !context.placement) {
+      cancelNativeBuildingPlacement();
+      setNotice(nativePlacementBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+      return;
+    }
+    if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+      cancelNativeBuildingPlacement();
+      setNotice("建造凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(context.revision, (baseRevision) =>
+      baseRevision === context.revision
+        ? createNativeProjectedOrdinaryBuildingPlacementCommand(context, position)
+        : null, () => {
+      const label = getConstructionDefinition(buildingId)?.name ?? buildingId;
+      setNotice(`已由 Rust 确认放置${label} ×1`);
+      playTone("place");
+      spawnInteractionBurst(screenPoint.x, screenPoint.y, "建筑已放置", "positive");
+      trackAnalyticsEvent("building_place", 1);
+      recordBasicOnboardingEvent("building-placed");
+    });
+    if (!accepted) return;
+    nativePlacementIntentRef.current = { buildingId: null, generation: generation + 1 };
+    setNativePlacementBuildingId(null);
+    setPlacementCount(1);
+  }, [
+    cancelNativeBuildingPlacement,
+    commitNativeProjectedCommand,
+    desktopBridge,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
+
+  useEffect(() => {
+    cancelNativeBuildingPlacement();
+  }, [
+    cancelNativeBuildingPlacement,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (nativePlacementBuildingId &&
+        (blueprintPlacementId || selectionMode || deleteMode || regionMode || connectionDraft)) {
+      cancelNativeBuildingPlacement();
+    }
+  }, [
+    blueprintPlacementId,
+    cancelNativeBuildingPlacement,
+    connectionDraft,
+    deleteMode,
+    nativePlacementBuildingId,
+    regionMode,
+    selectionMode,
+  ]);
+
   const rejectLegacyFactoryInteractionWhileNative = useCallback((label: string): boolean => {
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) return false;
     setNotice(`Windows 原生权威尚未接入${label}命令；本次操作未应用，也不会读取旧星球数据`);
@@ -10421,6 +10599,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         updateConnectionDraft(null);
         setConnectionHint(null);
         setPlacement(null);
+        cancelNativeBuildingPlacement();
         setTechnologyOpen(false);
         setStatisticsOpen(false);
         setRecipesOpen(false);
@@ -10481,7 +10660,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
+  }, [cancelNativeBuildingPlacement, closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
 
   const onMiningStop = useCallback(() => {
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
@@ -10740,6 +10919,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setLineFindMode(false);
     setAutoLayoutUndo(null);
     setPlacement(null);
+    cancelNativeBuildingPlacement();
     setBlueprintPlacementId(null);
     setBlueprintsOpen(false);
     setConstructionCenterOpen(false);
@@ -10760,7 +10940,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setHoveredNodeId(null);
     setFocusedNodeId(null);
     setNodes([]);
-  }, [abortCanvasGestureLifecycle, flowStore, onMiningStop, setNodes, updateConnectionDraft]);
+  }, [abortCanvasGestureLifecycle, cancelNativeBuildingPlacement, flowStore, onMiningStop, setNodes, updateConnectionDraft]);
 
   useEffect(() => {
     const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
@@ -12618,14 +12798,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [getViewport, setViewport]);
 
   const beginPlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    if ((!placement && !blueprintPlacementId) || event.button !== 0 || !event.isPrimary) return;
+    if ((!placement && !nativePlacementBuildingId && !blueprintPlacementId) ||
+        event.button !== 0 || !event.isPrimary) return;
     canvasPointerMotionRef.current = beginCanvasPointerMotion(
       canvasPointerMotionRef.current,
       event.pointerId,
       event.clientX,
       event.clientY,
     );
-  }, [blueprintPlacementId, placement]);
+  }, [blueprintPlacementId, nativePlacementBuildingId, placement]);
 
   const movePlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const previousMotion = canvasPointerMotionRef.current;
@@ -12669,7 +12850,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   useEffect(() => {
     stopCanvasPointerMotion();
-  }, [blueprintPlacementId, placement, stopCanvasPointerMotion]);
+  }, [blueprintPlacementId, nativePlacementBuildingId, placement, stopCanvasPointerMotion]);
 
   useEffect(() => {
     const stopWhenHidden = () => {
@@ -14674,6 +14855,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativePlacementBuildingId) {
+      setNotice("普通建筑只能放在画布空白处；Rust 不会用落点覆盖现有建筑");
+      return;
+    }
     if (!placement && completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) return;
     // Continuous connection owns node/port interaction until the batch is
     // confirmed or cancelled. A bubbled node click must not replace its
@@ -14735,15 +14920,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       } else if (nextMobileShell) mobileNavigation.openSheet("inspector", "peek");
       else setMobilePanel("inspector");
     }
-  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, rejectLegacyFactoryInteractionWhileNative, selectionMode]);
+  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nativePlacementBuildingId, nextMobileShell, openCommandWorkspace, placement, placementCount, rejectLegacyFactoryInteractionWhileNative, selectionMode]);
 
   const onNodeDoubleClick: NodeMouseHandler<FactoryFlowNode> = useCallback((_event, node) => {
-    if (placement || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
+    if (placement || nativePlacementBuildingId || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
     setSelectedEntityIds([node.id]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     focusEntityIds([node.id]);
-  }, [blueprintPlacementId, focusEntityIds, placement]);
+  }, [blueprintPlacementId, focusEntityIds, nativePlacementBuildingId, placement]);
 
   const onRegionPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (!regionMode || event.button !== 0 || placement || blueprintPlacementId || connectionDraftRef.current) return;
@@ -14954,6 +15139,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const onPaneClick = useCallback((event: React.MouseEvent) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativePlacementBuildingId) {
+      const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      void placeNativeOrdinaryBuildingAt(
+        nativePlacementBuildingId,
+        position,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
     if ((placement || blueprintPlacementId) &&
       rejectLegacyFactoryInteractionWhileNative(blueprintPlacementId ? "蓝图部署" : "建筑放置与扩建")) return;
     if (regionMode) {
@@ -15116,7 +15310,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nativePlacementBuildingId, nextMobileShell, nodes, placement, placementCount, placeNativeOrdinaryBuildingAt, playTone, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -16018,7 +16212,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   ] as const;
   const canvasFlowStaticPresentation = canvasFlowStaticPresentationCandidate;
   const canvasFlowFullyDeferred = canvasFlowStaticPresentation && canvasVisibleNodeCount === 0 &&
-    reactFlowBelts.length === 0 && !placement && !blueprintPlacementId && !selectionMode && !deleteMode &&
+    reactFlowBelts.length === 0 && !placement && !nativePlacementBuildingId && !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
   const flowElementVirtualizationActive = (denseViewportCullingActive || shouldVirtualizeCanvas(activePlanetEntityCount, activePlanetBelts.length)) &&
     !(connectionDraft && connectExpandAll);
@@ -16076,7 +16270,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
     <main
-      className={`game-shell${placement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
+      className={`game-shell${placement || nativePlacementBuildingId || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
       onContextMenuCapture={(event) => {
         const target = event.target as HTMLElement | null;
         if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
@@ -16579,7 +16773,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               // A pressed primary pointer is panning the viewport. Re-running
               // Canvas belt hit-testing for every drag sample cannot produce a
               // useful hover target and competes directly with the pan frame.
-              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 && !placement && !blueprintPlacementId && !connectionDraft) {
+              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 && !placement && !nativePlacementBuildingId && !blueprintPlacementId && !connectionDraft) {
                 const target = event.target instanceof Element ? event.target : null;
                 if (!target?.closest(".react-flow__node, .react-flow__edge, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .planet-navigator")) {
                   const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
@@ -16628,7 +16822,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               event.stopPropagation();
               return;
             }
-            if (!placement && !blueprintPlacementId) return;
+            if (!placement && !nativePlacementBuildingId && !blueprintPlacementId) return;
             const target = event.target instanceof Element ? event.target : null;
             if (!target?.closest(".react-flow") || target.closest(".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .canvas-placement-options, .planet-navigator")) return;
             event.preventDefault();
@@ -16637,7 +16831,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           }}
           onDoubleClick={(event) => {
             if (nativeFactoryProjectionPending) return;
-            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element && event.target.classList.contains("react-flow__pane") && !placement && !blueprintPlacementId) {
+            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element && event.target.classList.contains("react-flow__pane") && !placement && !nativePlacementBuildingId && !blueprintPlacementId) {
               void fitView({ padding: 0.18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 260 });
             }
           }}
@@ -16682,6 +16876,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onNodeDrag={onNodeDrag}
             onNodeDragStop={handleFactoryNodeDragStop}
             onEdgeClick={(_event, edge) => {
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && nativePlacementBuildingId) {
+                setNotice("普通建筑只能放在画布空白处；Rust 不会把落点附着到运输线上");
+                return;
+              }
               if (nextMobileShell && mobileCanvasMode === "select") {
                 setSelectedBeltIds((current) => current.includes(edge.id) ? current.filter((id) => id !== edge.id) : [...current, edge.id]);
                 setSelectedBeltId(null);
@@ -16697,6 +16895,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onEdgeMouseEnter={(_event, edge) => setHoveredBeltId(edge.id)}
             onEdgeMouseLeave={(_event, edge) => setHoveredBeltId((current) => current === edge.id ? null : current)}
             onEdgeDoubleClick={(_event, edge) => {
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && nativePlacementBuildingId) return;
               setFocusedBeltNetworkId((current) => current === edge.id ? null : edge.id);
               setHighlightedTaskId(null);
               const snapshot = analyzeBeltNetwork(gameRef.current, edge.id);
@@ -17293,6 +17492,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <RuntimeRenderProfile id="construction-dock">
       {nativePlayerAuthorityOwnsRuntime ? <NativeConstructionDock
         frame={nativeConstructionInventoryFrame}
+        selectedBuildingId={nativePlacementBuildingId}
+        pending={nativePlacementContextPending || nativePlayerAuthorityCommandPending ||
+          !nativePlayerAuthorityCommandSource ||
+          typeof desktopBridge?.getNativeCoreConstructionPlacementContext !== "function"}
+        onPlacementChange={selectNativeBuildingPlacement}
       /> : <StableConstructionDock
         game={panelGame}
         placement={placement}
@@ -17896,8 +18100,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <CanvasInteractionOverlay
         active={pointerOverlayActive}
         placement={placement}
+        nativePlacementLabel={nativePlacementLabel}
         placementCount={placementCount}
-        cargo={game.cargo}
+        cargo={canvasPointerCargo}
         blueprint={activeBlueprint}
         ctrlHeld={ctrlHeld}
         clickConnectionPreview={clickConnectionPreview}

@@ -14,11 +14,13 @@ describe("native construction inventory App integration", () => {
     expect(app).toMatch(/selectNativeConstructionInventoryFrame\(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity\)/);
   });
 
-  it("renders only the Rust frame and exposes no legacy construction mutation", () => {
+  it("renders only the Rust frame and routes one placement through a fresh Rust capability", () => {
     expect(app).toMatch(/<NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}/);
-    expect(dock).not.toMatch(/GameState|panelGame|commitGame|gameRef|onPlacement|onCraft|onDelete/);
+    expect(app).toMatch(/readVerifiedNativeConstructionPlacementContext\([\s\S]*?desktopBridge,[\s\S]*?identity,[\s\S]*?buildingId/);
+    expect(app).toMatch(/commitNativeProjectedCommand\(context\.revision,[\s\S]*?createNativeProjectedOrdinaryBuildingPlacementCommand\(context, position\)/);
+    expect(dock).not.toMatch(/GameState|panelGame|commitGame|gameRef|onCraft|onDelete/);
     expect(dock).toMatch(/frame\?\.rows/);
-    expect(dock).toMatch(/data-native-construction-read-only="true"/);
-    expect(dock).toMatch(/disabled/);
+    expect(dock).toMatch(/data-native-construction-placement="ordinary-single-v1"/);
+    expect(dock).toMatch(/knownNonBuilding/);
   });
 });

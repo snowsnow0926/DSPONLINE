@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NativeConstructionInventoryFrame } from "../game/nativeConstructionInventoryStore";
 import { NativeConstructionDock } from "./NativeConstructionDock";
 
@@ -10,6 +10,7 @@ import { NativeConstructionDock } from "./NativeConstructionDock";
 
 function frame(): NativeConstructionInventoryFrame {
   const rows = [
+    { buildingId: "arc_smelter", amount: 2 },
     { buildingId: "conveyor_belt_mk3", amount: 3_000 },
     { buildingId: "MOD/quantum-factory", amount: 7 },
   ] as const;
@@ -22,7 +23,7 @@ function frame(): NativeConstructionInventoryFrame {
     registryFingerprint: "builtin:test",
     rows,
     rowsByBuildingId: new Map(rows.map((row) => [row.buildingId, row])),
-    totalAmount: 3_007,
+    totalAmount: 3_009,
   };
 }
 
@@ -42,17 +43,45 @@ describe("NativeConstructionDock", () => {
   });
 
   it("fails closed without a same-revision Rust frame", () => {
-    act(() => root.render(<NativeConstructionDock frame={null} />));
+    act(() => root.render(<NativeConstructionDock
+      frame={null}
+      selectedBuildingId={null}
+      pending={false}
+      onPlacementChange={() => undefined}
+    />));
     expect(host.querySelector("[data-native-authority-unavailable='construction-inventory-v1']")).not.toBeNull();
     expect(host.textContent).toContain("旧网页库存不会显示");
   });
 
-  it("renders core and MOD rows without importing GameState interactions", () => {
-    act(() => root.render(<NativeConstructionDock frame={frame()} />));
+  it("keeps known non-building rows disabled and exposes MOD placement candidates", () => {
+    const onPlacementChange = vi.fn();
+    act(() => root.render(<NativeConstructionDock
+      frame={frame()}
+      selectedBuildingId={null}
+      pending={false}
+      onPlacementChange={onPlacementChange}
+    />));
     expect(host.textContent).toContain("传送带 Mk.III");
     expect(host.textContent).toContain("MOD/quantum-factory");
-    expect(host.textContent).toContain("3,007");
-    expect([...host.querySelectorAll<HTMLButtonElement>("button")].every((button) => button.disabled)).toBe(true);
-    expect(host.querySelector("[data-native-construction-read-only='true']")).not.toBeNull();
+    expect(host.textContent).toContain("3,009");
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons[0].disabled).toBe(false);
+    expect(buttons[1].disabled).toBe(true);
+    expect(buttons[2].disabled).toBe(false);
+    act(() => buttons[2].click());
+    expect(onPlacementChange).toHaveBeenCalledWith("MOD/quantum-factory");
+    expect(host.querySelector("[data-native-construction-placement='ordinary-single-v1']")).not.toBeNull();
+  });
+
+  it("marks the selected row and disables all placement while a command is pending", () => {
+    act(() => root.render(<NativeConstructionDock
+      frame={frame()}
+      selectedBuildingId="MOD/quantum-factory"
+      pending
+      onPlacementChange={() => undefined}
+    />));
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(buttons[2].getAttribute("aria-pressed")).toBe("true");
   });
 });

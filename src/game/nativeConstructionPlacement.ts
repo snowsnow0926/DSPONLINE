@@ -92,7 +92,7 @@ export interface NativeConstructionPlacementContext {
 }
 
 export interface NativeConstructionPlacementBridge {
-  getNativeCoreConstructionPlacementContext(request: {
+  getNativeCoreConstructionPlacementContext?(request: {
     sessionId: string;
     expectedRevision: number;
     expectedRegistryFingerprint: string;
@@ -141,7 +141,8 @@ function validCanonicalEntityTemplate(
       !isEmptyRecord(template.inputs) || !isEmptyRecord(template.outputs) ||
       template.progress !== 0 || template.routingCursor !== 0 ||
       template.utilization !== 0 || template.productionRate !== 0 ||
-      !["machine", "power", "storage", "splitter"].includes(String(template.kind))) {
+      typeof template.kind !== "string" ||
+      !["machine", "power", "storage", "splitter"].includes(template.kind)) {
     return false;
   }
   if (!validOptionalOpaqueId(template.recipeId) ||
@@ -215,11 +216,12 @@ export async function readVerifiedNativeConstructionPlacementContext(
   identity: NativeConstructionPlacementIdentity,
   buildingId: string,
 ): Promise<NativeConstructionPlacementContext | null> {
-  if (!bridge || !validLogicalId(identity.sessionId, 128) ||
+  const reader = bridge?.getNativeCoreConstructionPlacementContext;
+  if (typeof reader !== "function" || !validLogicalId(identity.sessionId, 128) ||
       !validLogicalId(identity.runId, 128) || !safeNonnegativeInteger(identity.revision) ||
       !validLogicalId(identity.registryFingerprint) || !validOpaqueId(buildingId)) return null;
   try {
-    const value = await bridge.getNativeCoreConstructionPlacementContext({
+    const value = await reader({
       sessionId: identity.sessionId,
       expectedRevision: identity.revision,
       expectedRegistryFingerprint: identity.registryFingerprint,

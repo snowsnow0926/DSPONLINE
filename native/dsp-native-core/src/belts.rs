@@ -16,6 +16,7 @@ use crate::state::{
 };
 
 const EPSILON: f64 = 0.0001;
+const RESERVATION_TARGET_CAPACITY_ROWS_PER_CHUNK: usize = 1_024;
 
 #[inline]
 fn persisted_belt_dimensions(belt: &Map<String, Value>) -> (f64, f64) {
@@ -1414,6 +1415,18 @@ impl BeltTransferProfiler {
             );
         }
     }
+
+    fn reservation_target_capacity_plan(&self, diagnostics: TargetCapacityPlanDiagnostics) {
+        if self.enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tbelt-reservation-target-capacity-plan-workers\tworkers={}\tcomponents={}\tparallel={}\tserial={}",
+                diagnostics.worker_count,
+                diagnostics.component_count,
+                diagnostics.parallel_component_count,
+                diagnostics.serial_component_count,
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2757,6 +2770,73 @@ fn target_capacity_for_route(
     .max(0.0))
 }
 
+fn resolve_target_capacity_plan_with_runtime<ParallelProbe, SerialProbe>(
+    prepared_routes: &PreparedRoutes,
+    plan: &[TargetCapacityPlanEntry],
+    parallel_route_indices: &[u32],
+    target_free: &mut [f64],
+    executor: &DeterministicRuntime,
+    parallel_probe: ParallelProbe,
+    mut serial_probe: SerialProbe,
+) -> anyhow::Result<TargetCapacityPlanDiagnostics>
+where
+    ParallelProbe: Fn(usize) -> anyhow::Result<f64> + Sync,
+    SerialProbe: FnMut(usize) -> anyhow::Result<f64>,
+{
+    // Immutable probes write only worker-private result slots. Indexed
+    // collection fixes their order; the coordinator below remains the sole
+    // writer of the shared capacity ledger and reports the first stable plan
+    // error even when later workers have already completed.
+    let parallel_results = executor.indexed_map(parallel_route_indices, |_, route_index| {
+        parallel_probe(expand_compact_index(*route_index))
+    });
+    let worker_count = if parallel_route_indices.is_empty() {
+        0
+    } else {
+        executor.worker_count_for_items(parallel_route_indices.len())
+    };
+    let parallel_component_count = parallel_route_indices.len();
+    let mut parallel_results = parallel_results.into_iter().enumerate();
+    let mut serial_component_count = 0_usize;
+    for entry in plan {
+        let route_index = expand_compact_index(entry.route_index);
+        let capacity = if let Some(expected_result_index) = entry.parallel_result_index {
+            let (actual_result_index, result) = parallel_results
+                .next()
+                .ok_or_else(|| anyhow!("native belt target-capacity result is missing"))?;
+            if actual_result_index != expand_compact_index(expected_result_index) {
+                bail!("native belt target-capacity result order changed");
+            }
+            result?
+        } else {
+            serial_component_count = serial_component_count.saturating_add(1);
+            serial_probe(route_index)?
+        };
+        if !capacity.is_finite() || capacity < 0.0 {
+            bail!("native belt target capacity is invalid");
+        }
+        let target_slot = prepared_routes
+            .routes
+            .get(route_index)
+            .ok_or_else(|| anyhow!("native belt target-capacity route is outside the topology"))?
+            .target_slot();
+        let free = target_free
+            .get_mut(target_slot)
+            .ok_or_else(|| anyhow!("native belt target-capacity slot is outside the workspace"))?;
+        *free = capacity;
+    }
+    if parallel_results.next().is_some() {
+        bail!("native belt target-capacity result count changed");
+    }
+
+    Ok(TargetCapacityPlanDiagnostics {
+        component_count: plan.len(),
+        parallel_component_count,
+        serial_component_count,
+        worker_count,
+    })
+}
+
 fn build_transfer_target_capacity_plan(
     prepared_routes: &PreparedRoutes,
     selection: &ActiveSelection,
@@ -2857,41 +2937,23 @@ fn prepare_transfer_target_capacities_with_runtime(
             ))
         },
     )?;
-
-    // These probes only read the exact candidate snapshot. Results are kept
-    // private to workers, collected in route order, then applied below in the
-    // original first-use order. A worker error is therefore reported at the
-    // same stable component boundary and cannot partially mutate GameState.
-    let parallel_results = executor.indexed_map(&parallel_route_indices, |_, route_index| {
-        target_capacity_for_route(
-            state,
-            base,
-            entities,
-            prepared_routes,
-            expand_compact_index(*route_index),
-            &mut None,
-        )
-    });
-    let worker_count = if parallel_route_indices.is_empty() {
-        0
-    } else {
-        executor.worker_count_for_items(parallel_route_indices.len())
-    };
-    let parallel_component_count = parallel_route_indices.len();
-    let mut parallel_results = parallel_results.into_iter().enumerate();
-    let mut serial_component_count = 0_usize;
-    for entry in &plan {
-        let route_index = expand_compact_index(entry.route_index);
-        let capacity = if let Some(expected_result_index) = entry.parallel_result_index {
-            let (actual_result_index, result) = parallel_results
-                .next()
-                .ok_or_else(|| anyhow!("native belt target-capacity result is missing"))?;
-            if actual_result_index != expand_compact_index(expected_result_index) {
-                bail!("native belt target-capacity result order changed");
-            }
-            result?
-        } else {
-            serial_component_count = serial_component_count.saturating_add(1);
+    resolve_target_capacity_plan_with_runtime(
+        prepared_routes,
+        &plan,
+        &parallel_route_indices,
+        target_free,
+        executor,
+        |route_index| {
+            target_capacity_for_route(
+                state,
+                base,
+                entities,
+                prepared_routes,
+                route_index,
+                &mut None,
+            )
+        },
+        |route_index| {
             target_capacity_for_route(
                 state,
                 base,
@@ -2899,24 +2961,236 @@ fn prepare_transfer_target_capacities_with_runtime(
                 prepared_routes,
                 route_index,
                 quantum_session,
-            )?
-        };
+            )
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReservationTargetCapacityPolicy {
+    reuse_cached: bool,
+}
+
+fn reservation_target_capacity_policy(
+    state: &CoreState,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    route_index: usize,
+) -> anyhow::Result<ReservationTargetCapacityPolicy> {
+    let route = prepared_routes
+        .routes
+        .get(route_index)
+        .ok_or_else(|| anyhow!("native belt reservation route is outside the topology"))?;
+    let target = entities
+        .get(route.target_index())
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+    let prepared_group = prepared_routes
+        .groups
+        .get(route.source_group())
+        .ok_or_else(|| anyhow!("native belt reservation group is outside the topology"))?;
+    let item_id = state
+        .symbols
+        .resolve(prepared_group.item_symbol)
+        .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+    let quantum_supply = crate::quantum_logistics::is_supply_endpoint(target, item_id);
+    let building_id = string_at(target, "buildingId");
+    // A quantum supply slot includes one shared network balance, so another
+    // station can invalidate a capacity computed by the input transfer. An
+    // orbital terminal's topology slot is port-specific while its persisted
+    // input balance is entity/item-specific, so a sibling port can do the
+    // same. The two unbounded sinks report MAX_SAFE capacity independently
+    // of the material just moved, so their decremented workspace value is not
+    // a reusable physical-capacity snapshot. Every remaining target-slot key
+    // fully owns the finite capacity it consumed during the immediately
+    // preceding input transfer.
+    let unbounded_sink = building_id == Some("micro_black_hole_connector")
+        || (building_id == Some("material_delivery_hub")
+            && matches!(item_id, "logistics_drone" | "logistics_vessel"));
+    let reuse_cached =
+        !quantum_supply && building_id != Some("orbital_cargo_terminal") && !unbounded_sink;
+    Ok(ReservationTargetCapacityPolicy { reuse_cached })
+}
+
+fn build_reservation_target_capacity_plan(
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    target_free: &mut [f64],
+    touched_target_slots: &mut Vec<u32>,
+    mut route_allowance: impl FnMut(usize) -> anyhow::Result<f64>,
+    mut route_policy: impl FnMut(usize) -> anyhow::Result<ReservationTargetCapacityPolicy>,
+) -> anyhow::Result<Vec<TargetCapacityPlanEntry>> {
+    if target_free.len() != expand_compact_index(prepared_routes.target_slot_count) {
+        bail!("native belt reservation target-capacity workspace changed");
+    }
+
+    let mut plan = Vec::<TargetCapacityPlanEntry>::new();
+    for route_index in selection.route_indices(prepared_routes.routes.len()) {
+        let allowance = route_allowance(route_index)?;
+        if allowance < 1.0 {
+            continue;
+        }
+        let route = prepared_routes
+            .routes
+            .get(route_index)
+            .ok_or_else(|| anyhow!("native belt reservation route is outside the topology"))?;
+        let target_slot = route.target_slot();
+        let current = *target_free.get(target_slot).ok_or_else(|| {
+            anyhow!("native belt reservation target slot is outside the workspace")
+        })?;
+        // NEG_INFINITY is the private first-use marker installed by this
+        // builder. It prevents duplicate routes from scheduling the same
+        // target component while no worker can observe mutable workspace.
+        if current.is_infinite() && current.is_sign_negative() {
+            continue;
+        }
+        if !current.is_nan() && (!current.is_finite() || current < 0.0) {
+            bail!("native belt reservation cached target capacity is invalid");
+        }
+
+        let policy = route_policy(route_index)?;
+        if current.is_finite() && policy.reuse_cached {
+            continue;
+        }
+        if current.is_nan() {
+            touched_target_slots.push(compact_index(
+                target_slot,
+                "reservation target-capacity touched slot",
+            )?);
+        }
+        target_free[target_slot] = f64::NEG_INFINITY;
+        plan.push(TargetCapacityPlanEntry {
+            route_index: compact_index(
+                route_index,
+                "reservation target-capacity plan route index",
+            )?,
+            // Reservation has its own fixed-chunk resolver. Each large-batch
+            // chunk owns a private read-only quantum session, while a small
+            // batch uses one shared serial session.
+            parallel_result_index: None,
+        });
+    }
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_reservation_target_capacity_plan_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    plan: &[TargetCapacityPlanEntry],
+    target_free: &mut [f64],
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<TargetCapacityPlanDiagnostics> {
+    if plan.is_empty() {
+        return Ok(TargetCapacityPlanDiagnostics::default());
+    }
+    let worker_count = executor.worker_count_for_items(plan.len());
+    if worker_count == 1 {
+        for entry in plan {
+            let route_index = expand_compact_index(entry.route_index);
+            let capacity = target_capacity_for_route(
+                state,
+                base,
+                entities,
+                prepared_routes,
+                route_index,
+                quantum_session,
+            )?;
+            if !capacity.is_finite() || capacity < 0.0 {
+                bail!("native belt target capacity is invalid");
+            }
+            target_free[prepared_routes.routes[route_index].target_slot()] = capacity;
+        }
+        return Ok(TargetCapacityPlanDiagnostics {
+            component_count: plan.len(),
+            parallel_component_count: 0,
+            serial_component_count: plan.len(),
+            worker_count,
+        });
+    }
+
+    // Supply-capacity queries only read their parsed network. Each fixed
+    // chunk owns one lazy private session, so quantum inventory never crosses
+    // worker boundaries and is parsed at most once per chunk. Chunk results
+    // are collected and replayed in first-use order; no worker can mutate the
+    // authoritative network, target ledger, reservation map, or float sums.
+    let chunk_results = executor.ordered_chunk_map(
+        plan.len(),
+        RESERVATION_TARGET_CAPACITY_ROWS_PER_CHUNK,
+        |_, range| {
+            let mut private_quantum_session = None;
+            range
+                .map(|plan_index| {
+                    target_capacity_for_route(
+                        state,
+                        base,
+                        entities,
+                        prepared_routes,
+                        expand_compact_index(plan[plan_index].route_index),
+                        &mut private_quantum_session,
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    );
+    let mut results = chunk_results.into_iter().flatten();
+    for entry in plan {
+        let route_index = expand_compact_index(entry.route_index);
+        let capacity = results.next().ok_or_else(|| {
+            anyhow!("native belt reservation target-capacity result is missing")
+        })??;
         if !capacity.is_finite() || capacity < 0.0 {
             bail!("native belt target capacity is invalid");
         }
-        let target_slot = prepared_routes.routes[route_index].target_slot();
-        target_free[target_slot] = capacity;
+        target_free[prepared_routes.routes[route_index].target_slot()] = capacity;
     }
-    if parallel_results.next().is_some() {
-        bail!("native belt target-capacity result count changed");
+    if results.next().is_some() {
+        bail!("native belt reservation target-capacity result count changed");
     }
-
     Ok(TargetCapacityPlanDiagnostics {
         component_count: plan.len(),
-        parallel_component_count,
-        serial_component_count,
+        parallel_component_count: plan.len(),
+        serial_component_count: 0,
         worker_count,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_reservation_target_capacities_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    progress: &BeltPagedColumn<f64>,
+    target_free: &mut [f64],
+    touched_target_slots: &mut Vec<u32>,
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<TargetCapacityPlanDiagnostics> {
+    let plan = build_reservation_target_capacity_plan(
+        prepared_routes,
+        selection,
+        target_free,
+        touched_target_slots,
+        |route_index| Ok((progress[route_index] + EPSILON).floor().max(0.0)),
+        |route_index| {
+            reservation_target_capacity_policy(state, entities, prepared_routes, route_index)
+        },
+    )?;
+    resolve_reservation_target_capacity_plan_with_runtime(
+        state,
+        base,
+        entities,
+        prepared_routes,
+        &plan,
+        target_free,
+        quantum_session,
+        executor,
+    )
 }
 
 fn route_from_record(
@@ -3753,8 +4027,8 @@ pub(crate) fn reserve(
             active_source_items: Vec::new(),
         },
     };
+    let mut profiler = BeltTransferProfiler::new();
     let mut quantum_session = None;
-    belt_runtime.workspace.reset_target_free();
     let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
         std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
     } else {
@@ -3775,6 +4049,21 @@ pub(crate) fn reserve(
     let progress = &belt_runtime.progress;
     let target_free = &mut belt_runtime.workspace.target_free;
     let touched_target_slots = &mut belt_runtime.workspace.touched_target_slots;
+    let target_capacity_diagnostics = prepare_reservation_target_capacities_with_runtime(
+        state,
+        base,
+        entities,
+        prepared_routes,
+        &selection,
+        progress,
+        target_free,
+        touched_target_slots,
+        &mut quantum_session,
+        deterministic_runtime(),
+    )?;
+    profiler.mark("belt-reservation-target-capacity-plan");
+    profiler.reservation_target_capacity_plan(target_capacity_diagnostics);
+
     for belt_index in selection.route_indices(routes.len()) {
         let route = &routes[belt_index];
         let source_group = route.source_group();
@@ -3782,29 +4071,17 @@ pub(crate) fn reserve(
         if allowance < 1.0 {
             continue;
         }
-        let target = entities[route.target_index()]
+        let _target = entities[route.target_index()]
             .as_object()
             .ok_or_else(|| anyhow!("native belt target is not an object"))?;
         let prepared_group = &prepared_routes.groups[source_group];
-        let item_id = state
+        let _item_id = state
             .symbols
             .resolve(prepared_group.item_symbol)
             .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
         let target_slot = route.target_slot();
-        if target_free[target_slot].is_nan() {
-            let free = target_capacity(
-                state,
-                base,
-                &mut quantum_session,
-                entities,
-                target,
-                item_id,
-                route.target_port_index,
-            )?
-            .floor()
-            .max(0.0);
-            target_free[target_slot] = free;
-            touched_target_slots.push(compact_index(target_slot, "reservation target slot")?);
+        if !target_free[target_slot].is_finite() {
+            bail!("native belt reservation target-capacity plan is incomplete");
         }
         let free = target_free[target_slot];
         let reserved = allowance.min(free.floor().max(0.0));
@@ -3824,6 +4101,7 @@ pub(crate) fn reserve(
             .or_insert(0.0);
         *credit = (*credit + reserved).min(belt_limit);
     }
+    profiler.mark("belt-reservation-stable-apply");
     belt_runtime.diagnostics.reservation_allowance_entries = result.allowance_by_belt.len();
     let mut credited_group_indices = result
         .output_credits
@@ -5243,6 +5521,220 @@ mod tests {
         assert!(error.to_string().contains("outside the topology"));
         assert!(target_free.iter().all(|value| value.is_nan()));
         assert!(touched.is_empty());
+    }
+
+    #[test]
+    fn reservation_target_capacity_plan_reuses_only_proven_stable_cached_slots() {
+        let prepared = target_capacity_plan_fixture();
+        let selection = ActiveSelection::All;
+        let progress = [4.0, 4.0, 4.0, 4.0, 0.0];
+        // Slots 0 and 2 were populated by the immediately preceding input
+        // transfer. Route 1 deliberately models a shared-domain target whose
+        // cached value must be refreshed; route 0 models an owned target slot.
+        let mut target_free = vec![17.0, f64::NAN, 23.0, f64::NAN];
+        let mut touched = vec![0, 2];
+        let mut classified = Vec::new();
+
+        let plan = build_reservation_target_capacity_plan(
+            &prepared,
+            &selection,
+            &mut target_free,
+            &mut touched,
+            |route_index| Ok(progress[route_index]),
+            |route_index| {
+                classified.push(route_index);
+                Ok(match route_index {
+                    1 => ReservationTargetCapacityPolicy {
+                        reuse_cached: false,
+                    },
+                    _ => ReservationTargetCapacityPolicy { reuse_cached: true },
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(classified, [0, 1, 3]);
+        assert_eq!(
+            plan.iter()
+                .map(|entry| expand_compact_index(entry.route_index))
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|entry| entry.parallel_result_index.map(expand_compact_index))
+                .collect::<Vec<_>>(),
+            [None, None]
+        );
+        assert_eq!(touched, [0, 2, 1]);
+        assert!(target_free[0].is_infinite() && target_free[0].is_sign_negative());
+        assert!(target_free[1].is_infinite() && target_free[1].is_sign_negative());
+        assert_eq!(target_free[2].to_bits(), 23.0_f64.to_bits());
+        assert!(target_free[3].is_nan());
+    }
+
+    fn target_capacity_resolver_fixture(component_count: usize) -> PreparedRoutes {
+        let routes = (0..component_count)
+            .map(|route_index| Route {
+                capacity: 6.0,
+                source_index: 0,
+                target_index: 0,
+                source_group: 0,
+                target_slot: compact_index(route_index, "resolver target slot").unwrap(),
+                belt_sort_rank: compact_index(route_index, "resolver belt rank").unwrap(),
+                target_port_index: None,
+                priority: 1,
+            })
+            .collect::<Vec<_>>();
+        PreparedRoutes {
+            routes,
+            groups: Vec::new(),
+            target_slot_count: compact_index(component_count, "resolver target count").unwrap(),
+            total_capacity: component_count as f64 * 6.0,
+            group_by_key: Arc::new(HashMap::new()),
+        }
+    }
+
+    fn all_parallel_target_capacity_plan(component_count: usize) -> Vec<TargetCapacityPlanEntry> {
+        (0..component_count)
+            .map(|route_index| TargetCapacityPlanEntry {
+                route_index: compact_index(route_index, "resolver plan route").unwrap(),
+                parallel_result_index: Some(
+                    compact_index(route_index, "resolver result index").unwrap(),
+                ),
+            })
+            .collect()
+    }
+
+    fn resolver_capacity(route_index: usize) -> f64 {
+        if route_index.is_multiple_of(257) {
+            -0.0
+        } else {
+            f64::from(u32::try_from(route_index % 10_007).unwrap()) + 0.25
+        }
+    }
+
+    #[test]
+    fn target_capacity_resolution_matches_bitwise_at_one_two_four_and_eight_workers() {
+        let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let prepared = target_capacity_resolver_fixture(component_count);
+        let plan = all_parallel_target_capacity_plan(component_count);
+        let parallel_routes = (0..component_count)
+            .map(|route_index| compact_index(route_index, "resolver parallel route").unwrap())
+            .collect::<Vec<_>>();
+        let run = |workers| {
+            let mut target_free = vec![f64::NEG_INFINITY; component_count];
+            let diagnostics = resolve_target_capacity_plan_with_runtime(
+                &prepared,
+                &plan,
+                &parallel_routes,
+                &mut target_free,
+                &DeterministicRuntime::for_test(workers),
+                |route_index| Ok(resolver_capacity(route_index)),
+                |_| unreachable!("all resolver components are private probes"),
+            )
+            .unwrap();
+            (
+                diagnostics,
+                target_free
+                    .into_iter()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let expected = run(1);
+        assert_eq!(expected.0.worker_count, 1);
+        for workers in [2, 4, 8] {
+            let actual = run(workers);
+            assert_eq!(actual.0.worker_count, workers);
+            assert_eq!(
+                actual.0.component_count, expected.0.component_count,
+                "worker limit {workers}"
+            );
+            assert_eq!(
+                actual.0.parallel_component_count, expected.0.parallel_component_count,
+                "worker limit {workers}"
+            );
+            assert_eq!(
+                actual.0.serial_component_count, expected.0.serial_component_count,
+                "worker limit {workers}"
+            );
+            assert_eq!(actual.1, expected.1, "worker limit {workers}");
+        }
+    }
+
+    #[test]
+    fn target_capacity_resolution_keeps_small_batches_off_the_rayon_pool() {
+        let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS - 1;
+        let prepared = target_capacity_resolver_fixture(component_count);
+        let plan = all_parallel_target_capacity_plan(component_count);
+        let parallel_routes = (0..component_count)
+            .map(|route_index| compact_index(route_index, "small resolver route").unwrap())
+            .collect::<Vec<_>>();
+        let observed_pool_worker = std::sync::atomic::AtomicBool::new(false);
+        let mut target_free = vec![f64::NEG_INFINITY; component_count];
+
+        let diagnostics = resolve_target_capacity_plan_with_runtime(
+            &prepared,
+            &plan,
+            &parallel_routes,
+            &mut target_free,
+            &DeterministicRuntime::for_test(8),
+            |route_index| {
+                if rayon::current_thread_index().is_some() {
+                    observed_pool_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(resolver_capacity(route_index))
+            },
+            |_| unreachable!("all resolver components are private probes"),
+        )
+        .unwrap();
+
+        assert_eq!(diagnostics.worker_count, 1);
+        assert!(!observed_pool_worker.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn target_capacity_resolution_reports_the_first_stable_error_after_workers_finish() {
+        let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 1;
+        let prepared = target_capacity_resolver_fixture(component_count);
+        let plan = all_parallel_target_capacity_plan(component_count);
+        let parallel_routes = (0..component_count)
+            .map(|route_index| compact_index(route_index, "error resolver route").unwrap())
+            .collect::<Vec<_>>();
+        let completed = std::sync::atomic::AtomicUsize::new(0);
+        let source = "mod:保持/原检查点/Ω🚀".to_owned();
+        let source_before = source.clone();
+        let mut target_free = vec![f64::NEG_INFINITY; component_count];
+
+        let error = resolve_target_capacity_plan_with_runtime(
+            &prepared,
+            &plan,
+            &parallel_routes,
+            &mut target_free,
+            &DeterministicRuntime::for_test(8),
+            |route_index| {
+                let _ = source.len();
+                completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if matches!(route_index, 17 | 4_096) {
+                    Err(anyhow!("private capacity probe {route_index} failed"))
+                } else {
+                    Ok(resolver_capacity(route_index))
+                }
+            },
+            |_| unreachable!("all resolver components are private probes"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "private capacity probe 17 failed");
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::Relaxed),
+            component_count
+        );
+        assert_eq!(source, source_before);
+        assert_eq!(target_free[16].to_bits(), resolver_capacity(16).to_bits());
+        assert!(target_free[17].is_infinite() && target_free[17].is_sign_negative());
     }
 
     #[test]

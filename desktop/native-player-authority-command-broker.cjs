@@ -57,6 +57,13 @@ function normalizeRequest(value) {
       "NATIVE_PLAYER_AUTHORITY_COMMAND_REQUEST_INVALID",
     );
   }
+  if (value.command.topLevelChanges.some((change) =>
+    isRecord(change) && Array.isArray(change.path) && change.path[0] === "paused")) {
+    throw brokerError(
+      "native player-authority pause requires the dedicated durable lifecycle",
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_REQUEST_INVALID",
+    );
+  }
   let encoded;
   try {
     encoded = JSON.stringify(value.command);

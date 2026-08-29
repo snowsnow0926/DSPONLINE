@@ -2513,6 +2513,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     source: NativePlayerAuthorityCommandSource;
   } | null>(null);
   const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  const nativePlayerAuthorityPauseInFlightRef = useRef(false);
   const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
   if (!nativePlayerAuthorityActiveFrame) {
     nativePlayerAuthorityCommandBindingRef.current = null;
@@ -7061,7 +7062,75 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const togglePause = useCallback(() => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      setNotice("Windows 原生权威的暂停控制仍在闭合中；本次操作未应用，也没有修改旧 JavaScript 状态");
+      const bridge = desktopBridge;
+      const frame = nativePlayerAuthorityClockRef.current?.getSnapshot().currentFrame ?? null;
+      if (!bridge?.setNativePlayerAuthorityPaused || frame?.schemaVersion !== 1) {
+        setNotice("Windows 原生暂停控制当前不可用；本次操作未应用，也没有修改旧 JavaScript 状态");
+        return;
+      }
+      const targetPaused = frame.phase === "active" || frame.phase === "pause-uncertain"
+        ? true
+        : frame.phase === "paused" || frame.phase === "resume-uncertain"
+          ? false
+          : null;
+      if (targetPaused === null) {
+        if (frame.phase === "uncertain") {
+          setNotice("最后一个模拟秒的落盘回执暂时无法确认，程序已保护性停止；请重启应用，让 Rust 从磁盘恢复后再尝试暂停。不会切换到旧 JavaScript 状态，也不会主动回退进度");
+          return;
+        }
+        const label = frame.phase === "pausing"
+          ? "暂停正在安全落盘"
+          : frame.phase === "resuming"
+            ? "继续正在建立新时间锚点"
+            : "原生权威当前正在处理其他事务";
+        setNotice(`${label}；请等待当前回执完成`);
+        return;
+      }
+      if (nativePlayerAuthorityCommandInFlightRef.current) {
+        setNotice("当前建筑或物流操作正在落盘；完成后再切换暂停状态");
+        return;
+      }
+      if (nativePlayerAuthorityPauseInFlightRef.current) {
+        setNotice("暂停状态正在核对；请等待当前回执完成");
+        return;
+      }
+      nativePlayerAuthorityPauseInFlightRef.current = true;
+      invalidateFactoryAlertProjection();
+      setNotice(targetPaused
+        ? "正在结清已到期的一秒并安全暂停；不会丢弃进度"
+        : "正在从新的当前时间继续；暂停期间不会补算积压时间");
+      void bridge.setNativePlayerAuthorityPaused({ paused: targetPaused })
+        .then(async (receipt) => {
+          await nativePlayerAuthorityClockRef.current?.refresh();
+          const settled = receipt.phase === (targetPaused ? "paused" : "active");
+          setNotice(settled
+            ? targetPaused ? "模拟已安全暂停" : "模拟已继续"
+            : "暂停状态回执仍在核对；不会切换到旧 JavaScript 状态");
+        })
+        .catch(async () => {
+          await nativePlayerAuthorityClockRef.current?.refresh();
+          const latest = nativePlayerAuthorityClockRef.current?.getSnapshot().currentFrame;
+          if (latest?.schemaVersion === 1 &&
+              latest.phase === (targetPaused ? "paused" : "active")) {
+            setNotice(targetPaused ? "模拟已安全暂停" : "模拟已继续");
+            return;
+          }
+          if (latest?.schemaVersion === 1 &&
+              latest.phase === (targetPaused ? "pause-uncertain" : "resume-uncertain")) {
+            setNotice(targetPaused
+              ? "暂停事务的最终回执暂时无法确认；请再次点击，程序会按同一个持久事务核对，不会重复提交"
+              : "继续事务的最终回执暂时无法确认；请再次点击，程序会按同一时间锚点核对，不会补算暂停时间");
+            return;
+          }
+          if (latest?.schemaVersion === 1 && latest.phase === "uncertain") {
+            setNotice("暂停前最后一个模拟秒的落盘回执暂时无法确认，程序已保护性停止；请重启应用，让 Rust 从磁盘恢复后再操作。不会切换到旧 JavaScript 状态，也不会主动回退进度");
+            return;
+          }
+          setNotice("暂停状态尚未确认，程序没有切换到旧 JavaScript 状态；请等待片刻，若状态不恢复请重启应用后再操作");
+        })
+        .finally(() => {
+          nativePlayerAuthorityPauseInFlightRef.current = false;
+        });
       return;
     }
     if (gameRef.current.paused && durableRecoveryLifecycleRef.current === "active" &&
@@ -7081,7 +7150,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       dispatchDurableUiCommandRef.current();
     }
     setNotice(wasPaused ? "模拟已继续" : "模拟已暂停");
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
+  }, [desktopBridge, invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
 
   const handleTimeWarpEnabledChange = useCallback((enabled: boolean) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -7787,13 +7856,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         await nativePlayerAuthorityClock.refresh();
         const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
         const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, request.rustLease.sessionId);
+        const bound = selectBoundNativePlayerAuthorityFrame(clockSnapshot, request.rustLease.sessionId);
+        const paused = bound?.phase === "paused" && !bound.inFlight &&
+            bound.currentOperation === null && bound.lastErrorCode === null
+          ? bound
+          : null;
+        const settled = active ?? paused;
         const macro = selectNativePlayerAuthorityMacroStatus(
           clockSnapshot,
           clockSnapshot.expectedSessionId,
         );
-        const clockRevision = active?.revision ?? macro?.revision ?? null;
-        const nextDeadlineMs = active?.nextDeadlineMs ?? macro?.nextDeadlineMs ?? null;
-        if ((!active && !macro) || active && active.runId !== request.rustLease.runId ||
+        const clockRevision = settled?.revision ?? macro?.revision ?? null;
+        const nextDeadlineMs = settled?.nextDeadlineMs ?? macro?.nextDeadlineMs ?? null;
+        if ((!settled && !macro) || settled && settled.runId !== request.rustLease.runId ||
+          settled && request.rustLease.summary.paused !== (settled.phase === "paused") ||
           clockRevision !== request.rustLease.checkpoint.revision ||
           !Number.isSafeInteger(nextDeadlineMs) ||
           journal.nativeWriterFence.ownerId !== `native_authority:${request.rustLease.runId}`) {

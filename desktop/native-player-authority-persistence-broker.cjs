@@ -43,11 +43,12 @@ function validLogicalId(value, maximum = 128) {
 function validateBoundary(boundary, summary) {
   if (!isRecord(boundary) || !validLogicalId(boundary.sessionId) || !validLogicalId(boundary.runId) ||
       !Number.isSafeInteger(boundary.revision) || boundary.revision < 0 ||
+      typeof boundary.paused !== "boolean" ||
       !isRecord(boundary.checkpoint) || !Number.isSafeInteger(boundary.checkpoint.generation) ||
       boundary.checkpoint.generation < 1 || !SHA256_PATTERN.test(boundary.checkpoint.rootHash) ||
       boundary.checkpoint.revision !== boundary.revision || !isRecord(summary) ||
       summary.revision !== boundary.revision || summary.stateVersion !== 47 ||
-      summary.mode !== "normal" || summary.paused !== false ||
+      summary.mode !== "normal" || summary.paused !== boundary.paused ||
       summary.coverage?.authorityEligible !== true) {
     throw brokerError(
       "native player-authority durable boundary is incomplete",

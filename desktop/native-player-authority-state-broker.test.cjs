@@ -143,6 +143,31 @@ test("uncertain state remains revision-addressable but read-only", () => {
   assert.equal(result.lastErrorCode, "NATIVE_PLAYER_AUTHORITY_TICK_UNCERTAIN");
 });
 
+test("pause lifecycle states remain bounded and settled paused is clock-stopped", () => {
+  for (const value of [
+    active({ phase: "pausing", inFlight: true, currentOperation: "pause" }),
+    active({ phase: "resuming", inFlight: true, currentOperation: "resume" }),
+    active({ phase: "pause-uncertain", currentOperation: null,
+      lastErrorCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN" }),
+    active({ phase: "resume-uncertain", currentOperation: "resume", inFlight: true,
+      lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN" }),
+    active({ phase: "paused" }),
+  ]) {
+    assert.deepEqual(normalizeNativePlayerAuthorityState(value), {
+      schemaVersion: 1,
+      ...value,
+    });
+  }
+  for (const invalid of [
+    active({ phase: "paused", inFlight: true }),
+    active({ phase: "paused", currentOperation: "pause" }),
+    active({ phase: "pausing", currentOperation: "resume" }),
+    active({ phase: "pause-uncertain", lastErrorCode: null }),
+  ]) {
+    assert.throws(() => normalizeNativePlayerAuthorityState(invalid), /native player-authority/i);
+  }
+});
+
 test("partial identities, discontinuous sequences and malformed active states fail closed", () => {
   for (const value of [
     active({ runId: null }),

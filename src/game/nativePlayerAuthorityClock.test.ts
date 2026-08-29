@@ -141,6 +141,29 @@ describe("native player-authority clock validation", () => {
       .toEqual({ kind: "finished-pending-disable", revision: 10 });
   });
 
+  it("accepts bounded pause lifecycle frames and rejects impossible phase shapes", () => {
+    for (const frame of [
+      activeFrame({ phase: "pausing", inFlight: true, currentOperation: "pause" }),
+      activeFrame({ phase: "paused" }),
+      activeFrame({ phase: "resuming", inFlight: true, currentOperation: "resume" }),
+      activeFrame({ phase: "pause-uncertain",
+        lastErrorCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN" }),
+      activeFrame({ phase: "resume-uncertain", inFlight: true, currentOperation: "resume",
+        lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN" }),
+    ]) {
+      expect(normalizeNativePlayerAuthorityClockFrame(frame)).toEqual(frame);
+    }
+    for (const malformed of [
+      activeFrame({ phase: "paused", inFlight: true }),
+      activeFrame({ phase: "paused", currentOperation: "pause" }),
+      activeFrame({ phase: "pausing", currentOperation: "resume" }),
+      activeFrame({ phase: "pause-uncertain", lastErrorCode: null }),
+    ]) {
+      expect(() => normalizeNativePlayerAuthorityClockFrame(malformed))
+        .toThrow(/native player-authority/i);
+    }
+  });
+
   it("accepts identity-free pre-authority and fault frames without manufacturing a session", () => {
     const identityFree = {
       ...activeFrame(),
@@ -246,6 +269,17 @@ describe("NativePlayerAuthorityClockController", () => {
     });
     expect(selectBoundNativePlayerAuthorityFrame(snapshot, snapshot.expectedSessionId)?.revision).toBe(10);
     expect(selectActiveNativePlayerAuthorityFrame(snapshot, snapshot.expectedSessionId)?.runId).toBe("run-a");
+  });
+
+  it("keeps a startup-recovered paused session bound but not mutation-active", async () => {
+    const value = clockFixture(activeFrame({ phase: "paused" }));
+    value.controller.start();
+    await settlePromises();
+
+    const snapshot = value.controller.getSnapshot();
+    expect(selectBoundNativePlayerAuthorityFrame(snapshot, "core-a")?.phase).toBe("paused");
+    expect(selectActiveNativePlayerAuthorityFrame(snapshot, "core-a")).toBeNull();
+    expect(snapshot.lastConfirmedFrame).toBeNull();
   });
 
   it("treats an unbound v1 push only as a pull wake-up and never binds from the event payload", async () => {

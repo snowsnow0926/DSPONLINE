@@ -404,6 +404,12 @@ function assertCommandStructure(value: unknown, expectedRevision: number): Norma
   }
   command.topLevelChanges.forEach((change, index) =>
     assertValuePatch(change, `topLevelChanges[${index}]`));
+  if (command.topLevelChanges.some((change) => change.path[0] === "paused")) {
+    throw sourceError(
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_INVALID",
+      "暂停与继续必须由 Windows 主进程的专用持久化生命周期处理",
+    );
+  }
 
   const validateChangedRecords = (
     records: unknown[],

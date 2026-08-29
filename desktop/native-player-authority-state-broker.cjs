@@ -14,12 +14,15 @@ const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const LEGACY_PHASES = new Set([
-  "idle", "activating", "recovering", "active", "uncertain", "faulted", "shutdown",
+  "idle", "activating", "recovering", "active", "pausing", "paused", "resuming",
+  "pause-uncertain", "resume-uncertain", "uncertain", "faulted", "shutdown",
 ]);
 const MACRO_PHASES = new Set([
   "macro-active", "macro-committing", "macro-finishing", "macro-uncertain",
 ]);
-const LEGACY_OPERATIONS = new Set([null, "activation", "recovery", "tick", "command"]);
+const LEGACY_OPERATIONS = new Set([
+  null, "activation", "recovery", "tick", "command", "pause", "resume",
+]);
 const MACRO_OPERATIONS = new Set([null, "macro-advance", "macro-finish"]);
 
 class NativePlayerAuthorityStateBrokerError extends Error {
@@ -115,7 +118,9 @@ function normalizeCommonState(value) {
   if (hasCompleteIdentity && acknowledgedSequence + 1 !== nextSequence) {
     throw stateError("native player-authority sequence is not contiguous");
   }
-  if ((phase === "active" || macroPhase) && !hasCompleteIdentity) {
+  if (([
+    "active", "pausing", "paused", "resuming", "pause-uncertain", "resume-uncertain",
+  ].includes(phase) || macroPhase) && !hasCompleteIdentity) {
     throw stateError("active native player-authority state is incomplete");
   }
   if (["idle", "activating", "recovering"].includes(phase) && !hasNoIdentity) {
@@ -300,6 +305,23 @@ function normalizeNativePlayerAuthorityState(value, macroDetails, macroRecoveryH
     }
     if (common.phase === "active" && common.lastErrorCode !== null) {
       throw stateError("active native player-authority state is incomplete");
+    }
+    if (common.phase === "paused" &&
+        (common.inFlight || common.currentOperation !== null || common.lastErrorCode !== null ||
+          common.queuedCommands !== 0)) {
+      throw stateError("paused native player-authority state is not settled");
+    }
+    if (common.phase === "pausing" &&
+        (common.currentOperation !== "pause" || common.lastErrorCode !== null) ||
+        common.phase === "resuming" &&
+        (common.currentOperation !== "resume" || common.lastErrorCode !== null)) {
+      throw stateError("native player-authority pause lifecycle transition is invalid");
+    }
+    if (common.phase === "pause-uncertain" &&
+        (common.lastErrorCode === null || ![null, "pause"].includes(common.currentOperation)) ||
+        common.phase === "resume-uncertain" &&
+        (common.lastErrorCode === null || ![null, "resume"].includes(common.currentOperation))) {
+      throw stateError("native player-authority pause lifecycle uncertainty is invalid");
     }
     const recoveryHint = normalizeMacroRecoveryHint(macroRecoveryHint, common);
     return Object.freeze({

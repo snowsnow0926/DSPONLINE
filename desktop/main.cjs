@@ -624,7 +624,7 @@ async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId
   let observation = nativePlayerAuthorityStartupReconcileObservation;
   const recoveredRuntimePhase = nativePlayerAuthorityRuntime?.snapshot().phase ?? null;
   if (observation.state === "active" &&
-      !["active", "macro-active"].includes(recoveredRuntimePhase)) {
+      !["active", "paused", "macro-active"].includes(recoveredRuntimePhase)) {
     observation = Object.freeze({ state: "unknown" });
   }
   const handoffId = `startup-reconcile-${randomUUID()}`;
@@ -635,7 +635,8 @@ async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId
     releaseAuthorized: rustLease.state === "absent",
     timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
   }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
-  if (observation.state === "active" && ["active", "macro-active"].includes(recoveredRuntimePhase) &&
+  if (observation.state === "active" &&
+      ["active", "paused", "macro-active"].includes(recoveredRuntimePhase) &&
       nativePlayerAuthorityPersistenceBroker) {
     // Keep the exact clock frozen from checkpoint capture through renderer
     // drain and ACK. The outer retry coordinator starts a fresh atomic attempt
@@ -832,11 +833,13 @@ async function initializeNativeHost() {
         ...inspectedExactRealtimeStartup,
         state: "player-authority-recovered",
         leaseState: "valid",
-        leasePhase: "active",
+        leasePhase: playerAuthorityStartupRecovery.paused ? "paused" : "active",
         code: null,
         normalWindowAllowed: true,
         message: playerAuthorityStartupRecovery.macroSessionId
           ? "已恢复 Windows 原生纯挂机结算；普通确定性时钟保持暂停"
+          : playerAuthorityStartupRecovery.paused
+            ? "已恢复 Windows 原生玩家权威会话；模拟保持玩家暂停状态"
           : "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
       }
       : inspectedExactRealtimeStartup;
@@ -1529,6 +1532,29 @@ ipcMain.handle("desktop:native-player-authority-state", async (event) =>
     fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED",
     message: "无法读取 Windows 原生玩家权威时钟",
   }, async () => validatedNativePlayerAuthorityState(requireTrustedNativeSender(event))));
+
+ipcMain.handle("desktop:native-player-authority-set-paused", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityState", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_FAILED",
+    message: "Windows 原生暂停状态切换失败",
+  }, async () => {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Reflect.ownKeys(request).length !== 1 || !Object.hasOwn(request, "paused") ||
+        typeof request.paused !== "boolean") {
+      throw Object.assign(new TypeError("native player-authority pause intent is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PAUSE_REQUEST_INVALID",
+      });
+    }
+    if (!nativePlayerAuthorityRuntime ||
+        typeof nativePlayerAuthorityRuntime.setPaused !== "function") {
+      throw Object.assign(new Error("native player-authority pause lifecycle is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE",
+      });
+    }
+    await nativePlayerAuthorityRuntime.setPaused(request.paused);
+    return validatedNativePlayerAuthorityState(rendererOwnerId);
+  }));
 
 ipcMain.handle("desktop:native-player-authority-macro-start", async (event, request) =>
   runRendererNativeOperation("playerAuthorityMacroReceipt", {

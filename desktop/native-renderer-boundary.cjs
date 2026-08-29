@@ -74,6 +74,10 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
   "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
   "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY", "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+  "NATIVE_PLAYER_AUTHORITY_PAUSE_FAILED", "NATIVE_PLAYER_AUTHORITY_PAUSE_BUSY",
+  "NATIVE_PLAYER_AUTHORITY_PAUSE_INVALID", "NATIVE_PLAYER_AUTHORITY_PAUSE_RECEIPT_INVALID",
+  "NATIVE_PLAYER_AUTHORITY_PAUSE_REQUEST_INVALID", "NATIVE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE",
+  "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN", "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN",
   "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
   "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
   "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY", "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
@@ -5842,7 +5846,8 @@ function normalizePlayerAuthorityV1State(value) {
   const source = exactObject(value, keys, "native player-authority state");
   if (source.schemaVersion !== 1) throw protocolError("native player-authority state schema");
   const phase = oneOf(source.phase, [
-    "idle", "activating", "recovering", "active", "uncertain", "faulted", "shutdown",
+    "idle", "activating", "recovering", "active", "pausing", "paused", "resuming",
+    "pause-uncertain", "resume-uncertain", "uncertain", "faulted", "shutdown",
   ], "native player-authority phase");
   const nullableLogicalId = (entry, label) => entry === null ? null : logicalId(entry, label, 128);
   const nullableInteger = (entry, label, minimum) => entry === null
@@ -5867,7 +5872,7 @@ function normalizePlayerAuthorityV1State(value) {
     0,
   );
   const currentOperation = oneOf(source.currentOperation, [
-    null, "activation", "recovery", "tick", "command",
+    null, "activation", "recovery", "tick", "command", "pause", "resume",
   ], "native player-authority operation");
   const queuedCommands = safeInteger(
     source.queuedCommands,
@@ -5882,9 +5887,22 @@ function normalizePlayerAuthorityV1State(value) {
   const emptyIdentity = identity.every((entry) => entry === null);
   if ((!completeIdentity && !emptyIdentity) ||
       completeIdentity && acknowledgedSequence + 1 !== nextSequence ||
-      phase === "active" && (!completeIdentity || lastErrorCode !== null) ||
+      ["active", "pausing", "paused", "resuming", "pause-uncertain", "resume-uncertain"]
+        .includes(phase) && !completeIdentity ||
+      phase === "active" && lastErrorCode !== null ||
       ["idle", "activating", "recovering"].includes(phase) && !emptyIdentity) {
     throw protocolError("native player-authority state identity");
+  }
+  const inFlight = boolean(source.inFlight, "native player-authority in-flight flag");
+  if (phase === "paused" &&
+      (inFlight || currentOperation !== null || lastErrorCode !== null || queuedCommands !== 0) ||
+      phase === "pausing" && (currentOperation !== "pause" || lastErrorCode !== null) ||
+      phase === "resuming" && (currentOperation !== "resume" || lastErrorCode !== null) ||
+      phase === "pause-uncertain" &&
+        (lastErrorCode === null || ![null, "pause"].includes(currentOperation)) ||
+      phase === "resume-uncertain" &&
+        (lastErrorCode === null || ![null, "resume"].includes(currentOperation))) {
+    throw protocolError("native player-authority pause lifecycle state");
   }
   let macroRecoveryHint = null;
   if (Object.hasOwn(source, "macroRecoveryHint")) {
@@ -5914,7 +5932,7 @@ function normalizePlayerAuthorityV1State(value) {
     acknowledgedSequence,
     nextSequence,
     nextDeadlineMs,
-    inFlight: boolean(source.inFlight, "native player-authority in-flight flag"),
+    inFlight,
     currentOperation,
     queuedCommands,
     lastErrorCode,

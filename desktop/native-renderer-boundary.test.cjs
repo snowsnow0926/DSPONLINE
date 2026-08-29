@@ -85,6 +85,43 @@ test("player-authority clock state is exact, bounded and contains no writer iden
   }
 });
 
+test("player-authority pause lifecycle states expose no durable identity", () => {
+  const base = {
+    schemaVersion: 1,
+    phase: "paused",
+    sessionId: "core-paused-1",
+    runId: "player-run-paused-1",
+    revision: 12,
+    acknowledgedSequence: 5,
+    nextSequence: 6,
+    nextDeadlineMs: 12_000,
+    inFlight: false,
+    currentOperation: null,
+    queuedCommands: 0,
+    lastErrorCode: null,
+  };
+  for (const state of [
+    base,
+    { ...base, phase: "pausing", inFlight: true, currentOperation: "pause" },
+    { ...base, phase: "resuming", inFlight: true, currentOperation: "resume" },
+    { ...base, phase: "pause-uncertain", lastErrorCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN" },
+    { ...base, phase: "resume-uncertain", currentOperation: "resume", inFlight: true,
+      lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN" },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+    assert.doesNotMatch(JSON.stringify(state), /checkpoint|settledDeadline|commandId|ownerId/);
+  }
+  for (const invalid of [
+    { ...base, inFlight: true },
+    { ...base, currentOperation: "pause" },
+    { ...base, phase: "pausing", currentOperation: "resume" },
+    { ...base, phase: "resume-uncertain", lastErrorCode: null },
+  ]) {
+    assert.throws(() => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i);
+  }
+});
+
 test("player-authority macro status is an exact scalar-only discriminated union", () => {
   const state = {
     schemaVersion: 2,
@@ -1419,7 +1456,9 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 50);
+  assert.equal(mainChannels.length, 51);
+  assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-set-paused"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));

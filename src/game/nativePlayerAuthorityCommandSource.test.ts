@@ -75,11 +75,11 @@ function macroFrame(revision = 10): DesktopNativePlayerAuthorityMacroState {
   };
 }
 
-function pausePatch(baseRevision = 10): SimulationCommandPatch {
+function metadataPatch(baseRevision = 10): SimulationCommandPatch {
   return {
     protocolVersion: 1,
     baseRevision,
-    topLevelChanges: [{ path: ["paused"], operation: "set", value: true }],
+    topLevelChanges: [{ path: ["lastSavedAt"], operation: "set", value: 50_000 }],
     changedEntities: [],
     addedEntities: [],
     removedEntityIds: [],
@@ -262,8 +262,8 @@ describe("native player-authority command source", () => {
   });
 
   it("creates bounded unique renderer-local command IDs without exposing them as durable IDs", async () => {
-    const firstPatch = pausePatch(70);
-    const secondPatch = pausePatch(71);
+    const firstPatch = metadataPatch(70);
+    const secondPatch = metadataPatch(71);
     const first = await sourceHarness(firstPatch, { topologyDirty: false }).source.applyCommand(firstPatch);
     const second = await sourceHarness(secondPatch, { topologyDirty: false }).source.applyCommand(secondPatch);
 
@@ -272,32 +272,36 @@ describe("native player-authority command source", () => {
     expect(second.commandId.length).toBeLessThanOrEqual(96);
   });
 
-  it("rejects extra keys, malformed IDs, duplicate rows, protocol forgery, and revision forgery before IPC", async () => {
+  it("rejects pause lifecycle, extra keys, malformed IDs, duplicate rows, protocol forgery, and revision forgery before IPC", async () => {
     const cases: unknown[] = [
-      { ...pausePatch(), authority: "renderer" },
-      { ...pausePatch(), commandId: "renderer-forged-durable-id" },
-      { ...pausePatch(), protocolVersion: 2 },
-      { ...pausePatch(), baseRevision: 11 },
       {
-        ...pausePatch(),
+        ...metadataPatch(),
+        topLevelChanges: [{ path: ["paused"], operation: "set", value: true }],
+      },
+      { ...metadataPatch(), authority: "renderer" },
+      { ...metadataPatch(), commandId: "renderer-forged-durable-id" },
+      { ...metadataPatch(), protocolVersion: 2 },
+      { ...metadataPatch(), baseRevision: 11 },
+      {
+        ...metadataPatch(),
         topLevelChanges: [{ path: ["stationSlots", 0], operation: "set", value: undefined }],
       },
       {
-        ...pausePatch(),
+        ...metadataPatch(),
         topLevelChanges: [],
         changedEntities: [{ id: "entity-a", changes: [
           { path: ["inputs", "iron_ore"], operation: "set", value: 1 },
         ], ownerId: "renderer" }],
       },
       {
-        ...pausePatch(),
+        ...metadataPatch(),
         topLevelChanges: [],
         changedEntities: [{ id: "bad\0entity", changes: [
           { path: ["inputs", "iron_ore"], operation: "set", value: 1 },
         ] }],
       },
       {
-        ...pausePatch(),
+        ...metadataPatch(),
         topLevelChanges: [],
         changedEntities: [{ id: "entity-a", changes: [
           { path: ["inputs", "iron_ore"], operation: "set", value: 1 },
@@ -306,7 +310,7 @@ describe("native player-authority command source", () => {
       },
     ];
     for (const malformed of cases) {
-      const harness = sourceHarness(pausePatch());
+      const harness = sourceHarness(metadataPatch());
       await expect(harness.source.applyCommand(malformed as SimulationCommandPatch)).rejects.toMatchObject({
         code: expect.stringMatching(/INVALID|REVISION_MISMATCH/),
       });
@@ -338,7 +342,7 @@ describe("native player-authority command source", () => {
   });
 
   it("enforces one in-flight command and consumes the exact frame after success", async () => {
-    const patch = pausePatch();
+    const patch = metadataPatch();
     const frame = activeFrame();
     let current: DesktopNativePlayerAuthorityState = frame;
     let resolveApply!: (value: DesktopNativeCoreCommandResult) => void;
@@ -376,7 +380,7 @@ describe("native player-authority command source", () => {
         lastErrorCode: "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
       }),
     ] as DesktopNativePlayerAuthorityState[]) {
-      const patch = pausePatch();
+      const patch = metadataPatch();
       const harness = sourceHarness(patch);
       harness.setFrame(pulled);
       await expect(harness.source.applyCommand(patch)).rejects.toMatchObject({
@@ -390,7 +394,7 @@ describe("native player-authority command source", () => {
   });
 
   it("poisons the source when preflight, dispatch, or postflight transport is uncertain", async () => {
-    const patch = pausePatch();
+    const patch = metadataPatch();
     const frame = activeFrame();
     const preflightFailureBridge = {
       getNativePlayerAuthorityState: vi.fn(async () => { throw new Error("clock pull lost"); }),
@@ -463,7 +467,7 @@ describe("native player-authority command source", () => {
 
   it("accepts bounded Unicode opaque IDs only in UTF-8 stable receipt order", async () => {
     const patch: SimulationCommandPatch = {
-      ...pausePatch(88),
+      ...metadataPatch(88),
       topLevelChanges: [],
       changedEntities: ["MOD-物品/Ω", "MOD-\uE000", "MOD-𐀀"].map((id) => ({
         id,

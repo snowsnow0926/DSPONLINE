@@ -32,9 +32,11 @@ function fixture(overrides = {}) {
     sessionId: "core-main-1",
     runId: "player-run-1",
     revision: 41,
+    paused: false,
     checkpoint: CHECKPOINT,
     acknowledgedSequence: 7,
     settledDeadlineMs: 18_000,
+    ...overrides.boundary,
   };
   const runtime = {
     async withSettledPersistenceBoundary(operation) {
@@ -120,6 +122,23 @@ test("checkpoint reuses the Rust-ACKed lease checkpoint and never enters generic
   ]);
 });
 
+test("paused checkpoints remain readable only when the Rust summary matches the frozen lifecycle", async () => {
+  const paused = fixture({
+    boundary: { paused: true },
+    registry: { status: async () => summary({ paused: true }) },
+  });
+  await assert.doesNotReject(paused.broker.checkpoint(7));
+
+  const mismatched = fixture({
+    boundary: { paused: true },
+    registry: { status: async () => summary({ paused: false }) },
+  });
+  await assert.rejects(
+    mismatched.broker.checkpoint(7),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BOUNDARY_INVALID",
+  );
+});
+
 test("export selects the active main-owned session and renderer cannot supply authority identity", async () => {
   const value = fixture();
   value.broker.bindRendererAuthority(7, {
@@ -168,6 +187,7 @@ test("startup reconciliation holds the settled runtime boundary through the rend
             sessionId: "core-main-1",
             runId: "player-run-1",
             revision: 41,
+            paused: false,
             checkpoint: CHECKPOINT,
             acknowledgedSequence: 7,
             settledDeadlineMs: 18_000,
@@ -211,6 +231,7 @@ test("live completion keeps the clock frozen through its durable receipt and ren
             sessionId: "core-main-1",
             runId: "player-run-1",
             revision: 41,
+            paused: false,
             checkpoint: CHECKPOINT,
             acknowledgedSequence: 7,
             settledDeadlineMs: 18_000,

@@ -284,6 +284,7 @@ test("startup recovery accepts one complete macro identity and rejects a partial
     changedEntityIds: [],
     changedBeltIds: [],
     topologyDirty: false,
+    paused: false,
     macroSessionId: "macro-session-recovered",
     recoveredMacroOperationId: "macro-operation-recovered",
     macroAlgorithmVersion: "native-pure-idle-macro-v10",

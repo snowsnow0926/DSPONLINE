@@ -51,6 +51,11 @@ const CLOCK_PHASES = new Set<DesktopNativePlayerAuthorityPhase>([
   "activating",
   "recovering",
   "active",
+  "pausing",
+  "paused",
+  "resuming",
+  "pause-uncertain",
+  "resume-uncertain",
   "uncertain",
   "faulted",
   "shutdown",
@@ -61,6 +66,8 @@ const CLOCK_OPERATIONS = new Set<DesktopNativePlayerAuthorityOperation | null>([
   "recovery",
   "tick",
   "command",
+  "pause",
+  "resume",
 ]);
 const MACRO_PHASES = new Set<DesktopNativePlayerAuthorityMacroPhase>([
   "macro-active",
@@ -189,8 +196,29 @@ function normalizeClockState(value: Record<string, unknown>): DesktopNativePlaye
   if (["idle", "activating", "recovering"].includes(value.phase) && !emptyIdentity) {
     throw new TypeError("pre-authority clock frame exposes an identity");
   }
-  if (value.phase === "active" && (!completeIdentity || lastErrorCode !== null)) {
+  if (["active", "pausing", "paused", "resuming", "pause-uncertain", "resume-uncertain"]
+    .includes(value.phase) && !completeIdentity) {
+    throw new TypeError("native player-authority lifecycle clock frame is incomplete");
+  }
+  if (value.phase === "active" && lastErrorCode !== null) {
     throw new TypeError("active native player-authority clock frame is incomplete");
+  }
+  if (value.phase === "paused" &&
+      (value.inFlight || value.currentOperation !== null || lastErrorCode !== null ||
+        value.queuedCommands !== 0)) {
+    throw new TypeError("paused native player-authority clock frame is not settled");
+  }
+  if (value.phase === "pausing" &&
+      (value.currentOperation !== "pause" || lastErrorCode !== null) ||
+      value.phase === "resuming" &&
+      (value.currentOperation !== "resume" || lastErrorCode !== null)) {
+    throw new TypeError("native player-authority pause transition is invalid");
+  }
+  if (value.phase === "pause-uncertain" &&
+      (lastErrorCode === null || ![null, "pause"].includes(value.currentOperation as null | "pause")) ||
+      value.phase === "resume-uncertain" &&
+      (lastErrorCode === null || ![null, "resume"].includes(value.currentOperation as null | "resume"))) {
+    throw new TypeError("native player-authority pause transition is uncertain");
   }
   let macroRecoveryHint: DesktopNativePlayerAuthorityClockState["macroRecoveryHint"];
   if (Object.hasOwn(value, "macroRecoveryHint")) {

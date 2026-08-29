@@ -1332,7 +1332,7 @@ describe("Windows native core invitation-Beta controller", () => {
       rootHash: "e".repeat(64),
       revision: 41,
     };
-    const startupSummary = summary(41, true);
+    const startupSummary = { ...summary(41, true), paused: true };
 
     const bound = controller.bindMainOwnedPlayerAuthority({
       sessionId: "core-recovered-1",

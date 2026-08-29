@@ -3773,6 +3773,9 @@ fn simulate_step(
     station_mode_transition_runtime: &mut std::sync::Arc<
         crate::system_space_station::ModeTransitionRuntime,
     >,
+    quantum_transition_runtime: &mut std::sync::Arc<
+        crate::quantum_logistics::QuantumTransitionRuntime,
+    >,
     interstellar_peer_directory: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarPeerDirectory,
     >,
@@ -5221,12 +5224,13 @@ fn simulate_step(
     // reservation. Rebuild the already-required congestion ledger once here
     // so post-route warper refill reads the exact post-advance reservation
     // set without rescanning every entity a second time.
-    let congestion_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
-        state,
-        entities,
-        local_step_runtime,
-        interstellar_step_runtime,
-    );
+    let congestion_route_ledger =
+        crate::station_route_ledger::StationRouteLedger::build_with_remote_transition_view(
+            state,
+            entities,
+            local_step_runtime,
+            interstellar_step_runtime,
+        );
     let (post_route_warper_changed_station_indices, post_route_warper_refill_scan) =
         crate::interstellar_logistics::refill_station_warpers(
             base,
@@ -5426,8 +5430,26 @@ fn simulate_step(
                     mode_scan.ledger_fallback,
                 );
             }
-            station_mode_topology_changed |=
-                crate::quantum_logistics::settle_transitions(base, entities)?;
+            let (quantum_transition_changed, quantum_transition_scan) =
+                crate::quantum_logistics::settle_transitions_indexed(
+                    std::sync::Arc::make_mut(quantum_transition_runtime),
+                    base,
+                    entities,
+                    &congestion_route_ledger,
+                )?;
+            station_mode_topology_changed |= quantum_transition_changed;
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tquantum-transition-active\t{}/{}\ttransitions={}\troute-memberships={}\tdense={}\truntime-fallback={}\tledger-fallback={}",
+                    quantum_transition_scan.selected_rows,
+                    quantum_transition_scan.total_rows,
+                    quantum_transition_scan.transition_rows,
+                    quantum_transition_scan.route_membership_rows,
+                    quantum_transition_scan.dense_fallback,
+                    quantum_transition_scan.runtime_fallback,
+                    quantum_transition_scan.ledger_fallback,
+                );
+            }
             crate::system_space_station::settle_construction(state, base, entities)?;
             crate::system_space_station::settle_hubs(
                 state,
@@ -5521,6 +5543,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub construction_runtime: std::sync::Arc<crate::construction::ConstructionRuntime>,
     pub station_mode_transition_runtime:
         std::sync::Arc<crate::system_space_station::ModeTransitionRuntime>,
+    pub quantum_transition_runtime:
+        std::sync::Arc<crate::quantum_logistics::QuantumTransitionRuntime>,
     pub interstellar_peer_directory:
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
@@ -5611,6 +5635,13 @@ pub(crate) fn prepare_advance(
             std::sync::Arc::new(
                 crate::system_space_station::ModeTransitionRuntime::from_entities(&entities),
             )
+        });
+    let mut quantum_transition_runtime = state
+        .prepared_quantum_transition_runtime()
+        .unwrap_or_else(|| {
+            std::sync::Arc::new(crate::quantum_logistics::QuantumTransitionRuntime::build(
+                &entities,
+            ))
         });
     let mut interstellar_route_activity =
         if let Some(activity) = state.prepared_interstellar_route_activity() {
@@ -5741,6 +5772,7 @@ pub(crate) fn prepare_advance(
             &mut quantum_logistics_directory,
             &mut construction_runtime,
             &mut station_mode_transition_runtime,
+            &mut quantum_transition_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
@@ -5832,6 +5864,7 @@ pub(crate) fn prepare_advance(
         quantum_logistics_directory,
         construction_runtime,
         station_mode_transition_runtime,
+        quantum_transition_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
     })

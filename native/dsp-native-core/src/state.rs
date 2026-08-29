@@ -2493,6 +2493,11 @@ pub struct CoreState {
     /// only after the corresponding entity revision commits.
     prepared_station_mode_transition_runtime:
         Option<Arc<crate::system_space_station::ModeTransitionRuntime>>,
+    /// Runtime-only active rows for five-second quantum attachment/mode
+    /// settlement. The candidate clone advances transactionally and replaces
+    /// this value only after the corresponding simulation revision commits.
+    prepared_quantum_transition_runtime:
+        Option<Arc<crate::quantum_logistics::QuantumTransitionRuntime>>,
     /// Immutable traditional interstellar peer/reverse-wake graph. It is
     /// shared across committed revisions and rebuilt only when record
     /// topology, station mode, research, or exploration membership changes.
@@ -3152,6 +3157,7 @@ impl CoreState {
             prepared_quantum_logistics_directory: None,
             prepared_construction_runtime: None,
             prepared_station_mode_transition_runtime: None,
+            prepared_quantum_transition_runtime: None,
             prepared_interstellar_peer_directory: None,
             prepared_interstellar_route_activity: None,
             save_dirty,
@@ -3540,6 +3546,7 @@ impl CoreState {
         self.prepared_belt_activity = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
+        self.prepared_quantum_transition_runtime = None;
         // Non-pause top-level commands can change research, exploration,
         // routing settings, or tray-backed warper availability. Re-admit the
         // complete interstellar reverse graph and demand wake queue rather
@@ -3620,6 +3627,19 @@ impl CoreState {
         runtime: Arc<crate::system_space_station::ModeTransitionRuntime>,
     ) {
         self.prepared_station_mode_transition_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_quantum_transition_runtime(
+        &self,
+    ) -> Option<Arc<crate::quantum_logistics::QuantumTransitionRuntime>> {
+        self.prepared_quantum_transition_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_quantum_transition_runtime(
+        &mut self,
+        runtime: Arc<crate::quantum_logistics::QuantumTransitionRuntime>,
+    ) {
+        self.prepared_quantum_transition_runtime = Some(runtime);
     }
 
     pub(crate) fn prepared_interstellar_route_activity(
@@ -3965,6 +3985,9 @@ impl CoreState {
                 entity_values.len(),
                 station_mode_transition_indices,
             ),
+        ));
+        self.prepared_quantum_transition_runtime = Some(Arc::new(
+            crate::quantum_logistics::QuantumTransitionRuntime::build(entity_values),
         ));
         // Record commands may alter station slots or elevator mode. The next
         // admitted advance recompiles this immutable directory from the new
@@ -5672,6 +5695,11 @@ impl CoreState {
             .as_ref()
             .map(|runtime| runtime.estimated_bytes())
             .unwrap_or(0);
+        let prepared_quantum_transition_bytes = self
+            .prepared_quantum_transition_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
         let prepared_interstellar_peer_bytes = self
             .prepared_interstellar_peer_directory
             .as_ref()
@@ -5688,12 +5716,13 @@ impl CoreState {
             + prepared_quantum_logistics_bytes
             + prepared_construction_runtime_bytes
             + prepared_station_mode_transition_bytes
+            + prepared_quantum_transition_bytes
             + prepared_interstellar_peer_bytes
             + prepared_interstellar_activity_bytes
             + factory_topology_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self
@@ -6623,6 +6652,11 @@ mod tests {
                     .unwrap_or(0)
                 + state
                     .prepared_construction_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_quantum_transition_runtime
                     .as_ref()
                     .map(|runtime| runtime.estimated_bytes())
                     .unwrap_or(0)

@@ -346,6 +346,7 @@ impl CoreState {
             let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
             let construction_runtime = prepared.construction_runtime.clone();
             let station_mode_transition_runtime = prepared.station_mode_transition_runtime.clone();
+            let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
             let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
             let interstellar_route_activity = prepared.interstellar_route_activity.clone();
             profile_mark!("simulate");
@@ -382,6 +383,7 @@ impl CoreState {
             self.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
             self.install_prepared_construction_runtime(construction_runtime);
             self.install_prepared_station_mode_transition_runtime(station_mode_transition_runtime);
+            self.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
             self.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
             self.install_prepared_interstellar_route_activity(interstellar_route_activity);
             profile_mark!("commit-state");

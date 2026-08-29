@@ -28,6 +28,26 @@ pub(crate) struct StationRouteLedgerScan {
     pub active_order_fallback: bool,
 }
 
+/// Exact legacy fields consumed when an ordinary remote route is mirrored
+/// into a quantum-mode transition bridge. The view is runtime-only and keeps
+/// persisted entity/route order; opaque IDs are data, never lookup authority.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RemoteTransitionRoute {
+    pub demand_id: String,
+    pub route_id: String,
+    pub item_id: String,
+    pub peer_id: String,
+    pub cargo: u64,
+    pub duration: f64,
+    pub progress: f64,
+}
+
+#[derive(Debug, Default)]
+struct RemoteTransitionRouteView {
+    by_station_id: HashMap<String, Vec<Arc<RemoteTransitionRoute>>>,
+    membership_rows: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct StableIndexOrderStats {
     input_rows: usize,
@@ -69,6 +89,11 @@ pub(crate) struct StationRouteLedger {
     active_local_progress: HashMap<usize, f64>,
     active_local_stations: HashSet<usize>,
     active_remote_stations: HashSet<usize>,
+    /// Exact reverse view of every ordinary remote route by each referenced
+    /// station ID. It is produced by the same complete sparse/dense route
+    /// scan as the material ledger, so transition settlement does not rescan
+    /// dormant entity JSON. `None` means absence cannot be proven.
+    remote_transition_routes: Option<RemoteTransitionRouteView>,
     scan: Option<StationRouteLedgerScan>,
 }
 
@@ -77,6 +102,60 @@ fn finite_number(value: Option<&Value>) -> f64 {
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0)
+}
+
+fn floor_safe_u64(value: f64) -> u64 {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else {
+        value.floor().min(MAX_SAFE_INTEGER as f64) as u64
+    }
+}
+
+fn push_unique_station_id(station_ids: &mut Vec<String>, station_id: &str) {
+    if !station_ids.iter().any(|candidate| candidate == station_id) {
+        station_ids.push(station_id.to_owned());
+    }
+}
+
+fn record_remote_transition_route(
+    view: &mut RemoteTransitionRouteView,
+    demand: &serde_json::Map<String, Value>,
+    route: &serde_json::Map<String, Value>,
+    referenced_station_ids: &mut Vec<String>,
+) {
+    if string_at(route, "scope") != Some("remote") {
+        return;
+    }
+    let demand_id = string_at(demand, "id").unwrap_or_default();
+    let peer_id = string_at(route, "peerId").unwrap_or_default();
+    let vehicle_station_id = string_at(route, "vehicleStationId").unwrap_or(demand_id);
+    referenced_station_ids.clear();
+    push_unique_station_id(referenced_station_ids, demand_id);
+    push_unique_station_id(referenced_station_ids, peer_id);
+    push_unique_station_id(referenced_station_ids, vehicle_station_id);
+    if let Some(waypoints) = route.get("waypointStationIds").and_then(Value::as_array) {
+        for station_id in waypoints.iter().filter_map(Value::as_str) {
+            push_unique_station_id(referenced_station_ids, station_id);
+        }
+    }
+    let transition_route = Arc::new(RemoteTransitionRoute {
+        demand_id: demand_id.to_owned(),
+        route_id: string_at(route, "id").unwrap_or_default().to_owned(),
+        item_id: string_at(route, "itemId").unwrap_or_default().to_owned(),
+        peer_id: peer_id.to_owned(),
+        cargo: floor_safe_u64(finite_number(route.get("cargo"))),
+        duration: finite_number(route.get("duration")),
+        progress: finite_number(route.get("progress")).clamp(0.0, 1.0),
+    });
+    for station_id in referenced_station_ids {
+        view.by_station_id
+            .entry(station_id.clone())
+            .or_default()
+            .push(transition_route.clone());
+        view.membership_rows = view.membership_rows.saturating_add(1);
+    }
 }
 
 fn string_at<'a>(value: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -243,13 +322,39 @@ impl StationRouteLedger {
         local_directory: &LocalPeerDirectory,
         remote_activity: &InterstellarRouteActivity,
     ) -> Self {
+        Self::build_internal(state, entities, local_directory, remote_activity, false)
+    }
+
+    pub(crate) fn build_with_remote_transition_view(
+        state: &CoreState,
+        entities: &[Value],
+        local_directory: &LocalPeerDirectory,
+        remote_activity: &InterstellarRouteActivity,
+    ) -> Self {
+        Self::build_internal(state, entities, local_directory, remote_activity, true)
+    }
+
+    fn build_internal(
+        state: &CoreState,
+        entities: &[Value],
+        local_directory: &LocalPeerDirectory,
+        remote_activity: &InterstellarRouteActivity,
+        include_remote_transition_view: bool,
+    ) -> Self {
         let (scan_indices, scan) = ordered_scan_indices(
             &state.factory_topology.station_indices,
             entities,
             local_directory,
             remote_activity,
         );
-        Self::build_for_indices(state, entities, local_directory, &scan_indices, scan)
+        Self::build_for_indices(
+            state,
+            entities,
+            local_directory,
+            &scan_indices,
+            scan,
+            include_remote_transition_view,
+        )
     }
 
     fn build_for_indices(
@@ -258,13 +363,17 @@ impl StationRouteLedger {
         local_directory: &LocalPeerDirectory,
         scan_indices: &[usize],
         scan: StationRouteLedgerScan,
+        include_remote_transition_view: bool,
     ) -> Self {
         let mut ledger = Self {
             local_station_ranks: local_directory.shared_station_ranks(),
+            remote_transition_routes: include_remote_transition_view
+                .then(RemoteTransitionRouteView::default),
             scan: Some(scan),
             ..Self::default()
         };
         let mut active_stations = Vec::<usize>::with_capacity(8);
+        let mut referenced_station_ids = Vec::<String>::with_capacity(8);
         for &demand_index in scan_indices {
             let Some(demand) = entities.get(demand_index).and_then(Value::as_object) else {
                 continue;
@@ -278,6 +387,15 @@ impl StationRouteLedger {
             // distinct even though the JSON row is parsed only once here.
             let visible_to_local = local_directory.contains_local_station(demand_index);
             for route in routes.iter().filter_map(Value::as_object) {
+                let scope = string_at(route, "scope");
+                if let Some(view) = ledger.remote_transition_routes.as_mut() {
+                    record_remote_transition_route(
+                        view,
+                        demand,
+                        route,
+                        &mut referenced_station_ids,
+                    );
+                }
                 let owner = string_at(route, "vehicleStationId")
                     .or_else(|| string_at(demand, "id"))
                     .and_then(|id| state.entity_index.get(id))
@@ -332,7 +450,6 @@ impl StationRouteLedger {
                     *current = current.max(progress);
                 }
 
-                let scope = string_at(route, "scope");
                 if !matches!(scope, Some("local" | "remote")) {
                     continue;
                 }
@@ -411,6 +528,7 @@ impl StationRouteLedger {
                 active_order_duplicate_rows: 0,
                 active_order_fallback: false,
             },
+            false,
         )
     }
 
@@ -423,6 +541,24 @@ impl StationRouteLedger {
             active_order_duplicate_rows: 0,
             active_order_fallback: false,
         })
+    }
+
+    pub(crate) fn remote_transition_routes(
+        &self,
+        station_id: &str,
+    ) -> Option<&[Arc<RemoteTransitionRoute>]> {
+        self.remote_transition_routes.as_ref().map(|view| {
+            view.by_station_id
+                .get(station_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        })
+    }
+
+    pub(crate) fn remote_transition_membership_rows(&self) -> Option<usize> {
+        self.remote_transition_routes
+            .as_ref()
+            .map(|view| view.membership_rows)
     }
 
     pub(crate) fn local_busy_floor(&self, station_index: usize) -> f64 {
@@ -676,6 +812,7 @@ impl StationRouteLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn legacy_sorted_union<const SOURCE_COUNT: usize>(
         sources: [&[usize]; SOURCE_COUNT],
@@ -706,6 +843,170 @@ mod tests {
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         *seed
+    }
+
+    fn transition_view_for_indices(
+        entities: &[Value],
+        indices: impl IntoIterator<Item = usize>,
+    ) -> RemoteTransitionRouteView {
+        let mut view = RemoteTransitionRouteView::default();
+        let mut station_ids = Vec::new();
+        for index in indices {
+            let Some(demand) = entities.get(index).and_then(Value::as_object) else {
+                continue;
+            };
+            for route in demand
+                .get("stationRoutes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+            {
+                record_remote_transition_route(&mut view, demand, route, &mut station_ids);
+            }
+        }
+        view
+    }
+
+    fn legacy_transition_routes(
+        entities: &[Value],
+        station_id: &str,
+    ) -> Vec<RemoteTransitionRoute> {
+        let mut routes = Vec::new();
+        for demand in entities.iter().filter_map(Value::as_object) {
+            let demand_id = string_at(demand, "id").unwrap_or_default();
+            for route in demand
+                .get("stationRoutes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+            {
+                if string_at(route, "scope") != Some("remote") {
+                    continue;
+                }
+                let peer_id = string_at(route, "peerId").unwrap_or_default();
+                let owner_id = string_at(route, "vehicleStationId").unwrap_or(demand_id);
+                let waypoint = route
+                    .get("waypointStationIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(station_id)));
+                if demand_id != station_id
+                    && peer_id != station_id
+                    && owner_id != station_id
+                    && !waypoint
+                {
+                    continue;
+                }
+                routes.push(RemoteTransitionRoute {
+                    demand_id: demand_id.to_owned(),
+                    route_id: string_at(route, "id").unwrap_or_default().to_owned(),
+                    item_id: string_at(route, "itemId").unwrap_or_default().to_owned(),
+                    peer_id: peer_id.to_owned(),
+                    cargo: floor_safe_u64(finite_number(route.get("cargo"))),
+                    duration: finite_number(route.get("duration")),
+                    progress: finite_number(route.get("progress")).clamp(0.0, 1.0),
+                });
+            }
+        }
+        routes
+    }
+
+    #[test]
+    fn remote_transition_reverse_view_matches_independent_full_scan_oracle() {
+        let entities = vec![
+            json!({
+                "id": "MOD/需求-甲",
+                "stationRoutes": [
+                    {
+                        "id": "route-a",
+                        "scope": "remote",
+                        "peerId": "MOD/供给-乙",
+                        "vehicleStationId": "MOD/船主-丙",
+                        "waypointStationIds": ["MOD/中继-丁", "MOD/供给-乙", "MOD/中继-丁"],
+                        "itemId": "MOD/物料-Ω",
+                        "cargo": 17.9,
+                        "duration": 12.5,
+                        "progress": 1.4
+                    },
+                    { "id": "local", "scope": "local", "peerId": "ignored" }
+                ]
+            }),
+            Value::String("ignored".to_owned()),
+            json!({
+                "id": "second",
+                "stationRoutes": [{
+                    "id": "route-b",
+                    "scope": "remote",
+                    "peerId": "MOD/供给-乙",
+                    "itemId": "iron_ore",
+                    "cargo": -4,
+                    "duration": "invalid",
+                    "progress": -2
+                }]
+            }),
+        ];
+        let view = transition_view_for_indices(&entities, 0..entities.len());
+        for station_id in [
+            "MOD/需求-甲",
+            "MOD/供给-乙",
+            "MOD/船主-丙",
+            "MOD/中继-丁",
+            "second",
+            "",
+            "missing",
+        ] {
+            assert_eq!(
+                view.by_station_id
+                    .get(station_id)
+                    .map(|routes| {
+                        routes
+                            .iter()
+                            .map(|route| route.as_ref().clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                legacy_transition_routes(&entities, station_id),
+                "station {station_id:?}"
+            );
+        }
+        assert_eq!(view.membership_rows, 6);
+    }
+
+    #[test]
+    fn remote_transition_sparse_rows_match_full_oracle_for_every_referenced_station() {
+        let mut entities = (0..1_024)
+            .map(|index| json!({ "id": format!("quiet-{index}"), "stationRoutes": [] }))
+            .collect::<Vec<_>>();
+        for (index, peer) in [(7, "target"), (509, "target"), (777, "other")] {
+            entities[index]["stationRoutes"] = json!([{
+                "id": format!("route-{index}"),
+                "scope": "remote",
+                "peerId": peer,
+                "vehicleStationId": format!("owner-{index}"),
+                "waypointStationIds": ["target"],
+                "itemId": "iron_ore",
+                "cargo": index + 1,
+                "duration": 10,
+                "progress": 0.25
+            }]);
+        }
+        let sparse = transition_view_for_indices(&entities, [7, 509, 777]);
+        for station_id in ["target", "other", "owner-7", "owner-509", "owner-777"] {
+            assert_eq!(
+                sparse
+                    .by_station_id
+                    .get(station_id)
+                    .map(|routes| {
+                        routes
+                            .iter()
+                            .map(|route| route.as_ref().clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                legacy_transition_routes(&entities, station_id)
+            );
+        }
     }
 
     #[test]

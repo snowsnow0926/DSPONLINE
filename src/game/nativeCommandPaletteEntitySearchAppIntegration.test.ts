@@ -18,8 +18,9 @@ describe("native command palette entity-search App integration", () => {
   });
 
   it("keeps native pending, error and stale states detached from the GameState entity scan", () => {
-    expect(palette).toMatch(/const webEntities = entitySearchMode === "web" \? game\.entities : null/);
-    expect(palette.match(/game\.entities/g)).toHaveLength(1);
+    expect(app).toMatch(/webEntities=\{nativePlayerAuthorityOwnsRuntime \? null : game\.entities\}/);
+    expect(palette).not.toMatch(/game\.entities/);
+    expect(palette).toMatch(/for \(const entity of webEntities \?\? \[\]\)/);
     expect(palette).toMatch(/if \(entitySearchMode === "native"\)[\s\S]*?nativeEntitySearch\?\.query === normalizedQuery[\s\S]*?for \(const row of nativeEntitySearch\.rows\)/);
     expect(palette).toMatch(/nativeEntitySearchStatus === "unavailable"[\s\S]*?原生权威设备搜索暂不可用/);
     expect(palette).toMatch(/onFocusEntity\(row\.entityId, \{[\s\S]*?sessionId: nativeEntitySearch\.sessionId[\s\S]*?planetId: row\.planetId[\s\S]*?positionX: row\.positionX[\s\S]*?positionY: row\.positionY/);

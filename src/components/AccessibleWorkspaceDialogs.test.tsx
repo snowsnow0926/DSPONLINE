@@ -52,7 +52,10 @@ describe("accessible workspace dialogs", () => {
     const onClose = vi.fn();
     render(<CommandPalette
       open
-      game={game}
+      webEntities={game.entities}
+      paused={game.paused}
+      performanceMode={game.settings.performanceMode}
+      reducedMotion={game.settings.reducedMotion}
       onClose={onClose}
       onOpenWorkspace={vi.fn()}
       onFocusRecipe={vi.fn()}
@@ -73,17 +76,14 @@ describe("accessible workspace dialogs", () => {
   });
 
   it("uses only native scalar rows while native authority is bound and pages without reading GameState entities", () => {
-    const game = new Proxy(createInitialState(), {
-      get(target, property, receiver) {
-        if (property === "entities") throw new Error("native command search must not read GameState entities");
-        return Reflect.get(target, property, receiver);
-      },
-    });
     const onEntitySearchRequest = vi.fn();
     const onFocusEntity = vi.fn();
     const common = {
       open: true,
-      game,
+      webEntities: null,
+      paused: false,
+      performanceMode: false,
+      reducedMotion: false,
       onClose: vi.fn(),
       onOpenWorkspace: vi.fn(),
       onFocusRecipe: vi.fn(),

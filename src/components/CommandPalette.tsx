@@ -6,7 +6,7 @@ import type {
   CommandPaletteNativeEntityTarget,
 } from "../game/commandPaletteEntitySearchReadModel";
 import type { NativeCommandPaletteEntitySearchSnapshot } from "../game/nativeCommandPaletteEntitySearchStore";
-import type { GameState, ItemId } from "../game/types";
+import type { FactoryEntity, ItemId } from "../game/types";
 import "../styles/command-palette.css";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
@@ -17,7 +17,11 @@ export type CommandWorkspace = "operations" | "campaign" | "galaxy" | "star-map"
 
 interface CommandPaletteProps {
   open: boolean;
-  game: GameState;
+  /** Null while Rust owns the factory; native search must never fall back. */
+  webEntities: readonly FactoryEntity[] | null;
+  paused: boolean;
+  performanceMode: boolean;
+  reducedMotion: boolean;
   onClose: () => void;
   onOpenWorkspace: (workspace: CommandWorkspace) => void;
   onFocusRecipe: (itemId: ItemId) => void;
@@ -47,7 +51,10 @@ export function CommandPalette({ open, ...props }: CommandPaletteProps) {
 }
 
 function OpenCommandPalette({
-  game,
+  webEntities,
+  paused,
+  performanceMode,
+  reducedMotion,
   onClose,
   onOpenWorkspace,
   onFocusRecipe,
@@ -64,7 +71,7 @@ function OpenCommandPalette({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const webEntities = entitySearchMode === "web" ? game.entities : null;
+  const nativeAuthority = entitySearchMode === "native";
   const close = () => {
     clearStableTextDraft(COMMAND_PALETTE_DRAFT_ID);
     setQuery("");
@@ -83,7 +90,7 @@ function OpenCommandPalette({
       icon,
       run: () => run(() => onOpenWorkspace(target)),
     });
-    const base: PaletteCommand[] = [
+    const workspaceCommands: PaletteCommand[] = [
       workspace("star-map", "打开星图与星际工业", "探索、航线和行星角色", <Telescope size={16} />, "star-map"),
       workspace("galaxy", "打开银河网络", "账户、累计发电与白矩阵排行榜", <Globe2 size={16} />, "galaxy"),
       workspace("statistics", "打开生产统计", "网络、吞吐和工业规划", <BarChart3 size={16} />, "statistics"),
@@ -95,11 +102,17 @@ function OpenCommandPalette({
       workspace("dyson", "打开戴森规划", "轨道、壳层和发射", <Map size={16} />, "dyson"),
       workspace("inspector", "打开设备检查器", "查看当前选中设备", <Wrench size={16} />, "inspector"),
       workspace("resources", "打开物资托盘", "库存与跨星球物资", <PackageOpen size={16} />, "resources"),
-      { id: "pause", label: game.paused ? "继续模拟" : "暂停模拟", detail: "Space", icon: game.paused ? <Play size={16} /> : <Pause size={16} />, run: () => run(onPauseToggle) },
-      { id: "performance", label: game.settings.performanceMode ? "关闭性能模式" : "开启性能模式", detail: "降低大规模工厂视觉负载", icon: <Gauge size={16} />, run: () => run(onTogglePerformance) },
-      { id: "motion", label: game.settings.reducedMotion ? "开启动态效果" : "减少动态效果", detail: "尊重动效偏好", icon: <Settings2 size={16} />, run: () => run(onToggleReducedMotion) },
-      { id: "auto-layout", label: "整理当前行星生产网络", detail: "按物流上下游自动排列全部设备", icon: <WandSparkles size={16} />, run: () => run(onAutoLayout) },
     ];
+    const nativeWorkspaceIds = new Set(["star-map", "statistics", "recipes", "technology", "dyson", "inspector"]);
+    const base: PaletteCommand[] = nativeAuthority
+      ? workspaceCommands.filter((command) => nativeWorkspaceIds.has(command.id))
+      : [
+          ...workspaceCommands,
+          { id: "pause", label: paused ? "继续模拟" : "暂停模拟", detail: "Space", icon: paused ? <Play size={16} /> : <Pause size={16} />, run: () => run(onPauseToggle) },
+          { id: "performance", label: performanceMode ? "关闭性能模式" : "开启性能模式", detail: "降低大规模工厂视觉负载", icon: <Gauge size={16} />, run: () => run(onTogglePerformance) },
+          { id: "motion", label: reducedMotion ? "开启动态效果" : "减少动态效果", detail: "尊重动效偏好", icon: <Settings2 size={16} />, run: () => run(onToggleReducedMotion) },
+          { id: "auto-layout", label: "整理当前行星生产网络", detail: "按物流上下游自动排列全部设备", icon: <WandSparkles size={16} />, run: () => run(onAutoLayout) },
+        ];
     const itemCommands: PaletteCommand[] = Object.values(ITEMS).map((item) => ({
       id: `recipe:${item.id}`,
       label: `聚焦配方：${item.name}`,
@@ -120,7 +133,7 @@ function OpenCommandPalette({
         // Native authority returns only fingerprint-bound scalar identity and
         // finite position fields. Display names stay local to the renderer
         // catalog; an absent/stale frame is intentionally an empty native
-        // result, never a GameState fallback.
+        // result, never a fallback to the stale renderer state.
         if (nativeEntitySearchStatus === "ready" && nativeEntitySearch?.query === normalizedQuery) {
           for (const row of nativeEntitySearch.rows) {
             const name = row.buildingId
@@ -178,7 +191,7 @@ function OpenCommandPalette({
       }
     }
     return [...base, ...itemCommands, ...entityCommands];
-  }, [entitySearchMode, game.paused, game.settings.performanceMode, game.settings.reducedMotion, nativeEntitySearch, nativeEntitySearchStatus, onAutoLayout, onFocusEntity, onFocusRecipe, onOpenWorkspace, onPauseToggle, onTogglePerformance, onToggleReducedMotion, query, webEntities]);
+  }, [entitySearchMode, nativeAuthority, nativeEntitySearch, nativeEntitySearchStatus, onAutoLayout, onFocusEntity, onFocusRecipe, onOpenWorkspace, onPauseToggle, onTogglePerformance, onToggleReducedMotion, paused, performanceMode, query, reducedMotion, webEntities]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("zh-CN");
     if (!normalized) return commands.slice(0, 12);

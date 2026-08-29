@@ -17572,7 +17572,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       /> : null}
       <CommandPalette
         open={commandPaletteOpen}
-        game={game}
+        webEntities={nativePlayerAuthorityOwnsRuntime ? null : game.entities}
+        paused={factoryRunStatusReadModel.paused}
+        performanceMode={game.settings.performanceMode}
+        reducedMotion={game.settings.reducedMotion}
         onClose={closeCommandPalette}
         onOpenWorkspace={openCommandWorkspace}
         onFocusRecipe={openRecipeFocus}

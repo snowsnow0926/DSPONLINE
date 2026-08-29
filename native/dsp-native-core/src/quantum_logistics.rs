@@ -291,6 +291,27 @@ struct Network {
     routing_cursors: BTreeMap<String, u64>,
     upload_routing_cursors: BTreeMap<String, u64>,
     runtime_flow: Option<BoundaryFlow>,
+    /// The v47 JSON record was already in the exact shape emitted by the
+    /// legacy full writer. Only that shape is eligible for in-place patches;
+    /// legacy, malformed and extension-shaped records keep the old rewrite.
+    /// A parsed Network is a synchronous, exclusive mutation session: no
+    /// helper may edit the source JSON network between parse and write. A
+    /// future interleaved owner must add a runtime generation token rather
+    /// than re-hashing every inventory key at every boundary.
+    sparse_write_compatible: bool,
+    mutable_record_rows: usize,
+    dirty_inventory: BTreeSet<String>,
+    dirty_routing_cursors: BTreeSet<String>,
+    dirty_upload_routing_cursors: BTreeSet<String>,
+    runtime_flow_dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NetworkWriteScan {
+    dirty_rows: usize,
+    total_rows: usize,
+    dense_fallback: bool,
+    signature_fallback: bool,
 }
 
 #[derive(Debug)]
@@ -457,6 +478,43 @@ fn advance_routing_cursor(record: &mut BTreeMap<String, u64>, item_id: &str) {
         *cursor += 1;
     } else {
         record.insert(item_id.to_owned(), 1);
+    }
+}
+
+impl Network {
+    fn set_inventory_amount(&mut self, item_id: &str, amount: BigUint) {
+        if self.inventory.get(item_id) == Some(&amount) {
+            return;
+        }
+        set_biguint_amount(&mut self.inventory, item_id, amount);
+        self.dirty_inventory.insert(item_id.to_owned());
+    }
+
+    fn remove_zero_inventory(&mut self) {
+        let zero_items = self
+            .inventory
+            .iter()
+            .filter_map(|(item_id, amount)| amount.is_zero().then_some(item_id.clone()))
+            .collect::<Vec<_>>();
+        for item_id in zero_items {
+            self.inventory.remove(&item_id);
+            self.dirty_inventory.insert(item_id);
+        }
+    }
+
+    fn advance_routing_cursor(&mut self, item_id: &str) {
+        advance_routing_cursor(&mut self.routing_cursors, item_id);
+        self.dirty_routing_cursors.insert(item_id.to_owned());
+    }
+
+    fn advance_upload_routing_cursor(&mut self, item_id: &str) {
+        advance_routing_cursor(&mut self.upload_routing_cursors, item_id);
+        self.dirty_upload_routing_cursors.insert(item_id.to_owned());
+    }
+
+    fn set_runtime_flow(&mut self, flow: BoundaryFlow) {
+        self.runtime_flow = Some(flow);
+        self.runtime_flow_dirty = true;
     }
 }
 
@@ -645,6 +703,99 @@ fn parse_flow(value: Option<&Value>) -> Option<BoundaryFlow> {
     })
 }
 
+fn canonical_decimal_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_INTEGER_DIGITS
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn canonical_capacity_text(value: &str) -> bool {
+    canonical_decimal_text(value)
+        && (value.len() > 5 || (value.len() == 5 && value >= "10000"))
+        && (value.len() < 11 || (value.len() == 11 && value <= "10000000000"))
+}
+
+fn canonical_quantity_record_matches(
+    raw: Option<&Value>,
+    parsed: &BTreeMap<String, BigUint>,
+    capacities: bool,
+) -> bool {
+    let Some(raw) = raw.and_then(Value::as_object) else {
+        return false;
+    };
+    raw.len() == parsed.len()
+        && raw.iter().all(|(item_id, value)| {
+            parsed.contains_key(item_id)
+                && value.as_str().is_some_and(|value| {
+                    if capacities {
+                        canonical_capacity_text(value)
+                    } else {
+                        canonical_decimal_text(value)
+                    }
+                })
+        })
+}
+
+fn canonical_cursor_record_matches(raw: Option<&Value>, parsed: &BTreeMap<String, u64>) -> bool {
+    let Some(raw) = raw.and_then(Value::as_object) else {
+        return false;
+    };
+    raw.len() == parsed.len()
+        && parsed
+            .iter()
+            .all(|(item_id, cursor)| raw.get(item_id) == Some(&Value::from(*cursor)))
+}
+
+fn canonical_f64_matches(raw: Option<&Value>, value: f64) -> bool {
+    Number::from_f64(value).is_some_and(|number| raw == Some(&Value::Number(number)))
+}
+
+fn canonical_flow_matches(raw: Option<&Value>, flow: &BoundaryFlow) -> bool {
+    let Some(raw) = raw.and_then(Value::as_object) else {
+        return false;
+    };
+    raw.len() == 7
+        && canonical_f64_matches(raw.get("boundarySecond"), flow.boundary_second)
+        && canonical_quantity_record_matches(raw.get("uploaded"), &flow.uploaded, false)
+        && canonical_quantity_record_matches(raw.get("downloaded"), &flow.downloaded, false)
+        && canonical_f64_matches(
+            raw.get("globalUploadPerMinute"),
+            flow.global_upload_per_minute,
+        )
+        && canonical_f64_matches(
+            raw.get("globalDownloadPerMinute"),
+            flow.global_download_per_minute,
+        )
+        && canonical_f64_matches(raw.get("quantumTowerStacks"), flow.quantum_tower_stacks)
+        && canonical_f64_matches(
+            raw.get("quantumCollectorStacks"),
+            flow.quantum_collector_stacks,
+        )
+}
+
+fn canonical_network_record_matches(raw: &Map<String, Value>, network: &Network) -> bool {
+    let expected_fields = 5 + usize::from(network.runtime_flow.is_some());
+    raw.len() == expected_fields
+        && raw.get("enabled") == Some(&Value::Bool(network.enabled))
+        && canonical_quantity_record_matches(raw.get("inventory"), &network.inventory, false)
+        && canonical_quantity_record_matches(
+            raw.get("itemCapacities"),
+            &network.item_capacities,
+            true,
+        )
+        && canonical_cursor_record_matches(raw.get("routingCursors"), &network.routing_cursors)
+        && canonical_cursor_record_matches(
+            raw.get("uploadRoutingCursors"),
+            &network.upload_routing_cursors,
+        )
+        && match (&network.runtime_flow, raw.get("runtimeFlow")) {
+            (None, None) => true,
+            (Some(flow), raw_flow) => canonical_flow_matches(raw_flow, flow),
+            _ => false,
+        }
+}
+
 fn parse_network(base: &Map<String, Value>) -> anyhow::Result<Network> {
     let raw = base
         .get("quantumLogisticsNetwork")
@@ -662,14 +813,26 @@ fn parse_network(base: &Map<String, Value>) -> anyhow::Result<Network> {
             )
         })
         .collect();
-    Ok(Network {
+    let inventory = parse_quantity_record(raw.get("inventory"), false);
+    let routing_cursors = parse_cursor_record(raw.get("routingCursors"));
+    let upload_routing_cursors = parse_cursor_record(raw.get("uploadRoutingCursors"));
+    let runtime_flow = parse_flow(raw.get("runtimeFlow"));
+    let mutable_record_rows = inventory
+        .len()
+        .saturating_add(routing_cursors.len())
+        .saturating_add(upload_routing_cursors.len());
+    let mut network = Network {
         enabled: raw.get("enabled").and_then(Value::as_bool) == Some(true),
-        inventory: parse_quantity_record(raw.get("inventory"), false),
+        inventory,
         item_capacities: capacities,
-        routing_cursors: parse_cursor_record(raw.get("routingCursors")),
-        upload_routing_cursors: parse_cursor_record(raw.get("uploadRoutingCursors")),
-        runtime_flow: parse_flow(raw.get("runtimeFlow")),
-    })
+        routing_cursors,
+        upload_routing_cursors,
+        runtime_flow,
+        mutable_record_rows,
+        ..Network::default()
+    };
+    network.sparse_write_compatible = canonical_network_record_matches(raw, &network);
+    Ok(network)
 }
 
 fn quantity_record(values: &BTreeMap<String, BigUint>) -> Value {
@@ -714,7 +877,7 @@ fn flow_value(flow: &BoundaryFlow) -> anyhow::Result<Value> {
     Ok(Value::Object(value))
 }
 
-fn write_network(base: &mut Map<String, Value>, network: &Network) -> anyhow::Result<()> {
+fn write_network_full(base: &mut Map<String, Value>, network: &Network) -> anyhow::Result<()> {
     let mut value = Map::new();
     value.insert("enabled".to_owned(), Value::Bool(network.enabled));
     value.insert("inventory".to_owned(), quantity_record(&network.inventory));
@@ -735,6 +898,133 @@ fn write_network(base: &mut Map<String, Value>, network: &Network) -> anyhow::Re
     }
     base.insert("quantumLogisticsNetwork".to_owned(), Value::Object(value));
     Ok(())
+}
+
+fn patch_quantity_record(
+    raw: &mut Map<String, Value>,
+    values: &BTreeMap<String, BigUint>,
+    dirty: &BTreeSet<String>,
+) {
+    for item_id in dirty {
+        if let Some(amount) = values.get(item_id) {
+            let next = Value::String(decimal(amount));
+            if let Some(current) = raw.get_mut(item_id) {
+                *current = next;
+            } else {
+                raw.insert(item_id.clone(), next);
+            }
+        } else {
+            raw.remove(item_id);
+        }
+    }
+}
+
+fn patch_cursor_record(
+    raw: &mut Map<String, Value>,
+    values: &BTreeMap<String, u64>,
+    dirty: &BTreeSet<String>,
+) {
+    for item_id in dirty {
+        if let Some(cursor) = values.get(item_id) {
+            let next = Value::from(*cursor);
+            if let Some(current) = raw.get_mut(item_id) {
+                *current = next;
+            } else {
+                raw.insert(item_id.clone(), next);
+            }
+        } else {
+            raw.remove(item_id);
+        }
+    }
+}
+
+fn write_network_with_scan(
+    base: &mut Map<String, Value>,
+    network: &Network,
+) -> anyhow::Result<NetworkWriteScan> {
+    let dirty_rows = network
+        .dirty_inventory
+        .len()
+        .saturating_add(network.dirty_routing_cursors.len())
+        .saturating_add(network.dirty_upload_routing_cursors.len());
+    let dense_fallback = dirty_rows > 0
+        && dirty_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_DENOMINATOR)
+            >= network
+                .mutable_record_rows
+                .saturating_mul(QUANTUM_ACTIVE_DENSE_NUMERATOR);
+    let sparse_shape_present = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .is_some_and(|raw| {
+            raw.get("inventory").and_then(Value::as_object).is_some()
+                && raw
+                    .get("routingCursors")
+                    .and_then(Value::as_object)
+                    .is_some()
+                && raw
+                    .get("uploadRoutingCursors")
+                    .and_then(Value::as_object)
+                    .is_some()
+        });
+    let signature_fallback = !network.sparse_write_compatible || !sparse_shape_present;
+    let scan = NetworkWriteScan {
+        dirty_rows,
+        total_rows: network.mutable_record_rows,
+        dense_fallback,
+        signature_fallback,
+    };
+    if dense_fallback || signature_fallback {
+        write_network_full(base, network)?;
+        return Ok(scan);
+    }
+
+    // Preserve the full writer's failure atomicity: serialize every fallible
+    // value before borrowing and patching the authoritative base record.
+    let runtime_flow_patch = if network.runtime_flow_dirty {
+        Some(network.runtime_flow.as_ref().map(flow_value).transpose()?)
+    } else {
+        None
+    };
+
+    let raw = base
+        .get_mut("quantumLogisticsNetwork")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native quantum logistics network is missing"))?;
+    patch_quantity_record(
+        raw.get_mut("inventory")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native quantum logistics inventory is missing"))?,
+        &network.inventory,
+        &network.dirty_inventory,
+    );
+    patch_cursor_record(
+        raw.get_mut("routingCursors")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native quantum logistics routing cursors are missing"))?,
+        &network.routing_cursors,
+        &network.dirty_routing_cursors,
+    );
+    patch_cursor_record(
+        raw.get_mut("uploadRoutingCursors")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                anyhow!("native quantum logistics upload routing cursors are missing")
+            })?,
+        &network.upload_routing_cursors,
+        &network.dirty_upload_routing_cursors,
+    );
+    if let Some(runtime_flow) = runtime_flow_patch {
+        if let Some(flow) = runtime_flow {
+            raw.insert("runtimeFlow".to_owned(), flow);
+        } else {
+            raw.remove("runtimeFlow");
+        }
+    }
+    Ok(scan)
+}
+
+fn write_network(base: &mut Map<String, Value>, network: &Network) -> anyhow::Result<()> {
+    write_network_with_scan(base, network).map(|_| ())
 }
 
 fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
@@ -2023,13 +2313,9 @@ fn settle_outputs(
                     .unwrap_or_default(),
             );
         }
-        set_biguint_amount(
-            &mut network.inventory,
-            item_id,
-            saturated(available - &allocation.total),
-        );
+        network.set_inventory_amount(item_id, saturated(available - &allocation.total));
         if allocation.total < planned && !item_requests.is_empty() {
-            advance_routing_cursor(&mut network.routing_cursors, item_id);
+            network.advance_routing_cursor(item_id);
         }
     }
     values
@@ -2084,11 +2370,11 @@ fn settle_inputs(
             .iter()
             .fold(BigUint::zero(), |sum, request| sum + &request.amount);
         if accepted < requested && item_requests.len() > 1 {
-            advance_routing_cursor(&mut network.upload_routing_cursors, &item_id);
+            network.advance_upload_routing_cursor(&item_id);
         }
         if !accepted.is_zero() {
             let next = network.inventory.get(&item_id).cloned().unwrap_or_default() + accepted;
-            set_biguint_amount(&mut network.inventory, &item_id, saturated(next));
+            network.set_inventory_amount(&item_id, saturated(next));
         }
     }
     global.values
@@ -2154,11 +2440,7 @@ fn deposit(network: &mut Network, item_id: &str, requested: &BigUint) -> BigUint
     };
     let accepted = requested.min(&free).clone();
     if !accepted.is_zero() {
-        set_biguint_amount(
-            &mut network.inventory,
-            item_id,
-            saturated(current + &accepted),
-        );
+        network.set_inventory_amount(item_id, saturated(current + &accepted));
     }
     accepted
 }
@@ -2197,10 +2479,11 @@ fn record_immediate_upload(
         .as_ref()
         .is_none_or(|flow| flow.boundary_second != boundary)
     {
-        network.runtime_flow = Some(create_flow_with_bandwidth(network, boundary, bandwidth));
+        network.set_runtime_flow(create_flow_with_bandwidth(network, boundary, bandwidth));
     }
     if let Some(flow) = &mut network.runtime_flow {
         add_flow(&mut flow.uploaded, item_id, amount);
+        network.runtime_flow_dirty = true;
     }
 }
 
@@ -2263,7 +2546,7 @@ fn flush_supply_buffers_for_index(
                 continue;
             }
             if !normalized_for_deposit {
-                network.inventory.retain(|_, amount| !amount.is_zero());
+                network.remove_zero_inventory();
                 normalized_for_deposit = true;
             }
             let accepted = deposit(&mut network, item_id, &BigUint::from(requested));
@@ -2285,7 +2568,8 @@ fn flush_supply_buffers_for_index(
     write_network(base, &network)
 }
 
-pub(crate) fn flush_active_supply_buffers(
+#[allow(clippy::too_many_arguments)]
+fn flush_active_supply_buffers_with_network(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -2293,8 +2577,8 @@ pub(crate) fn flush_active_supply_buffers(
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
     runtime_bandwidth: RuntimeBandwidth,
     frozen_mode: bool,
+    network: &mut Network,
 ) -> anyhow::Result<QuantumActiveScan> {
-    let mut network = parse_network(base)?;
     if !network.enabled {
         return Ok(QuantumActiveScan {
             total_rows: directory.upload_plans.len(),
@@ -2303,7 +2587,12 @@ pub(crate) fn flush_active_supply_buffers(
     }
     let (selected, scan) = directory.selected_flush_plans(state, entities, frozen_mode);
     let Some(selected) = selected else {
+        // The permissive oracle owns its own parse/write cycle. Publish the
+        // caller's current boundary flow first, then refresh the local session
+        // from the oracle result before later upload allocation continues.
+        write_network(base, network)?;
         flush_supply_buffers_for_index(base, entities, None)?;
+        *network = parse_network(base)?;
         directory.mark_fallback_flush_runtime_rows();
         return Ok(scan);
     };
@@ -2332,10 +2621,10 @@ pub(crate) fn flush_active_supply_buffers(
             continue;
         }
         if !normalized_for_deposit {
-            network.inventory.retain(|_, amount| !amount.is_zero());
+            network.remove_zero_inventory();
             normalized_for_deposit = true;
         }
-        let accepted = deposit(&mut network, item_id, &BigUint::from(requested));
+        let accepted = deposit(network, item_id, &BigUint::from(requested));
         let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if accepted_number < 1.0 {
             continue;
@@ -2348,11 +2637,40 @@ pub(crate) fn flush_active_supply_buffers(
         if remaining > 0.0 {
             set_item_amount(station, "inputs", item_id, (input - remaining).max(0.0))?;
         }
-        record_immediate_upload(base, runtime_bandwidth, &mut network, item_id, &accepted);
+        record_immediate_upload(base, runtime_bandwidth, network, item_id, &accepted);
         directory.mark_inventory_written(entity_index);
     }
-    write_network(base, &network)?;
     directory.commit_flush(&selected);
+    Ok(scan)
+}
+
+pub(crate) fn flush_active_supply_buffers(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut QuantumLogisticsDirectory,
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+    runtime_bandwidth: RuntimeBandwidth,
+    frozen_mode: bool,
+) -> anyhow::Result<QuantumActiveScan> {
+    let mut network = parse_network(base)?;
+    if !network.enabled {
+        return Ok(QuantumActiveScan {
+            total_rows: directory.upload_plans.len(),
+            ..QuantumActiveScan::default()
+        });
+    }
+    let scan = flush_active_supply_buffers_with_network(
+        state,
+        base,
+        entities,
+        directory,
+        route_ledger,
+        runtime_bandwidth,
+        frozen_mode,
+        &mut network,
+    )?;
+    write_network(base, &network)?;
     Ok(scan)
 }
 
@@ -2418,10 +2736,7 @@ pub(crate) fn receive_supply_material_in_session(
     }
     let mut remaining = requested - kept;
     if remaining > 0.0 {
-        session
-            .network
-            .inventory
-            .retain(|_, amount| !amount.is_zero());
+        session.network.remove_zero_inventory();
         let accepted = deposit(
             &mut session.network,
             item_id,
@@ -2556,7 +2871,7 @@ pub(crate) fn settle_downloads(
         apply_quantum_download_to_station(station, &request.item_id, amount_number, seconds)?;
         add_flow(&mut flow.downloaded, &request.item_id, &amount);
     }
-    network.runtime_flow = Some(flow.clone());
+    network.set_runtime_flow(flow.clone());
     write_network(base, &network)?;
     Ok(Some(flow))
 }
@@ -2730,7 +3045,7 @@ pub(crate) fn settle_active_downloads(
         directory.mark_download_runtime_written(request.entity_index);
         add_flow(&mut flow.downloaded, &request.item_id, &amount);
     }
-    network.runtime_flow = Some(flow.clone());
+    network.set_runtime_flow(flow.clone());
     write_network(base, &network)?;
     directory.commit_download(&selected, retain);
     directory.commit_construction_download(&indexed_construction_rows, construction_retain);
@@ -2786,10 +3101,9 @@ pub(crate) fn settle_uploads(
     flow.global_download_per_minute = bandwidth.per_minute;
     flow.quantum_tower_stacks = bandwidth.tower_stacks;
     flow.quantum_collector_stacks = bandwidth.collector_stacks;
-    network.runtime_flow = Some(flow.clone());
-    write_network(base, &network)?;
+    network.set_runtime_flow(flow.clone());
 
-    let flush_scan = flush_active_supply_buffers(
+    let flush_scan = flush_active_supply_buffers_with_network(
         state,
         base,
         entities,
@@ -2797,12 +3111,11 @@ pub(crate) fn settle_uploads(
         route_ledger,
         runtime_bandwidth,
         true,
+        &mut network,
     )?;
     if flush_scan.directory_fallback {
         directory.fallback_full_scan = true;
     }
-    network = parse_network(base)?;
-
     let (selected_rows, upload_scan) = directory.selected_boundary_upload_rows(state, entities);
     if upload_scan.directory_fallback {
         directory.fallback_full_scan = true;
@@ -2989,7 +3302,7 @@ pub(crate) fn settle_uploads(
         directory.mark_inventory_written(request.entity_index);
         add_flow(&mut flow.uploaded, &request.item_id, &amount);
     }
-    network.runtime_flow = Some(flow);
+    network.set_runtime_flow(flow);
     write_network(base, &network)?;
     if let Some(selected_rows) = selected_rows.as_ref() {
         directory.commit_boundary_upload(selected_rows, retain_rows);
@@ -3948,6 +4261,277 @@ mod tests {
     }
 
     #[test]
+    fn sparse_network_write_matches_full_writer_and_survives_reload() {
+        let mut sparse_base = active_quantum_base(0);
+        let inventory = sparse_base["quantumLogisticsNetwork"]["inventory"]
+            .as_object_mut()
+            .expect("wide inventory");
+        for index in 0..16 {
+            inventory.insert(
+                format!("item-{index:02}"),
+                Value::from(format!("{}", index + 1)),
+            );
+        }
+        inventory.insert("mod:量子/Ω🚀".to_owned(), Value::from("23"));
+        inventory.insert("zero-to-remove".to_owned(), Value::from("0"));
+        sparse_base["quantumLogisticsNetwork"]["routingCursors"] =
+            serde_json::json!({ "item-00": 2 });
+        let untouched_pointer = sparse_base["quantumLogisticsNetwork"]["inventory"]["mod:量子/Ω🚀"]
+            .as_str()
+            .expect("untouched Unicode/MOD value")
+            .as_ptr();
+        let mut full_base = sparse_base.clone();
+        let mut network = parse_network(&sparse_base).expect("canonical sparse network");
+        assert!(network.sparse_write_compatible);
+        network.set_inventory_amount("item-00", BigUint::from(77_u8));
+        network.set_inventory_amount("007/新物料", BigUint::from(31_u8));
+        network.remove_zero_inventory();
+        network.advance_routing_cursor("item-00");
+        network.set_runtime_flow(BoundaryFlow {
+            boundary_second: 5.0,
+            uploaded: BTreeMap::from([("mod:量子/Ω🚀".to_owned(), BigUint::from(3_u8))]),
+            downloaded: BTreeMap::from([("item-00".to_owned(), BigUint::from(5_u8))]),
+            global_upload_per_minute: 5_000.0,
+            global_download_per_minute: 5_000.0,
+            quantum_tower_stacks: 1.0,
+            quantum_collector_stacks: -0.0,
+        });
+
+        let scan = write_network_with_scan(&mut sparse_base, &network).expect("sparse write");
+        write_network_full(&mut full_base, &network).expect("full oracle write");
+        assert_eq!(scan.dirty_rows, 4);
+        assert_eq!(scan.total_rows, 19);
+        assert!(!scan.dense_fallback);
+        assert!(!scan.signature_fallback);
+        assert_eq!(
+            sparse_base["quantumLogisticsNetwork"]["inventory"]["mod:量子/Ω🚀"]
+                .as_str()
+                .expect("untouched Unicode/MOD value")
+                .as_ptr(),
+            untouched_pointer,
+            "sparse writes must not rebuild untouched inventory values"
+        );
+        assert_eq!(
+            serde_json::to_vec(&sparse_base).expect("sparse bytes"),
+            serde_json::to_vec(&full_base).expect("full bytes")
+        );
+
+        let serialized = serde_json::to_vec(&sparse_base).expect("serialize sparse network");
+        let mut reloaded = serde_json::from_slice::<Value>(&serialized)
+            .expect("reload sparse network")
+            .as_object()
+            .expect("reloaded base")
+            .clone();
+        let mut reload_oracle = reloaded.clone();
+        let mut reloaded_network = parse_network(&reloaded).expect("parse reloaded network");
+        assert!(reloaded_network.sparse_write_compatible);
+        reloaded_network.set_inventory_amount("item-15", BigUint::from(101_u8));
+        let reload_scan =
+            write_network_with_scan(&mut reloaded, &reloaded_network).expect("reload sparse write");
+        write_network_full(&mut reload_oracle, &reloaded_network)
+            .expect("reload full oracle write");
+        assert!(!reload_scan.dense_fallback);
+        assert!(!reload_scan.signature_fallback);
+        assert_eq!(
+            serde_json::to_vec(&reloaded).expect("reloaded sparse bytes"),
+            serde_json::to_vec(&reload_oracle).expect("reloaded full bytes")
+        );
+    }
+
+    #[test]
+    fn network_sparse_writer_uses_exact_three_quarters_dense_fallback() {
+        let mut sparse_base = active_quantum_base(0);
+        sparse_base["quantumLogisticsNetwork"]["inventory"] = serde_json::json!({
+            "item-0": "1",
+            "item-1": "2",
+            "item-2": "3",
+            "item-3": "4"
+        });
+        let mut full_base = sparse_base.clone();
+        let mut network = parse_network(&sparse_base).expect("dense network");
+        for index in 0..3 {
+            network.set_inventory_amount(&format!("item-{index}"), BigUint::from(10_u8));
+        }
+        let scan = write_network_with_scan(&mut sparse_base, &network).expect("dense write");
+        write_network_full(&mut full_base, &network).expect("dense full oracle");
+        assert_eq!(scan.dirty_rows, 3);
+        assert_eq!(scan.total_rows, 4);
+        assert!(scan.dense_fallback);
+        assert!(!scan.signature_fallback);
+        assert_eq!(
+            serde_json::to_vec(&sparse_base).expect("dense sparse bytes"),
+            serde_json::to_vec(&full_base).expect("dense full bytes")
+        );
+    }
+
+    #[test]
+    fn network_sparse_writer_failure_keeps_source_bytes_unchanged() {
+        let mut base = active_quantum_base(0);
+        let inventory = base["quantumLogisticsNetwork"]["inventory"]
+            .as_object_mut()
+            .expect("atomic inventory");
+        for index in 0..8 {
+            inventory.insert(format!("item-{index}"), Value::from("1"));
+        }
+        let before = serde_json::to_vec(&base).expect("source bytes before failed write");
+        let mut network = parse_network(&base).expect("atomic sparse network");
+        network.set_inventory_amount("item-0", BigUint::from(2_u8));
+        network.set_runtime_flow(BoundaryFlow {
+            boundary_second: 5.0,
+            global_upload_per_minute: f64::NAN,
+            ..BoundaryFlow::default()
+        });
+
+        assert!(write_network_with_scan(&mut base, &network).is_err());
+        assert_eq!(
+            serde_json::to_vec(&base).expect("source bytes after failed write"),
+            before
+        );
+    }
+
+    #[test]
+    fn disabled_noncanonical_network_remains_byte_unchanged() {
+        let mut entities = Vec::new();
+        let state = crate::simple_factory::tests::fixture_state(&entities);
+        let mut base = active_quantum_base(0);
+        base["quantumLogisticsNetwork"]["enabled"] = Value::Bool(false);
+        base["quantumLogisticsNetwork"]["inventory"]["legacy-negative-zero"] = Value::from(-0.0);
+        base["quantumLogisticsNetwork"]["mod:outer/字段"] = Value::from("untouched");
+        let before = serde_json::to_vec(&base).expect("disabled source bytes");
+        let mut directory = QuantumLogisticsDirectory::build(&state, &entities);
+
+        flush_active_supply_buffers(
+            &state,
+            &mut base,
+            &mut entities,
+            &mut directory,
+            &crate::station_route_ledger::StationRouteLedger::default(),
+            RuntimeBandwidth {
+                per_minute: 0.0,
+                tower_stacks: 0.0,
+                collector_stacks: 0.0,
+            },
+            false,
+        )
+        .expect("disabled flush");
+        assert_eq!(
+            serde_json::to_vec(&base).expect("disabled result bytes"),
+            before
+        );
+    }
+
+    #[test]
+    fn network_sparse_writer_fails_closed_for_noncanonical_v47_shapes() {
+        let baseline = active_quantum_base(0);
+        let mut variants = Vec::new();
+
+        let mut numeric = baseline.clone();
+        numeric["quantumLogisticsNetwork"]["inventory"]["legacy-number"] = Value::from(7);
+        variants.push(("numeric inventory", numeric));
+
+        let mut negative_zero = baseline.clone();
+        negative_zero["quantumLogisticsNetwork"]["inventory"]["negative-zero"] = Value::from(-0.0);
+        variants.push(("negative zero", negative_zero));
+
+        let mut fractional = baseline.clone();
+        fractional["quantumLogisticsNetwork"]["inventory"]["fractional"] = Value::from(1.25);
+        variants.push(("fractional inventory", fractional));
+
+        let mut leading_zero = baseline.clone();
+        leading_zero["quantumLogisticsNetwork"]["inventory"]["leading-zero"] = Value::from("0007");
+        variants.push(("noncanonical decimal", leading_zero));
+
+        let mut missing = baseline.clone();
+        missing["quantumLogisticsNetwork"]
+            .as_object_mut()
+            .expect("network")
+            .remove("uploadRoutingCursors");
+        variants.push(("missing field", missing));
+
+        let mut extension = baseline;
+        extension["quantumLogisticsNetwork"]["mod:extra/字段"] = Value::from("keep-or-normalize");
+        variants.push(("extension field", extension));
+
+        let baseline = active_quantum_base(0);
+        for (label, value) in [
+            ("numeric capacity", Value::from(20_000)),
+            ("capacity below minimum", Value::from("1")),
+            ("capacity above maximum", Value::from("10000000001")),
+        ] {
+            let mut candidate = baseline.clone();
+            candidate["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"] = value;
+            variants.push((label, candidate));
+        }
+        for (label, value) in [
+            ("string cursor", Value::from("2")),
+            ("negative-zero cursor", Value::from(-0.0)),
+            ("fractional cursor", Value::from(1.25)),
+            ("unsafe cursor", Value::from(MAX_SAFE_INTEGER + 1)),
+        ] {
+            let mut candidate = baseline.clone();
+            candidate["quantumLogisticsNetwork"]["routingCursors"]["iron_ore"] = value;
+            variants.push((label, candidate));
+        }
+        let canonical_flow = flow_value(&BoundaryFlow {
+            boundary_second: 5.0,
+            uploaded: BTreeMap::from([("mod:量子/Ω🚀".to_owned(), BigUint::from(2_u8))]),
+            downloaded: BTreeMap::new(),
+            global_upload_per_minute: 5_000.0,
+            global_download_per_minute: 5_000.0,
+            quantum_tower_stacks: 1.0,
+            quantum_collector_stacks: -0.0,
+        })
+        .expect("canonical fallback-test flow");
+        let mut missing_flow_field = baseline.clone();
+        missing_flow_field["quantumLogisticsNetwork"]["runtimeFlow"] = canonical_flow.clone();
+        missing_flow_field["quantumLogisticsNetwork"]["runtimeFlow"]
+            .as_object_mut()
+            .expect("runtime flow")
+            .remove("downloaded");
+        variants.push(("runtime flow missing field", missing_flow_field));
+        let mut extra_flow_field = baseline.clone();
+        extra_flow_field["quantumLogisticsNetwork"]["runtimeFlow"] = canonical_flow;
+        extra_flow_field["quantumLogisticsNetwork"]["runtimeFlow"]["mod:extra"] = Value::from(1);
+        variants.push(("runtime flow extra field", extra_flow_field));
+        let mut null_flow = baseline;
+        null_flow["quantumLogisticsNetwork"]["runtimeFlow"] = Value::Null;
+        variants.push(("null runtime flow", null_flow));
+
+        for (label, mut sparse_base) in variants {
+            let mut full_base = sparse_base.clone();
+            let mut network = parse_network(&sparse_base).expect(label);
+            network.set_inventory_amount("iron_ore", BigUint::from(9_u8));
+            let scan = write_network_with_scan(&mut sparse_base, &network).expect(label);
+            write_network_full(&mut full_base, &network).expect("full compatibility oracle");
+            assert!(scan.signature_fallback, "{label}");
+            assert_eq!(
+                serde_json::to_vec(&sparse_base).expect("fallback sparse bytes"),
+                serde_json::to_vec(&full_base).expect("fallback full bytes"),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_nonobject_network_parse_failure_keeps_source_bytes_unchanged() {
+        for (label, base) in [
+            ("missing", Map::new()),
+            (
+                "nonobject",
+                Map::from_iter([("quantumLogisticsNetwork".to_owned(), Value::from("invalid"))]),
+            ),
+        ] {
+            let before = serde_json::to_vec(&base).expect("parse failure source bytes");
+            assert!(parse_network(&base).is_err(), "{label}");
+            assert_eq!(
+                serde_json::to_vec(&base).expect("parse failure result bytes"),
+                before,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn in_place_network_updates_match_clone_reinsert_settlement() {
         let special = "mod:量子矿石/Ω🚀";
         let mut optimized = Network {
@@ -4292,6 +4876,60 @@ mod tests {
             assert_eq!(scan.selected_rows, 8);
             assert_eq!(scan.total_rows, 8);
             assert!(!scan.directory_fallback);
+        }
+    }
+
+    #[test]
+    fn construction_sparse_network_write_matches_old_full_oracle_at_1_5_and_60_seconds() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let (state, mut source_base, source_entities) = construction_quantum_fixture(8);
+            let inventory = source_base["quantumLogisticsNetwork"]["inventory"]
+                .as_object_mut()
+                .expect("construction network inventory");
+            for index in 0..24 {
+                inventory.insert(
+                    format!("inactive-{index:02}"),
+                    Value::from(format!("{}", index + 1)),
+                );
+            }
+            inventory.insert("mod:未触发/Ω🚀".to_owned(), Value::from("97"));
+            let mut active_base = source_base.clone();
+            let mut oracle_base = source_base;
+            let mut active_entities = source_entities.clone();
+            let mut oracle_entities = source_entities;
+            let untouched_pointer =
+                active_base["quantumLogisticsNetwork"]["inventory"]["mod:未触发/Ω🚀"]
+                    .as_str()
+                    .expect("untouched construction item")
+                    .as_ptr();
+            let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+
+            settle_construction_download_pair(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &mut directory,
+                seconds,
+                seconds,
+            );
+            assert_eq!(
+                active_base["quantumLogisticsNetwork"]["inventory"]["mod:未触发/Ω🚀"]
+                    .as_str()
+                    .expect("untouched construction item")
+                    .as_ptr(),
+                untouched_pointer,
+                "{seconds}s active settlement must patch only the dirty inventory key"
+            );
+
+            let oracle_network = parse_network(&oracle_base).expect("oracle network");
+            write_network_full(&mut oracle_base, &oracle_network).expect("old full writer oracle");
+            assert_eq!(
+                quantum_oracle_bytes(&active_base, &active_entities),
+                quantum_oracle_bytes(&oracle_base, &oracle_entities),
+                "sparse/full network writer at {seconds}s"
+            );
         }
     }
 

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 describe("native ordinary construction removal App integration", () => {
   const app = readFileSync(resolve("src/App.tsx"), "utf8");
-  const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
+  const inspector = readFileSync(resolve("src/components/NativeFactoryInspectorPanel.tsx"), "utf8");
   const boundary = readFileSync(resolve("src/game/nativeConstructionRemoval.ts"), "utf8");
 
   it("requests a fresh Rust capability only after the destructive confirmation", () => {
@@ -20,11 +20,11 @@ describe("native ordinary construction removal App integration", () => {
   });
 
   it("exposes only the guarded whole-building action in the native inspector", () => {
-    expect(app).toMatch(/nativeActionPending=\{nativeRemovalContextPending \|\| nativePlayerAuthorityCommandPending\}/);
-    expect(app).toMatch(/onRemoveEntity=\{nativePlayerAuthorityOwnsRuntime \? removeNativeOrdinaryBuilding : handleRemoveEntity\}/);
-    expect(panels).toMatch(/data-native-construction-removal="ordinary-complete-v1"/);
-    expect(panels).toMatch(/disabled=\{props\.nativeActionPending \|\| props\.selectedEntity\.interactionLocked/);
-    expect(panels).toMatch(/onClick=\{\(\) => props\.onRemoveEntity\(props\.selectedEntity!\.id\)\}/);
+    expect(app).toMatch(/<NativeFactoryInspectorPanel[\s\S]*?pending=\{nativeRemovalContextPending \|\| nativePlayerAuthorityCommandPending\}/);
+    expect(app).toMatch(/onRemoveEntity=\{\(entityId\) => void removeNativeOrdinaryBuilding\(entityId\)\}/);
+    expect(inspector).toMatch(/data-native-construction-removal="ordinary-complete-v1"/);
+    expect(inspector).toMatch(/disabled=\{pending \|\| entity\.interactionLocked/);
+    expect(inspector).toMatch(/onClick=\{\(\) => onRemoveEntity\(entity\.entityId\)\}/);
   });
 
   it("builds the refund/removal command without reading GameState", () => {

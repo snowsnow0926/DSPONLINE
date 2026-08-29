@@ -6131,6 +6131,39 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   color: var(--coral);
 }
 
+.native-inspector-items {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.native-inspector-items > header,
+.native-inspector-items > div {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.native-inspector-items > p,
+.native-inspector-items > small,
+.native-factory-inspector__route,
+.native-factory-inspector__lock {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.native-factory-inspector__lock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--coral);
+}
+
 .inspector-empty {
   display: flex;
   align-items: center;

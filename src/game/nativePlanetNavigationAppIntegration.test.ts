@@ -112,7 +112,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
-    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?readOnly=\{nativePlayerAuthorityOwnsRuntime\}/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterUnavailable=\{nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/constructionCenterOpen && !nativePlayerAuthorityOwnsRuntime \? \(/);
     expect(app).toMatch(/nodesConnectable=\{!nativePlayerAuthorityOwnsRuntime\}/);

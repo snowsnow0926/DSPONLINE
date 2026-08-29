@@ -50,6 +50,7 @@ import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
+import { NativeFactoryInspectorPanel } from "./components/NativeFactoryInspectorPanel";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
@@ -912,19 +913,27 @@ export function RuntimeRenderProfile({ id, children }: { id: string; children: R
  * window while preserving immediate updates whenever the simulation is
  * paused or the player is actively inspecting an object.
  */
-function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameState {
+function useThrottledRuntimeShellGame(game: GameState, immediate = false, enabled = true): GameState {
   const [snapshot, setSnapshot] = useState(game);
   const latestRef = useRef(game);
+  const enabledRef = useRef(enabled);
   const timerRef = useRef<number | null>(null);
-  latestRef.current = game;
-  const cargoChanged = snapshot.cargo?.itemId !== game.cargo?.itemId ||
+  const enabledChanged = enabledRef.current !== enabled;
+  enabledRef.current = enabled;
+  if (enabled) latestRef.current = game;
+  const cargoChanged = enabled && (snapshot.cargo?.itemId !== game.cargo?.itemId ||
     snapshot.cargo?.amount !== game.cargo?.amount ||
     snapshot.cargo?.origin?.kind !== game.cargo?.origin?.kind ||
-    snapshot.cargo?.origin?.id !== game.cargo?.origin?.id;
-  const publishImmediately = immediate || cargoChanged;
+    snapshot.cargo?.origin?.id !== game.cargo?.origin?.id);
+  const publishImmediately = enabled && (enabledChanged || immediate || cargoChanged);
   const trailingDelayMs = isLargeRuntimeState(game) ? 2_000 : 750;
 
   useEffect(() => {
+    if (!enabled) {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      return;
+    }
     if (publishImmediately) {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -940,7 +949,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
       // the whole trailing refresh into one main-thread task.
       startTransition(() => setSnapshot(latestRef.current));
     }, trailingDelayMs);
-  }, [game, publishImmediately, trailingDelayMs]);
+  }, [enabled, game, publishImmediately, trailingDelayMs]);
 
   useEffect(() => () => {
     if (timerRef.current !== null) {
@@ -948,7 +957,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
       timerRef.current = null;
     }
   }, []);
-  return publishImmediately ? game : snapshot;
+  return enabled && publishImmediately ? game : snapshot;
 }
 
 // Run-log visibility is a presentation preference. Keep safety-critical
@@ -1805,11 +1814,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [, setHistoryRevision] = useState(0);
   const [nodes, setNodes, onNodesChange] = useNodesState<FactoryFlowNode>([]);
   useEffect(() => installRuntimeLongTaskDiagnostics(), []);
-  const panelGame = useThrottledRuntimeShellGame(game,
-    operationsOpen || mobilePanel !== null ||
-    selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
-    placement !== null || nativePlacementBuildingId !== null || blueprintPlacementId !== null || connectionDraft !== null,
-  );
   useLayoutEffect(() => {
     recordActiveRuntimeTransitionPhase("react-layout-commit", {
       paused: game.paused,
@@ -2257,6 +2261,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityMacroStatus !== null;
   const nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending ||
     nativePlayerAuthorityRuntimeDetected || nativeAuthorityHandoffQuiescing;
+  const panelGame = useThrottledRuntimeShellGame(
+    game,
+    !nativePlayerAuthorityOwnsRuntime && (
+      operationsOpen || mobilePanel !== null ||
+      selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
+      placement !== null || nativePlacementBuildingId !== null || blueprintPlacementId !== null || connectionDraft !== null
+    ),
+    !nativePlayerAuthorityOwnsRuntime,
+  );
   const nativePlayerAuthorityOwnsRuntimeRef = useRef(false);
   nativePlayerAuthorityOwnsRuntimeRef.current = nativePlayerAuthorityOwnsRuntime;
   const nativePlayerAuthorityOwnershipEpochRef = useRef(
@@ -15681,20 +15694,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     playTone,
   ]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
-  const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative"
-    ? {
-        ...panelGame,
-        activePlanetId: factoryCanvasPlanetId,
-        entities: factoryInteractionRows.projectionEntities as FactoryEntity[],
-        belts: factoryInteractionRows.projectionBelts as BeltConnection[],
-        cargo: null,
-        tray: {},
-      }
-    : panelGame,
-  [factoryCanvasPlanetId, factoryInteractionRows, panelGame]);
-  const factoryInspectorGame = nativePlayerAuthorityOwnsRuntime || inspectorTab === "inspect"
-    ? factorySelectionReadGame
-    : panelGame;
   const dockBeltTier = resolveConnectionBeltTier(game, beltTierMode, beltTier);
   const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
     ? []
@@ -16589,11 +16588,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onOpenStarMap={() => { if (starMapOpen) closeAllWorkspaces(); else openCommandWorkspace("star-map"); setNotice(null); }}
       />
       </RuntimeRenderProfile>
-      <MobileGameShell
+      {!nativePlayerAuthorityOwnsRuntime ? <MobileGameShell
         enabled={nextMobileShell && !nativePlayerAuthorityOwnsRuntime}
         layout={compactLayout}
         game={game}
-        factoryGame={factorySelectionReadGame}
+        factoryGame={panelGame}
         alertCount={alertCount}
         planetAlertCounts={planetAlertCounts}
         route={mobileNavigation.route}
@@ -16794,7 +16793,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onDismissExit={mobileNavigation.dismissExit}
         onRequestExit={mobileNavigation.requestExit}
         onSwitchLegacy={switchToLegacyMobileUi}
-      />
+      /> : null}
       {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
         mode={activeMobileCanvasMode}
         buildingId={placement}
@@ -17430,10 +17429,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         </section>
         </RuntimeRenderProfile>
         <RuntimeRenderProfile id="inspector">
-        <StableInspectorPanel
-          game={factoryInspectorGame}
-          readOnly={nativePlayerAuthorityOwnsRuntime}
-          nativeActionPending={nativeRemovalContextPending || nativePlayerAuthorityCommandPending}
+        {nativePlayerAuthorityOwnsRuntime ? <NativeFactoryInspectorPanel
+          inspector={factoryInspectorSummaryReadModel}
+          multiSelection={factoryMultiSelectionSummaryReadModel}
+          pending={nativeRemovalContextPending || nativePlayerAuthorityCommandPending}
+          onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
+        /> : <StableInspectorPanel
+          game={panelGame}
+          readOnly={false}
           inspectorReadModel={factoryInspectorSummaryReadModel}
           multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
           multiSelectedBelts={selectedBeltsForMultiSummary as BeltConnection[]}
@@ -17647,13 +17650,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onCraftItem={handleQuickCraftFleet}
           onQueueCraftItem={(recipeId, batches) => commitGame((current) => queueHandcraftRecipe(current, recipeId, batches))}
           onCancelCraftQueue={(entryId) => commitGame((current) => cancelHandcraftQueueEntry(current, entryId))}
-          onRemoveEntity={nativePlayerAuthorityOwnsRuntime ? removeNativeOrdinaryBuilding : handleRemoveEntity}
+          onRemoveEntity={handleRemoveEntity}
           onRemoveBelt={(beltId) => {
             commitGame((current) => removeBelt(current, beltId));
             setSelectedBeltId(null);
             playTone("remove");
           }}
-        />
+        />}
         </RuntimeRenderProfile>
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--right${rightSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setRightSidebarCollapsed((collapsed) => !collapsed)} title={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"} aria-label={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"}>{rightSidebarCollapsed ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
       </div>

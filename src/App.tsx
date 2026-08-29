@@ -320,7 +320,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -528,6 +528,11 @@ import {
   createNativeProjectedRemoveQueuedTechnologyCommand,
 } from "./game/nativeProjectedTechnologyCommands";
 import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
+import {
+  createNativeProjectedRecipeFocusItemCommand,
+  createNativeProjectedRecipeFocusModeCommand,
+  createNativeProjectedRecipeFocusPositionCommand,
+} from "./game/nativeProjectedRecipeFocusCommands";
 import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
@@ -11198,12 +11203,63 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [commitGame]);
 
   const onRecipeFocusChange = useCallback((itemId: ItemId | null) => {
-    if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦设置")) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusItemCommand(identity, model, itemId)
+          : null,
+        () => setNotice(itemId ? "已由 Rust 更新聚焦物料" : "已由 Rust 取消聚焦物料"),
+      );
+      return;
+    }
     commitGame((current) => setRecipeFocus(current, itemId));
-  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
+
+  const onRecipeFocusModeChange = useCallback((mode: RecipeFocusMode) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusModeCommand(identity, model, mode)
+          : null,
+        () => setNotice(`已由 Rust 切换为${mode === "full" ? "完整" : "两层"}生产链`),
+      );
+      return;
+    }
+    commitGame((current) => setRecipeFocusMode(current, mode));
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
+
+  const onRecipeFocusPositionChange = useCallback((position: { x: number; y: number }) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusPositionCommand(identity, model, position)
+          : null);
+      return;
+    }
+    commitGame((current) => setRecipeFocusPosition(current, position));
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
 
   const openRecipeFocus = useCallback((itemId?: ItemId) => {
-    const focused = itemId ?? gameRef.current.recipeFocus.itemId;
+    const focused = itemId ?? recipeFocusReadModel?.itemId ??
+      (nativePlayerAuthorityOwnsRuntimeRef.current ? null : gameRef.current.recipeFocus.itemId);
     if (focused) setCampaignFocusItemId(focused);
     closeAllWorkspaces();
     setRecipesOpen(true);
@@ -11211,7 +11267,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setNotice(null);
     if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("recipes");
     else mobileNavigation.openWorkspace("recipes");
-  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, recipeFocusReadModel?.itemId]);
 
   const onFuelChange = useCallback((entityId: string, itemId: ItemId) => {
     commitGame((current) => setFuelItem(current, entityId, itemId));
@@ -18161,17 +18217,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </div>
           <RecipeFocusPanel
             model={recipeFocusReadModel}
-            readOnly={nativePlayerAuthorityOwnsRuntime}
+            readOnly={nativePlayerAuthorityOwnsRuntime &&
+              (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)}
             onClear={() => onRecipeFocusChange(null)}
-            onModeChange={(mode) => {
-              if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦层级")) return;
-              commitGame((current) => setRecipeFocusMode(current, mode));
-            }}
+            onModeChange={onRecipeFocusModeChange}
             onOpen={openRecipeFocus}
-            onPositionChange={(position) => {
-              if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦位置")) return;
-              commitGame((current) => setRecipeFocusPosition(current, position));
-            }}
+            onPositionChange={onRecipeFocusPositionChange}
           />
         </section>
         </RuntimeRenderProfile>

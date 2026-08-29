@@ -124,11 +124,11 @@ describe("recipe focus thin read model", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*nativeRecipeFocusReadModel\s*:\s*webRecipeFocusReadModel/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? null : createWebRecipeFocusReadModel\(game\)/);
     expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}/);
-    expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}\s+readOnly=\{nativePlayerAuthorityOwnsRuntime\}/);
+    expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}[\s\S]*?readOnly=\{nativePlayerAuthorityOwnsRuntime &&[\s\S]*?!nativeRecipeFocusReadModel[\s\S]*?nativePlayerAuthorityCommandPending/);
     expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/const onRecipeFocusChange = useCallback[\s\S]*?rejectLegacyFactoryInteractionWhileNative\("生产链聚焦设置"\)/);
-    expect(app).toMatch(/onModeChange=\{\(mode\) => \{[\s\S]*?rejectLegacyFactoryInteractionWhileNative\("生产链聚焦层级"\)/);
-    expect(app).toMatch(/onPositionChange=\{\(position\) => \{[\s\S]*?rejectLegacyFactoryInteractionWhileNative\("生产链聚焦位置"\)/);
+    expect(app).toMatch(/const onRecipeFocusChange = useCallback[\s\S]*?createNativeProjectedRecipeFocusItemCommand/);
+    expect(app).toMatch(/onModeChange=\{onRecipeFocusModeChange\}/);
+    expect(app).toMatch(/onPositionChange=\{onRecipeFocusPositionChange\}/);
     expect(app).not.toMatch(/<RecipeFocusPanel\s+game=\{/);
     expect(panel).toMatch(/RecipeFocusReadModel/);
     expect(panel).toMatch(/data-recipe-focus-source=\{model\.source\}/);

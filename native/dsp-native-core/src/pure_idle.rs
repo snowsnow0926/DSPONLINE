@@ -96,6 +96,94 @@ struct FiniteVeinProofSnapshot {
     depletion_remainder: i128,
 }
 
+/// Bit-exact, non-negative finite power reading. Power metrics are rounded
+/// diagnostics rather than material counters, so retaining their IEEE-754
+/// identity avoids inventing integer precision above JavaScript's safe range
+/// while still making adjacent exact-window comparisons deterministic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PowerProofScalar(u64);
+
+impl PowerProofScalar {
+    fn from_f64(value: f64, label: &str) -> anyhow::Result<Self> {
+        if !value.is_finite() || value < 0.0 {
+            bail!("{label} is not a finite non-negative power value");
+        }
+        Ok(Self(if value == 0.0 { 0 } else { value.to_bits() }))
+    }
+
+    fn from_value(value: Option<&Value>, label: &str) -> anyhow::Result<Self> {
+        let value = value
+            .and_then(Value::as_f64)
+            .ok_or_else(|| anyhow!("{label} is missing or not numeric"))?;
+        Self::from_f64(value, label)
+    }
+
+    fn from_optional_value(value: Option<&Value>, label: &str) -> anyhow::Result<Self> {
+        match value {
+            None | Some(Value::Null) => Ok(Self::default()),
+            value => Self::from_value(value, label),
+        }
+    }
+
+    fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PowerGridKey {
+    planet_id: String,
+    grid_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RenewablePowerGridProofSnapshot {
+    complete: bool,
+    connected_entities: i128,
+    disconnected_entities: i128,
+    demand_kw: PowerProofScalar,
+    wind_generation_kw: PowerProofScalar,
+    solar_generation_kw: PowerProofScalar,
+    geothermal_generation_kw: PowerProofScalar,
+    thermal_generation_kw: PowerProofScalar,
+    fusion_generation_kw: PowerProofScalar,
+    artificial_star_generation_kw: PowerProofScalar,
+    ray_generation_kw: PowerProofScalar,
+    storage_discharge_kw: PowerProofScalar,
+    storage_charge_kw: PowerProofScalar,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RenewablePowerProofSnapshot {
+    time_warp_complete: bool,
+    controller_entity_id: String,
+    requested_multiplier: PowerProofScalar,
+    effective_multiplier: PowerProofScalar,
+    required_power_kw: PowerProofScalar,
+    allocated_power_kw: PowerProofScalar,
+    grids: BTreeMap<PowerGridKey, RenewablePowerGridProofSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenewablePowerGridGrant {
+    demand_ceiling_kw: PowerProofScalar,
+    static_generation_floor_kw: PowerProofScalar,
+    ray_generation_floor_kw: PowerProofScalar,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenewablePowerTailCertificate {
+    controller_entity_id: String,
+    controller_grid: PowerGridKey,
+    requested_multiplier: PowerProofScalar,
+    effective_multiplier: PowerProofScalar,
+    required_power_kw: PowerProofScalar,
+    allocated_power_kw: PowerProofScalar,
+    grids: BTreeMap<PowerGridKey, RenewablePowerGridGrant>,
+    structure_floor_by_system: BTreeMap<String, i128>,
+    shell_floor_by_system: BTreeMap<String, i128>,
+}
+
 /// Ephemeral proof input for one native candidate. It is never serialized into
 /// public GameState v47, the save envelope, or a canonical hash. Each capture
 /// owns only compact per-item counters; entity rows are decoded one at a time.
@@ -114,6 +202,7 @@ struct SettlementProofSnapshot {
     /// Baselines and serialized/reloaded states deliberately carry `None`.
     construction_receipt: Option<ConstructionRunReceipt>,
     dyson: DysonTerminalSnapshot,
+    renewable_power: RenewablePowerProofSnapshot,
     research: ResearchProofSnapshot,
     finite_veins: BTreeMap<String, FiniteVeinProofSnapshot>,
 }
@@ -240,6 +329,17 @@ struct OrdinaryFlowCertificate {
     /// is extrapolated; orbit decay and shell absorption are advanced by the
     /// native Dyson lifecycle from the committed endpoint.
     dyson_sail: Option<DysonSailSinkCertificate>,
+    /// Runtime-only, per-grid lower-bound proof. It is present only when a
+    /// solar-sail lifecycle shares power authority with dynamic ray receivers.
+    renewable_power: Option<RenewablePowerTailCertificate>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OrdinaryTerminalCertificates {
+    research: Option<ResearchSinkCertificate>,
+    dyson_rocket: Option<DysonRocketSinkCertificate>,
+    dyson_sail: Option<DysonSailSinkCertificate>,
+    renewable_power: Option<RenewablePowerTailCertificate>,
 }
 
 /// Runtime acceleration for a continuous macro-v10 session. This cache never
@@ -824,6 +924,125 @@ fn proof_fixed_micros(value: Option<&Value>, label: &str) -> anyhow::Result<i128
     Ok(rounded as i128)
 }
 
+fn capture_renewable_power_proof_snapshot(
+    state: &CoreState,
+) -> anyhow::Result<RenewablePowerProofSnapshot> {
+    let base = state.base_value();
+    let time_warp = base.get("timeWarp").and_then(Value::as_object);
+    let controller_entity_id = time_warp
+        .and_then(|time_warp| time_warp.get("controllerEntityId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    let time_warp_fields = [
+        "requestedMultiplier",
+        "effectiveMultiplier",
+        "requiredPowerKw",
+        "allocatedPowerKw",
+    ];
+    let mut snapshot = RenewablePowerProofSnapshot {
+        time_warp_complete: !controller_entity_id.is_empty()
+            && time_warp_fields.iter().all(|field| {
+                time_warp
+                    .and_then(|time_warp| time_warp.get(*field))
+                    .is_some_and(Value::is_number)
+            }),
+        controller_entity_id,
+        requested_multiplier: PowerProofScalar::from_optional_value(
+            time_warp.and_then(|time_warp| time_warp.get("requestedMultiplier")),
+            "timeWarp.requestedMultiplier",
+        )?,
+        effective_multiplier: PowerProofScalar::from_optional_value(
+            time_warp.and_then(|time_warp| time_warp.get("effectiveMultiplier")),
+            "timeWarp.effectiveMultiplier",
+        )?,
+        required_power_kw: PowerProofScalar::from_optional_value(
+            time_warp.and_then(|time_warp| time_warp.get("requiredPowerKw")),
+            "timeWarp.requiredPowerKw",
+        )?,
+        allocated_power_kw: PowerProofScalar::from_optional_value(
+            time_warp.and_then(|time_warp| time_warp.get("allocatedPowerKw")),
+            "timeWarp.allocatedPowerKw",
+        )?,
+        grids: BTreeMap::new(),
+    };
+    let Some(power_metrics) = base.get("powerGridMetrics").and_then(Value::as_object) else {
+        return Ok(snapshot);
+    };
+    for (planet_id, grids) in power_metrics {
+        if !state
+            .catalog
+            .planets
+            .iter()
+            .any(|planet| planet.id == *planet_id)
+        {
+            bail!("powerGridMetrics contains unknown planet {planet_id}");
+        }
+        let grids = grids
+            .as_object()
+            .ok_or_else(|| anyhow!("powerGridMetrics.{planet_id} is not an object"))?;
+        for (grid_id, metric) in grids {
+            if !matches!(grid_id.as_str(), "grid-a" | "grid-b" | "grid-c") {
+                bail!("powerGridMetrics.{planet_id} contains unknown grid {grid_id}");
+            }
+            let metric = metric.as_object().ok_or_else(|| {
+                anyhow!("powerGridMetrics.{planet_id}.{grid_id} is not an object")
+            })?;
+            let required_fields = [
+                "demandKw",
+                "windGenerationKw",
+                "solarGenerationKw",
+                "geothermalGenerationKw",
+                "thermalGenerationKw",
+                "fusionGenerationKw",
+                "artificialStarGenerationKw",
+                "rayGenerationKw",
+                "storageDischargeKw",
+                "storageChargeKw",
+                "connectedEntities",
+                "disconnectedEntities",
+            ];
+            let read = |field: &str| {
+                PowerProofScalar::from_optional_value(
+                    metric.get(field),
+                    &format!("powerGridMetrics.{planet_id}.{grid_id}.{field}"),
+                )
+            };
+            snapshot.grids.insert(
+                PowerGridKey {
+                    planet_id: planet_id.clone(),
+                    grid_id: grid_id.clone(),
+                },
+                RenewablePowerGridProofSnapshot {
+                    complete: required_fields
+                        .iter()
+                        .all(|field| metric.get(*field).is_some_and(Value::is_number)),
+                    connected_entities: proof_counter(
+                        metric.get("connectedEntities"),
+                        &format!("powerGridMetrics.{planet_id}.{grid_id}.connectedEntities"),
+                    )?,
+                    disconnected_entities: proof_counter(
+                        metric.get("disconnectedEntities"),
+                        &format!("powerGridMetrics.{planet_id}.{grid_id}.disconnectedEntities"),
+                    )?,
+                    demand_kw: read("demandKw")?,
+                    wind_generation_kw: read("windGenerationKw")?,
+                    solar_generation_kw: read("solarGenerationKw")?,
+                    geothermal_generation_kw: read("geothermalGenerationKw")?,
+                    thermal_generation_kw: read("thermalGenerationKw")?,
+                    fusion_generation_kw: read("fusionGenerationKw")?,
+                    artificial_star_generation_kw: read("artificialStarGenerationKw")?,
+                    ray_generation_kw: read("rayGenerationKw")?,
+                    storage_discharge_kw: read("storageDischargeKw")?,
+                    storage_charge_kw: read("storageChargeKw")?,
+                },
+            );
+        }
+    }
+    Ok(snapshot)
+}
+
 fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<ResearchProofSnapshot> {
     let base = state.base_value();
     let research = base
@@ -1291,6 +1510,7 @@ fn capture_settlement_snapshot_with_runtime(
             "constructionAutomation.totalCrafted",
         )?,
         dyson: capture_dyson_terminal(base)?,
+        renewable_power: capture_renewable_power_proof_snapshot(state)?,
         research: capture_research_proof_snapshot(state)?,
         finite_veins: capture_finite_veins(state)?,
         ..SettlementProofSnapshot::default()
@@ -2501,10 +2721,10 @@ fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String>
 /// Ray-power receivers are unlike wind, solar and geothermal facilities: their
 /// available generation is derived from the live Dyson swarm/sphere state.
 /// A certified solar-sail tail advances decay and absorption, so the exact
-/// prefix's persisted time-warp power snapshot is not a lower bound for that
-/// tail. Until the macro owns a per-grid renewable headroom certificate, fail
-/// closed whenever both domains would be active instead of continuing with a
-/// stale powered multiplier.
+/// prefix's persisted time-warp power snapshot is not itself a lower bound for
+/// that tail. This detector routes the mixed domain through the stricter
+/// per-grid permanent-renewable certificate below; an unprovable combination
+/// still fails closed instead of continuing with a stale powered multiplier.
 fn has_dynamic_ray_power_source(state: &CoreState) -> Result<bool, String> {
     for &entity_index in &state.factory_topology.power_source_indices {
         let entity = state
@@ -2518,6 +2738,378 @@ fn has_dynamic_ray_power_source(state: &CoreState) -> Result<bool, String> {
         }
     }
     Ok(false)
+}
+
+const POWER_PROOF_ABSOLUTE_MARGIN_KW: f64 = 0.006;
+const POWER_PROOF_RELATIVE_MARGIN: f64 = 1e-12;
+
+fn conservative_power_floor(value: f64) -> Result<f64, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("power lower-bound input is invalid".to_owned());
+    }
+    if value == 0.0 {
+        return Ok(0.0);
+    }
+    let margin = POWER_PROOF_ABSOLUTE_MARGIN_KW.max(value.abs() * POWER_PROOF_RELATIVE_MARGIN);
+    Ok((value - margin).max(0.0))
+}
+
+fn conservative_power_ceiling(value: f64, exact_empty_grid: bool) -> Result<f64, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("power upper-bound input is invalid".to_owned());
+    }
+    // An empty grid has an exact zero demand, not a positive epsilon-sized
+    // consumer. Keeping zero exact lets a topology that declares grid-b/c but
+    // has no machines there remain certifiable without inventing generation.
+    if value == 0.0 && exact_empty_grid {
+        return Ok(0.0);
+    }
+    let margin = POWER_PROOF_ABSOLUTE_MARGIN_KW.max(value.abs() * POWER_PROOF_RELATIVE_MARGIN);
+    let value = value + margin;
+    if !value.is_finite() {
+        return Err("power upper bound overflowed".to_owned());
+    }
+    Ok(value)
+}
+
+fn stable_renewable_power_grid(
+    left: &RenewablePowerGridProofSnapshot,
+    right: &RenewablePowerGridProofSnapshot,
+) -> bool {
+    left.complete
+        && right.complete
+        && left.connected_entities == right.connected_entities
+        && left.disconnected_entities == right.disconnected_entities
+        && left.demand_kw == right.demand_kw
+        && left.wind_generation_kw == right.wind_generation_kw
+        && left.solar_generation_kw == right.solar_generation_kw
+        && left.geothermal_generation_kw == right.geothermal_generation_kw
+        && left.thermal_generation_kw == right.thermal_generation_kw
+        && left.fusion_generation_kw == right.fusion_generation_kw
+        && left.artificial_star_generation_kw == right.artificial_star_generation_kw
+        && left.storage_discharge_kw == right.storage_discharge_kw
+        && left.storage_charge_kw == right.storage_charge_kw
+}
+
+fn controller_power_grid(
+    state: &CoreState,
+    controller_entity_id: &str,
+) -> Result<PowerGridKey, String> {
+    let entity_index = state
+        .entity_index
+        .get(controller_entity_id)
+        .copied()
+        .ok_or_else(|| "time-warp controller is absent from the entity directory".to_owned())?;
+    let entity = state
+        .parse_entity(entity_index)
+        .map_err(|error| format!("time-warp controller decode failed: {error:#}"))?;
+    if entity.get("buildingId").and_then(Value::as_str) != Some("time_warp_device") {
+        return Err("time-warp controller entity has the wrong building".to_owned());
+    }
+    let planet_id = entity
+        .get("planetId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "time-warp controller has no planet".to_owned())?;
+    let grid_id = entity
+        .get("powerGridId")
+        .and_then(Value::as_str)
+        .unwrap_or("grid-a");
+    if !matches!(grid_id, "grid-a" | "grid-b" | "grid-c") {
+        return Err("time-warp controller has an unknown grid".to_owned());
+    }
+    Ok(PowerGridKey {
+        planet_id: planet_id.to_owned(),
+        grid_id: grid_id.to_owned(),
+    })
+}
+
+/// Computes a permanent lower bound for dynamic ray power without duplicating
+/// Dyson formulas. The existing native reception allocator runs on a private
+/// base where every in-orbit sail and its generation are zeroed. Structure and
+/// shell counters remain, and neither can decrease in a certified sail tail,
+/// so every returned per-grid allocation is sustainable for any window size.
+fn conservative_ray_generation_by_grid(
+    state: &CoreState,
+) -> Result<BTreeMap<PowerGridKey, f64>, String> {
+    let entities = state
+        .parse_entities_parallel()
+        .map_err(|error| format!("ray-power entity snapshot failed: {error:#}"))?;
+    let mut lower_base = state.base_value().clone();
+    let systems = lower_base
+        .get_mut("dysonEngineering")
+        .and_then(Value::as_object_mut)
+        .and_then(|engineering| engineering.get_mut("orbitsBySystem"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Dyson orbit directory is missing from the power proof".to_owned())?;
+    for (system_id, orbits) in systems {
+        let orbits = orbits
+            .as_array_mut()
+            .ok_or_else(|| format!("Dyson orbit directory {system_id} is malformed"))?;
+        for (orbit_index, orbit) in orbits.iter_mut().enumerate() {
+            let orbit = orbit
+                .as_object_mut()
+                .ok_or_else(|| format!("Dyson orbit {system_id}.{orbit_index} is malformed"))?;
+            orbit.insert("sailsInOrbit".to_owned(), Value::from(0));
+            orbit.insert("generationKw".to_owned(), Value::from(0));
+        }
+    }
+    if let Some(swarm) = lower_base
+        .get_mut("dysonSwarm")
+        .and_then(Value::as_object_mut)
+    {
+        swarm.insert("sailsInOrbit".to_owned(), Value::from(0));
+        swarm.insert("generationKw".to_owned(), Value::from(0));
+    }
+    let reception = crate::dyson::calculate_reception(state, &mut lower_base, &entities)
+        .map_err(|error| format!("Dyson ray-power lower-bound allocation failed: {error:#}"))?;
+    let mut by_grid = BTreeMap::<PowerGridKey, f64>::new();
+    for &entity_index in &state.factory_topology.power_source_indices {
+        let entity = entities
+            .get(entity_index)
+            .and_then(Value::as_object)
+            .ok_or_else(|| "ray-power source disappeared from its topology row".to_owned())?;
+        if entity.get("buildingId").and_then(Value::as_str) != Some("ray_receiver")
+            || entity.get("recipeId").and_then(Value::as_str) != Some("ray_power")
+        {
+            continue;
+        }
+        let entity_id = entity
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "ray-power source has no entity ID".to_owned())?;
+        let planet_id = entity
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("ray-power source {entity_id} has no planet"))?;
+        let grid_id = entity
+            .get("powerGridId")
+            .and_then(Value::as_str)
+            .unwrap_or("grid-a");
+        if !matches!(grid_id, "grid-a" | "grid-b" | "grid-c") {
+            return Err(format!("ray-power source {entity_id} has an unknown grid"));
+        }
+        let allocation = reception
+            .ray_power_by_entity
+            .get(entity_id)
+            .copied()
+            .unwrap_or(0.0);
+        if !allocation.is_finite() || allocation < 0.0 {
+            return Err(format!(
+                "ray-power source {entity_id} has an invalid lower-bound allocation"
+            ));
+        }
+        let key = PowerGridKey {
+            planet_id: planet_id.to_owned(),
+            grid_id: grid_id.to_owned(),
+        };
+        let next = by_grid.get(&key).copied().unwrap_or(0.0) + allocation;
+        if !next.is_finite() {
+            return Err(format!(
+                "ray-power lower-bound allocation overflowed for {}.{}",
+                key.planet_id, key.grid_id
+            ));
+        }
+        by_grid.insert(key, next);
+    }
+    Ok(by_grid)
+}
+
+fn build_renewable_power_tail_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<RenewablePowerTailCertificate, String> {
+    if snapshots.len() != 4 {
+        return Err("renewable power proof requires three exact windows".to_owned());
+    }
+    // Snapshot zero may be a restored checkpoint whose metrics predate this
+    // disposable probe. The three post-exact endpoints are authoritative.
+    let observed = &snapshots[1..];
+    let reference = &observed[0].renewable_power;
+    if !reference.time_warp_complete || reference.grids.is_empty() {
+        return Err("renewable power calibration is incomplete".to_owned());
+    }
+    for candidate in observed
+        .iter()
+        .skip(1)
+        .map(|snapshot| &snapshot.renewable_power)
+    {
+        if !candidate.time_warp_complete
+            || candidate.controller_entity_id != reference.controller_entity_id
+            || candidate.requested_multiplier != reference.requested_multiplier
+            || candidate.effective_multiplier != reference.effective_multiplier
+            || candidate.required_power_kw != reference.required_power_kw
+            || candidate.allocated_power_kw != reference.allocated_power_kw
+            || candidate.grids.len() != reference.grids.len()
+            || reference.grids.iter().any(|(key, grid)| {
+                candidate
+                    .grids
+                    .get(key)
+                    .is_none_or(|other| !stable_renewable_power_grid(grid, other))
+            })
+        {
+            return Err(
+                "per-grid renewable power demand or topology changed across calibration windows"
+                    .to_owned(),
+            );
+        }
+    }
+    let current = capture_renewable_power_proof_snapshot(state)
+        .map_err(|error| format!("current renewable power snapshot failed: {error:#}"))?;
+    if !current.time_warp_complete
+        || current.controller_entity_id != reference.controller_entity_id
+        || current.requested_multiplier != reference.requested_multiplier
+        || current.effective_multiplier != reference.effective_multiplier
+        || current.required_power_kw != reference.required_power_kw
+        || current.allocated_power_kw != reference.allocated_power_kw
+    {
+        return Err("current time-warp power identity diverged from calibration".to_owned());
+    }
+    let controller_grid = controller_power_grid(state, &reference.controller_entity_id)?;
+    let lower_ray_by_grid = conservative_ray_generation_by_grid(state)?;
+    let mut grants = BTreeMap::new();
+    for (key, grid) in &reference.grids {
+        if !grid.complete {
+            return Err(format!(
+                "power grid {}.{} has an incomplete calibration metric",
+                key.planet_id, key.grid_id
+            ));
+        }
+        if grid.thermal_generation_kw.get() > EPSILON
+            || grid.fusion_generation_kw.get() > EPSILON
+            || grid.artificial_star_generation_kw.get() > EPSILON
+            || grid.storage_discharge_kw.get() > EPSILON
+            || grid.storage_charge_kw.get() > EPSILON
+        {
+            return Err(format!(
+                "power grid {}.{} used finite generation or storage during calibration",
+                key.planet_id, key.grid_id
+            ));
+        }
+        let static_generation_floor_kw = [
+            grid.wind_generation_kw.get(),
+            grid.solar_generation_kw.get(),
+            grid.geothermal_generation_kw.get(),
+        ]
+        .into_iter()
+        .try_fold(0.0, |total, value| {
+            conservative_power_floor(value).and_then(|value| {
+                let next = total + value;
+                next.is_finite()
+                    .then_some(next)
+                    .ok_or_else(|| "static renewable power lower bound overflowed".to_owned())
+            })
+        })?;
+        let ray_generation_floor_kw =
+            conservative_power_floor(lower_ray_by_grid.get(key).copied().unwrap_or(0.0))?;
+        let demand_ceiling_kw = conservative_power_ceiling(
+            grid.demand_kw.get(),
+            grid.connected_entities == 0 && grid.disconnected_entities == 0,
+        )?;
+        let renewable_supply_kw = static_generation_floor_kw + ray_generation_floor_kw;
+        if !renewable_supply_kw.is_finite() {
+            return Err(format!(
+                "power grid {}.{} renewable lower-bound supply overflowed",
+                key.planet_id, key.grid_id
+            ));
+        }
+        if renewable_supply_kw < demand_ceiling_kw {
+            return Err(format!(
+                "power grid {}.{} has only {:.3} kW renewable lower-bound supply for {:.3} kW demand",
+                key.planet_id, key.grid_id, renewable_supply_kw, demand_ceiling_kw,
+            ));
+        }
+        grants.insert(
+            key.clone(),
+            RenewablePowerGridGrant {
+                demand_ceiling_kw: PowerProofScalar::from_f64(
+                    demand_ceiling_kw,
+                    "renewable demand ceiling",
+                )
+                .map_err(|error| error.to_string())?,
+                static_generation_floor_kw: PowerProofScalar::from_f64(
+                    static_generation_floor_kw,
+                    "static renewable generation floor",
+                )
+                .map_err(|error| error.to_string())?,
+                ray_generation_floor_kw: PowerProofScalar::from_f64(
+                    ray_generation_floor_kw,
+                    "ray generation floor",
+                )
+                .map_err(|error| error.to_string())?,
+            },
+        );
+    }
+    if !grants.contains_key(&controller_grid) {
+        return Err("time-warp controller grid has no renewable power grant".to_owned());
+    }
+    let dyson = capture_dyson_terminal(state.base_value())
+        .map_err(|error| format!("Dyson power floor snapshot failed: {error:#}"))?;
+    Ok(RenewablePowerTailCertificate {
+        controller_entity_id: reference.controller_entity_id.clone(),
+        controller_grid,
+        requested_multiplier: reference.requested_multiplier,
+        effective_multiplier: reference.effective_multiplier,
+        required_power_kw: reference.required_power_kw,
+        allocated_power_kw: reference.allocated_power_kw,
+        grids: grants,
+        structure_floor_by_system: dyson.structure_by_system,
+        shell_floor_by_system: dyson.shell_by_system,
+    })
+}
+
+fn validate_renewable_power_tail_certificate(
+    state: &CoreState,
+    certificate: &RenewablePowerTailCertificate,
+) -> Result<(), String> {
+    let current = capture_renewable_power_proof_snapshot(state)
+        .map_err(|error| format!("current renewable power snapshot failed: {error:#}"))?;
+    if !current.time_warp_complete
+        || current.controller_entity_id != certificate.controller_entity_id
+        || current.requested_multiplier != certificate.requested_multiplier
+        || current.effective_multiplier != certificate.effective_multiplier
+        || current.required_power_kw != certificate.required_power_kw
+        || current.allocated_power_kw != certificate.allocated_power_kw
+        || controller_power_grid(state, &current.controller_entity_id)?
+            != certificate.controller_grid
+    {
+        return Err("renewable power certificate no longer matches time-warp authority".to_owned());
+    }
+    if !certificate.grids.contains_key(&certificate.controller_grid) {
+        return Err("renewable power certificate lost its controller-grid grant".to_owned());
+    }
+    for (key, grant) in &certificate.grids {
+        let supply = grant.static_generation_floor_kw.get() + grant.ray_generation_floor_kw.get();
+        if !supply.is_finite() || supply < grant.demand_ceiling_kw.get() {
+            return Err(format!(
+                "renewable power grant for {}.{} is no longer closed",
+                key.planet_id, key.grid_id
+            ));
+        }
+    }
+    let dyson = capture_dyson_terminal(state.base_value())
+        .map_err(|error| format!("current Dyson power floor snapshot failed: {error:#}"))?;
+    for (system_id, floor) in &certificate.structure_floor_by_system {
+        if dyson
+            .structure_by_system
+            .get(system_id)
+            .copied()
+            .unwrap_or(0)
+            < *floor
+        {
+            return Err(format!(
+                "Dyson structure power floor regressed for {system_id}"
+            ));
+        }
+    }
+    for (system_id, floor) in &certificate.shell_floor_by_system {
+        if dyson.shell_by_system.get(system_id).copied().unwrap_or(0) < *floor {
+            return Err(format!("Dyson shell power floor regressed for {system_id}"));
+        }
+    }
+    Ok(())
 }
 
 fn source_has_unbounded_vein(state: &CoreState, item_id: &str) -> Result<bool, String> {
@@ -2696,6 +3288,7 @@ fn active_ordinary_recipe_ids(
     state: &CoreState,
     allow_certified_rocket_terminal: bool,
     allow_certified_sail_terminal: bool,
+    allow_certified_ray_power_terminal: bool,
 ) -> Result<Vec<String>, String> {
     if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
         return Err(format!("ordinary recipe tail is excluded while {reason}"));
@@ -2790,6 +3383,24 @@ fn active_ordinary_recipe_ids(
                 continue;
             }
             return Err("active solar_sail_launch has no certified Dyson sail sink".to_owned());
+        }
+        if recipe_id == "ray_power" {
+            if allow_certified_ray_power_terminal {
+                // Ray receivers are an energy terminal, not a material recipe.
+                // They may be absent from the ordinary material DAG only when
+                // the per-grid renewable certificate has independently closed
+                // their permanent generation floor and the powered demand.
+                if entity
+                    .get("inputs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|inputs| !inputs.is_empty())
+                    || !entity_output_ids.is_empty()
+                {
+                    return Err("active ray_power declares material slots".to_owned());
+                }
+                continue;
+            }
+            return Err("active ray_power has no certified renewable power floor".to_owned());
         }
         if recipe.inputs.is_empty() || recipe.outputs.is_empty() {
             return Err(format!(
@@ -3823,12 +4434,20 @@ fn build_closed_recipe_certificate(
     sources: &BTreeSet<String>,
     flow: &OrdinaryWindowFlow,
     finite_veins: Vec<FiniteVeinCertificate>,
-    research: Option<ResearchSinkCertificate>,
-    dyson_rocket: Option<DysonRocketSinkCertificate>,
-    dyson_sail: Option<DysonSailSinkCertificate>,
+    terminals: OrdinaryTerminalCertificates,
 ) -> Result<OrdinaryFlowCertificate, String> {
-    let recipe_ids =
-        active_ordinary_recipe_ids(state, dyson_rocket.is_some(), dyson_sail.is_some())?;
+    let OrdinaryTerminalCertificates {
+        research,
+        dyson_rocket,
+        dyson_sail,
+        renewable_power,
+    } = terminals;
+    let recipe_ids = active_ordinary_recipe_ids(
+        state,
+        dyson_rocket.is_some(),
+        dyson_sail.is_some(),
+        renewable_power.is_some(),
+    )?;
     if recipe_ids.is_empty() && research.is_none() && dyson_rocket.is_none() && dyson_sail.is_none()
     {
         return Err(
@@ -4122,6 +4741,7 @@ fn build_closed_recipe_certificate(
         research,
         dyson_rocket,
         dyson_sail,
+        renewable_power,
     })
 }
 
@@ -4163,12 +4783,11 @@ fn build_ordinary_flow_certificate(
     let finite_veins = build_finite_vein_certificates(state, snapshots, &sources)?;
     let research = build_research_sink_certificate(state, snapshots)?;
     let dyson_sail = build_dyson_sail_sink_certificate(state, snapshots)?;
-    if dyson_sail.is_some() && has_dynamic_ray_power_source(state)? {
-        return Err(
-            "solar-sail tail cannot reuse a time-warp power snapshot with a dynamic Dyson ray-power source"
-                .to_owned(),
-        );
-    }
+    let renewable_power = if dyson_sail.is_some() && has_dynamic_ray_power_source(state)? {
+        Some(build_renewable_power_tail_certificate(state, snapshots)?)
+    } else {
+        None
+    };
     let dyson_rocket = if dyson_sail.is_none() {
         build_dyson_rocket_sink_certificate(state, snapshots)?
     } else {
@@ -4196,9 +4815,12 @@ fn build_ordinary_flow_certificate(
             &sources,
             &flow,
             finite_veins.clone(),
-            research.clone(),
-            dyson_rocket.clone(),
-            dyson_sail.clone(),
+            OrdinaryTerminalCertificates {
+                research: research.clone(),
+                dyson_rocket: dyson_rocket.clone(),
+                dyson_sail: dyson_sail.clone(),
+                renewable_power: renewable_power.clone(),
+            },
         )
     })();
     if let Ok(certificate) = recipe_rejection {
@@ -4209,7 +4831,13 @@ fn build_ordinary_flow_certificate(
     // Source-only is a strict subset, not a recovery path for a malformed or
     // unclosed active recipe domain. Otherwise a blocked/cyclic factory could
     // still receive extrapolated mining while its material consumers freeze.
-    if !active_ordinary_recipe_ids(state, dyson_rocket.is_some(), dyson_sail.is_some())?.is_empty()
+    if !active_ordinary_recipe_ids(
+        state,
+        dyson_rocket.is_some(),
+        dyson_sail.is_some(),
+        renewable_power.is_some(),
+    )?
+    .is_empty()
         || research.is_some()
         || dyson_rocket.is_some()
         || dyson_sail.is_some()
@@ -4289,6 +4917,7 @@ fn build_ordinary_flow_certificate(
         research: None,
         dyson_rocket: None,
         dyson_sail: None,
+        renewable_power: None,
     })
 }
 
@@ -4689,6 +5318,9 @@ fn apply_ordinary_flow_certificate(
             elapsed_before,
             elapsed_after,
         );
+    }
+    if let Some(power) = &certificate.renewable_power {
+        validate_renewable_power_tail_certificate(state, power)?;
     }
     let before_micros = elapsed_micros(elapsed_before)?;
     let after_micros = elapsed_micros(elapsed_after)?;
@@ -5209,7 +5841,10 @@ fn prove_internal_exact_settlement_candidate(
 /// solar-sail sink may consume only same-window manufactured whole sails and
 /// feed a stable per-orbit launch schedule into the native decay/absorption
 /// lifecycle. Starting launcher inventories are never renewable sources.
-/// Stored/fuel energy, construction and every other terminal remain frozen.
+/// Dynamic ray power is admitted only when a runtime-private per-grid proof
+/// removes transient orbit sails and still covers the calibrated demand from
+/// permanent sphere plus static renewable generation. Stored/fuel energy,
+/// construction and every other terminal remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6622,6 +7257,53 @@ mod tests {
 
     fn productive_solar_sail_launch_with_ray_power_fixture(multiplier: f64) -> CoreState {
         productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", true, true)
+    }
+
+    fn dynamic_ray_power_fixture(
+        multiplier: f64,
+        structure_points: i64,
+        transient_orbit_sails: i64,
+    ) -> CoreState {
+        let mut state = productive_solar_sail_launch_with_ray_power_fixture(multiplier);
+        let wind_index = state.entity_index.get("wind").copied().unwrap();
+        let mut wind = state.parse_entity(wind_index).unwrap();
+        wind["machineCount"] = json!(0);
+        state.replace_entity_raw(wind_index, serde_json::to_string(&wind).unwrap().into());
+
+        let receiver_index = state.entity_index.get("ray-power").copied().unwrap();
+        let mut receiver = state.parse_entity(receiver_index).unwrap();
+        // 2e11 receivers expose a 1.2e15 kW reception ceiling in the test
+        // catalog, enough to power a 14x controller without relying on wind.
+        receiver["machineCount"] = json!(200_000_000_000_i64);
+        state.replace_entity_raw(
+            receiver_index,
+            serde_json::to_string(&receiver).unwrap().into(),
+        );
+
+        let base = state.base_value_mut();
+        base["dysonPlans"]["helios"]["structurePoints"] = json!(structure_points);
+        base["dysonSphere"]["structurePoints"] = json!(structure_points);
+        base["dysonSphere"]["totalRocketsLaunched"] = json!(structure_points);
+        base["dysonEngineering"]["orbitsBySystem"]["helios"][0]["sailsInOrbit"] =
+            json!(transient_orbit_sails);
+        base["dysonEngineering"]["orbitsBySystem"]["helios"][0]["totalLaunched"] =
+            json!(transient_orbit_sails);
+        base["dysonSwarm"]["sailsInOrbit"] = json!(transient_orbit_sails);
+        base["dysonSwarm"]["totalLaunched"] = json!(transient_orbit_sails);
+        crate::dyson::finalize(base).unwrap();
+        state.rebuild_indexes().unwrap();
+        state
+    }
+
+    fn sustainable_dynamic_ray_power_fixture(multiplier: f64) -> CoreState {
+        // Structure power is permanent across a certified solar-sail tail.
+        dynamic_ray_power_fixture(multiplier, 2_000_000_000_000, 0)
+    }
+
+    fn transient_dynamic_ray_power_fixture(multiplier: f64) -> CoreState {
+        // These old sails power the exact prefix, but can decay. They are
+        // deliberately removed from the permanent lower-bound proof.
+        dynamic_ray_power_fixture(multiplier, 0, 15_000_000_000_000)
     }
 
     fn productive_rocket_macro_fixture(
@@ -9161,8 +9843,150 @@ mod tests {
     }
 
     #[test]
-    fn macro_v10_sail_tail_with_dynamic_ray_power_fails_closed_deterministically() {
-        let initial = productive_solar_sail_launch_with_ray_power_fixture(15.0);
+    fn macro_v10_dynamic_ray_sail_tail_with_permanent_headroom_is_productive_and_split_invariant() {
+        let initial = sustainable_dynamic_ray_power_fixture(14.0);
+        assert!(has_dynamic_ray_power_source(&initial).unwrap());
+        let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / 14.0);
+        let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+        let certificate = build_ordinary_flow_certificate(&initial, &snapshots).unwrap();
+        let power = certificate
+            .renewable_power
+            .as_ref()
+            .expect("dynamic ray-powered sail tail has a renewable proof");
+        assert_eq!(power.controller_entity_id, "controller");
+        let controller_grant = &power.grids[&power.controller_grid];
+        assert_eq!(controller_grant.static_generation_floor_kw.get(), 0.0);
+        assert!(controller_grant.ray_generation_floor_kw.get() > 0.0);
+        assert!(
+            controller_grant.ray_generation_floor_kw.get()
+                >= controller_grant.demand_ceiling_kw.get()
+        );
+
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        let result = advance_macro_v10(
+            &mut prefix,
+            &pure_idle_macro_request(revision, 30.0, 30.0 / 14.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_terminal = capture_dyson_terminal(prefix.base_value()).unwrap();
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(revision, 600.0, 600.0 / 14.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let long_terminal = capture_dyson_terminal(long.base_value()).unwrap();
+        assert_eq!(
+            long_terminal.sails_launched - prefix_terminal.sails_launched,
+            570
+        );
+        assert_eq!(
+            long_terminal.rockets_launched,
+            prefix_terminal.rockets_launched
+        );
+        assert_eq!(
+            long_terminal.structure_points,
+            prefix_terminal.structure_points
+        );
+        assert!(long_terminal.sails_absorbed >= prefix_terminal.sails_absorbed);
+        assert!(long_terminal.shell_sails >= prefix_terminal.shell_sails);
+        let before = capture_settlement_snapshot(&initial).unwrap();
+        let after = capture_settlement_snapshot(&long).unwrap();
+        validate_settlement_proof(&before, &after, &long.catalog, None).unwrap();
+
+        // The certificate is permanent rather than a finite energy coupon.
+        // Consequently an arbitrary 1/5/60 boundary shape cannot recalibrate
+        // or reissue extra exact power credit.
+        let mut segmented = initial.clone();
+        for seconds in [30.0, 1.0, 5.0, 60.0, 504.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 14.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256,
+        );
+
+        let mut reloaded = prefix.clone();
+        reloaded.pure_idle_macro_runtime = None;
+        let revision = reloaded.revision;
+        let result = advance_macro_v10(
+            &mut reloaded,
+            &pure_idle_macro_request(revision, 570.0, 570.0 / 14.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            reloaded.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256,
+        );
+
+        // A private certificate that overstates its monotonic Dyson floor is
+        // rejected before any candidate mutation; the source's canonical
+        // state, revision and exact-credit runtime remain untouched.
+        let source_hash = initial.summary().unwrap().canonical_sha256;
+        let source_revision = initial.revision;
+        let source_exact_credit = initial.pure_idle_macro_exact_seconds_used();
+        let mut wrong_controller = certificate.clone();
+        wrong_controller
+            .renewable_power
+            .as_mut()
+            .unwrap()
+            .controller_entity_id = "same-grid-impostor".to_owned();
+        let mut disposable = initial.clone();
+        let rejection =
+            apply_ordinary_flow_certificate(&mut disposable, &mut wrong_controller, 0.0, 570.0)
+                .unwrap_err();
+        assert!(
+            rejection.contains("no longer matches time-warp authority"),
+            "{rejection}"
+        );
+        assert_eq!(disposable.summary().unwrap().canonical_sha256, source_hash);
+        assert_eq!(disposable.revision, source_revision);
+
+        let mut corrupted = certificate;
+        *corrupted
+            .renewable_power
+            .as_mut()
+            .unwrap()
+            .structure_floor_by_system
+            .get_mut("helios")
+            .unwrap() += 1;
+        let mut disposable = initial.clone();
+        let rejection =
+            apply_ordinary_flow_certificate(&mut disposable, &mut corrupted, 0.0, 570.0)
+                .unwrap_err();
+        assert!(
+            rejection.contains("structure power floor regressed"),
+            "{rejection}"
+        );
+        assert_eq!(disposable.summary().unwrap().canonical_sha256, source_hash);
+        assert_eq!(disposable.revision, source_revision);
+        assert_eq!(
+            disposable.pure_idle_macro_exact_seconds_used(),
+            source_exact_credit
+        );
+        assert_eq!(initial.summary().unwrap().canonical_sha256, source_hash);
+        assert_eq!(initial.revision, source_revision);
+        assert_eq!(
+            initial.pure_idle_macro_exact_seconds_used(),
+            source_exact_credit
+        );
+    }
+
+    #[test]
+    fn macro_v10_transient_ray_power_sail_tail_fails_closed_and_is_split_invariant() {
+        let initial = transient_dynamic_ray_power_fixture(14.0);
         assert!(has_dynamic_ray_power_source(&initial).unwrap());
 
         // Certificate construction is a disposable read-only probe. Rejecting
@@ -9170,10 +9994,13 @@ mod tests {
         // or alter the player's canonical source state.
         let source_hash = initial.summary().unwrap().canonical_sha256;
         let source_revision = initial.revision;
-        let request = pure_idle_macro_request(source_revision, 600.0, 40.0);
+        let request = pure_idle_macro_request(source_revision, 600.0, 600.0 / 14.0);
         let snapshots = exact_three_window_probe(&initial, &request).unwrap();
         let rejection = build_ordinary_flow_certificate(&initial, &snapshots).unwrap_err();
-        assert!(rejection.contains("dynamic Dyson ray-power source"));
+        assert!(
+            rejection.contains("renewable lower-bound supply"),
+            "{rejection}"
+        );
         assert_eq!(initial.summary().unwrap().canonical_sha256, source_hash);
         assert_eq!(initial.revision, source_revision);
         assert_eq!(initial.pure_idle_macro_exact_seconds_used(), 0.0);
@@ -9182,7 +10009,7 @@ mod tests {
         let revision = exact_prefix.revision;
         let result = advance_macro_v10(
             &mut exact_prefix,
-            &pure_idle_macro_request(revision, 30.0, 2.0),
+            &pure_idle_macro_request(revision, 30.0, 30.0 / 14.0),
         )
         .unwrap();
         assert!(result.supported, "reason={:?}", result.reason);
@@ -9190,14 +10017,17 @@ mod tests {
 
         let mut long = initial.clone();
         let revision = long.revision;
-        let result =
-            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        let result = advance_macro_v10(
+            &mut long,
+            &pure_idle_macro_request(revision, 600.0, 600.0 / 14.0),
+        )
+        .unwrap();
         assert!(result.supported, "reason={:?}", result.reason);
         assert!(
             result
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("dynamic Dyson ray-power source")),
+                .is_some_and(|reason| reason.contains("renewable lower-bound supply")),
             "reason={:?}",
             result.reason,
         );
@@ -9227,7 +10057,7 @@ mod tests {
             let revision = segmented.revision;
             let result = advance_macro_v10(
                 &mut segmented,
-                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+                &pure_idle_macro_request(revision, seconds, seconds / 14.0),
             )
             .unwrap();
             assert!(result.supported, "reason={:?}", result.reason);
@@ -9247,6 +10077,126 @@ mod tests {
         let static_certificate =
             build_ordinary_flow_certificate(&static_renewable, &static_snapshots).unwrap();
         assert!(static_certificate.dyson_sail.is_some());
+        assert!(static_certificate.renewable_power.is_none());
+    }
+
+    #[test]
+    fn renewable_power_proof_rejects_finite_energy_and_unpowered_peer_grids() {
+        let initial = sustainable_dynamic_ray_power_fixture(14.0);
+        let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / 14.0);
+        let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+        build_renewable_power_tail_certificate(&initial, &snapshots).unwrap();
+
+        for finite_field in ["thermal", "storage-discharge", "storage-charge"] {
+            let mut finite = snapshots.clone();
+            for snapshot in finite.iter_mut().skip(1) {
+                let grid = snapshot
+                    .renewable_power
+                    .grids
+                    .get_mut(&PowerGridKey {
+                        planet_id: "home".to_owned(),
+                        grid_id: "grid-a".to_owned(),
+                    })
+                    .unwrap();
+                let value = PowerProofScalar::from_f64(1.0, finite_field).unwrap();
+                match finite_field {
+                    "thermal" => grid.thermal_generation_kw = value,
+                    "storage-discharge" => grid.storage_discharge_kw = value,
+                    "storage-charge" => grid.storage_charge_kw = value,
+                    _ => unreachable!(),
+                }
+            }
+            let rejection = build_renewable_power_tail_certificate(&initial, &finite).unwrap_err();
+            assert!(
+                rejection.contains("finite generation or storage"),
+                "field={finite_field} rejection={rejection}"
+            );
+        }
+
+        let mut isolated_grid = snapshots.clone();
+        for snapshot in isolated_grid.iter_mut().skip(1) {
+            let grid = snapshot
+                .renewable_power
+                .grids
+                .get_mut(&PowerGridKey {
+                    planet_id: "home".to_owned(),
+                    grid_id: "grid-b".to_owned(),
+                })
+                .unwrap();
+            grid.demand_kw = PowerProofScalar::from_f64(1.0, "isolated demand").unwrap();
+        }
+        let rejection =
+            build_renewable_power_tail_certificate(&initial, &isolated_grid).unwrap_err();
+        assert!(
+            rejection.contains("renewable lower-bound supply"),
+            "{rejection}"
+        );
+
+        let mut rounded_tiny_demand = snapshots.clone();
+        for snapshot in rounded_tiny_demand.iter_mut().skip(1) {
+            snapshot
+                .renewable_power
+                .grids
+                .get_mut(&PowerGridKey {
+                    planet_id: "home".to_owned(),
+                    grid_id: "grid-b".to_owned(),
+                })
+                .unwrap()
+                .connected_entities = 1;
+        }
+        let rejection =
+            build_renewable_power_tail_certificate(&initial, &rounded_tiny_demand).unwrap_err();
+        assert!(
+            rejection.contains("renewable lower-bound supply"),
+            "{rejection}"
+        );
+
+        let mut unstable = snapshots;
+        unstable[3]
+            .renewable_power
+            .grids
+            .get_mut(&PowerGridKey {
+                planet_id: "home".to_owned(),
+                grid_id: "grid-a".to_owned(),
+            })
+            .unwrap()
+            .demand_kw = PowerProofScalar::from_f64(2.0, "unstable demand").unwrap();
+        let rejection = build_renewable_power_tail_certificate(&initial, &unstable).unwrap_err();
+        assert!(
+            rejection.contains("changed across calibration"),
+            "{rejection}"
+        );
+    }
+
+    #[test]
+    fn renewable_power_proof_closes_active_grids_without_cross_grid_pooling() {
+        let mut initial = sustainable_dynamic_ray_power_fixture(14.0);
+        let wind_index = initial.entity_index.get("wind").copied().unwrap();
+        let mut wind = initial.parse_entity(wind_index).unwrap();
+        wind["machineCount"] = json!(1);
+        wind["powerGridId"] = json!("grid-b");
+        initial.replace_entity_raw(wind_index, serde_json::to_string(&wind).unwrap().into());
+        let vein_index = initial.entity_index.get("vein").copied().unwrap();
+        let mut vein = initial.parse_entity(vein_index).unwrap();
+        vein["powerGridId"] = json!("grid-b");
+        initial.replace_entity_raw(vein_index, serde_json::to_string(&vein).unwrap().into());
+        initial.rebuild_indexes().unwrap();
+
+        let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / 14.0);
+        let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+        let power = build_renewable_power_tail_certificate(&initial, &snapshots).unwrap();
+        let controller = &power.grids[&PowerGridKey {
+            planet_id: "home".to_owned(),
+            grid_id: "grid-a".to_owned(),
+        }];
+        let peer = &power.grids[&PowerGridKey {
+            planet_id: "home".to_owned(),
+            grid_id: "grid-b".to_owned(),
+        }];
+        assert_eq!(controller.static_generation_floor_kw.get(), 0.0);
+        assert!(controller.ray_generation_floor_kw.get() > controller.demand_ceiling_kw.get());
+        assert_eq!(peer.ray_generation_floor_kw.get(), 0.0);
+        assert!(peer.static_generation_floor_kw.get() > peer.demand_ceiling_kw.get());
     }
 
     #[test]
@@ -9730,9 +10680,7 @@ mod tests {
             &cycle_sources,
             &flows[0],
             Vec::new(),
-            None,
-            None,
-            None,
+            OrdinaryTerminalCertificates::default(),
         )
         .unwrap_err();
         assert!(rejection.contains("dependency cycle"), "{rejection}");
@@ -9758,9 +10706,7 @@ mod tests {
             &alternate_sources,
             &flows[0],
             Vec::new(),
-            None,
-            None,
-            None,
+            OrdinaryTerminalCertificates::default(),
         )
         .unwrap_err();
         assert!(
@@ -9784,9 +10730,7 @@ mod tests {
             &hidden_sources,
             &flows[0],
             Vec::new(),
-            None,
-            None,
-            None,
+            OrdinaryTerminalCertificates::default(),
         )
         .unwrap_err();
         assert!(
@@ -9809,9 +10753,7 @@ mod tests {
             &sprayed_sources,
             &flows[0],
             Vec::new(),
-            None,
-            None,
-            None,
+            OrdinaryTerminalCertificates::default(),
         )
         .unwrap_err();
         assert!(rejection.contains("proliferator"), "{rejection}");
@@ -10745,6 +11687,7 @@ mod tests {
                 research: None,
                 dyson_rocket: None,
                 dyson_sail: None,
+                renewable_power: None,
             });
         let before_revision = state.revision;
         let before_hash = state.summary().unwrap().canonical_sha256;

@@ -559,6 +559,106 @@ describe("native player authority macro controller", () => {
     expect(controller.getSnapshot().settledThroughMs).toBe(1_100);
   });
 
+  it("retries start, advance, and finish after persistence BUSY without changing the cursor", async () => {
+    const clock = clockHarness(100);
+    const busy = () => Object.assign(new Error("persistence boundary busy"), {
+      code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    });
+    let startAttempts = 0;
+    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroBudgetRequest) => {
+      startAttempts += 1;
+      if (startAttempts === 1) throw busy();
+      return activeMacroReceipt(11, budget);
+    });
+    let advanceAttempts = 0;
+    const advance = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroBudgetRequest) => {
+      advanceAttempts += 1;
+      if (advanceAttempts === 1) throw busy();
+      return activeMacroReceipt(12, budget);
+    });
+    let finishAttempts = 0;
+    const finish = vi.fn(async () => {
+      finishAttempts += 1;
+      if (finishAttempts === 1) throw busy();
+      return finishedMacroReceipt(12);
+    });
+    const bridge = macroBridge({
+      startNativePlayerAuthorityMacro: start,
+      advanceNativePlayerAuthorityMacro: advance,
+      finishNativePlayerAuthorityMacro: finish,
+    });
+    const controller = controllerWithClock(bridge, clock);
+    controller.bind(binding({
+      activeFrame: activeFrame(10, { nextDeadlineMs: 1_000 }),
+      timeWarp: timeWarp(),
+      commandSource: commandSource(10),
+    }));
+
+    expect(controller.requestStart()).toBe(true);
+    await flushPromises();
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "starting",
+      settledThroughMs: 0,
+      lastErrorCode: "macro:NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    });
+    expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
+    expect(bridge.recoverNativePlayerAuthorityMacro).not.toHaveBeenCalled();
+    clock.runNext(150);
+    await flushPromises();
+    expect(start).toHaveBeenNthCalledWith(1, {
+      simulationMilliseconds: 1_500,
+      wallMilliseconds: 100,
+    });
+    expect(start).toHaveBeenNthCalledWith(2, {
+      simulationMilliseconds: 1_500,
+      wallMilliseconds: 100,
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "active",
+      settledThroughMs: 100,
+      lastErrorCode: null,
+    });
+
+    clock.runNext(1_100);
+    await flushPromises();
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "advancing",
+      settledThroughMs: 100,
+      lastErrorCode: "macro:NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    });
+    expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
+    clock.runNext(1_150);
+    await flushPromises();
+    expect(advance).toHaveBeenNthCalledWith(1, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    });
+    expect(advance).toHaveBeenNthCalledWith(2, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    });
+    expect(controller.getSnapshot()).toMatchObject({ phase: "active", settledThroughMs: 1_100 });
+
+    clock.setNow(1_100);
+    expect(controller.requestStop()).toBe(true);
+    await flushPromises();
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "finishing",
+      settledThroughMs: 1_100,
+      lastErrorCode: "macro:NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    });
+    expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
+    clock.runNext(1_150);
+    await flushPromises();
+    expect(finish).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "waiting-disable-frame",
+      settledThroughMs: 1_100,
+      lastErrorCode: null,
+    });
+    expect(bridge.recoverNativePlayerAuthorityMacro).not.toHaveBeenCalled();
+  });
+
   it("fails closed for invalid startup state, unpowered frames, and invalid native receipts", async () => {
     const invalidBridge = macroBridge();
     const invalidController = controllerWithClock(invalidBridge, clockHarness(10_000));

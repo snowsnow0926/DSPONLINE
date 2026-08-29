@@ -11,6 +11,9 @@ import type { SimulationCommandPatch, SimulationValuePatch } from "./simulationR
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const PERIODIC_WINDOW_MILLISECONDS = 1_000;
 const MINIMUM_TIMER_DELAY_MILLISECONDS = 16;
+const PERSISTENCE_BUSY_ERROR_CODE = "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY";
+const PERSISTENCE_BUSY_RETRY_BASE_MILLISECONDS = 50;
+const PERSISTENCE_BUSY_RETRY_MAX_MILLISECONDS = 1_000;
 
 interface MacroBudget {
   readonly simulationMilliseconds: number;
@@ -24,6 +27,19 @@ interface PendingMacroRecovery {
   readonly settledThroughMs: number;
   readonly budget: MacroBudget | null;
 }
+
+type PendingPersistenceBusyRetry = Readonly<
+  | {
+      kind: "advance";
+      start: boolean;
+      budget: MacroBudget;
+      phase: "starting" | "advancing" | "stopping";
+    }
+  | {
+      kind: "finish";
+      phase: "finishing";
+    }
+>;
 
 type MacroBridge = Pick<
   DesktopBridge,
@@ -179,6 +195,8 @@ export class NativePlayerAuthorityMacroController {
   private disableRevision: number | null = null;
   private macroRevision: number | null = null;
   private pendingRecovery: PendingMacroRecovery | null = null;
+  private pendingPersistenceBusyRetry: PendingPersistenceBusyRetry | null = null;
+  private persistenceBusyRetryAttempt = 0;
   private recoveryKey: string | null = null;
   private generation = 0;
 
@@ -290,6 +308,7 @@ export class NativePlayerAuthorityMacroController {
   dispose(): void {
     this.generation += 1;
     this.clearTimer();
+    this.pendingPersistenceBusyRetry = null;
     this.listeners.clear();
   }
 
@@ -321,6 +340,8 @@ export class NativePlayerAuthorityMacroController {
 
   private fail(phase: "uncertain" | "faulted", code: string): void {
     this.clearTimer();
+    this.pendingPersistenceBusyRetry = null;
+    this.persistenceBusyRetryAttempt = 0;
     this.publish(
       phase,
       this.stopRequested ? false : this.snapshotValue.requested,
@@ -334,6 +355,27 @@ export class NativePlayerAuthorityMacroController {
     const code = errorCode(error);
     const uncertain = code.includes("UNCERTAIN") || code.includes("TRANSPORT");
     this.fail(uncertain ? "uncertain" : "faulted", `${kind}:${code}`);
+  }
+
+  private queuePersistenceBusyRetry(retry: PendingPersistenceBusyRetry): void {
+    this.pendingPersistenceBusyRetry = retry;
+    this.persistenceBusyRetryAttempt = Math.min(this.persistenceBusyRetryAttempt + 1, 16);
+    this.publish(
+      retry.phase,
+      this.stopRequested ? false : this.snapshotValue.requested,
+      this.snapshotValue.effectiveMultiplier,
+      this.snapshotValue.settledThroughMs,
+      `macro:${PERSISTENCE_BUSY_ERROR_CODE}`,
+    );
+  }
+
+  private armPersistenceBusyRetry(): void {
+    const exponent = Math.min(5, Math.max(0, this.persistenceBusyRetryAttempt - 1));
+    const delayMs = Math.min(
+      PERSISTENCE_BUSY_RETRY_MAX_MILLISECONDS,
+      PERSISTENCE_BUSY_RETRY_BASE_MILLISECONDS * (2 ** exponent),
+    );
+    this.arm(delayMs);
   }
 
   private beginStartupRecovery(status: DesktopNativePlayerAuthorityMacroState): void {
@@ -458,6 +500,17 @@ export class NativePlayerAuthorityMacroController {
 
   private pump(): void {
     if (this.operationInFlight) return;
+    if (this.pendingPersistenceBusyRetry) {
+      if (this.timer !== null) return;
+      const retry = this.pendingPersistenceBusyRetry;
+      this.pendingPersistenceBusyRetry = null;
+      if (retry.kind === "advance") {
+        this.commitAdvanceBudget(retry.start, retry.budget);
+      } else {
+        this.finish();
+      }
+      return;
+    }
     const phase = this.snapshotValue.phase;
     if (phase === "recovering" && this.pendingRecovery) {
       this.recoverOnce(this.pendingRecovery);
@@ -525,6 +578,10 @@ export class NativePlayerAuthorityMacroController {
       this.arm(settled === null ? PERIODIC_WINDOW_MILLISECONDS : Math.max(1, settled + 1 - this.now()));
       return;
     }
+    this.commitAdvanceBudget(start, budget);
+  }
+
+  private commitAdvanceBudget(start: boolean, budget: MacroBudget): void {
     const generation = this.generation;
     this.operationInFlight = true;
     this.publish(start ? "starting" : this.stopRequested ? "stopping" : "advancing",
@@ -545,13 +602,29 @@ export class NativePlayerAuthorityMacroController {
       }
       const settled = this.snapshotValue.settledThroughMs! + budget.wallMilliseconds;
       this.macroRevision = receipt.revision;
+      this.persistenceBusyRetryAttempt = 0;
       this.publish(this.stopRequested ? "stopping" : "active", !this.stopRequested,
         this.snapshotValue.effectiveMultiplier, settled, null);
     }).catch((error: unknown) => {
-      if (generation === this.generation) this.recoverAfterUncertain(error, budget);
+      if (generation !== this.generation) return;
+      if (errorCode(error) === PERSISTENCE_BUSY_ERROR_CODE) {
+        this.queuePersistenceBusyRetry(Object.freeze({
+          kind: "advance",
+          start,
+          budget: Object.freeze({ ...budget }),
+          phase: start ? "starting" : this.stopRequested ? "stopping" : "advancing",
+        }));
+        return;
+      }
+      this.persistenceBusyRetryAttempt = 0;
+      this.recoverAfterUncertain(error, budget);
     }).finally(() => {
       if (generation !== this.generation) return;
       this.operationInFlight = false;
+      if (this.pendingPersistenceBusyRetry) {
+        this.armPersistenceBusyRetry();
+        return;
+      }
       this.pump();
     });
   }
@@ -608,11 +681,17 @@ export class NativePlayerAuthorityMacroController {
         return;
       }
       this.finishRevision = receipt.revision;
+      this.persistenceBusyRetryAttempt = 0;
       this.publish("waiting-disable-frame", false, this.snapshotValue.effectiveMultiplier,
         this.snapshotValue.settledThroughMs, null);
     }).catch((error: unknown) => {
       if (generation !== this.generation) return;
       const code = errorCode(error);
+      if (code === PERSISTENCE_BUSY_ERROR_CODE) {
+        this.queuePersistenceBusyRetry(Object.freeze({ kind: "finish", phase: "finishing" }));
+        return;
+      }
+      this.persistenceBusyRetryAttempt = 0;
       if (!code.includes("UNCERTAIN") || this.macroRevision === null ||
           this.snapshotValue.settledThroughMs === null) {
         this.failForError(error, "macro");
@@ -630,6 +709,10 @@ export class NativePlayerAuthorityMacroController {
     }).finally(() => {
       if (generation !== this.generation) return;
       this.operationInFlight = false;
+      if (this.pendingPersistenceBusyRetry) {
+        this.armPersistenceBusyRetry();
+        return;
+      }
       this.pump();
     });
   }
@@ -691,6 +774,8 @@ export class NativePlayerAuthorityMacroController {
     this.disableRevision = null;
     this.macroRevision = null;
     this.pendingRecovery = null;
+    this.pendingPersistenceBusyRetry = null;
+    this.persistenceBusyRetryAttempt = 0;
     this.recoveryKey = null;
     this.publish("idle", false, null, null, null);
   }

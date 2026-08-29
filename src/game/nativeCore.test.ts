@@ -300,6 +300,34 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
+  it("verifies and decodes a same-revision construction removal context", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "construction-removal-context-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      request: {
+        expectedRevision: 14,
+        expectedRegistryFingerprint: "builtin:test",
+        entityId: "MOD/设备-一",
+      },
+      activePlanetId: "home",
+      entityId: "MOD/设备-一",
+      buildingId: "MOD/building-beta",
+      machineCount: 2,
+      currentConstruction: 3,
+      refundAfterRemoval: 5,
+      support: { supported: true, reason: null },
+      limits: { projectionBytes: 1_048_576 },
+    } as const;
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "construction-removal-context-v1",
+    })).resolves.toEqual(value);
+  });
+
   it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1"] as const)(
     "verifies and decodes the bounded %s block",
     async (projectionType) => {

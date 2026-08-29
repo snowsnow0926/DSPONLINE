@@ -416,6 +416,24 @@ function normalizeConstructionPlacementContext(value, label) {
   };
 }
 
+function normalizeConstructionRemovalContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "entityId"],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    entityId: factoryInventoryId(source.entityId, `${label} entity ID`),
+  };
+}
+
 function factoryInventoryId(value, label) {
   const result = opaqueId(value, label);
   for (const character of result) {
@@ -2234,6 +2252,144 @@ function normalizeCoreConstructionPlacementContext(value, context) {
     nextEntityId,
     support: { supported, reason },
     placement,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreConstructionRemovalContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "entityId", "buildingId",
+    "machineCount", "currentConstruction", "refundAfterRemoval", "support", "limits",
+  ], "native construction removal context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "construction-removal-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native construction removal identity");
+  }
+  requireProjectionByteBudget(source, "native construction removal context");
+  const projectionContext = normalizeConstructionRemovalContext(
+    context,
+    "native construction removal request context",
+  );
+  const revision = safeInteger(source.revision, "native construction removal revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction removal registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction removal revision binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    ["expectedRevision", "expectedRegistryFingerprint", "entityId"],
+    "native construction removal request echo",
+  );
+  const requestEntityId = factoryInventoryId(
+    requestSource.entityId,
+    "native construction removal request entity ID",
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestEntityId !== projectionContext.entityId) {
+    throw protocolError("native construction removal request binding");
+  }
+  const activePlanetId = factoryInventoryId(
+    source.activePlanetId,
+    "native construction removal active planet",
+  );
+  const entityId = factoryInventoryId(source.entityId, "native construction removal entity ID");
+  if (entityId !== projectionContext.entityId) {
+    throw protocolError("native construction removal entity binding");
+  }
+  const nullableId = (value, label) => value === null ? null : factoryInventoryId(value, label);
+  const nullableInteger = (value, label) => value === null ? null : safeInteger(value, label);
+  const buildingId = nullableId(source.buildingId, "native construction removal building ID");
+  const machineCount = nullableInteger(
+    source.machineCount,
+    "native construction removal machine count",
+  );
+  const currentConstruction = nullableInteger(
+    source.currentConstruction,
+    "native construction removal current construction",
+  );
+  const refundAfterRemoval = nullableInteger(
+    source.refundAfterRemoval,
+    "native construction removal refund",
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native construction removal support",
+  );
+  const supported = boolean(
+    supportSource.supported,
+    "native construction removal support flag",
+  );
+  const unsupportedReasons = [
+    "entity-not-found", "invalid-entity", "not-active-planet", "interaction-locked",
+    "missing-building-id", "unknown-building", "missing-construction-definition",
+    "unsupported-building-kind", "unsupported-building-domain", "entity-kind-mismatch",
+    "invalid-machine-count", "empty-machine-stack", "spray-coater-installed",
+    "buffered-material", "incident-belt", "construction-queue-reference",
+    "blueprint-pruning-required", "invalid-construction-inventory", "refund-overflow",
+  ];
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        unsupportedReasons,
+        "native construction removal unsupported reason",
+      );
+  if (supported !== (reason === null) || (!supported && refundAfterRemoval !== null)) {
+    throw protocolError("native construction removal support binding");
+  }
+  if (supported) {
+    if (buildingId === null || machineCount === null || machineCount < 1 ||
+        currentConstruction === null || refundAfterRemoval === null ||
+        currentConstruction > Number.MAX_SAFE_INTEGER - machineCount ||
+        refundAfterRemoval !== currentConstruction + machineCount) {
+      throw protocolError("native construction removal refund binding");
+    }
+  } else if ((reason === "entity-not-found" &&
+      (buildingId !== null || machineCount !== null || currentConstruction !== null)) ||
+      (reason === "invalid-machine-count" && machineCount !== null) ||
+      (reason === "empty-machine-stack" && machineCount !== 0) ||
+      (reason === "invalid-construction-inventory" && currentConstruction !== null) ||
+      (reason === "refund-overflow" &&
+        (machineCount === null || currentConstruction === null ||
+          currentConstruction <= Number.MAX_SAFE_INTEGER - machineCount))) {
+    throw protocolError("native construction removal unsupported binding");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native construction removal limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction removal limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-removal-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      entityId: projectionContext.entityId,
+    },
+    activePlanetId,
+    entityId,
+    buildingId,
+    machineCount,
+    currentConstruction,
+    refundAfterRemoval,
+    support: { supported, reason },
     limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
@@ -5254,6 +5410,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
+  coreConstructionRemovalContext: normalizeCoreConstructionRemovalContext,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,

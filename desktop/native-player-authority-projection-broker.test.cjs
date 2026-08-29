@@ -39,6 +39,10 @@ function fixture(initialSnapshot = {}) {
       calls.push(["construction-placement-context-v1", ownerId, request]);
       return { projectionType: "construction-placement-context-v1", schemaVersion: 1, revision: request.expectedRevision };
     },
+    async constructionRemovalContext(ownerId, request) {
+      calls.push(["construction-removal-context-v1", ownerId, request]);
+      return { projectionType: "construction-removal-context-v1", schemaVersion: 1, revision: request.expectedRevision };
+    },
     async statisticsProjection(ownerId, request) {
       calls.push(["statistics-v1", ownerId, request]);
       return { projectionType: "statistics-v1", schemaVersion: 1, revision: request.expectedRevision };
@@ -97,7 +101,7 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"]) {
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-removal-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"]) {
     const request = { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
@@ -108,6 +112,7 @@ test("active same-session same-revision reads use only the main owner identity",
     ["factory-inventory-v1", "main-player-authority"],
     ["construction-inventory-v1", "main-player-authority"],
     ["construction-placement-context-v1", "main-player-authority"],
+    ["construction-removal-context-v1", "main-player-authority"],
     ["statistics-v1", "main-player-authority"],
     ["technology-v1", "main-player-authority"],
     ["recipe-workspace-v1", "main-player-authority"],

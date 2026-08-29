@@ -2751,6 +2751,21 @@ impl CoreRegistry {
             )
     }
 
+    pub fn construction_removal_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        entity_id: &str,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .construction_removal_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                entity_id,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

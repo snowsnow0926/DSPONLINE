@@ -218,6 +218,12 @@ pub enum ControlRequest {
         expected_registry_fingerprint: String,
         building_id: String,
     },
+    CoreConstructionRemovalContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        entity_id: String,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,
@@ -854,6 +860,32 @@ mod tests {
                 assert_eq!(building_id, "MOD/custom-machine");
             }
             _ => panic!("construction placement context decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn construction_removal_context_protocol_preserves_exact_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionRemovalContext",
+            "sessionId": "core-removal",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "entityId": "未知/MOD-实体"
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreConstructionRemovalContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                entity_id,
+            } => {
+                assert_eq!(session_id, "core-removal");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(entity_id, "未知/MOD-实体");
+            }
+            _ => panic!("construction removal context decoded as the wrong variant"),
         }
     }
 

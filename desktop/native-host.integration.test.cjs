@@ -386,6 +386,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-factory-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-placement-context-v1"));
+  assert.ok(hello.capabilities.includes("native-core-construction-removal-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
@@ -695,6 +696,47 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     expectedRegistryFingerprint: "other",
     buildingId: "未知/MOD-建筑",
   }), /construction placement context request is invalid/);
+  const constructionRemovalContext = await client.request({
+    operation: "coreConstructionRemovalContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    entityId: "未知/MOD-实体",
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreConstructionRemovalContext",
+    constructionRemovalContext,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      entityId: "未知/MOD-实体",
+    },
+  ));
+  assert.equal(constructionRemovalContext.activePlanetId, "home");
+  assert.equal(constructionRemovalContext.entityId, "未知/MOD-实体");
+  assert.equal(constructionRemovalContext.buildingId, null);
+  assert.equal(constructionRemovalContext.machineCount, null);
+  assert.equal(constructionRemovalContext.currentConstruction, null);
+  assert.equal(constructionRemovalContext.refundAfterRemoval, null);
+  assert.deepEqual(constructionRemovalContext.support, {
+    supported: false,
+    reason: "entity-not-found",
+  });
+  await assert.rejects(client.request({
+    operation: "coreConstructionRemovalContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 1,
+    expectedRegistryFingerprint: "builtin:test",
+    entityId: "未知/MOD-实体",
+  }), /construction removal context request is invalid/);
+  await assert.rejects(client.request({
+    operation: "coreConstructionRemovalContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "other",
+    entityId: "未知/MOD-实体",
+  }), /construction removal context request is invalid/);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

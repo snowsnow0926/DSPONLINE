@@ -327,6 +327,8 @@ export interface DesktopBridge {
   getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
   /** Same-revision Rust-derived ordinary single-building template; the renderer may add only a finite position. */
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
+  /** Same-revision Rust-derived complete ordinary-building recycling eligibility and exact refund. */
+  getNativeCoreConstructionRemovalContext?: (request: DesktopNativeCoreConstructionRemovalContextRequest) => Promise<DesktopNativeCoreConstructionRemovalContextResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
@@ -1066,6 +1068,60 @@ export interface DesktopNativeCoreConstructionPlacementContextResult {
     remainingConstruction: number;
     nextIdAfterPlacement: number;
     entityTemplate: Record<string, unknown>;
+  };
+  limits: {
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionRemovalContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  entityId: string;
+}
+
+export type DesktopNativeCoreConstructionRemovalUnsupportedReason =
+  | "entity-not-found"
+  | "invalid-entity"
+  | "not-active-planet"
+  | "interaction-locked"
+  | "missing-building-id"
+  | "unknown-building"
+  | "missing-construction-definition"
+  | "unsupported-building-kind"
+  | "unsupported-building-domain"
+  | "entity-kind-mismatch"
+  | "invalid-machine-count"
+  | "empty-machine-stack"
+  | "spray-coater-installed"
+  | "buffered-material"
+  | "incident-belt"
+  | "construction-queue-reference"
+  | "blueprint-pruning-required"
+  | "invalid-construction-inventory"
+  | "refund-overflow";
+
+export interface DesktopNativeCoreConstructionRemovalContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-removal-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    entityId: string;
+  };
+  activePlanetId: string;
+  entityId: string;
+  buildingId: string | null;
+  machineCount: number | null;
+  currentConstruction: number | null;
+  refundAfterRemoval: number | null;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionRemovalUnsupportedReason | null;
   };
   limits: {
     projectionBytes: 1048576;
@@ -1982,6 +2038,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-removal-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     }
@@ -2031,7 +2092,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-removal-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

@@ -1078,6 +1078,15 @@ function nativeConstructionPlacementContextResultContext(request) {
   };
 }
 
+function nativeConstructionRemovalContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    entityId: request?.entityId,
+  };
+}
+
 function nativeStatisticsProjectionResultContext(request) {
   return {
     minElapsedSeconds: request?.minElapsedSeconds,
@@ -1817,6 +1826,24 @@ ipcMain.handle("desktop:native-core-construction-placement-context", async (even
   });
 });
 
+ipcMain.handle("desktop:native-core-construction-removal-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionRemovalContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑回收上下文请求失败，请重试",
+    resultContext: nativeConstructionRemovalContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-removal-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionRemovalContext(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
   return runRendererNativeOperation("coreStatisticsProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1969,7 +1996,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-removal-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1994,6 +2021,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.constructionInventoryProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-placement-context-v1") {
       rawResult = await nativeCoreSessions.constructionPlacementContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-removal-context-v1") {
+      rawResult = await nativeCoreSessions.constructionRemovalContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "statistics-v1") {
       rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "recipe-workspace-v1") {
@@ -2026,6 +2055,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? "coreConstructionInventoryProjection"
                 : request.projectionType === "construction-placement-context-v1"
                   ? "coreConstructionPlacementContext"
+                : request.projectionType === "construction-removal-context-v1"
+                  ? "coreConstructionRemovalContext"
                 : request.projectionType === "statistics-v1"
                   ? "coreStatisticsProjection"
               : request.projectionType === "recipe-workspace-v1"
@@ -2056,6 +2087,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? nativeConstructionInventoryResultContext(normalizedRequest)
                 : request.projectionType === "construction-placement-context-v1"
                   ? nativeConstructionPlacementContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-removal-context-v1"
+                  ? nativeConstructionRemovalContextResultContext(normalizedRequest)
                 : request.projectionType === "statistics-v1"
                   ? nativeStatisticsProjectionResultContext(request.payload)
               : request.projectionType === "recipe-workspace-v1"

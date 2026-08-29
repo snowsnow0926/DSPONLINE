@@ -1083,7 +1083,38 @@ fn ordinary_removal_entity(
     Ok((entity, building_id, machine_count))
 }
 
-fn queue_or_blueprint_pruning_would_change(state: &CoreState, entity_id: &str) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryBuildingRemovalEligibility {
+    pub active_planet_id: String,
+    pub entity_id: String,
+    pub building_id: Option<String>,
+    pub machine_count: Option<u64>,
+    pub current_construction: Option<u64>,
+    pub refund_after_removal: Option<u64>,
+    pub unsupported_reason: Option<&'static str>,
+}
+
+impl OrdinaryBuildingRemovalEligibility {
+    fn new(active_planet_id: &str, entity_id: &str) -> Self {
+        Self {
+            active_planet_id: active_planet_id.to_owned(),
+            entity_id: entity_id.to_owned(),
+            building_id: None,
+            machine_count: None,
+            current_construction: None,
+            refund_after_removal: None,
+            unsupported_reason: None,
+        }
+    }
+
+    fn unsupported(mut self, reason: &'static str) -> Self {
+        self.unsupported_reason = Some(reason);
+        self.refund_after_removal = None;
+        self
+    }
+}
+
+fn construction_queue_references_entity(state: &CoreState, entity_id: &str) -> bool {
     let queue = state
         .base_value()
         .get("constructionQueue")
@@ -1103,6 +1134,16 @@ fn queue_or_blueprint_pruning_would_change(state: &CoreState, entity_id: &str) -
     }) {
         return true;
     }
+    false
+}
+
+fn blueprint_pruning_would_change(state: &CoreState) -> bool {
+    let queue = state
+        .base_value()
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let referenced_versions = queue
         .iter()
         .filter_map(|entry| entry.get("blueprintVersionId").and_then(Value::as_str))
@@ -1119,6 +1160,139 @@ fn queue_or_blueprint_pruning_would_change(state: &CoreState, entity_id: &str) -
                     .is_none_or(|id| !referenced_versions.contains(id))
             })
         })
+}
+
+/// Re-derives every eligibility and refund fact needed to remove exactly one
+/// ordinary building. Both the read-only same-revision context and the durable
+/// player-authority command validator call this helper; neither trusts fields
+/// copied from an earlier renderer response.
+pub(crate) fn ordinary_building_removal_eligibility(
+    state: &CoreState,
+    entity_id: &str,
+) -> anyhow::Result<OrdinaryBuildingRemovalEligibility> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native player-authority active planet is not in the catalog")
+    }
+    let mut eligibility = OrdinaryBuildingRemovalEligibility::new(active_planet_id, entity_id);
+    let Some(index) = state.entity_index.get(entity_id).copied() else {
+        return Ok(eligibility.unsupported("entity-not-found"));
+    };
+    let entity = state.parse_entity(index)?;
+    let Some(object) = entity.as_object() else {
+        return Ok(eligibility.unsupported("invalid-entity"));
+    };
+
+    eligibility.building_id = object
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    eligibility.machine_count =
+        safe_json_integer(object.get("machineCount"), "building stack").ok();
+    let construction = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object);
+    eligibility.current_construction = eligibility
+        .building_id
+        .as_deref()
+        .zip(construction)
+        .and_then(|(building_id, stock)| {
+            normalized_construction_inventory(stock.get(building_id)).ok()
+        });
+
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        return Ok(eligibility.unsupported("not-active-planet"));
+    }
+    if object.get("interactionLocked").and_then(Value::as_bool) == Some(true) {
+        return Ok(eligibility.unsupported("interaction-locked"));
+    }
+    let Some(building_id) = eligibility.building_id.as_deref() else {
+        return Ok(eligibility.unsupported("missing-building-id"));
+    };
+    let Some(building) = state.catalog.buildings.get(building_id) else {
+        return Ok(eligibility.unsupported("unknown-building"));
+    };
+    if !state.catalog.constructions.contains_key(building_id) {
+        return Ok(eligibility.unsupported("missing-construction-definition"));
+    }
+    if matches!(building.kind.as_str(), "miner" | "station")
+        || !matches!(
+            building.kind.as_str(),
+            "machine" | "power" | "storage" | "splitter"
+        )
+    {
+        return Ok(eligibility.unsupported("unsupported-building-kind"));
+    }
+    if UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS.contains(&building_id) {
+        return Ok(eligibility.unsupported("unsupported-building-domain"));
+    }
+    let expected_kind = match building.kind.as_str() {
+        "power" => "power",
+        "storage" => "storage",
+        "splitter" => "splitter",
+        _ => "machine",
+    };
+    if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
+        return Ok(eligibility.unsupported("entity-kind-mismatch"));
+    }
+    let Some(machine_count) = eligibility.machine_count else {
+        return Ok(eligibility.unsupported("invalid-machine-count"));
+    };
+    if machine_count == 0 {
+        return Ok(eligibility.unsupported("empty-machine-stack"));
+    }
+    if object.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true) {
+        return Ok(eligibility.unsupported("spray-coater-installed"));
+    }
+    if ["inputs", "outputs"].iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_object)
+            .is_none_or(|inventory| inventory.values().any(|value| value.as_f64() != Some(0.0)))
+    }) {
+        return Ok(eligibility.unsupported("buffered-material"));
+    }
+    for belt_index in 0..state.belt_index.len() {
+        let belt = state.parse_belt(belt_index)?;
+        if ["source", "target"]
+            .iter()
+            .any(|key| belt.get(*key).and_then(Value::as_str) == Some(entity_id))
+        {
+            return Ok(eligibility.unsupported("incident-belt"));
+        }
+    }
+    if construction_queue_references_entity(state, entity_id) {
+        return Ok(eligibility.unsupported("construction-queue-reference"));
+    }
+    if blueprint_pruning_would_change(state) {
+        return Ok(eligibility.unsupported("blueprint-pruning-required"));
+    }
+    let Some(construction) = construction else {
+        return Ok(eligibility.unsupported("invalid-construction-inventory"));
+    };
+    let Ok(current_construction) = normalized_construction_inventory(construction.get(building_id))
+    else {
+        return Ok(eligibility.unsupported("invalid-construction-inventory"));
+    };
+    eligibility.current_construction = Some(current_construction);
+    let Some(refund_after_removal) = current_construction
+        .checked_add(machine_count)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+    else {
+        return Ok(eligibility.unsupported("refund-overflow"));
+    };
+    eligibility.refund_after_removal = Some(refund_after_removal);
+    Ok(eligibility)
 }
 
 fn validate_ordinary_building_stack_change(
@@ -1201,45 +1375,18 @@ fn validate_ordinary_building_removal(
         bail!("native player-authority ordinary building removal shape is invalid")
     }
     let entity_id = &command.removed_entity_ids[0];
-    let (entity, building_id, machine_count) = ordinary_removal_entity(state, entity_id)?;
-    let object = entity.as_object().expect("validated entity object");
-    if object.get("sprayCoaterInstalled").and_then(Value::as_bool) == Some(true)
-        || ["inputs", "outputs"].iter().any(|key| {
-            object
-                .get(*key)
-                .and_then(Value::as_object)
-                .is_none_or(|inventory| inventory.values().any(|value| value.as_f64() != Some(0.0)))
-        })
-    {
-        bail!("native player-authority removal building owns buffered material")
+    let eligibility = ordinary_building_removal_eligibility(state, entity_id)?;
+    if let Some(reason) = eligibility.unsupported_reason {
+        bail!("native player-authority ordinary building removal is unsupported: {reason}")
     }
-    for belt_index in 0..state.belt_index.len() {
-        let belt = state.parse_belt(belt_index)?;
-        if ["source", "target"]
-            .iter()
-            .any(|key| belt.get(*key).and_then(Value::as_str) == Some(entity_id))
-        {
-            bail!("native player-authority removal building still has an incident belt")
-        }
-    }
-    if queue_or_blueprint_pruning_would_change(state, entity_id) {
-        bail!("native player-authority removal requires queue or blueprint pruning")
-    }
-    let construction = state
-        .base_value()
-        .get("construction")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
-    let previous = normalized_construction_inventory(construction.get(&building_id))?;
-    let expected = previous
-        .checked_add(machine_count)
-        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-        .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?;
-    if require_exact_set_patch(
-        &command.top_level_changes,
-        &["construction", building_id.as_str()],
-    )?
-    .as_u64()
+    let building_id = eligibility
+        .building_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("native player-authority removal building ID is missing"))?;
+    let expected = eligibility
+        .refund_after_removal
+        .ok_or_else(|| anyhow!("native player-authority building refund is missing"))?;
+    if require_exact_set_patch(&command.top_level_changes, &["construction", building_id])?.as_u64()
         != Some(expected)
     {
         bail!("native player-authority building removal refund is invalid")

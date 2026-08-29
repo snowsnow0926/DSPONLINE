@@ -14,6 +14,7 @@ mod construction;
 mod construction_inventory;
 mod construction_placement_context;
 mod construction_planner;
+mod construction_removal_context;
 mod deterministic_runtime;
 mod dyson;
 mod dyson_workspace;

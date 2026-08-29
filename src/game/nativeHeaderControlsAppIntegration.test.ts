@@ -22,12 +22,12 @@ describe("native header controls App integration", () => {
   });
 
   it("uses the bounded run status for shell pause state and suspends legacy diagnostics", () => {
-    expect(app).toMatch(/usePerformanceMonitor\(\s*getCurrentGame,\s*nativePlayerAuthorityOwnsRuntime \|\| factoryRunStatusReadModel\.paused/);
+    expect(app).toMatch(/usePerformanceMonitor\(\s*getCurrentGame,\s*nativePlayerAuthorityOwnsRuntime/);
     expect(app).toContain("const canvasRefreshPaused = canvasWorkspacePaused || factoryRunStatusReadModel.paused;");
     expect(app).toContain('data-simulation-paused={factoryRunStatusReadModel.paused ? "true" : "false"}');
     expect(app).toContain("if (!coarsePointer || factoryRunStatusReadModel.paused)");
     expect(app).toContain('if (productionRefreshPreference !== "auto" || factoryRunStatusReadModel.paused) return;');
     expect(app).toContain("const visibleFactoryAlertProjection = !factoryAlertsEnabled || factoryRunStatusReadModel.paused");
-    expect(performanceMonitor).toContain("if (!snapshot.active || paused) return;");
+    expect(performanceMonitor).toContain("if (!snapshot.active || suspendLegacyStateSampling) return;");
   });
 });

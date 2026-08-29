@@ -3901,7 +3901,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, []);
   const performanceMonitor = usePerformanceMonitor(
     getCurrentGame,
-    nativePlayerAuthorityOwnsRuntime || factoryRunStatusReadModel.paused,
+    nativePlayerAuthorityOwnsRuntime,
   );
   const publishTimeWarpComputeState = useCallback((next: TimeWarpComputeGovernorState) => {
     timeWarpComputeStateRef.current = next;

@@ -386,6 +386,13 @@ import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type Persist
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
+import {
+  evaluateNativeAuthorityPersistenceBoundary,
+  nativeAuthorityReplacementBlockedMessage,
+  verifyNativeAuthorityCheckpointReceipt,
+  type NativeAuthorityPersistenceBoundary,
+  type NativeAuthorityRuntimeObservation,
+} from "./game/nativeAuthorityPersistenceBoundary";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import {
   NativeTechnologyWorkspaceStore,
@@ -1944,6 +1951,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  // A Rust-owned checkpoint is an independent single-writer transaction. It
+  // must reject renderer commands even when the legacy "edit while saving"
+  // preference is enabled, because there is no JavaScript state to rebase.
+  const nativeAuthorityCheckpointInFlightRef = useRef(false);
+  // Memory/lifecycle callbacks are intentionally stable and may run between
+  // React renders. Keep the latest fail-closed ownership decision available
+  // without consulting the stale JavaScript mirror.
+  const nativeAuthorityPersistenceProtectedRef = useRef(false);
   const memoryWorkloadForState = useCallback((state: GameState): MemoryWorkload => ({
     serializedBytes: persistedPrimaryBytes,
     entityCount: state.entities.length,
@@ -1955,6 +1970,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     stationCount: state.entities.length >= 10_000 ? 10_000 : 0,
   }), [persistedPrimaryBytes]);
   const pauseForMemoryPressure = useCallback((reason: string) => {
+    if (nativeAuthorityPersistenceProtectedRef.current) {
+      setNotice(`检测到内存压力：${reason}。Windows 原生权威未被 JavaScript 假暂停；已停止本次旧存档写入，请等待原生恢复或重试`);
+      return;
+    }
     if (memoryGuardPausedRef.current || gameRef.current.paused) return;
     memoryGuardPausedRef.current = true;
     // Memory protection is not a recovery operation. Preserve the exact
@@ -1978,6 +1997,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
     if (nativePlayerAuthorityMacroReadOnlyRef.current) {
       setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
+      return true;
+    }
+    if (nativeAuthorityCheckpointInFlightRef.current) {
+      setNotice("Windows 原生权威正在创建 durable 检查点；本次操作未应用");
       return true;
     }
     if (durableWorkerRecoveryInFlightRef.current) {
@@ -2040,6 +2063,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   nativePlayerAuthorityOwnsRuntimeRef.current = nativePlayerAuthorityOwnsRuntime;
   const nativePlayerAuthorityMacroReadOnly = nativePlayerAuthorityMacroStatus !== null;
   nativePlayerAuthorityMacroReadOnlyRef.current = nativePlayerAuthorityMacroReadOnly;
+  const readNativeAuthorityRuntimeObservation = useCallback((): NativeAuthorityRuntimeObservation => {
+    const controllerSnapshot = windowsNativeCoreBetaControllerRef.current?.snapshot();
+    const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
+    const sessionId = controllerSnapshot?.authority.sessionId ?? clockSnapshot.expectedSessionId;
+    const macro = selectNativePlayerAuthorityMacroStatus(clockSnapshot, sessionId);
+    if (macro) return { kind: "macro", sessionId, revision: macro.revision };
+    const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, sessionId);
+    if (active) return { kind: "active", sessionId: active.sessionId, revision: active.revision };
+    const bound = selectBoundNativePlayerAuthorityFrame(clockSnapshot, sessionId);
+    if (bound) return { kind: "bound-paused", sessionId: bound.sessionId, revision: bound.revision };
+    return { kind: "inactive", sessionId: null, revision: null };
+  }, [nativePlayerAuthorityClock]);
+  const readNativeAuthorityPersistenceBoundary = useCallback((): NativeAuthorityPersistenceBoundary =>
+    evaluateNativeAuthorityPersistenceBoundary(
+      windowsNativeCoreBetaControllerRef.current!.snapshot(),
+      readNativeAuthorityRuntimeObservation(),
+    ), [readNativeAuthorityRuntimeObservation]);
+  const refreshNativeAuthorityPersistenceBoundary = useCallback(async (): Promise<NativeAuthorityPersistenceBoundary> => {
+    await nativePlayerAuthorityClock.refresh();
+    return readNativeAuthorityPersistenceBoundary();
+  }, [nativePlayerAuthorityClock, readNativeAuthorityPersistenceBoundary]);
+  nativeAuthorityPersistenceProtectedRef.current = readNativeAuthorityPersistenceBoundary().protected;
   const nativePlayerAuthorityCommandBindingRef = useRef<{
     key: string;
     source: NativePlayerAuthorityCommandSource;
@@ -4081,15 +4126,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [dispatchDurableUiCommand, stateWithSimulationDebt]);
   dispatchSimulationCheckpointRef.current = dispatchSimulationCheckpoint;
 
+  const assertJavaScriptAuthorityCheckpointAllowed = useCallback(() => {
+    if (!readNativeAuthorityPersistenceBoundary().protected) return;
+    throw new Error("Windows 原生权威尚未安全交还控制权，已阻止读取旧 JavaScript 检查点");
+  }, [readNativeAuthorityPersistenceBoundary]);
+
   const requestAuthoritativeSimulationCheckpoint = useCallback((): Promise<GameState> => {
+    try {
+      assertJavaScriptAuthorityCheckpointAllowed();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint"
-        ? existing.promise
+        ? existing.promise.then((state) => {
+            assertJavaScriptAuthorityCheckpointAllowed();
+            return state;
+          })
         : existing.promise.then(() => requestAuthoritativeSimulationCheckpoint());
     }
     if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
-      return Promise.resolve(stateWithSimulationDebt(gameRef.current));
+      const state = stateWithSimulationDebt(gameRef.current);
+      try {
+        assertJavaScriptAuthorityCheckpointAllowed();
+        return Promise.resolve(state);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     let resolve!: (state: GameState) => void;
     let reject!: (error: Error) => void;
@@ -4109,18 +4173,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       command: null,
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
-    return promise;
-  }, [stateWithSimulationDebt]);
+    return promise.then((state) => {
+      assertJavaScriptAuthorityCheckpointAllowed();
+      return state;
+    });
+  }, [assertJavaScriptAuthorityCheckpointAllowed, stateWithSimulationDebt]);
   requestAuthoritativeSimulationCheckpointRef.current = requestAuthoritativeSimulationCheckpoint;
 
   const requestAuthoritativePersistenceCheckpoint = useCallback((
     chunkedSave?: NonNullable<SimulationWorkerRequest["chunkedSave"]>,
     nativeSaveTransaction?: NativeSaveTransaction | null,
   ): Promise<GameState> => {
+    try {
+      assertJavaScriptAuthorityCheckpointAllowed();
+    } catch (error) {
+      void nativeSaveTransaction?.abort();
+      return Promise.reject(error);
+    }
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint" || existing.mode === "persistence-checkpoint"
-        ? existing.promise
+        ? existing.promise.then((state) => {
+            assertJavaScriptAuthorityCheckpointAllowed();
+            return state;
+          })
         : existing.promise.then(() => requestAuthoritativePersistenceCheckpoint(chunkedSave, nativeSaveTransaction));
     }
     if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
@@ -4150,8 +4226,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ...(nativeSaveTransaction ? { nativeSaveTransaction } : {}),
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
-    return promise;
-  }, [stateWithSimulationDebt]);
+    return promise.then((state) => {
+      assertJavaScriptAuthorityCheckpointAllowed();
+      return state;
+    });
+  }, [assertJavaScriptAuthorityCheckpointAllowed, stateWithSimulationDebt]);
 
   const requestAuthoritativeDeferredTopLevelProjection = useCallback((): Promise<GameState> => {
     const existing = simulationCheckpointRequestRef.current;
@@ -4444,6 +4523,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [currentPrimarySaveSource]);
 
   const saveVerifiedPrimaryCheckpoint = useCallback((state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      return Promise.resolve({
+        success: false,
+        message: "Windows 原生权威尚未安全交还控制权，已阻止提交旧 JavaScript 主档",
+        code: "conflict",
+      });
+    }
     const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
     if (!checkpoint || checkpoint.state !== state) {
       // A replacement/imported state must not retain the previous authority
@@ -4459,7 +4545,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ...options,
       ...(checkpoint.expectedStateIdentity ? { expectedStateIdentity: checkpoint.expectedStateIdentity } : {}),
     });
-  }, []);
+  }, [readNativeAuthorityPersistenceBoundary]);
 
   /**
    * Direct/dev entry points can mount FactoryGame without the StartMenu
@@ -4565,7 +4651,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         policy: memoryGuardPolicy,
       });
       if (saveMemoryDecision.shouldPause) {
-        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留当前进度", code: "conflict" };
+        const nativeProtected = nativeAuthorityPersistenceProtectedRef.current;
+        const failure: SaveGameResult = {
+          success: false,
+          message: nativeProtected
+            ? "内存压力过高；已停止旧存档写入，但未把 JavaScript 暂停冒充为 Rust 权威保护"
+            : "内存压力过高，已暂停并保留当前进度",
+          code: "conflict",
+        };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
         setSaveFailure(failure);
         setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
@@ -4672,6 +4765,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed" });
       if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
+      if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
+        setNotice(`${failure.message}；Rust 权威状态未被旧 JavaScript 镜像替换或假暂停`);
+        repairDurableWorkerAfterSave = primaryWriteVerified;
+        return failure;
+      }
       if (allowEditsDuringSaveRef.current) {
         // 保存失败时不再回滚/丢弃玩家在保存期间已接受的编辑；
         // 保留当前 UI 与 durable 队列，提示玩家导出或重试。
@@ -5033,12 +5131,81 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
   }, [clearPureIdleRecovery, replaceSimulationAuthorityFromStateTransfer]);
 
+  const persistNativeAuthorityCheckpoint = useCallback(async (
+    kind: RuntimePersistenceKind,
+  ): Promise<SaveGameResult> => {
+    if (kind === "return") {
+      return {
+        success: false,
+        message: "Windows 原生 durable 检查点的启动恢复链尚未完成验证，已阻止返回主页；当前 Rust 工厂未改变",
+        code: "unavailable",
+      };
+    }
+    if (nativeAuthorityCheckpointInFlightRef.current) {
+      return kind === "autosave" || kind === "lifecycle"
+        ? { success: true, message: "已有 Windows 原生 durable 检查点正在进行，本次自动请求已合并", skippedUnchanged: true }
+        : { success: false, message: "已有 Windows 原生 durable 检查点正在验证，请稍候再试", code: "conflict" };
+    }
+    const initialBoundary = await refreshNativeAuthorityPersistenceBoundary();
+    const token = initialBoundary.checkpointToken;
+    if (!token) {
+      return {
+        success: false,
+        message: initialBoundary.runtimeKind === "macro"
+          ? "Windows 原生宏观结算使用自己的 durable 提交链；普通保存未写入旧 JavaScript 主档"
+          : "Windows 原生权威尚未取得稳定 revision，保存已失败关闭且未写入旧 JavaScript 主档",
+        code: "unavailable",
+      };
+    }
+    nativeAuthorityCheckpointInFlightRef.current = true;
+    const savedAt = Date.now();
+    try {
+      const controller = windowsNativeCoreBetaControllerRef.current;
+      if (!controller) throw new Error("Windows 原生权威控制器不可用");
+      const receipt = await controller.createAuthorityCheckpoint(undefined, savedAt);
+      await nativePlayerAuthorityClock.refresh();
+      const runtime = readNativeAuthorityRuntimeObservation();
+      if (!verifyNativeAuthorityCheckpointReceipt(token, receipt, runtime)) {
+        throw new Error("Windows 原生 durable 检查点回执已过期或与当前 revision 不一致");
+      }
+      const revision = receipt.summary?.revision;
+      const result: SaveGameResult = {
+        success: true,
+        message: `Windows 原生 durable 检查点已确认（revision ${revision}）；未写入公共 JavaScript 主档或云档`,
+        savedAt,
+      };
+      setSaveFailure(null);
+      return result;
+    } catch (error) {
+      const result: SaveGameResult = {
+        success: false,
+        message: `${error instanceof Error ? error.message : "Windows 原生 durable 检查点失败"}；未写入旧 JavaScript 主档，也未把 JavaScript 暂停冒充为 Rust 保护`,
+        code: "unavailable",
+      };
+      setSaveFailure(result);
+      return result;
+    } finally {
+      nativeAuthorityCheckpointInFlightRef.current = false;
+    }
+  }, [nativePlayerAuthorityClock, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
+
   const persistPrimarySave = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
   ): Promise<SaveGameResult> => {
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
+    }
+    const nativeBoundary = readNativeAuthorityPersistenceBoundary();
+    if (nativeBoundary.protected) {
+      if (state !== undefined) {
+        return {
+          success: false,
+          message: "Windows 原生权威尚未安全交还控制权，已阻止用旧 JavaScript 状态替换主存档；当前 Rust 工厂和原存档均未改变",
+          code: "conflict",
+        };
+      }
+      return persistNativeAuthorityCheckpoint(kind);
     }
     // Exactly one full checkpoint may own memory at a time. Timers coalesce;
     // explicit actions get a visible conflict and can be retried after the
@@ -5158,7 +5325,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         policy: memoryGuardPolicy,
       });
       if (saveMemoryDecision.shouldPause) {
-        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留当前进度", code: "conflict" };
+        const nativeProtected = nativeAuthorityPersistenceProtectedRef.current;
+        const failure: SaveGameResult = {
+          success: false,
+          message: nativeProtected
+            ? "内存压力过高；已停止旧存档写入，但未把 JavaScript 暂停冒充为 Rust 权威保护"
+            : "内存压力过高，已暂停并保留当前进度",
+          code: "conflict",
+        };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
         // A guard rejection is an expected, terminal save outcome rather than
         // an exception. Publish the same failed phase/transition as the catch
@@ -5300,7 +5474,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure,
+  }, [createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
@@ -5773,11 +5947,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const bridge = getDesktopBridge();
     if (!bridge?.onPrepareForUpdate) return;
     return bridge.onPrepareForUpdate(() => {
+      if (readNativeAuthorityPersistenceBoundary().protected) {
+        setNotice("Windows 原生权威的更新重启恢复链尚未完成验证；已阻止退出安装，Rust 工厂未被旧 JavaScript 主档替换");
+        return;
+      }
       void persistPrimarySave().finally(() => {
         void bridge.confirmUpdateReady();
       });
     });
-  }, [persistPrimarySave]);
+  }, [persistPrimarySave, readNativeAuthorityPersistenceBoundary]);
 
   const togglePause = useCallback(() => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -8317,6 +8495,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.
       lifecycleExitStartedRef.current = true;
+      if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
+        // Synchronous unload cannot wait for a Rust checkpoint. The native
+        // host keeps its last durable revision; writing the renderer mirror
+        // here would be an irreversible authority downgrade.
+        return;
+      }
       if (durableRecoveryLifecycleRef.current === "active") {
         // beforeunload/pagehide are synchronous and cannot await a checkpoint
         // or WAL finalize. Never overwrite the T0 primary with an emergency
@@ -8364,7 +8548,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       queueMicrotask(() => {
         if (lifecycleSaveEffectGenerationRef.current !== effectGeneration) return;
         const controlledCommit = controlledReturnCommitRef.current;
-        if (lifecycleSaveStarted || lifecycleExitStartedRef.current || durableRecoveryLifecycleRef.current === "active" ||
+        if (lifecycleSaveStarted || lifecycleExitStartedRef.current || nativeAuthorityPersistenceProtectedRef.current ||
+          readNativeAuthorityPersistenceBoundary().protected ||
+          durableRecoveryLifecycleRef.current === "active" ||
           (controlledCommit && isCurrentPrimarySaveSourceRef.current(controlledCommit))) return;
         const cleanupState = durableSimulationRuntimeEnabled
           ? latestAuthoritativeCheckpointRef.current
@@ -8372,13 +8558,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         saveGame(stateWithSimulationDebtRef.current(cleanupState));
       });
     };
-  }, [durableSimulationRuntimeEnabled]);
+  }, [durableSimulationRuntimeEnabled, readNativeAuthorityPersistenceBoundary]);
 
   useEffect(() => {
     let active = true;
     let syncing = false;
     const synchronizeMainSave = async () => {
       if (syncing || !hasCloudAuthentication() || pureIdleMacroActiveRef.current) return;
+      const nativeBoundary = readNativeAuthorityPersistenceBoundary();
+      if (nativeBoundary.protected) {
+        const previous = readCloudAutoSyncStatus();
+        if (previous?.userId) writeCloudAutoSyncStatus({
+          userId: previous.userId,
+          state: "skipped",
+          attemptedAt: Date.now(),
+          uploadedAt: previous.uploadedAt,
+          revision: previous.revision,
+          message: "Windows 原生权威接管期间不上传旧 JavaScript 镜像",
+        });
+        return;
+      }
       syncing = true;
       const attemptedAt = Date.now();
       let syncUserId = readCloudAutoSyncStatus()?.userId ?? null;
@@ -8445,7 +8644,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       active = false;
       window.clearInterval(timer);
     };
-  }, [requestAuthoritativeSimulationCheckpoint]);
+  }, [readNativeAuthorityPersistenceBoundary, requestAuthoritativeSimulationCheckpoint]);
 
   useEffect(() => {
     const syncAccount = () => {
@@ -9226,7 +9425,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return { actionLabel, scopeLabel: scope, successCount: result.startedIds.length, skippedCount: result.skipped.length, skipReasons };
   }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
 
-  const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null) => {
+  const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null): boolean => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威尚未安全交还控制权，已阻止替换当前工厂；Rust 工厂和旧 JavaScript 镜像均未改变");
+      return false;
+    }
     onMiningStop();
     simulationWorkerRef.current?.terminate();
     simulationWorkerRef.current = null;
@@ -9284,7 +9487,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setPendingBlueprintViewport({ ...viewport });
     setMinimapViewport({ ...viewport });
     setViewport(viewport, { duration: state.settings.reducedMotion ? 0 : 180 });
-  }, [clearHistory, invalidateFactoryAlertProjection, onMiningStop, setNodes, setViewport]);
+    return true;
+  }, [clearHistory, invalidateFactoryAlertProjection, onMiningStop, readNativeAuthorityPersistenceBoundary, setNodes, setViewport]);
 
   const focusEntityIds = useCallback((entityIds: string[]) => {
     const selected = gameRef.current.entities.filter((entity) => entityIds.includes(entity.id));
@@ -9852,6 +10056,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const downloadSave = useCallback(() => {
     void (async () => {
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，存档导出未执行");
+      const nativeBoundary = await refreshNativeAuthorityPersistenceBoundary();
+      if (nativeBoundary.protected) {
+        if (!nativeBoundary.canExportAuthoritativeV47 || !nativeBoundary.checkpointToken) {
+          throw new Error("Windows 原生权威当前不是稳定 active revision；导出已失败关闭且未读取旧 JavaScript 主档");
+        }
+        const checkpoint = await persistNativeAuthorityCheckpoint("manual");
+        if (!checkpoint.success) throw new Error(checkpoint.message);
+        const exportBoundary = await refreshNativeAuthorityPersistenceBoundary();
+        if (!exportBoundary.canExportAuthoritativeV47 || !exportBoundary.checkpointToken) {
+          throw new Error("Windows 原生权威 revision 在导出前发生变化；请等待稳定后重试");
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        const date = new Date().toISOString().slice(0, 10);
+        const exported = await controller.exportAuthoritativeV47(
+          `manual-export-${Date.now().toString(36)}`,
+          `dsp-idle-native-save-${date}.json`,
+        );
+        await nativePlayerAuthorityClock.refresh();
+        const latestRuntime = readNativeAuthorityRuntimeObservation();
+        if (latestRuntime.kind !== "active" || latestRuntime.sessionId !== exportBoundary.checkpointToken.sessionId ||
+          latestRuntime.revision !== exported.result.revision) {
+          throw new Error("Windows 原生导出回执不再对应最新 settled revision；未读取或导出旧 JavaScript 镜像");
+        }
+        return exported.cancelled ? "cancelled" as const : "native-json" as const;
+      }
       const saved = await persistPrimarySave(undefined, "manual");
       if (!saved.success) throw new Error(saved.message);
       const mode = gameRef.current.mode;
@@ -9875,15 +10105,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
       return "json" as const;
     })().then((format) => {
-      setNotice(format === "gzip" ? "压缩存档 .json.gz 已导出" : "存档 JSON 已导出（当前环境不支持 gzip）");
-      playTone("confirm");
+      setNotice(format === "gzip"
+        ? "压缩存档 .json.gz 已导出"
+        : format === "native-json"
+          ? "Windows 原生权威 v47 存档已直接导出"
+          : format === "cancelled"
+            ? "已取消 Windows 原生权威存档导出"
+            : "存档 JSON 已导出（当前环境不支持 gzip）");
+      playTone(format === "cancelled" ? "remove" : "confirm");
     }).catch((error) => {
       setNotice(error instanceof Error ? `存档导出失败：${error.message}` : "存档导出失败");
       playTone("alert");
     });
-  }, [persistPrimarySave, playTone]);
+  }, [nativePlayerAuthorityClock, persistNativeAuthorityCheckpoint, persistPrimarySave, playTone, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
   const importSave = useCallback(async (raw: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("import"));
+      playTone("alert");
+      return;
+    }
     if (saveImportCommitInFlightRef.current) {
       setNotice("当前存档正在导入，请等待写入完成");
       return;
@@ -9914,7 +10155,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(error instanceof Error ? `存档导入失败：${error.message}` : "存档导入失败：后台检查不可用");
       playTone("alert");
     }
-  }, [playTone]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary]);
 
   const cancelImport = useCallback(() => {
     saveImportInspectionGenerationRef.current += 1;
@@ -9925,6 +10166,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const confirmImport = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("import"));
+      playTone("alert");
+      return;
+    }
     const importedState = pendingImportState;
     const importedPreview = importPreview;
     if (!importedState || !importedPreview || saveImportCommitInFlightRef.current) return;
@@ -9973,7 +10219,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         restoreImportPreview(result.message);
         return;
       }
-      restoreGame(importedState);
+      if (!restoreGame(importedState)) {
+        restoreImportPreview(nativeAuthorityReplacementBlockedMessage("import"));
+        return;
+      }
       void refreshSaveData();
       setNotice("存档导入完成，已自动创建回滚快照");
       playTone("complete");
@@ -9982,9 +10231,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } finally {
       saveImportCommitInFlightRef.current = false;
     }
-  }, [importPreview, pendingImportState, persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [importPreview, pendingImportState, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const confirmImportRescue = useCallback(() => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+      playTone("alert");
+      return;
+    }
     if (!importPreview?.repairable || importPreview.valid || !pendingImportRaw) return;
     if (!importRescueArmed) {
       setImportRescueArmed(true);
@@ -10018,7 +10272,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         playTone("alert");
         return;
       }
-      restoreGame(repaired.inspection.state!);
+      if (!restoreGame(repaired.inspection.state!)) {
+        setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+        playTone("alert");
+        return;
+      }
       refreshSaveData();
       setImportPreview(null);
       setPendingImportState(null);
@@ -10030,9 +10288,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(error instanceof Error ? `原始存档备份失败：${error.message}` : "原始存档备份失败，未执行救援");
       playTone("alert");
     });
-  }, [importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const restoreCloudSave = useCallback(async (raw: string): Promise<{ success: boolean; message: string }> => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const inspection = await inspectSaveInWorker(raw);
     if (!inspection.valid || !inspection.state) {
       if (inspection.repairable && inspection.state) {
@@ -10064,13 +10328,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return { success: false, message: result.message };
     }
-    restoreGame(inspection.state);
+    if (!restoreGame(inspection.state)) {
+      const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
+      playTone("alert");
+      return { success: false, message };
+    }
     refreshSaveData();
     playTone("complete");
     return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
-  }, [persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const saveToSlot = useCallback(async (slotId: SaveSlotId) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威接管期间不能把旧 JavaScript 镜像写入本地槽位；槽位和当前工厂均未改变");
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，槽位保存未执行");
@@ -10084,9 +10357,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     refreshSaveData();
     setNotice(result.message);
     playTone(result.success ? "confirm" : "alert");
-  }, [playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-slot"));
+      playTone("alert");
+      return;
+    }
     const slot = await loadGameSlotFromPersistence(slotId, gameRef.current.mode);
     if (!slot) {
       setNotice(`槽位 ${slotId} 没有可用存档`);
@@ -10102,11 +10380,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    restoreGame(slot.state, slot.offlineReport);
+    if (!restoreGame(slot.state, slot.offlineReport)) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-slot"));
+      playTone("alert");
+      return;
+    }
     refreshSaveData();
     setNotice(`已载入本地槽位 ${slotId}`);
     playTone("complete");
-  }, [persistPrimarySave, playTone, refreshSaveData, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, restoreGame]);
 
   const deleteSlot = useCallback(async (slotId: SaveSlotId) => {
     const removed = await clearGameSlotVerified(slotId, gameRef.current.mode);
@@ -10115,6 +10397,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [refreshSaveData]);
 
   const createSnapshot = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威接管期间不能用旧 JavaScript 镜像创建快照；当前工厂和已有快照均未改变");
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，快照未创建");
@@ -10128,9 +10415,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     refreshSaveData();
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
-  }, [playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
 
   const addSecondUnipolarVein = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+      playTone("alert");
+      return;
+    }
     if (unipolarExpansionBusy) return;
     const source = gameRef.current;
     if (!source.paused) {
@@ -10180,9 +10472,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } finally {
       setUnipolarExpansionBusy(false);
     }
-  }, [commitGame, gameDialog, persistPrimarySave, playTone, refreshSaveData, unipolarExpansionBusy]);
+  }, [commitGame, gameDialog, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, unipolarExpansionBusy]);
 
   const loadSnapshot = useCallback(async (snapshotId: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-snapshot"));
+      playTone("alert");
+      return;
+    }
     const state = await loadSaveSnapshotFromPersistence(snapshotId, gameRef.current.mode);
     if (!state) {
       setNotice("快照不可用，可能已损坏");
@@ -10199,11 +10496,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    restoreGame(state);
+    if (!restoreGame(state)) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-snapshot"));
+      playTone("alert");
+      return;
+    }
     refreshSaveData();
     setNotice("已回滚到自动快照");
     playTone("complete");
-  }, [persistPrimarySave, playTone, refreshSaveData, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, restoreGame]);
 
   const deleteSnapshot = useCallback(async (snapshotId: string) => {
     const removed = await clearSaveSnapshotVerified(snapshotId, gameRef.current.mode);
@@ -10247,6 +10548,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame]);
 
   const registerValidatedContentPack = useCallback(() => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     if (!modValidation?.valid || !modValidation.manifest) {
       setNotice("请先选择并校验内容包 JSON");
       playTone("alert");
@@ -10272,9 +10578,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ? `内容包已注册并启用：${modValidation.manifest.name}`
       : `内容包已注册，等待依赖：${result.reason ?? "未满足"}`);
     playTone(result.enabled && report.catalogValid ? "complete" : "alert");
-  }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const toggleRegisteredContentPack = useCallback((packId: string, enabled: boolean) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     const pack = contentPackRegistry.packs[packId];
     if (!pack) return;
     if (!enabled) {
@@ -10294,9 +10605,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const report = applyRegisteredContentPacks(result.registry);
     setNotice(`${pack.manifest.name}已${enabled ? "启用" : "停用"}${report.catalogValid ? "" : "，目录存在校验问题"}`);
     playTone(enabled && report.catalogValid ? "confirm" : "alert");
-  }, [applyRegisteredContentPacks, contentPackRegistry, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const removeRegisteredContentPack = useCallback((packId: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     const pack = contentPackRegistry.packs[packId];
     if (!pack) return;
     const usage = getContentPackUsage(gameRef.current, pack.manifest);
@@ -10314,7 +10630,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     applyRegisteredContentPacks(result.registry);
     setNotice(`内容包已移除：${pack.manifest.name}`);
     playTone("remove");
-  }, [applyRegisteredContentPacks, contentPackRegistry, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const downloadModTemplate = useCallback(() => {
     void exportTextFile({ contents: JSON.stringify(createContentPackTemplate(), null, 2), fileName: "dsp-content-pack-template.json", title: "导出内容包模板" })

@@ -7,9 +7,9 @@ use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
     CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
-    CoreCommitPlayerAuthorityMacroAdvanceRequest, CoreCommitPlayerAuthorityTickRequest,
-    CoreFinishPlayerAuthorityMacroSessionRequest, CorePlayerAuthorityStartupRecoveryReceipt,
-    CorePreparePlayerAuthorityRequest,
+    CoreCommitPlayerAuthorityMacroAdvanceRequest, CoreCommitPlayerAuthorityPauseRequest,
+    CoreCommitPlayerAuthorityTickRequest, CoreFinishPlayerAuthorityMacroSessionRequest,
+    CorePlayerAuthorityStartupRecoveryReceipt, CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
 
@@ -46,6 +46,13 @@ pub struct CoreCommitPlayerAuthorityTickControlRequest {
 pub struct CoreCommitPlayerAuthorityCommandControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthorityCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityPauseControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityPauseRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +414,7 @@ pub enum ControlRequest {
     CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
     CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
     CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
+    CoreCommitPlayerAuthorityPause(CoreCommitPlayerAuthorityPauseControlRequest),
     CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),
     CoreCommitPlayerAuthorityMacroAdvance(CoreCommitPlayerAuthorityMacroAdvanceControlRequest),
     CoreFinishPlayerAuthorityMacroSession(CoreFinishPlayerAuthorityMacroSessionControlRequest),
@@ -662,6 +670,58 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown field")
+        );
+    }
+
+    #[test]
+    fn player_authority_pause_protocol_exposes_only_the_lifecycle_target_and_clock_anchor() {
+        let value = json!({
+            "operation": "coreCommitPlayerAuthorityPause",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "player-authority-run",
+                "baseRevision": 7,
+                "targetPaused": true,
+                "settledDeadlineMs": 42_000
+            }
+        });
+        match serde_json::from_value::<ControlRequest>(value.clone()).unwrap() {
+            ControlRequest::CoreCommitPlayerAuthorityPause(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.run_id, "player-authority-run");
+                assert_eq!(control.request.base_revision, 7);
+                assert!(control.request.target_paused);
+                assert_eq!(control.request.settled_deadline_ms, 42_000);
+            }
+            _ => panic!("player-authority pause decoded as the wrong operation"),
+        }
+
+        for forbidden in [
+            "command",
+            "commandId",
+            "proof",
+            "checkpoint",
+            "sequence",
+            "simulationSeconds",
+            "wallSeconds",
+            "registryFingerprint",
+        ] {
+            let mut invalid = value.clone();
+            invalid["request"][forbidden] = json!(0);
+            let error = serde_json::from_value::<ControlRequest>(invalid).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{forbidden}: {error}"
+            );
+        }
+
+        let mut top_level_extra = value;
+        top_level_extra["rendererClockAnchor"] = json!(42_000);
+        assert!(
+            serde_json::from_value::<ControlRequest>(top_level_extra)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
         );
     }
 

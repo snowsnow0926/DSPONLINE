@@ -4731,7 +4731,7 @@ fn validate_player_pause_command(
     {
         bail!("native player-authority pause command shape is invalid")
     }
-    let target = require_exact_set_patch(&command.top_level_changes, &["paused"])?
+    let _target = require_exact_set_patch(&command.top_level_changes, &["paused"])?
         .as_bool()
         .ok_or_else(|| anyhow!("native player-authority paused value is invalid"))?;
     if state
@@ -4742,13 +4742,10 @@ fn validate_player_pause_command(
     {
         bail!("native player-authority paused state is invalid")
     }
-    // Setting true would make a durable retry ineligible under the active
-    // player-authority lease. Pause remains owned by its existing control
-    // path; accepting the running value is retained for protocol/retry tests.
-    if target {
-        bail!("native player-authority pause transition is not owned by this command path")
-    }
-    Ok(())
+    // Pause and resume change both GameState and the private durable clock
+    // lease. A renderer-shaped gameplay command cannot prove that paired
+    // transition, even when it happens to request the current value.
+    bail!("native player-authority pause transition is not owned by this command path")
 }
 
 fn canonical_player_quantum_capacity<'a>(
@@ -6102,6 +6099,40 @@ impl CoreState {
             }
         }
         self.apply_command(&normalized)
+    }
+
+    /// Applies the one exact pause bit used by the main-owned durable clock.
+    ///
+    /// The Host calls this only while holding a request-bound player-authority
+    /// lease transition. Keeping it separate from
+    /// `apply_player_authority_command()` prevents renderer gameplay commands
+    /// from changing the clock lifecycle without its paired durable lease ACK.
+    pub fn apply_player_authority_pause_transition(
+        &mut self,
+        command: &SimulationCommandPatch,
+    ) -> anyhow::Result<CommandApplyResult> {
+        if command.top_level_changes.len() != 1
+            || !command.changed_entities.is_empty()
+            || !command.added_entities.is_empty()
+            || !command.removed_entity_ids.is_empty()
+            || !command.changed_belts.is_empty()
+            || !command.added_belts.is_empty()
+            || !command.removed_belt_ids.is_empty()
+        {
+            bail!("native player-authority pause lifecycle command shape is invalid")
+        }
+        let target = require_exact_set_patch(&command.top_level_changes, &["paused"])?
+            .as_bool()
+            .ok_or_else(|| anyhow!("native player-authority pause lifecycle target is invalid"))?;
+        let current = self
+            .base_value()
+            .get("paused")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("native player-authority paused state is invalid"))?;
+        if current == target {
+            bail!("native player-authority pause lifecycle target is unchanged")
+        }
+        self.apply_command(command)
     }
 
     pub fn apply_command(
@@ -8132,6 +8163,51 @@ mod tests {
         let retry_error = state.apply_player_authority_command(&command).unwrap_err();
         assert!(format!("{retry_error:#}").contains("base revision is not current"));
         assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn player_authority_pause_bit_requires_the_dedicated_lifecycle_entrypoint() {
+        let mut state = player_command_state();
+        let pause = top_level_leaf_command(state.revision, &["paused"], Value::from(true));
+        let running_hash = state.canonical_sha256().unwrap();
+
+        let generic_error = state.apply_player_authority_command(&pause).unwrap_err();
+        assert!(format!("{generic_error:#}").contains("not owned by this command path"));
+        assert_eq!(state.revision, 9);
+        assert!(!state.base_value()["paused"].as_bool().unwrap());
+        assert_eq!(state.canonical_sha256().unwrap(), running_hash);
+
+        let paused = state
+            .apply_player_authority_pause_transition(&pause)
+            .unwrap();
+        assert_eq!(paused.previous_revision, 9);
+        assert_eq!(paused.revision, 10);
+        assert!(paused.changed_entity_ids.is_empty());
+        assert!(paused.changed_belt_ids.is_empty());
+        assert!(!paused.topology_dirty);
+        assert!(state.base_value()["paused"].as_bool().unwrap());
+
+        let resume = top_level_leaf_command(state.revision, &["paused"], Value::from(false));
+        let paused_hash = state.canonical_sha256().unwrap();
+        assert!(state.apply_player_authority_command(&resume).is_err());
+        assert_eq!(state.revision, 10);
+        assert_eq!(state.canonical_sha256().unwrap(), paused_hash);
+
+        let resumed = state
+            .apply_player_authority_pause_transition(&resume)
+            .unwrap();
+        assert_eq!(resumed.previous_revision, 10);
+        assert_eq!(resumed.revision, 11);
+        assert!(!state.base_value()["paused"].as_bool().unwrap());
+
+        let unchanged = top_level_leaf_command(state.revision, &["paused"], Value::from(false));
+        let resumed_hash = state.canonical_sha256().unwrap();
+        let unchanged_error = state
+            .apply_player_authority_pause_transition(&unchanged)
+            .unwrap_err();
+        assert!(format!("{unchanged_error:#}").contains("target is unchanged"));
+        assert_eq!(state.revision, 11);
+        assert_eq!(state.canonical_sha256().unwrap(), resumed_hash);
     }
 
     #[test]

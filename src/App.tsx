@@ -1173,6 +1173,7 @@ function beltHeatColor(utilization: number): string {
 
 const RecipeWorkspace = lazy(() => importWithRecovery(() => import("./components/RecipeWorkspace"), "生产资料库模块").then((module) => ({ default: module.RecipeWorkspace })));
 const StatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/StatisticsWorkspace"), "生产统计模块").then((module) => ({ default: module.StatisticsWorkspace })));
+const NativeStatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeStatisticsWorkspace"), "原生生产统计模块").then((module) => ({ default: module.NativeStatisticsWorkspace })));
 const StarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "星图模块").then((module) => ({ default: module.StarMapWorkspace })));
 const DysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "戴森规划模块").then((module) => ({ default: module.DysonPlannerWorkspace })));
 const NativeDysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "原生戴森规划模块").then((module) => ({ default: module.NativeDysonPlannerWorkspace })));
@@ -4959,7 +4960,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const expectedRevision = simulationStateRevisionRef.current;
     const nativeProjection = await windowsNativeCoreBetaControllerRef.current?.readVerifiedStatisticsProjection({
       minElapsedSeconds: 0,
-      maxElapsedSeconds: Math.max(0, gameRef.current.elapsedSeconds),
+      maxElapsedSeconds: nativePlayerAuthorityOwnsRuntimeRef.current
+        ? Number.MAX_SAFE_INTEGER
+        : Math.max(0, gameRef.current.elapsedSeconds),
       cursor: 0,
       limit: 512,
     }, expectedRevision);
@@ -4971,6 +4974,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         revision: nativeProjection.revision,
         samples: nativeProjection.samples,
       };
+    }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      throw new Error("Rust 权威生产历史未通过当前 revision 校验");
     }
 
     const existing = statisticsReadModelRequestRef.current;
@@ -5010,11 +5016,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // is intentionally excluded from the default factory projection. Keep the
   // open workspace live through its narrow read model; this replaces the old
   // full-top-level publication without freezing the chart at open time.
+  const statisticsHistoryRefreshToken = nativePlayerAuthorityOwnsRuntime
+    ? factoryThinViewExpectedRevision
+    : game.historyRecordedAt;
   useEffect(() => {
     if (!statisticsOpen || authorityWorkspaceSync === "statistics") return;
-    if (statisticsHistoryRecordedAtRef.current === game.historyRecordedAt) return;
+    if (statisticsHistoryRecordedAtRef.current === statisticsHistoryRefreshToken) return;
     const authoritySyncId = authorityWorkspaceSyncIdRef.current;
-    const requestedHistoryRecordedAt = game.historyRecordedAt;
+    const requestedHistoryRecordedAt = statisticsHistoryRefreshToken;
     let cancelled = false;
     void requestAuthoritativeStatisticsHistory()
       .then((readModel) => {
@@ -5030,7 +5039,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return () => {
       cancelled = true;
     };
-  }, [authorityWorkspaceSync, game.historyRecordedAt, requestAuthoritativeStatisticsHistory, statisticsOpen]);
+  }, [authorityWorkspaceSync, requestAuthoritativeStatisticsHistory, statisticsHistoryRefreshToken, statisticsOpen]);
 
   /** Replace the live simulation Worker from the exact terminal state that
    * was just persisted (pure-idle handoff). This uses the existing durable
@@ -11274,7 +11283,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (requiresAuthoritySync) {
       try {
         if (workspace === "statistics") {
-          const requestedHistoryRecordedAt = gameRef.current.historyRecordedAt;
+          const requestedHistoryRecordedAt = nativePlayerAuthorityOwnsRuntimeRef.current
+            ? simulationStateRevisionRef.current
+            : gameRef.current.historyRecordedAt;
           const readModel = await requestAuthoritativeStatisticsHistory();
           if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
             statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
@@ -17713,7 +17724,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
           />
         ) : <WorkspaceLoading label="正在同步权威科研状态…" />) : null}
-        {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
+        {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : nativePlayerAuthorityOwnsRuntime ? <NativeStatisticsWorkspace
+          open
+          revision={factoryThinViewExpectedRevision}
+          samples={statisticsHistory ?? []}
+          onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStatisticsOpen(false)}
+        /> : <StatisticsWorkspace
           open
           game={game}
           productionHistory={statisticsHistory ?? game.productionHistory}

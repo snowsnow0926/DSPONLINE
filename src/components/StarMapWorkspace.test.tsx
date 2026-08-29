@@ -288,17 +288,23 @@ describe("NativeIndustryConsole", () => {
     expect(queryRequest.query.length).toBeGreaterThan(0);
   });
 
-  it("keeps native authority configuration read-only across 2→0→2 and native-only station IDs", () => {
+  it("submits projection-bound native configuration across 2→0→2 and native-only station IDs", () => {
     const game = createInitialState();
     expect(game.entities.some((entity) => entity.id === TARGET_STATION.stationId)).toBe(false);
     const onRoleChange = vi.fn();
     const onStationPriorityChange = vi.fn();
     const onStationMinimumLoadChange = vi.fn();
     const onStationLimitsChange = vi.fn();
-    renderWorkspace({
+    const onNativeRoleChange = vi.fn(() => true);
+    const onNativeStationPriorityChange = vi.fn(() => true);
+    const onNativeStationLimitsChange = vi.fn(() => true);
+    const props = renderWorkspace({
       game,
       nativeReadModel: READ_MODEL,
       nativeAuthorityRequired: true,
+      onNativeRoleChange,
+      onNativeStationPriorityChange,
+      onNativeStationLimitsChange,
       onRoleChange,
       onStationPriorityChange,
       onStationMinimumLoadChange,
@@ -311,17 +317,17 @@ describe("NativeIndustryConsole", () => {
     const minimumLoad = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线最低装载率']")!;
     const sourceLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线出口保底库存']")!;
     const targetLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线进口库存上限']")!;
-    expect(host.textContent).toContain("配置只读");
-    expect(host.textContent).toContain("未绑定权威命令");
-    for (const control of [role, priority, minimumLoad, sourceLimit, targetLimit]) {
-      expect(control.disabled).toBe(true);
+    expect(host.textContent).toContain("权威命令");
+    expect(host.textContent).toContain("装载率暂只读");
+    for (const control of [role, priority, sourceLimit, targetLimit]) {
+      expect(control.disabled).toBe(false);
       expect(control.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
     }
+    expect(minimumLoad.disabled).toBe(true);
+    expect(minimumLoad.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
 
     act(() => {
       priority.value = "0";
-      priority.dispatchEvent(new Event("change", { bubbles: true }));
-      priority.value = "2";
       priority.dispatchEvent(new Event("change", { bubbles: true }));
       role.value = "mining" satisfies PlanetIndustryRole;
       role.dispatchEvent(new Event("change", { bubbles: true }));
@@ -331,10 +337,46 @@ describe("NativeIndustryConsole", () => {
       inputValue(targetLimit, "0");
     });
 
+    expect(onNativeStationPriorityChange).toHaveBeenCalledWith(TARGET_STATION.stationId, 1, 2, 0);
+    expect(onNativeRoleChange).toHaveBeenCalledWith("home", "manufacturing", "mining");
+    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(SOURCE_STATION.stationId, 0, 50, 500, 0, 500);
+    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(TARGET_STATION.stationId, 1, 10, 200, 10, 0);
+
+    const priorityZeroRoute = Object.freeze({ ...ROUTE, priority: 0 }) as typeof ROUTE;
+    const priorityZeroModel = Object.freeze({
+      ...READ_MODEL,
+      revision: READ_MODEL.revision + 1,
+      routes: Object.freeze([priorityZeroRoute]),
+      routeRowsById: new Map([[priorityZeroRoute.id, priorityZeroRoute]]),
+      routeRowsByTargetStationId: new Map([[TARGET_STATION.stationId, Object.freeze([priorityZeroRoute])]]),
+    }) as NativeStarMapWorkspaceReadModel;
+    act(() => root.render(<AppLocaleProvider><StarMapWorkspace {...props} nativeReadModel={priorityZeroModel} /></AppLocaleProvider>));
+    const refreshedPriority = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线航线优先级']")!;
+    act(() => {
+      refreshedPriority.value = "2";
+      refreshedPriority.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onNativeStationPriorityChange).toHaveBeenLastCalledWith(TARGET_STATION.stationId, 1, 0, 2);
+
     expect(onRoleChange).not.toHaveBeenCalled();
     expect(onStationPriorityChange).not.toHaveBeenCalled();
     expect(onStationMinimumLoadChange).not.toHaveBeenCalled();
     expect(onStationLimitsChange).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when projection-bound native command callbacks are unavailable", () => {
+    renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeAuthorityRequired: true,
+    });
+    clickButton("星际工业");
+
+    for (const control of host.querySelectorAll<HTMLSelectElement | HTMLInputElement>(
+      "[aria-describedby='native-stellar-command-boundary']",
+    )) {
+      expect(control.disabled).toBe(true);
+    }
   });
 });
 

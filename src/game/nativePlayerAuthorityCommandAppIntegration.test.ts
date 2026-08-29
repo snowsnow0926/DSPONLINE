@@ -37,6 +37,21 @@ describe("native player-authority command App boundary", () => {
     expect(commit.slice(nativeBranch, historyRecord)).not.toMatch(/publishRuntimeGame|gameRef\.current\s*=|setGame\(|gameHistoryRef\.current\.record/);
   });
 
+  it("builds direct projected edits from the exact bound revision without reading or predicting GameState", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const start = app.indexOf("const commitNativeProjectedCommand = useCallback");
+    const block = app.slice(start, app.indexOf("useEffect(() => {", start));
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(block).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current/);
+    expect(block).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current/);
+    expect(block).toMatch(/buildCommand\(binding\.source\.baseRevision\)/);
+    expect(block).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = true[\s\S]*?binding\.source\.applyCommand\(command\)/);
+    expect(block).toMatch(/invalidateFactoryAlertProjection\(\)/);
+    expect(block).toMatch(/\.finally\(\(\) => \{[\s\S]*?nativePlayerAuthorityCommandInFlightRef\.current = false/);
+    expect(block).not.toMatch(/createSimulationCommandPatch|gameRef\.current|publishRuntimeGame|setGame\(|gameHistoryRef\.current\.record/);
+  });
+
   it("never lets the legacy Worker or scheduler advance beside Rust authority", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const workerGuard = app.indexOf("if (nativePlayerAuthorityOwnsRuntime)");

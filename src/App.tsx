@@ -407,6 +407,11 @@ import {
   type NativeStellarIndustrySelector,
 } from "./game/nativeStellarWorkspaceStore";
 import {
+  createNativeProjectedPlanetRoleCommand,
+  createNativeProjectedStationLimitsCommand,
+  createNativeProjectedStationPriorityCommand,
+} from "./game/nativeProjectedPlayerCommands";
+import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
   recipeWorkspaceSelectorsEqual,
@@ -6306,6 +6311,44 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     return true;
   }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+
+  const commitNativeProjectedCommand = useCallback((
+    buildCommand: (baseRevision: number) => SimulationCommandPatch | null,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("原生投影命令只能在 Windows 原生权威接管后使用；本次操作未应用");
+      return false;
+    }
+    const binding = nativePlayerAuthorityCommandBindingRef.current;
+    if (!binding || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令或等待稳定 revision；本次操作未应用");
+      return false;
+    }
+    let command: SimulationCommandPatch | null;
+    try {
+      command = buildCommand(binding.source.baseRevision);
+    } catch {
+      setNotice("原生投影命令参数未通过边界校验；本次操作未应用");
+      return false;
+    }
+    if (!command) return false;
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    void binding.source.applyCommand(command).then(() => {
+      // Never install or predict the projected edit locally. The next exact
+      // authority revision refreshes every affected bounded read model.
+      invalidateFactoryAlertProjection();
+    }).catch((error: unknown) => {
+      const code = error && typeof error === "object" && "code" in error &&
+        typeof error.code === "string" ? error.code : "";
+      setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
+        ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复"
+        : "原生投影命令未通过当前 revision 的权威校验；本次操作未应用");
+    }).finally(() => {
+      nativePlayerAuthorityCommandInFlightRef.current = false;
+    });
+    return true;
+  }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
 
   useEffect(() => {
     const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
@@ -14888,6 +14931,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               if (changed) setStarMapOpen(false);
               return changed;
             }}
+            onNativeRoleChange={(planetId, currentRole, targetRole) => commitNativeProjectedCommand((baseRevision) =>
+              createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))}
             onRoleChange={(planetId: PlanetId, role: PlanetIndustryRole) => commitGame((current) => setPlanetIndustryRole(current, planetId, role))}
             onPlanetMetadataChange={(planetId, metadata) => commitGame((current) => setPlanetDisplayMetadata(current, planetId, metadata))}
             onSystemNameChange={(systemId, customName) => commitGame((current) => setStarSystemDisplayName(current, systemId, customName))}
@@ -14895,8 +14940,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onAttachAllQuantumStations={handleAttachAllQuantumStations}
             onCollectorQuantumModeChange={handleAllOrbitalCollectorsQuantumMode}
             onQuantumItemCapacityChange={(itemId, value) => commitGame((current) => setQuantumLogisticsItemCapacity(current, itemId, value))}
+            onNativeStationPriorityChange={(stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand((baseRevision) =>
+              createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
             onStationPriorityChange={(entityId: string, slotIndex: number, priority: LogisticsPriority) => commitGame((current) => setStationSlotPriority(current, entityId, slotIndex, priority))}
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
+            onNativeStationLimitsChange={(stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand((baseRevision) =>
+              createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}
             onFocusStation={focusStellarStation}
           />

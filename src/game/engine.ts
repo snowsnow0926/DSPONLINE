@@ -10432,10 +10432,13 @@ export function pickFromEntity(state: GameState, entityId: string, itemId: ItemI
   const total = Math.floor((entity?.outputs[itemId] ?? 0) + EPSILON);
   const available = Math.max(0, total - reserved);
   if (!entity || available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
   const target = next.entities.find((item) => item.id === entityId)!;
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   target.outputs[itemId] = total - taken;
   next.cargo = {
     itemId,
@@ -10449,10 +10452,13 @@ export function pickFromEntityInput(state: GameState, entityId: string, itemId: 
   const entity = state.entities.find((item) => item.id === entityId);
   const available = Math.floor((entity?.inputs[itemId] ?? 0) + EPSILON);
   if (!entity || available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
   const target = next.entities.find((item) => item.id === entityId)!;
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   target.inputs[itemId] = available - taken;
   next.cargo = {
     itemId,
@@ -10585,9 +10591,12 @@ export function dropCargoToTray(state: GameState): GameState {
 export function pickFromTray(state: GameState, itemId: ItemId, amount = 100): GameState {
   const available = Math.floor((state.tray[itemId] ?? 0) + EPSILON);
   if (available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   next.tray[itemId] = available - taken;
   next.cargo = { itemId, amount: Math.floor(currentCargo + taken), origin: { kind: "tray" } };
   return next;

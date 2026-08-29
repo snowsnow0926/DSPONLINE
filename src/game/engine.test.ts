@@ -129,6 +129,7 @@ import {
   moveEntities,
   pickFromEntity,
   pickFromEntityInput,
+  pickFromTray,
   placeBuilding,
   placeBlueprint,
   pauseCurrentResearch,
@@ -2191,6 +2192,33 @@ describe("factory simulation", () => {
     expect(state.tray.iron_ingot ?? 0).toBe(0);
     expect(state.tray.coal ?? 0).toBe(0);
     expect(state.planetTrays.ashen).toMatchObject({ coal: 2, iron_ingot: 3 });
+  });
+
+  it("preserves oversized historical cargo without creating material when another pick is attempted", () => {
+    let state = createInitialState();
+    state.tray.iron_ore = 25;
+    state.cargo = { itemId: "iron_ore", amount: 125, origin: { kind: "tray" } };
+    const trayBefore = state.tray.iron_ore;
+    const cargoBefore = state.cargo;
+
+    const trayPick = pickFromTray(state, "iron_ore");
+    expect(trayPick).toBe(state);
+    expect(trayPick.tray.iron_ore).toBe(trayBefore);
+    expect(trayPick.cargo).toBe(cargoBefore);
+
+    const vein = state.entities.find((entity) => entity.id === "vein_iron")!;
+    vein.outputs.iron_ore = 40;
+    const outputPick = pickFromEntity(state, vein.id, "iron_ore");
+    expect(outputPick).toBe(state);
+    expect(outputPick.entities.find((entity) => entity.id === vein.id)?.outputs.iron_ore).toBe(40);
+
+    state.construction.arc_smelter = 1;
+    state = placeBuilding(state, "arc_smelter", { x: 0, y: 0 });
+    const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    smelter.inputs.iron_ore = 30;
+    const inputPick = pickFromEntityInput(state, smelter.id, "iron_ore");
+    expect(inputPick).toBe(state);
+    expect(inputPick.entities.find((entity) => entity.id === smelter.id)?.inputs.iron_ore).toBe(30);
   });
 
   it("ships integer cargo between paired interstellar stations", () => {

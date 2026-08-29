@@ -1811,7 +1811,7 @@ function normalizeCoreFactoryInventoryProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "source", "revision", "stateVersion",
     "registryFingerprint", "activePlanetId", "cargo", "pickupTargetAmount",
-    "portableFleet", "trayItemLimit", "trayItemLimitBounds", "request",
+    "portableFleet", "productionBufferLimit", "trayItemLimit", "trayItemLimitBounds", "request",
     "totalCount", "rows", "nextCursor", "truncated", "limits",
   ], "native factory inventory projection");
   if (source.schemaVersion !== 1 || source.projectionType !== "factory-inventory-v1" ||
@@ -1880,6 +1880,14 @@ function normalizeCoreFactoryInventoryProjection(value, context) {
       "native factory portable logistics vessels",
     ),
   };
+  const productionBufferLimit = safeInteger(
+    source.productionBufferLimit,
+    "native factory production buffer limit",
+    1_000,
+  );
+  if (productionBufferLimit > 100_000_000) {
+    throw protocolError("native factory production buffer limit");
+  }
   const boundsSource = exactObject(
     source.trayItemLimitBounds,
     ["minimum", "default", "maximum"],
@@ -1959,6 +1967,7 @@ function normalizeCoreFactoryInventoryProjection(value, context) {
     cargo,
     pickupTargetAmount: 100,
     portableFleet,
+    productionBufferLimit,
     trayItemLimit,
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     request: {

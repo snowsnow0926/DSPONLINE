@@ -31,7 +31,10 @@ test("factory inventory TypeScript contract is revision-bound and included in tr
 
   assert.match(desktop, /getNativeCoreFactoryInventory\?:\s*\(request:\s*DesktopNativeCoreFactoryInventoryRequest\)\s*=>\s*Promise<DesktopNativeCoreFactoryInventoryResult>/);
   assert.match(desktop, /interface DesktopNativeCoreFactoryInventoryRequest[\s\S]*?expectedRevision:\s*number;[\s\S]*?cursor:\s*number;[\s\S]*?limit:\s*number;/);
-  assert.match(desktop, /interface DesktopNativeCoreFactoryInventoryResult[\s\S]*?projectionType:\s*"factory-inventory-v1";[\s\S]*?source:\s*"native-core";[\s\S]*?portableFleet:[\s\S]*?logistics_drone:[\s\S]*?logistics_vessel:[\s\S]*?trayItemLimitBounds:[\s\S]*?request:[\s\S]*?nextCursor:[\s\S]*?limits:/);
+  assert.match(desktop, /interface DesktopNativeCoreFactoryInventoryResult[\s\S]*?projectionType:\s*"factory-inventory-v1";[\s\S]*?source:\s*"native-core";[\s\S]*?portableFleet:[\s\S]*?logistics_drone:[\s\S]*?logistics_vessel:[\s\S]*?productionBufferLimit:\s*number;[\s\S]*?trayItemLimitBounds:[\s\S]*?request:[\s\S]*?nextCursor:[\s\S]*?limits:/);
+  const boundary = source("native-renderer-boundary.cjs");
+  assert.match(boundary, /"portableFleet",\s*"productionBufferLimit",\s*"trayItemLimit"/);
+  assert.match(boundary, /productionBufferLimit\s*=\s*safeInteger\([\s\S]*?1_000[\s\S]*?productionBufferLimit\s*>\s*100_000_000/);
   assert.match(desktop, /projectionType:\s*"factory-inventory-v1";[\s\S]*?Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">/);
   assert.match(nativeCore, /factoryInventoryProjection\([\s\S]*?projectionType:\s*"factory-inventory-v1"[\s\S]*?decodeNativeCoreProjectionTransfer<DesktopNativeCoreFactoryInventoryResult>/);
 });

@@ -541,6 +541,7 @@ function factoryInventoryProjection(overrides = {}) {
     },
     pickupTargetAmount: 100,
     portableFleet: { logistics_drone: 3, logistics_vessel: 4 },
+    productionBufferLimit: 10_000,
     trayItemLimit: 1_000,
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     request: { expectedRevision: 7, cursor: 0, limit: 2 },
@@ -1308,6 +1309,8 @@ test("factory inventory pages are exact, revision-bound, sorted, and conservatio
     ...projection,
     portableFleet: { ...projection.portableFleet, logistics_drone: -1 },
   });
+  rejects({ ...projection, productionBufferLimit: 999 });
+  rejects({ ...projection, productionBufferLimit: 100_000_001 });
   rejects({
     ...projection,
     trayItemLimitBounds: { ...projection.trayItemLimitBounds, minimum: 0 },

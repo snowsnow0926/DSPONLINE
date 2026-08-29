@@ -609,6 +609,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.deepEqual(factoryInventory.portableFleet, {
     logistics_drone: 2, logistics_vessel: 1,
   });
+  assert.equal(factoryInventory.productionBufferLimit, 1_000_000);
   await assert.rejects(client.request({
     operation: "coreFactoryInventoryProjection",
     sessionId: opened.sessionId,

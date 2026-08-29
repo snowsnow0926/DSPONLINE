@@ -5,6 +5,7 @@ import {
   evaluateNativeAuthorityPersistenceBoundary,
   nativeAuthorityReplacementBlockedMessage,
   verifyNativeAuthorityArtifactLineage,
+  verifyNativeAuthorityCheckpointArtifact,
   verifyNativeAuthorityCheckpointReceipt,
   type NativeAuthorityRuntimeObservation,
 } from "./nativeAuthorityPersistenceBoundary";
@@ -144,6 +145,7 @@ describe("native authority persistence boundary", () => {
     const token = evaluateNativeAuthorityPersistenceBoundary(nativeSnapshot(), runtime("active")).checkpointToken!;
     expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), runtime("active", 13))).toBe(true);
     expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13, 14), runtime("active", 15))).toBe(true);
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13, 14), runtime("bound-paused", 15))).toBe(true);
     expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(11), runtime("active", 15))).toBe(false);
     expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), runtime("active", 12))).toBe(false);
     expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), {
@@ -161,11 +163,27 @@ describe("native authority persistence boundary", () => {
     const corrupt = checkpointReceipt(13);
     corrupt.snapshot.recoveryRootHash = HASH_B;
     expect(verifyNativeAuthorityCheckpointReceipt(token, corrupt, runtime("active", 13))).toBe(false);
+    expect(verifyNativeAuthorityCheckpointArtifact(token, checkpointReceipt(13, 14))).toBe(true);
+    expect(verifyNativeAuthorityCheckpointArtifact(token, checkpointReceipt(11))).toBe(false);
+    const replacedArtifact = checkpointReceipt(13);
+    replacedArtifact.artifact.identity.runId = "replacement-run";
+    expect(verifyNativeAuthorityCheckpointArtifact(token, replacedArtifact)).toBe(false);
+    expect(verifyNativeAuthorityCheckpointArtifact(token, corrupt)).toBe(false);
     expect(verifyNativeAuthorityArtifactLineage(token, {
       sessionId: "native-session",
       runId: "native-run",
       revision: 13,
     }, runtime("active", 99))).toBe(true);
+    expect(verifyNativeAuthorityArtifactLineage(token, {
+      sessionId: "native-session",
+      runId: "native-run",
+      revision: 13,
+    }, runtime("bound-paused", 14))).toBe(true);
+    expect(verifyNativeAuthorityArtifactLineage(token, {
+      sessionId: "native-session",
+      runId: "native-run",
+      revision: 13,
+    }, runtime("bound-paused", 12))).toBe(false);
   });
 
   it("does not mutate source state when a replacement is rejected", () => {

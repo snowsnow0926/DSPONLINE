@@ -474,6 +474,21 @@ export class WindowsNativeCoreBetaController {
       throw new Error("原生权威完成回执不属于当前影子会话");
     }
     const proof = proofFromSummary(input.summary, input.checkpoint.rootHash);
+    if (input.source === "handoff" && this.mainOwnedPlayerAuthority) {
+      if (this.mainOwnedPlayerAuthority.sessionId !== input.sessionId ||
+        this.mainOwnedPlayerAuthority.runId !== input.runId ||
+        this.authorityState.phase !== "native-authoritative" ||
+        this.authorityState.authority !== "native" ||
+        !this.authorityState.latestVerifiedProof ||
+        proof.revision < this.authorityState.latestVerifiedProof.revision ||
+        proof.registryFingerprint !== this.authorityState.latestVerifiedProof.registryFingerprint) {
+        throw new Error("重复的主进程原生权威完成回执发生 lineage 回退或替换");
+      }
+      this.authorityState = recordNativeCoreAuthorityProgress(this.authorityState, proof);
+      this.recoveryRootHash = input.checkpoint.rootHash;
+      this.lastSummary = input.summary;
+      return this.snapshot();
+    }
     const nextAuthorityState = bindMainOwnedNativeCoreAuthority(this.authorityState, {
       sessionId: input.sessionId,
       proof,
@@ -621,11 +636,14 @@ export class WindowsNativeCoreBetaController {
       // The main-owned clock can advance between renderer projections and the
       // frozen export boundary. The dedicated main broker proves that export
       // belongs to the current lease, so forward progress is valid; a
-      // renderer-owned shadow must still match its exact cached revision.
+      // renderer-owned shadow must still match its exact cached revision. Once
+      // main returns, the selected file has already been atomically published;
+      // a renderer clock-lineage change is therefore a recovery warning, not a
+      // reason to misreport the durable file as failed.
       const resultAuthority = playerAuthorityArtifactIdentity(result);
       if (mainOwnedIdentity && (result.mode !== "normal" || !resultAuthority ||
-        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.result.revision))) {
-        throw new Error("主进程原生权威导出不属于当前 session/run lineage");
+        resultAuthority.revision !== result.result.revision)) {
+        throw new Error("主进程原生权威导出回执结构无效");
       }
       if (!this.lastSummary || (!mainOwnedIdentity &&
         result.result.revision !== this.lastSummary.revision)) {

@@ -128,7 +128,8 @@ export function verifyNativeAuthorityArtifactLineage(
   artifact: NativeCoreDurableArtifactIdentity,
   runtime: NativeAuthorityRuntimeObservation,
 ): boolean {
-  return runtime.kind === "active" && runtime.sessionId === token.sessionId &&
+  return (runtime.kind === "active" || runtime.kind === "bound-paused") &&
+    runtime.sessionId === token.sessionId &&
     runtime.runId === token.runId && artifact.sessionId === token.sessionId &&
     artifact.runId === token.runId && validRevision(runtime.revision) &&
     validRevision(artifact.revision) && artifact.revision >= token.minimumRevision &&
@@ -140,8 +141,17 @@ export function verifyNativeAuthorityCheckpointReceipt(
   receipt: NativeCoreAuthorityCheckpointReceipt,
   runtime: NativeAuthorityRuntimeObservation,
 ): boolean {
+  return verifyNativeAuthorityCheckpointArtifact(token, receipt) &&
+    verifyNativeAuthorityArtifactLineage(token, receipt.artifact.identity, runtime);
+}
+
+export function verifyNativeAuthorityCheckpointArtifact(
+  token: NativeAuthorityCheckpointToken,
+  receipt: NativeCoreAuthorityCheckpointReceipt,
+): boolean {
   const { artifact, snapshot } = receipt;
-  if (!verifyNativeAuthorityArtifactLineage(token, artifact.identity, runtime) ||
+  if (artifact.identity.sessionId !== token.sessionId || artifact.identity.runId !== token.runId ||
+    !validRevision(artifact.identity.revision) || artifact.identity.revision < token.minimumRevision ||
     !controllerOwnsNative(snapshot) || snapshot.authority.sessionId !== token.sessionId ||
     !controllerProofIsSelfConsistent(snapshot) || artifact.checkpoint.revision !== artifact.identity.revision ||
     artifact.summary.revision !== artifact.identity.revision || artifact.summary.stateVersion !== 47 ||

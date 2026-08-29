@@ -418,6 +418,7 @@ import {
   evaluateNativeAuthorityPersistenceBoundary,
   nativeAuthorityReplacementBlockedMessage,
   verifyNativeAuthorityArtifactLineage,
+  verifyNativeAuthorityCheckpointArtifact,
   verifyNativeAuthorityCheckpointReceipt,
   type NativeAuthorityPersistenceBoundary,
   type NativeAuthorityRuntimeObservation,
@@ -5755,15 +5756,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const controller = windowsNativeCoreBetaControllerRef.current;
       if (!controller) throw new Error("Windows 原生权威控制器不可用");
       const receipt = await controller.createAuthorityCheckpoint(undefined, savedAt);
-      await nativePlayerAuthorityClock.refresh();
-      const runtime = readNativeAuthorityRuntimeObservation();
-      if (!verifyNativeAuthorityCheckpointReceipt(token, receipt, runtime)) {
-        throw new Error("Windows 原生 durable 检查点回执已过期或与当前 revision 不一致");
+      if (!verifyNativeAuthorityCheckpointArtifact(token, receipt)) {
+        throw new Error("Windows 原生 durable 检查点回执发生 lineage 回退、替换或结构损坏");
+      }
+      let runtime: NativeAuthorityRuntimeObservation | null = null;
+      let liveLineageHealthy = false;
+      try {
+        await nativePlayerAuthorityClock.refresh();
+        runtime = readNativeAuthorityRuntimeObservation();
+        liveLineageHealthy = verifyNativeAuthorityCheckpointReceipt(token, receipt, runtime);
+      } catch {
+        // The immutable checkpoint is already durable. A failed follow-up clock
+        // pull affects recovery status only and cannot undo or falsify that ACK.
       }
       const revision = receipt.artifact.identity.revision;
+      const recoveryWarning = liveLineageHealthy && runtime?.kind === "active"
+        ? ""
+        : "；检查点本身已安全落盘，但原生时钟正忙或等待恢复，游戏不会回退到旧 JavaScript 存档";
       const result: SaveGameResult = {
         success: true,
-        message: `Windows 原生 durable 检查点已确认（revision ${revision}）；未写入公共 JavaScript 主档或云档`,
+        message: `Windows 原生 durable 检查点已确认（revision ${revision}）；未写入公共 JavaScript 主档或云档${recoveryWarning}`,
         savedAt,
       };
       setSaveFailure(null);
@@ -7553,9 +7565,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         };
       }
       if (request.kind === "native-player-authority-handoff-complete-v1") {
-        if (current.phase !== "browser-fenced" || !current.receipt || !current.checkpoint ||
+        const completionPhaseValid = current.phase === "browser-fenced" || current.phase === "native-active";
+        const completionCheckpointValid = current.checkpoint !== null &&
+          (current.phase === "browser-fenced"
+            ? sameCheckpoint(request.checkpoint, current.checkpoint)
+            : request.revision >= current.checkpoint.revision &&
+              (request.revision > current.checkpoint.revision ||
+                sameCheckpoint(request.checkpoint, current.checkpoint)));
+        if (!completionPhaseValid || !completionCheckpointValid || !current.receipt ||
           request.revision !== request.checkpoint.revision ||
-          !sameCheckpoint(request.checkpoint, current.checkpoint) ||
           !sameFence(request.nativeWriterFence, current.receipt.nativeWriterFence) ||
           request.summary.revision !== request.revision || request.summary.stateVersion !== 47 ||
           request.summary.mode !== "normal" || request.summary.paused !== false ||
@@ -11765,16 +11783,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           `manual-export-${Date.now().toString(36)}`,
           `dsp-idle-native-save-${date}.json`,
         );
-        await nativePlayerAuthorityClock.refresh();
-        const latestRuntime = readNativeAuthorityRuntimeObservation();
-        if (!verifyNativeAuthorityArtifactLineage(
-          exportBoundary.checkpointToken,
-          exported.artifact.identity,
-          latestRuntime,
-        ) || exported.artifact.identity.revision !== exported.artifact.export.result.revision) {
-          throw new Error("Windows 原生导出回执不属于当前 session/run lineage；未读取或导出旧 JavaScript 镜像");
+        if (exported.artifact.export.cancelled) return "cancelled" as const;
+        let latestRuntime: NativeAuthorityRuntimeObservation | null = null;
+        let liveLineageHealthy = false;
+        try {
+          await nativePlayerAuthorityClock.refresh();
+          latestRuntime = readNativeAuthorityRuntimeObservation();
+          liveLineageHealthy = verifyNativeAuthorityArtifactLineage(
+            exportBoundary.checkpointToken,
+            exported.artifact.identity,
+            latestRuntime,
+          ) && exported.artifact.identity.revision === exported.artifact.export.result.revision;
+        } catch {
+          // Main already verified and atomically published the selected file.
+          // Surface only a recovery warning if the follow-up clock pull fails.
         }
-        return exported.artifact.export.cancelled ? "cancelled" as const : "native-json" as const;
+        // Main has already verified and atomically replaced the selected file.
+        // A tick/command may make the subsequent clock read transiently busy;
+        // never rewrite that durable success into a false "export failed".
+        return liveLineageHealthy && latestRuntime?.kind === "active"
+          ? "native-json" as const
+          : "native-json-recovery-warning" as const;
       }
       const saved = await persistPrimarySave(undefined, "manual");
       if (!saved.success) throw new Error(saved.message);
@@ -11803,6 +11832,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "压缩存档 .json.gz 已导出"
         : format === "native-json"
           ? "Windows 原生权威 v47 存档已直接导出"
+          : format === "native-json-recovery-warning"
+            ? "Windows 原生权威 v47 存档已成功导出；随后检测到原生时钟正忙或需恢复，文件无需重导"
           : format === "cancelled"
             ? "已取消 Windows 原生权威存档导出"
             : "存档 JSON 已导出（当前环境不支持 gzip）");

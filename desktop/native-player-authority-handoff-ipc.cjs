@@ -275,6 +275,217 @@ function startupReconciliationIsTerminalResolved(result) {
     TERMINAL_STARTUP_RECONCILE_ACTIONS.has(result.action);
 }
 
+const DEFAULT_RETRY_DELAYS_MS = Object.freeze([0, 25, 100, 250, 500, 1_000, 2_000]);
+
+function boundedErrorCode(error, fallback) {
+  return typeof error?.code === "string" && error.code.length <= 128 &&
+    LOGICAL_ID_PATTERN.test(error.code) ? error.code : fallback;
+}
+
+/**
+ * Main-process-only retry state machine for startup reconciliation and the
+ * post-transfer completion ACK. A renderer-ready signal may start it, but the
+ * renderer cannot select an authority identity or drive an individual retry.
+ */
+class NativePlayerAuthorityBoundedRetryCoordinator {
+  constructor(options) {
+    if (!isRecord(options) || typeof options.operation !== "function" ||
+        typeof options.isTerminalResult !== "function" ||
+        typeof options.isOwnerAvailable !== "function" ||
+        options.shouldRetryError !== undefined && typeof options.shouldRetryError !== "function" ||
+        options.schedule !== undefined && typeof options.schedule !== "function" ||
+        options.cancel !== undefined && typeof options.cancel !== "function") {
+      throw new TypeError("native player-authority retry coordinator options are invalid");
+    }
+    const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+    if (!Array.isArray(retryDelaysMs) || retryDelaysMs.length < 1 || retryDelaysMs.length > 16 ||
+        retryDelaysMs.some((delay) => !Number.isSafeInteger(delay) || delay < 0 || delay > 60_000)) {
+      throw new TypeError("native player-authority retry delays are invalid");
+    }
+    this.operation = options.operation;
+    this.isTerminalResult = options.isTerminalResult;
+    this.isOwnerAvailable = options.isOwnerAvailable;
+    this.shouldRetryError = options.shouldRetryError ?? (() => true);
+    this.schedule = options.schedule ?? setTimeout;
+    this.cancel = options.cancel ?? clearTimeout;
+    this.retryDelaysMs = Object.freeze([...retryDelaysMs]);
+    this.generation = 0;
+    this.timer = null;
+    this.completion = null;
+    this.resolveCompletion = null;
+    this.rejectCompletion = null;
+    this.result = null;
+    this.state = Object.freeze({
+      phase: "recovery-blocked",
+      rendererOwnerId: null,
+      attempt: 0,
+      retryDelayMs: null,
+      lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RETRY_NOT_STARTED",
+    });
+  }
+
+  snapshot() {
+    return this.state;
+  }
+
+  start(rendererOwnerId) {
+    if (!Number.isSafeInteger(rendererOwnerId) || rendererOwnerId < 1) {
+      return Promise.reject(protocolError("native player-authority retry owner is invalid"));
+    }
+    if (this.state.rendererOwnerId === rendererOwnerId &&
+        ["terminal", "retry-pending"].includes(this.state.phase) && this.completion) {
+      return this.completion;
+    }
+    if (this.state.phase === "retry-pending" && this.state.rendererOwnerId !== rendererOwnerId) {
+      return Promise.reject(protocolError(
+        "native player-authority retry already belongs to another renderer",
+        "NATIVE_PLAYER_AUTHORITY_RETRY_ALREADY_STARTED",
+      ));
+    }
+    this.clearTimer();
+    const generation = ++this.generation;
+    this.result = null;
+    this.completion = new Promise((resolve, reject) => {
+      this.resolveCompletion = resolve;
+      this.rejectCompletion = reject;
+    });
+    this.state = Object.freeze({
+      phase: "retry-pending",
+      rendererOwnerId,
+      attempt: 0,
+      retryDelayMs: 0,
+      lastErrorCode: null,
+    });
+    this.scheduleAttempt(generation, 0);
+    return this.completion;
+  }
+
+  cancelOwner(rendererOwnerId, reason = "renderer owner is unavailable") {
+    if (this.state.rendererOwnerId !== rendererOwnerId || this.state.phase !== "retry-pending") return false;
+    this.block(
+      protocolError(reason, "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE"),
+      ++this.generation,
+      rendererOwnerId,
+    );
+    return true;
+  }
+
+  shutdown() {
+    const ownerId = this.state.rendererOwnerId;
+    if (this.state.phase !== "retry-pending" || ownerId === null) {
+      this.clearTimer();
+      return false;
+    }
+    this.block(
+      protocolError("native player-authority retry stopped during process exit", "NATIVE_PLAYER_AUTHORITY_RETRY_SHUTDOWN"),
+      ++this.generation,
+      ownerId,
+    );
+    return true;
+  }
+
+  clearTimer() {
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+  }
+
+  scheduleAttempt(generation, delayMs) {
+    this.clearTimer();
+    this.timer = this.schedule(() => {
+      this.timer = null;
+      void this.runAttempt(generation);
+    }, delayMs);
+  }
+
+  scheduleRetry(generation, rendererOwnerId, attempt, errorCode) {
+    if (generation !== this.generation || this.state.rendererOwnerId !== rendererOwnerId) return;
+    const delayMs = this.retryDelaysMs[Math.min(attempt, this.retryDelaysMs.length - 1)];
+    this.state = Object.freeze({
+      phase: "retry-pending",
+      rendererOwnerId,
+      attempt,
+      retryDelayMs: delayMs,
+      lastErrorCode: errorCode,
+    });
+    this.scheduleAttempt(generation, delayMs);
+  }
+
+  block(error, generation, rendererOwnerId) {
+    if (generation !== this.generation || this.state.rendererOwnerId !== rendererOwnerId) return;
+    this.clearTimer();
+    this.state = Object.freeze({
+      phase: "recovery-blocked",
+      rendererOwnerId,
+      attempt: this.state.attempt,
+      retryDelayMs: null,
+      lastErrorCode: boundedErrorCode(error, "NATIVE_PLAYER_AUTHORITY_RETRY_BLOCKED"),
+    });
+    const reject = this.rejectCompletion;
+    this.resolveCompletion = null;
+    this.rejectCompletion = null;
+    reject?.(error);
+  }
+
+  async runAttempt(generation) {
+    const rendererOwnerId = this.state.rendererOwnerId;
+    if (generation !== this.generation || this.state.phase !== "retry-pending" ||
+        rendererOwnerId === null) return;
+    if (!this.isOwnerAvailable(rendererOwnerId)) {
+      this.block(protocolError(
+        "renderer owner disappeared during native player-authority retry",
+        "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE",
+      ), generation, rendererOwnerId);
+      return;
+    }
+    const attempt = this.state.attempt + 1;
+    this.state = Object.freeze({
+      phase: "retry-pending",
+      rendererOwnerId,
+      attempt,
+      retryDelayMs: null,
+      lastErrorCode: this.state.lastErrorCode,
+    });
+    try {
+      const result = await this.operation(rendererOwnerId);
+      if (generation !== this.generation || this.state.rendererOwnerId !== rendererOwnerId) return;
+      if (!this.isTerminalResult(result)) {
+        this.scheduleRetry(
+          generation,
+          rendererOwnerId,
+          attempt,
+          "NATIVE_PLAYER_AUTHORITY_RECONCILE_NON_TERMINAL",
+        );
+        return;
+      }
+      this.clearTimer();
+      this.result = result;
+      this.state = Object.freeze({
+        phase: "terminal",
+        rendererOwnerId,
+        attempt,
+        retryDelayMs: null,
+        lastErrorCode: null,
+      });
+      const resolve = this.resolveCompletion;
+      this.resolveCompletion = null;
+      this.rejectCompletion = null;
+      resolve?.(result);
+    } catch (error) {
+      if (generation !== this.generation || this.state.rendererOwnerId !== rendererOwnerId) return;
+      if (!this.isOwnerAvailable(rendererOwnerId) || !this.shouldRetryError(error)) {
+        this.block(error, generation, rendererOwnerId);
+        return;
+      }
+      this.scheduleRetry(
+        generation,
+        rendererOwnerId,
+        attempt,
+        boundedErrorCode(error, "NATIVE_PLAYER_AUTHORITY_RETRY_FAILED"),
+      );
+    }
+  }
+}
+
 function normalizeResultForRequest(value, request) {
   switch (request.kind) {
     case PREPARE_REQUEST_KIND: return normalizePreparedResult(value, request);
@@ -445,6 +656,7 @@ module.exports = {
   COMMIT_REQUEST_KIND,
   COMPLETE_REQUEST_KIND,
   COMPLETED_RESULT_KIND,
+  NativePlayerAuthorityBoundedRetryCoordinator,
   NativePlayerAuthorityHandoffIpcBridge,
   NativePlayerAuthorityHandoffIpcError,
   PREPARED_RESULT_KIND,

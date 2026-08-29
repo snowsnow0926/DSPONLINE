@@ -129,6 +129,17 @@ class NativePlayerAuthorityPersistenceBroker {
     })));
   }
 
+  withHandoffCompletion(rendererOwnerId, operation) {
+    if (typeof operation !== "function") {
+      throw new TypeError("native player-authority handoff completion is invalid");
+    }
+    return this.withBoundary(rendererOwnerId, async (boundary, summary) => operation(Object.freeze({
+      authority: authorityIdentity(boundary),
+      checkpoint: Object.freeze({ ...boundary.checkpoint }),
+      summary,
+    })));
+  }
+
   exportV47(rendererOwnerId, request) {
     exactKeys(request, ["exportId", "savedAtMs"], "native player-authority export request");
     if (!validLogicalId(request.exportId) || !Number.isSafeInteger(request.savedAtMs) || request.savedAtMs < 0) {

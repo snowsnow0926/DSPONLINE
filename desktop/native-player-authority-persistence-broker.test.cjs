@@ -187,6 +187,48 @@ test("startup reconciliation holds the settled runtime boundary through the rend
   assert.equal(boundaryReleased, true);
 });
 
+test("live completion keeps the clock frozen through its durable receipt and renderer ACK", async () => {
+  const gate = (() => {
+    let resolve;
+    const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+    return { promise, resolve };
+  })();
+  let boundaryReleased = false;
+  const value = fixture({
+    runtime: {
+      async withSettledPersistenceBoundary(operation) {
+        try {
+          return await operation({
+            sessionId: "core-main-1",
+            runId: "player-run-1",
+            revision: 41,
+            checkpoint: CHECKPOINT,
+            acknowledgedSequence: 7,
+            settledDeadlineMs: 18_000,
+          });
+        } finally {
+          boundaryReleased = true;
+        }
+      },
+    },
+  });
+  const pending = value.broker.withHandoffCompletion(7, async (receipt) => {
+    assert.equal(receipt.checkpoint.revision, 41);
+    assert.deepEqual(receipt.authority, {
+      sessionId: "core-main-1",
+      runId: "player-run-1",
+      revision: 41,
+    });
+    await gate.promise;
+    return "completion-ack";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(boundaryReleased, false);
+  gate.resolve();
+  assert.equal(await pending, "completion-ack");
+  assert.equal(boundaryReleased, true);
+});
+
 test("untrusted callers, stale revisions, and non-exclusive owners fail closed", async () => {
   const value = fixture();
   await assert.rejects(

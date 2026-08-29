@@ -60,6 +60,7 @@ describe("native authority persistence App boundary", () => {
     expect(nativeSave).toMatch(/refreshNativeAuthorityPersistenceBoundary\(\)[\s\S]*?checkpointToken/);
     expect(nativeSave).toMatch(/createAuthorityCheckpoint\(undefined, savedAt\)/);
     expect(nativeSave).toMatch(/verifyNativeAuthorityCheckpointReceipt\(token, receipt, runtime\)/);
+    expect(nativeSave).toMatch(/runtime\?\.kind === "active"[\s\S]*?时钟正忙或等待恢复/);
     expect(nativeSave).toMatch(/未写入公共 JavaScript 主档或云档/);
     expect(nativeSave).not.toMatch(/saveGame(?:Verified)?\(|readLocalSavePayload|uploadCloudSave/);
 
@@ -80,8 +81,22 @@ describe("native authority persistence App boundary", () => {
     expect(nativeBranch).toMatch(/persistNativeAuthorityCheckpoint\("manual"\)/);
     expect(nativeBranch).toMatch(/exportAuthoritativeV47\(/);
     expect(nativeBranch).toMatch(/verifyNativeAuthorityArtifactLineage\([\s\S]*?exported\.artifact\.identity,[\s\S]*?latestRuntime/);
-    expect(nativeBranch).toMatch(/exported\.artifact\.identity\.revision !== exported\.artifact\.export\.result\.revision/);
+    expect(nativeBranch).toMatch(/exported\.artifact\.identity\.revision === exported\.artifact\.export\.result\.revision/);
+    expect(nativeBranch).toMatch(/native-json-recovery-warning/);
+    expect(nativeBranch).not.toMatch(/throw new Error\("Windows 原生导出回执不属于当前/);
     expect(nativeBranch).not.toMatch(/readLocalSavePayload|compressSaveTextToGzipBlob|exportTextFile/);
+  });
+
+  it("makes a lost live completion ACK idempotent without reopening browser authority", () => {
+    const handoff = block(
+      "if (request.kind === \"native-player-authority-handoff-complete-v1\")",
+      "if (request.kind === \"native-player-authority-browser-fence-release-v1\")",
+    );
+    expect(handoff).toMatch(/current\.phase === "browser-fenced" \|\| current\.phase === "native-active"/);
+    expect(handoff).toMatch(/request\.revision >= current\.checkpoint\.revision/);
+    expect(handoff).toMatch(/counts\.renderer !== 0 \|\| counts\.worker !== 0/);
+    expect(handoff).toMatch(/current\.phase = "native-active"/);
+    expect(handoff).not.toMatch(/releaseLocalSaveNativeAuthorityHandoff/);
   });
 
   it("skips native cloud autosync before session, serialization, or upload", () => {

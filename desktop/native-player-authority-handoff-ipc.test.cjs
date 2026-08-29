@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   COMMIT_REQUEST_KIND,
   COMPLETE_REQUEST_KIND,
+  NativePlayerAuthorityBoundedRetryCoordinator,
   NativePlayerAuthorityHandoffIpcBridge,
   PREPARE_REQUEST_KIND,
   RELEASE_REQUEST_KIND,
@@ -346,6 +347,103 @@ test("startup reconciliation actions are constrained by main's active/absent/unk
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_INVALID",
     );
   }
+});
+
+test("startup retry is single-instance, bounded, and reaches terminal without another renderer-ready signal", async () => {
+  const scheduled = [];
+  const cancelled = [];
+  const calls = [];
+  let elapsedMs = 0;
+  let maximumDelayMs = 0;
+  const outcomes = [
+    ...Array.from({ length: 8 }, () => Object.assign(new Error("tick busy"), {
+      code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    })),
+    Object.assign(new Error("renderer timeout"), {
+      code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_TIMEOUT",
+    }),
+    { kind: "native-player-authority-startup-reconciled-v1", action: "fail-closed" },
+    { kind: "native-player-authority-startup-reconciled-v1", action: "resumed-native" },
+  ];
+  const retry = new NativePlayerAuthorityBoundedRetryCoordinator({
+    operation: async (ownerId) => {
+      calls.push(ownerId);
+      const outcome = outcomes.shift();
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    },
+    isTerminalResult: startupReconciliationIsTerminalResolved,
+    isOwnerAvailable: (ownerId) => ownerId === 7,
+    shouldRetryError: (error) => [
+      "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+      "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_TIMEOUT",
+    ].includes(error?.code),
+    schedule: (callback, delayMs) => {
+      maximumDelayMs = Math.max(maximumDelayMs, delayMs);
+      const token = { callback, delayMs, cancelled: false };
+      scheduled.push(token);
+      return token;
+    },
+    cancel: (token) => {
+      token.cancelled = true;
+      cancelled.push(token);
+    },
+  });
+  const completion = retry.start(7);
+  assert.equal(retry.start(7), completion);
+  while (scheduled.length > 0) {
+    const timer = scheduled.shift();
+    if (!timer.cancelled) {
+      elapsedMs += timer.delayMs;
+      timer.callback();
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  assert.equal((await completion).action, "resumed-native");
+  assert.deepEqual(calls, Array.from({ length: 11 }, () => 7));
+  assert.ok(elapsedMs > 2_000);
+  assert.equal(maximumDelayMs, 2_000);
+  assert.deepEqual(retry.snapshot(), {
+    phase: "terminal",
+    rendererOwnerId: 7,
+    attempt: 11,
+    retryDelayMs: null,
+    lastErrorCode: null,
+  });
+  assert.ok(cancelled.every((timer) => timer.cancelled));
+});
+
+test("retry-pending becomes recovery-blocked and cancels its timer when the renderer is destroyed", async () => {
+  const scheduled = [];
+  let ownerAvailable = true;
+  const retry = new NativePlayerAuthorityBoundedRetryCoordinator({
+    operation: async () => ({
+      kind: "native-player-authority-startup-reconciled-v1",
+      action: "fail-closed",
+    }),
+    isTerminalResult: startupReconciliationIsTerminalResolved,
+    isOwnerAvailable: () => ownerAvailable,
+    retryDelaysMs: [0, 25],
+    schedule: (callback, delayMs) => {
+      const token = { callback, delayMs, cancelled: false };
+      scheduled.push(token);
+      return token;
+    },
+    cancel: (token) => { token.cancelled = true; },
+  });
+  const completion = retry.start(7);
+  scheduled.shift().callback();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(retry.snapshot().phase, "retry-pending");
+  assert.equal(scheduled.at(-1).delayMs, 25);
+  ownerAvailable = false;
+  assert.equal(retry.cancelOwner(7), true);
+  await assert.rejects(completion, (error) =>
+    error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE");
+  assert.equal(retry.snapshot().phase, "recovery-blocked");
+  assert.equal(scheduled.at(-1).cancelled, true);
 });
 
 test("preload subscription is response-only and removes its listener cleanly", async () => {

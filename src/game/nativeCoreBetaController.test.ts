@@ -1181,6 +1181,30 @@ describe("Windows native core invitation-Beta controller", () => {
       "factory-after-clock-tick.json",
       22_000,
     )).resolves.toMatchObject({ artifact: { export: { result: { revision: 3 } } } });
+    exportBridge.mockResolvedValueOnce({
+      authority: { sessionId: "replacement-session", runId: "replacement-run", revision: 4 },
+      exportId: "export-after-lineage-change",
+      mode: "normal" as const,
+      result: {
+        revision: 4,
+        savedAtMs: 23_000,
+        byteLength: 125,
+        envelopeSha256: "9".repeat(64),
+        stateChecksum: "abcdef12",
+      },
+      cancelled: false,
+      fileName: "factory-after-lineage-change.json",
+    });
+    await expect(controller.exportAuthoritativeV47(
+      "export-after-lineage-change",
+      "factory-after-lineage-change.json",
+      23_000,
+    )).resolves.toMatchObject({
+      artifact: {
+        identity: { sessionId: "replacement-session", runId: "replacement-run", revision: 4 },
+        export: { cancelled: false, result: { revision: 4 } },
+      },
+    });
     expect(session.exportCalls).toBe(0);
   });
 
@@ -1265,6 +1289,44 @@ describe("Windows native core invitation-Beta controller", () => {
       authority: "native",
       shadowRevision: 3,
     });
+  });
+
+  it("idempotently rebinds a lost completion ACK only for monotonic same-run progress", async () => {
+    const session = new FakeNativeSession();
+    const controller = await gatedController(session);
+    controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "player-run-completion-retry",
+      checkpoint: { generation: 5, rootHash: "f".repeat(64), revision: 2 },
+      summary: summary(2, true),
+      source: "handoff",
+    });
+    const advanced = controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "player-run-completion-retry",
+      checkpoint: { generation: 6, rootHash: "e".repeat(64), revision: 3 },
+      summary: summary(3, true),
+      source: "handoff",
+    });
+    expect(advanced.authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      shadowRevision: 3,
+    });
+    expect(() => controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "replacement-run",
+      checkpoint: { generation: 6, rootHash: "e".repeat(64), revision: 3 },
+      summary: summary(3, true),
+      source: "handoff",
+    })).toThrow(/lineage 回退或替换/);
+    expect(() => controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "player-run-completion-retry",
+      checkpoint: { generation: 5, rootHash: "f".repeat(64), revision: 2 },
+      summary: summary(2, true),
+      source: "handoff",
+    })).toThrow(/lineage 回退或替换/);
   });
 
   it("recovers a main-owned startup session only from a complete v47 eligible receipt", async () => {

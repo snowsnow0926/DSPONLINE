@@ -64,6 +64,13 @@ import { cloudSaveCapacityDetails, type CloudSaveCapacityDetails } from "../game
 import { cloudSyncStatusFromUpload, writeCloudSyncStatus } from "../game/cloudSyncStatus";
 import { exportTextFile } from "../game/fileExport";
 import { getPrimaryLocalSaveRevision } from "../game/localSaveStore";
+import {
+  canContinueLegacyAuthorityAsyncLease,
+  createLegacyAuthorityAsyncLeaseFence,
+  issueLegacyAuthorityAsyncLease,
+  reconcileLegacyAuthorityAsyncLeaseFence,
+  type LegacyAuthorityAsyncLeaseToken,
+} from "../game/legacyAuthorityAsyncLease";
 
 type GalaxyTab = "ranking" | "speedrun" | "cloud" | "account";
 
@@ -72,6 +79,7 @@ interface GalaxyWorkspaceProps {
   focusTab?: GalaxyTab | null;
   accountState: AccountState;
   game: GameState;
+  nativeAuthorityReadOnly: boolean;
   onClose: () => void;
   onUpdateProfile: (changes: AccountProfileChanges) => void;
   onUpdateCloudBinding: (cloud: { id: string; email: string } | null) => void;
@@ -146,6 +154,7 @@ export function GalaxyWorkspace({
   focusTab,
   accountState,
   game,
+  nativeAuthorityReadOnly,
   onClose,
   onUpdateProfile,
   onUpdateCloudBinding,
@@ -172,6 +181,17 @@ export function GalaxyWorkspace({
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudUploadActive, setCloudUploadActive] = useState(false);
   const cloudUploadAbortRef = useRef<AbortController | null>(null);
+  const cloudLegacyAuthorityFenceRef = useRef(createLegacyAuthorityAsyncLeaseFence(
+    nativeAuthorityReadOnly ? "native" : "javascript",
+  ));
+  cloudLegacyAuthorityFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+    cloudLegacyAuthorityFenceRef.current,
+    nativeAuthorityReadOnly ? "native" : "javascript",
+  );
+  const issueCloudLegacyAuthorityLease = (): LegacyAuthorityAsyncLeaseToken | null =>
+    issueLegacyAuthorityAsyncLease(cloudLegacyAuthorityFenceRef.current);
+  const cloudLegacyAuthorityLeaseIsCurrent = (token: LegacyAuthorityAsyncLeaseToken | null): boolean =>
+    canContinueLegacyAuthorityAsyncLease(token, cloudLegacyAuthorityFenceRef.current);
   const [cloudUploadCapacity, setCloudUploadCapacity] = useState<CloudSaveCapacityDetails | null>(null);
   const [cloudUploadErrorCode, setCloudUploadErrorCode] = useState<string | null>(null);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
@@ -298,6 +318,17 @@ export function GalaxyWorkspace({
   }, [focusTab, open]);
   useEffect(() => () => cloudUploadAbortRef.current?.abort(), []);
   useEffect(() => {
+    if (!nativeAuthorityReadOnly) return;
+    const activeMainUpload = cloudUploadAbortRef.current;
+    if (activeMainUpload) {
+      activeMainUpload.abort();
+      cloudUploadAbortRef.current = null;
+      setCloudUploadActive(false);
+      setCloudBusy(false);
+    }
+    setCloudMessage("Windows 原生权威接管期间，旧界面主存档只读；主云档上传已暂停");
+  }, [nativeAuthorityReadOnly]);
+  useEffect(() => {
     if (!open || tab !== "speedrun") return;
     let cancelled = false;
     setSpeedrunStatus("loading");
@@ -313,9 +344,9 @@ export function GalaxyWorkspace({
     if (account.profile.privacy !== privacy) onUpdateProfile({ privacy });
   }, [account.profile.privacy, cloudSession.status, cloudSession.user, onUpdateProfile]);
   useEffect(() => {
-    setLocalCloudPayload(open && tab === "cloud" ? exportGame(game) : null);
+    setLocalCloudPayload(open && tab === "cloud" && !nativeAuthorityReadOnly ? exportGame(game) : null);
     if (open && tab === "cloud") setLocalSaveSlots(getSaveSlotSummaries(game.mode));
-  }, [cloudSession.cloudSave?.revision, game.mode, open, tab]);
+  }, [cloudSession.cloudSave?.revision, game.mode, nativeAuthorityReadOnly, open, tab]);
   useEffect(() => {
     if (uploadState === "idle") return;
     const timer = window.setTimeout(() => setUploadState("idle"), 2200);
@@ -460,6 +491,11 @@ export function GalaxyWorkspace({
 
   const saveCurrentFactoryToCloud = async () => {
     if (cloudSession.status !== "authenticated" || !cloudSession.user) return;
+    const authorityLease = issueCloudLegacyAuthorityLease();
+    if (!cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) {
+      setCloudMessage("Windows 原生权威接管期间，旧界面主存档只读；请使用原生存档通道");
+      return;
+    }
     const userId = cloudSession.user.id;
     const localPayload = exportGame(game);
     const initialCapacity = cloudSaveCapacityDetails(new TextEncoder().encode(localPayload).byteLength);
@@ -481,19 +517,30 @@ export function GalaxyWorkspace({
       const uploaded = await uploadCloudSave(localPayload, cloudSession.cloudSave?.revision ?? 0, "main", { mode: game.mode,
         signal: controller.signal,
         onStage: (stage) => {
+          if (!cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
           const message = cloudUploadStageLabel(stage);
           setCloudMessage(message);
           writeCloudSyncStatus(cloudSyncStatusFromUpload(game.mode, "main", stage === "compressing" ? "compressing" : stage === "confirming" ? "confirming" : "uploading", { comparison: cloudComparison?.state ?? null, cloud: cloudSession.cloudSave, message, sizes: initialCapacity }));
         },
-        onDiagnostics: (diagnostics: CloudUploadDiagnostics) => setCloudUploadCapacity(diagnostics.capacity),
+        onDiagnostics: (diagnostics: CloudUploadDiagnostics) => {
+          if (cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) setCloudUploadCapacity(diagnostics.capacity);
+        },
       });
-      const metadata = await refreshCloudSaveMetadata("main", undefined, game.mode).catch(() => uploaded) ?? uploaded;
+      if (!cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
+      let metadata = uploaded;
+      try {
+        metadata = await refreshCloudSaveMetadata("main", undefined, game.mode) ?? uploaded;
+      } catch {
+        metadata = uploaded;
+      }
+      if (!cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
       markCloudSaveSynchronized(userId, metadata, localPayload, "main", game.mode);
       setCloudSession((current) => ({ ...current, cloudSave: metadata, cloudSaves: { "1": null, "2": null, "3": null, ...current.cloudSaves, main: metadata } }));
       setUploadRevision((revision) => revision + 1);
       setCloudMessage(`云存档已更新到修订 ${metadata.revision}，排行榜已自动更新`);
       writeCloudSyncStatus(cloudSyncStatusFromUpload(game.mode, "main", "success", { comparison: "synced", cloud: metadata, lastSuccessfulSyncAt: Date.now(), message: `已提交并确认修订 ${metadata.revision}`, sizes: cloudUploadCapacity ?? initialCapacity }));
     } catch (error) {
+      if (!cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
       if (error instanceof DOMException && error.name === "AbortError") {
         setCloudUploadErrorCode("ABORTED");
         setCloudMessage("云存档上传已取消；本地存档与云端旧修订均保持不变");
@@ -509,9 +556,11 @@ export function GalaxyWorkspace({
       setCloudMessage(described.message);
       writeCloudSyncStatus(cloudSyncStatusFromUpload(game.mode, "main", error instanceof CloudApiError && error.status === 409 ? "conflict" : "failed", { comparison: error instanceof CloudApiError && error.status === 409 ? "conflict" : cloudComparison?.state ?? null, cloud: cloudSession.cloudSave, message: described.message, errorCode: described.code, sizes: described.capacity ?? cloudUploadCapacity ?? initialCapacity }));
     } finally {
-      if (cloudUploadAbortRef.current === controller) cloudUploadAbortRef.current = null;
-      setCloudUploadActive(false);
-      setCloudBusy(false);
+      if (cloudUploadAbortRef.current === controller) {
+        cloudUploadAbortRef.current = null;
+        setCloudUploadActive(false);
+        setCloudBusy(false);
+      }
     }
   };
 
@@ -713,24 +762,48 @@ export function GalaxyWorkspace({
 
   const keepLocalConflictVersion = async () => {
     if (!cloudConflict || cloudSession.status !== "authenticated" || !cloudSession.user) return;
+    const conflict = cloudConflict;
+    const authorityLease = conflict.slot === "main" ? issueCloudLegacyAuthorityLease() : null;
+    if (conflict.slot === "main" && !cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) {
+      setCloudMessage("Windows 原生权威接管期间，不能用旧界面镜像覆盖主云档");
+      return;
+    }
     const userId = cloudSession.user.id;
+    const controller = conflict.slot === "main" ? new AbortController() : null;
+    if (controller) cloudUploadAbortRef.current = controller;
     setCloudBusy(true);
     try {
-      const uploaded = await uploadCloudSave(cloudConflict.localPayload, cloudConflict.remote.revision, cloudConflict.slot, { mode: game.mode,
-        onStage: (stage) => setCloudMessage(cloudUploadStageLabel(stage)),
+      const uploaded = await uploadCloudSave(conflict.localPayload, conflict.remote.revision, conflict.slot, { mode: game.mode,
+        signal: controller?.signal,
+        onStage: (stage) => {
+          if (conflict.slot !== "main" || cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) {
+            setCloudMessage(cloudUploadStageLabel(stage));
+          }
+        },
       });
-      const metadata = await refreshCloudSaveMetadata(cloudConflict.slot, undefined, game.mode).catch(() => uploaded) ?? uploaded;
-      markCloudSaveSynchronized(userId, metadata, cloudConflict.localPayload, cloudConflict.slot, game.mode);
-      updateCloudSlot(cloudConflict.slot, metadata);
+      if (conflict.slot === "main" && !cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
+      let metadata = uploaded;
+      try {
+        metadata = await refreshCloudSaveMetadata(conflict.slot, undefined, game.mode) ?? uploaded;
+      } catch {
+        metadata = uploaded;
+      }
+      if (conflict.slot === "main" && !cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
+      markCloudSaveSynchronized(userId, metadata, conflict.localPayload, conflict.slot, game.mode);
+      updateCloudSlot(conflict.slot, metadata);
       setCloudConflict(null);
       setCloudMessage(`本地进度已保存为云端修订 ${metadata.revision}`);
     } catch (error) {
+      if (conflict.slot === "main" && !cloudLegacyAuthorityLeaseIsCurrent(authorityLease)) return;
       if (error instanceof CloudApiError && error.status === 409 && error.payload.cloudSave) {
         setCloudConflict((current) => current ? { ...current, remote: error.payload.cloudSave as CloudSaveMetadata } : current);
       }
       setCloudMessage(error instanceof Error ? error.message : "本地版本上传失败");
     } finally {
-      setCloudBusy(false);
+      if (!controller || cloudUploadAbortRef.current === controller) {
+        if (controller) cloudUploadAbortRef.current = null;
+        setCloudBusy(false);
+      }
     }
   };
 
@@ -854,7 +927,7 @@ export function GalaxyWorkspace({
                 {uploadState === "success" ? <Check size={15} /> : !leaderboardVisible ? <LockKeyhole size={15} /> : <Send size={15} />}
                 {uploadState === "success" ? "排名已刷新" : !leaderboardVisible ? "已退出公开排行榜" : snapshot.season.status === "ended" ? "历史赛季已封存" : cloudSession.status !== "authenticated" ? "登录后刷新排名" : !cloudSession.cloudSave ? "先上传主云存档" : "立即刷新排名"}
               </button>
-              {cloudSession.status === "authenticated" && game.mode === "normal" ? <button className="galaxy-upload-command" type="button" disabled={cloudBusy} onClick={() => void saveCurrentFactoryToCloud()}><Cloud size={15} />立即同步普通主存档</button> : null}
+              {cloudSession.status === "authenticated" && game.mode === "normal" ? <button className="galaxy-upload-command" type="button" disabled={cloudBusy || nativeAuthorityReadOnly} onClick={() => void saveCurrentFactoryToCloud()}><Cloud size={15} />立即同步普通主存档</button> : null}
               {cloudSession.status === "authenticated" ? <label className="galaxy-leaderboard-visibility"><span><strong>{leaderboardVisible ? "参与公开排行榜" : "已退出排行榜"}</strong><small>{leaderboardVisible ? "主云存档同步成功后自动更新排名" : "后续同步不会重新加入，可随时恢复"}</small></span><input type="checkbox" checked={leaderboardVisible} disabled={leaderboardVisibilityBusy} onChange={(event) => void updateLeaderboardVisibility(event.target.checked)} aria-label="参与公开排行榜" /></label> : null}
               {leaderboardError ? <p className="galaxy-leaderboard-error" role="alert"><CloudOff size={13} /><span>{leaderboardError}</span></p> : null}
               {statusMessage ? <p><LockKeyhole size={13} /><span>{statusMessage}</span></p> : null}
@@ -923,8 +996,8 @@ export function GalaxyWorkspace({
                 <header><Save size={18} /><span><small>{game.mode === "speedrun" ? "速通模式" : "普通模式"} · 当前主存档</small><strong>{cloudSession.cloudSave ? `修订 ${cloudSession.cloudSave.revision}` : "尚未上传"}</strong></span><em>{cloudSession.cloudSave ? `${(cloudSession.cloudSave.size / 1024).toFixed(1)} KB` : "--"}</em></header>
                 {cloudComparison ? <p className={`cloud-sync-state cloud-sync-state--${cloudComparison.state}`}>{cloudSyncLabel(cloudComparison.state)}</p> : null}
                 <dl><div><dt>更新时间</dt><dd>{cloudSession.cloudSave ? new Date(cloudSession.cloudSave.updatedAt).toLocaleString("zh-CN") : "--"}</dd></div><div><dt>校验摘要</dt><dd>{cloudSession.cloudSave?.checksum.slice(0, 12) ?? "--"}</dd></div><div><dt>本地进度</dt><dd>{cloudComparison?.local ? `${Math.floor(cloudComparison.local.elapsedSeconds / 3600)}h · 科技 ${cloudComparison.local.completedTechCount}` : "--"}</dd></div><div><dt>云端进度</dt><dd>{cloudSession.cloudSave?.summary ? `${Math.floor(cloudSession.cloudSave.summary.elapsedSeconds / 3600)}h · 科技 ${cloudSession.cloudSave.summary.completedTechCount}` : "--"}</dd></div></dl>
-                <div><button type="button" disabled={cloudBusy} onClick={() => void prepareCloudRestore()}><Download size={14} />下载到本机</button><button className="primary" type="button" disabled={cloudBusy} onClick={() => void saveCurrentFactoryToCloud()}><Save size={14} />上传当前存档</button><button className="danger" type="button" disabled={cloudBusy || !cloudSession.cloudSave} onClick={() => cloudSession.cloudSave && setCloudDeleteRequest({ slot: "main", mode: game.mode, metadata: cloudSession.cloudSave, scope: "cloud", label: `${game.mode === "speedrun" ? "速通模式" : "普通模式"}云端主存档`, details: `修订 ${cloudSession.cloudSave.revision} · ${new Date(cloudSession.cloudSave.updatedAt).toLocaleString("zh-CN")}` })}><Trash2 size={14} />删除云存档</button></div>
-                <CloudSaveStatusCenter userId={cloudSession.user.id} mode={game.mode} slot="main" localRevision={getPrimaryLocalSaveRevision(game.mode)} cloud={cloudSession.cloudSave} comparison={cloudComparison?.state ?? null} active={cloudUploadActive} message={cloudMessage} errorCode={cloudUploadErrorCode} capacity={cloudUploadCapacity} onRetry={() => void saveCurrentFactoryToCloud()} onCancel={cloudUploadActive ? () => cloudUploadAbortRef.current?.abort() : undefined} onExportLocal={() => void exportTextFile({ contents: localCloudPayload ?? exportGame(game), fileName: `dsp-idle-${game.mode}-local-${new Date().toISOString().slice(0, 10)}.json`, title: "导出本地主存档副本" })} onExportCloud={cloudSession.cloudSave ? () => void downloadCloudSave(undefined, "main", game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-cloud-r${save.revision}.json`, title: "导出云端主存档副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "云端副本导出失败")) : undefined} />
+                <div><button type="button" disabled={cloudBusy} onClick={() => void prepareCloudRestore()}><Download size={14} />下载到本机</button><button className="primary" type="button" disabled={cloudBusy || nativeAuthorityReadOnly} onClick={() => void saveCurrentFactoryToCloud()}><Save size={14} />上传当前存档</button><button className="danger" type="button" disabled={cloudBusy || !cloudSession.cloudSave} onClick={() => cloudSession.cloudSave && setCloudDeleteRequest({ slot: "main", mode: game.mode, metadata: cloudSession.cloudSave, scope: "cloud", label: `${game.mode === "speedrun" ? "速通模式" : "普通模式"}云端主存档`, details: `修订 ${cloudSession.cloudSave.revision} · ${new Date(cloudSession.cloudSave.updatedAt).toLocaleString("zh-CN")}` })}><Trash2 size={14} />删除云存档</button></div>
+                <CloudSaveStatusCenter userId={cloudSession.user.id} mode={game.mode} slot="main" localRevision={getPrimaryLocalSaveRevision(game.mode)} cloud={cloudSession.cloudSave} comparison={cloudComparison?.state ?? null} active={cloudUploadActive} message={cloudMessage} errorCode={cloudUploadErrorCode} capacity={cloudUploadCapacity} onRetry={nativeAuthorityReadOnly ? undefined : () => void saveCurrentFactoryToCloud()} onCancel={cloudUploadActive ? () => cloudUploadAbortRef.current?.abort() : undefined} onExportLocal={nativeAuthorityReadOnly ? undefined : () => void exportTextFile({ contents: localCloudPayload ?? exportGame(game), fileName: `dsp-idle-${game.mode}-local-${new Date().toISOString().slice(0, 10)}.json`, title: "导出本地主存档副本" })} onExportCloud={cloudSession.cloudSave ? () => void downloadCloudSave(undefined, "main", game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-cloud-r${save.revision}.json`, title: "导出云端主存档副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "云端副本导出失败")) : undefined} />
               </div>
               <CloudSaveSlotsPanel mode={game.mode} cloudSaves={cloudSession.cloudSaves} localSlots={localSaveSlots} busySlot={cloudBusy ? "main" : null} uploadDisabled={false} onUpload={(slot) => void uploadManualCloudSlot(slot)} onDownload={(slot) => void downloadManualCloudSlot(slot)} onDelete={(slot, metadata) => setCloudDeleteRequest({ slot, mode: game.mode, metadata, scope: "cloud", label: `${game.mode === "speedrun" ? "速通模式" : "普通模式"}云端槽位 ${slot}`, details: `修订 ${metadata.revision} · ${new Date(metadata.updatedAt).toLocaleString("zh-CN")}` })} />
               {cloudHistory.length > 0 ? <section className="galaxy-cloud-history" aria-label="云存档历史修订">
@@ -942,7 +1015,7 @@ export function GalaxyWorkspace({
           </section>
           <aside className="galaxy-cloud-policy"><ShieldCheck size={20} /><span><strong>冲突与校验</strong><small>每次上传都携带云端修订号；另一台设备先更新后，本机不会静默覆盖。恢复云存档前会保留当前工厂快照。</small></span></aside>
           {pendingCloudSave ? <div className="galaxy-cloud-confirm"><section role="alertdialog" aria-modal="true" aria-label="确认恢复云存档"><header><Download size={18} /><span><strong>恢复{game.mode === "speedrun" ? "速通模式" : "普通模式"}云存档修订 {pendingCloudSave.revision}</strong><small>{new Date(pendingCloudSave.updatedAt).toLocaleString("zh-CN")}</small></span></header><p>只会替换当前模式工厂，并先创建同模式本地回滚快照；另一模式不会受到影响。</p><footer><button type="button" onClick={() => setPendingCloudSave(null)}>取消</button><button className="primary" type="button" onClick={restorePendingCloudSave}>确认恢复</button></footer></section></div> : null}
-          {cloudConflict ? <CloudSaveConflictDialog local={summarizeCloudPayload(cloudConflict.localPayload)} cloud={cloudConflict.remote} slot={cloudConflict.slot} busy={cloudBusy} onUseCloud={() => void useCloudConflictVersion()} onKeepLocal={() => void keepLocalConflictVersion()} onExportLocal={() => void exportTextFile({ contents: cloudConflict.localPayload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-local-conflict.json`, title: "导出冲突本地副本" })} onExportCloud={() => void downloadCloudSave(cloudConflict.remote.revision, cloudConflict.slot, game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-cloud-r${save.revision}.json`, title: "导出冲突云端副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "冲突云端副本导出失败"))} onCancel={() => setCloudConflict(null)} /> : null}
+          {cloudConflict ? <CloudSaveConflictDialog local={summarizeCloudPayload(cloudConflict.localPayload)} cloud={cloudConflict.remote} slot={cloudConflict.slot} busy={cloudBusy || (nativeAuthorityReadOnly && cloudConflict.slot === "main")} onUseCloud={() => void useCloudConflictVersion()} onKeepLocal={() => void keepLocalConflictVersion()} onExportLocal={() => void exportTextFile({ contents: cloudConflict.localPayload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-local-conflict.json`, title: "导出冲突本地副本" })} onExportCloud={() => void downloadCloudSave(cloudConflict.remote.revision, cloudConflict.slot, game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-cloud-r${save.revision}.json`, title: "导出冲突云端副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "冲突云端副本导出失败"))} onCancel={() => setCloudConflict(null)} /> : null}
           <SaveDeleteDialog target={cloudDeleteRequest} onCancel={() => setCloudDeleteRequest(null)} onDelete={() => void deleteSelectedCloudSave()} />
         </div>
       ) : (

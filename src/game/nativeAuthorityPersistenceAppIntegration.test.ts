@@ -4,13 +4,18 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const app = readFileSync(resolve("src/App.tsx"), "utf8");
+const galaxy = readFileSync(resolve("src/components/GalaxyWorkspace.tsx"), "utf8");
 
-function block(start: string, end: string): string {
-  const startIndex = app.indexOf(start);
-  const endIndex = app.indexOf(end, startIndex + start.length);
+function sourceBlock(source: string, start: string, end: string): string {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
   expect(startIndex, `missing start marker: ${start}`).toBeGreaterThanOrEqual(0);
   expect(endIndex, `missing end marker: ${end}`).toBeGreaterThan(startIndex);
-  return app.slice(startIndex, endIndex);
+  return source.slice(startIndex, endIndex);
+}
+
+function block(start: string, end: string): string {
+  return sourceBlock(app, start, end);
 }
 
 describe("native authority persistence App boundary", () => {
@@ -166,5 +171,83 @@ describe("native authority persistence App boundary", () => {
     );
     expect(cleanup.indexOf("simulationWorkerRef.current = null")).toBeLessThan(cleanup.indexOf("worker.terminate()"));
     expect(cleanup.indexOf("worker.onmessage = null")).toBeLessThan(cleanup.indexOf("worker.terminate()"));
+  });
+
+  it("carries one pure-idle authority lease through nested helpers and every terminal await", () => {
+    const persistTerminal = block(
+      "const persistPureIdleTerminalEnvelope = useCallback",
+      "const persistNativeAuthorityCheckpoint = useCallback",
+    );
+    expect(persistTerminal).toMatch(/finalized: PureIdleMacroFinalEnvelopeResult,[\s\S]*?authorityLease: LegacyAuthorityAsyncLeaseToken/);
+    expect(persistTerminal).not.toMatch(/issueLegacyJavaScriptAuthorityLease\(/);
+    for (const awaited of [
+      "saveGameVerifiedFromEnvelopeTransfer",
+      "initializeSimulationRuntimeRecoveryInPersistenceWorker",
+      "recordPureIdleRecoveryTransition",
+      "replaceSimulationAuthorityFromStateTransfer",
+      "clearPureIdleRecovery",
+    ]) {
+      const awaitIndex = persistTerminal.indexOf(`await ${awaited}`);
+      expect(awaitIndex, awaited).toBeGreaterThanOrEqual(0);
+      expect(
+        persistTerminal.indexOf("legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)", awaitIndex),
+        `${awaited} missing post-await lease check`,
+      ).toBeGreaterThan(awaitIndex);
+    }
+
+    const settleBackground = block(
+      "const settlePureIdleBackgroundRecovery = useCallback",
+      "const markPureIdleBackgrounded = useCallback",
+    );
+    expect(settleBackground).not.toMatch(/issueLegacyJavaScriptAuthorityLease\(/);
+    expect(settleBackground).toMatch(/initializePureIdleMacroClient\(record, authorityLease\)/);
+    expect(settleBackground).toMatch(/persistPureIdleTransition\(record,[\s\S]*?authorityLease/);
+    expect(settleBackground).toMatch(/persistPureIdleWorkerFailure\(record,[\s\S]*?authorityLease/);
+    expect(settleBackground).toMatch(/persistPureIdleTerminalEnvelope\(record, backgroundFinalized, authorityLease\)/);
+    expect(settleBackground).toMatch(/publishPureIdleTerminalGameBehindOverlay\(authorityLease\)/);
+
+    const stop = block("const stopPureIdle = useCallback", "const cancelPureIdleSettlement = useCallback");
+    expect(stop).toMatch(/inheritedAuthorityLease\?: LegacyAuthorityAsyncLeaseToken/);
+    expect(stop).toMatch(/inheritedAuthorityLease \?\? issueLegacyJavaScriptAuthorityLease\(\)/);
+    expect(stop).toMatch(/settlePureIdleBackgroundRecovery\(record, authorityLease, stoppedAtMs\)/);
+    expect(stop).toMatch(/initializePureIdleMacroClient\(record, authorityLease\)/);
+    expect(stop).toMatch(/persistPureIdleTerminalEnvelope\(record, finalized, authorityLease\)/);
+
+    const retry = block("const retryPureIdleRecovery = useCallback", "const continueFromPureIdleCheckpoint = useCallback");
+    expect(retry).toMatch(/const authorityLease = issueLegacyJavaScriptAuthorityLease\(\)/);
+    expect(retry).toMatch(/initializePureIdleMacroClient\(record, authorityLease\)/);
+    expect(retry).toMatch(/stopPureIdle\(authorityLease\)/);
+  });
+
+  it("makes GalaxyWorkspace main-cloud upload read-only under native authority and fences ABA", () => {
+    expect(app).toMatch(/<GalaxyWorkspace[\s\S]*?nativeAuthorityReadOnly=\{nativePlayerAuthorityOwnsRuntime\}/);
+
+    const upload = sourceBlock(
+      galaxy,
+      "const saveCurrentFactoryToCloud = async () =>",
+      "const updateCloudSlot =",
+    );
+    const issueIndex = upload.indexOf("issueCloudLegacyAuthorityLease()");
+    const exportIndex = upload.indexOf("exportGame(game)");
+    expect(issueIndex).toBeGreaterThanOrEqual(0);
+    expect(upload.indexOf("cloudLegacyAuthorityLeaseIsCurrent(authorityLease)", issueIndex)).toBeLessThan(exportIndex);
+    expect(upload.indexOf("await uploadCloudSave")).toBeGreaterThan(exportIndex);
+    expect(upload).toMatch(/await uploadCloudSave[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)[\s\S]*?await refreshCloudSaveMetadata[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)[\s\S]*?markCloudSaveSynchronized/);
+    expect(upload).toMatch(/onStage:[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)/);
+    expect(upload).toMatch(/onDiagnostics:[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)/);
+
+    const keepLocal = sourceBlock(
+      galaxy,
+      "const keepLocalConflictVersion = async () =>",
+      "const submitCurrentSpeedrun = async () =>",
+    );
+    expect(keepLocal).toMatch(/conflict\.slot === "main" \? issueCloudLegacyAuthorityLease\(\) : null/);
+    expect(keepLocal).toMatch(/signal: controller\?\.signal/);
+    expect(keepLocal).toMatch(/await uploadCloudSave[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)[\s\S]*?await refreshCloudSaveMetadata[\s\S]*?cloudLegacyAuthorityLeaseIsCurrent\(authorityLease\)[\s\S]*?markCloudSaveSynchronized/);
+
+    expect(galaxy).toMatch(/立即同步普通主存档[\s\S]*?上传当前存档/);
+    expect(galaxy.match(/disabled=\{cloudBusy \|\| nativeAuthorityReadOnly\}/g) ?? []).toHaveLength(2);
+    expect(galaxy).toMatch(/onRetry=\{nativeAuthorityReadOnly \? undefined/);
+    expect(galaxy).toMatch(/busy=\{cloudBusy \|\| \(nativeAuthorityReadOnly && cloudConflict\.slot === "main"\)\}/);
   });
 });

@@ -5504,7 +5504,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPureIdleTerminalEnvelope = useCallback(async (
     record: PureIdleRecoveryRecord,
     finalized: PureIdleMacroFinalEnvelopeResult,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
   ): Promise<SaveGameResult> => {
+    const staleAuthorityResult = (): SaveGameResult => ({
+      success: false,
+      message: "Windows 原生权威已接管，旧纯挂机终态已作废",
+      code: "conflict",
+    });
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
     if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
     if (durableRecoveryLifecycleRef.current !== "active") {
       return { success: false, message: "durable recovery 尚未就绪，未写入纯挂机终态", code: "unavailable" };
@@ -5532,6 +5539,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
         throw new Error("纯挂机终态接管前仍有普通模拟操作未完成");
       }
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "serialize-write-readback" });
       const identity = finalized.finalEnvelope.identity;
@@ -5548,6 +5556,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         elapsedSeconds: identity.elapsedSeconds,
       }, {
         onProgress: (progress) => {
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (progress.stage === "complete") {
             setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "纯挂机终态已写入，正在验证模拟 Worker 接管…" });
           } else if ("bytes" in progress && progress.bytes) {
@@ -5555,6 +5564,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           }
         },
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (saved.sourceEnvelopeTransfer) finalized.finalEnvelope.payloadBytes = saved.sourceEnvelopeTransfer;
       if (!saved.success) {
         setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: saved.message });
@@ -5577,6 +5587,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
       const fence = { ownerId: writer.writerId, fencingToken: writer.fencingToken };
       const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(nextCheckpoint, fence);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (!initialized.result.ok) throw new Error(initialized.result.message);
       durableRecoveryHeadRef.current = {
         baseIdentity: nextCheckpoint.baseIdentity,
@@ -5594,6 +5605,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         committed: true,
         committedAtMs,
       }, committedAtMs);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (marked && pureIdleRecoveryRef.current?.sessionId === record.sessionId) {
         pureIdleRecoveryRef.current = {
           ...pureIdleRecoveryRef.current,
@@ -5609,7 +5621,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!sourceStateTransfer) throw new Error("纯挂机保存未返还模拟 Worker state transfer");
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "主存档已验证，正在等待模拟 Worker 接管…" });
       await replaceSimulationAuthorityFromStateTransfer(sourceStateTransfer, durableRecoveryHeadRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (saved.bytes !== undefined) setPersistedPrimaryBytes(saved.bytes);
       // Keep completion presentation in the same low-priority publication as
       // the caller's terminal GameState + overlay close. Publishing here used
@@ -5622,18 +5636,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "complete" });
       return saved;
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       const failure: SaveGameResult = { success: false, message: error instanceof Error ? error.message : "纯挂机终态保存/接管失败", code: "unavailable" };
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: failure.message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "failed" });
       setNotice(`${failure.message}；主存档若已验证，请刷新以从新主存档恢复`);
       return failure;
     } finally {
-      durablePrimarySaveInFlightRef.current = false;
-      simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
-      if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
-      window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        durablePrimarySaveInFlightRef.current = false;
+        simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
+        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
+        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+      }
     }
-  }, [clearPureIdleRecovery, replaceSimulationAuthorityFromStateTransfer]);
+  }, [clearPureIdleRecovery, legacyJavaScriptAuthorityLeaseIsCurrent, replaceSimulationAuthorityFromStateTransfer]);
 
   const persistNativeAuthorityCheckpoint = useCallback(async (
     kind: RuntimePersistenceKind,
@@ -6027,8 +6044,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPureIdleTransition = useCallback(async (
     record: PureIdleRecoveryRecord,
     update: PureIdleRecoveryTransition,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     nowMs = Date.now(),
   ): Promise<boolean> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     let persisted = false;
     try {
       persisted = await recordPureIdleRecoveryTransition(
@@ -6040,6 +6059,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch {
       // The checkpoint remains authoritative if diagnostic metadata cannot be written.
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     const current = pureIdleRecoveryRef.current;
     if (current?.sessionId !== record.sessionId) return persisted;
     pureIdleRecoveryRef.current = {
@@ -6056,13 +6076,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       lastTransitionAtMs: nowMs,
     };
     return persisted;
-  }, []);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const persistPureIdleWorkerFailure = useCallback(async (
     record: PureIdleRecoveryRecord,
     message: string,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     stopReason: PureIdleStopReason = "worker-error",
   ): Promise<number> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     const localFallback = pureIdleMacroRestartCountRef.current + 1;
     let persisted: number | null = null;
     try {
@@ -6075,6 +6097,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // The durable checkpoint remains authoritative even if this diagnostic
       // transaction is temporarily unavailable.
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     const restartCount = persisted ?? localFallback;
     pureIdleMacroRestartCountRef.current = restartCount;
     pureIdleMacroForceConservativeRef.current = restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT;
@@ -6091,11 +6114,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stopReason,
       phase: "failed",
       lastError: message,
-    });
+    }, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     return restartCount;
-  }, [persistPureIdleTransition]);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition]);
 
-  const publishPureIdleMacroSummary = useCallback((record: PureIdleRecoveryRecord, summary: PureIdleMacroSummary) => {
+  const publishPureIdleMacroSummary = useCallback((
+    record: PureIdleRecoveryRecord,
+    summary: PureIdleMacroSummary,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ) => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const current = pureIdleRecoveryRef.current;
     if (!pureIdleMacroActiveRef.current || current?.sessionId !== record.sessionId) return;
     pureIdleRecoveryRef.current = {
@@ -6118,9 +6147,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       summary.phase,
       summary,
     );
-  }, [setPureIdleRecoveryContinueState]);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, setPureIdleRecoveryContinueState]);
 
-  const initializePureIdleMacroClient = useCallback(async (record: PureIdleRecoveryRecord): Promise<PureIdleMacroClient | null> => {
+  const initializePureIdleMacroClient = useCallback(async (
+    record: PureIdleRecoveryRecord,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ): Promise<PureIdleMacroClient | null> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
     pureIdleMacroRestartCountRef.current = Math.max(
       pureIdleMacroRestartCountRef.current,
       record.workerRestartCount,
@@ -6142,10 +6175,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const client = new PureIdleMacroClient({
       operationDeadlineMs: complexity.recommendedDeadlineMs || undefined,
       onProgress: (progress) => {
-        if (pureIdleMacroClientRef.current !== client || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) return;
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+          pureIdleMacroClientRef.current !== client || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) return;
         setPureIdleRecoveryStatus(`${pureIdleProgressLabel(progress)} · 现实耗时 ${(progress.wallClockMs / 1_000).toFixed(1)} 秒`);
       },
     });
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+      client.close();
+      return null;
+    }
     pureIdleMacroClientRef.current = client;
     setPureIdleRecoveryStatus(forceConservativeReason
       ? `正在从权威检查点建立保守宏观会话 · ${offlineProfileLabel(complexity.profile)}`
@@ -6159,11 +6197,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           baselineTotalProduced: record.state.totalProduced,
         },
       });
-      if (!pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+        !pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
         client.close();
         return null;
       }
-      publishPureIdleMacroSummary(record, summary);
+      publishPureIdleMacroSummary(record, summary, authorityLease);
       if (summary.settledWallSeconds > 0) pureIdleMacroRestartCountRef.current = 0;
       setPureIdleRecoveryContinueState(false);
       setNotice(summary.conservativeOnly
@@ -6175,9 +6214,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch (error) {
       client.close();
       if (pureIdleMacroClientRef.current === client) pureIdleMacroClientRef.current = null;
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
       if (!isCountedPureIdleWorkerFailure(error)) return null;
       const message = error instanceof Error ? error.message : "纯挂机 Worker 初始化失败";
-      const restartCount = await persistPureIdleWorkerFailure(record, message, pureIdleStopReasonForError(error));
+      const restartCount = await persistPureIdleWorkerFailure(record, message, authorityLease, pureIdleStopReasonForError(error));
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
       if (forceConservativeReason) {
         setPureIdleRecoveryContinueState(true);
         setPureIdleRecoveryStatus(`保守 Worker 仍不可用：${message}`);
@@ -6190,7 +6231,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       return null;
     }
-  }, [persistPureIdleWorkerFailure, publishPureIdleMacroSummary, setPureIdleRecoveryContinueState]);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, setPureIdleRecoveryContinueState]);
 
   /**
    * Publish the verified terminal mirror while the pure-idle overlay still
@@ -6199,7 +6240,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
    * painted frames keep the state publication and canvas reveal as separate,
    * bounded tasks without ever exposing the stale pre-terminal canvas.
    */
-  const publishPureIdleTerminalGameBehindOverlay = useCallback(async (): Promise<void> => {
+  const publishPureIdleTerminalGameBehindOverlay = useCallback(async (
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ): Promise<boolean> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     startTransition(() => publishRuntimeGame(gameRef.current, true));
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -6212,33 +6256,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const fallback = window.setTimeout(finish, 100);
       window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
     });
-  }, [publishRuntimeGame]);
+    return legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, publishRuntimeGame]);
 
   const settlePureIdleBackgroundRecovery = useCallback(async (
     record: PureIdleRecoveryRecord,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     nowMs = Date.now(),
   ): Promise<"continued" | "completed" | "not-backgrounded"> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     const plan = getPureIdleBackgroundPlan(record, nowMs);
     if (!plan.backgrounded) return "not-backgrounded";
     if (pureIdleStoppingRef.current || pureIdleBackgroundRecoveryRef.current) return "completed";
     pureIdleBackgroundRecoveryRef.current = true;
 
     if (!plan.graceExpired) {
-      const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+      const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (!client) {
         pureIdleBackgroundRecoveryRef.current = false;
         return "completed";
       }
       try {
         const summary = await client.advance(plan.highWallSeconds);
-        if (!pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+          !pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
           client.close();
           pureIdleBackgroundRecoveryRef.current = false;
           return "completed";
         }
         pureIdleMacroClientRef.current = client;
-        publishPureIdleMacroSummary(record, summary);
+        publishPureIdleMacroSummary(record, summary, authorityLease);
         const cleared = await clearPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (cleared && pureIdleRecoveryRef.current?.sessionId === record.sessionId) {
           const { backgroundStartedAtMs: _backgroundStartedAtMs, ...withoutBackground } = pureIdleRecoveryRef.current;
           pureIdleRecoveryRef.current = withoutBackground;
@@ -6248,9 +6298,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return "continued";
       } catch (error) {
         client.close();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const restartCount = isCountedPureIdleWorkerFailure(error)
-          ? await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", pureIdleStopReasonForError(error))
+          ? await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", authorityLease, pureIdleStopReasonForError(error))
           : pureIdleMacroRestartCountRef.current;
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const message = error instanceof Error ? error.message : "后台纯挂机恢复失败";
         setPureIdleRecoveryStatus(`${message}；恢复日志与原主存档保持不变（${restartCount}/${PURE_IDLE_WORKER_RESTART_LIMIT}）`);
         setNotice(`${message}；正在等待安全重建`);
@@ -6266,10 +6318,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       phase: "finalizing",
       stopRequestedAtMs: nowMs,
       targetWallSeconds: plan.highWallSeconds,
-    }, nowMs);
+    }, authorityLease, nowMs);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     setPureIdleRecoveryStatus("后台宽限已结束，正在切换普通离线结算");
     setNotice("后台超过 5 分钟，剩余时间将按普通离线规则结算");
-    const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+    const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     if (!finalizer) {
       pureIdleStoppingRef.current = false;
       pureIdleBackgroundRecoveryRef.current = false;
@@ -6287,12 +6341,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // 1.0.44-only envelope/head handoff below.
         setPureIdleRecoveryStatus("正在复用已校准会话推进后台宽限边界");
         const legacyFinalized = await finalizer.finalize(plan.highWallSeconds);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         macroFinalized = true;
         await persistPureIdleTransition(record, {
           stopReason: "background-grace-expired",
           phase: "validating",
           finalizedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         let ordinaryState = legacyFinalized.state;
         if (plan.normalOfflineSeconds >= 1) {
           setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对");
@@ -6300,11 +6356,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             () => import("./game/offlineSimulation"),
             "后台普通离线结算模块",
           );
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
           const ordinary = await runOfflineSimulationInWorkerDetailed(ordinaryState, plan.normalOfflineSeconds, {
             signal: abortController.signal,
             approximate: readOfflineApproximationEnabled(),
             registry: contentPackRuntimeSnapshotRef.current,
           });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
           if (ordinary.status !== "complete") {
             throw new Error(ordinary.approximation.fallbackReason ?? "后台普通离线结算需要玩家确认");
           }
@@ -6324,7 +6382,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           record.startedPaused,
         );
         setPureIdleRecoveryStatus("后台候选已验证，正在按稳定存档链写入并复核主存档");
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const saved = await persistPrimarySave(restored, "pure-idle-stop");
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (lifecycleExitStartedRef.current) return "completed";
         if (!saved.success) {
           setPureIdleRecoveryContinueState(true);
@@ -6337,9 +6397,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           phase: "finalizing",
           committed: true,
           committedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (!marked) throw new Error("纯挂机恢复日志提交标记未获得持久化确认");
         const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
 
         // The macro Worker owned the old time-warp checkpoint.  Reinstall the
         // ordinary simulation Worker from the verified stable state before the
@@ -6381,17 +6443,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         terminal: false,
         binaryTransport: "blob",
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       macroFinalized = true;
       await persistPureIdleTransition(record, {
         stopReason: "background-grace-expired",
         phase: "validating",
         finalizedAtMs: Date.now(),
-      });
+      }, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对并生成终止存档");
       const { runOfflineBackgroundTerminalFinalize } = await importWithRecovery(
         () => import("./game/offlineSimulation"),
         "后台普通离线结算模块",
       );
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       const settled = await runOfflineBackgroundTerminalFinalize({
         sourceEnvelope: finalized.finalEnvelope.payloadBytes,
         sourceVerification: finalized.finalEnvelope.verification,
@@ -6405,6 +6470,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         signal: abortController.signal,
         approximate: readOfflineApproximationEnabled(),
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       // Reuse the same proof-bound persistence + durable head roll + committed
       // journal mark + simulation-Worker rebase + exact recovery clear as a
       // normal pure-idle stop. The old recovery journal stays authoritative
@@ -6416,7 +6482,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         durationMs: settled.durationMs,
       };
       setPureIdleRecoveryStatus("后台候选已验证，正在由保存 Worker 写入并重新读取主存档");
-      const saved = await persistPureIdleTerminalEnvelope(record, backgroundFinalized);
+      const saved = await persistPureIdleTerminalEnvelope(record, backgroundFinalized, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (lifecycleExitStartedRef.current) return "completed";
       if (!saved.success) {
         setPureIdleRecoveryContinueState(true);
@@ -6428,7 +6495,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // T0->T1 recovery replacement, simulation-Worker rebase, and exact
       // recovery clear. Only now may the UI close the session.
       const cleared = pureIdleRecoveryRef.current?.sessionId !== record.sessionId;
-      await publishPureIdleTerminalGameBehindOverlay();
+      if (!await publishPureIdleTerminalGameBehindOverlay(authorityLease)) return "completed";
       pureIdleMacroActiveRef.current = false;
       pureIdleActiveRef.current = false;
       pureIdleRecoveryRef.current = null;
@@ -6447,8 +6514,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       return "completed";
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (!macroFinalized && isCountedPureIdleWorkerFailure(error)) {
-        const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", pureIdleStopReasonForError(error));
+        const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", authorityLease, pureIdleStopReasonForError(error));
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
         finalizer.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
@@ -6460,13 +6529,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`${message}；未提交后台候选时间，原主存档保持不变`);
       return "completed";
     } finally {
-      pureIdleBackgroundOfflineAbortRef.current = null;
-      pureIdleStoppingRef.current = false;
-      pureIdleBackgroundRecoveryRef.current = false;
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        pureIdleBackgroundOfflineAbortRef.current = null;
+        pureIdleStoppingRef.current = false;
+        pureIdleBackgroundRecoveryRef.current = false;
+      }
     }
-  }, [durableSimulationRuntimeEnabled, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, publishRuntimeGame, setPureIdleRecoveryContinueState]);
+  }, [durableSimulationRuntimeEnabled, initializePureIdleMacroClient, invalidateFactoryAlertProjection, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, publishRuntimeGame, setPureIdleRecoveryContinueState]);
 
   const markPureIdleBackgrounded = useCallback(() => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record || record.backgroundStartedAtMs !== undefined) return;
@@ -6474,13 +6547,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     pureIdleRecoveryRef.current = { ...record, backgroundStartedAtMs };
     void markPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current, backgroundStartedAtMs);
     setPureIdleRecoveryStatus("页面已进入后台，纯挂机保留 5 分钟高倍率宽限");
-  }, []);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const resumePureIdleFromBackground = useCallback(() => {
     const record = pureIdleRecoveryRef.current;
     if (!record || !pureIdleMacroActiveRef.current || document.visibilityState !== "visible") return;
-    void settlePureIdleBackgroundRecovery(record);
-  }, [settlePureIdleBackgroundRecovery]);
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
+    void settlePureIdleBackgroundRecovery(record, authorityLease);
+  }, [issueLegacyJavaScriptAuthorityLease, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => {
     const bridge = getDesktopBridge();
@@ -6543,6 +6618,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       if (!gameRef.current.speedrun?.enabled) {
+        const authorityLease = issueLegacyJavaScriptAuthorityLease();
+        if (!authorityLease) {
+          setNotice("Windows 原生权威状态正在变化，旧纯挂机启动已取消");
+          return;
+        }
         pureIdleMacroActiveRef.current = true;
         pureIdleStopTargetRef.current = null;
         pureIdleMacroRestartCountRef.current = 0;
@@ -6552,7 +6632,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const waitStartedAt = performance.now();
           while (simulationSubmissionRef.current && performance.now() - waitStartedAt < 2_000) {
             await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           }
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (simulationSubmissionRef.current) {
             pureIdleMacroActiveRef.current = false;
             setNotice("当前模拟切片仍在提交，请稍后再次开始纯挂机");
@@ -6578,10 +6660,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // points, so do the same durable T0 bootstrap the menu normally
           // performs before creating a pure-idle recovery journal.
           if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
             return;
           }
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const claim = await createPureIdleRecovery(
             checkpoint,
             mode,
@@ -6590,15 +6674,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             Date.now(),
             startedPaused,
           );
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!claim.ok) {
             pureIdleMacroActiveRef.current = false;
             setNotice(claim.message);
             return;
           }
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const saved = await persistPrimarySave(checkpoint);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (lifecycleExitStartedRef.current) return;
           if (!saved.success) {
             await clearPureIdleRecovery(claim.record.sessionId, pureIdleOwnerTokenRef.current);
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("无法创建纯挂机检查点，主存档未改变");
             return;
@@ -6612,7 +6700,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           gameRef.current = checkpoint;
           setGame(checkpoint);
           setNotice(mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
-          await initializePureIdleMacroClient(claim.record);
+          await initializePureIdleMacroClient(claim.record, authorityLease);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         })();
         return;
       }
@@ -6654,7 +6743,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, setPureIdleRecoveryContinueState]);
+  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {
@@ -6693,7 +6782,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(message);
   }, [publishTimeWarpComputeState]);
 
-  const stopPureIdle = useCallback(async () => {
+  const stopPureIdle = useCallback(async (
+    inheritedAuthorityLease?: LegacyAuthorityAsyncLeaseToken,
+  ) => {
+    const authorityLease = inheritedAuthorityLease ?? issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (pureIdleMacroActiveRef.current) {
       recordRuntimeTransitionPhase("pure-idle-terminal-stop-requested", performance.now(), 0);
       if (pureIdleStoppingRef.current) return;
@@ -6708,7 +6801,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const backgroundPlan = getPureIdleBackgroundPlan(record, stoppedAtMs);
       if (backgroundPlan.backgrounded && backgroundPlan.graceExpired) {
         pureIdleStoppingRef.current = false;
-        await settlePureIdleBackgroundRecovery(record, stoppedAtMs);
+        await settlePureIdleBackgroundRecovery(record, authorityLease, stoppedAtMs);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         return;
       }
       const targetWallSeconds = backgroundPlan.backgrounded
@@ -6723,13 +6817,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         phase: "finalizing",
         stopRequestedAtMs: stoppedAtMs,
         targetWallSeconds: frozenTarget,
-      }, stoppedAtMs);
+      }, authorityLease, stoppedAtMs);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       recordRuntimeTransitionPhase("pure-idle-terminal-journal-staged", performance.now(), 0);
       startTransition(() => {
         setPureIdleRecoveryStatus("正在复用已校准会话推进最后结算边界");
         setNotice("正在停止纯挂机；恢复日志会保留到主存档验证成功");
       });
-      const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+      const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (!finalizer) {
         pureIdleStoppingRef.current = false;
         return;
@@ -6741,12 +6837,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // validated state, the ordinary primary save verifies it, and only
           // then is the independent recovery log marked committed/cleared.
           const legacyFinalized = await finalizer.finalize(frozenTarget);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           macroFinalized = true;
           await persistPureIdleTransition(record, {
             stopReason: "user-stop-requested",
             phase: "validating",
             finalizedAtMs: Date.now(),
-          });
+          }, authorityLease);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const settledIdle = settleIdleRun(
             record.state.idleSettlement,
             frozenTarget,
@@ -6761,7 +6859,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             record.startedPaused,
           );
           setPureIdleRecoveryStatus("候选已序列化验证，正在写入并重新读取主存档");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const saved = await persistPrimarySave(restored, "pure-idle-stop");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!saved.success) {
             setPureIdleRecoveryContinueState(true);
             setPureIdleRecoveryStatus("候选状态有效，但主存档写入失败；恢复日志已保留");
@@ -6773,8 +6873,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             phase: "finalizing",
             committed: true,
             committedAtMs: Date.now(),
-          });
+          }, authorityLease);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           pureIdleMacroActiveRef.current = false;
           pureIdleActiveRef.current = false;
           pureIdleRecoveryRef.current = null;
@@ -6801,6 +6903,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           terminal: true,
           binaryTransport: "blob",
         });
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-finalize-received",
           terminalFinalizeStartedAt,
@@ -6812,13 +6915,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           stopReason: "user-stop-requested",
           phase: "validating",
           finalizedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         startTransition(() => {
           setPureIdleRecoveryStatus("候选已序列化验证，正在由保存 Worker 写入并重新读取主存档");
         });
         const terminalPersistStartedAt = performance.now();
         recordRuntimeTransitionPhase("pure-idle-terminal-persist-dispatched", terminalPersistStartedAt, 0);
-        const saved = await persistPureIdleTerminalEnvelope(record, finalized);
+        const saved = await persistPureIdleTerminalEnvelope(record, finalized, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-persist-returned",
           terminalPersistStartedAt,
@@ -6836,7 +6941,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // T0->T1 recovery replacement, simulation-worker rebase, and exact
         // recovery clear.  Only now may the UI close the overlay/session.
         const cleared = pureIdleRecoveryRef.current?.sessionId !== record.sessionId;
-        await publishPureIdleTerminalGameBehindOverlay();
+        if (!await publishPureIdleTerminalGameBehindOverlay(authorityLease)) return;
         pureIdleMacroActiveRef.current = false;
         pureIdleActiveRef.current = false;
         pureIdleRecoveryRef.current = null;
@@ -6853,8 +6958,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         finalizer.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       } catch (error) {
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         if (!macroFinalized && isCountedPureIdleWorkerFailure(error)) {
-          const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", pureIdleStopReasonForError(error));
+          const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", authorityLease, pureIdleStopReasonForError(error));
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
           finalizer.close();
           if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
@@ -6863,7 +6970,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setPureIdleRecoveryStatus(`${message}；恢复日志和原主存档保持不变`);
         setNotice(`${message}；可以重试停止，未结算时间没有被清空`);
       } finally {
-        pureIdleStoppingRef.current = false;
+        if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
       }
       return;
     }
@@ -6877,7 +6984,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const waitStartedAt = performance.now();
     while (simulationSubmissionRef.current && performance.now() - waitStartedAt < 10_000) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (simulationSubmissionRef.current) {
       pureIdleStoppingRef.current = false;
       pureIdleActiveRef.current = true;
@@ -6898,7 +7007,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     let authoritative: GameState;
     try {
       authoritative = await requestAuthoritativeSimulationCheckpoint();
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       pureIdleStoppingRef.current = false;
       pureIdleActiveRef.current = true;
       setPureIdleActive(true);
@@ -6911,7 +7022,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     gameRef.current = next;
     setGame(next);
     setPureIdleStartedAt(null);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const result = await persistPrimarySave(next, "pure-idle-stop");
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (lifecycleExitStartedRef.current) return;
     if (!result.success) {
       setSaveFailure(result);
@@ -6921,9 +7034,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     setNotice("纯挂机已停止，Worker 权威进度已校验保存");
     pureIdleStoppingRef.current = false;
-  }, [initializePureIdleMacroClient, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
 
   const cancelPureIdleSettlement = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     pureIdleStopTargetRef.current = null;
@@ -6937,13 +7052,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       await persistPureIdleTransition(record, {
         stopReason: "user-cancelled",
         lastError: "玩家取消了本次停止结算；候选未提交",
-      });
+      }, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     }
     setPureIdleRecoveryStatus("停止结算已取消；恢复日志和原主存档保持不变");
     setNotice("停止结算已取消；纯挂机会话将从权威检查点安全恢复");
-  }, [persistPureIdleTransition]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition]);
 
   const retryPureIdleRecovery = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current || pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record) {
@@ -6952,15 +7070,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     setPureIdleRecoveryContinueState(false);
     setPureIdleRecoveryStatus("正在从权威检查点重试恢复 Worker");
-    const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+    const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!client) {
       setPureIdleRecoveryContinueState(true);
       return;
     }
-    if (pureIdleStopTargetRef.current?.sessionId === record.sessionId) await stopPureIdle();
-  }, [initializePureIdleMacroClient, setPureIdleRecoveryContinueState, stopPureIdle]);
+    if (pureIdleStopTargetRef.current?.sessionId === record.sessionId) {
+      await stopPureIdle(authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+    }
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, setPureIdleRecoveryContinueState, stopPureIdle]);
 
   const continueFromPureIdleCheckpoint = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current || pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record) {
@@ -6976,7 +7100,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stopReason: "user-cancelled",
       abandonedWallSeconds,
       lastError: `玩家确认放弃 ${Math.floor(abandonedWallSeconds)} 秒未结算时间`,
-    });
+    }, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     setPureIdleRecoveryStatus("正在恢复检查点并验证主存档");
     setNotice("正在放弃未结算纯挂机时间，并恢复普通模拟");
     pureIdleMacroClientRef.current?.close();
@@ -6991,7 +7116,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         { ...setTimeWarpEnabled(repaired, false), idleSettlement: finishIdleRun(repaired.idleSettlement) },
         record.startedPaused,
       );
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const saved = await persistPrimarySave(restored, "pure-idle-stop");
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (lifecycleExitStartedRef.current) return;
       if (!saved.success) {
         setPureIdleRecoveryStatus("检查点有效，但主存档写入失败；恢复日志已保留");
@@ -6999,6 +7126,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       pureIdleMacroActiveRef.current = false;
       pureIdleActiveRef.current = false;
       pureIdleRecoveryRef.current = null;
@@ -7015,13 +7143,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "未结算纯挂机时间未发放，已恢复到开始前的暂停状态"
         : "未结算纯挂机时间未发放，已恢复普通模拟");
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const message = error instanceof Error ? error.message : "恢复普通模拟失败";
       setPureIdleRecoveryStatus(`${message}；恢复日志和原主存档保持不变`);
       setNotice(`${message}；可以重试，未结算时间没有被清空`);
     } finally {
-      pureIdleStoppingRef.current = false;
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
     }
-  }, [invalidateFactoryAlertProjection, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
+  }, [invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
 
   const openCommandPalette = useCallback(() => {
     if (nextMobileShell) mobileNavigation.openModal("command");
@@ -7370,6 +7499,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // be recreated or retain a second independently advancing factory.
       simulationWorkerDisabledRef.current = true;
       simulationSubmissionRef.current = null;
+      durablePrimarySaveInFlightRef.current = false;
+      simulationSaveBarrierDepthRef.current = 0;
+      simulationCheckpointBarrierRef.current = false;
       simulationPendingSecondsRef.current = 0;
       simulationPendingWallSecondsRef.current = 0;
       simulationRetrySecondsRef.current = 0;
@@ -7384,7 +7516,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       pureIdleMacroClientRef.current?.close();
       pureIdleMacroClientRef.current = null;
       pureIdleMacroActiveRef.current = false;
+      pureIdleMacroRestartingRef.current = false;
       pureIdleActiveRef.current = false;
+      pureIdleStoppingRef.current = false;
+      pureIdleBackgroundRecoveryRef.current = false;
+      pureIdleStopTargetRef.current = null;
+      pureIdleRecoveryRef.current = null;
+      setPureIdleActive(false);
+      setPureIdleStartedAt(null);
       return;
     }
     if (typeof Worker === "undefined") {
@@ -8623,17 +8762,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setPureIdleRecoveryStatus(loaded.state.speedrun?.enabled ? "速通工厂继续使用独立精确规则" : "未运行纯挂机");
       return;
     }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
     let cancelled = false;
     void (async () => {
       let claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       // A same-tab reload can briefly leave the previous document's Web Lock
       // visible after its IndexedDB lease has already been released. Retry only
       // this bounded boot race; a genuinely active tab remains authoritative.
       if (!claim.ok && claim.reason === "owned") {
         for (const delayMs of [50, 150, 300]) {
           await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
-          if (cancelled) return;
+          if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+          if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (claim.ok || claim.reason !== "owned") break;
         }
       }
@@ -8653,8 +8796,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           Date.now(),
           startedPaused,
         );
+        if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       }
-      if (cancelled) return;
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (!claim.ok) {
         if (claim.reason === "owned") {
           setPureIdleRecoveryStatus("另一个标签页持有纯挂机会话");
@@ -8690,6 +8834,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           pureIdleOwnerTokenRef.current,
           backgroundStartedAtMs,
         );
+        if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         if (marked) recoveryRecord = { ...recoveryRecord, backgroundStartedAtMs };
       }
       pureIdleRecoveryRef.current = recoveryRecord;
@@ -8711,11 +8856,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setNotice("上次停止结算未提交；原主存档保持不变，等待安全恢复");
         return;
       }
-      const backgroundRecovery = await settlePureIdleBackgroundRecovery(recoveryRecord);
+      const backgroundRecovery = await settlePureIdleBackgroundRecovery(recoveryRecord, authorityLease);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (backgroundRecovery !== "not-backgrounded") return;
-      await initializePureIdleMacroClient(recoveryRecord);
+      await initializePureIdleMacroClient(recoveryRecord, authorityLease);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     })().catch((error) => {
-      if (cancelled) return;
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const message = error instanceof Error ? error.message : "纯挂机恢复失败";
       setPureIdleRecoveryStatus(`${message}；原主存档保持不变`);
       setNotice(`${message}；未结算会话仍保留在恢复日志中`);
@@ -8724,12 +8871,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // Recovery starts once only after the main-owned authority bootstrap has
     // proved that JavaScript still owns this save.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initializePureIdleMacroClient, nativePlayerAuthorityBootstrapPending, nativePlayerAuthorityOwnsRuntime, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityBootstrapPending, nativePlayerAuthorityOwnsRuntime, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => {
     if (!pureIdleActive || !pureIdleMacroActiveRef.current) return;
     let cancelled = false;
     const tick = async () => {
+      const authorityLease = issueLegacyJavaScriptAuthorityLease();
+      if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const record = pureIdleRecoveryRef.current;
       if (!record || cancelled || pureIdleStoppingRef.current || pureIdleStopTargetRef.current?.sessionId === record.sessionId) return;
       let client = pureIdleMacroClientRef.current;
@@ -8751,18 +8900,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         pureIdleMacroRestartingRef.current = true;
         try {
           const claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (claim.ok && !cancelled && pureIdleMacroActiveRef.current) {
             pureIdleRecoveryRef.current = claim.record;
             pureIdleMacroRestartCountRef.current = Math.max(
               pureIdleMacroRestartCountRef.current,
               claim.record.workerRestartCount,
             );
-            await initializePureIdleMacroClient(claim.record);
+            await initializePureIdleMacroClient(claim.record, authorityLease);
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           } else if (!claim.ok) {
             setPureIdleRecoveryStatus(claim.message);
           }
         } finally {
-          pureIdleMacroRestartingRef.current = false;
+          if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleMacroRestartingRef.current = false;
         }
         return;
       }
@@ -8770,7 +8921,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!client || client.busy) return;
       const backgroundPlan = getPureIdleBackgroundPlan(record);
       if (backgroundPlan.backgrounded && backgroundPlan.graceExpired && document.visibilityState === "visible") {
-        await settlePureIdleBackgroundRecovery(record);
+        await settlePureIdleBackgroundRecovery(record, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         return;
       }
       const totalWallSeconds = Math.max(0, (Date.now() - record.startedAtMs) / 1_000);
@@ -8782,8 +8934,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (targetBoundary > settled + 1e-9) {
         try {
           const summary = await client.advance(targetBoundary);
-          publishPureIdleMacroSummary(record, summary);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          publishPureIdleMacroSummary(record, summary, authorityLease);
           if (await resetPureIdleWorkerFailures(record.sessionId, pureIdleOwnerTokenRef.current)) {
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroRestartCountRef.current = 0;
             pureIdleMacroForceConservativeRef.current = summary.conservativeOnly;
             const current = pureIdleRecoveryRef.current;
@@ -8794,9 +8948,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         } catch (error) {
           client.close();
           if (pureIdleMacroClientRef.current === client) pureIdleMacroClientRef.current = null;
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!isCountedPureIdleWorkerFailure(error)) return;
           const message = error instanceof Error ? error.message : "宏观结算 Worker 失败";
-          const restartCount = await persistPureIdleWorkerFailure(record, message, pureIdleStopReasonForError(error));
+          const restartCount = await persistPureIdleWorkerFailure(record, message, authorityLease, pureIdleStopReasonForError(error));
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           setPureIdleRecoveryStatus(`${message}；墙钟时间与检查点已保留（${restartCount}/${PURE_IDLE_WORKER_RESTART_LIMIT}）`);
           setNotice(pureIdleMacroForceConservativeRef.current
             ? `${message}；精确重建已达上限，下一次只建立保守宏观会话`
@@ -8821,18 +8977,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [initializePureIdleMacroClient, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => () => {
     pureIdleMacroClientRef.current?.close();
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const record = pureIdleRecoveryRef.current;
     if (record) {
       const mark = record.backgroundStartedAtMs === undefined
         ? markPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current, Date.now())
         : Promise.resolve(true);
-      void mark.finally(() => releasePureIdleRecoveryLease(record.sessionId, pureIdleOwnerTokenRef.current));
+      void (async () => {
+        try {
+          await mark;
+        } catch {
+          // Best-effort page lifecycle metadata must not block lease release.
+        }
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        try {
+          await releasePureIdleRecoveryLease(record.sessionId, pureIdleOwnerTokenRef.current);
+        } catch {
+          // The IndexedDB lease expires naturally if explicit release fails.
+        }
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+      })();
     }
-  }, []);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -16358,6 +16529,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             open
             accountState={accountState}
             game={game}
+            nativeAuthorityReadOnly={nativePlayerAuthorityOwnsRuntime}
             focusTab={galaxyFocusTab}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
             onUpdateProfile={updateGalaxyProfile}

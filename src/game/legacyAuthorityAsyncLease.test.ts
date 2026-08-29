@@ -49,6 +49,29 @@ describe("legacy authority async lease fence", () => {
     expect(canCommitLegacyAuthorityAsyncLease(currentToken, returnedJavascript)).toBe(true);
   });
 
+  it("keeps one inherited lease stale across a nested async native-to-JavaScript ABA", async () => {
+    let fence = createLegacyAuthorityAsyncLeaseFence("javascript");
+    const inheritedToken = issueLegacyAuthorityAsyncLease(fence);
+    let releaseAwait = (): void => {
+      throw new Error("await boundary was not initialized");
+    };
+    const awaitBoundary = new Promise<void>((resolve) => {
+      releaseAwait = resolve;
+    });
+    const nestedContinuation = async () => {
+      await awaitBoundary;
+      return canContinueLegacyAuthorityAsyncLease(inheritedToken, fence);
+    };
+
+    const pending = nestedContinuation();
+    fence = reconcileLegacyAuthorityAsyncLeaseFence(fence, "native");
+    fence = reconcileLegacyAuthorityAsyncLeaseFence(fence, "javascript");
+    releaseAwait();
+
+    expect(await pending).toBe(false);
+    expect(canContinueLegacyAuthorityAsyncLease(issueLegacyAuthorityAsyncLease(fence), fence)).toBe(true);
+  });
+
   it("unblocks and advances the fence when bootstrap resolves to JavaScript", () => {
     const pending = createLegacyAuthorityAsyncLeaseFence("bootstrap-pending");
     const javascript = reconcileLegacyAuthorityAsyncLeaseFence(pending, "javascript");
